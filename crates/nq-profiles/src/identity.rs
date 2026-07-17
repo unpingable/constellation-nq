@@ -10,14 +10,24 @@
 //!
 //! # Identity law
 //!
-//! This is a *conservative implementation-semantic identity*, not an extensional
-//! proof that two evaluators mean the same thing:
+//! `profile_semantic_id` identifies *declared* profile meaning: rule/descriptor
+//! data, the source closure of the law-bearing crates, the declared protocol
+//! semantics, and locked dependency declarations. It does **not** capture ad-hoc
+//! build-invocation effects (e.g. package-qualified `--features` activation),
+//! which are not observable from a build script; those are bound separately by the
+//! evaluator artifact digest (SHA-256 of the running `nqd` executable) in the
+//! admission context.
 //!
-//! - A **matching** identity permits replay under the covered implementation
-//!   context.
-//! - A **mismatching** identity means equivalence has *not* been established — it
-//!   does **not** prove behavior changed. Comments and unrelated lockfile bumps
-//!   deliberately cause conservative rotation.
+//! - Matching `profile_semantic_id`s establish equality of the covered *declared*
+//!   semantics.
+//! - Different ids mean equivalence has *not* been established — conservative
+//!   source churn (comments, unrelated lockfile bumps) may rotate the id without
+//!   changing behavior; it is **not** proof that behavior changed.
+//! - The evaluator artifact digest binds the exact compiled realization, including
+//!   undeclared build-invocation effects.
+//!
+//! **Replay requires both** a matching declared semantic identity **and** a
+//! matching evaluator artifact digest.
 
 use serde::{Deserialize, Serialize};
 

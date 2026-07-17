@@ -469,9 +469,10 @@ Reconciled by amendment `f4e2585`:
   binding to the admission context. The source protocol JSON stays as witness
   material; neither substitutes for the other.
 - Identity fields (`profile_semantic_id`, detector id, evaluator source digest,
-  executable/helper digest, protocol version, config identity) live in the
-  **`admission_records`** context object; the report binds to it via an explicit
-  `admission_context_id`/digest, not several nullable joins.
+  **`evaluator_artifact_digest`** (running `nqd`), helper digest, protocol version,
+  config identity) live in the **`admission_records`** context object; the report
+  binds to it via an explicit `admission_context_id`/digest, not several nullable
+  joins.
 - `witness_runs.admission_id` stays nullable (refused/failed runs legitimately
   have none); enforce the conditional law — *a run that produced an admitted
   report has a complete admission context* — via a trigger in the same atomic
@@ -483,3 +484,32 @@ Reconciled by amendment `f4e2585`:
   **3C** replay (diagnostic, non-mutating, exact-identity only) + reassessment
   (append a new linked report; no update path to the old one). Three distinct
   guarantees, three commits.
+
+**Final identity recheck (2026-07-17) — RESOLVED.** codex's recheck of the amended
+identity machinery cleared protocol escape, value consumption, reproducibility, and
+the inequality law, and raised one class-(a) escape: build-invocation feature
+activation (`cargo build --features serde_json/arbitrary_precision`) changes
+canonicalization/admission without rotating `profile_semantic_id`. Ratified
+resolution — real, but **not closable in `build.rs`** (a build script cannot observe
+package-qualified `--features` on transitive deps). Closed at the composite
+admission-context layer, per the two-layer identity the plan already mandates:
+- `profile_semantic_id` is a **declared-semantics** identity (source closure of the
+  law-bearing crates + declared features + locked versions + toolchain). Boundary +
+  asymmetric law documented in `crates/nq-profiles/src/identity.rs`.
+- **`evaluator_artifact_digest`** — SHA-256 of the exact running `nqd` executable,
+  derived **inside the daemon** from `/proc/self/exe` at startup (never from config
+  or a helper claim; identifies the executing inode, so on-disk replacement of a
+  running process is caught), cached, and compared to the packaged release manifest
+  when present. Prefer this name over generic "build_id" (which reads as linker
+  metadata). A human-readable build manifest (toolchain / target / feature graph /
+  codegen) is retained as *explanatory evidence*; the digest is the authority.
+- Both are bound into every admitted report's admission context; **replay requires
+  both to match** (declared semantics *and* artifact digest).
+- **3A boundary obligation:** enumerate the remaining external semantic inputs
+  (dynamically loaded libraries, external policy/schema files, env-sensitive
+  behavior) and bind each into the admission context or prove none exist. Config
+  identity and helper digest are already planned; the executable digest closes
+  compile-time feature activation *only if* all admission semantics live inside the
+  evaluator executable — the 3A tests must assert that enumeration.
+- No further identity review loop before 3A: codex forced the *reason* the
+  two-layer identity exists; that is resolution.
