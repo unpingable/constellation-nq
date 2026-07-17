@@ -399,16 +399,13 @@ impl Detector for HostLoadPressureDetector {
         };
 
         let normalized_load = load_1m / f64::from(cpu_count);
-        let threshold = match &descriptor.parameters {
+        let threshold_millis = match descriptor.parameters {
             DetectorRuleParameters::LoadPressure {
                 normalized_load_threshold_millis,
-            } => f64::from(*normalized_load_threshold_millis) / 1000.0,
+            } => normalized_load_threshold_millis,
         };
-        let state = if normalized_load >= threshold {
-            DetectorState::Present
-        } else {
-            DetectorState::ExplicitlyAbsent
-        };
+        let threshold = f64::from(threshold_millis) / 1000.0;
+        let state = load_pressure_state(normalized_load, threshold_millis);
         DetectorResult {
             state,
             condition: descriptor.condition.clone(),
@@ -433,6 +430,16 @@ impl Detector for HostLoadPressureDetector {
             refusal: None,
             watermark: input.watermark,
         }
+    }
+}
+
+/// Pure load-pressure decision, separated so a test can prove the threshold data
+/// governs the verdict independently of the compiled descriptor.
+fn load_pressure_state(normalized_load: f64, threshold_millis: u32) -> DetectorState {
+    if normalized_load >= f64::from(threshold_millis) / 1000.0 {
+        DetectorState::Present
+    } else {
+        DetectorState::ExplicitlyAbsent
     }
 }
 
@@ -590,5 +597,22 @@ fn projection_failure(report: &ValidatedReport, error: String) -> ProfileRefusal
         code: ProfileRefusalCode::InvalidPayload,
         message: "admitted host payload could not be projected".to_owned(),
         details: BTreeMap::from([("error".to_owned(), error)]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DetectorState, load_pressure_state};
+
+    #[test]
+    fn load_pressure_state_is_parametric_in_the_threshold() {
+        // Fixed normalized load; only the threshold moves the verdict. If
+        // evaluation ignored the descriptor parameter and hard-coded a constant,
+        // this would not hold for both thresholds.
+        assert_eq!(load_pressure_state(2.5, 2000), DetectorState::Present);
+        assert_eq!(load_pressure_state(2.5, 3000), DetectorState::ExplicitlyAbsent);
+        // The boundary is inclusive at exactly the threshold.
+        assert_eq!(load_pressure_state(2.0, 2000), DetectorState::Present);
+        assert_eq!(load_pressure_state(1.999, 2000), DetectorState::ExplicitlyAbsent);
     }
 }
