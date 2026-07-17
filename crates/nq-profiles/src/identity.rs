@@ -28,8 +28,8 @@ pub const PROFILE_SEMANTIC_ID_SCHEMA: &str = "nq.profile_semantic_id.v1";
 
 /// Conservative source-closure digest computed at build time over the compiled
 /// semantics: every `nq-profiles` and `nq-protocol` source file, this crate's
-/// manifest and build script, and the workspace lockfile (which pins external
-/// canonicalization crates such as `serde_jcs`).
+/// build script, every workspace manifest (which carries enabled Cargo features),
+/// the workspace lockfile (pinned dependency versions), and the toolchain file.
 ///
 /// Fail-closed against *omission* — a new source file under either law-bearing
 /// crate is auto-included — but deliberately coarse and conservative: it is

@@ -3,8 +3,10 @@
 //! The compiled meaning of an admission spans two crates: `nq-profiles`
 //! (profiles + shared admission machinery) and `nq-protocol` (the
 //! canonicalization admission delegates to). This script hashes both source
-//! trees, plus this crate's manifest and build script and the workspace
-//! lockfile (which pins external canonicalization crates such as `serde_jcs`),
+//! trees, plus this crate's build script, every workspace manifest (enabled
+//! Cargo features change protocol decoding/canonicalization via feature
+//! unification and are not recorded in the lockfile), the workspace lockfile
+//! (pinned dependency versions), and the toolchain file (compiler version),
 //! into `NQ_PROFILES_SOURCE_DIGEST`.
 //!
 //! It is fail-closed against *omission* — walking directories means a newly
@@ -34,9 +36,15 @@ fn main() {
     collect_rs(&workspace_root.join("crates/nq-profiles/src"), &mut files);
     collect_rs(&workspace_root.join("crates/nq-protocol/src"), &mut files);
     files.push(workspace_root.join("crates/nq-profiles/build.rs"));
-    files.push(workspace_root.join("crates/nq-profiles/Cargo.toml"));
+    // Every workspace manifest: enabled Cargo features change protocol decoding
+    // and canonicalization via feature unification, and are NOT recorded in
+    // Cargo.lock. The lockfile pins versions; the toolchain file pins rustc.
+    files.push(workspace_root.join("Cargo.toml"));
+    collect_manifests(&workspace_root.join("crates"), &mut files);
     files.push(workspace_root.join("Cargo.lock"));
+    files.push(workspace_root.join("rust-toolchain.toml"));
     files.sort();
+    files.dedup();
 
     let mut hasher = Sha256::new();
     for file in &files {
@@ -63,6 +71,10 @@ fn main() {
         "cargo:rerun-if-changed={}",
         workspace_root.join("crates/nq-protocol/src").display()
     );
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_root.join("crates").display()
+    );
 
     let digest = hex::encode(hasher.finalize());
     println!("cargo:rustc-env=NQ_PROFILES_SOURCE_DIGEST=sha256:{digest}");
@@ -76,6 +88,22 @@ fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
         if path.is_dir() {
             collect_rs(&path, out);
         } else if path.extension().is_some_and(|extension| extension == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+fn collect_manifests(dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries = fs::read_dir(dir)
+        .unwrap_or_else(|error| panic!("cannot read crate dir {}: {error}", dir.display()));
+    for entry in entries {
+        let path = entry.expect("readable directory entry").path();
+        if path.is_dir() {
+            if path.file_name().is_some_and(|name| name == "target") {
+                continue;
+            }
+            collect_manifests(&path, out);
+        } else if path.file_name().is_some_and(|name| name == "Cargo.toml") {
             out.push(path);
         }
     }
