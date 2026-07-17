@@ -428,6 +428,106 @@ pub struct AdmissionRow {
     pub admitted_at: String,
 }
 
+/// An authenticated historical admission snapshot for an admitted report.
+///
+/// Returned only when the persisted admission context recomputes to its stored
+/// digest, the report is bound to exactly that context through its own run and
+/// instance, and the stored judgment digest recomputes over the persisted
+/// judgment bytes. It carries the *stored* evaluator identity so a caller can
+/// compare it against a freshly observed one — the store authenticates the past;
+/// it does not observe the present.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdmittedSnapshot {
+    pub report_id: String,
+    pub admission_id: String,
+    pub instance_id: String,
+    pub admission_context_digest: String,
+    pub judgment_schema_version: String,
+    pub judgment_digest: String,
+    pub validated_report_json: Vec<u8>,
+    /// Evaluator identity as it was recorded at admission time.
+    pub evaluator_artifact_digest: String,
+    pub artifact_identity_method: String,
+    pub platform_runtime_version: String,
+}
+
+/// Why an admitted report's stored snapshot failed authentication. Each variant
+/// preserves the reason instead of flattening every mismatch into "digest
+/// changed". None of these consult present runtime state.
+#[derive(Debug, Error)]
+pub enum SnapshotVerificationError {
+    /// No admitted report with this id exists.
+    #[error("no admitted report {0}")]
+    ReportNotFound(String),
+    /// The report's run/instance/context chain is broken or substituted.
+    #[error("admitted report binding is broken: {0}")]
+    BindingBroken(String),
+    /// The persisted admission context does not recompute to its stored digest.
+    #[error("admission context is corrupt: {0}")]
+    AdmissionContextCorrupt(String),
+    /// The persisted judgment does not recompute to its stored digest.
+    #[error("stored judgment is corrupt: {0}")]
+    JudgmentCorrupt(String),
+    /// The judgment was written under a schema version this binary does not
+    /// understand, so its digest preimage cannot be honestly recomputed. This is
+    /// not corruption — it is an incompatibility to be surfaced, not reinterpreted.
+    #[error("judgment schema {stored} is not supported by this binary ({supported})")]
+    UnsupportedJudgmentSchema { stored: String, supported: String },
+}
+
+/// The persisted admission constituents reached through one report's run, used
+/// to recompute the admission context digest with the single store-owned
+/// preimage law.
+struct StoredAdmissionConstituents {
+    run_instance_id: String,
+    admission_instance_id: String,
+    admission_id: String,
+    admission_context_digest: String,
+    config_digest: String,
+    helper_artifact_digest: String,
+    profile_semantic_id: String,
+    detector_identity_digest: String,
+    evaluator_source_digest: String,
+    evaluator_artifact_digest: String,
+    protocol_version: String,
+    artifact_identity_method: String,
+    platform_runtime_version: String,
+}
+
+impl StoredAdmissionConstituents {
+    /// Recompute `admission_context_digest` from the persisted constituents via
+    /// the same [`AdmissionIdentity::context_digest`] used to write it. Metadata
+    /// (target triple, method, platform) is deliberately absent from the
+    /// preimage, so it is left empty here.
+    fn recompute_context_digest(&self) -> Result<String, String> {
+        let parse = |field: &str, value: &str| {
+            Sha256Digest::parse(value).map_err(|_| format!("{field} is not a valid digest"))
+        };
+        let identity = AdmissionIdentity {
+            profile_semantic_id: parse("profile_semantic_id", &self.profile_semantic_id)?,
+            detector_identity_digest: parse(
+                "detector_identity_digest",
+                &self.detector_identity_digest,
+            )?,
+            evaluator_source_digest: parse(
+                "evaluator_source_digest",
+                &self.evaluator_source_digest,
+            )?,
+            evaluator_artifact_digest: parse(
+                "evaluator_artifact_digest",
+                &self.evaluator_artifact_digest,
+            )?,
+            helper_artifact_digest: parse("helper_artifact_digest", &self.helper_artifact_digest)?,
+            config_digest: parse("config_digest", &self.config_digest)?,
+            protocol_version: self.protocol_version.clone(),
+            target_triple: String::new(),
+            artifact_identity_method: String::new(),
+            platform_runtime_version: String::new(),
+        };
+        identity.context_digest().map_err(|error| error.to_string())
+    }
+}
+
 /// Latest immutable binding transition for an instance.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BindingEventRow {
@@ -750,6 +850,163 @@ impl Store {
             )
             .optional()
             .map_err(StoreError::from)
+    }
+
+    /// Authenticate the stored snapshot of an admitted report (read-only).
+    ///
+    /// Recomputes the admission context from its persisted constituents, verifies
+    /// the report is bound to exactly that context through its own run and
+    /// instance, and recomputes the judgment digest over the persisted judgment
+    /// bytes. It never invokes an evaluator, never consults present runtime
+    /// state, and never mutates the store; it only confirms or rejects that the
+    /// historical admission was validly recorded and is intact.
+    #[allow(clippy::too_many_lines)]
+    pub fn verify_admitted_snapshot(
+        &self,
+        report_id: &str,
+    ) -> Result<AdmittedSnapshot, SnapshotVerificationError> {
+        let report = self
+            .connection
+            .query_row(
+                "SELECT submission_id, instance_id, validated_report_json,
+                        judgment_schema_version, judgment_digest, admission_context_digest
+                 FROM admitted_reports WHERE report_id = ?1",
+                [report_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| SnapshotVerificationError::BindingBroken(error.to_string()))?
+            .ok_or_else(|| SnapshotVerificationError::ReportNotFound(report_id.to_owned()))?;
+        let (
+            submission_id,
+            report_instance_id,
+            validated_report_json,
+            judgment_schema_version,
+            stored_judgment_digest,
+            report_context_digest,
+        ) = report;
+
+        // Reach the admission through the report's own run. A null admission_id
+        // or missing row yields no result: an admitted report whose run has no
+        // recorded admission is a broken binding, never a silent pass.
+        let admission = self
+            .connection
+            .query_row(
+                "SELECT run.instance_id, a.instance_id, a.admission_id, a.admission_context_digest,
+                        a.config_digest, a.helper_artifact_digest, a.profile_semantic_id,
+                        a.detector_identity_digest, a.evaluator_source_digest,
+                        a.evaluator_artifact_digest, a.protocol_version,
+                        a.artifact_identity_method, a.platform_runtime_version
+                 FROM raw_submissions AS s
+                 JOIN witness_runs AS run ON run.run_id = s.run_id
+                 JOIN admission_records AS a ON a.admission_id = run.admission_id
+                 WHERE s.submission_id = ?1",
+                [&submission_id],
+                |row| {
+                    Ok(StoredAdmissionConstituents {
+                        run_instance_id: row.get(0)?,
+                        admission_instance_id: row.get(1)?,
+                        admission_id: row.get(2)?,
+                        admission_context_digest: row.get(3)?,
+                        config_digest: row.get(4)?,
+                        helper_artifact_digest: row.get(5)?,
+                        profile_semantic_id: row.get(6)?,
+                        detector_identity_digest: row.get(7)?,
+                        evaluator_source_digest: row.get(8)?,
+                        evaluator_artifact_digest: row.get(9)?,
+                        protocol_version: row.get(10)?,
+                        artifact_identity_method: row.get(11)?,
+                        platform_runtime_version: row.get(12)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|error| SnapshotVerificationError::BindingBroken(error.to_string()))?
+            .ok_or_else(|| {
+                SnapshotVerificationError::BindingBroken(
+                    "the report's run is not bound to a recorded admission".to_owned(),
+                )
+            })?;
+
+        // The persisted admission context must recompute to its stored digest:
+        // a tampered constituent column is corruption, caught before any
+        // comparison to the present.
+        let recomputed_context = admission.recompute_context_digest().map_err(|error| {
+            SnapshotVerificationError::AdmissionContextCorrupt(format!(
+                "a persisted constituent is not a valid digest: {error}"
+            ))
+        })?;
+        if recomputed_context != admission.admission_context_digest {
+            return Err(SnapshotVerificationError::AdmissionContextCorrupt(format!(
+                "recomputed {recomputed_context} does not match stored {}",
+                admission.admission_context_digest
+            )));
+        }
+
+        // The report must bind exactly this admission's context and share its
+        // instance the whole way down; another admission's intact context cannot
+        // be substituted for this report's.
+        if report_context_digest != admission.admission_context_digest {
+            return Err(SnapshotVerificationError::BindingBroken(format!(
+                "report context {report_context_digest} is not the run's admission context {}",
+                admission.admission_context_digest
+            )));
+        }
+        if report_instance_id != admission.run_instance_id
+            || report_instance_id != admission.admission_instance_id
+        {
+            return Err(SnapshotVerificationError::BindingBroken(format!(
+                "instance {report_instance_id} does not match run {} / admission {}",
+                admission.run_instance_id, admission.admission_instance_id
+            )));
+        }
+
+        // Only recompute a judgment whose schema this binary owns; a foreign
+        // schema version is surfaced, never recomputed under the wrong preimage.
+        if judgment_schema_version != JUDGMENT_SCHEMA_VERSION {
+            return Err(SnapshotVerificationError::UnsupportedJudgmentSchema {
+                stored: judgment_schema_version,
+                supported: JUDGMENT_SCHEMA_VERSION.to_owned(),
+            });
+        }
+
+        // The stored judgment must recompute to its stored digest over exactly
+        // the persisted judgment bytes and context — no re-evaluation.
+        let validated = CanonicalDocument::from_canonical_bytes(validated_report_json.clone())
+            .map_err(|error| {
+                SnapshotVerificationError::JudgmentCorrupt(format!(
+                    "persisted judgment is not canonical: {error}"
+                ))
+            })?;
+        let recomputed_judgment = judgment_digest(&report_context_digest, validated.digest())
+            .map_err(|error| SnapshotVerificationError::JudgmentCorrupt(error.to_string()))?;
+        if recomputed_judgment != stored_judgment_digest {
+            return Err(SnapshotVerificationError::JudgmentCorrupt(format!(
+                "recomputed {recomputed_judgment} does not match stored {stored_judgment_digest}"
+            )));
+        }
+
+        Ok(AdmittedSnapshot {
+            report_id: report_id.to_owned(),
+            admission_id: admission.admission_id,
+            instance_id: report_instance_id,
+            admission_context_digest: admission.admission_context_digest,
+            judgment_schema_version,
+            judgment_digest: stored_judgment_digest,
+            validated_report_json,
+            evaluator_artifact_digest: admission.evaluator_artifact_digest,
+            artifact_identity_method: admission.artifact_identity_method,
+            platform_runtime_version: admission.platform_runtime_version,
+        })
     }
 
     /// Atomically append the authoritative binding transition and the intent
@@ -3952,6 +4209,145 @@ mod tests {
             Store::open(&path),
             Err(StoreError::Integrity(message))
                 if message.contains("stale candidate") && message.contains("recreated")
+        ));
+    }
+
+    fn admitted_report_count(store: &Store) -> i64 {
+        store
+            .connection
+            .query_row("SELECT COUNT(*) FROM admitted_reports", [], |row| {
+                row.get(0)
+            })
+            .expect("count admitted reports")
+    }
+
+    #[test]
+    fn verify_admitted_snapshot_authenticates_and_carries_stored_identity() {
+        let (mut store, profile_digest) = configured_store();
+        commit_admitted(
+            &mut store,
+            "instance-a",
+            "a",
+            &profile_digest,
+            document(json!({"report": "a"})),
+            b"raw-a".to_vec(),
+        );
+        let snapshot = store
+            .verify_admitted_snapshot("report-a")
+            .expect("a valid report authenticates");
+        assert_eq!(snapshot.admission_id, "admission-a");
+        assert_eq!(snapshot.instance_id, "instance-a");
+        assert_eq!(snapshot.judgment_schema_version, JUDGMENT_SCHEMA_VERSION);
+        // The snapshot carries the evaluator identity as recorded at admission,
+        // for the caller to compare against a freshly observed one.
+        assert_eq!(
+            snapshot.evaluator_artifact_digest,
+            typed_digest("evaluator-artifact").into_string()
+        );
+        assert_eq!(snapshot.artifact_identity_method, "fixture");
+        assert_eq!(snapshot.platform_runtime_version, "test");
+    }
+
+    #[test]
+    fn verify_admitted_snapshot_reports_an_unknown_report() {
+        let (store, _profile_digest) = configured_store();
+        assert!(matches!(
+            store.verify_admitted_snapshot("no-such-report"),
+            Err(SnapshotVerificationError::ReportNotFound(id)) if id == "no-such-report"
+        ));
+    }
+
+    #[test]
+    fn verify_admitted_snapshot_detects_a_corrupted_constituent() {
+        let (mut store, profile_digest) = configured_store();
+        commit_admitted(
+            &mut store,
+            "instance-a",
+            "a",
+            &profile_digest,
+            document(json!({"report": "a"})),
+            b"raw-a".to_vec(),
+        );
+        store
+            .verify_admitted_snapshot("report-a")
+            .expect("valid before tampering");
+        let before = admitted_report_count(&store);
+        // Simulate external tampering: edit a stored constituent without
+        // recomputing the context digest, bypassing the immutability guard.
+        store
+            .connection
+            .execute_batch(
+                "DROP TRIGGER immutable_admission_records_update;
+                 UPDATE admission_records
+                    SET evaluator_artifact_digest =
+                        'sha256:0000000000000000000000000000000000000000000000000000000000000000'
+                  WHERE admission_id = 'admission-a';",
+            )
+            .expect("tamper with a constituent");
+        assert!(matches!(
+            store.verify_admitted_snapshot("report-a"),
+            Err(SnapshotVerificationError::AdmissionContextCorrupt(_))
+        ));
+        assert_eq!(
+            admitted_report_count(&store),
+            before,
+            "verification never mutates the store"
+        );
+    }
+
+    #[test]
+    fn verify_admitted_snapshot_detects_a_substituted_report_context() {
+        let (mut store, profile_digest) = configured_store();
+        commit_admitted(
+            &mut store,
+            "instance-a",
+            "a",
+            &profile_digest,
+            document(json!({"report": "a"})),
+            b"raw-a".to_vec(),
+        );
+        // Point the report at a different context than its run's admission.
+        store
+            .connection
+            .execute_batch(
+                "DROP TRIGGER immutable_admitted_reports_update;
+                 UPDATE admitted_reports
+                    SET admission_context_digest =
+                        'sha256:1111111111111111111111111111111111111111111111111111111111111111'
+                  WHERE report_id = 'report-a';",
+            )
+            .expect("substitute the report context");
+        assert!(matches!(
+            store.verify_admitted_snapshot("report-a"),
+            Err(SnapshotVerificationError::BindingBroken(_))
+        ));
+    }
+
+    #[test]
+    fn verify_admitted_snapshot_detects_a_tampered_judgment() {
+        let (mut store, profile_digest) = configured_store();
+        commit_admitted(
+            &mut store,
+            "instance-a",
+            "a",
+            &profile_digest,
+            document(json!({"report": "a"})),
+            b"raw-a".to_vec(),
+        );
+        // Replace the persisted judgment bytes; the stored judgment digest no
+        // longer recomputes.
+        store
+            .connection
+            .execute_batch(
+                "DROP TRIGGER immutable_admitted_reports_update;
+                 UPDATE admitted_reports
+                    SET validated_report_json = CAST('{\"tampered\":true}' AS BLOB)
+                  WHERE report_id = 'report-a';",
+            )
+            .expect("tamper with the judgment");
+        assert!(matches!(
+            store.verify_admitted_snapshot("report-a"),
+            Err(SnapshotVerificationError::JudgmentCorrupt(_))
         ));
     }
 }

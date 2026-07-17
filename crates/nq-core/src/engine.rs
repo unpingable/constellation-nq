@@ -253,6 +253,72 @@ struct BoundUnixRunner {
     runner: UnixRunner,
 }
 
+/// The result of verifying a historical admitted report.
+///
+/// Its existence is the verdict: verification confirmed that the admission was
+/// validly made and its stored judgment is intact, under a current evaluator
+/// whose identity matches the admitted one. It may carry recorded ambient
+/// observations that qualify the *present* context without altering the
+/// *historical* verdict. Verification never re-evaluates and never mutates.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdmittedReportVerification {
+    /// The verified admitted report.
+    pub report_id: String,
+    /// The admission whose context the report was verified against.
+    pub admission_id: String,
+    /// The instance both belong to.
+    pub instance_id: String,
+    /// Recorded ambient observations that qualify the present context.
+    pub platform_observations: Vec<PlatformObservation>,
+}
+
+/// A recorded ambient-drift observation. It qualifies the context in which a
+/// historical admission is inspected; it does not refuse or reinterpret it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PlatformObservation {
+    /// The platform runtime version (kernel release) differs from admission
+    /// time. Recorded context only — a kernel upgrade does not invalidate a
+    /// prior admission, whose identity deliberately excludes the kernel.
+    RuntimeDrift {
+        /// The platform runtime version recorded at admission.
+        admitted: String,
+        /// The platform runtime version observed now.
+        current: String,
+    },
+}
+
+/// Why verification refused. Each variant preserves the specific reason rather
+/// than flattening every mismatch into "digest changed"; none of them mutate the
+/// store or re-run the evaluator.
+#[derive(Debug, Error)]
+pub enum VerificationRefusal {
+    /// The stored admission snapshot failed authentication (corruption,
+    /// substitution, broken binding, or an unsupported judgment schema).
+    #[error("stored admission snapshot failed authentication: {0}")]
+    SnapshotUnauthenticated(#[from] nq_store::SnapshotVerificationError),
+    /// The current evaluator identity could not be observed, so drift cannot be
+    /// assessed. Fails closed.
+    #[error("current evaluator identity is unverifiable: {0}")]
+    CurrentIdentityUnverifiable(String),
+    /// The identity-observation method changed, so the admitted and current
+    /// artifact digests are not comparable.
+    #[error("evaluator identity method changed: admitted {admitted}, current {current}")]
+    MethodIncompatible {
+        /// The identity-observation method recorded at admission.
+        admitted: String,
+        /// The identity-observation method in effect now.
+        current: String,
+    },
+    /// The running evaluator artifact differs from the admitted one.
+    #[error("evaluator artifact drift: admitted {admitted}, current {current}")]
+    EvaluatorArtifactDrift {
+        /// The evaluator artifact digest recorded at admission.
+        admitted: String,
+        /// The evaluator artifact digest observed now.
+        current: String,
+    },
+}
+
 impl CollectionEngine {
     /// Open an initialized exactly compatible store and resolve the running
     /// evaluator's identity from the platform provider.
@@ -335,6 +401,64 @@ impl CollectionEngine {
             target_triple: evaluator.target_triple().to_owned(),
             artifact_identity_method: evaluator.artifact_identity_method().to_owned(),
             platform_runtime_version: evaluator.platform_runtime_version().to_owned(),
+        })
+    }
+
+    /// Verify a historical admitted report (read-only; no re-evaluation).
+    ///
+    /// Order matters: authenticate the stored snapshot from persisted data
+    /// first, rejecting corruption or substitution before consulting any present
+    /// runtime state; then observe the current sealed identity; then compare,
+    /// distinguishing artifact drift (refuse), method incompatibility (refuse),
+    /// and platform drift (recorded, non-refusing). Verification may confirm or
+    /// reject the historical admission; it may never recreate it under present
+    /// conditions, refresh a binding, or ask the evaluator what it thinks today.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`VerificationRefusal`] preserving the exact reason.
+    pub fn verify_admitted(
+        &self,
+        report_id: &str,
+    ) -> Result<AdmittedReportVerification, VerificationRefusal> {
+        // Steps 1-2: authenticate the stored snapshot and verify the stored
+        // judgment, purely from persisted data. Corruption/substitution/broken
+        // binding/unsupported schema are rejected here, before runtime state.
+        let snapshot = self.store.verify_admitted_snapshot(report_id)?;
+
+        // Step 3: observe the current sealed identity; fail closed if absent.
+        let current = self
+            .require_evaluator_identity()
+            .map_err(|error| VerificationRefusal::CurrentIdentityUnverifiable(error.to_string()))?;
+
+        // Step 4: compare, distinguishing the reason.
+        // Digests observed by different methods are not comparable.
+        if snapshot.artifact_identity_method != current.artifact_identity_method() {
+            return Err(VerificationRefusal::MethodIncompatible {
+                admitted: snapshot.artifact_identity_method,
+                current: current.artifact_identity_method().to_owned(),
+            });
+        }
+        if snapshot.evaluator_artifact_digest != current.artifact_digest().as_str() {
+            return Err(VerificationRefusal::EvaluatorArtifactDrift {
+                admitted: snapshot.evaluator_artifact_digest,
+                current: current.artifact_digest().as_str().to_owned(),
+            });
+        }
+        // Platform drift is recorded ambient context, never a refusal.
+        let mut platform_observations = Vec::new();
+        if snapshot.platform_runtime_version != current.platform_runtime_version() {
+            platform_observations.push(PlatformObservation::RuntimeDrift {
+                admitted: snapshot.platform_runtime_version.clone(),
+                current: current.platform_runtime_version().to_owned(),
+            });
+        }
+
+        Ok(AdmittedReportVerification {
+            report_id: snapshot.report_id,
+            admission_id: snapshot.admission_id,
+            instance_id: snapshot.instance_id,
+            platform_observations,
         })
     }
 
@@ -3438,6 +3562,222 @@ mod tests {
         assert!(matches!(
             outcome,
             CollectionOutcome::AdmissionRefused { .. }
+        ));
+    }
+
+    /// Seed one admitted report with a chosen recorded evaluator identity, so a
+    /// verification against a chosen *current* identity can be exercised.
+    fn seed_admitted_report(
+        db_path: &Path,
+        evaluator_artifact_digest: Sha256Digest,
+        artifact_identity_method: &str,
+        platform_runtime_version: &str,
+    ) -> String {
+        const TS: &str = "2026-07-16T12:00:00.000Z";
+        let doc = |value: Value| CanonicalDocument::from_serializable(&value).expect("canonical");
+        let sd = |label: &str| nq_protocol::sha256_bytes(label.as_bytes());
+        let mut store = Store::initialize(db_path).expect("initialize verify store");
+        let descriptor = doc(json!({"profile": "verify.fixture"}));
+        let profile_digest = descriptor.digest().to_owned();
+        store
+            .append_profile_descriptor(&ProfileDescriptorInput {
+                profile_id: "verify.fixture".to_owned(),
+                profile_version: "1".to_owned(),
+                descriptor,
+                recorded_at: TS.to_owned(),
+            })
+            .expect("descriptor");
+        store
+            .append_admission(&AdmissionInput {
+                admission_id: "adm-1".to_owned(),
+                instance_id: "inst-1".to_owned(),
+                identity: AdmissionIdentity {
+                    profile_semantic_id: sd("semantic"),
+                    detector_identity_digest: sd("detector"),
+                    evaluator_source_digest: sd("source"),
+                    evaluator_artifact_digest,
+                    helper_artifact_digest: sd("helper"),
+                    config_digest: sd("config"),
+                    protocol_version: "1.0".to_owned(),
+                    target_triple: "x86_64-unknown-linux-gnu".to_owned(),
+                    artifact_identity_method: artifact_identity_method.to_owned(),
+                    platform_runtime_version: platform_runtime_version.to_owned(),
+                },
+                execution_chain: doc(json!({})),
+                profile_id: "verify.fixture".to_owned(),
+                profile_version: "1".to_owned(),
+                profile_digest: profile_digest.clone(),
+                capability_grant: doc(json!([])),
+                conformance: doc(json!({})),
+                lock: doc(json!({})),
+                admitted_at: TS.to_owned(),
+                operator_identity: doc(json!({})),
+            })
+            .expect("admission");
+        let run = RunInput {
+            run_id: "run-1".to_owned(),
+            request_id: "req-1".to_owned(),
+            instance_id: "inst-1".to_owned(),
+            admission_id: Some("adm-1".to_owned()),
+            binding_digest: sd("binding").as_str().to_owned(),
+            checkpoint_contract_digest: sd("checkpoint").as_str().to_owned(),
+            profile_id: "verify.fixture".to_owned(),
+            profile_version: "1".to_owned(),
+            profile_digest: profile_digest.clone(),
+            carrier: "stdio".to_owned(),
+            started_at: TS.to_owned(),
+            deadline_at: TS.to_owned(),
+            finished_at: TS.to_owned(),
+            acquisition_outcome: "response".to_owned(),
+            execution_identity: doc(json!({})),
+            resource_outcome: doc(json!({})),
+        };
+        let report = ReportInput {
+            report_id: "rep-1".to_owned(),
+            instance_id: "inst-1".to_owned(),
+            profile_id: "verify.fixture".to_owned(),
+            profile_version: "1".to_owned(),
+            profile_digest,
+            observed_at: TS.to_owned(),
+            received_at: TS.to_owned(),
+            report_status: "complete".to_owned(),
+            canonical_report: doc(json!({"report": 1})),
+            validated_report: doc(json!({"validated": 1})),
+            next_checkpoint: None,
+            admitted_at: TS.to_owned(),
+            observations: Vec::new(),
+            coverage: Vec::new(),
+            errors: Vec::new(),
+        };
+        store
+            .commit_collection(&CollectionInput {
+                run,
+                submission: Some(SubmissionInput {
+                    submission_id: "sub-1".to_owned(),
+                    raw_bytes: b"raw".to_vec(),
+                    received_at: TS.to_owned(),
+                    protocol_outcome: "valid_exchange".to_owned(),
+                    disposition: SubmissionDisposition::Admitted(report),
+                }),
+            })
+            .expect("commit admitted report");
+        "rep-1".to_owned()
+    }
+
+    #[test]
+    fn verify_admitted_passes_when_snapshot_and_runtime_agree() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (config, _witness, _lock) = binding_recovery_fixture(dir.path());
+        let artifact = nq_protocol::sha256_bytes(b"evaluator-artifact");
+        let report = seed_admitted_report(
+            &config.database_path,
+            artifact.clone(),
+            "test-fixture-v1",
+            "test",
+        );
+        let engine = CollectionEngine::open_with_evaluator_identity(
+            &config,
+            Ok(EvaluatorRuntimeIdentity::for_test(artifact)),
+        )
+        .expect("engine");
+        let verified = engine
+            .verify_admitted(&report)
+            .expect("verification passes");
+        assert_eq!(verified.report_id, "rep-1");
+        assert_eq!(verified.admission_id, "adm-1");
+        assert!(verified.platform_observations.is_empty());
+    }
+
+    #[test]
+    fn verify_admitted_refuses_evaluator_artifact_drift() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (config, _witness, _lock) = binding_recovery_fixture(dir.path());
+        let report = seed_admitted_report(
+            &config.database_path,
+            nq_protocol::sha256_bytes(b"admitted-artifact"),
+            "test-fixture-v1",
+            "test",
+        );
+        let current = EvaluatorRuntimeIdentity::for_test(nq_protocol::sha256_bytes(b"different"));
+        let engine =
+            CollectionEngine::open_with_evaluator_identity(&config, Ok(current)).expect("engine");
+        assert!(matches!(
+            engine.verify_admitted(&report),
+            Err(VerificationRefusal::EvaluatorArtifactDrift { .. })
+        ));
+    }
+
+    #[test]
+    fn verify_admitted_refuses_when_the_identity_method_changed() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (config, _witness, _lock) = binding_recovery_fixture(dir.path());
+        let artifact = nq_protocol::sha256_bytes(b"artifact");
+        // Admitted under an older observation method; digests are not comparable.
+        let report = seed_admitted_report(
+            &config.database_path,
+            artifact.clone(),
+            "linux-proc-self-exe-fd-sha256-v0",
+            "test",
+        );
+        let engine = CollectionEngine::open_with_evaluator_identity(
+            &config,
+            Ok(EvaluatorRuntimeIdentity::for_test(artifact)),
+        )
+        .expect("engine");
+        assert!(matches!(
+            engine.verify_admitted(&report),
+            Err(VerificationRefusal::MethodIncompatible { .. })
+        ));
+    }
+
+    #[test]
+    fn verify_admitted_records_platform_drift_without_refusing() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (config, _witness, _lock) = binding_recovery_fixture(dir.path());
+        let artifact = nq_protocol::sha256_bytes(b"artifact");
+        let report = seed_admitted_report(
+            &config.database_path,
+            artifact.clone(),
+            "test-fixture-v1",
+            "6.1.0-admitted",
+        );
+        let engine = CollectionEngine::open_with_evaluator_identity(
+            &config,
+            Ok(EvaluatorRuntimeIdentity::for_test(artifact)),
+        )
+        .expect("engine");
+        let verified = engine
+            .verify_admitted(&report)
+            .expect("platform drift still verifies the historical admission");
+        assert_eq!(
+            verified.platform_observations,
+            vec![PlatformObservation::RuntimeDrift {
+                admitted: "6.1.0-admitted".to_owned(),
+                current: "test".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn verify_admitted_fails_closed_when_current_identity_is_unavailable() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (config, _witness, _lock) = binding_recovery_fixture(dir.path());
+        // The snapshot authenticates, but the current identity cannot be
+        // observed, so drift cannot be assessed and verification fails closed.
+        let report = seed_admitted_report(
+            &config.database_path,
+            nq_protocol::sha256_bytes(b"artifact"),
+            "test-fixture-v1",
+            "test",
+        );
+        let engine = CollectionEngine::open_with_evaluator_identity(
+            &config,
+            Err("evaluator identity is unsupported on this platform".to_owned()),
+        )
+        .expect("engine");
+        assert!(matches!(
+            engine.verify_admitted(&report),
+            Err(VerificationRefusal::CurrentIdentityUnverifiable(_))
         ));
     }
 }
