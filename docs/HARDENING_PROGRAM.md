@@ -104,6 +104,15 @@ native archive** (§4 storage) — enough to preserve and inspect the alpha/beta
 later, without inventing a backend-independent export format before its consumers
 exist.
 
+**Beta-2 has a coherent theme: portability, on two axes.** Canonical logical export
+makes the *evidence lineage* portable across storage backends; FreeBSD as an admitted
+platform makes the *runtime contract* portable across operating systems (see the
+platform-boundary decision in §8). Beta-2 bar: *the same admission, identity, custody,
+and replay guarantees survive both a logical state transfer and a second
+operating-system implementation.* Beta-1's cleaner job is to prove one Linux
+implementation of the platform-neutral laws without pretending Linux mechanisms are
+those laws.
+
 ## 3. Workstream 1 (concrete sketch) — semantic identity + historical custody
 
 The largest and most architectural; everything downstream keys off the rule-IR /
@@ -513,3 +522,80 @@ admission-context layer, per the two-layer identity the plan already mandates:
   evaluator executable — the 3A tests must assert that enumeration.
 - No further identity review loop before 3A: codex forced the *reason* the
   two-layer identity exists; that is resolution.
+
+**3A design amendments (2026-07-17, pre-implementation).** Reviewed before writing
+the schema; four representational shortcuts corrected so the database does not weaken
+the identity law while keeping its vocabulary.
+
+1. **Explicit report↔context binding, not a nullable join chain.** Do *not* rely on
+   `report → submission → run → admission_id` alone. Add
+   `admission_records.admission_context_digest` and
+   `admitted_reports.admission_context_digest`, the digest taken over a canonical
+   constituent record — {`profile_semantic_id`, `evaluator_source_digest`,
+   `evaluator_artifact_digest`, `helper_artifact_digest`, `protocol_version`,
+   `config_digest`, `judgment_schema_version`}. Enforce that the report's digest
+   equals the admission record reached through its run. The relational chain stays as
+   custody; the report carries its explicit semantic binding.
+
+2. **Detector identity must be persisted — at the *evaluation* seam.** Slice 1 earned
+   a detector semantic id (its descriptor digest now covers the threshold); 3A must
+   not leave it in the hallway. But report *admission* does not involve detectors
+   (they evaluate admitted reports later), so detector identity binds into the
+   **finding/evaluation** context, not the report-admission context: make
+   `finding_events.detector_digest` carry the detector *semantic* id, add the
+   evaluator artifact digest there, and fix `build_finding_event`, which currently
+   accepts `_detector_digest` and ignores it (`engine.rs:1939`). Multiple detectors
+   per finding → a canonical ordered-set digest.
+
+3. **Bind the judgment digest to its context.** Not `H(validated_report_json)`. Use
+   `judgment_digest = H(judgment_schema_tag ‖ admission_context_digest ‖ canonical
+   ValidatedReport bytes)`, so `verify_admitted` (3B) proves both that these are the
+   stored judgment bytes *and* that this judgment belongs to this exact admission
+   context.
+
+4. **Schema fingerprint, named honestly: `schema_artifact_digest`.** Hash of the exact
+   `schema.sql`, derived at build, stored in `schema_metadata` at creation, compared
+   to the binary's expected digest at startup (retain the existing structural checks;
+   refuse + instruct recreation on mismatch). It rejects stale *provisional-candidate*
+   databases; it does **not** prove the live SQLite schema was unmodified — do not
+   describe it as tamper attestation.
+
+**Evaluator artifact identity — platform seam, not procfs theology.** `/proc/self/exe`
+is the *Linux provider*, not the product contract. Admission obtains evaluator
+identity through a fail-closed platform interface —
+`trait EvaluatorArtifactIdentity { fn running_artifact_digest(&self) -> Result<Sha256Digest, IdentityError>; }`:
+- **Linux:** open `/proc/self/exe` once before serving/admitting, verify it is a
+  regular executable, hash *through the opened descriptor* (race-safe vs pathname
+  re-open), cache in trusted daemon state, inject into the engine/store.
+- **Unsupported/unverifiable platform:** *refuse admission* — no best-effort pathname
+  hashing.
+- Store the platform-neutral `evaluator_artifact_digest` plus inspectable metadata:
+  `target_triple`, `artifact_identity_method`, `platform_runtime_version`.
+- Tests inject a fixture identity; never implicitly hash the test binary.
+
+**Boundary rule (honest).** A test cannot prove no unknown environment or dynamic
+library affects behavior. The executable digest covers compiled Cargo feature
+activation; it does NOT fingerprint libc, dynamically linked SQLite, locale, time, or
+arbitrary env. Maintain an explicit **inventory** of admitted external semantic inputs
+with tests that each *known* one is bound or forbidden. Beta rule:
+> Admission semantics must not depend on ambient environment except explicitly
+> enumerated, normalized, and context-bound inputs.
+
+**Platform boundary + release call.** FreeBSD is a *named target*, not designed out
+(classic-NQ already moved toward BSD). NQ-ng needs a small explicit `PlatformRuntime`
+boundary — running evaluator identity, Unix peer credentials (Linux `SO_PEERCRED` vs
+FreeBSD `getpeereid`/`LOCAL_PEERCRED`), helper confinement (seccomp vs Capsicum),
+service/runtime paths, platform capability receipt — rather than Linux calls scattered
+through core. Not built before 3A. Release: **Beta-1 admits Linux only**; **now**, make
+identity/store/core APIs platform-neutral and fail-closed; **Beta-2** restores FreeBSD
+as an admitted target with its own executable-identity provider, peer-credential
+adapter, confinement disposition, packaging, and platform specimen.
+
+**3A build order:** (1) schema/store — context fields + digest, explicit report
+binding, canonical judgment snapshot + bound digest, conditional trigger, atomic-write
+preservation; (2) daemon identity wiring — platform-seam executable digest, trusted
+injection; (3) tests — round-trip, inconsistent context/report binding refused,
+judgment tamper refused, stale schema-artifact refused, atomic rollback, detector
+identity retained. One named 3A workstream; commit the store substrate and daemon
+wiring separately if the diff develops weather. Independent review of the commit
+before 3B.
