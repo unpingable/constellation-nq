@@ -35,6 +35,7 @@ use crate::admission::{
 };
 use crate::config::{Carrier, CheckpointPolicy, NqConfig, ResourceLimits, WitnessConfig};
 use crate::coordination::{CoordinationError, InstanceGuard};
+use crate::evaluator_identity::EvaluatorRuntimeIdentity;
 use crate::identity::{ExecutionIdentity, VerifiedLaunch};
 use crate::public::{
     ComponentKind, ComponentStatus, ConditionState, ConditionView, DetectorIdentity,
@@ -233,36 +234,18 @@ impl CollectionOutcome {
     }
 }
 
-/// Stateful engine over one explicitly opened compatible database.
-/// Identity of the running evaluator (`nqd`) obtained from trusted runtime
-/// state.
-///
-/// This is the one admission-context constituent that cannot be derived from
-/// the profile, the lock, or compiled sources: it names the exact executing
-/// binary. The 3A-2 platform provider will supply it from the daemon
-/// (`/proc/self/exe` on Linux); 3A-1 leaves it injectable so tests exercise the
-/// full path while production admission and evaluation refuse until it is
-/// present, rather than fabricating one.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EvaluatorRuntimeIdentity {
-    /// SHA-256 of the exact running evaluator executable.
-    pub artifact_digest: Sha256Digest,
-    /// Target triple the evaluator was built for (receipt metadata).
-    pub target_triple: String,
-    /// How the artifact digest was obtained, e.g. the platform provider name.
-    pub artifact_identity_method: String,
-    /// Version of the platform runtime that produced the identity.
-    pub platform_runtime_version: String,
-}
-
-/// End-to-end collection, admission, evaluation, and public read-model engine.
+/// End-to-end collection, admission, evaluation, and public read-model engine
+/// over one explicitly opened compatible database.
 pub struct CollectionEngine {
     config: NqConfig,
     store: Store,
     admission: AdmissionManager,
     runner: StdioRunner,
     unix_runners: BTreeMap<String, BoundUnixRunner>,
-    evaluator_identity: Option<EvaluatorRuntimeIdentity>,
+    /// The running evaluator's trusted identity, resolved once from the platform
+    /// provider at open, or a structured reason it could not be established.
+    /// Admission and collection fail closed on the error side.
+    evaluator_identity: Result<EvaluatorRuntimeIdentity, String>,
 }
 
 struct BoundUnixRunner {
@@ -271,11 +254,14 @@ struct BoundUnixRunner {
 }
 
 impl CollectionEngine {
-    /// Open an initialized exactly compatible store.
+    /// Open an initialized exactly compatible store and resolve the running
+    /// evaluator's identity from the platform provider.
     ///
-    /// The evaluator runtime identity is absent until the 3A-2 platform provider
-    /// wires it here; until then, admission and evaluation refuse (fail closed)
-    /// rather than mint durable records with a fabricated context.
+    /// Identity enters the engine only here and only from the provider — there
+    /// is no caller-supplied identity, no provider parameter, and no public
+    /// constructor for [`EvaluatorRuntimeIdentity`]. On an unsupported or
+    /// unverifiable platform the identity resolves to a structured refusal and
+    /// admission and collection fail closed.
     ///
     /// # Errors
     ///
@@ -287,29 +273,33 @@ impl CollectionEngine {
             admission: AdmissionManager,
             runner: StdioRunner,
             unix_runners: BTreeMap::new(),
-            evaluator_identity: None,
+            evaluator_identity: crate::evaluator_identity::resolved(),
         })
     }
 
-    /// Inject the running evaluator's trusted runtime identity.
-    ///
-    /// 3A-2 supplies this from the platform provider; tests inject a fixture.
-    /// It is the sole path by which evaluator identity may enter the engine —
-    /// never a configuration string or helper claim.
-    #[must_use]
-    pub fn with_evaluator_identity(mut self, identity: EvaluatorRuntimeIdentity) -> Self {
-        self.evaluator_identity = Some(identity);
-        self
+    /// Test-only constructor that installs a specific evaluator identity (or a
+    /// refusal) without consulting the platform provider. Gated on `cfg(test)`
+    /// so no shipping binary and no downstream crate can reach it.
+    #[cfg(test)]
+    pub(crate) fn open_with_evaluator_identity(
+        config: &NqConfig,
+        evaluator_identity: Result<EvaluatorRuntimeIdentity, String>,
+    ) -> Result<Self, EngineError> {
+        Ok(Self {
+            config: config.clone(),
+            store: Store::open(&config.database_path)?,
+            admission: AdmissionManager,
+            runner: StdioRunner,
+            unix_runners: BTreeMap::new(),
+            evaluator_identity,
+        })
     }
 
-    /// The running evaluator identity, or a typed refusal when it is unavailable.
+    /// The running evaluator identity, or a typed refusal carrying the exact
+    /// reason it could not be established.
     fn require_evaluator_identity(&self) -> Result<&EvaluatorRuntimeIdentity, EngineError> {
-        self.evaluator_identity.as_ref().ok_or_else(|| {
-            EngineError::Invariant(
-                "evaluator runtime identity is unavailable; admission and evaluation are refused \
-                 until the platform provider supplies the running artifact digest (3A-2)"
-                    .to_owned(),
-            )
+        self.evaluator_identity.as_ref().map_err(|reason| {
+            EngineError::Invariant(format!("evaluator runtime identity unavailable: {reason}"))
         })
     }
 
@@ -335,16 +325,16 @@ impl CollectionEngine {
                 "evaluator_source_digest",
                 EVALUATOR_SOURCE_DIGEST,
             )?,
-            evaluator_artifact_digest: evaluator.artifact_digest.clone(),
+            evaluator_artifact_digest: evaluator.artifact_digest().clone(),
             helper_artifact_digest: parse_identity_digest(
                 "helper_artifact_digest",
                 &lock.execution.sha256,
             )?,
             config_digest: parse_identity_digest("config_digest", &lock.config_digest)?,
             protocol_version: lock.protocol_version.clone(),
-            target_triple: evaluator.target_triple.clone(),
-            artifact_identity_method: evaluator.artifact_identity_method.clone(),
-            platform_runtime_version: evaluator.platform_runtime_version.clone(),
+            target_triple: evaluator.target_triple().to_owned(),
+            artifact_identity_method: evaluator.artifact_identity_method().to_owned(),
+            platform_runtime_version: evaluator.platform_runtime_version().to_owned(),
         })
     }
 
@@ -1346,7 +1336,7 @@ impl CollectionEngine {
         // refuse (fail closed) rather than stamp findings with a fabricated one.
         let evaluator_artifact_digest = self
             .require_evaluator_identity()?
-            .artifact_digest
+            .artifact_digest()
             .as_str()
             .to_owned();
         let mut count = 0;
@@ -3408,5 +3398,46 @@ mod tests {
         )
         .expect_err("report ID, durable sequence, and semantic digest must agree");
         assert!(error.to_string().contains("unknown report occurrence"));
+    }
+
+    #[test]
+    fn collection_fails_closed_when_evaluator_identity_is_unresolved() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (config, witness, _lock) = binding_recovery_fixture(directory.path());
+        Store::initialize(&config.database_path).expect("initialize store");
+
+        // An unresolved (unsupported/unverifiable) identity refuses collection
+        // before any persistence, carrying the exact structured reason — never a
+        // fabricated fallback.
+        let mut refusing = CollectionEngine::open_with_evaluator_identity(
+            &config,
+            Err("evaluator identity is unsupported on this platform (plan9)".to_owned()),
+        )
+        .expect("engine opens");
+        let error = refusing
+            .collect(&witness)
+            .expect_err("collection refuses without a resolved evaluator identity");
+        assert!(matches!(
+            error,
+            EngineError::Invariant(message)
+                if message.contains("evaluator runtime identity unavailable")
+                    && message.contains("plan9")
+        ));
+
+        // A resolved identity clears the identity gate; with no active admission
+        // the next step is an ordinary admission refusal, proving the gate is
+        // what the first engine tripped on, not helper execution.
+        let identity = EvaluatorRuntimeIdentity::for_test(
+            Sha256Digest::parse(format!("sha256:{}", "a".repeat(64))).expect("digest"),
+        );
+        let mut ready =
+            CollectionEngine::open_with_evaluator_identity(&config, Ok(identity)).expect("engine");
+        let outcome = ready
+            .collect(&witness)
+            .expect("collection clears the identity gate");
+        assert!(matches!(
+            outcome,
+            CollectionOutcome::AdmissionRefused { .. }
+        ));
     }
 }

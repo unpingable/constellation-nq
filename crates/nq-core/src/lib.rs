@@ -8,6 +8,7 @@ pub mod admission;
 pub mod config;
 pub mod coordination;
 pub mod engine;
+pub mod evaluator_identity;
 pub mod identity;
 pub mod public;
 pub mod runner;
@@ -18,6 +19,7 @@ pub use admission::{AdmissionLock, AdmissionManager, AdmissionVerification};
 pub use config::{MAX_WITNESSES, NqConfig, WitnessConfig};
 pub use coordination::{CoordinationError, InstanceGuard};
 pub use engine::{BindingActionOutcome, CollectionEngine, CollectionOutcome};
+pub use evaluator_identity::{EvaluatorIdentityError, EvaluatorRuntimeIdentity};
 pub use identity::{
     ExecutionArtifact, ExecutionDirectory, ExecutionIdentity, MAX_LAUNCH_ARTIFACT_BYTES,
     MAX_LAUNCH_ARTIFACTS, MAX_LAUNCH_RETAINED_FDS, MAX_LAUNCH_TOTAL_BYTES,

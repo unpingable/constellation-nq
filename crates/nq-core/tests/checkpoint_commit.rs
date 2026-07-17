@@ -5,26 +5,16 @@ use std::path::Path;
 
 use nq_core::config::NqConfig;
 use nq_core::engine::{
-    CollectionEngine, CollectionOutcome, EvaluatorRuntimeIdentity, append_profile_descriptor,
-    checkpoint_contract_digest, validate_compiled_config,
+    CollectionEngine, CollectionOutcome, append_profile_descriptor, checkpoint_contract_digest,
+    validate_compiled_config,
 };
 use nq_profiles::resolve_profile;
-use nq_protocol::Sha256Digest;
 use nq_store::Store;
 use serde_json::{Value, json};
 
-/// A fixture running-evaluator identity. Real admission draws this from the
-/// platform provider (3A-2); tests inject one so the full admission and
-/// evaluation path is exercised without a fabricated production identity.
-fn fixture_evaluator_identity() -> EvaluatorRuntimeIdentity {
-    EvaluatorRuntimeIdentity {
-        artifact_digest: Sha256Digest::parse(format!("sha256:{}", "e".repeat(64)))
-            .expect("valid fixture digest"),
-        target_triple: "x86_64-unknown-linux-gnu".to_owned(),
-        artifact_identity_method: "fixture".to_owned(),
-        platform_runtime_version: "test".to_owned(),
-    }
-}
+// This end-to-end test drives the real engine, so evaluator identity comes from
+// the platform provider (`CollectionEngine::open`) exactly as in production —
+// there is no fabricated fixture identity to inject.
 
 const CHECKPOINT_HELPER: &str = r#"#!/usr/bin/python3
 import datetime
@@ -231,9 +221,7 @@ fn only_committed_admitted_reports_advance_the_next_request_checkpoint() {
         .witness("checkpoint.primary")
         .expect("configured witness")
         .clone();
-    let mut engine = CollectionEngine::open(&config)
-        .expect("open collection engine")
-        .with_evaluator_identity(fixture_evaluator_identity());
+    let mut engine = CollectionEngine::open(&config).expect("open collection engine");
     let admission = engine.witness_action(&witness, "admit");
     if admission.as_ref().is_err_and(|error| {
         error.to_string().contains("spawn_failed")
