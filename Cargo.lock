@@ -590,9 +590,11 @@ name = "nq-profiles"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "hex",
  "nq-protocol",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
 ]
 

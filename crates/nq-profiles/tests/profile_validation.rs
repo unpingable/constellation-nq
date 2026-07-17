@@ -19,6 +19,39 @@ fn now() -> chrono::DateTime<Utc> {
 }
 
 #[test]
+fn profile_semantic_id_binds_descriptor_source_and_protocol() {
+    let host_desc = host::MODULE.descriptor();
+    let id = nq_profiles::profile_semantic_id(host_desc).expect("host semantic id");
+
+    // Deterministic.
+    assert_eq!(
+        id,
+        nq_profiles::profile_semantic_id(host_desc).expect("host semantic id"),
+    );
+
+    // Strictly more than the descriptor digest: it also binds the evaluator
+    // source closure and the protocol semantics version.
+    assert_ne!(
+        id.as_str(),
+        host_desc.digest().expect("descriptor digest").as_str(),
+    );
+    assert!(nq_profiles::EVALUATOR_SOURCE_DIGEST.starts_with("sha256:"));
+
+    // Distinct profiles carry distinct semantic ids.
+    let conformance_id = nq_profiles::profile_semantic_id(conformance::MODULE.descriptor())
+        .expect("conformance semantic id");
+    assert_ne!(id, conformance_id);
+
+    // A change to the descriptor's declared law rotates the semantic id.
+    let mut modified = host_desc.clone();
+    modified.limits.max_observations += 1;
+    assert_ne!(
+        id,
+        nq_profiles::profile_semantic_id(&modified).expect("modified semantic id"),
+    );
+}
+
+#[test]
 fn detector_semantic_id_covers_the_load_pressure_threshold() {
     let descriptor = host::MODULE.detectors()[0].descriptor();
 

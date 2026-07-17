@@ -8,6 +8,7 @@
 
 mod descriptor;
 mod detector;
+mod identity;
 mod projection;
 mod registry;
 mod validation;
@@ -24,6 +25,9 @@ pub use descriptor::{
 pub use detector::{
     DETECTOR_DESCRIPTOR_SCHEMA, Detector, DetectorDescriptor, DetectorEvidence, DetectorInput,
     DetectorReport, DetectorResult, DetectorRuleParameters, DetectorState, EvidenceWatermark,
+};
+pub use identity::{
+    EVALUATOR_SOURCE_DIGEST, PROFILE_SEMANTIC_ID_SCHEMA, ProfileSemanticId, profile_semantic_id,
 };
 pub use projection::{ProfileProjection, ProjectionResult};
 pub use registry::{all_profiles, resolve_profile, resolve_profile_key};
