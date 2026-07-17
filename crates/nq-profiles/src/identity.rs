@@ -7,6 +7,17 @@
 //! and the protocol semantics label, so a behavior-changing edit rotates the id
 //! even when the descriptor is byte-identical. Conservative by design: a cosmetic
 //! source edit also rotates it, which is far safer than silent drift.
+//!
+//! # Identity law
+//!
+//! This is a *conservative implementation-semantic identity*, not an extensional
+//! proof that two evaluators mean the same thing:
+//!
+//! - A **matching** identity permits replay under the covered implementation
+//!   context.
+//! - A **mismatching** identity means equivalence has *not* been established — it
+//!   does **not** prove behavior changed. Comments and unrelated lockfile bumps
+//!   deliberately cause conservative rotation.
 
 use serde::{Deserialize, Serialize};
 
