@@ -23,7 +23,7 @@ pub use descriptor::{
 };
 pub use detector::{
     DETECTOR_DESCRIPTOR_SCHEMA, Detector, DetectorDescriptor, DetectorEvidence, DetectorInput,
-    DetectorReport, DetectorResult, DetectorState, EvidenceWatermark,
+    DetectorReport, DetectorResult, DetectorRuleParameters, DetectorState, EvidenceWatermark,
 };
 pub use projection::{ProfileProjection, ProjectionResult};
 pub use registry::{all_profiles, resolve_profile, resolve_profile_key};

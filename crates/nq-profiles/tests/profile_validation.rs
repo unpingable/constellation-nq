@@ -4,7 +4,8 @@ use std::collections::BTreeSet;
 
 use chrono::{Duration, TimeZone as _, Utc};
 use nq_profiles::{
-    DetectorInput, DetectorReport, DetectorState, EvidenceWatermark, ProfileModule,
+    DetectorInput, DetectorReport, DetectorRuleParameters, DetectorState, EvidenceWatermark,
+    ProfileModule,
     ProfileRefusalCode, ReportInput, ScopeGrant, SemanticCoverageState, SemanticReportStatus,
     ValidatedReport, ValidationContext, VantageGrant, all_profiles, conformance, host,
     resolve_profile,
@@ -15,6 +16,44 @@ fn now() -> chrono::DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 7, 16, 12, 0, 0)
         .single()
         .expect("fixed date is valid")
+}
+
+#[test]
+fn detector_semantic_id_covers_the_load_pressure_threshold() {
+    let descriptor = host::MODULE.detectors()[0].descriptor();
+
+    // The shipped compiled detector fixes the load-pressure law at 2.0x CPU.
+    assert_eq!(
+        descriptor.parameters,
+        DetectorRuleParameters::LoadPressure {
+            normalized_load_threshold_millis: 2000,
+        },
+    );
+
+    let baseline = descriptor.digest().expect("compiled detector digest");
+
+    // Same parameters -> same detector semantic id.
+    assert_eq!(
+        baseline,
+        descriptor.clone().digest().expect("unchanged detector digest"),
+    );
+
+    // Changing only the executable threshold must rotate the detector semantic
+    // id, even though id, version, condition, and profile are untouched. This is
+    // the invariant the hardening plan requires: behavior-changing law lives
+    // inside the hashed identity, not floating beside it.
+    let mut shifted = descriptor.clone();
+    shifted.parameters = DetectorRuleParameters::LoadPressure {
+        normalized_load_threshold_millis: 3000,
+    };
+    assert_eq!(shifted.id, descriptor.id);
+    assert_eq!(shifted.version, descriptor.version);
+    assert_eq!(shifted.condition, descriptor.condition);
+    assert_ne!(
+        baseline,
+        shifted.digest().expect("shifted detector digest"),
+        "changing the load-pressure threshold must rotate the detector semantic id",
+    );
 }
 
 fn conformance_context() -> ValidationContext {

@@ -8,7 +8,8 @@ use serde_json::{Value, json};
 
 use crate::{
     CardinalityLimits, DETECTOR_DESCRIPTOR_SCHEMA, Detector, DetectorDescriptor, DetectorEvidence,
-    DetectorInput, DetectorReport, DetectorResult, DetectorState, EvidenceBasis, FreshnessPolicy,
+    DetectorInput, DetectorReport, DetectorResult, DetectorRuleParameters, DetectorState,
+    EvidenceBasis, FreshnessPolicy,
     ProfileDescriptor, ProfileModule, ProfileProjection, ProfileRefusal, ProfileRefusalCode,
     ProjectionResult, RefusalBoundary, SemanticCoverageState, SemanticReportStatus, SubjectRules,
     ValidatedReport, ValidationContext, ValidationResult, VocabularyTerm,
@@ -346,6 +347,9 @@ static HOST_LOAD_DESCRIPTOR: LazyLock<DetectorDescriptor> = LazyLock::new(|| Det
         .unwrap_or_else(|error| panic!("compiled host descriptor must canonicalize: {error}")),
     title: "Sustained host load pressure".to_owned(),
     condition: "host_load_pressure".to_owned(),
+    parameters: DetectorRuleParameters::LoadPressure {
+        normalized_load_threshold_millis: 2000,
+    },
 });
 
 static DETECTORS: [&'static dyn Detector; 1] = [&HOST_LOAD_PRESSURE_DETECTOR];
@@ -395,7 +399,12 @@ impl Detector for HostLoadPressureDetector {
         };
 
         let normalized_load = load_1m / f64::from(cpu_count);
-        let state = if normalized_load >= 2.0 {
+        let threshold = match &descriptor.parameters {
+            DetectorRuleParameters::LoadPressure {
+                normalized_load_threshold_millis,
+            } => f64::from(*normalized_load_threshold_millis) / 1000.0,
+        };
+        let state = if normalized_load >= threshold {
             DetectorState::Present
         } else {
             DetectorState::ExplicitlyAbsent
@@ -404,7 +413,9 @@ impl Detector for HostLoadPressureDetector {
             state,
             condition: descriptor.condition.clone(),
             summary: if state == DetectorState::Present {
-                "one-minute load is at least twice the logical CPU count".to_owned()
+                format!(
+                    "one-minute load reached the detector threshold of {threshold:.2}x logical CPU count"
+                )
             } else {
                 "current complete coverage places one-minute load below the detector threshold"
                     .to_owned()

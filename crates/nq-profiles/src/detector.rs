@@ -12,6 +12,23 @@ use crate::{
 /// Schema identifier for canonical detector descriptors.
 pub const DETECTOR_DESCRIPTOR_SCHEMA: &str = "nq.detector_descriptor.v1";
 
+/// Typed, canonically hashed rule parameters carried inside a detector
+/// descriptor so the detector's semantic identity covers its executable law.
+///
+/// Thresholds are fixed-point integers, never floats: a float has no single
+/// canonical byte form, and behavior-bearing law must hash deterministically.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DetectorRuleParameters {
+    /// One-minute load-pressure law. The condition is `Present` when
+    /// `load_1m / cpu_count >= normalized_load_threshold_millis / 1000`.
+    LoadPressure {
+        /// Threshold on normalized one-minute load, in thousandths of a logical
+        /// CPU (e.g. `2000` = load at least twice the logical CPU count).
+        normalized_load_threshold_millis: u32,
+    },
+}
+
 /// Canonical identity and operator metadata for one detector revision.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -30,6 +47,9 @@ pub struct DetectorDescriptor {
     pub title: String,
     /// Stable condition name emitted by this detector.
     pub condition: String,
+    /// Typed rule parameters interpreted by this detector revision. Part of the
+    /// hashed identity, so a behavior-changing threshold rotates the digest.
+    pub parameters: DetectorRuleParameters,
 }
 
 impl DetectorDescriptor {
