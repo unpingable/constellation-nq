@@ -1,0 +1,71 @@
+#!/bin/sh
+set -eu
+
+ensure_account_fallback() {
+    if ! getent group nq >/dev/null 2>&1; then
+        addgroup --system nq
+    fi
+    if ! getent passwd nq >/dev/null 2>&1; then
+        shell=/usr/sbin/nologin
+        if [ ! -x "$shell" ]; then
+            shell=/bin/false
+        fi
+        adduser \
+            --system \
+            --ingroup nq \
+            --home /var/lib/nq \
+            --no-create-home \
+            --shell "$shell" \
+            nq
+    fi
+    if ! getent group nq-witness >/dev/null 2>&1; then
+        addgroup --system nq-witness
+    fi
+    if ! getent passwd nq-witness >/dev/null 2>&1; then
+        shell=/usr/sbin/nologin
+        if [ ! -x "$shell" ]; then
+            shell=/bin/false
+        fi
+        adduser \
+            --system \
+            --ingroup nq-witness \
+            --home /nonexistent \
+            --no-create-home \
+            --shell "$shell" \
+            nq-witness
+    fi
+}
+
+create_layout_fallback() {
+    install -d -o root -g nq -m 0750 /etc/nq
+    install -d -o nq -g nq -m 0700 \
+        /var/lib/nq \
+        /var/lib/nq/admissions \
+        /var/lib/nq/backups
+    install -d -o nq -g nq -m 0751 /run/nq
+    install -d -o nq -g nq -m 0711 /run/nq/helpers
+}
+
+case "${1:-}" in
+    configure|abort-upgrade|abort-remove|abort-deconfigure)
+        if command -v systemd-sysusers >/dev/null 2>&1; then
+            systemd-sysusers /usr/lib/sysusers.d/nq.conf
+        else
+            ensure_account_fallback
+        fi
+
+        if command -v systemd-tmpfiles >/dev/null 2>&1; then
+            systemd-tmpfiles --create /usr/lib/tmpfiles.d/nq.conf
+        else
+            create_layout_fallback
+        fi
+
+        if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+            systemctl daemon-reload || true
+        fi
+        ;;
+esac
+
+# Deliberately absent: nq init, nq admin upgrade, config installation,
+# systemctl enable, and systemctl start. Each requires an operator decision.
+exit 0

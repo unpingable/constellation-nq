@@ -1,0 +1,19 @@
+{
+  "schema": "nq.profile_catalog.v1",
+  "digest_basis": "RFC 8785 canonical descriptor JSON, SHA-256, qualified as sha256:<hex>",
+  "generated_by": "nq profiles show",
+  "profiles": [
+    {
+      "id": "nq.conformance",
+      "version": 1,
+      "descriptor": "nq.conformance.v1.json",
+      "semantic_digest": "sha256:e1d808429458639aaff4a7e7fc2f0145258b0ebe1c36a28dad8ee86d36581494"
+    },
+    {
+      "id": "nq.host",
+      "version": 1,
+      "descriptor": "nq.host.v1.json",
+      "semantic_digest": "sha256:c8c10fed1cc5598d953b4defbc98e8c106fc59e035c249d43681698a5c7b4ff9"
+    }
+  ]
+}

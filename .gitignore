@@ -1,0 +1,9 @@
+/target/
+/dist/
+*.db
+*.db-shm
+*.db-wal
+*.tmp
+/.nq/
+__pycache__/
+*.py[cod]

@@ -1,0 +1,95 @@
+{
+  "schema": "nq.profile_descriptor.v1",
+  "family": "host",
+  "profile": {
+    "id": "nq.host",
+    "version": 1
+  },
+  "title": "Local host state",
+  "observation_kinds": [
+    {
+      "name": "host_snapshot",
+      "description": "A bounded identity, uptime, CPU, and one-minute-load snapshot"
+    }
+  ],
+  "coverage": [
+    {
+      "name": "host_identity",
+      "description": "The local kernel hostname"
+    },
+    {
+      "name": "uptime",
+      "description": "Elapsed time since the local kernel booted"
+    },
+    {
+      "name": "load",
+      "description": "CPU count and one-minute scheduler load"
+    }
+  ],
+  "subjects": {
+    "namespace": "host:",
+    "exact_request_subject": true
+  },
+  "scope_kinds": [
+    {
+      "name": "host",
+      "description": "One exact local host"
+    }
+  ],
+  "vantages": [
+    {
+      "name": "local",
+      "description": "Observation from a process on the subject host"
+    }
+  ],
+  "access_paths": [
+    {
+      "name": "procfs",
+      "description": "Linux procfs files opened by the helper"
+    },
+    {
+      "name": "sysinfo",
+      "description": "Linux kernel system-information interfaces"
+    },
+    {
+      "name": "procfs_sysinfo",
+      "description": "A composite snapshot using both procfs and local kernel information"
+    }
+  ],
+  "bases": [
+    {
+      "name": "kernel_snapshot",
+      "description": "A bounded local kernel state snapshot"
+    }
+  ],
+  "regimes": [
+    {
+      "name": "normal",
+      "description": "Non-invasive observation without an induced workload"
+    }
+  ],
+  "capabilities": [
+    {
+      "name": "read_procfs",
+      "description": "Read bounded local procfs state"
+    },
+    {
+      "name": "read_system_info",
+      "description": "Read bounded local kernel system information"
+    }
+  ],
+  "freshness": {
+    "reliance_seconds": 300,
+    "alignment_seconds": 30
+  },
+  "limits": {
+    "max_observations": 1,
+    "max_payload_bytes": 8192,
+    "max_subject_bytes": 512,
+    "max_coverage_declarations": 3
+  },
+  "disturbance_assumptions": [
+    "Reading kernel counters does not materially alter host load",
+    "One local vantage does not establish external reachability or global health"
+  ]
+}

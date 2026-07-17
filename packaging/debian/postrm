@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload || true
+    systemctl reset-failed nqd.service >/dev/null 2>&1 || true
+fi
+
+if [ "${1:-}" = purge ]; then
+    echo "nq-ng: retaining /etc/nq, /var/lib/nq, and the nq/nq-witness accounts; see OPERATIONS.md for explicit purge"
+fi
+
+# Debian purge is intentionally non-destructive for NQ evidence. It does not
+# remove configuration, admissions, backups, the database, or the service
+# identities. Explicit local-state purge is a separate operator procedure.
+exit 0

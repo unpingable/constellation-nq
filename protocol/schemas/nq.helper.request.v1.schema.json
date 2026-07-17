@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.helper.request.v1.schema.json",
+  "title": "nq.helper.request.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "protocol_version", "request_id", "instance_id", "profile", "binding", "granted_capabilities", "deadline", "bounds"],
+  "properties": {
+    "schema": {"const": "nq.helper.request.v1"},
+    "protocol_version": {"const": "nq.helper.v1"},
+    "request_id": {"$ref": "#/$defs/token"},
+    "instance_id": {"$ref": "#/$defs/token"},
+    "profile": {"$ref": "#/$defs/profile"},
+    "binding": {"$ref": "#/$defs/binding"},
+    "granted_capabilities": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/token"}},
+    "checkpoint": {"$ref": "#/$defs/checkpoint"},
+    "deadline": {"$ref": "#/$defs/deadline"},
+    "bounds": {"$ref": "#/$defs/bounds"}
+  },
+  "$defs": {
+    "token": {"type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[A-Za-z0-9._:/@-]+$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "profile": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "version", "digest"],
+      "properties": {"id": {"$ref": "#/$defs/token"}, "version": {"$ref": "#/$defs/token"}, "digest": {"$ref": "#/$defs/digest"}}
+    },
+    "scope": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "value"],
+      "properties": {"kind": {"$ref": "#/$defs/token"}, "value": {}}
+    },
+    "vantage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "value"],
+      "properties": {"kind": {"$ref": "#/$defs/token"}, "value": {}}
+    },
+    "binding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["subject", "scope", "vantage"],
+      "properties": {"subject": {"$ref": "#/$defs/token"}, "scope": {"$ref": "#/$defs/scope"}, "vantage": {"$ref": "#/$defs/vantage"}}
+    },
+    "checkpoint": {
+      "type": "object", "additionalProperties": false,
+      "required": ["value"], "properties": {"value": {}}
+    },
+    "deadline": {
+      "type": "object", "additionalProperties": false,
+      "required": ["clock", "expires_at_ns"],
+      "properties": {"clock": {"const": "linux_boottime"}, "expires_at_ns": {"type": "string", "pattern": "^(?:[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]|1844674407370955161[0-4]|18446744073709551615)$"}}
+    },
+    "bounds": {
+      "type": "object", "additionalProperties": false,
+      "required": ["max_response_bytes", "max_observations", "max_payload_bytes", "max_coverage_entries", "max_report_errors", "max_checkpoint_bytes"],
+      "properties": {
+        "max_response_bytes": {"type": "integer", "minimum": 256, "maximum": 16777216},
+        "max_observations": {"type": "integer", "minimum": 0, "maximum": 65535},
+        "max_payload_bytes": {"type": "integer", "minimum": 0, "maximum": 1048576},
+        "max_coverage_entries": {"type": "integer", "minimum": 0, "maximum": 4096},
+        "max_report_errors": {"type": "integer", "minimum": 0, "maximum": 1024},
+        "max_checkpoint_bytes": {"type": "integer", "minimum": 0, "maximum": 1048576}
+      }
+    }
+  }
+}

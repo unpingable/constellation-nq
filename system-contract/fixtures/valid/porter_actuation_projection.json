@@ -1,0 +1,76 @@
+{
+  "schema": "nq.porter_actuation_projection.v1",
+  "projection_digest": "sha256:f8387f137205ce0ce7aef7ddca9780fda2b61b44e4a50551173957a55d4087b1",
+  "projection": {
+    "projection_id": "porter/conformance-system/1",
+    "scope_cut": {
+      "cut_id": "conformance-system/1",
+      "cut_digest": "sha256:07a4bb6081d3b1e5c92efcfe9a99fccbc831c4ec92427e3e212408e189c830f8"
+    },
+    "system_id": "conformance-system",
+    "actuation_targets": [
+      {
+        "target_id": "fixture-host",
+        "target_class": "conformance-only",
+        "target_identity_digest": "sha256:3a3bed92d6f850d0974d340fb568feac44e3b5cee9af328e2ac00998a3d580f2",
+        "source_snapshot_ids": ["bootstrap-fixture-host"]
+      }
+    ],
+    "actuation_components": [
+      {
+        "component_id": "echo-helper",
+        "kind": "protocol-fixture",
+        "hosted_on": "fixture-host",
+        "source_snapshot_ids": ["authored-conformance-system"]
+      }
+    ],
+    "affected_targets": [
+      {
+        "target_id": "fixture-host",
+        "target_class": "conformance-only",
+        "target_identity_digest": "sha256:3a3bed92d6f850d0974d340fb568feac44e3b5cee9af328e2ac00998a3d580f2",
+        "source_snapshot_ids": ["bootstrap-fixture-host"]
+      }
+    ],
+    "affected_components": [
+      {
+        "component_id": "echo-helper",
+        "kind": "protocol-fixture",
+        "hosted_on": "fixture-host",
+        "source_snapshot_ids": ["authored-conformance-system"]
+      }
+    ],
+    "boundary_dependencies": [],
+    "verification_obligations": [
+      {
+        "observation_obligation_id": "observe-echo",
+        "component_id": "echo-helper",
+        "instance_id": "conformance-fixture-local",
+        "profile": {
+          "id": "nq.conformance",
+          "version": "1",
+          "digest": "sha256:e1d808429458639aaff4a7e7fc2f0145258b0ebe1c36a28dad8ee86d36581494"
+        },
+        "subject_binding": {
+          "subject": "conformance:system-contract",
+          "scope": {
+            "kind": "fixture",
+            "value": {
+              "id": "system-contract",
+              "nonce": "scope-cut-fixture"
+            }
+          },
+          "vantage": {
+            "kind": "local",
+            "value": {}
+          }
+        },
+        "required_coverage": ["echo"],
+        "granted_capabilities": [],
+        "freshness_seconds": 60,
+        "source_snapshot_ids": ["authored-conformance-system"]
+      }
+    ],
+    "authority": "none"
+  }
+}

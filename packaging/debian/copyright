@@ -1,0 +1,10 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: nq-ng
+Source: private source distribution
+
+Files: *
+Copyright: 2026 NQ contributors
+License: Apache-2.0
+ The complete Apache License 2.0 text is shipped at
+ /usr/share/doc/nq-ng/LICENSE. On Debian systems it is also available at
+ /usr/share/common-licenses/Apache-2.0.

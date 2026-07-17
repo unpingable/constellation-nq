@@ -1,0 +1,15 @@
+[package]
+name = "nq-build-info"
+description = "Machine-readable NQ-ng release-cohort build policy probe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

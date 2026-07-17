@@ -1,0 +1,35 @@
+#!/bin/sh
+set -eu
+
+require_inactive() {
+    state=$(systemctl show --property=ActiveState --value nqd.service) || {
+        echo "nq-ng: cannot verify that nqd.service is inactive" >&2
+        exit 1
+    }
+    if [ "$state" != "inactive" ]; then
+        echo "nq-ng: refusing package lifecycle operation: nqd.service is $state, not inactive" >&2
+        exit 1
+    fi
+}
+
+if [ -d /run/systemd/system ]; then
+    if ! command -v systemctl >/dev/null 2>&1; then
+        echo "nq-ng: systemd is active but systemctl is unavailable" >&2
+        exit 1
+    fi
+
+    case "${1:-}" in
+        upgrade|failed-upgrade)
+            # Replacing a running evidence engine is unsafe. Keep enablement,
+            # but require explicit schema verification and restart afterward.
+            systemctl stop nqd.service
+            require_inactive
+            ;;
+        remove|deconfigure)
+            systemctl disable --now nqd.service
+            require_inactive
+            ;;
+    esac
+fi
+
+exit 0

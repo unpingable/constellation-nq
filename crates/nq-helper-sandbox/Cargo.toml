@@ -1,0 +1,24 @@
+[package]
+name = "nq-helper-sandbox"
+description = "Narrow Linux privilege-drop boundary for NQ-ng witness helpers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+libc.workspace = true
+nix.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints.rust]
+unsafe_code = "allow"
+missing_docs = "warn"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

@@ -1,0 +1,21 @@
+[package]
+name = "nq-host-helper"
+description = "First-party bounded witness for the compiled nq.host/v1 profile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+chrono.workspace = true
+nix = { workspace = true, features = ["hostname", "time"] }
+nq-build-info = { path = "../nq-build-info" }
+nq-profiles = { path = "../nq-profiles" }
+nq-protocol = { path = "../nq-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

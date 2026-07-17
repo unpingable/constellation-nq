@@ -1,0 +1,49 @@
+# Strict nq.config.v1 example using the first-party compiled host profile.
+schema = "nq.config.v1"
+database_path = "/var/lib/nq/nq.db"
+socket_path = "/run/nq/nqd.sock"
+admissions_dir = "/var/lib/nq/admissions"
+helper_runtime_dir = "/run/nq/helpers"
+
+[[witnesses]]
+instance_id = "host-local"
+carrier = "stdio"
+subject = "host:local"
+capability_ceiling = ["read_procfs", "read_system_info"]
+checkpoint_policy = "disabled"
+
+[witnesses.command]
+executable = "/usr/lib/nq/helpers/nq-host-helper"
+args = []
+env = {}
+execution_account = "nq-witness"
+working_directory = "/usr/lib/nq/helpers"
+
+[witnesses.profile]
+id = "nq.host"
+version = 1
+
+[witnesses.scope]
+kind = "host"
+value = { id = "local" }
+
+[witnesses.vantage]
+kind = "local"
+value = {}
+
+[witnesses.schedule]
+interval_seconds = 300
+jitter_seconds = 15
+deadline_ms = 30000
+retry_backoff_seconds = 10
+max_retry_backoff_seconds = 300
+
+[witnesses.resources]
+max_response_bytes = 1048576
+max_stderr_bytes = 65536
+max_observations = 1
+max_address_space_bytes = 536870912
+max_cpu_seconds = 60
+max_processes = 32
+max_open_files = 128
+max_file_bytes = 67108864

@@ -1,0 +1,6 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.scope_cut_proposal.v1.schema.json",
+  "title": "nq.scope_cut_proposal.v1",
+  "$ref": "nq.system_contract.defs.v1.schema.json#/$defs/scopeCutProposal"
+}

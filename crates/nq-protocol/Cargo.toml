@@ -1,0 +1,23 @@
+[package]
+name = "nq-protocol"
+description = "Language-neutral helper protocol and public Rust SDK for NQ-ng"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+chrono.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_jcs = "0.2.0"
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

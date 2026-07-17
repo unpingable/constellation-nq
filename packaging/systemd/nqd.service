@@ -1,0 +1,79 @@
+[Unit]
+Description=NQ-ng local operational evidence service
+Documentation=file:///usr/share/doc/nq-ng/OPERATIONS.md
+After=local-fs.target
+RequiresMountsFor=/var/lib/nq
+
+[Service]
+Type=simple
+User=nq
+Group=nq
+UMask=0077
+WorkingDirectory=/usr
+
+# Directory creation is deliberately limited to empty filesystem layout. The
+# service never initializes or upgrades the database and never writes config.
+ConfigurationDirectory=nq
+ConfigurationDirectoryMode=0750
+StateDirectory=nq nq/admissions nq/backups
+StateDirectoryMode=0700
+RuntimeDirectory=nq nq/helpers
+RuntimeDirectoryMode=0751
+
+ExecStartPre=+/usr/bin/install -d -o nq -g nq -m 0711 /run/nq/helpers
+# MANIFEST.sha256 is generated from the exact release stage with paths relative
+# to /usr. Recheck those installed bytes before configuration or daemon startup.
+# This detects package drift; it is not a signature or an authority grant.
+ExecStartPre=/usr/bin/sha256sum --quiet --check /usr/share/nq/MANIFEST.sha256
+ExecStartPre=/usr/bin/nq --config=/etc/nq/nq.toml config check
+ExecStart=/usr/bin/nqd --config=/etc/nq/nq.toml --console-address=127.0.0.1:8787
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=30s
+TimeoutStopSec=45s
+KillMode=control-group
+OOMPolicy=stop
+
+# nqd retains only the four capabilities required to enter a configured helper
+# account, transfer exact socket custody, and terminate a distinct-UID process
+# group. The child launcher clears every capability before helper exec.
+# In particular,
+# do not add PrivateDevices=yes: hardware witnesses may eventually need
+# explicitly managed device access.
+NoNewPrivileges=yes
+PrivateTmp=yes
+TemporaryFileSystem=/tmp:rw,nosuid,nodev,noexec,mode=1777,size=64M /var/tmp:rw,nosuid,nodev,noexec,mode=1777,size=64M
+ProtectSystem=strict
+ProtectHome=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+KeyringMode=private
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_KILL
+AmbientCapabilities=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_KILL
+ReadOnlyPaths=/etc/nq
+ReadWritePaths=/var/lib/nq /run/nq
+LimitNOFILE=4096
+LimitFSIZE=1G
+LimitCORE=0
+TasksMax=256
+MemoryMax=2G
+MemorySwapMax=0
+CPUQuota=200%
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nqd
+
+[Install]
+WantedBy=multi-user.target

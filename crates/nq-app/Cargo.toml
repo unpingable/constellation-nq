@@ -1,0 +1,46 @@
+[package]
+name = "nq-app"
+description = "Operator CLI and resident daemon for NQ-ng"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+default-run = "nq"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+hex.workspace = true
+nix.workspace = true
+nq-build-info = { path = "../nq-build-info" }
+nq-core = { path = "../nq-core" }
+nq-helper-sandbox = { path = "../nq-helper-sandbox" }
+nq-profiles = { path = "../nq-profiles" }
+nq-protocol = { path = "../nq-protocol" }
+nq-store = { path = "../nq-store" }
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+rusqlite.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "nq"
+path = "src/bin/nq.rs"
+
+[[bin]]
+name = "nqd"
+path = "src/bin/nqd.rs"

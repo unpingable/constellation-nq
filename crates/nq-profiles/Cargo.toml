@@ -1,0 +1,18 @@
+[package]
+name = "nq-profiles"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Compiled, versioned semantic profiles for NQ-ng"
+
+[dependencies]
+chrono.workspace = true
+nq-protocol = { path = "../nq-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

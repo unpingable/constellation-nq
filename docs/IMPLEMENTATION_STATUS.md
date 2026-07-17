@@ -1,0 +1,104 @@
+# NQ-ng implementation status
+
+The governing product plan is preserved verbatim in [`PLAN.md`](PLAN.md).
+This file records delivery status; it does not replace or narrow that plan.
+The separately labeled [`PORTER_NETBOX_ADDENDUM.md`](PORTER_NETBOX_ADDENDUM.md)
+records the future disposable-package specimen, persistent-deployment
+specimen, and shared system-cut contract. The bounded contract compiler is
+implemented; the specimens and live consumer integrations are not. The
+addendum does not change the v1 operational-core or authority boundary.
+
+## Current developer preview
+
+The repository implements the stage-one operational spine:
+
+- the `nq` operator CLI and resident `nqd` scheduler;
+- strict version-pinned NDJSON helper contracts, schemas, fixtures, Rust DTOs,
+  and an independent Python conformance specimen;
+- one-shot stdio and supervised request/response Unix carriers;
+- compiled profile registration, strict profile validation, typed projection,
+  and compiled detector evaluation;
+- explicit helper test/admission/rotation/rollback/revocation with immutable
+  admission history and drift refusal;
+- a generic append-only SQLite evidence substrate, exact raw and semantic
+  identities, rejected custody, evaluation watermarks, finding events, public
+  views, backup/restore, and an upgrade receipt skeleton;
+- consistent finding/status DTOs through CLI export, local Unix HTTP API,
+  bounded public SQL, and a loopback server-rendered console;
+- a native host profile/helper plus the conformance fixture profile;
+- strict, bounded `SystemSpecV1` validation and deterministic compilation into
+  schema-domain-separated `ScopeCut` proposals, ratification-bound cuts,
+  NQ-observation projections, and future Porter-scope projections. Publication
+  resolves every observation obligation against the exact compiled profile,
+  descriptor digest, full coverage vocabulary, capabilities, and profile-owned
+  freshness/subject/scope/vantage rules. Immutable custody verification is
+  separate from current-catalog qualification so a historical cut does not
+  become corrupt merely because a profile version leaves a later binary; all
+  documents are explicitly authority-free. The Porter-shaped projection keeps
+  direct plan scope separate from dependency-derived affected consumers and
+  their witness obligations; it does not call collection itself a satisfied
+  detector/result postcondition;
+- Linux systemd, tarball, and Debian packaging that creates identities/layout
+  but never initializes, migrates, starts, overwrites, or purges state; and
+- hostile tests for protocol planes, profile overclaim, append-only custody,
+  evidence lifecycle, executable/config races, cross-process binding mutation,
+  checkpoint isolation, schema integrity, and live-WAL backup/restore.
+
+The preview treats the SQLite binding history as authoritative. Active
+admission files are crash-recoverable materializations, and every collection
+or binding mutation is serialized per database/instance across `nq` and
+`nqd`. Helpers execute as a separately admitted local account with a bounded,
+sanitized launch and no NQ database or admission-directory custody.
+Native startup qualification is intentionally limited to supported glibc
+ELF64 deployments: it prequalifies a fixed-path recursive dependency closure,
+then requires the loader result for the exact retained memfd to match it, and
+refuses writable/custom runtime paths or redirecting dynamic tags. It does not
+claim to inventory later dynamic-language, plugin, `dlopen`, NSS/PAM, or
+driver-module loading; the Python program remains a conformance specimen only.
+Helpers are held in a seccomp-locked process group with configured hard
+rlimits and service-wide systemd resource ceilings. These are bounded preview
+controls, not per-instance cgroup or filesystem quotas; a shared execution
+account remains a shared sibling trust and resource domain.
+
+## Deliberately not replacement-ready
+
+The following governing-plan stages are not claimed by this preview:
+
+- ZFS, SMART, GPU, log-activity, and Prometheus sample-lane parity;
+- notification delivery workers and retention automation;
+- a historical multi-version migration chain and full install/upgrade matrix;
+- Nightshift conversion and its mandatory shipped-binary contract tests;
+- an operator-approved legacy cut manifest produced from an actual old NQ;
+- DNS/TLS/reachability/path observation profiles;
+- WLP custody transport, remote enrollment, or fleet administration;
+- claims, governed inquiry, remediation/action authorization, or authority of
+  any kind;
+- daemon/SQLite/API/CLI publication or consumption of system cuts, NetBox
+  snapshot import, Porter plan or receipt integration, AG cut binding, the
+  disposable Noble QEMU specimen, and the `sushi-k` deployment described by
+  the Porter/NetBox addendum;
+- typed endpoint, persistent-storage, backup-capability, and actuation-surface
+  properties, plus compiled expected detector/result semantics for transition
+  postconditions.
+
+There is no legacy importer or verdict compatibility mode. A future cut may
+reference an immutable legacy manifest, but it must not import legacy findings
+as current nq-ng state.
+
+## Acceptance posture
+
+The local acceptance suite is documented in [`DEVELOPMENT.md`](DEVELOPMENT.md).
+The bounded 2026-07-17 runtime-hardening campaign is recorded separately in
+[`../hardening/CAMPAIGN_2026-07-17.md`](../hardening/CAMPAIGN_2026-07-17.md).
+Its system-cut mutation, environment-perturbed release assembly, partial-write,
+and extracted-package checks passed locally. Its Noble QEMU lifecycle and real
+cross-UID AF_UNIX stages remain explicitly blocked and are not release
+evidence.
+Some kernel boundaries—real UID/GID transition with capabilities, executable
+memfd policy, and authenticated cross-UID Unix restart—also require the
+documented unsandboxed Linux package/VM job. A sandbox skip is never treated as
+release evidence for those boundaries.
+
+Delivery proceeds through the stages in `PLAN.md`. A later stage may add a
+profile module, helper, and registry entry, but may not silently move profile
+semantics into configuration, SQL, or helper-owned verdicts.

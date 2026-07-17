@@ -1,0 +1,70 @@
+{
+  "schema": "nq.profile_descriptor.v1",
+  "family": "conformance",
+  "profile": {
+    "id": "nq.conformance",
+    "version": 1
+  },
+  "title": "Protocol conformance echo",
+  "observation_kinds": [
+    {
+      "name": "echo",
+      "description": "A bounded nonce echoed by a language-neutral helper"
+    }
+  ],
+  "coverage": [
+    {
+      "name": "echo",
+      "description": "Whether the requested echo was returned"
+    }
+  ],
+  "subjects": {
+    "namespace": "conformance:",
+    "exact_request_subject": true
+  },
+  "scope_kinds": [
+    {
+      "name": "fixture",
+      "description": "A conformance fixture scope"
+    }
+  ],
+  "vantages": [
+    {
+      "name": "local",
+      "description": "The local supervised process"
+    }
+  ],
+  "access_paths": [
+    {
+      "name": "process",
+      "description": "A supervised local process exchange"
+    }
+  ],
+  "bases": [
+    {
+      "name": "request_echo",
+      "description": "The nonce carried by the current bounded request"
+    }
+  ],
+  "regimes": [
+    {
+      "name": "conformance",
+      "description": "Protocol conformance, not operational diagnosis"
+    }
+  ],
+  "capabilities": [],
+  "freshness": {
+    "reliance_seconds": 60,
+    "alignment_seconds": 0
+  },
+  "limits": {
+    "max_observations": 1,
+    "max_payload_bytes": 2048,
+    "max_subject_bytes": 256,
+    "max_coverage_declarations": 1
+  },
+  "disturbance_assumptions": [
+    "The echo fixture exercises serialization and validation only",
+    "A successful echo establishes no operational condition or authority"
+  ]
+}

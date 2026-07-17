@@ -1,0 +1,30 @@
+# Installed path relative to /usr                         Mode
+# The assembler enforces the expanded exact path/type/mode allowlist. Globs
+# here are the compact human-readable form of versioned catalog inventories.
+bin/nq                                                     0755
+bin/nqd                                                    0755
+lib/nq/helpers/nq-host-helper                              0755
+lib/nq/helpers/nq_conformance_helper.py                    0755
+lib/systemd/system/nqd.service                             0644
+lib/sysusers.d/nq.conf                                     0644
+lib/tmpfiles.d/nq.conf                                     0644
+share/doc/nq-ng/OPERATIONS.md                              0644
+share/doc/nq-ng/README.md                                  0644
+share/doc/nq-ng/LICENSE                                    0644
+share/doc/nq-ng/copyright                                  0644
+share/doc/nq-ng/docs/PLAN.md                               0644
+share/doc/nq-ng/docs/DEVELOPMENT.md                        0644
+share/doc/nq-ng/docs/IMPLEMENTATION_STATUS.md              0644
+share/doc/nq-ng/docs/PORTER_NETBOX_ADDENDUM.md             0644
+share/doc/nq-ng/examples/nq.toml                           0644
+share/doc/nq-ng/examples/nq-host.toml                      0644
+share/nq/profiles/*.json                                   0644
+share/nq/protocol/README.md                                0644
+share/nq/protocol/schemas/*.json                           0644
+share/nq/protocol/fixtures/manifest.json                   0644
+share/nq/protocol/fixtures/**/*.json                       0644
+share/nq/protocol/fixtures/**/*.ndjson                     0644
+share/nq/system-contract/manifest.json                     0644
+share/nq/system-contract/schemas/*.json                    0644
+share/nq/system-contract/fixtures/valid/*.json             0644
+share/nq/MANIFEST.sha256                                   0644

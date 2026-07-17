@@ -1,0 +1,19 @@
+{
+  "schema": "nq.protocol.conformance_manifest.v1",
+  "request": "valid/request.ndjson",
+  "valid": [
+    {"path": "valid/evidence_report.ndjson", "document": "evidence_report"},
+    {"path": "valid/response_report.ndjson", "document": "response", "outcome": "report"},
+    {"path": "valid/response_refusal.ndjson", "document": "response", "outcome": "refusal"},
+    {"path": "valid/response_failed_report.ndjson", "document": "response", "outcome": "failed_report"}
+  ],
+  "invalid": [
+    {"path": "invalid/request_unknown_field.ndjson", "phase": "decode"},
+    {"path": "invalid/request_duplicate_key.ndjson", "phase": "decode"},
+    {"path": "invalid/request_wrong_version.ndjson", "phase": "protocol_validation"},
+    {"path": "invalid/response_wrong_echo.ndjson", "phase": "exchange_validation"},
+    {"path": "invalid/response_capability_escape.ndjson", "phase": "exchange_validation"},
+    {"path": "invalid/response_failed_without_error.ndjson", "phase": "report_validation"},
+    {"path": "invalid/extra_frame.ndjson", "phase": "framing"}
+  ]
+}

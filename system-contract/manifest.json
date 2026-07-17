@@ -1,0 +1,73 @@
+{
+  "schema": "nq.system_contract_assets.v1",
+  "digest_basis": "RFC 8785 canonical JSON; versioned artifacts hash {schema,artifact}",
+  "definitions_schema": {
+    "path": "schemas/nq.system_contract.defs.v1.schema.json",
+    "sha256": "sha256:d9dbf3fa6d46e61c14552aabbd04e6aecc44de7983909570076ec387783a3426"
+  },
+  "contracts": [
+    {
+      "schema": "nq.system_spec.v1",
+      "schema_path": "schemas/nq.system_spec.v1.schema.json",
+      "schema_sha256": "sha256:b511f53ecf7efcaf6cab5eef41898ca0dda997efbc0450df2e8044769cc14602",
+      "fixture_path": "fixtures/valid/system_spec.json",
+      "fixture_sha256": "sha256:adacf1e5cb3aedf800ba51424ee49125cafac8d3f669b3e5f8a548b290f497de",
+      "semantic_digest": "sha256:cdab50290741332dafec6d75702eef020054ca0ae92641a83a2c27a4721b22c7"
+    },
+    {
+      "schema": "nq.scope_cut_proposal.v1",
+      "schema_path": "schemas/nq.scope_cut_proposal.v1.schema.json",
+      "schema_sha256": "sha256:0b13afaf9955dcf64974a5ffeaeb1512c8c6eda095e8f68e2dd4f26287c8efa8",
+      "fixture_path": "fixtures/valid/scope_cut_proposal.json",
+      "fixture_sha256": "sha256:4a341a434f178225636aad0f697063496d4dc47ba51468549eca8f358cbc66b1",
+      "semantic_digest": "sha256:eee73c2e499a3456b1eb9f28e8693fe019ca2d6618032045a35cdb6e885c2be1"
+    },
+    {
+      "schema": "nq.scope_cut.v1",
+      "schema_path": "schemas/nq.scope_cut.v1.schema.json",
+      "schema_sha256": "sha256:6dabcb8581d21e7741d57c645c68a3bde3ebc715b7771b42d4d39390dea18ee4",
+      "fixture_path": "fixtures/valid/scope_cut.json",
+      "fixture_sha256": "sha256:e3f220ff2b073b06b9a5a00c1e9ed6e1d983cfdc578cc41d32f8345400ef38f2",
+      "semantic_digest": "sha256:07a4bb6081d3b1e5c92efcfe9a99fccbc831c4ec92427e3e212408e189c830f8"
+    },
+    {
+      "schema": "nq.observation_projection.v1",
+      "schema_path": "schemas/nq.observation_projection.v1.schema.json",
+      "schema_sha256": "sha256:7fad1606b2eec706b4448ac6490394f3c07ab1417e9cd89be8ce470d2b641bdc",
+      "fixture_path": "fixtures/valid/nq_observation_projection.json",
+      "fixture_sha256": "sha256:680e97f107f6ede7ebd7791252ed32d168d703ae5c41039b1764f979c0e69843",
+      "semantic_digest": "sha256:7ee520901074760af423a71bffef56b0875e1ff19a0a8b578c29bb868a860930"
+    },
+    {
+      "schema": "nq.porter_actuation_projection.v1",
+      "schema_path": "schemas/nq.porter_actuation_projection.v1.schema.json",
+      "schema_sha256": "sha256:cf0c51f29994ce06dd7640710c54f0fb8f3db0d9cb8e1c735820e227b462505b",
+      "fixture_path": "fixtures/valid/porter_actuation_projection.json",
+      "fixture_sha256": "sha256:f654596f666f138e8257d30ee56a8606d1bd500234afc6d04248c99e53cfc999",
+      "semantic_digest": "sha256:f8387f137205ce0ce7aef7ddca9780fda2b61b44e4a50551173957a55d4087b1"
+    }
+  ],
+  "compiled_profile_fixture": {
+    "purpose": "conformance_only_not_operational_standing",
+    "id": "nq.conformance",
+    "version": "1",
+    "descriptor_digest": "sha256:e1d808429458639aaff4a7e7fc2f0145258b0ebe1c36a28dad8ee86d36581494"
+  },
+  "synthetic_digest_inputs": [
+    {
+      "purpose": "bootstrap_source_snapshot",
+      "preimage_utf8": "synthetic fixture: bootstrap-targets/fixture-host.yaml\n",
+      "digest": "sha256:a38deba3379b8637834b800297f598134702acda794daabe9145debef6a3bfb1"
+    },
+    {
+      "purpose": "authored_source_snapshot",
+      "preimage_utf8": "synthetic fixture: conformance-only system relationships\n",
+      "digest": "sha256:68dab034ae79f81571fe0709c840116a57ac3fb315bcccc21a63564535f23b73"
+    },
+    {
+      "purpose": "target_identity_record",
+      "preimage_utf8": "synthetic fixture: fixture-host target identity\n",
+      "digest": "sha256:3a3bed92d6f850d0974d340fb568feac44e3b5cee9af328e2ac00998a3d580f2"
+    }
+  ]
+}

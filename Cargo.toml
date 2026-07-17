@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/nq-build-info",
+    "crates/nq-helper-sandbox",
+    "crates/nq-protocol",
+    "crates/nq-system-contract",
+    "crates/nq-profiles",
+    "crates/nq-store",
+    "crates/nq-core",
+    "crates/nq-app",
+    "crates/nq-host-helper",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.94"
+authors = ["NQ contributors"]
+
+[workspace.dependencies]
+anyhow = "1.0.102"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde", "std"] }
+clap = { version = "4.6.1", features = ["derive", "env"] }
+hex = "0.4.3"
+libc = "0.2.186"
+nix = { version = "0.29.0", features = ["signal", "process", "user", "socket", "fs"] }
+rand = "0.9.4"
+rusqlite = { version = "0.36.0", features = ["bundled", "chrono", "backup"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+sha2 = "0.10.9"
+tempfile = "3.27.0"
+thiserror = "2.0.18"
+tokio = { version = "1.52.3", features = ["full"] }
+toml = "0.8.23"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+uuid = { version = "1.23.1", features = ["serde", "v4"] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"

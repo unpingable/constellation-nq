@@ -1,0 +1,30 @@
+[package]
+name = "nq-core"
+description = "Admission, collection, and evaluation engine for NQ-ng"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+hex.workspace = true
+libc.workspace = true
+nix.workspace = true
+nq-profiles = { path = "../nq-profiles" }
+nq-protocol = { path = "../nq-protocol" }
+nq-helper-sandbox = { path = "../nq-helper-sandbox" }
+nq-store = { path = "../nq-store" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

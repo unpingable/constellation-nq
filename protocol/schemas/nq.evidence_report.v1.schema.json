@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.evidence_report.v1.schema.json",
+  "title": "nq.evidence_report.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "profile", "binding", "observed_at", "status", "coverage", "observations", "errors", "used_capabilities", "backend"],
+  "properties": {
+    "schema": {"const": "nq.evidence_report.v1"},
+    "profile": {"$ref": "#/$defs/profile"},
+    "binding": {"$ref": "#/$defs/binding"},
+    "observed_at": {"type": "string", "format": "date-time"},
+    "status": {"enum": ["complete", "partial", "failed"]},
+    "coverage": {"type": "array", "maxItems": 4096, "items": {"$ref": "#/$defs/coverage"}},
+    "observations": {"type": "array", "maxItems": 65535, "items": {"$ref": "#/$defs/observation"}},
+    "errors": {"type": "array", "maxItems": 1024, "items": {"$ref": "#/$defs/report_error"}},
+    "used_capabilities": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/token"}},
+    "backend": {"$ref": "#/$defs/backend"},
+    "next_checkpoint": {"$ref": "#/$defs/checkpoint"}
+  },
+  "$defs": {
+    "token": {"type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[A-Za-z0-9._:/@-]+$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "profile": {
+      "type": "object", "additionalProperties": false, "required": ["id", "version", "digest"],
+      "properties": {"id": {"$ref": "#/$defs/token"}, "version": {"$ref": "#/$defs/token"}, "digest": {"$ref": "#/$defs/digest"}}
+    },
+    "scope": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "value"],
+      "properties": {"kind": {"$ref": "#/$defs/token"}, "value": {}}
+    },
+    "vantage": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "value"],
+      "properties": {"kind": {"$ref": "#/$defs/token"}, "value": {}}
+    },
+    "binding": {
+      "type": "object", "additionalProperties": false, "required": ["subject", "scope", "vantage"],
+      "properties": {"subject": {"$ref": "#/$defs/token"}, "scope": {"$ref": "#/$defs/scope"}, "vantage": {"$ref": "#/$defs/vantage"}}
+    },
+    "coverage": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "state"],
+      "properties": {"kind": {"$ref": "#/$defs/token"}, "subject": {"$ref": "#/$defs/token"}, "state": {"enum": ["complete", "partial", "unavailable"]}, "detail": {}}
+    },
+    "observation": {
+      "type": "object", "additionalProperties": false, "required": ["ordinal", "kind", "subject", "observed_at", "payload"],
+      "properties": {"ordinal": {"type": "integer", "minimum": 0, "maximum": 4294967295}, "kind": {"$ref": "#/$defs/token"}, "subject": {"$ref": "#/$defs/token"}, "observed_at": {"type": "string", "format": "date-time"}, "payload": {}}
+    },
+    "report_error": {
+      "type": "object", "additionalProperties": false, "required": ["code", "severity", "message", "retriable"],
+      "properties": {"code": {"$ref": "#/$defs/token"}, "severity": {"enum": ["warning", "error"]}, "message": {"type": "string", "minLength": 1, "maxLength": 4096, "x-nq-max-utf8-bytes": 4096}, "subject": {"$ref": "#/$defs/token"}, "observation_ordinal": {"type": "integer", "minimum": 0, "maximum": 4294967295}, "retriable": {"type": "boolean"}}
+    },
+    "backend_identity": {
+      "type": "object", "additionalProperties": false, "required": ["name"],
+      "properties": {"name": {"$ref": "#/$defs/token"}, "version": {"type": "string", "minLength": 1, "maxLength": 512, "x-nq-max-utf8-bytes": 512}, "digest": {"$ref": "#/$defs/digest"}}
+    },
+    "backend": {
+      "type": "object", "additionalProperties": false, "required": ["implementation", "tools"],
+      "properties": {"implementation": {"$ref": "#/$defs/backend_identity"}, "tools": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/backend_identity"}}}
+    },
+    "checkpoint": {"type": "object", "additionalProperties": false, "required": ["value"], "properties": {"value": {}}}
+  }
+}
