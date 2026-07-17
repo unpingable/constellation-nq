@@ -217,8 +217,9 @@ admission_context = {
 ```
 
 - **Beta (revised in review):** most context is *already recorded* — `admission_records`
-  carries `executable_digest`, `config_digest`, `profile_digest`, `protocol_version`,
-  `conformance_json`, `lock_json` (`schema.sql:20-37`), reachable via
+  carries `helper_artifact_digest` (renamed from `executable_digest` in 3A-1),
+  `config_digest`, `profile_digest`, `protocol_version`,
+  `conformance_json`, `lock_json`, reachable via
   report→submission→run→admission, and execution identity already includes the helper
   root / interpreter+argument chain / account / cwd
   (`nq-helper-sandbox/src/identity.rs:59-94`). So the beta work is **not** a new

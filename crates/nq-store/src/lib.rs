@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use chrono::{SecondsFormat, Utc};
+use nq_protocol::Sha256Digest;
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
@@ -22,6 +23,15 @@ use thiserror::Error;
 
 const SCHEMA: &str = include_str!("schema.sql");
 const APPLICATION_ID: i64 = 1_313_951_303;
+
+/// Schema tag bound into every admission-context digest preimage. Bump only when
+/// the constituent set or its canonicalization changes.
+pub const ADMISSION_CONTEXT_SCHEMA: &str = "nq-ng.admission_context.v1";
+
+/// Version of the persisted admitted-judgment representation. Bound into every
+/// `judgment_digest` and stored beside the judgment so 3B verification pins the
+/// exact format it is checking.
+pub const JUDGMENT_SCHEMA_VERSION: &str = "nq-ng.judgment.v1";
 static EXPECTED_SCHEMA_FINGERPRINT: LazyLock<Result<String, String>> = LazyLock::new(|| {
     let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
     connection
@@ -130,23 +140,105 @@ pub struct ProfileDescriptorInput {
     pub recorded_at: String,
 }
 
+/// The typed, identity-bearing constituents of an admission context, plus
+/// inspectable receipt metadata.
+///
+/// The seven identity fields (the six digests and `protocol_version`) are the
+/// exact preimage of `admission_context_digest`, which the store derives — never
+/// a caller outside tests. The digest fields are [`Sha256Digest`] so an
+/// arbitrary configuration string cannot be threaded in where an identity is
+/// required. `target_triple`, `artifact_identity_method`, and
+/// `platform_runtime_version` are retained as receipt metadata and are
+/// deliberately excluded from the digest: the artifact digest already fixes the
+/// compiled result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdmissionIdentity {
+    pub profile_semantic_id: Sha256Digest,
+    pub detector_identity_digest: Sha256Digest,
+    pub evaluator_source_digest: Sha256Digest,
+    pub evaluator_artifact_digest: Sha256Digest,
+    pub helper_artifact_digest: Sha256Digest,
+    pub config_digest: Sha256Digest,
+    pub protocol_version: String,
+    pub target_triple: String,
+    pub artifact_identity_method: String,
+    pub platform_runtime_version: String,
+}
+
 /// A machine-produced admission lock and its independently captured identities.
 #[derive(Clone, Debug)]
 pub struct AdmissionInput {
     pub admission_id: String,
     pub instance_id: String,
-    pub config_digest: String,
-    pub executable_digest: String,
+    pub identity: AdmissionIdentity,
     pub execution_chain: CanonicalDocument,
     pub profile_id: String,
     pub profile_version: String,
     pub profile_digest: String,
-    pub protocol_version: String,
     pub capability_grant: CanonicalDocument,
     pub conformance: CanonicalDocument,
     pub lock: CanonicalDocument,
     pub admitted_at: String,
     pub operator_identity: CanonicalDocument,
+}
+
+/// Canonical preimage of an admission context. JCS key ordering makes the field
+/// order here irrelevant; the schema tag pins the constituent set.
+#[derive(Serialize)]
+struct AdmissionContextPreimage<'a> {
+    admission_context_schema: &'a str,
+    config_digest: &'a Sha256Digest,
+    detector_identity_digest: &'a Sha256Digest,
+    evaluator_artifact_digest: &'a Sha256Digest,
+    evaluator_source_digest: &'a Sha256Digest,
+    helper_artifact_digest: &'a Sha256Digest,
+    profile_semantic_id: &'a Sha256Digest,
+    protocol_version: &'a str,
+}
+
+/// Preimage binding a persisted judgment to its schema version and admission
+/// context. The report bytes are bound through their own digest.
+#[derive(Serialize)]
+struct JudgmentPreimage<'a> {
+    judgment_schema_version: &'a str,
+    admission_context_digest: &'a str,
+    validated_report_digest: &'a str,
+}
+
+impl AdmissionIdentity {
+    /// Derive the algorithm-qualified `admission_context_digest` over exactly the
+    /// seven identity-bearing constituents. This is the single implementation of
+    /// the preimage law; callers never supply the digest.
+    fn context_digest(&self) -> Result<String, StoreError> {
+        let preimage = AdmissionContextPreimage {
+            admission_context_schema: ADMISSION_CONTEXT_SCHEMA,
+            config_digest: &self.config_digest,
+            detector_identity_digest: &self.detector_identity_digest,
+            evaluator_artifact_digest: &self.evaluator_artifact_digest,
+            evaluator_source_digest: &self.evaluator_source_digest,
+            helper_artifact_digest: &self.helper_artifact_digest,
+            profile_semantic_id: &self.profile_semantic_id,
+            protocol_version: &self.protocol_version,
+        };
+        let bytes = nq_protocol::canonical_json_bytes(&preimage)
+            .map_err(|error| StoreError::CanonicalJson(error.to_string()))?;
+        Ok(sha256_digest(&bytes))
+    }
+}
+
+/// Bind a persisted judgment to its schema version and admission context.
+fn judgment_digest(
+    admission_context_digest: &str,
+    validated_report_digest: &str,
+) -> Result<String, StoreError> {
+    let preimage = JudgmentPreimage {
+        judgment_schema_version: JUDGMENT_SCHEMA_VERSION,
+        admission_context_digest,
+        validated_report_digest,
+    };
+    let bytes = nq_protocol::canonical_json_bytes(&preimage)
+        .map_err(|error| StoreError::CanonicalJson(error.to_string()))?;
+    Ok(sha256_digest(&bytes))
 }
 
 /// An immutable transition in an instance's admission binding.
@@ -249,7 +341,12 @@ pub struct ReportInput {
     pub observed_at: String,
     pub received_at: String,
     pub report_status: String,
+    /// The source protocol JSON as received; retained as witness material.
     pub canonical_report: CanonicalDocument,
+    /// The canonical admitted judgment (`ValidatedReport`). Persisted losslessly;
+    /// 3B verification checks this snapshot rather than re-deriving one. The
+    /// store binds it to the admission context reached through the run.
+    pub validated_report: CanonicalDocument,
     pub next_checkpoint: Option<CanonicalDocument>,
     pub admitted_at: String,
     pub observations: Vec<ObservationInput>,
@@ -258,6 +355,10 @@ pub struct ReportInput {
 }
 
 /// The result of protocol validation and profile admission for retained raw bytes.
+// The admitted variant carries the full report and is the dominant case; boxing
+// it to shrink the delta against the rare rejected variant would add a heap
+// allocation on the common admission path for no correctness gain.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum SubmissionDisposition {
     /// The bytes remain a rejected custody artifact and never reach detectors.
@@ -310,11 +411,19 @@ pub struct AdmissionRow {
     pub admission_id: String,
     pub instance_id: String,
     pub config_digest: String,
-    pub executable_digest: String,
+    pub helper_artifact_digest: String,
+    pub profile_semantic_id: String,
+    pub detector_identity_digest: String,
+    pub evaluator_source_digest: String,
+    pub evaluator_artifact_digest: String,
+    pub admission_context_digest: String,
     pub profile_id: String,
     pub profile_version: String,
     pub profile_digest: String,
     pub protocol_version: String,
+    pub target_triple: String,
+    pub artifact_identity_method: String,
+    pub platform_runtime_version: String,
     pub lock_json: Vec<u8>,
     pub admitted_at: String,
 }
@@ -452,6 +561,31 @@ impl Store {
                 "metadata version {metadata_version} disagrees with user_version {version}"
             )));
         }
+        let expected_artifact_digest = schema_artifact_digest();
+        // A database written by an earlier provisional schema may lack this
+        // column entirely; that is the canonical stale candidate this check
+        // exists to catch, so a missing column must yield the same actionable
+        // recreation error as a mismatched value, not a raw "no such column".
+        let stored_artifact_digest: String = self
+            .connection
+            .query_row(
+                "SELECT schema_artifact_digest FROM schema_metadata WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| {
+                StoreError::Integrity(format!(
+                    "database predates the schema artifact digest recorded by this binary \
+                     ({expected_artifact_digest}); it is a stale candidate and must be recreated"
+                ))
+            })?;
+        if stored_artifact_digest != expected_artifact_digest {
+            return Err(StoreError::Integrity(format!(
+                "schema artifact digest {stored_artifact_digest} was written by a different \
+                 schema.sql revision than this binary's {expected_artifact_digest}; this database \
+                 is a stale candidate and must be recreated"
+            )));
+        }
         let quick_check: String =
             self.connection
                 .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
@@ -530,31 +664,44 @@ impl Store {
             .map_err(StoreError::from)
     }
 
-    /// Append a fully validated admission record.
+    /// Append a fully validated admission record. The store derives
+    /// `admission_context_digest` from the typed identity; it is never supplied.
     pub fn append_admission(&mut self, admission: &AdmissionInput) -> Result<(), StoreError> {
-        validate_digest("config_digest", &admission.config_digest)?;
-        validate_digest("executable_digest", &admission.executable_digest)?;
         validate_digest("profile_digest", &admission.profile_digest)?;
+        let identity = &admission.identity;
+        let context_digest = identity.context_digest()?;
         let transaction = self.immediate_transaction()?;
         transaction.execute(
             "INSERT INTO admission_records (
-                admission_id, instance_id, config_digest, executable_digest,
+                admission_id, instance_id, config_digest, helper_artifact_digest,
+                profile_semantic_id, detector_identity_digest, evaluator_source_digest,
+                evaluator_artifact_digest, admission_context_digest,
                 execution_chain_json, profile_id, profile_version, profile_digest,
-                protocol_version, capability_grant_json, conformance_json, lock_json,
-                admitted_at, operator_identity_json
+                protocol_version, target_triple, artifact_identity_method,
+                platform_runtime_version, capability_grant_json, conformance_json,
+                lock_json, admitted_at, operator_identity_json
              ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
              )",
             params![
                 admission.admission_id,
                 admission.instance_id,
-                admission.config_digest,
-                admission.executable_digest,
+                identity.config_digest.as_str(),
+                identity.helper_artifact_digest.as_str(),
+                identity.profile_semantic_id.as_str(),
+                identity.detector_identity_digest.as_str(),
+                identity.evaluator_source_digest.as_str(),
+                identity.evaluator_artifact_digest.as_str(),
+                context_digest,
                 admission.execution_chain.as_bytes(),
                 admission.profile_id,
                 admission.profile_version,
                 admission.profile_digest,
-                admission.protocol_version,
+                identity.protocol_version,
+                identity.target_triple,
+                identity.artifact_identity_method,
+                identity.platform_runtime_version,
                 admission.capability_grant.as_bytes(),
                 admission.conformance.as_bytes(),
                 admission.lock.as_bytes(),
@@ -570,8 +717,11 @@ impl Store {
     pub fn admission(&self, admission_id: &str) -> Result<Option<AdmissionRow>, StoreError> {
         self.connection
             .query_row(
-                "SELECT admission_id, instance_id, config_digest, executable_digest,
+                "SELECT admission_id, instance_id, config_digest, helper_artifact_digest,
+                        profile_semantic_id, detector_identity_digest, evaluator_source_digest,
+                        evaluator_artifact_digest, admission_context_digest,
                         profile_id, profile_version, profile_digest, protocol_version,
+                        target_triple, artifact_identity_method, platform_runtime_version,
                         lock_json, admitted_at
                  FROM admission_records WHERE admission_id = ?1",
                 [admission_id],
@@ -580,13 +730,21 @@ impl Store {
                         admission_id: row.get(0)?,
                         instance_id: row.get(1)?,
                         config_digest: row.get(2)?,
-                        executable_digest: row.get(3)?,
-                        profile_id: row.get(4)?,
-                        profile_version: row.get(5)?,
-                        profile_digest: row.get(6)?,
-                        protocol_version: row.get(7)?,
-                        lock_json: row.get(8)?,
-                        admitted_at: row.get(9)?,
+                        helper_artifact_digest: row.get(3)?,
+                        profile_semantic_id: row.get(4)?,
+                        detector_identity_digest: row.get(5)?,
+                        evaluator_source_digest: row.get(6)?,
+                        evaluator_artifact_digest: row.get(7)?,
+                        admission_context_digest: row.get(8)?,
+                        profile_id: row.get(9)?,
+                        profile_version: row.get(10)?,
+                        profile_digest: row.get(11)?,
+                        protocol_version: row.get(12)?,
+                        target_triple: row.get(13)?,
+                        artifact_identity_method: row.get(14)?,
+                        platform_runtime_version: row.get(15)?,
+                        lock_json: row.get(16)?,
+                        admitted_at: row.get(17)?,
                     })
                 },
             )
@@ -790,7 +948,43 @@ impl Store {
                     }
                 }
                 SubmissionDisposition::Admitted(report) => {
-                    let sequence = insert_report(&transaction, &submission.submission_id, report)?;
+                    // A run that produced an admitted report must carry a
+                    // complete admission context. Resolve it here (fail closed)
+                    // and bind the report to exactly that context; the trigger
+                    // rejects any other value at the database boundary.
+                    let admission_id = collection.run.admission_id.as_deref().ok_or_else(|| {
+                        StoreError::Invariant(
+                            "an admitted report requires a run bound to an admission".to_owned(),
+                        )
+                    })?;
+                    let (admission_instance_id, admission_context_digest): (String, String) =
+                        transaction
+                            .query_row(
+                                "SELECT instance_id, admission_context_digest FROM admission_records
+                                 WHERE admission_id = ?1",
+                                [admission_id],
+                                |row| Ok((row.get(0)?, row.get(1)?)),
+                            )
+                            .optional()?
+                            .ok_or_else(|| {
+                                StoreError::Invariant(format!(
+                                    "run admission {admission_id} is not recorded; cannot bind report context"
+                                ))
+                            })?;
+                    // The named admission must govern this run's own instance; a
+                    // run may not borrow another instance's admission context.
+                    if admission_instance_id != collection.run.instance_id {
+                        return Err(StoreError::Invariant(format!(
+                            "run instance {} cannot bind admission {admission_id} of instance {admission_instance_id}",
+                            collection.run.instance_id
+                        )));
+                    }
+                    let sequence = insert_report(
+                        &transaction,
+                        &submission.submission_id,
+                        report,
+                        &admission_context_digest,
+                    )?;
                     receipt.semantic_digest = Some(report.canonical_report.digest().to_owned());
                     receipt.report_sequence = Some(sequence);
                 }
@@ -883,6 +1077,9 @@ pub struct EvaluationInput {
     pub detector_id: String,
     pub detector_version: String,
     pub detector_digest: String,
+    /// Artifact digest of the running evaluator (nqd) that produced this
+    /// evaluation and its finding events.
+    pub evaluator_artifact_digest: String,
     pub started_at: String,
     pub evaluated_at: String,
     pub outcome: String,
@@ -1250,6 +1447,10 @@ impl Store {
         finding: Option<&FindingEventInput>,
     ) -> Result<EvaluationReceipt, StoreError> {
         validate_digest("detector_digest", &evaluation.detector_digest)?;
+        validate_digest(
+            "evaluator_artifact_digest",
+            &evaluation.evaluator_artifact_digest,
+        )?;
         if (evaluation.outcome == "cannot_evaluate") != evaluation.refusal.is_some() {
             return Err(StoreError::Invariant(
                 "cannot_evaluate requires exactly one typed refusal".to_owned(),
@@ -1688,6 +1889,12 @@ impl Store {
 
 fn configure_connection(connection: &Connection, on_disk: bool) -> Result<(), StoreError> {
     connection.pragma_update(None, "foreign_keys", "ON")?;
+    // With recursive triggers off, the implicit DELETE of an INSERT OR REPLACE
+    // does not fire DELETE triggers, which would let a direct-SQL writer replace
+    // an append-only parent row (run/submission/admission) and silently
+    // invalidate the report->admission-context binding. Enabling it makes the
+    // immutability triggers, and therefore that binding, hold against REPLACE.
+    connection.pragma_update(None, "recursive_triggers", "ON")?;
     connection.busy_timeout(std::time::Duration::from_secs(5))?;
     if on_disk {
         connection.pragma_update(None, "journal_mode", "WAL")?;
@@ -1700,12 +1907,20 @@ fn initialize_connection(connection: &mut Connection) -> Result<(), StoreError> 
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     transaction.execute_batch(SCHEMA)?;
     transaction.execute(
-        "INSERT INTO schema_metadata (singleton, product, schema_version, initialized_at)
-         VALUES (1, 'nq-ng', ?1, ?2)",
-        params![SCHEMA_VERSION, now_utc()],
+        "INSERT INTO schema_metadata (
+            singleton, product, schema_version, schema_artifact_digest, initialized_at
+         ) VALUES (1, 'nq-ng', ?1, ?2, ?3)",
+        params![SCHEMA_VERSION, schema_artifact_digest(), now_utc()],
     )?;
     transaction.commit()?;
     Ok(())
+}
+
+/// Digest of the exact `schema.sql` artifact compiled into this binary. Stored
+/// at creation and compared at startup so a database created by a different
+/// schema revision is refused rather than opened and misread.
+fn schema_artifact_digest() -> String {
+    sha256_digest(SCHEMA.as_bytes())
 }
 
 fn now_utc() -> String {
@@ -2205,13 +2420,17 @@ fn insert_report(
     transaction: &Transaction<'_>,
     submission_id: &str,
     report: &ReportInput,
+    admission_context_digest: &str,
 ) -> Result<i64, StoreError> {
+    let judgment_digest =
+        judgment_digest(admission_context_digest, report.validated_report.digest())?;
     transaction.execute(
         "INSERT INTO admitted_reports (
             report_id, submission_id, instance_id, profile_id, profile_version,
             profile_digest, observed_at, received_at, report_status, canonical_json,
-            semantic_digest, next_checkpoint_json, admitted_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            semantic_digest, validated_report_json, judgment_schema_version,
+            judgment_digest, admission_context_digest, next_checkpoint_json, admitted_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             report.report_id,
             submission_id,
@@ -2224,6 +2443,10 @@ fn insert_report(
             report.report_status,
             report.canonical_report.as_bytes(),
             report.canonical_report.digest(),
+            report.validated_report.as_bytes(),
+            JUDGMENT_SCHEMA_VERSION,
+            judgment_digest,
+            admission_context_digest,
             report
                 .next_checkpoint
                 .as_ref()
@@ -2494,7 +2717,7 @@ fn insert_finding_event(
     transaction.execute(
         "INSERT INTO finding_events (
             event_id, finding_id, event_revision, event_kind, evaluation_id,
-            instance_id, detector_id, detector_version, detector_digest,
+            instance_id, detector_id, detector_version, detector_digest, evaluator_artifact_digest,
             evaluation_revision, profile_id, profile_version, profile_digest,
             subject_json, condition_name, condition_state, visibility_state, operator_work_state,
             severity, summary, limitations_json, safe_next_checks_json,
@@ -2504,7 +2727,7 @@ fn insert_finding_event(
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
             ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
             ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
-            ?31
+            ?31, ?32
          )",
         params![
             finding.event_id,
@@ -2516,6 +2739,7 @@ fn insert_finding_event(
             evaluation.detector_id,
             evaluation.detector_version,
             evaluation.detector_digest,
+            evaluation.evaluator_artifact_digest,
             evaluation_revision,
             finding.profile_id,
             finding.profile_version,
@@ -2613,6 +2837,25 @@ mod tests {
         (store, profile_digest)
     }
 
+    fn typed_digest(label: &str) -> Sha256Digest {
+        nq_protocol::sha256_bytes(label.as_bytes())
+    }
+
+    fn fixture_identity() -> AdmissionIdentity {
+        AdmissionIdentity {
+            profile_semantic_id: typed_digest("profile-semantic"),
+            detector_identity_digest: typed_digest("detector-identity"),
+            evaluator_source_digest: typed_digest("evaluator-source"),
+            evaluator_artifact_digest: typed_digest("evaluator-artifact"),
+            helper_artifact_digest: typed_digest("helper-executable"),
+            config_digest: typed_digest("config"),
+            protocol_version: "1.0".to_owned(),
+            target_triple: "x86_64-unknown-linux-gnu".to_owned(),
+            artifact_identity_method: "fixture".to_owned(),
+            platform_runtime_version: "test".to_owned(),
+        }
+    }
+
     fn append_fixture_admission(
         store: &mut Store,
         profile_digest: &str,
@@ -2623,13 +2866,11 @@ mod tests {
             .append_admission(&AdmissionInput {
                 admission_id: admission_id.to_owned(),
                 instance_id: instance_id.to_owned(),
-                config_digest: digest("config"),
-                executable_digest: digest("executable"),
+                identity: fixture_identity(),
                 execution_chain: document(json!({"artifacts": []})),
                 profile_id: "fixture.health".to_owned(),
                 profile_version: "1".to_owned(),
                 profile_digest: profile_digest.to_owned(),
-                protocol_version: "1.0".to_owned(),
                 capability_grant: document(json!([])),
                 conformance: document(json!({"passed": true})),
                 lock: document(json!({
@@ -2680,6 +2921,11 @@ mod tests {
             received_at: TIME.to_owned(),
             report_status: "complete".to_owned(),
             canonical_report,
+            validated_report: document(json!({
+                "schema": "fixture.validated_report",
+                "instance_id": instance_id,
+                "report": suffix,
+            })),
             next_checkpoint: None,
             admitted_at: TIME.to_owned(),
             observations: vec![ObservationInput {
@@ -2713,9 +2959,14 @@ mod tests {
         canonical_report: CanonicalDocument,
         raw_bytes: Vec<u8>,
     ) -> CollectionReceipt {
+        // An admitted report requires a run bound to a recorded admission.
+        let admission_id = format!("admission-{suffix}");
+        append_fixture_admission(store, profile_digest, instance_id, &admission_id);
+        let mut bound_run = run(instance_id, suffix, profile_digest);
+        bound_run.admission_id = Some(admission_id);
         store
             .commit_collection(&CollectionInput {
-                run: run(instance_id, suffix, profile_digest),
+                run: bound_run,
                 submission: Some(SubmissionInput {
                     submission_id: format!("submission-{suffix}"),
                     raw_bytes,
@@ -2953,6 +3204,7 @@ mod tests {
             detector_id: "fixture.unhealthy".to_owned(),
             detector_version: "1".to_owned(),
             detector_digest: digest("detector-v1"),
+            evaluator_artifact_digest: digest("evaluator-artifact"),
             started_at: TIME.to_owned(),
             evaluated_at: TIME.to_owned(),
             outcome: "condition_present".to_owned(),
@@ -3004,6 +3256,7 @@ mod tests {
             detector_id: "fixture.unhealthy".to_owned(),
             detector_version: "1".to_owned(),
             detector_digest: digest("detector-v1"),
+            evaluator_artifact_digest: digest("evaluator-artifact"),
             started_at: TIME.to_owned(),
             evaluated_at: TIME.to_owned(),
             outcome: "cannot_evaluate".to_owned(),
@@ -3052,6 +3305,7 @@ mod tests {
             detector_id: "fixture.unhealthy".to_owned(),
             detector_version: "1".to_owned(),
             detector_digest: digest("detector-v1"),
+            evaluator_artifact_digest: digest("evaluator-artifact"),
             started_at: TIME.to_owned(),
             evaluated_at: TIME.to_owned(),
             outcome: "cannot_evaluate".to_owned(),
@@ -3090,6 +3344,7 @@ mod tests {
             detector_id: "fixture.unhealthy".to_owned(),
             detector_version: "1".to_owned(),
             detector_digest: digest("detector-v1"),
+            evaluator_artifact_digest: digest("evaluator-artifact"),
             started_at: TIME.to_owned(),
             evaluated_at: TIME.to_owned(),
             outcome: "condition_explicitly_absent".to_owned(),
@@ -3348,8 +3603,11 @@ mod tests {
             ("contract-a", digest("contract-a"), "cursor-a"),
             ("contract-b", digest("contract-b"), "cursor-b"),
         ] {
+            let admission_id = format!("admission-{suffix}");
+            append_fixture_admission(&mut store, &profile_digest, "fixture-a", &admission_id);
             let mut run = run("fixture-a", suffix, &profile_digest);
             run.checkpoint_contract_digest = contract;
+            run.admission_id = Some(admission_id);
             let mut admitted = report(
                 "fixture-a",
                 suffix,
@@ -3430,6 +3688,270 @@ mod tests {
         assert!(matches!(
             Store::open(&altered),
             Err(StoreError::Integrity(message)) if message.contains("schema definition fingerprint")
+        ));
+    }
+
+    #[test]
+    fn admitted_report_persists_context_bound_recomputable_judgment() {
+        let (mut store, profile_digest) = configured_store();
+        commit_admitted(
+            &mut store,
+            "fixture-a",
+            "a",
+            &profile_digest,
+            document(json!({"report": "a"})),
+            b"raw-a".to_vec(),
+        );
+
+        // The store derives admission_context_digest from the constituents, so
+        // 3B can recompute it from the persisted admission row alone.
+        let expected_context = fixture_identity().context_digest().expect("context digest");
+        let admission = store
+            .admission("admission-a")
+            .expect("query admission")
+            .expect("admission row");
+        assert_eq!(admission.admission_context_digest, expected_context);
+
+        // The report copies exactly that context and stores a versioned,
+        // byte-lossless judgment whose digest recomputes over schema + context +
+        // report bytes.
+        let (validated_json, schema_version, judgment, report_context): (
+            Vec<u8>,
+            String,
+            String,
+            String,
+        ) = store
+            .connection
+            .query_row(
+                "SELECT validated_report_json, judgment_schema_version, judgment_digest,
+                        admission_context_digest
+                 FROM admitted_reports WHERE report_id = 'report-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("admitted report row");
+        assert_eq!(
+            report_context, expected_context,
+            "report binds the admission context"
+        );
+        assert_eq!(schema_version, JUDGMENT_SCHEMA_VERSION);
+        let validated = CanonicalDocument::from_canonical_bytes(validated_json)
+            .expect("validated report is canonical");
+        let recomputed =
+            judgment_digest(&expected_context, validated.digest()).expect("judgment digest");
+        assert_eq!(
+            judgment, recomputed,
+            "judgment digest binds schema version, admission context, and report bytes"
+        );
+        // Tamper detection substrate: a different judgment context yields a
+        // different digest, so a swapped context cannot pass a later re-check.
+        let foreign = judgment_digest(&digest("other-context"), validated.digest())
+            .expect("foreign judgment digest");
+        assert_ne!(judgment, foreign);
+    }
+
+    #[test]
+    fn admitted_report_requires_a_run_bound_to_an_admission() {
+        let (mut store, profile_digest) = configured_store();
+        // A run with no admission cannot carry an admitted report, and the
+        // failed commit leaves neither the run nor the submission behind.
+        let unbound = run("fixture-a", "a", &profile_digest);
+        let error = store
+            .commit_collection(&CollectionInput {
+                run: unbound,
+                submission: Some(SubmissionInput {
+                    submission_id: "submission-a".to_owned(),
+                    raw_bytes: b"raw".to_vec(),
+                    received_at: TIME.to_owned(),
+                    protocol_outcome: "valid_exchange".to_owned(),
+                    disposition: SubmissionDisposition::Admitted(report(
+                        "fixture-a",
+                        "a",
+                        &profile_digest,
+                        document(json!({"report": "a"})),
+                    )),
+                }),
+            })
+            .expect_err("an admitted report requires a run bound to an admission");
+        assert!(
+            matches!(error, StoreError::Invariant(message) if message.contains("bound to an admission"))
+        );
+        let runs: i64 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM witness_runs", [], |row| row.get(0))
+            .expect("count runs");
+        assert_eq!(runs, 0, "the atomic commit rolled back the run");
+    }
+
+    #[test]
+    fn admission_context_binding_trigger_rejects_a_forged_report_context() {
+        let (mut store, profile_digest) = configured_store();
+        append_fixture_admission(&mut store, &profile_digest, "fixture-a", "admission-a");
+        let context = fixture_identity().context_digest().expect("context digest");
+
+        // Build a run + admitted submission graph directly, then attempt to bind
+        // a report to a context that is not the one reached through its run. The
+        // database trigger must refuse it regardless of what the writer claims.
+        store
+            .connection
+            .execute_batch(
+                "INSERT INTO witness_runs (
+                    run_id, request_id, instance_id, admission_id, binding_digest,
+                    checkpoint_contract_digest, profile_id, profile_version, profile_digest,
+                    carrier, started_at, deadline_at, finished_at, acquisition_outcome,
+                    execution_identity_json, resource_outcome_json
+                 ) VALUES (
+                    'run-a', 'request-a', 'fixture-a', 'admission-a',
+                    'sha256:0000000000000000000000000000000000000000000000000000000000000000',
+                    'sha256:1111111111111111111111111111111111111111111111111111111111111111',
+                    'fixture.health', '1', 'unused-profile-digest', 'stdio',
+                    '2026-07-16T12:00:00.000Z', '2026-07-16T12:00:10.000Z',
+                    '2026-07-16T12:00:01.000Z', 'response',
+                    CAST('{}' AS BLOB), CAST('{}' AS BLOB)
+                 );
+                 INSERT INTO raw_submissions (
+                    submission_id, run_id, raw_bytes, raw_sha256, received_at,
+                    protocol_outcome, admission_outcome, rejection_code
+                 ) VALUES (
+                    'submission-a', 'run-a', X'6162',
+                    'sha256:2222222222222222222222222222222222222222222222222222222222222222',
+                    '2026-07-16T12:00:01.000Z', 'valid_exchange', 'admitted', NULL
+                 );",
+            )
+            .expect("run and admitted submission graph");
+
+        let insert_report_with_context = |context_digest: &str| {
+            store.connection.execute(
+                "INSERT INTO admitted_reports (
+                    report_id, submission_id, instance_id, profile_id, profile_version,
+                    profile_digest, observed_at, received_at, report_status, canonical_json,
+                    semantic_digest, validated_report_json, judgment_schema_version,
+                    judgment_digest, admission_context_digest, next_checkpoint_json, admitted_at
+                 ) VALUES (
+                    'report-a', 'submission-a', 'fixture-a', 'fixture.health', '1',
+                    ?1, '2026-07-16T12:00:00.000Z', '2026-07-16T12:00:01.000Z', 'complete',
+                    CAST('{}' AS BLOB),
+                    'sha256:3333333333333333333333333333333333333333333333333333333333333333',
+                    CAST('{}' AS BLOB), ?2,
+                    'sha256:4444444444444444444444444444444444444444444444444444444444444444',
+                    ?3, NULL, '2026-07-16T12:00:01.000Z'
+                 )",
+                params![profile_digest, JUDGMENT_SCHEMA_VERSION, context_digest],
+            )
+        };
+
+        let forged = digest("forged-context");
+        let refusal = insert_report_with_context(&forged)
+            .expect_err("a forged admission context must be refused by the trigger");
+        assert!(refusal.to_string().contains("bind the admission context"));
+
+        insert_report_with_context(&context).expect("the correct admission context is accepted");
+    }
+
+    #[test]
+    fn a_database_from_a_different_schema_artifact_is_refused() {
+        let directory = tempdir().expect("temp dir");
+        let path = directory.path().join("stale.db");
+        // Hand-craft a database whose stored schema artifact digest belongs to a
+        // different schema.sql revision. The immutable triggers block in-place
+        // edits, so a stale candidate arises only at creation — model that here.
+        {
+            let connection = Connection::open(&path).expect("open raw database");
+            connection.execute_batch(SCHEMA).expect("apply schema");
+            connection
+                .execute(
+                    "INSERT INTO schema_metadata (
+                        singleton, product, schema_version, schema_artifact_digest, initialized_at
+                     ) VALUES (1, 'nq-ng', ?1, ?2, ?3)",
+                    params![
+                        SCHEMA_VERSION,
+                        "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+                        TIME
+                    ],
+                )
+                .expect("insert stale metadata");
+        }
+        assert!(matches!(
+            Store::open(&path),
+            Err(StoreError::Integrity(message))
+                if message.contains("stale candidate") && message.contains("recreated")
+        ));
+    }
+
+    #[test]
+    fn a_run_cannot_borrow_another_instances_admission_context() {
+        let (mut store, profile_digest) = configured_store();
+        append_fixture_admission(&mut store, &profile_digest, "instance-a", "admission-a");
+
+        // A run for instance-b names instance-a's admission. The store must
+        // refuse to bind the report to a context that does not govern its run.
+        let mut foreign = run("instance-b", "b", &profile_digest);
+        foreign.admission_id = Some("admission-a".to_owned());
+        let error = store
+            .commit_collection(&CollectionInput {
+                run: foreign,
+                submission: Some(SubmissionInput {
+                    submission_id: "submission-b".to_owned(),
+                    raw_bytes: b"raw".to_vec(),
+                    received_at: TIME.to_owned(),
+                    protocol_outcome: "valid_exchange".to_owned(),
+                    disposition: SubmissionDisposition::Admitted(report(
+                        "instance-b",
+                        "b",
+                        &profile_digest,
+                        document(json!({"report": "b"})),
+                    )),
+                }),
+            })
+            .expect_err("a run cannot borrow another instance's admission");
+        assert!(
+            matches!(error, StoreError::Invariant(message) if message.contains("cannot bind admission"))
+        );
+    }
+
+    #[test]
+    fn a_replace_cannot_invalidate_an_append_only_row() {
+        let store = Store::initialize_in_memory().expect("store initializes");
+        // With recursive triggers enabled, the implicit delete of INSERT OR
+        // REPLACE fires the immutability trigger, so a parent row an admitted
+        // report depends on cannot be silently swapped out from under it.
+        let error = store
+            .connection
+            .execute(
+                "INSERT OR REPLACE INTO schema_metadata (
+                    singleton, product, schema_version, schema_artifact_digest, initialized_at
+                 ) VALUES (1, 'nq-ng', ?1, ?2, ?3)",
+                params![SCHEMA_VERSION, schema_artifact_digest(), TIME],
+            )
+            .expect_err("INSERT OR REPLACE must fire the immutability trigger");
+        assert!(error.to_string().contains("append-only table"));
+    }
+
+    #[test]
+    fn a_database_missing_the_schema_artifact_column_is_refused_actionably() {
+        let directory = tempdir().expect("temp dir");
+        let path = directory.path().join("pre_column.db");
+        // Model a database created by the earlier provisional schema, before the
+        // schema_artifact_digest column existed.
+        {
+            let connection = Connection::open(&path).expect("open raw database");
+            connection.execute_batch(SCHEMA).expect("apply schema");
+            connection
+                .execute(
+                    "INSERT INTO schema_metadata (
+                        singleton, product, schema_version, schema_artifact_digest, initialized_at
+                     ) VALUES (1, 'nq-ng', ?1, ?2, ?3)",
+                    params![SCHEMA_VERSION, schema_artifact_digest(), TIME],
+                )
+                .expect("insert metadata");
+            connection
+                .execute_batch("ALTER TABLE schema_metadata DROP COLUMN schema_artifact_digest")
+                .expect("drop the column to model the older schema");
+        }
+        assert!(matches!(
+            Store::open(&path),
+            Err(StoreError::Integrity(message))
+                if message.contains("stale candidate") && message.contains("recreated")
         ));
     }
 }

@@ -5,6 +5,11 @@ CREATE TABLE schema_metadata (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     product TEXT NOT NULL CHECK (product = 'nq-ng'),
     schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    -- Digest of the exact schema.sql artifact compiled into the writing binary.
+    -- Rejects stale provisional-candidate databases at startup; it is NOT a
+    -- tamper attestation of the live SQLite schema (which the structural
+    -- fingerprint checks separately).
+    schema_artifact_digest TEXT NOT NULL CHECK (length(schema_artifact_digest) = 71 AND substr(schema_artifact_digest, 1, 7) = 'sha256:'),
     initialized_at TEXT NOT NULL
 ) STRICT;
 
@@ -21,12 +26,29 @@ CREATE TABLE admission_records (
     admission_id TEXT PRIMARY KEY,
     instance_id TEXT NOT NULL,
     config_digest TEXT NOT NULL CHECK (length(config_digest) = 71 AND substr(config_digest, 1, 7) = 'sha256:'),
-    executable_digest TEXT NOT NULL CHECK (length(executable_digest) = 71 AND substr(executable_digest, 1, 7) = 'sha256:'),
+    -- Digest of the opened helper executable bytes (was `executable_digest`;
+    -- renamed while the schema is provisional so the helper artifact is not
+    -- confused with the evaluator artifact below).
+    helper_artifact_digest TEXT NOT NULL CHECK (length(helper_artifact_digest) = 71 AND substr(helper_artifact_digest, 1, 7) = 'sha256:'),
+    -- Identity-bearing admission-context constituents. admission_context_digest
+    -- is H over exactly these seven fields (config_digest, protocol_version, and
+    -- the five here); the store computes it, never a caller outside tests.
+    profile_semantic_id TEXT NOT NULL CHECK (length(profile_semantic_id) = 71 AND substr(profile_semantic_id, 1, 7) = 'sha256:'),
+    detector_identity_digest TEXT NOT NULL CHECK (length(detector_identity_digest) = 71 AND substr(detector_identity_digest, 1, 7) = 'sha256:'),
+    evaluator_source_digest TEXT NOT NULL CHECK (length(evaluator_source_digest) = 71 AND substr(evaluator_source_digest, 1, 7) = 'sha256:'),
+    evaluator_artifact_digest TEXT NOT NULL CHECK (length(evaluator_artifact_digest) = 71 AND substr(evaluator_artifact_digest, 1, 7) = 'sha256:'),
+    admission_context_digest TEXT NOT NULL CHECK (length(admission_context_digest) = 71 AND substr(admission_context_digest, 1, 7) = 'sha256:'),
     execution_chain_json BLOB NOT NULL CHECK (json_valid(CAST(execution_chain_json AS TEXT))),
     profile_id TEXT NOT NULL,
     profile_version TEXT NOT NULL,
     profile_digest TEXT NOT NULL,
     protocol_version TEXT NOT NULL,
+    -- Inspectable receipt metadata about how evaluator identity was obtained.
+    -- Intentionally NOT part of admission_context_digest: the artifact digest
+    -- already captures the compiled result.
+    target_triple TEXT NOT NULL,
+    artifact_identity_method TEXT NOT NULL,
+    platform_runtime_version TEXT NOT NULL,
     capability_grant_json BLOB NOT NULL CHECK (json_valid(CAST(capability_grant_json AS TEXT))),
     conformance_json BLOB NOT NULL CHECK (json_valid(CAST(conformance_json AS TEXT))),
     lock_json BLOB NOT NULL CHECK (json_valid(CAST(lock_json AS TEXT))),
@@ -120,8 +142,20 @@ CREATE TABLE admitted_reports (
     observed_at TEXT NOT NULL,
     received_at TEXT NOT NULL,
     report_status TEXT NOT NULL CHECK (report_status IN ('complete', 'partial', 'failed')),
+    -- Source protocol JSON as received. Retained as witness material; the
+    -- admitted judgment below does not substitute for it, nor it for the judgment.
     canonical_json BLOB NOT NULL CHECK (length(canonical_json) <= 16777216 AND json_valid(CAST(canonical_json AS TEXT))),
     semantic_digest TEXT NOT NULL CHECK (length(semantic_digest) = 71 AND substr(semantic_digest, 1, 7) = 'sha256:'),
+    -- Persisted, versioned admitted judgment (the canonical ValidatedReport).
+    -- verify_admitted (3B) checks this snapshot; it never re-derives one.
+    validated_report_json BLOB NOT NULL CHECK (length(validated_report_json) <= 16777216 AND json_valid(CAST(validated_report_json AS TEXT))),
+    judgment_schema_version TEXT NOT NULL,
+    -- H(judgment_schema_version || admission_context_digest || canonical
+    -- validated report). Binds the judgment bytes to their exact admission context.
+    judgment_digest TEXT NOT NULL CHECK (length(judgment_digest) = 71 AND substr(judgment_digest, 1, 7) = 'sha256:'),
+    -- The admission context this report was judged under, copied from the
+    -- admission reached through its run. The trigger below forbids any other value.
+    admission_context_digest TEXT NOT NULL CHECK (length(admission_context_digest) = 71 AND substr(admission_context_digest, 1, 7) = 'sha256:'),
     next_checkpoint_json BLOB CHECK (next_checkpoint_json IS NULL OR json_valid(CAST(next_checkpoint_json AS TEXT))),
     admitted_at TEXT NOT NULL,
     UNIQUE (report_id, semantic_digest),
@@ -139,6 +173,26 @@ BEFORE INSERT ON admitted_reports
 WHEN (SELECT admission_outcome FROM raw_submissions WHERE submission_id = NEW.submission_id) <> 'admitted'
 BEGIN
     SELECT RAISE(ABORT, 'rejected submissions cannot become admitted reports');
+END;
+
+-- The conditional admission-context law: a run that produced an admitted report
+-- has a complete admission context, and the report is bound to exactly that
+-- context. The join reaches the admission through submission -> run ->
+-- admission_id; a null admission_id yields no matching row, so an admitted
+-- report from a context-less run is refused. witness_runs.admission_id stays
+-- globally nullable (refused/failed runs legitimately have none).
+CREATE TRIGGER admitted_reports_bind_admission_context
+BEFORE INSERT ON admitted_reports
+WHEN (
+    SELECT COUNT(*)
+    FROM raw_submissions AS s
+    JOIN witness_runs AS r ON r.run_id = s.run_id
+    JOIN admission_records AS a ON a.admission_id = r.admission_id
+    WHERE s.submission_id = NEW.submission_id
+      AND a.admission_context_digest = NEW.admission_context_digest
+) <> 1
+BEGIN
+    SELECT RAISE(ABORT, 'admitted report must bind the admission context reached through its run');
 END;
 
 CREATE TABLE observations (
@@ -237,7 +291,12 @@ CREATE TABLE finding_events (
     instance_id TEXT NOT NULL,
     detector_id TEXT NOT NULL,
     detector_version TEXT NOT NULL,
+    -- The detector *semantic* id (descriptor digest covers the threshold since
+    -- slice 1); a canonical ordered-set digest when several detectors judge one
+    -- finding. This is evaluation-seam identity, distinct from report admission.
     detector_digest TEXT NOT NULL CHECK (length(detector_digest) = 71 AND substr(detector_digest, 1, 7) = 'sha256:'),
+    -- Artifact digest of the running evaluator (nqd) that produced this finding.
+    evaluator_artifact_digest TEXT NOT NULL CHECK (length(evaluator_artifact_digest) = 71 AND substr(evaluator_artifact_digest, 1, 7) = 'sha256:'),
     evaluation_revision INTEGER NOT NULL CHECK (evaluation_revision >= 0),
     profile_id TEXT NOT NULL,
     profile_version TEXT NOT NULL,

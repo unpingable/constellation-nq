@@ -9,9 +9,9 @@ use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use nq_profiles::{
-    DetectorInput, DetectorReport, DetectorState, EvidenceWatermark, ProfileModule,
-    ReportInput as ProfileReportInput, ScopeGrant, SemanticReportStatus, ValidatedReport,
-    ValidationContext, VantageGrant,
+    DetectorInput, DetectorReport, DetectorState, EVALUATOR_SOURCE_DIGEST, EvidenceWatermark,
+    ProfileModule, ReportInput as ProfileReportInput, ScopeGrant, SemanticReportStatus,
+    ValidatedReport, ValidationContext, VantageGrant, profile_semantic_id,
 };
 use nq_protocol::{
     Capability, Checkpoint, CollectionBounds, HelperRequest, InstanceId, MonotonicClock,
@@ -19,10 +19,11 @@ use nq_protocol::{
     ScopeBinding, ScopeKind, Sha256Digest, SubjectBinding, SubjectId, VantageBinding, VantageKind,
 };
 use nq_store::{
-    AdmissionInput, BindingEventInput, BindingMaterializationInput, CanonicalDocument,
-    CollectionInput, CoverageInput, EvaluationInput, FindingEventInput, FindingEvidenceInput,
-    GenesisInput, ObservationInput, ProfileDescriptorInput, RefusalInput, ReportErrorInput,
-    ReportInput, RunInput, StatusEventInput, Store, SubmissionDisposition, SubmissionInput,
+    AdmissionIdentity, AdmissionInput, BindingEventInput, BindingMaterializationInput,
+    CanonicalDocument, CollectionInput, CoverageInput, EvaluationInput, FindingEventInput,
+    FindingEvidenceInput, GenesisInput, ObservationInput, ProfileDescriptorInput, RefusalInput,
+    ReportErrorInput, ReportInput, RunInput, StatusEventInput, Store, SubmissionDisposition,
+    SubmissionInput,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -233,12 +234,35 @@ impl CollectionOutcome {
 }
 
 /// Stateful engine over one explicitly opened compatible database.
+/// Identity of the running evaluator (`nqd`) obtained from trusted runtime
+/// state.
+///
+/// This is the one admission-context constituent that cannot be derived from
+/// the profile, the lock, or compiled sources: it names the exact executing
+/// binary. The 3A-2 platform provider will supply it from the daemon
+/// (`/proc/self/exe` on Linux); 3A-1 leaves it injectable so tests exercise the
+/// full path while production admission and evaluation refuse until it is
+/// present, rather than fabricating one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvaluatorRuntimeIdentity {
+    /// SHA-256 of the exact running evaluator executable.
+    pub artifact_digest: Sha256Digest,
+    /// Target triple the evaluator was built for (receipt metadata).
+    pub target_triple: String,
+    /// How the artifact digest was obtained, e.g. the platform provider name.
+    pub artifact_identity_method: String,
+    /// Version of the platform runtime that produced the identity.
+    pub platform_runtime_version: String,
+}
+
+/// End-to-end collection, admission, evaluation, and public read-model engine.
 pub struct CollectionEngine {
     config: NqConfig,
     store: Store,
     admission: AdmissionManager,
     runner: StdioRunner,
     unix_runners: BTreeMap<String, BoundUnixRunner>,
+    evaluator_identity: Option<EvaluatorRuntimeIdentity>,
 }
 
 struct BoundUnixRunner {
@@ -248,6 +272,10 @@ struct BoundUnixRunner {
 
 impl CollectionEngine {
     /// Open an initialized exactly compatible store.
+    ///
+    /// The evaluator runtime identity is absent until the 3A-2 platform provider
+    /// wires it here; until then, admission and evaluation refuse (fail closed)
+    /// rather than mint durable records with a fabricated context.
     ///
     /// # Errors
     ///
@@ -259,6 +287,64 @@ impl CollectionEngine {
             admission: AdmissionManager,
             runner: StdioRunner,
             unix_runners: BTreeMap::new(),
+            evaluator_identity: None,
+        })
+    }
+
+    /// Inject the running evaluator's trusted runtime identity.
+    ///
+    /// 3A-2 supplies this from the platform provider; tests inject a fixture.
+    /// It is the sole path by which evaluator identity may enter the engine —
+    /// never a configuration string or helper claim.
+    #[must_use]
+    pub fn with_evaluator_identity(mut self, identity: EvaluatorRuntimeIdentity) -> Self {
+        self.evaluator_identity = Some(identity);
+        self
+    }
+
+    /// The running evaluator identity, or a typed refusal when it is unavailable.
+    fn require_evaluator_identity(&self) -> Result<&EvaluatorRuntimeIdentity, EngineError> {
+        self.evaluator_identity.as_ref().ok_or_else(|| {
+            EngineError::Invariant(
+                "evaluator runtime identity is unavailable; admission and evaluation are refused \
+                 until the platform provider supplies the running artifact digest (3A-2)"
+                    .to_owned(),
+            )
+        })
+    }
+
+    /// Assemble the full, typed admission-context identity. Every constituent
+    /// except the running evaluator artifact is derived here from the profile,
+    /// the compiled evaluator source, or the admission lock; the store computes
+    /// `admission_context_digest` from the result.
+    fn admission_identity(
+        &self,
+        profile: &'static dyn ProfileModule,
+        lock: &AdmissionLock,
+    ) -> Result<AdmissionIdentity, EngineError> {
+        let evaluator = self.require_evaluator_identity()?;
+        let profile_semantic = profile_semantic_id(profile.descriptor())
+            .map_err(|error| EngineError::Canonical(error.to_string()))?;
+        Ok(AdmissionIdentity {
+            profile_semantic_id: parse_identity_digest(
+                "profile_semantic_id",
+                profile_semantic.as_str(),
+            )?,
+            detector_identity_digest: detector_identity_digest(profile)?,
+            evaluator_source_digest: parse_identity_digest(
+                "evaluator_source_digest",
+                EVALUATOR_SOURCE_DIGEST,
+            )?,
+            evaluator_artifact_digest: evaluator.artifact_digest.clone(),
+            helper_artifact_digest: parse_identity_digest(
+                "helper_artifact_digest",
+                &lock.execution.sha256,
+            )?,
+            config_digest: parse_identity_digest("config_digest", &lock.config_digest)?,
+            protocol_version: lock.protocol_version.clone(),
+            target_triple: evaluator.target_triple.clone(),
+            artifact_identity_method: evaluator.artifact_identity_method.clone(),
+            platform_runtime_version: evaluator.platform_runtime_version.clone(),
         })
     }
 
@@ -352,16 +438,18 @@ impl CollectionEngine {
             &execution_before,
         )?;
 
+        // Assemble the typed admission-context identity before taking a mutable
+        // store borrow. This refuses (fail closed) when the running evaluator
+        // identity is unavailable, rather than admitting under a fabricated one.
+        let identity = self.admission_identity(profile, &lock)?;
         self.store.append_admission(&AdmissionInput {
             admission_id: lock.admission_id.clone(),
             instance_id: lock.instance_id.clone(),
-            config_digest: lock.config_digest.clone(),
-            executable_digest: lock.execution.sha256.clone(),
+            identity,
             execution_chain: canonical(&lock.execution)?,
             profile_id: lock.profile.id.clone(),
             profile_version: lock.profile.version.to_string(),
             profile_digest: lock.profile.digest.clone(),
-            protocol_version: lock.protocol_version.clone(),
             capability_grant: canonical(&lock.granted_capabilities)?,
             conformance: canonical(&lock.conformance)?,
             lock: canonical(&lock)?,
@@ -394,6 +482,11 @@ impl CollectionEngine {
     pub fn collect(&mut self, witness: &WitnessConfig) -> Result<CollectionOutcome, EngineError> {
         let _guard =
             InstanceGuard::acquire(&self.config.database_path, &witness.instance_id, "collect")?;
+        // Fail closed before any persistence: a collection stamps evaluator
+        // identity onto its finding events, so refuse up front when it is
+        // unavailable rather than commit an admitted report and only then refuse
+        // at evaluation, leaving a durable report behind.
+        self.require_evaluator_identity()?;
         self.reconcile_pending_binding(witness)?;
         let profile = resolve(witness)?;
         let descriptor_digest = profile
@@ -1221,6 +1314,7 @@ impl CollectionEngine {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn evaluate_instance(
         &mut self,
         witness: &WitnessConfig,
@@ -1248,6 +1342,13 @@ impl CollectionEngine {
         let current_findings = self.store.finding_snapshots()?;
         let subject_json = serde_json::to_string(&Value::String(witness.subject.clone()))
             .map_err(|error| EngineError::Canonical(error.to_string()))?;
+        // Every finding event records the running evaluator that produced it;
+        // refuse (fail closed) rather than stamp findings with a fabricated one.
+        let evaluator_artifact_digest = self
+            .require_evaluator_identity()?
+            .artifact_digest
+            .as_str()
+            .to_owned();
         let mut count = 0;
         for detector in profile.detectors() {
             let evaluated_at = Utc::now();
@@ -1288,6 +1389,7 @@ impl CollectionEngine {
                 detector_id: descriptor.id.clone(),
                 detector_version: descriptor.version.to_string(),
                 detector_digest: detector_digest.clone(),
+                evaluator_artifact_digest: evaluator_artifact_digest.clone(),
                 started_at: timestamp(evaluated_at),
                 evaluated_at: timestamp(evaluated_at),
                 outcome: outcome.into(),
@@ -1311,7 +1413,6 @@ impl CollectionEngine {
                 witness,
                 profile,
                 descriptor,
-                &detector_digest,
                 &result,
                 evaluated_at,
                 current,
@@ -1789,6 +1890,9 @@ fn store_report(
         received_at: timestamp(received_at),
         report_status: semantic_report_status(validated.status).into(),
         canonical_report: canonical(report)?,
+        // The persisted, versioned admitted judgment. The store binds it to the
+        // admission context reached through the run and derives its digest.
+        validated_report: canonical(validated)?,
         next_checkpoint: report
             .next_checkpoint
             .as_ref()
@@ -1932,11 +2036,40 @@ fn reconstruct_admitted(
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+/// Parse an already-`sha256:`-shaped identity string into the typed digest the
+/// store requires. A failure here is an internal invariant, not caller input.
+fn parse_identity_digest(field: &str, value: &str) -> Result<Sha256Digest, EngineError> {
+    Sha256Digest::parse(value).map_err(|_| {
+        EngineError::Invariant(format!("{field} is not a valid sha256 digest: {value}"))
+    })
+}
+
+/// Canonical ordered-set digest of a profile's detector semantic ids. Binds the
+/// admitted judging mechanism to the exact detector suite, independent of which
+/// detector later produces any one finding.
+fn detector_identity_digest(
+    profile: &'static dyn ProfileModule,
+) -> Result<Sha256Digest, EngineError> {
+    let mut ids: Vec<String> = profile
+        .detectors()
+        .iter()
+        .map(|detector| {
+            detector
+                .descriptor()
+                .digest()
+                .map_err(EngineError::Canonical)
+        })
+        .collect::<Result<_, _>>()?;
+    ids.sort();
+    ids.dedup();
+    nq_protocol::semantic_digest(&ids).map_err(|error| EngineError::Canonical(error.to_string()))
+}
+
+#[allow(clippy::too_many_lines)]
 fn build_finding_event(
     witness: &WitnessConfig,
     profile: &'static dyn ProfileModule,
     descriptor: &nq_profiles::DetectorDescriptor,
-    _detector_digest: &str,
     result: &nq_profiles::DetectorResult,
     evaluated_at: DateTime<Utc>,
     current: Option<&nq_store::FindingSnapshotRow>,
@@ -2873,13 +3006,32 @@ mod tests {
             .append_admission(&AdmissionInput {
                 admission_id: lock.admission_id.clone(),
                 instance_id: lock.instance_id.clone(),
-                config_digest: lock.config_digest.clone(),
-                executable_digest: lock.execution.sha256.clone(),
+                identity: AdmissionIdentity {
+                    profile_semantic_id: Sha256Digest::parse(format!("sha256:{}", "b".repeat(64)))
+                        .unwrap(),
+                    detector_identity_digest: Sha256Digest::parse(format!(
+                        "sha256:{}",
+                        "c".repeat(64)
+                    ))
+                    .unwrap(),
+                    evaluator_source_digest: Sha256Digest::parse(EVALUATOR_SOURCE_DIGEST).unwrap(),
+                    evaluator_artifact_digest: Sha256Digest::parse(format!(
+                        "sha256:{}",
+                        "d".repeat(64)
+                    ))
+                    .unwrap(),
+                    helper_artifact_digest: Sha256Digest::parse(lock.execution.sha256.clone())
+                        .unwrap(),
+                    config_digest: Sha256Digest::parse(lock.config_digest.clone()).unwrap(),
+                    protocol_version: lock.protocol_version.clone(),
+                    target_triple: "x86_64-unknown-linux-gnu".to_owned(),
+                    artifact_identity_method: "fixture".to_owned(),
+                    platform_runtime_version: "test".to_owned(),
+                },
                 execution_chain: canonical(&lock.execution).expect("execution JSON"),
                 profile_id: lock.profile.id.clone(),
                 profile_version: lock.profile.version.to_string(),
                 profile_digest: lock.profile.digest.clone(),
-                protocol_version: lock.protocol_version.clone(),
                 capability_grant: canonical(&lock.granted_capabilities).expect("capability JSON"),
                 conformance: canonical(&lock.conformance).expect("conformance JSON"),
                 lock: canonical(&lock).expect("lock JSON"),
@@ -3151,7 +3303,6 @@ mod tests {
             witness,
             fixture.profile,
             descriptor,
-            &changed_detector_digest,
             &present,
             fixture.observed_at,
             changed_current,
@@ -3167,7 +3318,6 @@ mod tests {
             witness,
             fixture.profile,
             descriptor,
-            &changed_detector_digest,
             &cannot_evaluate,
             fixture.observed_at,
             changed_current,
@@ -3234,7 +3384,6 @@ mod tests {
             witness,
             profile,
             descriptor,
-            &descriptor.digest().expect("compiled detector digest"),
             &result,
             observed_at + Duration::seconds(2),
             None,
@@ -3252,7 +3401,6 @@ mod tests {
             witness,
             profile,
             descriptor,
-            &descriptor.digest().expect("compiled detector digest"),
             &mismatched,
             observed_at + Duration::seconds(2),
             None,
