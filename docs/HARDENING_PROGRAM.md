@@ -438,3 +438,48 @@ identity seam being reworked.
 
 **No structural insufficiency found by either pass. No further review gate before
 implementation.**
+
+---
+
+### Post-freeze execution log
+
+**Lineage:** own repo; root `abfb0ce`. WS1 slice 1 `99d0175`, slice 2 `8be9ece`,
+slice 1+2 amendment `f4e2585`.
+
+**Slice-review round (2026-07-17, before 3A).** codex reviewed the two identity
+commits *as implemented* against `abfb0ce`: slice 1 **AMEND**, slice 2 **REJECT**.
+Reconciled by amendment `f4e2585`:
+- protocol-canonicalization escape closed — the source closure now spans
+  `nq-profiles` + `nq-protocol` + the workspace `Cargo.lock`; a protocol-closure
+  kill-test confirms a `nq-protocol` edit rotates the id;
+- snapshot tests replaced by coupling tests (evaluation is parametric in the
+  hashed threshold; every semantic-id preimage field provably contributes);
+- overstated "transitive/fail-closed" claims corrected to the actual conservative
+  crate-global mechanism; the dormant `ProfileSemanticId` doc softened.
+- Accepted as conservative, not defects: crate-global over-hashing churn;
+  detector-vs-profile completeness deferred to the slice-3 admission-context bind.
+
+**Slice-3 execution decisions (ratified before 3A):**
+- Schema stays version `1` but **provisional and disposable** until beta
+  ratification — databases from earlier candidate revisions are unsupported and
+  must be recreated. Add a **schema-fingerprint test** so stale candidate DBs fail
+  loudly rather than strangely.
+- Persisted judgment lives on `admitted_reports` (immutable, 1:1): canonical
+  `validated_report_json` + judgment/schema format version + **judgment digest** +
+  binding to the admission context. The source protocol JSON stays as witness
+  material; neither substitutes for the other.
+- Identity fields (`profile_semantic_id`, detector id, evaluator source digest,
+  executable/helper digest, protocol version, config identity) live in the
+  **`admission_records`** context object; the report binds to it via an explicit
+  `admission_context_id`/digest, not several nullable joins.
+- `witness_runs.admission_id` stays nullable (refused/failed runs legitimately
+  have none); enforce the conditional law — *a run that produced an admitted
+  report has a complete admission context* — via a trigger in the same atomic
+  transaction. No global `NOT NULL`.
+- Ships as a mini-ladder: **3A** persistence substrate (judgment + context fields +
+  conditional invariant + round-trip/tamper tests, preserving the atomic
+  run/submission/report/observation commit) → **3B** `verify_admitted` (verify the
+  stored judgment, no evaluator invocation, refuse missing/incomplete context) →
+  **3C** replay (diagnostic, non-mutating, exact-identity only) + reassessment
+  (append a new linked report; no update path to the old one). Three distinct
+  guarantees, three commits.
