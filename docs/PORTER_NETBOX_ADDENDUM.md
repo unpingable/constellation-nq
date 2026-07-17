@@ -6,6 +6,27 @@ nq-ng developer preview. It supplements the governing plan in
 [`PLAN.md`](PLAN.md) without changing that plan's v1 operational-core scope or
 authority model.
 
+## Claim boundary: raw cuts are not coherent system state
+
+A `PublishedScopeCutV1` earns exact constituent binding and custody: every
+source snapshot is present, ratified, and digest-consistent. It does **not**
+thereby earn that its combined assertions form a coherent system state —
+`exactly_bound_cut` does not imply `causally_coherent_cut`. A hostile cut whose
+every constituent verifies but whose combined assertions are causally impossible
+(e.g. a required provider observed after its consumer) compiles and passes
+custody verification today.
+
+Any Porter path that relies on a cut *describing a coherent system state* must
+therefore refuse a raw `PublishedScopeCutV1` and require an
+`AdmissibleSystemCutV1` — the cut paired with a re-verified `CutCoherenceWitnessV1`
+(`nq-system-contract` `coherence` module). The V1 checker establishes bounded
+**required-observation coherence** under an instantaneous-snapshot model
+(`required_observation_v1`): for every required dependency the provider is
+observed no later than its consumer, and each required closure fits a declared
+window. It does **not** establish historical existence, epoch compatibility,
+concurrency, or causal completeness, and a V1 pass must never be described as if
+it did.
+
 ## Keep the two deployment specimens separate
 
 The deployment program has two deliberately different specimens:

@@ -6,6 +6,14 @@
 //! [`PublishedScopeCutV1`]. NQ and future Porter consumers receive distinct
 //! projections that cite that exact cut. None of these documents grants
 //! authority, approves a transition, or reports an observed condition.
+//!
+//! **Claim boundary.** A `PublishedScopeCutV1` earns exact constituent binding
+//! and custody — not that its combined assertions form a coherent system state.
+//! A consumer requiring coherent state must not rely on a raw cut; it must
+//! require an [`AdmissibleSystemCutV1`], which pairs the cut with a re-verified
+//! [`CutCoherenceWitnessV1`]. See the `coherence` module for exactly what that
+//! establishes (`required_observation_v1`) and, just as importantly, what it does
+//! not.
 
 use std::{collections::BTreeSet, fmt};
 
@@ -51,6 +59,13 @@ const MAX_TEXT_BYTES: usize = 4_096;
 const MAX_BINDING_VALUE_BYTES: usize = 64 * 1_024;
 const MAX_REQUIRED_COVERAGE: usize = 256;
 const MAX_FRESHNESS_SECONDS: u64 = 366 * 24 * 60 * 60;
+
+mod coherence;
+pub use coherence::{
+    AdmissibleSystemCutV1, CUT_COHERENCE_WITNESS_SCHEMA, CutCoherencePolicy, CutCoherenceRefusal,
+    CutCoherenceWitnessV1, REQUIRED_OBSERVATION_V1_CLAIM, compute_cut_coherence_witness,
+    parse_and_verify_admissible,
+};
 
 fn validate_id(value: &str) -> Result<(), ContractError> {
     if value.is_empty() || value.len() > MAX_ID_BYTES {
