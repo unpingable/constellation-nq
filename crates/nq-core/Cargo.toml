@@ -25,6 +25,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+trybuild = "1.0.118"
 
 [lints]
 workspace = true

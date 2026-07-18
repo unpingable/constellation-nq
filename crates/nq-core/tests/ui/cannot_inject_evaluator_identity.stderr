@@ -1,0 +1,22 @@
+error[E0599]: no function or associated item named `open_with_evaluator_identity` found for struct `CollectionEngine` in the current scope
+ --> tests/ui/cannot_inject_evaluator_identity.rs:8:37
+  |
+8 |     let _engine = CollectionEngine::open_with_evaluator_identity(todo!(), todo!());
+  |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ function or associated item not found in `CollectionEngine`
+  |
+note: if you're trying to build a new `CollectionEngine`, consider using `CollectionEngine::open` which returns `Result<CollectionEngine, EngineError>`
+ --> src/engine.rs
+  |
+  |     pub fn open(config: &NqConfig) -> Result<Self, EngineError> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unreachable expression
+ --> tests/ui/cannot_inject_evaluator_identity.rs:8:75
+  |
+8 |     let _engine = CollectionEngine::open_with_evaluator_identity(todo!(), todo!());
+  |                                                                  -------  ^^^^^^^ unreachable expression
+  |                                                                  |
+  |                                                                  any code following this expression is unreachable
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+  = note: this warning originates in the macro `todo` (in Nightly builds, run with -Z macro-backtrace for more info)

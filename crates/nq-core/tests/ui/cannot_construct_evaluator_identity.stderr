@@ -1,0 +1,23 @@
+warning: unreachable expression
+ --> tests/ui/cannot_construct_evaluator_identity.rs:9:24
+  |
+8 |         artifact_digest: todo!(),
+  |                          ------- any code following this expression is unreachable
+9 |         target_triple: String::new(),
+  |                        ^^^^^^^^^^^^^ unreachable expression
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+error[E0451]: fields `artifact_digest`, `target_triple`, `artifact_identity_method` and `platform_runtime_version` of struct `EvaluatorRuntimeIdentity` are private
+  --> tests/ui/cannot_construct_evaluator_identity.rs:8:9
+   |
+ 7 |     let _forged = EvaluatorRuntimeIdentity {
+   |                   ------------------------ in this type
+ 8 |         artifact_digest: todo!(),
+   |         ^^^^^^^^^^^^^^^ private field
+ 9 |         target_triple: String::new(),
+   |         ^^^^^^^^^^^^^ private field
+10 |         artifact_identity_method: String::from("fixture"),
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^ private field
+11 |         platform_runtime_version: String::new(),
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^ private field

@@ -1,0 +1,15 @@
+error[E0599]: no function or associated item named `for_test` found for struct `EvaluatorRuntimeIdentity` in the current scope
+ --> tests/ui/cannot_call_test_fixture.rs:8:46
+  |
+8 |     let _fixture = EvaluatorRuntimeIdentity::for_test(todo!());
+  |                                              ^^^^^^^^ function or associated item not found in `EvaluatorRuntimeIdentity`
+
+warning: unreachable call
+ --> tests/ui/cannot_call_test_fixture.rs:8:20
+  |
+8 |     let _fixture = EvaluatorRuntimeIdentity::for_test(todo!());
+  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ------- any code following this expression is unreachable
+  |                    |
+  |                    unreachable call
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
