@@ -18,9 +18,12 @@ pub struct Nqd {
     /// Human-edited configuration path.
     #[arg(long, env = "NQ_CONFIG", default_value = "/etc/nq/nq.toml")]
     pub config: PathBuf,
-    /// Optional loopback console address. The Unix API is always enabled.
-    #[arg(long, default_value = "127.0.0.1:8787")]
-    pub console_address: String,
+    /// Optional loopback console address (e.g. `127.0.0.1:8787`). Absent by
+    /// default: no INET listener is created and the host-local HTTP console is
+    /// off. The group-bounded Unix socket API is always enabled and remains the
+    /// primary local surface.
+    #[arg(long)]
+    pub console_address: Option<String>,
     /// Collect every configured instance once, then exit. Intended for install
     /// drills and black-box tests, not normal service operation.
     #[arg(long)]
@@ -33,6 +36,7 @@ pub struct Nqd {
 ///
 /// Returns when configuration/catalog/database validation fails or a daemon
 /// service terminates unexpectedly.
+#[allow(clippy::too_many_lines)]
 pub async fn run(options: Nqd) -> Result<()> {
     initialize_tracing();
     let config = NqConfig::load(&options.config)
@@ -65,9 +69,16 @@ pub async fn run(options: Nqd) -> Result<()> {
         return collect_once(config).await;
     }
 
-    let console_address = crate::api::parse_loopback(&options.console_address)?;
     let unix_listener = crate::api::bind_unix(&config.socket_path)?;
-    let loopback_listener = crate::api::bind_loopback(console_address).await?;
+    // Fail closed on the host-local surface: bind an INET listener only when an
+    // address is explicitly configured. Absent ⇒ Unix socket only.
+    let loopback_listener = match options.console_address.as_deref() {
+        Some(address) => {
+            let parsed = crate::api::parse_loopback(address)?;
+            Some(crate::api::bind_loopback(parsed).await?)
+        }
+        None => None,
+    };
     let mut ready_store = nq_store::Store::open(&config.database_path)?;
     nq_core::engine::record_component_status(
         &mut ready_store,
@@ -90,10 +101,15 @@ pub async fn run(options: Nqd) -> Result<()> {
     let database_path = config.database_path.clone();
     services
         .spawn(async move { crate::api::serve_unix_listener(unix_listener, database_path).await });
-    let database_path = config.database_path.clone();
-    services.spawn(async move {
-        crate::api::serve_loopback_listener(loopback_listener, database_path).await
-    });
+    if let Some(loopback_listener) = loopback_listener {
+        info!("host-local loopback console enabled (opt-in)");
+        let database_path = config.database_path.clone();
+        services.spawn(async move {
+            crate::api::serve_loopback_listener(loopback_listener, database_path).await
+        });
+    } else {
+        info!("no loopback console; Unix socket API only");
+    }
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     for witness in config.witnesses.clone() {
@@ -338,5 +354,37 @@ mod tests {
     #[test]
     fn daemon_cli_is_well_formed() {
         Nqd::command().debug_assert();
+    }
+
+    #[test]
+    fn console_address_is_absent_by_default() {
+        let parsed =
+            Nqd::try_parse_from(["nqd", "--config=/etc/nq/nq.toml"]).expect("minimal args parse");
+        assert!(
+            parsed.console_address.is_none(),
+            "the loopback console must be off unless explicitly configured"
+        );
+    }
+
+    /// Default packaged startup must expose no host-local INET listener: the
+    /// shipped unit carries no console address, and parsing its exact nqd
+    /// invocation yields none.
+    #[test]
+    fn packaged_unit_exposes_no_loopback_listener_by_default() {
+        const UNIT: &str = include_str!("../../../packaging/systemd/nqd.service");
+        let exec = UNIT
+            .lines()
+            .find_map(|line| line.strip_prefix("ExecStart="))
+            .expect("packaged unit has an ExecStart line");
+        assert!(
+            !exec.contains("--console-address"),
+            "packaged ExecStart must not enable the loopback console: {exec}"
+        );
+        let args = std::iter::once("nqd").chain(exec.split_whitespace().skip(1));
+        let parsed = Nqd::try_parse_from(args).expect("packaged nqd args parse");
+        assert!(
+            parsed.console_address.is_none(),
+            "packaged startup must not configure a loopback console"
+        );
     }
 }

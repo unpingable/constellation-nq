@@ -26,7 +26,11 @@ ExecStartPre=+/usr/bin/install -d -o nq -g nq -m 0711 /run/nq/helpers
 # This detects package drift; it is not a signature or an authority grant.
 ExecStartPre=/usr/bin/sha256sum --quiet --check /usr/share/nq/MANIFEST.sha256
 ExecStartPre=/usr/bin/nq --config=/etc/nq/nq.toml config check
-ExecStart=/usr/bin/nqd --config=/etc/nq/nq.toml --console-address=127.0.0.1:8787
+# The host-local loopback HTTP console is OFF by default: no --console-address,
+# so nqd binds no INET listener. The group-bounded 0660 Unix socket is the
+# primary local surface. To opt in to the host-local console, append e.g.
+# `--console-address=127.0.0.1:8787` (host-local, UID-agnostic).
+ExecStart=/usr/bin/nqd --config=/etc/nq/nq.toml
 Restart=on-failure
 RestartSec=5s
 TimeoutStartSec=30s

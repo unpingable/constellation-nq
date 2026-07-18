@@ -24,7 +24,7 @@ The repository implements the stage-one operational spine:
   identities, rejected custody, evaluation watermarks, finding events, public
   views, backup/restore, and an upgrade receipt skeleton;
 - consistent finding/status DTOs through CLI export, local Unix HTTP API,
-  bounded public SQL, and a loopback server-rendered console;
+  bounded public SQL, and an opt-in (off-by-default) loopback server-rendered console;
 - a native host profile/helper plus the conformance fixture profile;
 - strict, bounded `SystemSpecV1` validation and deterministic compilation into
   schema-domain-separated `ScopeCut` proposals, ratification-bound cuts,

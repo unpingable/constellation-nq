@@ -10,9 +10,18 @@ protocol exchange is also supported by a supervised persistent `unix` helper
 carrier with private sockets and peer-credential checks. The preview includes
 compiled profiles, admission locks, explicit collection, a resident scheduler,
 SQLite schema v1, verified SQLite backup/restore, read-only exports, the Unix
-API, and a loopback console. A real historical
+API, and an opt-in loopback console. A real historical
 migration chain, notifications, retention automation, privileged hardware
 helpers, and package-driven upgrades are not implemented yet.
+
+Two distinct local surfaces, deliberately separated:
+
+- the **Unix socket API** (`/run/nq/nqd.sock`, mode 0660) — always enabled,
+  group-bounded by filesystem permissions (DAC); and
+- the **loopback HTTP console** — host-local and UID-agnostic (any local user
+  can reach it), and therefore **off by default**. The packaged unit ships no
+  console address, so `nqd` binds no INET listener. Opt in by adding
+  `--console-address=127.0.0.1:8787` to the `nqd` invocation.
 
 ## Paths and identities
 
@@ -26,7 +35,7 @@ The packaged defaults are:
 | Operator-created backups | `/var/lib/nq/backups/` |
 | Local read API | `/run/nq/nqd.sock` |
 | Private supervised-helper runtime directory | `/run/nq/helpers/` |
-| Loopback console | `http://127.0.0.1:8787/` |
+| Loopback console (opt-in; off by default) | `http://127.0.0.1:8787/` when enabled |
 
 `nqd` runs as `nq:nq`; packaged witnesses default to the separate
 `nq-witness:nq-witness` identity. Configuration may name another local account
