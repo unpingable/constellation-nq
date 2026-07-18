@@ -712,6 +712,7 @@ impl Store {
                 "schema definition fingerprint {actual} differs from compiled {expected}"
             )));
         }
+        validate_stored_digests(&self.connection)?;
         validate_projection_invariants(&self.connection)
     }
 
@@ -1604,6 +1605,74 @@ impl Store {
         result
     }
 
+    /// Create a consistent, verified backup of a database file that `open`
+    /// refuses (incompatible schema, stale candidate) — so an operator can
+    /// preserve it before recreation. A backup must be possible *before* a
+    /// refusal, never gated behind passing validation. The source is opened
+    /// read-only with no schema/identity checks; the copy is verified only for
+    /// SQLite-level integrity (`quick_check`), not schema currency, and hashed.
+    pub fn backup_incompatible(
+        source: impl AsRef<Path>,
+        destination: impl AsRef<Path>,
+    ) -> Result<BackupArtifact, StoreError> {
+        let source = source.as_ref();
+        if !source.is_file() || std::fs::metadata(source)?.len() == 0 {
+            return Err(StoreError::NotInitialized(source.to_path_buf()));
+        }
+        let destination = destination.as_ref();
+        if destination.exists() {
+            return Err(StoreError::Invariant(format!(
+                "backup destination already exists: {}",
+                destination.display()
+            )));
+        }
+        drop(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(destination)?,
+        );
+        let result = (|| {
+            let source_connection = Connection::open_with_flags(
+                source,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            let mut target =
+                Connection::open_with_flags(destination, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+            {
+                let backup = rusqlite::backup::Backup::new(&source_connection, &mut target)?;
+                backup.run_to_completion(64, std::time::Duration::from_millis(10), None)?;
+            }
+            // Prove the copy is a structurally intact SQLite database, WITHOUT
+            // asserting schema currency — preserving an incompatible one is the
+            // whole point.
+            let quick_check: String =
+                target.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+            if quick_check != "ok" {
+                return Err(StoreError::Integrity(format!(
+                    "backup integrity: {quick_check}"
+                )));
+            }
+            drop(target);
+            let size_bytes = std::fs::metadata(destination)?.len();
+            let sha256 = sha256_file(destination)?;
+            Ok(BackupArtifact {
+                path: destination.to_path_buf(),
+                sha256,
+                size_bytes,
+            })
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(destination);
+            for suffix in ["-wal", "-shm"] {
+                let mut sidecar = destination.as_os_str().to_os_string();
+                sidecar.push(suffix);
+                let _ = std::fs::remove_file(PathBuf::from(sidecar));
+            }
+        }
+        result
+    }
+
     /// Read canonical admitted reports under one consistent SQLite snapshot.
     pub fn evidence_snapshot(
         &mut self,
@@ -2278,6 +2347,74 @@ fn schema_fingerprint(connection: &Connection) -> Result<String, StoreError> {
         }
     }
     Ok(sha256_digest(&basis))
+}
+
+/// Recompute every stored content-addressed digest from its persisted bytes and
+/// refuse any mismatch. This catches silent byte corruption that schema,
+/// foreign-key, and `quick_check` passes cannot: raw custody bytes, admitted
+/// report bytes, and compiled descriptor bytes must each still hash to their
+/// recorded identity. O(rows); a beta-scale startup integrity obligation.
+fn validate_stored_digests(connection: &Connection) -> Result<(), StoreError> {
+    let mut raw = connection.prepare(
+        "SELECT submission_id, raw_bytes, raw_sha256 FROM raw_submissions ORDER BY submission_id",
+    )?;
+    let mut raw_rows = raw.query([])?;
+    while let Some(row) = raw_rows.next()? {
+        let submission_id: String = row.get(0)?;
+        let raw_bytes: Vec<u8> = row.get(1)?;
+        let stored: String = row.get(2)?;
+        let recomputed = sha256_digest(&raw_bytes);
+        if recomputed != stored {
+            return Err(StoreError::Integrity(format!(
+                "raw submission {submission_id} bytes hash to {recomputed}, not stored {stored}"
+            )));
+        }
+    }
+
+    let mut reports = connection.prepare(
+        "SELECT report_id, canonical_json, semantic_digest FROM admitted_reports ORDER BY report_id",
+    )?;
+    let mut report_rows = reports.query([])?;
+    while let Some(row) = report_rows.next()? {
+        let report_id: String = row.get(0)?;
+        let canonical_json: Vec<u8> = row.get(1)?;
+        let stored: String = row.get(2)?;
+        let document =
+            CanonicalDocument::from_canonical_bytes(canonical_json).map_err(|error| {
+                StoreError::Integrity(format!("admitted report {report_id}: {error}"))
+            })?;
+        if document.digest() != stored {
+            return Err(StoreError::Integrity(format!(
+                "admitted report {report_id} bytes hash to {}, not stored {stored}",
+                document.digest()
+            )));
+        }
+    }
+
+    let mut descriptors = connection.prepare(
+        "SELECT profile_id, profile_version, descriptor_json, profile_digest
+         FROM profile_descriptor_snapshots ORDER BY profile_id, profile_version, profile_digest",
+    )?;
+    let mut descriptor_rows = descriptors.query([])?;
+    while let Some(row) = descriptor_rows.next()? {
+        let profile_id: String = row.get(0)?;
+        let profile_version: String = row.get(1)?;
+        let descriptor_json: Vec<u8> = row.get(2)?;
+        let stored: String = row.get(3)?;
+        let document =
+            CanonicalDocument::from_canonical_bytes(descriptor_json).map_err(|error| {
+                StoreError::Integrity(format!(
+                    "descriptor {profile_id}/{profile_version}: {error}"
+                ))
+            })?;
+        if document.digest() != stored {
+            return Err(StoreError::Integrity(format!(
+                "descriptor {profile_id}/{profile_version} bytes hash to {}, not stored {stored}",
+                document.digest()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate_projection_invariants(connection: &Connection) -> Result<(), StoreError> {
@@ -4349,5 +4486,78 @@ mod tests {
             store.verify_admitted_snapshot("report-a"),
             Err(SnapshotVerificationError::JudgmentCorrupt(_))
         ));
+    }
+
+    #[test]
+    fn validate_recomputes_stored_content_digests() {
+        let (store, _profile_digest) = configured_store();
+        store.validate().expect("valid before tampering");
+        // Append a raw custody row whose recorded digest does not match its
+        // bytes. Appending is allowed (the immutability triggers only block
+        // edits), so the schema fingerprint stays intact and the byte-digest
+        // recompute — not schema/FK/quick_check — is what must catch it.
+        store
+            .connection
+            .execute_batch(
+                "INSERT INTO witness_runs (
+                    run_id, request_id, instance_id, admission_id, binding_digest,
+                    checkpoint_contract_digest, profile_id, profile_version, profile_digest,
+                    carrier, started_at, deadline_at, finished_at, acquisition_outcome,
+                    execution_identity_json, resource_outcome_json
+                 ) VALUES (
+                    'run-x', 'req-x', 'inst-x', NULL,
+                    'sha256:0000000000000000000000000000000000000000000000000000000000000000',
+                    'sha256:1111111111111111111111111111111111111111111111111111111111111111',
+                    'fixture.health', '1', 'unused', 'stdio',
+                    '2026-07-16T12:00:00.000Z', '2026-07-16T12:00:10.000Z',
+                    '2026-07-16T12:00:01.000Z', 'transport_error',
+                    CAST('{}' AS BLOB), CAST('{}' AS BLOB)
+                 );
+                 INSERT INTO raw_submissions (
+                    submission_id, run_id, raw_bytes, raw_sha256, received_at,
+                    protocol_outcome, admission_outcome, rejection_code
+                 ) VALUES (
+                    'sub-x', 'run-x', X'78',
+                    'sha256:2222222222222222222222222222222222222222222222222222222222222222',
+                    '2026-07-16T12:00:01.000Z', 'protocol_error', 'rejected', 'bad'
+                 );",
+            )
+            .expect("append a raw custody row with a wrong digest");
+        assert!(matches!(
+            store.validate(),
+            Err(StoreError::Integrity(message)) if message.contains("bytes hash to")
+        ));
+    }
+
+    #[test]
+    fn an_incompatible_database_can_be_backed_up_before_it_is_refused() {
+        let directory = tempdir().expect("temp dir");
+        let path = directory.path().join("incompatible.db");
+        // A database open() refuses (stale schema artifact digest).
+        {
+            let connection = Connection::open(&path).expect("open raw database");
+            connection.execute_batch(SCHEMA).expect("apply schema");
+            connection
+                .execute(
+                    "INSERT INTO schema_metadata (
+                        singleton, product, schema_version, schema_artifact_digest, initialized_at
+                     ) VALUES (1, 'nq-ng', ?1, ?2, ?3)",
+                    params![
+                        SCHEMA_VERSION,
+                        "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+                        TIME
+                    ],
+                )
+                .expect("insert stale metadata");
+        }
+        assert!(matches!(Store::open(&path), Err(StoreError::Integrity(_))));
+        // It can still be preserved before recreation — backup is not gated
+        // behind passing validation.
+        let backup = directory.path().join("preserved.db");
+        let artifact =
+            Store::backup_incompatible(&path, &backup).expect("incompatible database backs up");
+        assert_eq!(artifact.path, backup);
+        assert!(artifact.sha256.starts_with("sha256:"));
+        assert!(backup.is_file());
     }
 }
