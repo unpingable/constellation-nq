@@ -91,13 +91,17 @@ The local acceptance suite is documented in [`DEVELOPMENT.md`](DEVELOPMENT.md).
 The bounded 2026-07-17 runtime-hardening campaign is recorded separately in
 [`../hardening/CAMPAIGN_2026-07-17.md`](../hardening/CAMPAIGN_2026-07-17.md).
 Its system-cut mutation, environment-perturbed release assembly, partial-write,
-and extracted-package checks passed locally. Its Noble QEMU lifecycle and real
-cross-UID AF_UNIX stages remain explicitly blocked and are not release
-evidence.
-Some kernel boundaries—real UID/GID transition with capabilities, executable
-memfd policy, and authenticated cross-UID Unix restart—also require the
-documented unsandboxed Linux package/VM job. A sandbox skip is never treated as
-release evidence for those boundaries.
+and extracted-package checks passed locally. Its Noble QEMU lifecycle, real
+cross-UID AF_UNIX custody, parent-side helper socket-mode enforcement, and
+byte-tamper/helper-drift refusals are qualified as of the sealed pass
+`run-2026-07-19-4abc478` — see the WS2 + WS5 ratification in
+[`HARDENING_PROGRAM.md`](HARDENING_PROGRAM.md) §8 for the bound
+source/image/package/harness digests and the narrow scope (Linux amd64 /
+Ubuntu 24.04 / real KVM only).
+Some kernel boundaries remain **not** qualified and still require the documented
+unsandboxed Linux package/VM job — executable memfd policy and the full
+`SO_PEERCRED` wrong-PID/UID/GID matrix among them. A sandbox skip is never treated
+as release evidence for those boundaries.
 
 Delivery proceeds through the stages in `PLAN.md`. A later stage may add a
 profile module, helper, and registry entry, but may not silently move profile

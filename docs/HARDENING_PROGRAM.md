@@ -628,3 +628,59 @@ Beta-1 required historical-admission guarantee:
 - replay, restart, restoration, or reassessment cannot recreate current
   authority;
 - records that cannot preserve or prove their historical meaning fail closed.
+
+---
+
+### WS2 + WS5 qualification — RATIFIED 2026-07-19 (operator)
+
+First sealed pass of the QEMU qualification harness, ratified as WS2 + WS5
+promotion evidence. Binds:
+
+- **source commit** `4abc47811832d3d872e40865a7a22ac2862e6979` (`fix(core):
+  preserve carrier_startup detail through the dry-collection CLI surface`) — the
+  reviewed cohort the packaged binaries were built from.
+- **image digest** (Ubuntu 24.04 amd64 cloud image) `sha256:ffe6203da54deeb6db5d2a98a83f9ec8e55f149d3f7ba622e1abe5fa966ee3d6`.
+- **package digest** `nq-ng_0.1.0_amd64.deb sha256:14c33792299425db6d3b089ec22c15c2c484f702c51c690e52f843f1b7e26351`,
+  reproducibly assembled (`SOURCE_DATE_EPOCH=0`, `scripts/build-release-bundle.sh`).
+- **harness commit lineage** WS2 `d23d1db` → WS5 seal `394ce7e` → durability/
+  preservation `8642e40`→`42e378e` → status+journal custody `9f9a391` → runtime-
+  root env `0a2938c`→`a4faf06`; guest driver `guest-lifecycle.sh`
+  `sha256:c12150a3f31c71da031521381b9566fa6edeb71dfccc679d98370c7e073fc7f8`
+  (staged + re-verified in guest per WS5).
+- **required markers** (all pass): `AF_UNIX_CROSS_UID`, `BYTE_TAMPER_REFUSAL`,
+  `HELPER_DRIFT_REFUSAL`, `SOCKET_CONTRACT_REFUSAL`.
+- **verified seal**: `run-2026-07-19-4abc478/ARTIFACTS.sha256` (50 files) verifies;
+  `run-noble-qemu.sh --check-guest-results` independently admits the guest results;
+  `RESULT=pass` written last; no `REFUSAL`, no `failed-guest-results`.
+
+**Correction lineage — all eight prior refusals preserved, none minted.** The gate
+advanced monotonically; each refusal was a distinct, correctly-diagnosed bucket:
+`d23d1db`/`bea7dfb`/`b2fa29c`/`d01343c`/`resetfailed` (WS1-era service/identity/
+reset gates) → `42e378e` (empty diagnostic) → `9f9a391` (`226/NAMESPACE`, `/run/nq`)
+→ `0a2938c` (`carrier_startup_failed`, `/run/nq/helpers`) → `a4faf06` (socket-mode
+refusal laundered to a bare code). The last was closed by the `4abc478` product fix:
+the CLI dry-collection path exported only the coarse `carrier_startup_failed` code —
+a refusal-preservation violation — so the working socket-mode predicate
+(`helper socket mode is 0o660; expected 0o600`) was invisible. Preserved read-only
+under `~/nqlab/nq-ng-hardening/`.
+
+**Qualification scope (narrow).** This ratifies, on **Linux amd64 / Ubuntu 24.04 /
+real KVM only**, that the packaged supervisor: (a) enforces the parent-side helper
+Unix socket-mode contract — refuses a non-conforming `0660` socket, requires `0600`,
+`admitted_reports=0` after refusal — exercising the **packaged helper bytes over the
+real Unix carrier** (WS2); (b) refuses byte-tampered helper bytes and drifted helper
+execution identity; (c) performs cross-UID AF_UNIX custody; and that the QEMU harness
+**seals its evidence admissibly** (WS5). It does **not** qualify: any other platform
+(Beta-2 FreeBSD), the loopback/console surface beyond the packaged default, the
+storage/archive obligations, the `SO_PEERCRED` wrong-PID/UID/GID matrix, memfd policy,
+or anything the four markers did not exercise. It is promotion **evidence**, not the
+mint.
+
+**Externally owned pre-mint dependency (NOT NQ-ng scope).** The corpus-wide
+refusal-preservation crosswalk — every coarse-projection family (`acquisition_code`
+done; `source_kind`, `rejection_code`, status `code`, `kind`/`reason` outstanding) ×
+every serialization/rendering/archival/API surface, with a hostile same-code pair per
+family and one cross-surface lossless-refusal suite — is assigned to the **separate
+audit-framework campaign** and is a pre-mint dependency owned there. It is **not**
+implemented or expanded in this repo. Provenance: the v14 rung-4/rung-6 refusal-
+preservation law; the `4abc478` fix was one instance surfaced under duress.
