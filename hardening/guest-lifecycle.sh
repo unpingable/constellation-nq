@@ -56,6 +56,9 @@ fi
 exec > >(tee -a "$RESULTS/guest-lifecycle.log") 2>&1
 
 counter=0
+# The config the supervisor runs against. Normally the installed one; the
+# non-conforming-socket qualification points it at a hostile-helper config.
+active_config=$CONFIG
 run_nq() {
     counter=$((counter + 1))
     systemd-run --quiet --wait --pipe --collect \
@@ -76,21 +79,22 @@ run_nq() {
         --property=LimitNOFILE=4096 --property=LimitFSIZE=1G \
         --property=LimitCORE=0 --property=TasksMax=256 \
         --property=MemoryMax=2G --property=MemorySwapMax=0 --property=CPUQuota=200% \
-        -- /usr/bin/nq --config="$CONFIG" "$@"
+        -- /usr/bin/nq --config="$active_config" "$@"
 }
 
 inactive() { [[ $(systemctl is-active nqd.service 2>/dev/null || true) == inactive ]]; }
 disabled() { [[ $(systemctl is-enabled nqd.service 2>/dev/null || true) == disabled ]]; }
 
 admitted_report_count() {
-    python3 - /var/lib/nq/nq.db <<'PY'
+    local instance=${1:-conformance-local}
+    python3 - /var/lib/nq/nq.db "$instance" <<'PY'
 import sqlite3
 import sys
 
 with sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True) as database:
     row = database.execute(
         "SELECT count(*) FROM admitted_reports WHERE instance_id = ?",
-        ("conformance-local",),
+        (sys.argv[2],),
     ).fetchone()
 print(row[0])
 PY
@@ -325,6 +329,68 @@ systemctl is-active --quiet nqd.service
 systemctl stop nqd.service
 printf 'BYTE_TAMPER_REFUSAL=pass\n' >>"$RESULTS/REQUIRED_CHECKS"
 
+current_check=non-conforming-socket-refusal
+# Hostile guest fixture: a helper that binds the supervised socket path with a
+# deliberately non-conforming mode (0660 instead of the required 0600) and then
+# idles. The PRODUCTION supervisor must refuse it on that exact predicate. Only
+# the helper side is a fixture; nothing here reimplements or relaxes the
+# parent-side enforcement.
+install -d -o root -g root -m 0755 /usr/local/lib/nq-hardening
+cat >/usr/local/lib/nq-hardening/bad-socket-helper.py <<'PY'
+#!/usr/bin/python3
+"""Bind the supervised socket path with a non-conforming 0660 mode, then idle."""
+import os
+import socket
+import time
+
+path = os.environ["NQ_HELPER_SOCKET"]
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+server.bind(path)
+os.chmod(path, 0o660)
+server.listen(1)
+time.sleep(600)
+PY
+chown root:root /usr/local/lib/nq-hardening/bad-socket-helper.py
+chmod 0755 /usr/local/lib/nq-hardening/bad-socket-helper.py
+
+hostile_config=/etc/nq/nq-hostile-socket.toml
+install -o root -g nq -m 0640 "$CONFIG" "$hostile_config"
+sed -i 's#^instance_id = "conformance-local"#instance_id = "hostile-socket-local"#' \
+    "$hostile_config"
+sed -i 's#^executable = .*#executable = "/usr/local/lib/nq-hardening/bad-socket-helper.py"#' \
+    "$hostile_config"
+sed -i 's#^working_directory = .*#working_directory = "/usr/local/lib/nq-hardening"#' \
+    "$hostile_config"
+grep -qx 'instance_id = "hostile-socket-local"' "$hostile_config" || fail \
+    "hostile instance identity was not configured"
+grep -q 'bad-socket-helper.py' "$hostile_config" || fail "hostile helper was not configured"
+grep -qx 'carrier = "unix"' "$hostile_config" || fail "hostile config is not the Unix carrier"
+
+set +e
+active_config=$hostile_config
+run_nq witness test hostile-socket-local >"$RESULTS/bad-socket-refusal.log" 2>&1
+bad_socket_status=$?
+active_config=$CONFIG
+set -e
+((bad_socket_status != 0)) || fail "supervisor accepted a non-conforming helper socket"
+# The refusal must name the violated socket predicate. A timeout, helper crash,
+# or generic launch failure does not qualify.
+grep -F 'helper socket mode is' "$RESULTS/bad-socket-refusal.log" >/dev/null || fail \
+    "refusal did not identify the socket mode predicate"
+grep -F 'expected 0o600' "$RESULTS/bad-socket-refusal.log" >/dev/null || fail \
+    "refusal did not state the required socket mode"
+# Nothing may follow a refused socket.
+[[ $(admitted_report_count hostile-socket-local) == 0 ]] || fail \
+    "a report was admitted after a refused socket"
+{
+    printf 'predicate=socket_mode\nrequired_mode=0600\ninjected_mode=0660\n'
+    printf 'instance=hostile-socket-local\nadmitted_reports=0\n'
+    printf 'observed='
+    grep -F 'helper socket mode is' "$RESULTS/bad-socket-refusal.log" | head -n 1
+} >"$RESULTS/BAD_SOCKET_METADATA"
+rm -f "$hostile_config"
+printf 'SOCKET_CONTRACT_REFUSAL=pass\n' >>"$RESULTS/REQUIRED_CHECKS"
+
 current_check=final-receipts
 systemctl enable --now nqd.service
 systemctl is-active --quiet nqd.service
@@ -337,7 +403,7 @@ sha256sum "$deb" /usr/bin/nq /usr/bin/nqd \
 find /etc/nq /var/lib/nq /run/nq -maxdepth 3 -printf '%M %u:%g %p\n' \
     | sort >"$RESULTS/final-layout.txt"
 sort -u "$RESULTS/REQUIRED_CHECKS" -o "$RESULTS/REQUIRED_CHECKS"
-[[ $(wc -l <"$RESULTS/REQUIRED_CHECKS") == 3 ]] || fail "required pass markers are incomplete"
+[[ $(wc -l <"$RESULTS/REQUIRED_CHECKS") == 4 ]] || fail "required pass markers are incomplete"
 printf 'pass\n' >"$RESULTS/RESULT"
 rm -f "$RESULTS/helper.original"
 chmod -R a+rX "$RESULTS"

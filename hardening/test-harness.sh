@@ -40,8 +40,17 @@ require_text "$guest" 'guest lifecycle driver bytes differ from host-bound diges
 require_text "$host" 'AF_UNIX_CROSS_UID'
 require_text "$host" 'BYTE_TAMPER_REFUSAL'
 require_text "$host" 'HELPER_DRIFT_REFUSAL'
+require_text "$host" 'SOCKET_CONTRACT_REFUSAL'
 require_text "$guest" 'AF_UNIX_CROSS_UID=pass'
 require_text "$guest" 'BYTE_TAMPER_REFUSAL=pass'
+# The non-conforming-socket qualification must exercise the production
+# supervisor and assert the exact refused predicate, not a generic failure.
+require_text "$guest" 'SOCKET_CONTRACT_REFUSAL=pass'
+require_text "$guest" 'run_nq witness test hostile-socket-local'
+require_text "$guest" "grep -F 'helper socket mode is'"
+require_text "$guest" 'supervisor accepted a non-conforming helper socket'
+require_text "$guest" 'a report was admitted after a refused socket'
+require_text "$guest" 'os.chmod(path, 0o660)'
 require_text "$guest" 'carrier = "unix"'
 require_text "$guest" 'run_nq witness test conformance-local'
 require_text "$guest" 'run_nq witness admit conformance-local'
@@ -93,7 +102,7 @@ grep -F 'Ubuntu cloud image is not a regular non-symlink file' \
 gr_valid=$scratch/gr-valid
 mkdir -p "$gr_valid"
 printf 'pass\n' >"$gr_valid/RESULT"
-printf 'AF_UNIX_CROSS_UID=pass\nBYTE_TAMPER_REFUSAL=pass\nHELPER_DRIFT_REFUSAL=pass\n' \
+printf 'AF_UNIX_CROSS_UID=pass\nBYTE_TAMPER_REFUSAL=pass\nHELPER_DRIFT_REFUSAL=pass\nSOCKET_CONTRACT_REFUSAL=pass\n' \
     >"$gr_valid/REQUIRED_CHECKS"
 "$host" --check-guest-results "$gr_valid" >/dev/null \
     || { printf 'valid guest results were rejected\n' >&2; exit 1; }
@@ -137,6 +146,20 @@ gr_noresult=$scratch/gr-noresult
 cp -r "$gr_valid" "$gr_noresult"
 rm -f "$gr_noresult/RESULT"
 expect_guest_refusal "$gr_noresult" 'guest result file is absent'
+
+# The non-conforming-socket qualification is enforced specifically: a run that
+# omits it, or reports it as anything but pass, cannot seal.
+gr_nosocket=$scratch/gr-nosocket
+cp -r "$gr_valid" "$gr_nosocket"
+grep -v '^SOCKET_CONTRACT_REFUSAL=' "$gr_valid/REQUIRED_CHECKS" \
+    >"$gr_nosocket/REQUIRED_CHECKS"
+expect_guest_refusal "$gr_nosocket" 'SOCKET_CONTRACT_REFUSAL'
+
+gr_socketfail=$scratch/gr-socketfail
+cp -r "$gr_valid" "$gr_socketfail"
+sed 's/^SOCKET_CONTRACT_REFUSAL=pass$/SOCKET_CONTRACT_REFUSAL=fail/' \
+    "$gr_valid/REQUIRED_CHECKS" >"$gr_socketfail/REQUIRED_CHECKS"
+expect_guest_refusal "$gr_socketfail" 'SOCKET_CONTRACT_REFUSAL'
 
 # A real staged input with the wrong declared hash is refused.
 real_input=$scratch/real.bin
