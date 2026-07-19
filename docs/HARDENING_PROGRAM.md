@@ -600,3 +600,31 @@ judgment tamper refused, stale schema-artifact refused, atomic rollback, detecto
 identity retained. One named 3A workstream; commit the store substrate and daemon
 wiring separately if the diff develops weather. Independent review of the commit
 before 3B.
+
+**Beta-1 blocker campaign execution (2026-07-18, resumed from `18e0b35`).** WS1
+(3A identity + 3B verify) landed `ddffa68`/`c14d8db`/`b7a06ed`/`18e0b35`. This
+pass: **WS3 loopback opt-in** `f401f7d` (console_address→Option; packaged unit
+ships no `--console-address`; unit↔code negative test; two-surface docs) and the
+**storage** obligations `54b46cb` (`Store::validate` recomputes stored
+raw/report/descriptor content digests; `Store::backup_incompatible` preserves a
+DB `open()` refuses before the refusal). Remaining merge-path: sealed cold
+archive + backend-independent store-contract tests, WS2 parent-side enforcement,
+WS5 QEMU script sealing, then the WS4 rename as the **final pre-mint** pass.
+VM-gated (operator, not sandbox): WS6 specimens, the real QEMU run, cross-UID
+AF_UNIX, kernel boundaries.
+
+**3C scope — RATIFIED post-beta (2026-07-18).** The full replay/reassessment
+lifecycle is additional governed lifecycle functionality and is **not a beta-1
+blocker**; it must not be silently implemented as part of archive or other beta
+work. The §2 "reconstruct → verify / replay / reassess split" row is scoped down
+for beta-1 to the historical-admission guarantee below; replay/reassess move to
+post-beta.
+
+Beta-1 required historical-admission guarantee:
+- stored historical admissions remain verifiable against their original
+  evidence, schema, binary/tooling context, and semantic identity;
+- verification may establish historical validity or retrospective
+  assessability;
+- replay, restart, restoration, or reassessment cannot recreate current
+  authority;
+- records that cannot preserve or prove their historical meaning fail closed.
