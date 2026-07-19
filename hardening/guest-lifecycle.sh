@@ -67,6 +67,14 @@ counter=0
 active_config=$CONFIG
 run_nq() {
     counter=$((counter + 1))
+    # The transient unit's sandbox binds /run/nq (ReadWritePaths below). /run is
+    # a tmpfs; after a reboot or a `systemctl stop nqd`, systemd tears down the
+    # daemon's RuntimeDirectory and /run/nq vanishes, so the next transient unit
+    # dies at namespace setup (226/NAMESPACE) before nq ever runs. Recreate the
+    # runtime root to the exact packaged contract before launching: nqd.service
+    # RuntimeDirectory=nq + RuntimeDirectoryMode=0751 as User=nq/Group=nq,
+    # identical to nq.tmpfiles `d /run/nq 0751 nq nq`.
+    install -d -o nq -g nq -m 0751 /run/nq
     # Record the transient unit name so an asserted attempt can retrieve its
     # journal after --collect reaps the unit: the service's own stdout/stderr
     # goes to the --pipe, but systemd's manager-side records (exec failures,

@@ -361,4 +361,89 @@ expect_custody unretrieved 1 EVIDENCE_CUSTODY_FAILURE
     exit 1
 }
 
+# --- A torn-down runtime root must be recreated exactly before a transient
+#     unit binds it, or a post-stop launch dies at 226/NAMESPACE before nq runs. ---
+#
+# run_nq launches nq inside a transient systemd unit whose sandbox binds /run/nq
+# (ReadWritePaths). /run is a tmpfs and `systemctl stop nqd` tears down the
+# daemon RuntimeDirectory, so /run/nq vanishes; the socket check that follows the
+# byte-tamper stop then failed 226/NAMESPACE with an empty stream (run
+# 2026-07-19-9f9a391). run_nq must recreate the runtime root itself, to the exact
+# packaged contract, before the unit starts. The contract is read from the
+# package source (nq.tmpfiles) rather than hardcoded here, so this test tracks it.
+tmpfiles=$HERE/../packaging/systemd/nq.tmpfiles
+[[ -f $tmpfiles ]] || { printf 'packaged nq.tmpfiles not found at %s\n' "$tmpfiles" >&2; exit 1; }
+python3 - "$guest" "$tmpfiles" <<'CHECK'
+import sys
+
+guest_path, tmpfiles_path = sys.argv[1], sys.argv[2]
+
+# Authoritative /run/nq contract, read from the package's tmpfiles source.
+mode = user = group = None
+for row in open(tmpfiles_path, encoding="utf-8"):
+    fields = row.split()
+    if len(fields) >= 5 and fields[0] == "d" and fields[1] == "/run/nq":
+        mode, user, group = fields[2], fields[3], fields[4]
+        break
+if mode is None:
+    print("nq.tmpfiles declares no /run/nq entry to enforce", file=sys.stderr)
+    raise SystemExit(1)
+
+expected = f"install -d -o {user} -g {group} -m {mode} /run/nq"
+
+lines = open(guest_path, encoding="utf-8").read().splitlines()
+start = next(i for i, l in enumerate(lines) if l.strip() == "run_nq() {")
+end = next(i for i in range(start + 1, len(lines)) if lines[i].strip() == "}")
+body = [l.strip() for l in lines[start:end]]
+
+prov_idx = body.index(expected) if expected in body else None
+launch_idx = next((i for i, l in enumerate(body) if l.startswith("systemd-run")), None)
+
+problems = []
+if prov_idx is None:
+    problems.append(f"run_nq must recreate the runtime root exactly as the package declares: `{expected}`")
+if launch_idx is None:
+    problems.append("run_nq must launch its transient unit via systemd-run")
+if prov_idx is not None and launch_idx is not None and prov_idx > launch_idx:
+    problems.append("run_nq must recreate /run/nq before launching the transient unit")
+
+if problems:
+    for problem in problems:
+        print(problem, file=sys.stderr)
+    raise SystemExit(1)
+CHECK
+
+# Behavioural proof, no VM: model systemd's namespace setup. A transient unit
+# whose sandbox binds a torn-down runtime root is refused at namespace setup
+# (226/NAMESPACE) before its payload runs; recreating the root first lets it
+# reach execution. This drives the same order run_nq uses (provision, then
+# launch); the static check above pins the privileged owner/mode the model omits.
+runtime_probe=$scratch/run-nq-runtime
+launched=$scratch/run-nq-launched
+# fake systemd-run: exit 226 (systemd's NAMESPACE code) when the bound runtime
+# root is absent at launch, else run the payload and mark that it executed.
+sandbox_launch() { [[ -d $runtime_probe ]] || return 226; printf 'reached\n' >"$launched"; }
+
+# Post-stop state: the runtime root is gone. Provision it to the packaged mode,
+# then launch -- exactly run_nq's ordering.
+rm -rf "$runtime_probe"; rm -f "$launched"
+install -d -m 0751 "$runtime_probe"
+set +e; sandbox_launch; launch_status=$?; set -e
+((launch_status == 0)) || {
+    printf 'transient unit did not reach execution after provisioning (exit %s)\n' "$launch_status" >&2
+    exit 1
+}
+[[ $(stat -c '%a' "$runtime_probe") == 751 ]] || { printf 'runtime root mode is not 0751\n' >&2; exit 1; }
+[[ $(cat "$launched") == reached ]] || { printf 'transient unit did not execute\n' >&2; exit 1; }
+
+# Bite: the exact regression. Without a runtime root, the launch fails 226 and
+# the payload never runs.
+rm -rf "$runtime_probe"; rm -f "$launched"
+set +e; sandbox_launch; noprov_status=$?; set -e
+((noprov_status == 226)) || {
+    printf 'expected 226/NAMESPACE without a runtime root, got %s\n' "$noprov_status" >&2
+    exit 1
+}
+[[ ! -e $launched ]] || { printf 'transient unit ran despite a missing runtime root\n' >&2; exit 1; }
+
 printf 'hardening harness syntax/static checks passed; guest-result, bad-hash, and stale-output negatives refused as required\n'
