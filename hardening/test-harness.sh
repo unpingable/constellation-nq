@@ -361,51 +361,100 @@ expect_custody unretrieved 1 EVIDENCE_CUSTODY_FAILURE
     exit 1
 }
 
-# --- A torn-down runtime root must be recreated exactly before a transient
-#     unit binds it, or a post-stop launch dies at 226/NAMESPACE before nq runs. ---
+# --- run_nq must reconstruct every runtime directory nqd.service creates,
+#     exactly, before a transient unit depends on it. ---
 #
 # run_nq launches nq inside a transient systemd unit whose sandbox binds /run/nq
-# (ReadWritePaths). /run is a tmpfs and `systemctl stop nqd` tears down the
-# daemon RuntimeDirectory, so /run/nq vanishes; the socket check that follows the
-# byte-tamper stop then failed 226/NAMESPACE with an empty stream (run
-# 2026-07-19-9f9a391). run_nq must recreate the runtime root itself, to the exact
-# packaged contract, before the unit starts. The contract is read from the
-# package source (nq.tmpfiles) rather than hardcoded here, so this test tracks it.
+# (ReadWritePaths) and whose helper carrier prepares a private directory under
+# /run/nq/helpers. Both are created by nqd.service and both live on the /run
+# tmpfs, so `systemctl stop nqd` tears them down. A transient unit run after that
+# stop then failed one gate apart depending on which was missing:
+#   - /run/nq gone     -> 226/NAMESPACE, empty stream (run 2026-07-19-9f9a391);
+#   - /run/nq/helpers gone -> nq ran but reported carrier_startup_failed before
+#     it could bind or inspect the socket (run 2026-07-19-0a2938c).
+# run_nq must reconstruct BOTH to the exact packaged contract before launching.
+# The contract is read from the package sources (nq.tmpfiles, cross-checked
+# against nqd.service's ExecStartPre) rather than hardcoded, so this tracks them.
 tmpfiles=$HERE/../packaging/systemd/nq.tmpfiles
+unit=$HERE/../packaging/systemd/nqd.service
 [[ -f $tmpfiles ]] || { printf 'packaged nq.tmpfiles not found at %s\n' "$tmpfiles" >&2; exit 1; }
-python3 - "$guest" "$tmpfiles" <<'CHECK'
+[[ -f $unit ]] || { printf 'packaged nqd.service not found at %s\n' "$unit" >&2; exit 1; }
+python3 - "$guest" "$tmpfiles" "$unit" <<'CHECK'
 import sys
 
-guest_path, tmpfiles_path = sys.argv[1], sys.argv[2]
+guest_path, tmpfiles_path, unit_path = sys.argv[1], sys.argv[2], sys.argv[3]
+problems = []
 
-# Authoritative /run/nq contract, read from the package's tmpfiles source.
-mode = user = group = None
+# Every runtime directory run_nq must reconstruct, parent before child.
+required = ["/run/nq", "/run/nq/helpers"]
+
+# Authoritative contract, read from the package's tmpfiles source.
+contract = {}
 for row in open(tmpfiles_path, encoding="utf-8"):
-    fields = row.split()
-    if len(fields) >= 5 and fields[0] == "d" and fields[1] == "/run/nq":
-        mode, user, group = fields[2], fields[3], fields[4]
+    f = row.split()
+    if len(f) >= 5 and f[0] == "d" and f[1] in required:
+        contract[f[1]] = {"mode": f[2], "user": f[3], "group": f[4]}
+for path in required:
+    if path not in contract:
+        problems.append(f"nq.tmpfiles declares no `d {path}` entry to enforce")
+
+
+def parse_install(tokens):
+    """Extract (user, group, mode, path) from an `install -d -o U -g G -m M P`."""
+    got = {"-o": None, "-g": None, "-m": None}
+    path = None
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t in got and i + 1 < len(tokens):
+            got[t] = tokens[i + 1]
+            i += 2
+            continue
+        if t != "-d" and not t.startswith("-"):
+            path = t
+        i += 1
+    return got["-o"], got["-g"], got["-m"], path
+
+
+# Cross-check: nqd.service's ExecStartPre for /run/nq/helpers must agree with
+# tmpfiles, so run_nq's single copy can be validated against a coherent contract.
+for line in open(unit_path, encoding="utf-8"):
+    s = line.strip()
+    if s.startswith("ExecStartPre=") and "install -d" in s and "/run/nq/helpers" in s:
+        u, g, m, p = parse_install(s.split())
+        c = contract.get("/run/nq/helpers")
+        if c and (u, g, m) != (c["user"], c["group"], c["mode"]):
+            problems.append(
+                "nqd.service ExecStartPre and nq.tmpfiles disagree on /run/nq/helpers: "
+                f"unit says {u}:{g}:{m}, tmpfiles says {c['user']}:{c['group']}:{c['mode']}")
         break
-if mode is None:
-    print("nq.tmpfiles declares no /run/nq entry to enforce", file=sys.stderr)
-    raise SystemExit(1)
 
-expected = f"install -d -o {user} -g {group} -m {mode} /run/nq"
-
+# run_nq must recreate each required directory, exactly, before systemd-run.
 lines = open(guest_path, encoding="utf-8").read().splitlines()
 start = next(i for i, l in enumerate(lines) if l.strip() == "run_nq() {")
 end = next(i for i in range(start + 1, len(lines)) if lines[i].strip() == "}")
 body = [l.strip() for l in lines[start:end]]
-
-prov_idx = body.index(expected) if expected in body else None
 launch_idx = next((i for i, l in enumerate(body) if l.startswith("systemd-run")), None)
-
-problems = []
-if prov_idx is None:
-    problems.append(f"run_nq must recreate the runtime root exactly as the package declares: `{expected}`")
 if launch_idx is None:
     problems.append("run_nq must launch its transient unit via systemd-run")
-if prov_idx is not None and launch_idx is not None and prov_idx > launch_idx:
-    problems.append("run_nq must recreate /run/nq before launching the transient unit")
+
+prov_at = {}
+for path in required:
+    c = contract.get(path)
+    if not c:
+        continue
+    expected = f"install -d -o {c['user']} -g {c['group']} -m {c['mode']} {path}"
+    idx = body.index(expected) if expected in body else None
+    prov_at[path] = idx
+    if idx is None:
+        problems.append(f"run_nq must recreate {path} exactly as the package declares: `{expected}`")
+    elif launch_idx is not None and idx > launch_idx:
+        problems.append(f"run_nq must recreate {path} before launching the transient unit")
+
+# Parent before child: /run/nq must be provisioned before /run/nq/helpers.
+a, b = prov_at.get("/run/nq"), prov_at.get("/run/nq/helpers")
+if a is not None and b is not None and a > b:
+    problems.append("run_nq must recreate /run/nq before its /run/nq/helpers child")
 
 if problems:
     for problem in problems:
@@ -413,37 +462,49 @@ if problems:
     raise SystemExit(1)
 CHECK
 
-# Behavioural proof, no VM: model systemd's namespace setup. A transient unit
-# whose sandbox binds a torn-down runtime root is refused at namespace setup
-# (226/NAMESPACE) before its payload runs; recreating the root first lets it
-# reach execution. This drives the same order run_nq uses (provision, then
-# launch); the static check above pins the privileged owner/mode the model omits.
+# Behavioural proof, no VM: model systemd bringing up a transient unit against
+# the two runtime directories. A launch after `systemctl stop nqd` sees neither;
+# missing /run/nq is a namespace-setup refusal (226) before nq runs, and a
+# present /run/nq with a missing /run/nq/helpers lets nq run but the helper
+# carrier cannot start (exit 1) before it can inspect the socket -- the two gates
+# the real runs hit. Provisioning both, in run_nq's order, reaches execution.
+# The static check above pins the privileged owner/mode this model omits.
 runtime_probe=$scratch/run-nq-runtime
 launched=$scratch/run-nq-launched
-# fake systemd-run: exit 226 (systemd's NAMESPACE code) when the bound runtime
-# root is absent at launch, else run the payload and mark that it executed.
-sandbox_launch() { [[ -d $runtime_probe ]] || return 226; printf 'reached\n' >"$launched"; }
+sandbox_launch() {
+    [[ -d $runtime_probe ]] || return 226            # /run/nq bind: 226/NAMESPACE
+    [[ -d $runtime_probe/helpers ]] || return 1      # helper carrier: carrier_startup_failed
+    printf 'reached\n' >"$launched"
+}
+provision_runtime() {
+    install -d -m 0751 "$runtime_probe"
+    install -d -m 0711 "$runtime_probe/helpers"
+}
 
-# Post-stop state: the runtime root is gone. Provision it to the packaged mode,
-# then launch -- exactly run_nq's ordering.
+# Post-stop state: both directories are gone. Provision both, then launch.
 rm -rf "$runtime_probe"; rm -f "$launched"
-install -d -m 0751 "$runtime_probe"
+provision_runtime
 set +e; sandbox_launch; launch_status=$?; set -e
 ((launch_status == 0)) || {
     printf 'transient unit did not reach execution after provisioning (exit %s)\n' "$launch_status" >&2
     exit 1
 }
-[[ $(stat -c '%a' "$runtime_probe") == 751 ]] || { printf 'runtime root mode is not 0751\n' >&2; exit 1; }
+[[ $(stat -c '%a' "$runtime_probe") == 751 ]] || { printf '/run/nq mode is not 0751\n' >&2; exit 1; }
+[[ $(stat -c '%a' "$runtime_probe/helpers") == 711 ]] || { printf '/run/nq/helpers mode is not 0711\n' >&2; exit 1; }
 [[ $(cat "$launched") == reached ]] || { printf 'transient unit did not execute\n' >&2; exit 1; }
 
-# Bite: the exact regression. Without a runtime root, the launch fails 226 and
-# the payload never runs.
+# Bite: neither directory -- the first regression. Launch fails 226, nothing runs.
 rm -rf "$runtime_probe"; rm -f "$launched"
-set +e; sandbox_launch; noprov_status=$?; set -e
-((noprov_status == 226)) || {
-    printf 'expected 226/NAMESPACE without a runtime root, got %s\n' "$noprov_status" >&2
-    exit 1
-}
-[[ ! -e $launched ]] || { printf 'transient unit ran despite a missing runtime root\n' >&2; exit 1; }
+set +e; sandbox_launch; s=$?; set -e
+((s == 226)) || { printf 'expected 226/NAMESPACE with no runtime dirs, got %s\n' "$s" >&2; exit 1; }
+[[ ! -e $launched ]] || { printf 'transient unit ran with no runtime dirs\n' >&2; exit 1; }
+
+# Bite: /run/nq only, /run/nq/helpers absent -- the second regression, the exact
+# state the /run/nq-only fix left. nq runs but the carrier fails (exit 1).
+rm -rf "$runtime_probe"; rm -f "$launched"
+install -d -m 0751 "$runtime_probe"
+set +e; sandbox_launch; s=$?; set -e
+((s == 1)) || { printf 'expected carrier_startup_failed (exit 1) without /run/nq/helpers, got %s\n' "$s" >&2; exit 1; }
+[[ ! -e $launched ]] || { printf 'transient unit executed without its helper runtime root\n' >&2; exit 1; }
 
 printf 'hardening harness syntax/static checks passed; guest-result, bad-hash, and stale-output negatives refused as required\n'
