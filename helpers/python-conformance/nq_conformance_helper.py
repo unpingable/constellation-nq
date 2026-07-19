@@ -386,7 +386,16 @@ def run_stdio() -> int:
 
 
 def validate_socket_path(raw_path: str) -> str:
-    """Require a fresh absolute socket path in a directory owned by this uid."""
+    """Require a fresh absolute socket path in an acceptable parent directory.
+
+    This is a *diagnostic* self-check, not the security boundary: a helper cannot
+    certify its own containment. The daemon authoritatively verifies the
+    directory and socket ownership, mode, and peer credentials parent-side. When
+    supervised, the daemon declares the directory owner via
+    ``NQ_HELPER_SOCKET_DIR_OWNER_UID`` and the directory is daemon-owned with mode
+    0730 (only this helper's primary group may write); standalone, the helper
+    owns its own directory.
+    """
 
     if not raw_path or not os.path.isabs(raw_path):
         raise InvalidRequest("NQ_HELPER_SOCKET must be an absolute path")
@@ -400,10 +409,29 @@ def validate_socket_path(raw_path: str) -> str:
         raise InvalidRequest(f"socket parent is unavailable: {error}") from error
     if not stat.S_ISDIR(parent_stat.st_mode):
         raise InvalidRequest("socket parent must be a real directory")
-    if parent_stat.st_uid != os.geteuid():
-        raise InvalidRequest("socket parent must be owned by the helper uid")
-    if parent_stat.st_mode & 0o022:
-        raise InvalidRequest("socket parent must not be group- or world-writable")
+
+    declared_owner = os.environ.get("NQ_HELPER_SOCKET_DIR_OWNER_UID")
+    if declared_owner is not None:
+        # Supervised contract: daemon-owned directory, this helper's primary
+        # group granted write to bind the socket, no access for others.
+        try:
+            expected_owner = int(declared_owner)
+        except ValueError as error:
+            raise InvalidRequest(
+                "NQ_HELPER_SOCKET_DIR_OWNER_UID must be a numeric UID"
+            ) from error
+        if parent_stat.st_uid != expected_owner:
+            raise InvalidRequest("socket parent is not owned by the supervising daemon")
+        if parent_stat.st_gid != os.getegid():
+            raise InvalidRequest("socket parent group is not the helper primary group")
+        if parent_stat.st_mode & 0o007:
+            raise InvalidRequest("socket parent must not be accessible to others")
+    else:
+        # Standalone: the helper owns its own private parent directory.
+        if parent_stat.st_uid != os.geteuid():
+            raise InvalidRequest("socket parent must be owned by the helper uid")
+        if parent_stat.st_mode & 0o022:
+            raise InvalidRequest("socket parent must not be group- or world-writable")
     try:
         os.lstat(raw_path)
     except FileNotFoundError:

@@ -51,6 +51,14 @@ pub const NQ_HELPER_SOCKET_ENV: &str = "NQ_HELPER_SOCKET";
 /// Environment variable containing the NQ-owned witness instance identifier.
 pub const NQ_HELPER_INSTANCE_ENV: &str = "NQ_HELPER_INSTANCE_ID";
 
+/// Environment variable through which the supervisor declares the UID that owns
+/// the helper's socket directory. Under supervision the directory is
+/// daemon-owned (mode 0730, granting only the helper's primary group write), so
+/// the helper must not assume it owns its own containment; its own directory
+/// check is diagnostic and validates against this declared owner, while the
+/// authoritative directory and socket custody checks are enforced parent-side.
+pub const NQ_HELPER_SOCKET_DIR_OWNER_ENV: &str = "NQ_HELPER_SOCKET_DIR_OWNER_UID";
+
 const SOCKET_FILE_NAME: &str = "helper.sock";
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 const PRIVATE_SOCKET_MODE: u32 = 0o600;
@@ -170,6 +178,15 @@ pub enum UnixLaunchFailure {
         /// Expected helper UID.
         expected: u32,
         /// Observed socket UID.
+        actual: u32,
+    },
+    /// The filesystem group did not match the expected execution GID. Ownership
+    /// is checked as UID and GID separately; one does not stand in for the other.
+    #[error("helper socket GID is {actual}; expected {expected}")]
+    SocketGroup {
+        /// Expected helper GID.
+        expected: u32,
+        /// Observed socket GID.
         actual: u32,
     },
     /// Linux `SO_PEERCRED` could not be obtained.
@@ -825,6 +842,10 @@ fn spawn_helper(
             .envs(sanitized_additional_env(&config.env))
             .env(NQ_HELPER_SOCKET_ENV, socket_path)
             .env(NQ_HELPER_INSTANCE_ENV, &options.instance_id)
+            .env(
+                NQ_HELPER_SOCKET_DIR_OWNER_ENV,
+                geteuid().as_raw().to_string(),
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -841,7 +862,9 @@ fn sanitized_additional_env(
     env: &BTreeMap<String, String>,
 ) -> impl Iterator<Item = (&String, &String)> {
     env.iter().filter(|(key, _)| {
-        key.as_str() != NQ_HELPER_SOCKET_ENV && key.as_str() != NQ_HELPER_INSTANCE_ENV
+        key.as_str() != NQ_HELPER_SOCKET_ENV
+            && key.as_str() != NQ_HELPER_INSTANCE_ENV
+            && key.as_str() != NQ_HELPER_SOCKET_DIR_OWNER_ENV
     })
 }
 
@@ -870,12 +893,12 @@ fn connect_bounded(
             }
         }
 
-        let socket_owner = if socket_in_daemon_custody {
-            geteuid().as_raw()
+        let (socket_owner, socket_group) = if socket_in_daemon_custody {
+            (geteuid().as_raw(), getegid().as_raw())
         } else {
-            options.expected_uid
+            (options.expected_uid, options.expected_gid)
         };
-        match inspect_socket(socket_path, socket_owner) {
+        match inspect_socket(socket_path, socket_owner, socket_group) {
             Ok(false) => {}
             Ok(true) => {
                 if !socket_in_daemon_custody {
@@ -911,7 +934,8 @@ fn connect_bounded(
             }
             Err(
                 failure @ (UnixLaunchFailure::SocketPermissions { .. }
-                | UnixLaunchFailure::SocketOwner { .. }),
+                | UnixLaunchFailure::SocketOwner { .. }
+                | UnixLaunchFailure::SocketGroup { .. }),
             ) if !socket_in_daemon_custody => {
                 // `bind` precedes a helper's chmod/chown. Permit that narrow
                 // setup window, but report the exact last validation failure
@@ -999,7 +1023,14 @@ fn finish_nonblocking_connect(stream: UnixStream) -> Result<ConnectAttempt, Unix
     }
 }
 
-fn inspect_socket(path: &Path, expected_uid: u32) -> Result<bool, UnixLaunchFailure> {
+#[allow(clippy::similar_names)]
+fn inspect_socket(
+    path: &Path,
+    expected_uid: u32,
+    expected_gid: u32,
+) -> Result<bool, UnixLaunchFailure> {
+    // `symlink_metadata` never follows a symlink, so a symlinked socket path is
+    // rejected as "not a socket" rather than inspected through its target.
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
@@ -1009,6 +1040,7 @@ fn inspect_socket(path: &Path, expected_uid: u32) -> Result<bool, UnixLaunchFail
             });
         }
     };
+    // Type, permissions, and ownership are separate predicates; all must hold.
     if !metadata.file_type().is_socket() {
         return Err(UnixLaunchFailure::NotSocket);
     }
@@ -1021,6 +1053,13 @@ fn inspect_socket(path: &Path, expected_uid: u32) -> Result<bool, UnixLaunchFail
         return Err(UnixLaunchFailure::SocketOwner {
             expected: expected_uid,
             actual: actual_uid,
+        });
+    }
+    let actual_gid = metadata.gid();
+    if actual_gid != expected_gid {
+        return Err(UnixLaunchFailure::SocketGroup {
+            expected: expected_gid,
+            actual: actual_gid,
         });
     }
     Ok(true)
@@ -1429,6 +1468,50 @@ const fn unix_path_limit() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inspect_socket_enforces_type_mode_owner_and_group_separately() {
+        use std::os::unix::net::UnixListener;
+        let directory = tempfile::tempdir().expect("temp dir");
+        let socket = directory.path().join("helper.sock");
+        let _listener = UnixListener::bind(&socket).expect("bind unix socket");
+        fs::set_permissions(&socket, fs::Permissions::from_mode(PRIVATE_SOCKET_MODE))
+            .expect("socket mode");
+        let uid = geteuid().as_raw();
+        let gid = getegid().as_raw();
+
+        // Correct type, mode, owner, and group pass.
+        assert!(matches!(inspect_socket(&socket, uid, gid), Ok(true)));
+
+        // A wrong group is rejected even with the right owner: GID is its own
+        // predicate and does not fold into UID.
+        assert!(matches!(
+            inspect_socket(&socket, uid, gid.wrapping_add(1)),
+            Err(UnixLaunchFailure::SocketGroup { .. })
+        ));
+        // A wrong owner is rejected even with the right group.
+        assert!(matches!(
+            inspect_socket(&socket, uid.wrapping_add(1), gid),
+            Err(UnixLaunchFailure::SocketOwner { .. })
+        ));
+
+        // A wrong mode is rejected regardless of ownership.
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o660)).expect("loosen mode");
+        assert!(matches!(
+            inspect_socket(&socket, uid, gid),
+            Err(UnixLaunchFailure::SocketPermissions { .. })
+        ));
+
+        // A regular file at the socket path is not a socket.
+        let regular = directory.path().join("regular");
+        fs::write(&regular, b"x").expect("write regular file");
+        fs::set_permissions(&regular, fs::Permissions::from_mode(PRIVATE_SOCKET_MODE))
+            .expect("regular mode");
+        assert!(matches!(
+            inspect_socket(&regular, uid, gid),
+            Err(UnixLaunchFailure::NotSocket)
+        ));
+    }
 
     const PYTHON_HELPER: &str = r#"
 import json
