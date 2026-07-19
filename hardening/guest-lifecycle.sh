@@ -315,7 +315,10 @@ for entry in \
     backup="$RESULTS/$label.original"
     cp --preserve=mode,ownership,timestamps "$packaged_path" "$backup"
     printf '\n' >>"$packaged_path"
-    systemctl reset-failed nqd.service
+    # Clearing stale failed state is setup, not an assertion: after a purge
+    # and reinstall the unit may not be loaded at all, and there is then
+    # nothing to reset. The qualification is the start attempt below.
+    systemctl reset-failed nqd.service 2>/dev/null || true
     set +e
     systemctl start nqd.service >"$RESULTS/$label-tamper-start.log" 2>&1
     start_status=$?
@@ -336,7 +339,7 @@ for entry in \
         sha256sum --quiet --check /usr/share/nq/MANIFEST.sha256
     ) || fail "installed manifest did not verify after restoring $label bytes"
 done
-systemctl reset-failed nqd.service
+systemctl reset-failed nqd.service 2>/dev/null || true
 systemctl start nqd.service
 systemctl is-active --quiet nqd.service
 systemctl stop nqd.service
