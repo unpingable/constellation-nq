@@ -342,6 +342,40 @@ scp_opts=(
     -o ConnectTimeout=5 -o ServerAliveInterval=15 -o ServerAliveCountMax=3
 )
 
+# Evidence custody on the failure path. A guest phase that fails takes its
+# diagnostics with it: cleanup destroys the VM, so anything the guest wrote under
+# $RESULTS — including the exact refusal text a qualification asserted on — is
+# lost before an operator can read it. Pull it first.
+#
+# This is diagnostic-only and MUST NOT touch the verdict. It never calls refuse,
+# never writes REFUSAL or RESULT, always returns 0, and lands in a directory the
+# sealing path does not read, so a retrieval can neither create nor repair a
+# pass. Its own failure is recorded beside the verdict as a secondary
+# evidence-custody note, never in place of the original refusal.
+preserve_guest_evidence() {
+    local phase=$1 dest=$output/failed-guest-results
+    # Every path returns 0. This runs with set -e active on the failure path, so
+    # anything that propagates a non-zero status would replace the very verdict
+    # this function exists to preserve.
+    $output_ready || return 0
+    if [[ -e $dest ]]; then return 0; fi
+    mkdir -m 0700 -p "$dest" 2>/dev/null || return 0
+    # A fixed bound, not remaining(): the deadline may already be blown, and
+    # remaining() refuses — which would hijack the verdict being preserved.
+    if {
+        printf '\n===== preserve-evidence %s %s =====\n' "$phase" "$(date --iso-8601=seconds)"
+        timeout 120 scp "${scp_opts[@]}" -r \
+            nqtest@127.0.0.1:/var/tmp/nq-hardening-results/. "$dest/"
+    } >>"$output/ssh-session.log" 2>&1; then
+        printf 'result=retrieved\nphase=%s\npath=failed-guest-results\n' \
+            "$phase" >"$output/EVIDENCE_CUSTODY"
+    else
+        printf 'result=unretrieved\nphase=%s\nreason=scp from the failed guest failed\n' \
+            "$phase" >"$output/EVIDENCE_CUSTODY_FAILURE"
+    fi
+    return 0
+}
+
 wait_ssh() {
     local expected=$1 limit=$2 start=$SECONDS budget
     # Never wait past the overall lifecycle deadline: bound the phase limit by
@@ -402,6 +436,7 @@ printf 'before_reboot_ssh_status=%s\n' "$before_status" >>"$output/ssh-session.l
 # and the guest's BEFORE_REBOOT_COMPLETE marker is present). A 255 that was not
 # actually an expected reboot fails those checks.
 if ((before_status != 0 && before_status != 255)); then
+    preserve_guest_evidence before-reboot
     refuse "before-reboot guest phase failed with SSH status $before_status"
 fi
 
@@ -411,8 +446,18 @@ wait_ssh up 900
 ssh_run reboot-marker 'sudo test -f /var/tmp/nq-hardening-results/BEFORE_REBOOT_COMPLETE'
 
 step=guest-after-reboot
+set +e
 ssh_run after-reboot \
     "sudo -- /home/nqtest/guest-lifecycle.sh after-reboot /home/nqtest/nq-ng.deb $deb_sha $guest_driver_sha"
+after_status=$?
+set -e
+if ((after_status != 0)); then
+    # Preserve the guest's diagnostics, then re-raise the identical failure: the
+    # cleanup trap writes the same REFUSAL (step, and "unexpected exit N") it
+    # would have written had this phase simply tripped set -e.
+    preserve_guest_evidence after-reboot
+    exit "$after_status"
+fi
 
 step=retrieve-results
 mkdir -m 0700 "$output/guest-results"

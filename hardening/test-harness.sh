@@ -234,4 +234,86 @@ CHECK
 # guest shutdown, so unflushed diagnostics never reach the overlay.
 require_text "$guest" 'sync || true'
 
+# --- Evidence custody at the failure boundary. ---
+#
+# A failed qualification must preserve the evidence it generated before failing,
+# without letting evidence recovery alter the verdict. Both guest phases pull
+# $RESULTS before the VM is destroyed; neither a successful nor a failed
+# retrieval may change what the run concluded.
+require_text "$host" 'preserve_guest_evidence before-reboot'
+require_text "$host" 'preserve_guest_evidence after-reboot'
+
+# The failure-path retrieval must land somewhere the sealing path does not read.
+# Sealing consumes $output/guest-results; recovered failure evidence must never
+# be able to stand in for it.
+require_text "$host" 'dest=$output/failed-guest-results'
+if grep -F 'preserve_guest_evidence' "$host" | grep -F '"$output/guest-results"' >/dev/null; then
+    printf 'failure-path retrieval must not write the sealed guest-results directory\n' >&2
+    exit 1
+fi
+
+# Behavioural proof, no VM: drive preserve_guest_evidence directly with a stubbed
+# scp and assert verdict-neutrality on both the success and the failure branch.
+probe=$scratch/preserve-probe.sh
+{
+    printf '%s\n' 'set -Eeuo pipefail'
+    printf '%s\n' 'output=$1'
+    printf '%s\n' 'output_ready=true'
+    printf '%s\n' 'scp_opts=()'
+    # If the function ever reaches the verdict machinery, these fire loudly.
+    printf '%s\n' 'refuse() { printf "FORBIDDEN: refuse called\n" >&2; exit 91; }'
+    # remaining() refuses once the deadline has passed, so the retrieval must
+    # never call it. It leaves a file rather than only exiting: a call inside a
+    # command substitution would otherwise die in the subshell unnoticed.
+    printf '%s\n' 'remaining() { printf "called\n" >"$output/FORBIDDEN_REMAINING"; exit 92; }'
+    printf '%s\n' 'timeout() { return "$STUB_SCP_STATUS"; }'
+    sed -n '/^preserve_guest_evidence()/,/^}/p' "$host"
+    printf '%s\n' 'preserve_guest_evidence after-reboot'
+    printf '%s\n' 'printf "returned=%s\n" "$?"'
+} >"$probe"
+
+expect_custody() {
+    local label=$1 stub_status=$2 expect_file=$3 probe_out probe_status
+    probe_out=$scratch/custody-$label
+    mkdir -p "$probe_out"
+    set +e
+    STUB_SCP_STATUS=$stub_status bash "$probe" "$probe_out" \
+        >"$scratch/custody-$label.out" 2>"$scratch/custody-$label.err"
+    probe_status=$?
+    set -e
+    # Verdict-neutrality: the function itself must never fail the run.
+    ((probe_status == 0)) || {
+        printf 'evidence retrieval (%s) altered control flow: exit %s\n' \
+            "$label" "$probe_status" >&2
+        cat "$scratch/custody-$label.err" >&2
+        exit 1
+    }
+    grep -qx 'returned=0' "$scratch/custody-$label.out" || {
+        printf 'evidence retrieval (%s) did not return 0\n' "$label" >&2
+        exit 1
+    }
+    # It must never manufacture, repair, or overwrite a verdict.
+    for forbidden in REFUSAL RESULT guest-results FORBIDDEN_REMAINING; do
+        [[ ! -e "$probe_out/$forbidden" ]] || {
+            printf 'evidence retrieval (%s) wrote verdict artifact %s\n' \
+                "$label" "$forbidden" >&2
+            exit 1
+        }
+    done
+    [[ -e "$probe_out/$expect_file" ]] || {
+        printf 'evidence retrieval (%s) did not record %s\n' "$label" "$expect_file" >&2
+        exit 1
+    }
+}
+
+# A successful retrieval records custody and changes nothing else.
+expect_custody retrieved 0 EVIDENCE_CUSTODY
+# A failed retrieval is a SECONDARY note: it must not obscure the original
+# refusal, and must still leave the verdict untouched.
+expect_custody unretrieved 1 EVIDENCE_CUSTODY_FAILURE
+[[ ! -e "$scratch/custody-unretrieved/EVIDENCE_CUSTODY" ]] || {
+    printf 'a failed retrieval falsely claimed custody\n' >&2
+    exit 1
+}
+
 printf 'hardening harness syntax/static checks passed; guest-result, bad-hash, and stale-output negatives refused as required\n'
