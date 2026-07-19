@@ -9,6 +9,7 @@ readonly DEFAULT_TIMEOUT=2700
 readonly SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 
 image= image_sha= deb= deb_sha= output=
+check_guest_results=
 ssh_port=22222
 timeout_seconds=$DEFAULT_TIMEOUT
 preflight_only=false
@@ -104,6 +105,27 @@ remaining() {
     printf '%s\n' "$((deadline - now))"
 }
 
+# Every guest qualification that must have run and passed. A missing or non-pass
+# marker is failure; a guest-declared refusal is failure; absence is never pass.
+readonly REQUIRED_GUEST_CHECKS=(
+    AF_UNIX_CROSS_UID
+    BYTE_TAMPER_REFUSAL
+    HELPER_DRIFT_REFUSAL
+)
+
+verify_guest_results() {
+    local dir=$1 check
+    [[ ! -e "$dir/GUEST_REFUSAL" ]] \
+        || refuse "guest declared a refusal: $(tr '\n' ' ' <"$dir/GUEST_REFUSAL")"
+    [[ -f "$dir/RESULT" ]] || refuse "guest result file is absent"
+    [[ $(<"$dir/RESULT") == pass ]] || refuse "guest result is not exactly 'pass'"
+    [[ -f "$dir/REQUIRED_CHECKS" ]] || refuse "guest required-checks file is absent"
+    for check in "${REQUIRED_GUEST_CHECKS[@]}"; do
+        grep -qx "$check=pass" "$dir/REQUIRED_CHECKS" \
+            || refuse "mandatory guest qualification $check is absent or not pass"
+    done
+}
+
 while (($#)); do
     case $1 in
         --image) image=${2-}; shift 2 ;;
@@ -114,10 +136,20 @@ while (($#)); do
         --ssh-port) ssh_port=${2-}; shift 2 ;;
         --timeout-seconds) timeout_seconds=${2-}; shift 2 ;;
         --preflight-only) preflight_only=true; shift ;;
+        --check-guest-results) check_guest_results=${2-}; shift 2 ;;
         --help|-h) usage; exit 0 ;;
         *) usage >&2; printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
+
+# Deterministic host-side self-check of the guest-result verifier: no VM, no
+# staging. Used by the static test harness to exercise every failure path.
+if [[ -n $check_guest_results ]]; then
+    step=guest-result-selfcheck
+    verify_guest_results "$check_guest_results"
+    printf 'guest results verified: %s\n' "$check_guest_results"
+    exit 0
+fi
 
 [[ -n $image && -n $image_sha && -n $deb && -n $deb_sha && -n $output ]] || {
     usage >&2
@@ -310,7 +342,11 @@ scp_opts=(
 )
 
 wait_ssh() {
-    local expected=$1 limit=$2 start=$SECONDS
+    local expected=$1 limit=$2 start=$SECONDS budget
+    # Never wait past the overall lifecycle deadline: bound the phase limit by
+    # the remaining budget (remaining() itself refuses once the deadline passes).
+    budget=$(remaining)
+    ((limit <= budget)) || limit=$budget
     while ((SECONDS - start < limit)); do
         kill -0 "$qemu_pid" 2>/dev/null || refuse "QEMU exited while waiting for SSH $expected"
         if timeout 10 ssh "${ssh_opts[@]}" nqtest@127.0.0.1 true \
@@ -340,6 +376,9 @@ ssh_run noble-version \
     'test "$(. /etc/os-release && printf %s "$ID:$VERSION_ID")" = ubuntu:24.04'
 
 step=upload
+regular_input "$SCRIPT_DIR/guest-lifecycle.sh" "guest lifecycle driver"
+guest_driver_sha=$(actual_hash "$SCRIPT_DIR/guest-lifecycle.sh")
+printf 'guest_driver_sha256=%s\n' "$guest_driver_sha" >>"$output/INPUTS"
 {
     printf '\n===== upload %s =====\n' "$(date --iso-8601=seconds)"
     timeout "$(remaining)" scp "${scp_opts[@]}" \
@@ -350,11 +389,17 @@ step=upload
 step=guest-before-reboot
 set +e
 timeout "$(remaining)" ssh "${ssh_opts[@]}" nqtest@127.0.0.1 \
-    "sudo -- /home/nqtest/guest-lifecycle.sh before-reboot /home/nqtest/nq-ng.deb $deb_sha" \
+    "sudo -- /home/nqtest/guest-lifecycle.sh before-reboot /home/nqtest/nq-ng.deb $deb_sha $guest_driver_sha" \
     >>"$output/ssh-session.log" 2>&1
 before_status=$?
 set -e
 printf 'before_reboot_ssh_status=%s\n' "$before_status" >>"$output/ssh-session.log"
+# The before-reboot phase ends in `systemctl reboot`, so SSH status 255 (dropped
+# connection) is expected here and ONLY here. Any other non-zero status is a
+# failure, and a 255 is accepted only provisionally: the reboot itself must then
+# be independently confirmed below (SSH goes down and back up, boot id changes,
+# and the guest's BEFORE_REBOOT_COMPLETE marker is present). A 255 that was not
+# actually an expected reboot fails those checks.
 if ((before_status != 0 && before_status != 255)); then
     refuse "before-reboot guest phase failed with SSH status $before_status"
 fi
@@ -366,7 +411,7 @@ ssh_run reboot-marker 'sudo test -f /var/tmp/nq-hardening-results/BEFORE_REBOOT_
 
 step=guest-after-reboot
 ssh_run after-reboot \
-    "sudo -- /home/nqtest/guest-lifecycle.sh after-reboot /home/nqtest/nq-ng.deb $deb_sha"
+    "sudo -- /home/nqtest/guest-lifecycle.sh after-reboot /home/nqtest/nq-ng.deb $deb_sha $guest_driver_sha"
 
 step=retrieve-results
 mkdir -m 0700 "$output/guest-results"
@@ -375,13 +420,7 @@ mkdir -m 0700 "$output/guest-results"
     timeout "$(remaining)" scp "${scp_opts[@]}" -r \
         nqtest@127.0.0.1:/var/tmp/nq-hardening-results/. "$output/guest-results/"
 } >>"$output/ssh-session.log" 2>&1
-[[ $(<"$output/guest-results/RESULT") == pass ]] || refuse "guest result is not pass"
-grep -qx AF_UNIX_CROSS_UID=pass "$output/guest-results/REQUIRED_CHECKS" \
-    || refuse "mandatory cross-UID AF_UNIX result is absent"
-grep -qx BYTE_TAMPER_REFUSAL=pass "$output/guest-results/REQUIRED_CHECKS" \
-    || refuse "mandatory byte-tamper refusal result is absent"
-grep -qx HELPER_DRIFT_REFUSAL=pass "$output/guest-results/REQUIRED_CHECKS" \
-    || refuse "mandatory helper-drift refusal result is absent"
+verify_guest_results "$output/guest-results"
 
 step=poweroff
 set +e
@@ -399,12 +438,28 @@ wait "$watchdog_pid" || refuse "scratch-cap watchdog failed"
 watchdog_pid=
 check_cap
 
+step=verify-disk
+# The overlay must remain a consistent qcow2 after clean shutdown.
+qemu-img check -- "$output/overlay.qcow2" || refuse "post-shutdown overlay disk check failed"
+
 step=seal-evidence
-printf 'result=pass\ncompleted_at=%s\n' "$(date --iso-8601=seconds)" >"$output/RESULT"
 rm -f "$output/ssh-identity"
+# Freeze host.log by stopping the tee, so the log is complete and stable before
+# it is hashed. Post-seal harness output goes to seal.log, which is deliberately
+# outside the sealed manifest.
+exec >>"$output/seal.log" 2>&1
+sync
+# Manifest over every sealed artifact (the frozen host.log included), excluding
+# the manifest itself, the not-yet-written pass marker, and the post-seal log.
 (
     cd "$output"
-    find . -type f ! -name ARTIFACTS.sha256 -print0 \
+    find . -type f ! -name ARTIFACTS.sha256 ! -name RESULT ! -name seal.log -print0 \
         | sort -z | xargs -0 sha256sum
 ) >"$output/ARTIFACTS.sha256"
+# No pass marker may exist until the manifest verifies.
+(cd "$output" && sha256sum --quiet --check ARTIFACTS.sha256) \
+    || refuse "artifact manifest did not verify"
+# The pass marker is written last: an early, partial, or failed run cannot
+# produce a result that appears sealed.
+printf 'result=pass\ncompleted_at=%s\n' "$(date --iso-8601=seconds)" >"$output/RESULT"
 printf 'hardening lifecycle passed; evidence retained at %s\n' "$output"

@@ -8,6 +8,7 @@ readonly CONFIG=/etc/nq/nq.toml
 phase=${1-}
 deb=${2-}
 expected_sha=${3-}
+expected_driver_sha=${4-}
 current_check=guest-arguments
 
 fail() {
@@ -33,6 +34,11 @@ trap on_exit EXIT
 [[ $expected_sha =~ ^[0-9a-f]{64}$ ]] || fail "invalid expected Debian SHA-256"
 [[ $(sha256sum "$deb" | awk '{print $1}') == "$expected_sha" ]] || fail \
     "guest Debian bytes differ from host-bound digest"
+# Re-verify this driver's own bytes inside the guest: host-side staging success
+# must not stand in for guest verification of what actually executes here.
+[[ $expected_driver_sha =~ ^[0-9a-f]{64}$ ]] || fail "invalid expected driver SHA-256"
+[[ $(sha256sum "$0" | awk '{print $1}') == "$expected_driver_sha" ]] || fail \
+    "guest lifecycle driver bytes differ from host-bound digest"
 [[ $(dpkg-deb -f "$deb" Package) == nq-ng ]] || fail "guest artifact is not nq-ng"
 [[ $(dpkg-deb -f "$deb" Architecture) == amd64 ]] || fail "guest artifact is not amd64"
 # shellcheck disable=SC1091

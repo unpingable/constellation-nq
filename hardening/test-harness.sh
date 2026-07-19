@@ -27,9 +27,21 @@ require_text "$host" 'ulimit -f $((SCRATCH_CAP_BYTES / 1024))'
 require_text "$host" '-P "$ssh_port"'
 require_text "$host" '-serial "file:$output/serial.log"'
 require_text "$host" 'restrict=on,hostfwd=tcp:127.0.0.1:'
-require_text "$host" 'before_status != 0 && before_status != 255'
-require_text "$host" 'AF_UNIX_CROSS_UID=pass'
-require_text "$host" 'BYTE_TAMPER_REFUSAL=pass'
+# SSH status 255 must be accepted only as an expected reboot, and only when that
+# reboot is then independently confirmed — never as broad acceptance.
+require_text "$host" 'expected here and ONLY here'
+require_text "$host" 'BEFORE_REBOOT_COMPLETE'
+require_text "$host" 'verify_guest_results "$output/guest-results"'
+require_text "$host" 'qemu-img check -- "$output/overlay.qcow2"'
+require_text "$host" 'guest_driver_sha=$(actual_hash'
+require_text "$guest" 'guest lifecycle driver bytes differ from host-bound digest'
+# The host enforces these guest qualifications by name; the guest emits the pass
+# markers.
+require_text "$host" 'AF_UNIX_CROSS_UID'
+require_text "$host" 'BYTE_TAMPER_REFUSAL'
+require_text "$host" 'HELPER_DRIFT_REFUSAL'
+require_text "$guest" 'AF_UNIX_CROSS_UID=pass'
+require_text "$guest" 'BYTE_TAMPER_REFUSAL=pass'
 require_text "$guest" 'carrier = "unix"'
 require_text "$guest" 'run_nq witness test conformance-local'
 require_text "$guest" 'run_nq witness admit conformance-local'
@@ -75,4 +87,85 @@ grep -qx 'step=input-custody' "$scratch/refusal/REFUSAL"
 grep -F 'Ubuntu cloud image is not a regular non-symlink file' \
     "$scratch/refusal/REFUSAL" >/dev/null
 
-printf 'hardening harness syntax/static checks passed; local preflight refused missing image as required\n'
+# --- Deterministic host-side negatives for the sealing logic (no VM). ---
+
+# A complete, passing guest-result set verifies.
+gr_valid=$scratch/gr-valid
+mkdir -p "$gr_valid"
+printf 'pass\n' >"$gr_valid/RESULT"
+printf 'AF_UNIX_CROSS_UID=pass\nBYTE_TAMPER_REFUSAL=pass\nHELPER_DRIFT_REFUSAL=pass\n' \
+    >"$gr_valid/REQUIRED_CHECKS"
+"$host" --check-guest-results "$gr_valid" >/dev/null \
+    || { printf 'valid guest results were rejected\n' >&2; exit 1; }
+
+expect_guest_refusal() {
+    local dir=$1 needle=$2 status
+    set +e
+    "$host" --check-guest-results "$dir" >"$scratch/gr.out" 2>"$scratch/gr.err"
+    status=$?
+    set -e
+    ((status != 0)) || {
+        printf 'guest-result check unexpectedly passed for %s\n' "$dir" >&2
+        exit 1
+    }
+    grep -F -- "$needle" "$scratch/gr.err" >/dev/null || {
+        printf 'guest-result refusal for %s did not mention %q\n' "$dir" "$needle" >&2
+        exit 1
+    }
+}
+
+# A guest-declared refusal is failure, never pass.
+gr_refused=$scratch/gr-refused
+cp -r "$gr_valid" "$gr_refused"
+printf 'result=refused\ncheck=cross-uid\n' >"$gr_refused/GUEST_REFUSAL"
+expect_guest_refusal "$gr_refused" 'guest declared a refusal'
+
+# A non-pass or malformed RESULT is failure.
+gr_notpass=$scratch/gr-notpass
+cp -r "$gr_valid" "$gr_notpass"
+printf 'partial\n' >"$gr_notpass/RESULT"
+expect_guest_refusal "$gr_notpass" "not exactly 'pass'"
+
+# A missing mandatory qualification is failure — absence is never pass.
+gr_missing=$scratch/gr-missing
+cp -r "$gr_valid" "$gr_missing"
+printf 'AF_UNIX_CROSS_UID=pass\n' >"$gr_missing/REQUIRED_CHECKS"
+expect_guest_refusal "$gr_missing" 'mandatory guest qualification'
+
+# A missing result file is failure.
+gr_noresult=$scratch/gr-noresult
+cp -r "$gr_valid" "$gr_noresult"
+rm -f "$gr_noresult/RESULT"
+expect_guest_refusal "$gr_noresult" 'guest result file is absent'
+
+# A real staged input with the wrong declared hash is refused.
+real_input=$scratch/real.bin
+head -c 4096 /dev/zero >"$real_input"
+zero_hash=0000000000000000000000000000000000000000000000000000000000000000
+set +e
+"$host" --image "$real_input" --image-sha256 "$zero_hash" \
+    --deb "$real_input" --deb-sha256 "$zero_hash" \
+    --output "$scratch/badhash" --preflight-only \
+    >"$scratch/badhash.out" 2>"$scratch/badhash.err"
+status=$?
+set -e
+((status != 0)) || { printf 'bad-hash preflight unexpectedly succeeded\n' >&2; exit 1; }
+grep -F 'SHA-256 mismatch' "$scratch/badhash/REFUSAL" >/dev/null
+
+# A pre-existing output directory (e.g. a stale pass marker) is refused: a pass
+# can never be produced into an existing path.
+stale=$scratch/stale-out
+mkdir -p "$stale"
+printf 'result=pass\n' >"$stale/RESULT"
+real_hash=$(sha256sum "$real_input" | awk '{print $1}')
+set +e
+"$host" --image "$real_input" --image-sha256 "$real_hash" \
+    --deb "$real_input" --deb-sha256 "$real_hash" \
+    --output "$stale" --preflight-only \
+    >"$scratch/stale.out" 2>"$scratch/stale.err"
+status=$?
+set -e
+((status != 0)) || { printf 'stale-output run unexpectedly succeeded\n' >&2; exit 1; }
+grep -F 'output path already exists' "$scratch/stale.err" >/dev/null
+
+printf 'hardening harness syntax/static checks passed; guest-result, bad-hash, and stale-output negatives refused as required\n'
