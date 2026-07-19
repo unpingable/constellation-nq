@@ -180,6 +180,12 @@ pub enum CollectionOutcome {
         run_id: String,
         /// Acquisition outcome code.
         code: String,
+        /// Exact diagnostic carried by the outcome, when it has one.
+        ///
+        /// The code alone cannot distinguish a refused socket mode from a
+        /// spawn failure, so a supervised daemon that logs only the code
+        /// cannot explain its own refusal. Preserve the variant's message.
+        detail: Option<String>,
     },
     /// A response was retained as rejected custody and never entered detectors.
     Rejected {
@@ -713,6 +719,7 @@ impl CollectionEngine {
                 instance_id: witness.instance_id.clone(),
                 run_id,
                 code: acquisition_code(&capture.outcome).to_owned(),
+                detail: acquisition_detail(&capture.outcome),
             };
             self.record_instance_status(witness, &outcome)?;
             return Ok(outcome);
@@ -2552,6 +2559,38 @@ fn acquisition_code(outcome: &AcquisitionOutcome) -> &'static str {
     }
 }
 
+/// Exact diagnostic carried by an acquisition outcome, when it has one.
+///
+/// Codes are a stable vocabulary, not an explanation. `carrier_startup_failed`
+/// covers every supervised-startup refusal — wrong socket mode, wrong owner,
+/// spawn failure, startup timeout — so a caller holding only the code cannot
+/// say which predicate refused. Callers that report a failure to an operator
+/// must report this alongside the code.
+fn acquisition_detail(outcome: &AcquisitionOutcome) -> Option<String> {
+    match outcome {
+        AcquisitionOutcome::SpawnFailed { message }
+        | AcquisitionOutcome::RequestWriteFailed { message }
+        | AcquisitionOutcome::MalformedFraming { message }
+        | AcquisitionOutcome::MalformedJson { message }
+        | AcquisitionOutcome::Disconnect { message }
+        | AcquisitionOutcome::CarrierStartupFailed { message }
+        | AcquisitionOutcome::IoFailed { message } => Some(message.clone()),
+        AcquisitionOutcome::ExitNonzero { code } | AcquisitionOutcome::HelperExited { code } => {
+            Some(code.map_or_else(
+                || "terminated by signal".to_owned(),
+                |code| format!("exit code {code}"),
+            ))
+        }
+        AcquisitionOutcome::ExchangeTimeout { .. }
+        | AcquisitionOutcome::Response
+        | AcquisitionOutcome::Timeout
+        | AcquisitionOutcome::OutputTooLarge
+        | AcquisitionOutcome::StderrTooLarge
+        | AcquisitionOutcome::Eof
+        | AcquisitionOutcome::NotRunning => None,
+    }
+}
+
 fn refusal_source(boundary: &str) -> &'static str {
     match boundary {
         "protocol" => "protocol",
@@ -3779,5 +3818,69 @@ mod tests {
             engine.verify_admitted(&report),
             Err(VerificationRefusal::CurrentIdentityUnverifiable(_))
         ));
+    }
+
+    /// A supervised daemon must be able to explain its own acquisition
+    /// refusal. `carrier_startup_failed` is one code covering every
+    /// supervised-startup predicate, so dropping the message leaves an
+    /// operator unable to tell a refused socket mode from a spawn failure.
+    ///
+    /// Regression: the 2026-07-18 sealed VM run refused at
+    /// `explicit-service-lifecycle` with four `carrier_startup_failed`
+    /// outcomes and no recoverable cause, because this detail was discarded.
+    #[test]
+    fn acquisition_detail_preserves_the_exact_startup_diagnostic() {
+        let refused = AcquisitionOutcome::CarrierStartupFailed {
+            message: "helper socket mode is 0o660; expected 0o600".to_owned(),
+        };
+        let spawn = AcquisitionOutcome::CarrierStartupFailed {
+            message: "could not spawn Unix helper: Permission denied (os error 13)".to_owned(),
+        };
+
+        // The code is a stable vocabulary, not an explanation: both refusals
+        // share it, so the code alone cannot distinguish them.
+        assert_eq!(acquisition_code(&refused), "carrier_startup_failed");
+        assert_eq!(acquisition_code(&spawn), "carrier_startup_failed");
+        assert_ne!(acquisition_detail(&refused), acquisition_detail(&spawn));
+
+        assert_eq!(
+            acquisition_detail(&refused).as_deref(),
+            Some("helper socket mode is 0o660; expected 0o600")
+        );
+        assert_eq!(
+            acquisition_detail(&AcquisitionOutcome::HelperExited { code: Some(2) }).as_deref(),
+            Some("exit code 2")
+        );
+        assert_eq!(
+            acquisition_detail(&AcquisitionOutcome::HelperExited { code: None }).as_deref(),
+            Some("terminated by signal")
+        );
+        // Outcomes that genuinely carry no diagnostic must not invent one.
+        assert!(acquisition_detail(&AcquisitionOutcome::Timeout).is_none());
+        assert!(acquisition_detail(&AcquisitionOutcome::Eof).is_none());
+    }
+
+    /// The reported outcome must carry the diagnostic, not merely compute it:
+    /// the daemon logs `CollectionOutcome`, so a dropped field is invisible.
+    #[test]
+    fn acquisition_failed_outcome_reports_its_detail() {
+        let outcome = CollectionOutcome::AcquisitionFailed {
+            instance_id: "conformance-local".to_owned(),
+            run_id: "0b8c140b-84ab-41f8-a473-fe77444ed64f".to_owned(),
+            code: acquisition_code(&AcquisitionOutcome::CarrierStartupFailed {
+                message: "helper socket mode is 0o660; expected 0o600".to_owned(),
+            })
+            .to_owned(),
+            detail: acquisition_detail(&AcquisitionOutcome::CarrierStartupFailed {
+                message: "helper socket mode is 0o660; expected 0o600".to_owned(),
+            }),
+        };
+
+        assert!(!outcome.is_success());
+        let rendered = format!("{outcome:?}");
+        assert!(
+            rendered.contains("helper socket mode is 0o660"),
+            "the logged outcome must name the refused predicate: {rendered}"
+        );
     }
 }
