@@ -197,6 +197,18 @@ pub enum AdminCommand {
         #[arg(long)]
         backup_directory: PathBuf,
     },
+    /// Create a sealed cold archive that verifies the historical system
+    /// independently of this installation. Grants no authority.
+    Archive {
+        /// Archive directory to create. Must not already exist.
+        #[arg(long)]
+        destination: PathBuf,
+    },
+    /// Verify a sealed cold archive using only its own contents.
+    ArchiveVerify {
+        /// Archive directory to verify.
+        archive: PathBuf,
+    },
 }
 
 /// Finding commands.
@@ -569,6 +581,14 @@ fn restore(backup: &Path, destination: &Path, json_output: bool) -> Result<()> {
 
 fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -> Result<()> {
     match command {
+        AdminCommand::Archive { destination } => {
+            let report = crate::archive::create_archive(config_path, &destination)?;
+            print_value(&serde_json::to_value(&report)?, json_output)
+        }
+        AdminCommand::ArchiveVerify { archive } => {
+            let report = crate::archive::verify_archive(&archive)?;
+            print_value(&serde_json::to_value(&report)?, json_output)
+        }
         AdminCommand::Upgrade { backup_directory } => {
             let config = NqConfig::load(config_path)?;
             let _ownership = crate::ownership::acquire(&config.database_path, "admin-upgrade")?;

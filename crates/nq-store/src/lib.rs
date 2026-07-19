@@ -2245,7 +2245,8 @@ fn initialize_connection(connection: &mut Connection) -> Result<(), StoreError> 
 /// Digest of the exact `schema.sql` artifact compiled into this binary. Stored
 /// at creation and compared at startup so a database created by a different
 /// schema revision is refused rather than opened and misread.
-fn schema_artifact_digest() -> String {
+#[must_use]
+pub fn schema_artifact_digest() -> String {
     sha256_digest(SCHEMA.as_bytes())
 }
 
