@@ -387,4 +387,52 @@ mod tests {
             "packaged startup must not configure a loopback console"
         );
     }
+
+    /// The helper runtime root must be exactly `0711`: the supervisor refuses
+    /// to prepare a private helper directory under any other mode.
+    ///
+    /// `RuntimeDirectoryMode=` applies to every `RuntimeDirectory=` entry, and
+    /// systemd re-applies that setup before each `Exec` command. Listing the
+    /// helper root there therefore overwrites the mode set by `ExecStartPre`,
+    /// and the overwrite is silent until a collection actually fails.
+    ///
+    /// Regression: the 2026-07-19 sealed VM run refused at
+    /// `explicit-service-lifecycle` because `/run/nq/helpers` was observed at
+    /// `0o0751` when the supervisor required exactly `0o0711`.
+    #[test]
+    fn packaged_unit_does_not_let_systemd_govern_the_helper_runtime_root() {
+        const UNIT: &str = include_str!("../../../packaging/systemd/nqd.service");
+        const HELPER_ROOT: &str = "/run/nq/helpers";
+
+        let managed: Vec<&str> = UNIT
+            .lines()
+            .filter_map(|line| line.strip_prefix("RuntimeDirectory="))
+            .flat_map(str::split_whitespace)
+            .collect();
+        assert!(
+            !managed.contains(&"nq/helpers"),
+            "systemd must not manage the helper runtime root; \
+             RuntimeDirectoryMode would overwrite its required 0711: {managed:?}"
+        );
+        assert!(
+            managed.contains(&"nq"),
+            "the daemon runtime directory must still be declared: {managed:?}"
+        );
+
+        // The helper root must instead be provisioned explicitly, at exactly
+        // 0711, by a privileged pre-start step.
+        let provisioning = UNIT
+            .lines()
+            .filter_map(|line| line.strip_prefix("ExecStartPre="))
+            .find(|line| line.contains(HELPER_ROOT))
+            .expect("packaged unit must provision the helper runtime root");
+        assert!(
+            provisioning.starts_with('+'),
+            "helper-root provisioning must run privileged: {provisioning}"
+        );
+        assert!(
+            provisioning.contains("-m 0711"),
+            "helper runtime root must be provisioned at exactly 0711: {provisioning}"
+        );
+    }
 }

@@ -17,7 +17,12 @@ ConfigurationDirectory=nq
 ConfigurationDirectoryMode=0750
 StateDirectory=nq nq/admissions nq/backups
 StateDirectoryMode=0700
-RuntimeDirectory=nq nq/helpers
+# Only /run/nq is systemd-managed. RuntimeDirectoryMode applies to every listed
+# entry, and systemd re-applies that setup before each Exec command, so listing
+# nq/helpers here would force it to 0751 and silently overwrite the 0711 set by
+# the ExecStartPre below. The helper runtime root must be exactly 0711: the
+# supervisor refuses to prepare a private helper directory under any other mode.
+RuntimeDirectory=nq
 RuntimeDirectoryMode=0751
 
 ExecStartPre=+/usr/bin/install -d -o nq -g nq -m 0711 /run/nq/helpers
