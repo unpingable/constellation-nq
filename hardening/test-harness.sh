@@ -195,12 +195,20 @@ set -e
 ((status != 0)) || { printf 'stale-output run unexpectedly succeeded\n' >&2; exit 1; }
 grep -F 'output path already exists' "$scratch/stale.err" >/dev/null
 
-# --- No hostile assertion may consume diagnostic output it did not preserve. ---
+# --- An asserted attempt must retain its stream, status, and execution context. ---
 #
 # A refusal assertion that greps a shell variable, a pipe, or a process
 # substitution destroys the evidence it is judging: when the assertion fails,
-# the operator is told the message was wrong but never what it was. Every
-# attempt whose exit status is asserted must land in a $RESULTS file first.
+# the operator is told the message was wrong but never what it was. But the
+# stream alone is not enough. A "silent non-zero" -- an attempt that exits
+# non-zero having printed nothing -- is underdetermined without its numeric
+# status and, when it ran through a transient systemd unit, that unit's journal:
+# the service's own output went to the --pipe, while systemd's manager-side
+# records (exec failure, sandbox step failure, killed vs exited) reach only the
+# journal under the unit name, which --collect reaps from live state.
+#
+# So an asserted attempt is preserved only if its stream, status, and execution
+# context are all retained in $RESULTS.
 python3 - "$guest" <<'CHECK'
 import re
 import sys
@@ -209,26 +217,63 @@ guest = open(sys.argv[1], encoding="utf-8").read()
 lines = guest.splitlines()
 problems = []
 
+# Region boundaries: each check is introduced by `current_check=...`. Preserved
+# artifacts for an attempt land after it, within the same check's region.
+def region_end(index):
+    for j in range(index + 1, len(lines)):
+        if lines[j].strip().startswith("current_check="):
+            return j
+    return len(lines)
+
+def region_has(start, end, *needles):
+    for j in range(start, end):
+        if all(n in lines[j] for n in needles):
+            return True
+    return False
+
 for index, line in enumerate(lines):
     stripped = line.strip()
-    # An attempt whose status is captured on the following line is an
-    # assertion subject: it must have been redirected to $RESULTS.
     if stripped.startswith("run_nq ") or stripped.startswith("systemctl start"):
         following = lines[index + 1].strip() if index + 1 < len(lines) else ""
-        asserted = following.endswith("=$?") or "||" in stripped
-        if asserted and '>"$RESULTS/' not in stripped:
-            problems.append(f"line {index + 1}: asserted attempt discards output: {stripped}")
+        status_capture = following.endswith("=$?")
+        asserted = status_capture or "||" in stripped
+        if not asserted:
+            continue
+        end = region_end(index)
+        # Stream: the attempt's stdout+stderr must be redirected to $RESULTS.
+        if '>"$RESULTS/' not in stripped:
+            problems.append(f"line {index + 1}: asserted attempt discards its stream: {stripped}")
+        # Status: the captured numeric status must itself be written durably.
+        if status_capture:
+            statusvar = following.split("=", 1)[0].strip()
+            if not region_has(index, end, f'"${statusvar}"', '>"$RESULTS/'):
+                problems.append(
+                    f"line {index + 1}: asserted attempt discards its status ${statusvar}: {stripped}")
+        # Execution context: an attempt run through a transient systemd unit
+        # (run_nq) must capture that unit's journal into $RESULTS, keyed on the
+        # recorded unit variable. Requiring the journalctl to reference a `_unit`
+        # variable folds unit identity into retrievability: it bites both when
+        # the journal capture is dropped and when it stops naming the transient
+        # unit (e.g. points at a fixed persistent unit instead).
+        if stripped.startswith("run_nq "):
+            if not region_has(index, end, "journalctl", "_unit", '>"$RESULTS/'):
+                problems.append(
+                    f"line {index + 1}: transient attempt discards its unit journal: {stripped}")
     # Grepping command substitution or a here-string of a command consumes
     # output that was never written down.
     if re.search(r"grep[^\n|]*<<<\s*\"?\$\(", stripped) or re.search(r"\$\([^)]*run_nq[^)]*\)\s*\|\s*grep", stripped):
         problems.append(f"line {index + 1}: assertion greps unpreserved output: {stripped}")
 
 if problems:
-    print("hostile assertions must preserve the diagnostics they judge:", file=sys.stderr)
+    print("asserted attempts must preserve stream, status, and execution context:", file=sys.stderr)
     for problem in problems:
         print(f"  {problem}", file=sys.stderr)
     raise SystemExit(1)
 CHECK
+
+# The transient unit name must actually be recorded where an asserted attempt
+# can capture it; without this assignment the unit-identity artifact is empty.
+require_text "$guest" 'last_nq_unit=nq-hardening'
 
 # The guest must flush refusal evidence: a refused run is killed without a
 # guest shutdown, so unflushed diagnostics never reach the overlay.

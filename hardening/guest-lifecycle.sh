@@ -67,8 +67,14 @@ counter=0
 active_config=$CONFIG
 run_nq() {
     counter=$((counter + 1))
+    # Record the transient unit name so an asserted attempt can retrieve its
+    # journal after --collect reaps the unit: the service's own stdout/stderr
+    # goes to the --pipe, but systemd's manager-side records (exec failures,
+    # sandbox step failures, killed/exited status) only reach the journal under
+    # this unit name. A silent non-zero is underdetermined without them.
+    last_nq_unit=nq-hardening-$$-$counter.service
     systemd-run --quiet --wait --pipe --collect \
-        --unit="nq-hardening-$$-$counter" \
+        --unit="$last_nq_unit" \
         --property=Type=exec \
         --property=User=nq --property=Group=nq --property=UMask=0077 \
         --property=NoNewPrivileges=yes --property=PrivateTmp=yes \
@@ -298,7 +304,13 @@ printf '\n# nq-hardening-byte-tamper\n' >>"$helper"
 set +e
 run_nq doctor >"$RESULTS/tamper-doctor.log" 2>&1
 tamper_status=$?
+tamper_unit=$last_nq_unit
 set -e
+printf '%s\n' "$tamper_status" >"$RESULTS/tamper-status"
+printf '%s\n' "$tamper_unit" >"$RESULTS/tamper-unit"
+journalctl -u "$tamper_unit" --no-pager >"$RESULTS/tamper-unit-journal.log" 2>&1 || true
+systemctl status "$tamper_unit" --no-pager >"$RESULTS/tamper-unit-status.log" 2>&1 || true
+sync
 ((tamper_status != 0)) || fail "doctor accepted changed helper bytes"
 grep -F 'binary drift' "$RESULTS/tamper-doctor.log" >/dev/null || fail \
     "tamper refusal was not diagnosed as binary drift"
@@ -329,6 +341,8 @@ for entry in \
     systemctl start nqd.service >"$RESULTS/$label-tamper-start.log" 2>&1
     start_status=$?
     set -e
+    printf '%s\n' "$start_status" >"$RESULTS/$label-tamper-start-status"
+    sync
     ((start_status != 0)) || fail "service accepted tampered $label bytes"
     if systemctl is-active --quiet nqd.service; then
         fail "service became active with tampered $label bytes"
@@ -392,8 +406,17 @@ set +e
 active_config=$hostile_config
 run_nq witness test hostile-socket-local >"$RESULTS/bad-socket-refusal.log" 2>&1
 bad_socket_status=$?
+bad_socket_unit=$last_nq_unit
 active_config=$CONFIG
 set -e
+# Preserve the full execution context before asserting on it. The stream alone
+# left "silent non-zero" underdetermined: record the numeric status, the
+# transient unit identity, and that unit's journal and status so the cause is
+# retrievable whether nq refused, crashed, or never started.
+printf '%s\n' "$bad_socket_status" >"$RESULTS/bad-socket-status"
+printf '%s\n' "$bad_socket_unit" >"$RESULTS/bad-socket-unit"
+journalctl -u "$bad_socket_unit" --no-pager >"$RESULTS/bad-socket-unit-journal.log" 2>&1 || true
+systemctl status "$bad_socket_unit" --no-pager >"$RESULTS/bad-socket-unit-status.log" 2>&1 || true
 sync
 ((bad_socket_status != 0)) || fail "supervisor accepted a non-conforming helper socket"
 # The refusal must name the violated socket predicate. A timeout, helper crash,
