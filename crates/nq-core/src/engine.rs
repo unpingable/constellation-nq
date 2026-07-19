@@ -1242,10 +1242,7 @@ impl CollectionEngine {
             .map_err(|error| EngineError::Canonical(error.to_string()))?;
         let capture = self.run_capture(witness, &request_json, None, launch);
         if capture.outcome != AcquisitionOutcome::Response {
-            return Err(EngineError::Protocol(format!(
-                "dry collection acquisition outcome {}",
-                acquisition_code(&capture.outcome)
-            )));
+            return Err(dry_collection_error(&capture.outcome));
         }
         let response = nq_protocol::parse_response(&request, &capture.stdout)
             .map_err(|error| EngineError::Protocol(error.to_string()))?;
@@ -2591,6 +2588,23 @@ fn acquisition_detail(outcome: &AcquisitionOutcome) -> Option<String> {
     }
 }
 
+/// Operator-facing error for a dry collection that did not return a response.
+///
+/// Preserves the stable acquisition code and appends `acquisition_detail` when
+/// the outcome carries one, mirroring the daemon path's `AcquisitionFailed`
+/// (code + detail). A refusal family whose members share one coarse code but
+/// carry distinct dependent witnesses -- every `carrier_startup_failed` variant:
+/// wrong socket mode, wrong owner, spawn failure, startup timeout -- must not be
+/// exported through a code-only projection that collapses those distinctions.
+fn dry_collection_error(outcome: &AcquisitionOutcome) -> EngineError {
+    let code = acquisition_code(outcome);
+    let message = match acquisition_detail(outcome) {
+        Some(detail) => format!("dry collection acquisition outcome {code}: {detail}"),
+        None => format!("dry collection acquisition outcome {code}"),
+    };
+    EngineError::Protocol(message)
+}
+
 fn refusal_source(boundary: &str) -> &'static str {
     match boundary {
         "protocol" => "protocol",
@@ -3882,5 +3896,68 @@ mod tests {
             rendered.contains("helper socket mode is 0o660"),
             "the logged outcome must name the refused predicate: {rendered}"
         );
+    }
+
+    /// Forcing case for refusal preservation: a refusal family whose members
+    /// share one coarse code but carry distinct dependent witnesses must stay
+    /// distinguishable through EVERY operator-facing and archival surface, not
+    /// merely internally. `carrier_startup_failed` covers a refused socket mode,
+    /// a spawn failure, and a startup timeout alike, so any surface that exports
+    /// only the code laundering-collapses them.
+    ///
+    /// Regression: through 2026-07-19 the `nq witness test` dry-collection path
+    /// exported only the code, so a helper-directory-missing failure (run
+    /// 0a2938c) and a 30s startup timeout (run a4faf06) were byte-identical
+    /// `carrier_startup_failed` to the operator. This proves the two now stay
+    /// distinct through the CLI error and the persisted status-event bytes,
+    /// while both retain the stable code.
+    #[test]
+    fn carrier_startup_detail_survives_the_cli_and_archival_surfaces() {
+        let mode = AcquisitionOutcome::CarrierStartupFailed {
+            message: "helper socket mode is 0o660; expected 0o600".to_owned(),
+        };
+        let timeout = AcquisitionOutcome::CarrierStartupFailed {
+            message: "supervised helper did not become ready within 30s".to_owned(),
+        };
+
+        // Same coarse code: the code alone cannot tell the two causes apart.
+        assert_eq!(acquisition_code(&mode), "carrier_startup_failed");
+        assert_eq!(acquisition_code(&timeout), "carrier_startup_failed");
+
+        // CLI surface (`nq witness test` dry collection): the stable code is
+        // retained and the distinct detail is appended, so the two differ.
+        let cli_mode = dry_collection_error(&mode).to_string();
+        let cli_timeout = dry_collection_error(&timeout).to_string();
+        assert!(cli_mode.contains("carrier_startup_failed"), "{cli_mode}");
+        assert!(cli_timeout.contains("carrier_startup_failed"), "{cli_timeout}");
+        assert!(cli_mode.contains("helper socket mode is 0o660"), "{cli_mode}");
+        assert!(cli_timeout.contains("did not become ready within 30s"), "{cli_timeout}");
+        assert_ne!(cli_mode, cli_timeout);
+
+        // Archival surface: record_instance_status persists canonical(outcome)
+        // into status_events.detail, so the same two causes must stay distinct
+        // in the stored bytes, code included.
+        let persist = |o: &AcquisitionOutcome| -> String {
+            let outcome = CollectionOutcome::AcquisitionFailed {
+                instance_id: "conformance-local".to_owned(),
+                run_id: "00000000-0000-4000-8000-000000000000".to_owned(),
+                code: acquisition_code(o).to_owned(),
+                detail: acquisition_detail(o),
+            };
+            String::from_utf8(nq_protocol::canonical_json_bytes(&outcome).expect("canonical"))
+                .expect("utf8")
+        };
+        let stored_mode = persist(&mode);
+        let stored_timeout = persist(&timeout);
+        assert!(stored_mode.contains("carrier_startup_failed"), "{stored_mode}");
+        assert!(stored_mode.contains("helper socket mode is 0o660"), "{stored_mode}");
+        assert!(stored_timeout.contains("did not become ready within 30s"), "{stored_timeout}");
+        assert_ne!(stored_mode, stored_timeout);
+
+        // Regression guard: an outcome that genuinely carries no detail keeps
+        // the bare code, with no invented `: <detail>` suffix appended.
+        let bare = dry_collection_error(&AcquisitionOutcome::Timeout).to_string();
+        assert!(bare.ends_with("timeout"), "{bare}");
+        assert!(!bare.contains("carrier_startup_failed"), "{bare}");
     }
 }
