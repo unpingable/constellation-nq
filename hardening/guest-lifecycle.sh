@@ -25,6 +25,12 @@ on_exit() {
         journalctl -u nqd.service --no-pager >"$RESULTS/failure-journal.log" 2>&1 || true
         chmod -R a+rX "$RESULTS" || true
     fi
+    # Durability, not politeness. A refused run is torn down by SIGTERM to
+    # QEMU with no guest shutdown, so anything still in the page cache is
+    # lost -- including the refusal marker and every diagnostic written just
+    # above. The 2026-07-19 socket refusal was undiagnosable for exactly this
+    # reason: the log was written, never flushed, and absent from the overlay.
+    sync || true
 }
 trap on_exit EXIT
 
@@ -388,6 +394,7 @@ run_nq witness test hostile-socket-local >"$RESULTS/bad-socket-refusal.log" 2>&1
 bad_socket_status=$?
 active_config=$CONFIG
 set -e
+sync
 ((bad_socket_status != 0)) || fail "supervisor accepted a non-conforming helper socket"
 # The refusal must name the violated socket predicate. A timeout, helper crash,
 # or generic launch failure does not qualify.

@@ -195,4 +195,43 @@ set -e
 ((status != 0)) || { printf 'stale-output run unexpectedly succeeded\n' >&2; exit 1; }
 grep -F 'output path already exists' "$scratch/stale.err" >/dev/null
 
+# --- No hostile assertion may consume diagnostic output it did not preserve. ---
+#
+# A refusal assertion that greps a shell variable, a pipe, or a process
+# substitution destroys the evidence it is judging: when the assertion fails,
+# the operator is told the message was wrong but never what it was. Every
+# attempt whose exit status is asserted must land in a $RESULTS file first.
+python3 - "$guest" <<'CHECK'
+import re
+import sys
+
+guest = open(sys.argv[1], encoding="utf-8").read()
+lines = guest.splitlines()
+problems = []
+
+for index, line in enumerate(lines):
+    stripped = line.strip()
+    # An attempt whose status is captured on the following line is an
+    # assertion subject: it must have been redirected to $RESULTS.
+    if stripped.startswith("run_nq ") or stripped.startswith("systemctl start"):
+        following = lines[index + 1].strip() if index + 1 < len(lines) else ""
+        asserted = following.endswith("=$?") or "||" in stripped
+        if asserted and '>"$RESULTS/' not in stripped:
+            problems.append(f"line {index + 1}: asserted attempt discards output: {stripped}")
+    # Grepping command substitution or a here-string of a command consumes
+    # output that was never written down.
+    if re.search(r"grep[^\n|]*<<<\s*\"?\$\(", stripped) or re.search(r"\$\([^)]*run_nq[^)]*\)\s*\|\s*grep", stripped):
+        problems.append(f"line {index + 1}: assertion greps unpreserved output: {stripped}")
+
+if problems:
+    print("hostile assertions must preserve the diagnostics they judge:", file=sys.stderr)
+    for problem in problems:
+        print(f"  {problem}", file=sys.stderr)
+    raise SystemExit(1)
+CHECK
+
+# The guest must flush refusal evidence: a refused run is killed without a
+# guest shutdown, so unflushed diagnostics never reach the overlay.
+require_text "$guest" 'sync || true'
+
 printf 'hardening harness syntax/static checks passed; guest-result, bad-hash, and stale-output negatives refused as required\n'
