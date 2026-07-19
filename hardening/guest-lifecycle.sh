@@ -268,6 +268,19 @@ current_check=reinstall-after-purge
 dpkg -i "$deb"
 assert_layout retained
 disabled || fail "reinstall after remove/purge unexpectedly enabled nqd"
+# A package transaction replaces the helper tree, so the admitted execution
+# identity no longer matches: identical bytes, a different pinned directory
+# inode. Drift is the deliberate behavior here, not a fault -- admission is
+# pinned to the object that was admitted, and identical content does not
+# resurrect it. OPERATIONS.md: "After executable, configuration, or profile
+# drift, keep the daemon stopped and use witness rotate." Re-admission stays
+# an explicit operator act, so the harness must require the refusal first.
+if run_nq doctor >"$RESULTS/reinstall-drift-doctor.log" 2>&1; then
+    fail "reinstall after purge did not invalidate the admitted execution identity"
+fi
+grep -F 'working_directory_identity' "$RESULTS/reinstall-drift-doctor.log" >/dev/null || fail \
+    "reinstall drift was not reported as execution-identity drift"
+run_nq witness rotate conformance-local
 run_nq doctor
 run_nq collect conformance-local
 

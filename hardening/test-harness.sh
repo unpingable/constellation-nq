@@ -61,6 +61,10 @@ require_text "$guest" 'reports_after_reboot=$(admitted_report_count)'
 require_text "$guest" 'wait_for_admitted_report_after "$reports_after_reboot" service-reboot'
 require_text "$guest" 'dpkg --remove nq-ng'
 require_text "$guest" 'dpkg --purge nq-ng'
+# A package transaction must invalidate the admitted execution identity, and
+# re-admission must stay an explicit operator act.
+require_text "$guest" 'reinstall after purge did not invalidate the admitted execution identity'
+require_text "$guest" 'run_nq witness rotate conformance-local'
 require_text "$guest" 'systemctl reboot'
 require_text "$guest" "grep -F 'binary drift'"
 require_text "$guest" '/usr/share/nq/system-contract/manifest.json'
