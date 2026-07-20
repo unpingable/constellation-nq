@@ -684,3 +684,26 @@ family and one cross-surface lossless-refusal suite — is assigned to the **sep
 audit-framework campaign** and is a pre-mint dependency owned there. It is **not**
 implemented or expanded in this repo. Provenance: the v14 rung-4/rung-6 refusal-
 preservation law; the `4abc478` fix was one instance surfaced under duress.
+
+### WS4 rename re-qualification — 2026-07-19 (pre-rename `4abc478` entry above preserved as history)
+
+The WS4 watcher/witness/`nq-helper` rename (`06aa918`) changed the packaged
+artifact, so the `4abc478` qualification was re-run against the renamed deb and
+**passed identically** — the rename did not weaken WS2/WS5. New binding:
+
+- **source commit** `06aa918b7b51cf165070d53215ee4e943192102e`
+  (`refactor(beta/WS4): rename watcher/witness/nq-helper by denotation`).
+- **image digest** `sha256:ffe6203da54deeb6db5d2a98a83f9ec8e55f149d3f7ba622e1abe5fa966ee3d6` (unchanged).
+- **package digest** `nq-ng_0.1.0_amd64.deb sha256:44e7bd1af43ac4d6f9543d2dc286610be43d86426334ca24ff1a05a45d24e2e0`
+  (supersedes the pre-rename `14c33792…`).
+- **guest driver** `guest-lifecycle.sh sha256:b1ff672343df21d22945ac4da4b08ff9fd7db46385f774e92e705133a3d32b7c`.
+- **required markers** all pass; **verified seal** `run-2026-07-20-06aa918/ARTIFACTS.sha256`
+  (50 files) + independent `--check-guest-results` admission; `RESULT=pass`, no `REFUSAL`.
+- **renamed identities exercised live**: the `nq-helper` account (UID 987) is created
+  and holds distinct cross-UID custody vs the `nq` daemon (988); `nq watcher test`
+  drives the hostile-socket refusal, which surfaces its exact predicate
+  (`helper socket mode is 0o660; expected 0o600`) through the renamed CLI path.
+
+The `4abc478`/`14c33792…` pass is retained as the pre-rename qualification of record;
+this entry binds the current mint-candidate artifact. **Mint gate reached — held for
+operator review; nothing pushed, nothing minted.**
