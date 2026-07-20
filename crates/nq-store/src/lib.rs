@@ -1302,6 +1302,19 @@ impl Store {
     /// Validation guarantees that every returned rejection has exactly one
     /// matching refusal; this method never guesses from a coarse code or log.
     pub fn rejected_custody(&self, limit: u32) -> Result<Vec<RejectedCustodyRow>, StoreError> {
+        self.rejected_custody_bounded(limit, None)
+    }
+
+    /// Read one bounded page of rejected custody after a submission identity.
+    ///
+    /// The immutable primary-key cursor lets archive verification exhaust the
+    /// entire history without treating a full public-response page as proof
+    /// that no later custody row exists.
+    pub fn rejected_custody_bounded(
+        &self,
+        limit: u32,
+        after_submission_id: Option<&str>,
+    ) -> Result<Vec<RejectedCustodyRow>, StoreError> {
         validate_public_limit(limit)?;
         // Refuse rather than expose a partial or ambiguous history if the live
         // connection has acquired an invalid row since it was opened.
@@ -1319,10 +1332,12 @@ impl Store {
              JOIN refusals AS refusal
                ON refusal.submission_id = submission.submission_id
              WHERE submission.admission_outcome = 'rejected'
-             ORDER BY run.started_at, submission.submission_id
-             LIMIT ?1",
+               AND (?1 IS NULL OR submission.submission_id > ?1)
+             ORDER BY submission.submission_id
+             LIMIT ?2",
         )?;
-        let rows = statement.query_map([limit], rejected_custody_row)?;
+        let rows =
+            statement.query_map(params![after_submission_id, limit], rejected_custody_row)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StoreError::from)
     }
@@ -1549,6 +1564,19 @@ pub struct FindingSnapshotRow {
 /// One component row from the stable `nq.status_snapshot.v1` public read model.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StatusSnapshotRow {
+    pub component_kind: String,
+    pub component_id: String,
+    pub state: String,
+    pub code: String,
+    pub detail_json: String,
+    pub observed_at: String,
+}
+
+/// One immutable status event in append order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StatusEventRow {
+    pub status_sequence: i64,
+    pub status_event_id: String,
     pub component_kind: String,
     pub component_id: String,
     pub state: String,
@@ -2142,6 +2170,46 @@ impl Store {
                 code: row.get(3)?,
                 detail_json: row.get(4)?,
                 observed_at: row.get(5)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    /// Read one bounded page of immutable status history after a sequence.
+    ///
+    /// This is the semantic-reopen path for archives. It reads source events,
+    /// not the rebuildable current projection, so an older unversioned result
+    /// cannot be hidden by a newer row for the same component.
+    pub fn status_history_bounded(
+        &self,
+        limit: u32,
+        after_sequence: Option<i64>,
+    ) -> Result<Vec<StatusEventRow>, StoreError> {
+        validate_public_limit(limit)?;
+        if after_sequence.is_some_and(|sequence| sequence < 0) {
+            return Err(StoreError::Invariant(
+                "status history cursor cannot be negative".into(),
+            ));
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT status_sequence, status_event_id, component_kind,
+                    component_id, state, code, CAST(detail_json AS TEXT), observed_at
+             FROM status_events
+             WHERE status_sequence > COALESCE(?1, 0)
+             ORDER BY status_sequence
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![after_sequence, limit], |row| {
+            Ok(StatusEventRow {
+                status_sequence: row.get(0)?,
+                status_event_id: row.get(1)?,
+                component_kind: row.get(2)?,
+                component_id: row.get(3)?,
+                state: row.get(4)?,
+                code: row.get(5)?,
+                detail_json: row.get(6)?,
+                observed_at: row.get(7)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()
@@ -3921,6 +3989,21 @@ mod tests {
         assert_eq!(first["details"]["errno"], "EAGAIN");
         assert_eq!(second["details"]["errno"], "ENODEV");
 
+        let first_page = store
+            .rejected_custody_bounded(1, None)
+            .expect("first custody page");
+        assert_eq!(first_page, live_rows[..1]);
+        let second_page = store
+            .rejected_custody_bounded(1, Some(&first_page[0].submission_id))
+            .expect("second custody page");
+        assert_eq!(second_page, live_rows[1..]);
+        assert!(
+            store
+                .rejected_custody_bounded(1, Some(&second_page[0].submission_id))
+                .expect("custody exhausted")
+                .is_empty()
+        );
+
         store.backup_verified(&backup).expect("verified backup");
         drop(store);
         let reopened = Store::open(&backup).expect("backup reopens");
@@ -4370,6 +4453,28 @@ mod tests {
         }
         let status = store.status_snapshots().expect("status view");
         assert_eq!(status[0].state, "healthy");
+        let first_page = store
+            .status_history_bounded(1, None)
+            .expect("first history page");
+        assert_eq!(first_page.len(), 1);
+        assert_eq!(first_page[0].status_event_id, "status-1");
+        assert_eq!(first_page[0].state, "starting");
+        let second_page = store
+            .status_history_bounded(1, Some(first_page[0].status_sequence))
+            .expect("second history page");
+        assert_eq!(second_page.len(), 1);
+        assert_eq!(second_page[0].status_event_id, "status-2");
+        assert_eq!(second_page[0].state, "healthy");
+        assert!(
+            store
+                .status_history_bounded(1, Some(second_page[0].status_sequence))
+                .expect("history exhausted")
+                .is_empty()
+        );
+        assert!(matches!(
+            store.status_history_bounded(1, Some(-1)),
+            Err(StoreError::Invariant(_))
+        ));
         assert!(matches!(
             store.status_snapshots_bounded(MAX_PUBLIC_QUERY_ROWS + 1, None),
             Err(StoreError::Invariant(_))
