@@ -758,6 +758,12 @@ framework's heuristic census. The authoritative pre-commit preflight ledger is
 (SHA-256
 `e809de2652bcdc0fd8e0bfce087ba840be38d0ba7da2d7ddc0013e7b6bc154ec`).
 Verifier identity and exact commands are in the adjacent `RECEIPT.md`.
+After the campaign objects were committed, the authoritative clean-pin rerun
+bound target `d82cf574b16cf4ff1d21ab5adda4b2b275f35069` at
+`audit/receipts/run-2026-07-20-qualification-repair-r4/refusal-audit/ledger.json`
+(SHA-256
+`24f2cb75c3e40ee20f41aebaf965159ad22979c6a49e210480cd71bfdfe6c896`);
+its adjacent receipt is the final blocked verdict.
 
 The ledger has no waiver or obstruction: its heuristic AC-R4-002 projection
 census passes and records 2/2 mutation commands as biting, but its v1 mutation

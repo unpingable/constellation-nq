@@ -102,7 +102,9 @@ Consequently neither historical run is a current mint qualification, and the
 exact `44e7bd1a…` candidate is blocked pending repair, rebuilt bytes, and a
 fresh qualification. See [`HARDENING_PROGRAM.md`](HARDENING_PROGRAM.md) §8 and
 [`../audit/REFUSAL_PRESERVATION_CROSSWALK.md`](../audit/REFUSAL_PRESERVATION_CROSSWALK.md)
-for the bound identities and verdict.
+for the scope, and
+[`../audit/receipts/run-2026-07-20-qualification-repair-r4/RECEIPT.md`](../audit/receipts/run-2026-07-20-qualification-repair-r4/RECEIPT.md)
+for the authoritative clean-pin blocked verdict.
 Some kernel boundaries remain **not** qualified and still require the documented
 unsandboxed Linux package/VM job — executable memfd policy and the full
 `SO_PEERCRED` wrong-PID/UID/GID matrix among them. A sandbox skip is never treated
