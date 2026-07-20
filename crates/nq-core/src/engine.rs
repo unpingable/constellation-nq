@@ -3898,6 +3898,73 @@ mod tests {
         );
     }
 
+    /// Same-code refusal testimony must survive the actual status-store path,
+    /// the shared public DTO, and a verified archival backup.  This positive
+    /// case complements the ignored release-forcing cases below: it passes for
+    /// already-preserved acquisition diagnostics and bites any mutation that
+    /// replaces the canonical outcome with a code-only status detail.
+    #[test]
+    fn status_store_and_backup_preserve_same_code_distinct_detail() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let (mut config, first_watcher, _lock) = binding_recovery_fixture(directory.path());
+        let mut second_watcher = first_watcher.clone();
+        second_watcher.instance_id = "recovery.secondary".to_owned();
+        config.watchers.push(second_watcher.clone());
+
+        drop(Store::initialize(&config.database_path).expect("initialize status store"));
+        let mut engine = CollectionEngine::open(&config).expect("open engine");
+        let outcome = |watcher: &WatcherConfig, message: &str| {
+            let acquisition = AcquisitionOutcome::CarrierStartupFailed {
+                message: message.to_owned(),
+            };
+            CollectionOutcome::AcquisitionFailed {
+                instance_id: watcher.instance_id.clone(),
+                run_id: "00000000-0000-4000-8000-000000000000".to_owned(),
+                code: acquisition_code(&acquisition).to_owned(),
+                detail: acquisition_detail(&acquisition),
+            }
+        };
+        let first_message = "helper socket mode is 0o660; expected 0o600";
+        let second_message = "could not spawn Unix helper: Permission denied (os error 13)";
+        engine
+            .record_instance_status(&first_watcher, &outcome(&first_watcher, first_message))
+            .expect("record first refusal status");
+        engine
+            .record_instance_status(&second_watcher, &outcome(&second_watcher, second_message))
+            .expect("record second refusal status");
+
+        let assert_exact = |snapshot: &StatusSnapshotV1| {
+            let component = |id: &str| {
+                snapshot
+                    .components
+                    .iter()
+                    .find(|component| component.id == id)
+                    .unwrap_or_else(|| panic!("missing status component {id}"))
+            };
+            let first = component(&first_watcher.instance_id);
+            let second = component(&second_watcher.instance_id);
+            assert_eq!(first.code, "collection_failed");
+            assert_eq!(second.code, "collection_failed");
+            assert_eq!(first.details["code"], "carrier_startup_failed");
+            assert_eq!(second.details["code"], "carrier_startup_failed");
+            assert_eq!(first.details["detail"], first_message);
+            assert_eq!(second.details["detail"], second_message);
+            assert_ne!(first.details, second.details);
+        };
+
+        assert_exact(&status_snapshot(&engine.store).expect("live public status snapshot"));
+        let backup = directory.path().join("nq-status-backup.db");
+        let artifact = engine
+            .store
+            .backup_verified(&backup)
+            .expect("verified status backup");
+        assert_eq!(artifact.path, backup);
+        drop(engine);
+
+        let reopened = Store::open(&artifact.path).expect("reopen verified backup");
+        assert_exact(&status_snapshot(&reopened).expect("archived public status snapshot"));
+    }
+
     /// Forcing case for refusal preservation: a refusal family whose members
     /// share one coarse code but carry distinct dependent watchers must stay
     /// distinguishable through EVERY operator-facing and archival surface, not
@@ -3929,9 +3996,18 @@ mod tests {
         let cli_mode = dry_collection_error(&mode).to_string();
         let cli_timeout = dry_collection_error(&timeout).to_string();
         assert!(cli_mode.contains("carrier_startup_failed"), "{cli_mode}");
-        assert!(cli_timeout.contains("carrier_startup_failed"), "{cli_timeout}");
-        assert!(cli_mode.contains("helper socket mode is 0o660"), "{cli_mode}");
-        assert!(cli_timeout.contains("did not become ready within 30s"), "{cli_timeout}");
+        assert!(
+            cli_timeout.contains("carrier_startup_failed"),
+            "{cli_timeout}"
+        );
+        assert!(
+            cli_mode.contains("helper socket mode is 0o660"),
+            "{cli_mode}"
+        );
+        assert!(
+            cli_timeout.contains("did not become ready within 30s"),
+            "{cli_timeout}"
+        );
         assert_ne!(cli_mode, cli_timeout);
 
         // Archival surface: record_instance_status persists canonical(outcome)
@@ -3949,9 +4025,18 @@ mod tests {
         };
         let stored_mode = persist(&mode);
         let stored_timeout = persist(&timeout);
-        assert!(stored_mode.contains("carrier_startup_failed"), "{stored_mode}");
-        assert!(stored_mode.contains("helper socket mode is 0o660"), "{stored_mode}");
-        assert!(stored_timeout.contains("did not become ready within 30s"), "{stored_timeout}");
+        assert!(
+            stored_mode.contains("carrier_startup_failed"),
+            "{stored_mode}"
+        );
+        assert!(
+            stored_mode.contains("helper socket mode is 0o660"),
+            "{stored_mode}"
+        );
+        assert!(
+            stored_timeout.contains("did not become ready within 30s"),
+            "{stored_timeout}"
+        );
         assert_ne!(stored_mode, stored_timeout);
 
         // Regression guard: an outcome that genuinely carries no detail keeps
@@ -3959,5 +4044,163 @@ mod tests {
         let bare = dry_collection_error(&AcquisitionOutcome::Timeout).to_string();
         assert!(bare.ends_with("timeout"), "{bare}");
         assert!(!bare.contains("carrier_startup_failed"), "{bare}");
+    }
+
+    /// Release forcing case: persistent-carrier timeout phase is dependent
+    /// refusal testimony, not decoration on the coarse `timeout` code.  The
+    /// write and read phases must remain distinguishable in the dry-collection
+    /// diagnostic and in the canonical `CollectionOutcome` persisted by
+    /// `record_instance_status`.
+    ///
+    /// This is ignored in the ordinary suite because it specifies the repair
+    /// required before release.  Running it explicitly must fail against a
+    /// candidate that still drops `ExchangeTimeout.phase`.
+    #[test]
+    #[ignore = "release gate: ExchangeTimeout.phase must survive every testimonial boundary"]
+    fn forcing_exchange_timeout_phase_survives_dry_and_status_surfaces() {
+        let write = AcquisitionOutcome::ExchangeTimeout {
+            phase: "write_request".to_owned(),
+        };
+        let read = AcquisitionOutcome::ExchangeTimeout {
+            phase: "read_response".to_owned(),
+        };
+
+        assert_eq!(acquisition_code(&write), "timeout");
+        assert_eq!(acquisition_code(&read), "timeout");
+
+        let write_detail = acquisition_detail(&write);
+        let read_detail = acquisition_detail(&read);
+        let dry_write = dry_collection_error(&write).to_string();
+        let dry_read = dry_collection_error(&read).to_string();
+        let status = |outcome: &AcquisitionOutcome| {
+            canonical(&CollectionOutcome::AcquisitionFailed {
+                instance_id: "conformance-local".to_owned(),
+                run_id: "00000000-0000-4000-8000-000000000000".to_owned(),
+                code: acquisition_code(outcome).to_owned(),
+                detail: acquisition_detail(outcome),
+            })
+            .expect("status outcome canonicalizes")
+        };
+        let stored_write = status(&write);
+        let stored_read = status(&read);
+
+        assert!(
+            write_detail.as_deref() == Some("write_request")
+                && read_detail.as_deref() == Some("read_response")
+                && dry_write != dry_read
+                && dry_write.contains("write_request")
+                && dry_read.contains("read_response")
+                && stored_write.as_bytes() != stored_read.as_bytes(),
+            "timeout phase collapsed: write_detail={write_detail:?}, \
+             read_detail={read_detail:?}, dry_write={dry_write:?}, \
+             dry_read={dry_read:?}, stored_write={}, stored_read={}",
+            String::from_utf8_lossy(stored_write.as_bytes()),
+            String::from_utf8_lossy(stored_read.as_bytes())
+        );
+    }
+
+    /// Release forcing case: `retriable` and structured details are part of a
+    /// protocol refusal's typed testimony. Two same-code refusals that differ
+    /// in those fields must not become one status event merely because their
+    /// operator-facing message is the same.
+    #[test]
+    #[ignore = "release gate: protocol refusal dependent fields must survive CollectionOutcome"]
+    fn forcing_protocol_refusal_dependent_fields_survive_collection_status() {
+        let instance = InstanceId::new("conformance-local").expect("instance token");
+        let transient = nq_protocol::Refusal {
+            responsible_instance_id: instance.clone(),
+            boundary: nq_protocol::RefusalBoundary::Collection,
+            code: nq_protocol::RefusalCode::CollectionFailed,
+            message: "backend collection failed".to_owned(),
+            retriable: true,
+            details: json!({"errno": "EAGAIN", "attempt": 1}),
+        };
+        let permanent = nq_protocol::Refusal {
+            responsible_instance_id: instance,
+            boundary: nq_protocol::RefusalBoundary::Collection,
+            code: nq_protocol::RefusalCode::CollectionFailed,
+            message: "backend collection failed".to_owned(),
+            retriable: false,
+            details: json!({"errno": "ENODEV", "device": "nvme0"}),
+        };
+        let source_transient = nq_protocol::canonical_json_bytes(&transient)
+            .expect("typed transient refusal canonicalizes");
+        let source_permanent = nq_protocol::canonical_json_bytes(&permanent)
+            .expect("typed permanent refusal canonicalizes");
+        assert_ne!(source_transient, source_permanent);
+
+        // Mirrors the current ResponseOutcome::Refusal -> CollectionOutcome
+        // conversion in `collect`; this is the object persisted in status.
+        let status = |refusal: &nq_protocol::Refusal| {
+            canonical(&CollectionOutcome::HelperRefused {
+                instance_id: refusal.responsible_instance_id.to_string(),
+                run_id: "00000000-0000-4000-8000-000000000000".to_owned(),
+                boundary: enum_token(&refusal.boundary).expect("boundary token"),
+                code: enum_token(&refusal.code).expect("code token"),
+                diagnostic: refusal.message.clone(),
+            })
+            .expect("status outcome canonicalizes")
+        };
+        let stored_transient = status(&transient);
+        let stored_permanent = status(&permanent);
+
+        assert_ne!(
+            stored_transient.as_bytes(),
+            stored_permanent.as_bytes(),
+            "typed protocol refusals collapsed in status: {}",
+            String::from_utf8_lossy(stored_transient.as_bytes())
+        );
+    }
+
+    /// Release forcing case: profile identity, exact refusing boundary, and
+    /// structured details remain part of a `ProfileRefusal` even when code and
+    /// message coincide.  The status carrier must preserve those dependent
+    /// fields instead of reducing both refusals to `plane = profile`.
+    #[test]
+    #[ignore = "release gate: profile refusal identity must survive CollectionOutcome"]
+    fn forcing_profile_refusal_identity_survives_collection_status() {
+        let report = nq_profiles::ProfileRefusal {
+            instance_id: "conformance-local".to_owned(),
+            profile: nq_profiles::ProfileKey::new("nq.conformance", 1),
+            boundary: nq_profiles::RefusalBoundary::Report,
+            code: nq_profiles::ProfileRefusalCode::InvalidPayload,
+            message: "payload is invalid".to_owned(),
+            details: BTreeMap::from([("field".to_owned(), "status".to_owned())]),
+        };
+        let observation = nq_profiles::ProfileRefusal {
+            instance_id: "conformance-local".to_owned(),
+            profile: nq_profiles::ProfileKey::new("nq.host", 7),
+            boundary: nq_profiles::RefusalBoundary::Observation,
+            code: nq_profiles::ProfileRefusalCode::InvalidPayload,
+            message: "payload is invalid".to_owned(),
+            details: BTreeMap::from([("ordinal".to_owned(), "4".to_owned())]),
+        };
+        let source_report =
+            nq_protocol::canonical_json_bytes(&report).expect("typed report refusal canonicalizes");
+        let source_observation = nq_protocol::canonical_json_bytes(&observation)
+            .expect("typed observation refusal canonicalizes");
+        assert_ne!(source_report, source_observation);
+
+        // Mirrors the current ProfileRefusal -> CollectionOutcome conversion
+        // in `collect`; neither profile nor exact boundary/details is carried.
+        let status = |refusal: &nq_profiles::ProfileRefusal| {
+            canonical(&CollectionOutcome::Rejected {
+                instance_id: refusal.instance_id.clone(),
+                run_id: "00000000-0000-4000-8000-000000000000".to_owned(),
+                plane: "profile".to_owned(),
+                code: enum_token(&refusal.code).expect("code token"),
+                diagnostic: refusal.message.clone(),
+            })
+            .expect("status outcome canonicalizes")
+        };
+        let stored_report = status(&report);
+        let stored_observation = status(&observation);
+
+        assert_ne!(
+            stored_report.as_bytes(),
+            stored_observation.as_bytes(),
+            "typed profile refusals collapsed in status: {}",
+            String::from_utf8_lossy(stored_report.as_bytes())
+        );
     }
 }

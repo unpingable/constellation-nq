@@ -1,0 +1,254 @@
+# NQ-ng correspondence manifest for the release-required refusal-preservation
+# gate. The external framework supplies the AC-R4 policy; this file binds that
+# policy to NQ-ng's existing types and surfaces.
+
+schema = "admissibility-audit.manifest/v1"
+
+[target]
+name = "nq-ng"
+pin = "auto"
+source_roots = [
+  "crates/nq-core/src",
+  "crates/nq-store/src",
+  "crates/nq-app/src",
+  "crates/nq-protocol/src",
+  "crates/nq-profiles/src",
+]
+
+[[surfaces]]
+id = "protocol-wire"
+kind = "wire"
+class = "testimonial"
+entry_point = "crates/nq-protocol/src/model.rs"
+
+[[surfaces]]
+id = "collection-cli"
+kind = "cli"
+class = "testimonial"
+entry_point = "crates/nq-app/src/cli.rs"
+
+[[surfaces]]
+id = "daemon-log"
+kind = "daemon_log"
+class = "testimonial"
+entry_point = "crates/nq-app/src/daemon.rs"
+
+[[surfaces]]
+id = "sqlite-history"
+kind = "store"
+class = "testimonial"
+entry_point = "crates/nq-store/src/schema.sql"
+
+[[surfaces]]
+id = "status-read-model"
+kind = "store"
+class = "testimonial"
+entry_point = "crates/nq-core/src/public.rs"
+
+[[surfaces]]
+id = "local-api"
+kind = "api"
+class = "testimonial"
+entry_point = "crates/nq-app/src/api.rs"
+
+[[surfaces]]
+id = "cold-archive"
+kind = "archive"
+class = "testimonial"
+entry_point = "crates/nq-app/src/archive.rs"
+
+[[surfaces]]
+id = "coarse-index-columns"
+kind = "store"
+class = "non_testimonial"
+entry_point = "crates/nq-store/src/schema.sql"
+allowed_uses = ["stable comparison", "bounded indexing", "metrics grouping"]
+forbidden_uses = [
+  "operator diagnosis without the linked typed payload",
+  "qualification predicate without the linked typed payload",
+  "archive testimony without the linked typed payload",
+]
+
+[[projections]]
+function = "acquisition_code"
+runtime_type = "nq_core::runner::AcquisitionOutcome"
+classification = "non_testimonial"
+allowed_uses = ["stable comparison", "bounded indexing", "metrics grouping"]
+forbidden_uses = [
+  "operator diagnosis",
+  "qualification predicate",
+  "archive testimony without resource_outcome_json",
+]
+
+[[projections]]
+function = "semantic_report_status"
+runtime_type = "nq_profiles::SemanticReportStatus"
+classification = "internal"
+allowed_uses = ["exact enum token rendering"]
+forbidden_uses = ["refusal diagnosis"]
+
+[[projections]]
+function = "as_str"
+runtime_type = "nq_profiles::ProfileDigest"
+classification = "internal"
+allowed_uses = ["digest token rendering"]
+forbidden_uses = ["qualification result"]
+
+[[projections]]
+function = "as_str"
+runtime_type = "nq_profiles::ProfileSemanticId"
+classification = "internal"
+allowed_uses = ["semantic identity token rendering"]
+forbidden_uses = ["qualification result"]
+
+[[projections]]
+function = "as_str"
+runtime_type = "nq_protocol::Sha256Digest"
+classification = "internal"
+allowed_uses = ["digest token rendering"]
+forbidden_uses = ["qualification result"]
+
+# The framework's function-shaped static census cannot discover SQL columns or
+# serde discriminants. They are declared here explicitly so that the target's
+# correspondence object, not the heuristic, owns their classification.
+[[projections]]
+function = "watcher_runs.acquisition_outcome"
+runtime_type = "nq_core::runner::AcquisitionOutcome"
+classification = "non_testimonial"
+allowed_uses = ["stable run indexing when resource_outcome_json is retained"]
+forbidden_uses = ["operator diagnosis", "archive testimony without resource_outcome_json"]
+
+[[projections]]
+function = "refusals.source_kind"
+runtime_type = "nq_store::RefusalInput"
+classification = "non_testimonial"
+allowed_uses = ["source-family indexing when boundary and detail_json are retained"]
+forbidden_uses = ["refusal diagnosis", "qualification predicate"]
+
+[[projections]]
+function = "raw_submissions.rejection_code"
+runtime_type = "nq_store::SubmissionDisposition"
+classification = "non_testimonial"
+allowed_uses = ["rejected-custody indexing when a typed refusal is linked"]
+forbidden_uses = ["standalone refusal testimony", "generic error replacement"]
+
+[[projections]]
+function = "status_events.code"
+runtime_type = "nq_core::CollectionOutcome"
+classification = "non_testimonial"
+allowed_uses = ["status grouping when canonical detail_json is retained"]
+forbidden_uses = ["standalone operator diagnosis", "re-deriving detail"]
+
+[[projections]]
+function = "binding_events.event_kind"
+runtime_type = "nq_store::BindingEventInput"
+classification = "non_testimonial"
+allowed_uses = ["active-binding state projection when reason_code and detail_json are retained"]
+forbidden_uses = ["standalone lifecycle cause"]
+
+[[projections]]
+function = "binding_events.reason_code"
+runtime_type = "nq_store::BindingEventInput"
+classification = "non_testimonial"
+allowed_uses = ["lifecycle reason indexing when event_kind and detail_json are retained"]
+forbidden_uses = ["standalone binding-event testimony"]
+
+[[projections]]
+function = "ResponseOutcome.kind"
+runtime_type = "nq_protocol::ResponseOutcome"
+classification = "internal"
+allowed_uses = ["serde tagged-union discrimination with the complete nested payload"]
+forbidden_uses = ["standalone refusal reason"]
+
+[[projections]]
+function = "refusal_source"
+runtime_type = "str (serialized refusal boundary token)"
+classification = "non_testimonial"
+allowed_uses = ["source-family indexing when the exact boundary and canonical refusal remain linked"]
+forbidden_uses = ["standalone refusal diagnosis", "generic error replacement"]
+
+[[projections]]
+function = "is_success"
+runtime_type = "nq_core::CollectionOutcome"
+classification = "non_testimonial"
+allowed_uses = ["scheduler cadence selection", "process exit selection after rendering the full outcome"]
+forbidden_uses = ["refusal diagnosis", "stored judgment", "replacement for the typed outcome"]
+
+[controls.AC-R4-001]
+runtime_type = "nq_core::runner::AcquisitionOutcome"
+coarse_projection = "acquisition_code"
+testimonial_surfaces = [
+  "collection-cli",
+  "daemon-log",
+  "sqlite-history",
+  "status-read-model",
+  "local-api",
+]
+non_testimonial_surfaces = ["coarse-index-columns"]
+
+[[controls.AC-R4-001.surface_evidence]]
+surface = "collection-cli"
+command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::forcing_exchange_timeout_phase_survives_dry_and_status_surfaces", "--", "--ignored", "--exact"]
+
+[[controls.AC-R4-001.surface_evidence]]
+surface = "daemon-log"
+command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::forcing_exchange_timeout_phase_survives_dry_and_status_surfaces", "--", "--ignored", "--exact"]
+
+[[controls.AC-R4-001.surface_evidence]]
+surface = "sqlite-history"
+command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::status_store_and_backup_preserve_same_code_distinct_detail", "--", "--exact"]
+
+[[controls.AC-R4-001.surface_evidence]]
+surface = "status-read-model"
+command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::forcing_exchange_timeout_phase_survives_dry_and_status_surfaces", "--", "--ignored", "--exact"]
+
+[[controls.AC-R4-001.surface_evidence]]
+surface = "local-api"
+command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::forcing_exchange_timeout_phase_survives_dry_and_status_surfaces", "--", "--ignored", "--exact"]
+
+[[controls.AC-R4-001.mutations]]
+id = "delete-acquisition-detail"
+operator = "delete-detail"
+file = "crates/nq-core/src/engine.rs"
+find = """        AcquisitionOutcome::SpawnFailed { message }
+        | AcquisitionOutcome::RequestWriteFailed { message }
+        | AcquisitionOutcome::MalformedFraming { message }
+        | AcquisitionOutcome::MalformedJson { message }
+        | AcquisitionOutcome::Disconnect { message }
+        | AcquisitionOutcome::CarrierStartupFailed { message }
+        | AcquisitionOutcome::IoFailed { message } => Some(message.clone()),"""
+replace = """        AcquisitionOutcome::SpawnFailed { message }
+        | AcquisitionOutcome::RequestWriteFailed { message }
+        | AcquisitionOutcome::MalformedFraming { message }
+        | AcquisitionOutcome::MalformedJson { message }
+        | AcquisitionOutcome::Disconnect { message }
+        | AcquisitionOutcome::IoFailed { message } => Some(message.clone()),
+        AcquisitionOutcome::CarrierStartupFailed { .. } => None,"""
+command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::carrier_startup_detail_survives_the_cli_and_archival_surfaces", "--", "--exact"]
+expect = "check_fails"
+
+[controls.AC-R4-002]
+runtime_type = "nq_core::runner::AcquisitionOutcome"
+coarse_projection = "acquisition_code"
+
+[controls.AC-R4-003]
+runtime_type = "nq_core::CollectionOutcome"
+coarse_projection = "status_events.code"
+testimonial_surfaces = ["sqlite-history", "status-read-model"]
+
+[[controls.AC-R4-003.surface_evidence]]
+surface = "sqlite-history"
+command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::status_store_and_backup_preserve_same_code_distinct_detail", "--", "--exact"]
+
+[[controls.AC-R4-003.surface_evidence]]
+surface = "status-read-model"
+command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::forcing_exchange_timeout_phase_survives_dry_and_status_surfaces", "--", "--ignored", "--exact"]
+
+[[controls.AC-R4-003.mutations]]
+id = "rederive-status-detail-from-code"
+operator = "recompute-from-code"
+file = "crates/nq-core/src/engine.rs"
+find = "            detail: canonical(outcome)?,"
+replace = "            detail: canonical(&json!({\"code\": code}))?,"
+command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::status_store_and_backup_preserve_same_code_distinct_detail", "--", "--exact"]
+expect = "check_fails"

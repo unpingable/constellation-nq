@@ -7,8 +7,9 @@ use std::{
 };
 
 use nq_protocol::{
-    EvidenceReport, FramingError, ResponseOutcome, ValidationError, canonical_json_bytes,
-    decode_ndjson, encode_ndjson, parse_request, parse_response, semantic_digest, validate_report,
+    EvidenceReport, FramingError, HelperResponse, Refusal, RefusalBoundary, RefusalCode,
+    ResponseOutcome, ValidationError, canonical_json_bytes, decode_ndjson, encode_ndjson,
+    parse_request, parse_response, semantic_digest, validate_report,
 };
 use serde_json::{Value, json};
 
@@ -40,6 +41,39 @@ fn positive_corpus_exercises_all_result_planes() {
     let response =
         parse_response(&request, RESPONSE_REFUSAL).expect("valid typed refusal response");
     assert!(matches!(response.outcome, ResponseOutcome::Refusal { .. }));
+}
+
+#[test]
+fn same_code_distinct_refusals_remain_distinct_on_wire() {
+    let request = parse_request(REQUEST).expect("valid request fixture");
+    let refusal = |retriable, details| Refusal {
+        responsible_instance_id: request.instance_id.clone(),
+        boundary: RefusalBoundary::Collection,
+        code: RefusalCode::CollectionFailed,
+        message: "backend collection failed".to_owned(),
+        retriable,
+        details,
+    };
+    let transient = HelperResponse::refusal(
+        &request,
+        refusal(true, json!({"errno": "EAGAIN", "attempt": 1})),
+    );
+    let permanent = HelperResponse::refusal(
+        &request,
+        refusal(false, json!({"errno": "ENODEV", "device": "nvme0"})),
+    );
+
+    let transient_wire = encode_ndjson(&transient).expect("transient refusal wire frame");
+    let permanent_wire = encode_ndjson(&permanent).expect("permanent refusal wire frame");
+    assert_ne!(transient_wire, permanent_wire);
+    assert_eq!(
+        parse_response(&request, &transient_wire).expect("parse transient refusal"),
+        transient
+    );
+    assert_eq!(
+        parse_response(&request, &permanent_wire).expect("parse permanent refusal"),
+        permanent
+    );
 }
 
 #[test]

@@ -9,7 +9,7 @@ readonly DEFAULT_TIMEOUT=2700
 readonly SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 
 image= image_sha= deb= deb_sha= output=
-check_guest_results=
+check_guest_results= check_evidence_seal=
 ssh_port=22222
 timeout_seconds=$DEFAULT_TIMEOUT
 preflight_only=false
@@ -22,6 +22,9 @@ usage() {
 Usage: run-noble-qemu.sh --image IMAGE --image-sha256 SHA256 \
   --deb DIST_DEB --deb-sha256 SHA256 --output NEW_ABSOLUTE_DIRECTORY \
   [--ssh-port PORT] [--timeout-seconds 600..7200] [--preflight-only]
+
+       run-noble-qemu.sh --check-guest-results DIRECTORY
+       run-noble-qemu.sh --check-evidence-seal DIRECTORY
 
 The bounded v1 harness accepts only a self-contained qcow2 Ubuntu 24.04 AMD64
 cloud image and an amd64 nq-ng Debian package. Both exact hashes are mandatory.
@@ -114,6 +117,16 @@ readonly REQUIRED_GUEST_CHECKS=(
     SOCKET_CONTRACT_REFUSAL
 )
 
+# Files whose bytes are directly consumed when a completed run is reopened for
+# admission. They must be regular, non-symlink files and must occur in the seal;
+# an otherwise self-consistent manifest over an incomplete run is not enough.
+readonly REQUIRED_SEALED_EVIDENCE=(
+    INPUTS
+    nq-ng.deb
+    guest-results/RESULT
+    guest-results/REQUIRED_CHECKS
+)
+
 verify_guest_results() {
     local dir=$1 check
     [[ ! -e "$dir/GUEST_REFUSAL" ]] \
@@ -127,6 +140,95 @@ verify_guest_results() {
     done
 }
 
+# Emit the one canonical manifest for a run directory. Only the three
+# intentionally post-seal/top-level files are outside its inventory. In
+# particular, a RESULT at any depth below the run root is evidence and is
+# sealed.
+canonical_evidence_manifest() {
+    local dir=$1
+    (
+        cd -- "$dir"
+        find . -type f \
+            ! -path './ARTIFACTS.sha256' \
+            ! -path './RESULT' \
+            ! -path './seal.log' \
+            -print0 \
+            | LC_ALL=C sort -z \
+            | xargs -0 -r sha256sum
+    )
+}
+
+require_exact_physical_evidence_root() {
+    local dir=$1 physical
+    [[ $dir == /* ]] \
+        || refuse "evidence root is not an exact physical absolute directory: $dir"
+    physical=$(cd -- "$dir" 2>/dev/null && pwd -P) \
+        || refuse "evidence root is not an exact physical absolute directory: $dir"
+    [[ $dir == "$physical" && -d $dir && ! -L $dir ]] \
+        || refuse "evidence root is not an exact physical absolute directory: $dir"
+}
+
+verify_evidence_seal() {
+    local dir=$1 evidence unexpected actual_manifest_hash expected_manifest_hash
+    # Bind reopening to one physical run-directory identity. Besides direct
+    # symlinks, this rejects aliases through symlinked ancestors, trailing
+    # slashes, and dot components that can defeat a leaf-only `-L` check.
+    require_exact_physical_evidence_root "$dir"
+    [[ -f $dir/ARTIFACTS.sha256 && ! -L $dir/ARTIFACTS.sha256 ]] \
+        || refuse "artifact manifest is not a regular non-symlink file"
+    [[ -d $dir/guest-results && ! -L $dir/guest-results ]] \
+        || refuse "guest-results is not a non-symlink directory"
+    for evidence in "${REQUIRED_SEALED_EVIDENCE[@]}"; do
+        [[ -f $dir/$evidence && ! -L $dir/$evidence ]] \
+            || refuse "required sealed evidence is not a regular non-symlink file: ./$evidence"
+    done
+    unexpected=$(find "$dir" ! -type d ! -type f -print -quit) \
+        || refuse "cannot inspect evidence entry types"
+    [[ -z $unexpected ]] \
+        || refuse "evidence tree contains a non-regular entry: $unexpected"
+    verify_guest_results "$dir/guest-results"
+    actual_manifest_hash=$(actual_hash "$dir/ARTIFACTS.sha256") \
+        || refuse "cannot hash artifact manifest"
+    expected_manifest_hash=$(canonical_evidence_manifest "$dir" \
+        | sha256sum | awk '{print $1}') \
+        || refuse "cannot recompute canonical artifact manifest"
+    [[ $actual_manifest_hash == "$expected_manifest_hash" ]] \
+        || refuse "artifact manifest is not an exact canonical inventory of sealed evidence"
+    # Check coverage before following any path written in the manifest. Exact
+    # byte equality with the canonical inventory confines every check target to
+    # a regular file found below the run root.
+    (cd -- "$dir" && sha256sum --strict --quiet --check ARTIFACTS.sha256) \
+        || refuse "artifact manifest did not verify"
+}
+
+# The write-last top-level RESULT is intentionally outside the cryptographic
+# inventory, but a read-only reopening of a completed run must still admit its
+# semantics. Extra operator-note lines are allowed; contradictory, duplicate,
+# absent, empty, or symlinked completion fields are not.
+verify_completed_result() {
+    local dir=$1
+    [[ ! -e $dir/REFUSAL && ! -L $dir/REFUSAL ]] \
+        || refuse "completed run contains a top-level refusal"
+    [[ -f $dir/RESULT && ! -L $dir/RESULT ]] \
+        || refuse "top-level result is not a regular non-symlink file"
+    awk '
+        $0 == "result=pass" { pass += 1; next }
+        /^result=/ { contradictory = 1; next }
+        /^completed_at=/ {
+            completed_fields += 1
+            if ($0 ~ /^completed_at=[0-9][0-9][0-9][0-9]-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$/) {
+                completed_valid += 1
+            }
+            next
+        }
+        END {
+            exit !(pass == 1 && contradictory == 0 &&
+                   completed_fields == 1 && completed_valid == 1)
+        }
+    ' "$dir/RESULT" \
+        || refuse "top-level result is not one unambiguous completed pass"
+}
+
 while (($#)); do
     case $1 in
         --image) image=${2-}; shift 2 ;;
@@ -138,6 +240,7 @@ while (($#)); do
         --timeout-seconds) timeout_seconds=${2-}; shift 2 ;;
         --preflight-only) preflight_only=true; shift ;;
         --check-guest-results) check_guest_results=${2-}; shift 2 ;;
+        --check-evidence-seal) check_evidence_seal=${2-}; shift 2 ;;
         --help|-h) usage; exit 0 ;;
         *) usage >&2; printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
     esac
@@ -149,6 +252,17 @@ if [[ -n $check_guest_results ]]; then
     step=guest-result-selfcheck
     verify_guest_results "$check_guest_results"
     printf 'guest results verified: %s\n' "$check_guest_results"
+    exit 0
+fi
+
+# Read-only, independently invocable reopening check for a completed evidence
+# directory. The static harness uses it to exercise hostile manifest cases.
+if [[ -n $check_evidence_seal ]]; then
+    step=evidence-seal-selfcheck
+    require_exact_physical_evidence_root "$check_evidence_seal"
+    verify_completed_result "$check_evidence_seal"
+    verify_evidence_seal "$check_evidence_seal"
+    printf 'evidence seal verified: %s\n' "$check_evidence_seal"
     exit 0
 fi
 
@@ -183,7 +297,7 @@ printf 'started_at=%s\nscratch_cap_bytes=%s\nminimum_free_kib=%s\n' \
 
 step=prerequisites
 for command in awk cp date df dpkg-deb du find grep mkdir mv python3 qemu-img \
-    qemu-system-x86_64 scp setsid sha256sum ssh ssh-keygen ss stat sync timeout xargs xorriso; do
+    qemu-system-x86_64 scp setsid sha256sum sort ssh ssh-keygen ss stat sync timeout xargs xorriso; do
     need "$command"
 done
 
@@ -496,15 +610,12 @@ rm -f "$output/ssh-identity"
 exec >>"$output/seal.log" 2>&1
 sync
 # Manifest over every sealed artifact (the frozen host.log included), excluding
-# the manifest itself, the not-yet-written pass marker, and the post-seal log.
-(
-    cd "$output"
-    find . -type f ! -name ARTIFACTS.sha256 ! -name RESULT ! -name seal.log -print0 \
-        | sort -z | xargs -0 sha256sum
-) >"$output/ARTIFACTS.sha256"
+# only the top-level manifest itself, the not-yet-written top-level pass marker,
+# and the top-level post-seal log. Nested files with any of those basenames are
+# evidence and remain inside the seal.
+canonical_evidence_manifest "$output" >"$output/ARTIFACTS.sha256"
 # No pass marker may exist until the manifest verifies.
-(cd "$output" && sha256sum --quiet --check ARTIFACTS.sha256) \
-    || refuse "artifact manifest did not verify"
+verify_evidence_seal "$output"
 # The pass marker is written last: an early, partial, or failed run cannot
 # produce a result that appears sealed.
 printf 'result=pass\ncompleted_at=%s\n' "$(date --iso-8601=seconds)" >"$output/RESULT"

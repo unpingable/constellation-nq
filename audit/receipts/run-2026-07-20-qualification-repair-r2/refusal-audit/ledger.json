@@ -1,0 +1,3492 @@
+{
+  "schema": "admissibility-audit.ledger/v1",
+  "tool": {
+    "name": "admissibility-audit",
+    "version": "0.1.0"
+  },
+  "as_of": "2026-07-20",
+  "authority_fence": "lean_theorems_are_specification_evidence_and_never_runtime_authority",
+  "honest_boundary": "Lean proves the abstract law. This audit demonstrates that the pinned runtime artifact corresponds to that law under the explicit assumptions listed here. It is not a verified-implementation claim, and a green gate is never evidence that a Lean theorem holds.",
+  "lean_baseline": {
+    "repository": "lean",
+    "revision": "ff491b808ebeab2a132d9ade46d234cf85dcfbe9",
+    "tree": "72cba07e35588e9f67c252b0bd92cf0523ab178f",
+    "release": "14.0.0",
+    "worktree": "clean"
+  },
+  "target": {
+    "name": "nq-ng",
+    "path": ".",
+    "pin": {
+      "kind": "git",
+      "commit": "dd0d23f6c1339d4dbce8a44ed4d8b4e715629f71",
+      "dirty": true
+    }
+  },
+  "assumptions": [
+    "Forcing fixtures and commands are supplied by the target repo and trusted to test what they claim; the framework verifies exit codes, mutation-anchor uniqueness, and classification completeness — not fixture intent.",
+    "The static census is heuristic (string-returning functions with projection-shaped names); projections outside the heuristic must be declared in the manifest to be governed.",
+    "Lab specimens provide compatibility evidence about the framework's mechanics, never live testimony about any production estate."
+  ],
+  "families": [
+    {
+      "id": "AC-R1",
+      "rung": 1,
+      "title": "Domain transport and located diagnostics do not repair evidence",
+      "status": "inactive",
+      "note": "registered and pinned; no claim of executable coverage in this campaign",
+      "nonclaims": [
+        "Located ids are caller-supplied diagnostic labels, not authenticated origins or occurrence history.",
+        "Relocation is not repair; erasure recovers the Edges fold exactly."
+      ],
+      "controls": [
+        {
+          "id": "AC-R1-001",
+          "claim": "Re-labeling a verdict's domain or relocating its diagnostics must not change what it authorizes on any runtime surface.",
+          "verdict": "inactive",
+          "findings": [
+            {
+              "control": "AC-R1-001",
+              "family": "AC-R1",
+              "verdict": "inactive",
+              "reason": "registered and pinned; no claim of executable coverage in this campaign",
+              "waived": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "AC-R2",
+      "rung": 2,
+      "title": "Governed-family signature: candidate is not authority",
+      "status": "inactive",
+      "note": "registered and pinned; no claim of executable coverage in this campaign",
+      "nonclaims": [
+        "No runtime correspondence or conformance is proved by rung 2.",
+        "Authority is derived (Nonempty witness); there is no alternative introduction rule."
+      ],
+      "controls": [
+        {
+          "id": "AC-R2-001",
+          "claim": "No runtime boolean check that erases which claim was witnessed may gate authority-bearing paths.",
+          "verdict": "inactive",
+          "findings": [
+            {
+              "control": "AC-R2-001",
+              "family": "AC-R2",
+              "verdict": "inactive",
+              "reason": "registered and pinned; no claim of executable coverage in this campaign",
+              "waived": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "AC-R3",
+      "rung": 3,
+      "title": "Concrete instances: no endpoint-only check is a faithful judge",
+      "status": "inactive",
+      "note": "registered and pinned; no claim of executable coverage in this campaign",
+      "nonclaims": [
+        "Staleness is a licensing judgment, not negation.",
+        "No discharge/payment lifecycle is proved."
+      ],
+      "controls": [
+        {
+          "id": "AC-R3-001",
+          "claim": "Runtime checks that observe only endpoints (final state, exit label) must not stand in for history-bearing authority judgments.",
+          "verdict": "inactive",
+          "findings": [
+            {
+              "control": "AC-R3-001",
+              "family": "AC-R3",
+              "verdict": "inactive",
+              "reason": "registered and pinned; no claim of executable coverage in this campaign",
+              "waived": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "AC-R4",
+      "rung": 4,
+      "title": "Refusal-packet losslessness",
+      "status": "active",
+      "nonclaims": [
+        "The Lean spine serializes no witness identity or multiplicity; witnesses remain recoverable from the family's evidence-returning checker.",
+        "No runtime serialization, canonical byte encoding, or cryptographic commitment is proved by rung 4.",
+        "SpineEncoding is permissive and must never be described as lossless; LosslessEncoding is the only exact contract."
+      ],
+      "controls": [
+        {
+          "id": "AC-R4-001",
+          "claim": "Rich refusal payloads remain distinguishable through every testimonial boundary: same coarse code with distinct witnesses must stay distinguishable on each testimonial surface.",
+          "verdict": "fail",
+          "findings": [
+            {
+              "control": "AC-R4-001",
+              "family": "AC-R4",
+              "surface": "protocol-wire",
+              "verdict": "pass",
+              "reason": "forcing evidence command passed",
+              "evidence": [
+                "command:AC-R4-001:protocol-wire"
+              ],
+              "bucket": "invariant",
+              "waived": false
+            },
+            {
+              "control": "AC-R4-001",
+              "family": "AC-R4",
+              "surface": "collection-cli",
+              "verdict": "fail",
+              "reason": "forcing evidence command failed (exit Some(101))",
+              "evidence": [
+                "command:AC-R4-001:collection-cli"
+              ],
+              "bucket": "predicate_collapse",
+              "waived": false
+            },
+            {
+              "control": "AC-R4-001",
+              "family": "AC-R4",
+              "surface": "daemon-log",
+              "verdict": "fail",
+              "reason": "forcing evidence command failed (exit Some(101))",
+              "evidence": [
+                "command:AC-R4-001:daemon-log"
+              ],
+              "bucket": "predicate_collapse",
+              "waived": false
+            },
+            {
+              "control": "AC-R4-001",
+              "family": "AC-R4",
+              "surface": "sqlite-history",
+              "verdict": "pass",
+              "reason": "forcing evidence command passed",
+              "evidence": [
+                "command:AC-R4-001:sqlite-history"
+              ],
+              "bucket": "invariant",
+              "waived": false
+            },
+            {
+              "control": "AC-R4-001",
+              "family": "AC-R4",
+              "surface": "status-read-model",
+              "verdict": "fail",
+              "reason": "forcing evidence command failed (exit Some(101))",
+              "evidence": [
+                "command:AC-R4-001:status-read-model"
+              ],
+              "bucket": "predicate_collapse",
+              "waived": false
+            },
+            {
+              "control": "AC-R4-001",
+              "family": "AC-R4",
+              "surface": "local-api",
+              "verdict": "fail",
+              "reason": "forcing evidence command failed (exit Some(101))",
+              "evidence": [
+                "command:AC-R4-001:local-api"
+              ],
+              "bucket": "predicate_collapse",
+              "waived": false
+            },
+            {
+              "control": "AC-R4-001",
+              "family": "AC-R4",
+              "surface": "cold-archive",
+              "verdict": "pass",
+              "reason": "forcing evidence command passed",
+              "evidence": [
+                "command:AC-R4-001:cold-archive"
+              ],
+              "bucket": "invariant",
+              "waived": false
+            },
+            {
+              "control": "AC-R4-001",
+              "family": "AC-R4",
+              "verdict": "pass",
+              "reason": "mutation delete-acquisition-detail bit (check went red)",
+              "evidence": [
+                "mutation:AC-R4-001:delete-acquisition-detail"
+              ],
+              "mutation": "delete-acquisition-detail",
+              "bucket": "context_sensitive",
+              "waived": false
+            }
+          ]
+        },
+        {
+          "id": "AC-R4-002",
+          "claim": "Every coarse projection over a refusal/outcome type is classified, and non-testimonial projections carry explicit allowed/forbidden uses.",
+          "verdict": "pass",
+          "findings": [
+            {
+              "control": "AC-R4-002",
+              "family": "AC-R4",
+              "verdict": "pass",
+              "reason": "projection semantic_report_status is classified",
+              "evidence": [
+                "projection:crates/nq-core/src/engine.rs:semantic_report_status"
+              ],
+              "waived": false
+            },
+            {
+              "control": "AC-R4-002",
+              "family": "AC-R4",
+              "verdict": "pass",
+              "reason": "projection acquisition_code is classified",
+              "evidence": [
+                "projection:crates/nq-core/src/engine.rs:acquisition_code"
+              ],
+              "waived": false
+            },
+            {
+              "control": "AC-R4-002",
+              "family": "AC-R4",
+              "verdict": "pass",
+              "reason": "projection as_str is classified",
+              "evidence": [
+                "projection:crates/nq-profiles/src/descriptor.rs:as_str"
+              ],
+              "waived": false
+            },
+            {
+              "control": "AC-R4-002",
+              "family": "AC-R4",
+              "verdict": "pass",
+              "reason": "projection as_str is classified",
+              "evidence": [
+                "projection:crates/nq-profiles/src/identity.rs:as_str"
+              ],
+              "waived": false
+            },
+            {
+              "control": "AC-R4-002",
+              "family": "AC-R4",
+              "verdict": "pass",
+              "reason": "projection as_str is classified",
+              "evidence": [
+                "projection:crates/nq-protocol/src/canonical.rs:as_str"
+              ],
+              "waived": false
+            }
+          ]
+        },
+        {
+          "id": "AC-R4-003",
+          "claim": "Stored refusal outcomes are rendered from stored detail, never re-derived from the coarse code.",
+          "verdict": "fail",
+          "findings": [
+            {
+              "control": "AC-R4-003",
+              "family": "AC-R4",
+              "surface": "sqlite-history",
+              "verdict": "pass",
+              "reason": "forcing evidence command passed",
+              "evidence": [
+                "command:AC-R4-003:sqlite-history"
+              ],
+              "bucket": "invariant",
+              "waived": false
+            },
+            {
+              "control": "AC-R4-003",
+              "family": "AC-R4",
+              "surface": "status-read-model",
+              "verdict": "fail",
+              "reason": "forcing evidence command failed (exit Some(101))",
+              "evidence": [
+                "command:AC-R4-003:status-read-model"
+              ],
+              "bucket": "predicate_collapse",
+              "waived": false
+            },
+            {
+              "control": "AC-R4-003",
+              "family": "AC-R4",
+              "verdict": "pass",
+              "reason": "mutation rederive-status-detail-from-code bit (check went red)",
+              "evidence": [
+                "mutation:AC-R4-003:rederive-status-detail-from-code"
+              ],
+              "mutation": "rederive-status-detail-from-code",
+              "bucket": "context_sensitive",
+              "waived": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "AC-R5",
+      "rung": 5,
+      "title": "Indexed comparison: collapsed projections recover nothing",
+      "status": "inactive",
+      "note": "registered and pinned; no claim of executable coverage in this campaign",
+      "nonclaims": [
+        "The concrete seven-entry comparison ledger is research-tree evidence custody, not public surface.",
+        "Digests do not prove comparison laws."
+      ],
+      "controls": [
+        {
+          "id": "AC-R5-001",
+          "claim": "Byte equality of projections never transports authority: promotion eligibility requires the exact stored basis, not a byte-identical reconstruction.",
+          "verdict": "inactive",
+          "findings": [
+            {
+              "control": "AC-R5-001",
+              "family": "AC-R5",
+              "verdict": "inactive",
+              "reason": "registered and pinned; no claim of executable coverage in this campaign",
+              "waived": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "AC-R6",
+      "rung": 6,
+      "title": "Stored decisions are rendered, never re-decided",
+      "status": "inactive",
+      "note": "registered and pinned; no claim of executable coverage in this campaign",
+      "nonclaims": [
+        "The verdict serializes refusals, not accepted witness identity.",
+        "Rollback resistance beyond the stored pair requires store-epoch ceremony not proved here."
+      ],
+      "controls": [
+        {
+          "id": "AC-R6-001",
+          "claim": "Every downstream view of a stored decision renders the stored pair; no consumer re-runs the native decision procedure.",
+          "verdict": "inactive",
+          "findings": [
+            {
+              "control": "AC-R6-001",
+              "family": "AC-R6",
+              "verdict": "inactive",
+              "reason": "registered and pinned; no claim of executable coverage in this campaign",
+              "waived": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "AC-R7",
+      "rung": 7,
+      "title": "Origin and history non-transport; lifecycle non-resurrection",
+      "status": "inactive",
+      "note": "registered and pinned; no claim of executable coverage in this campaign",
+      "nonclaims": [
+        "Sequential replay protection only (BreakGlass/Lifecycle.lean:423); no claim over arbitrary concurrent or restart adversaries.",
+        "No origin-allocator uniqueness, attestor honesty, runtime invocation counts, or runtime conformance.",
+        "No byte serialization or cryptographic commitment; settlement standing does not imply audit cleanliness; custody does not imply standing or authority."
+      ],
+      "controls": [
+        {
+          "id": "AC-R7-001",
+          "claim": "Origin identifiers travel with witnesses and authority across every runtime boundary; foreign-origin claims are structurally refused, not coerced.",
+          "verdict": "inactive",
+          "findings": [
+            {
+              "control": "AC-R7-001",
+              "family": "AC-R7",
+              "verdict": "inactive",
+              "reason": "registered and pinned; no claim of executable coverage in this campaign",
+              "waived": false
+            }
+          ]
+        },
+        {
+          "id": "AC-R7-002",
+          "claim": "Standing is never serialized and never resurrected: restart preserves custody of records but not live standing; settled or committed lifecycles refuse further exceptional attempts.",
+          "verdict": "inactive",
+          "findings": [
+            {
+              "control": "AC-R7-002",
+              "family": "AC-R7",
+              "verdict": "inactive",
+              "reason": "registered and pinned; no claim of executable coverage in this campaign",
+              "waived": false
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ANNEX-NR",
+      "title": "Temporal non-resurrection (outside-calculus annex)",
+      "status": "inactive",
+      "note": "registered and pinned; no claim of executable coverage in this campaign",
+      "nonclaims": [
+        "These declarations live in the broader Admissibility tree, not the v14 Calculus surface; the calculus's per-rung nonclaim fences do not cover them.",
+        "DeferredWitness Layer B (budget/refresh) is a declared open frontier."
+      ],
+      "controls": [
+        {
+          "id": "ANNEX-NR-001",
+          "claim": "No runtime path revives retired sources by time passing, nor backfills standing for claims that already relied on it.",
+          "verdict": "inactive",
+          "findings": [
+            {
+              "control": "ANNEX-NR-001",
+              "family": "ANNEX-NR",
+              "verdict": "inactive",
+              "reason": "registered and pinned; no claim of executable coverage in this campaign",
+              "waived": false
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "evidence": [
+    {
+      "id": "projection:crates/nq-core/src/engine.rs:semantic_report_status",
+      "kind": "projection_candidate",
+      "description": "free fn semantic_report_status() -> &'static str in crates/nq-core/src/engine.rs",
+      "data": {
+        "file": "crates/nq-core/src/engine.rs",
+        "function": "semantic_report_status",
+        "owner_type": null,
+        "return_type": "&'static str"
+      }
+    },
+    {
+      "id": "projection:crates/nq-core/src/engine.rs:acquisition_code",
+      "kind": "projection_candidate",
+      "description": "free fn acquisition_code() -> &'static str in crates/nq-core/src/engine.rs",
+      "data": {
+        "file": "crates/nq-core/src/engine.rs",
+        "function": "acquisition_code",
+        "owner_type": null,
+        "return_type": "&'static str"
+      }
+    },
+    {
+      "id": "projection:crates/nq-profiles/src/descriptor.rs:as_str",
+      "kind": "projection_candidate",
+      "description": "ProfileDigest fn as_str() -> &str in crates/nq-profiles/src/descriptor.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/descriptor.rs",
+        "function": "as_str",
+        "owner_type": "ProfileDigest",
+        "return_type": "&str"
+      }
+    },
+    {
+      "id": "projection:crates/nq-profiles/src/identity.rs:as_str",
+      "kind": "projection_candidate",
+      "description": "ProfileSemanticId fn as_str() -> &str in crates/nq-profiles/src/identity.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/identity.rs",
+        "function": "as_str",
+        "owner_type": "ProfileSemanticId",
+        "return_type": "&str"
+      }
+    },
+    {
+      "id": "projection:crates/nq-protocol/src/canonical.rs:as_str",
+      "kind": "projection_candidate",
+      "description": "Sha256Digest fn as_str() -> &str in crates/nq-protocol/src/canonical.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/canonical.rs",
+        "function": "as_str",
+        "owner_type": "Sha256Digest",
+        "return_type": "&str"
+      }
+    },
+    {
+      "id": "serialization:ArchiveMetadata:Serialize",
+      "kind": "serialization_impl",
+      "description": "ArchiveMetadata implements Serialize via derive in crates/nq-app/src/archive.rs",
+      "data": {
+        "file": "crates/nq-app/src/archive.rs",
+        "trait": "Serialize",
+        "type": "ArchiveMetadata",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ArchiveMetadata:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ArchiveMetadata implements Deserialize via derive in crates/nq-app/src/archive.rs",
+      "data": {
+        "file": "crates/nq-app/src/archive.rs",
+        "trait": "Deserialize",
+        "type": "ArchiveMetadata",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ArchiveReport:Serialize",
+      "kind": "serialization_impl",
+      "description": "ArchiveReport implements Serialize via derive in crates/nq-app/src/archive.rs",
+      "data": {
+        "file": "crates/nq-app/src/archive.rs",
+        "trait": "Serialize",
+        "type": "ArchiveReport",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:VerifyReport:Serialize",
+      "kind": "serialization_impl",
+      "description": "VerifyReport implements Serialize via derive in crates/nq-app/src/archive.rs",
+      "data": {
+        "file": "crates/nq-app/src/archive.rs",
+        "trait": "Serialize",
+        "type": "VerifyReport",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:AdmissionLock:Serialize",
+      "kind": "serialization_impl",
+      "description": "AdmissionLock implements Serialize via derive in crates/nq-core/src/admission.rs",
+      "data": {
+        "file": "crates/nq-core/src/admission.rs",
+        "trait": "Serialize",
+        "type": "AdmissionLock",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:AdmissionLock:Deserialize",
+      "kind": "serialization_impl",
+      "description": "AdmissionLock implements Deserialize via derive in crates/nq-core/src/admission.rs",
+      "data": {
+        "file": "crates/nq-core/src/admission.rs",
+        "trait": "Deserialize",
+        "type": "AdmissionLock",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:AdmittedProfile:Serialize",
+      "kind": "serialization_impl",
+      "description": "AdmittedProfile implements Serialize via derive in crates/nq-core/src/admission.rs",
+      "data": {
+        "file": "crates/nq-core/src/admission.rs",
+        "trait": "Serialize",
+        "type": "AdmittedProfile",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:AdmittedProfile:Deserialize",
+      "kind": "serialization_impl",
+      "description": "AdmittedProfile implements Deserialize via derive in crates/nq-core/src/admission.rs",
+      "data": {
+        "file": "crates/nq-core/src/admission.rs",
+        "trait": "Deserialize",
+        "type": "AdmittedProfile",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ConformanceReceipt:Serialize",
+      "kind": "serialization_impl",
+      "description": "ConformanceReceipt implements Serialize via derive in crates/nq-core/src/admission.rs",
+      "data": {
+        "file": "crates/nq-core/src/admission.rs",
+        "trait": "Serialize",
+        "type": "ConformanceReceipt",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ConformanceReceipt:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ConformanceReceipt implements Deserialize via derive in crates/nq-core/src/admission.rs",
+      "data": {
+        "file": "crates/nq-core/src/admission.rs",
+        "trait": "Deserialize",
+        "type": "ConformanceReceipt",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:OperatorIdentity:Serialize",
+      "kind": "serialization_impl",
+      "description": "OperatorIdentity implements Serialize via derive in crates/nq-core/src/admission.rs",
+      "data": {
+        "file": "crates/nq-core/src/admission.rs",
+        "trait": "Serialize",
+        "type": "OperatorIdentity",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:OperatorIdentity:Deserialize",
+      "kind": "serialization_impl",
+      "description": "OperatorIdentity implements Deserialize via derive in crates/nq-core/src/admission.rs",
+      "data": {
+        "file": "crates/nq-core/src/admission.rs",
+        "trait": "Deserialize",
+        "type": "OperatorIdentity",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:AdmissionVerification:Serialize",
+      "kind": "serialization_impl",
+      "description": "AdmissionVerification implements Serialize via derive in crates/nq-core/src/admission.rs",
+      "data": {
+        "file": "crates/nq-core/src/admission.rs",
+        "trait": "Serialize",
+        "type": "AdmissionVerification",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:AdmissionVerification:Deserialize",
+      "kind": "serialization_impl",
+      "description": "AdmissionVerification implements Deserialize via derive in crates/nq-core/src/admission.rs",
+      "data": {
+        "file": "crates/nq-core/src/admission.rs",
+        "trait": "Deserialize",
+        "type": "AdmissionVerification",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:NqConfig:Serialize",
+      "kind": "serialization_impl",
+      "description": "NqConfig implements Serialize via derive in crates/nq-core/src/config.rs",
+      "data": {
+        "file": "crates/nq-core/src/config.rs",
+        "trait": "Serialize",
+        "type": "NqConfig",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:NqConfig:Deserialize",
+      "kind": "serialization_impl",
+      "description": "NqConfig implements Deserialize via derive in crates/nq-core/src/config.rs",
+      "data": {
+        "file": "crates/nq-core/src/config.rs",
+        "trait": "Deserialize",
+        "type": "NqConfig",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:WatcherConfig:Serialize",
+      "kind": "serialization_impl",
+      "description": "WatcherConfig implements Serialize via derive in crates/nq-core/src/config.rs",
+      "data": {
+        "file": "crates/nq-core/src/config.rs",
+        "trait": "Serialize",
+        "type": "WatcherConfig",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:WatcherConfig:Deserialize",
+      "kind": "serialization_impl",
+      "description": "WatcherConfig implements Deserialize via derive in crates/nq-core/src/config.rs",
+      "data": {
+        "file": "crates/nq-core/src/config.rs",
+        "trait": "Deserialize",
+        "type": "WatcherConfig",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:CommandConfig:Serialize",
+      "kind": "serialization_impl",
+      "description": "CommandConfig implements Serialize via derive in crates/nq-core/src/config.rs",
+      "data": {
+        "file": "crates/nq-core/src/config.rs",
+        "trait": "Serialize",
+        "type": "CommandConfig",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:CommandConfig:Deserialize",
+      "kind": "serialization_impl",
+      "description": "CommandConfig implements Deserialize via derive in crates/nq-core/src/config.rs",
+      "data": {
+        "file": "crates/nq-core/src/config.rs",
+        "trait": "Deserialize",
+        "type": "CommandConfig",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:Carrier:Serialize",
+      "kind": "serialization_impl",
+      "description": "Carrier implements Serialize via derive in crates/nq-core/src/config.rs",
+      "data": {
+        "file": "crates/nq-core/src/config.rs",
+        "trait": "Serialize",
+        "type": "Carrier",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:Carrier:Deserialize",
+      "kind": "serialization_impl",
+      "description": "Carrier implements Deserialize via derive in crates/nq-core/src/config.rs",
+      "data": {
+        "file": "crates/nq-core/src/config.rs",
+        "trait": "Deserialize",
+        "type": "Carrier",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ProfileSelection:Serialize",
+      "kind": "serialization_impl",
+      "description": "ProfileSelection implements Serialize via derive in crates/nq-core/src/config.rs",
+      "data": {
+        "file": "crates/nq-core/src/config.rs",
+        "trait": "Serialize",
+        "type": "ProfileSelection",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ProfileSelection:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ProfileSelection implements Deserialize via derive in crates/nq-core/src/config.rs",
+      "data": {
+        "file": "crates/nq-core/src/config.rs",
+        "trait": "Deserialize",
+        "type": "ProfileSelection",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ScopeConfig:Serialize",
+      "kind": "serialization_impl",
+      "description": "ScopeConfig implements Serialize via derive in crates/nq-core/src/config.rs",
+      "data": {
+        "file": "crates/nq-core/src/config.rs",
+        "trait": "Serialize",
+        "type": "ScopeConfig",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ScopeConfig:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ScopeConfig implements Deserialize via derive in crates/nq-core/src/config.rs",
+      "data": {
+        "file": "crates/nq-core/src/config.rs",
+        "trait": "Deserialize",
+        "type": "ScopeConfig",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:VantageConfig:Serialize",
+      "kind": "serialization_impl",
+      "description": "VantageConfig implements Serialize via derive in crates/nq-core/src/config.rs",
+      "data": {
+        "file": "crates/nq-core/src/config.rs",
+        "trait": "Serialize",
+        "type": "VantageConfig",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:VantageConfig:Deserialize",
+      "kind": "serialization_impl",
+      "description": "VantageConfig implements Deserialize via derive in crates/nq-core/src/config.rs",
+      "data": {
+        "file": "crates/nq-core/src/config.rs",
+        "trait": "Deserialize",
+        "type": "VantageConfig",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ScheduleConfig:Serialize",
+      "kind": "serialization_impl",
+      "description": "ScheduleConfig implements Serialize via derive in crates/nq-core/src/config.rs",
+      "data": {
+        "file": "crates/nq-core/src/config.rs",
+        "trait": "Serialize",
+        "type": "ScheduleConfig",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ScheduleConfig:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ScheduleConfig implements Deserialize via derive in crates/nq-core/src/config.rs",
+      "data": {
+        "file": "crates/nq-core/src/config.rs",
+        "trait": "Deserialize",
+        "type": "ScheduleConfig",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ResourceLimits:Serialize",
+      "kind": "serialization_impl",
+      "description": "ResourceLimits implements Serialize via derive in crates/nq-core/src/config.rs",
+      "data": {
+        "file": "crates/nq-core/src/config.rs",
+        "trait": "Serialize",
+        "type": "ResourceLimits",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ResourceLimits:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ResourceLimits implements Deserialize via derive in crates/nq-core/src/config.rs",
+      "data": {
+        "file": "crates/nq-core/src/config.rs",
+        "trait": "Deserialize",
+        "type": "ResourceLimits",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:CheckpointPolicy:Serialize",
+      "kind": "serialization_impl",
+      "description": "CheckpointPolicy implements Serialize via derive in crates/nq-core/src/config.rs",
+      "data": {
+        "file": "crates/nq-core/src/config.rs",
+        "trait": "Serialize",
+        "type": "CheckpointPolicy",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:CheckpointPolicy:Deserialize",
+      "kind": "serialization_impl",
+      "description": "CheckpointPolicy implements Deserialize via derive in crates/nq-core/src/config.rs",
+      "data": {
+        "file": "crates/nq-core/src/config.rs",
+        "trait": "Deserialize",
+        "type": "CheckpointPolicy",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:WatcherActionOutcome:Serialize",
+      "kind": "serialization_impl",
+      "description": "WatcherActionOutcome implements Serialize via derive in crates/nq-core/src/engine.rs",
+      "data": {
+        "file": "crates/nq-core/src/engine.rs",
+        "trait": "Serialize",
+        "type": "WatcherActionOutcome",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:BindingActionOutcome:Serialize",
+      "kind": "serialization_impl",
+      "description": "BindingActionOutcome implements Serialize via derive in crates/nq-core/src/engine.rs",
+      "data": {
+        "file": "crates/nq-core/src/engine.rs",
+        "trait": "Serialize",
+        "type": "BindingActionOutcome",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:CollectionOutcome:Serialize",
+      "kind": "serialization_impl",
+      "description": "CollectionOutcome implements Serialize via derive in crates/nq-core/src/engine.rs",
+      "data": {
+        "file": "crates/nq-core/src/engine.rs",
+        "trait": "Serialize",
+        "type": "CollectionOutcome",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:BindingMaterializationPlan:Serialize",
+      "kind": "serialization_impl",
+      "description": "BindingMaterializationPlan implements Serialize via derive in crates/nq-core/src/engine.rs",
+      "data": {
+        "file": "crates/nq-core/src/engine.rs",
+        "trait": "Serialize",
+        "type": "BindingMaterializationPlan",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:BindingMaterializationPlan:Deserialize",
+      "kind": "serialization_impl",
+      "description": "BindingMaterializationPlan implements Deserialize via derive in crates/nq-core/src/engine.rs",
+      "data": {
+        "file": "crates/nq-core/src/engine.rs",
+        "trait": "Deserialize",
+        "type": "BindingMaterializationPlan",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:AdmissionRootIdentity:Serialize",
+      "kind": "serialization_impl",
+      "description": "AdmissionRootIdentity implements Serialize via derive in crates/nq-core/src/engine.rs",
+      "data": {
+        "file": "crates/nq-core/src/engine.rs",
+        "trait": "Serialize",
+        "type": "AdmissionRootIdentity",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:AdmissionRootIdentity:Deserialize",
+      "kind": "serialization_impl",
+      "description": "AdmissionRootIdentity implements Deserialize via derive in crates/nq-core/src/engine.rs",
+      "data": {
+        "file": "crates/nq-core/src/engine.rs",
+        "trait": "Deserialize",
+        "type": "AdmissionRootIdentity",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ExecutionIdentity:Serialize",
+      "kind": "serialization_impl",
+      "description": "ExecutionIdentity implements Serialize via derive in crates/nq-core/src/identity.rs",
+      "data": {
+        "file": "crates/nq-core/src/identity.rs",
+        "trait": "Serialize",
+        "type": "ExecutionIdentity",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ExecutionIdentity:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ExecutionIdentity implements Deserialize via derive in crates/nq-core/src/identity.rs",
+      "data": {
+        "file": "crates/nq-core/src/identity.rs",
+        "trait": "Deserialize",
+        "type": "ExecutionIdentity",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ExecutionDirectory:Serialize",
+      "kind": "serialization_impl",
+      "description": "ExecutionDirectory implements Serialize via derive in crates/nq-core/src/identity.rs",
+      "data": {
+        "file": "crates/nq-core/src/identity.rs",
+        "trait": "Serialize",
+        "type": "ExecutionDirectory",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ExecutionDirectory:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ExecutionDirectory implements Deserialize via derive in crates/nq-core/src/identity.rs",
+      "data": {
+        "file": "crates/nq-core/src/identity.rs",
+        "trait": "Deserialize",
+        "type": "ExecutionDirectory",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ExecutionArtifact:Serialize",
+      "kind": "serialization_impl",
+      "description": "ExecutionArtifact implements Serialize via derive in crates/nq-core/src/identity.rs",
+      "data": {
+        "file": "crates/nq-core/src/identity.rs",
+        "trait": "Serialize",
+        "type": "ExecutionArtifact",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ExecutionArtifact:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ExecutionArtifact implements Deserialize via derive in crates/nq-core/src/identity.rs",
+      "data": {
+        "file": "crates/nq-core/src/identity.rs",
+        "trait": "Deserialize",
+        "type": "ExecutionArtifact",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ArtifactRole:Serialize",
+      "kind": "serialization_impl",
+      "description": "ArtifactRole implements Serialize via derive in crates/nq-core/src/identity.rs",
+      "data": {
+        "file": "crates/nq-core/src/identity.rs",
+        "trait": "Serialize",
+        "type": "ArtifactRole",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ArtifactRole:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ArtifactRole implements Deserialize via derive in crates/nq-core/src/identity.rs",
+      "data": {
+        "file": "crates/nq-core/src/identity.rs",
+        "trait": "Deserialize",
+        "type": "ArtifactRole",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:FindingSnapshotV2:Serialize",
+      "kind": "serialization_impl",
+      "description": "FindingSnapshotV2 implements Serialize via derive in crates/nq-core/src/public.rs",
+      "data": {
+        "file": "crates/nq-core/src/public.rs",
+        "trait": "Serialize",
+        "type": "FindingSnapshotV2",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:FindingSnapshotV2:Deserialize",
+      "kind": "serialization_impl",
+      "description": "FindingSnapshotV2 implements Deserialize via derive in crates/nq-core/src/public.rs",
+      "data": {
+        "file": "crates/nq-core/src/public.rs",
+        "trait": "Deserialize",
+        "type": "FindingSnapshotV2",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:DetectorIdentity:Serialize",
+      "kind": "serialization_impl",
+      "description": "DetectorIdentity implements Serialize via derive in crates/nq-core/src/public.rs",
+      "data": {
+        "file": "crates/nq-core/src/public.rs",
+        "trait": "Serialize",
+        "type": "DetectorIdentity",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:DetectorIdentity:Deserialize",
+      "kind": "serialization_impl",
+      "description": "DetectorIdentity implements Deserialize via derive in crates/nq-core/src/public.rs",
+      "data": {
+        "file": "crates/nq-core/src/public.rs",
+        "trait": "Deserialize",
+        "type": "DetectorIdentity",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:PublicProfileIdentity:Serialize",
+      "kind": "serialization_impl",
+      "description": "PublicProfileIdentity implements Serialize via derive in crates/nq-core/src/public.rs",
+      "data": {
+        "file": "crates/nq-core/src/public.rs",
+        "trait": "Serialize",
+        "type": "PublicProfileIdentity",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:PublicProfileIdentity:Deserialize",
+      "kind": "serialization_impl",
+      "description": "PublicProfileIdentity implements Deserialize via derive in crates/nq-core/src/public.rs",
+      "data": {
+        "file": "crates/nq-core/src/public.rs",
+        "trait": "Deserialize",
+        "type": "PublicProfileIdentity",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ConditionView:Serialize",
+      "kind": "serialization_impl",
+      "description": "ConditionView implements Serialize via derive in crates/nq-core/src/public.rs",
+      "data": {
+        "file": "crates/nq-core/src/public.rs",
+        "trait": "Serialize",
+        "type": "ConditionView",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ConditionView:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ConditionView implements Deserialize via derive in crates/nq-core/src/public.rs",
+      "data": {
+        "file": "crates/nq-core/src/public.rs",
+        "trait": "Deserialize",
+        "type": "ConditionView",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ConditionState:Serialize",
+      "kind": "serialization_impl",
+      "description": "ConditionState implements Serialize via derive in crates/nq-core/src/public.rs",
+      "data": {
+        "file": "crates/nq-core/src/public.rs",
+        "trait": "Serialize",
+        "type": "ConditionState",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ConditionState:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ConditionState implements Deserialize via derive in crates/nq-core/src/public.rs",
+      "data": {
+        "file": "crates/nq-core/src/public.rs",
+        "trait": "Deserialize",
+        "type": "ConditionState",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:VisibilityView:Serialize",
+      "kind": "serialization_impl",
+      "description": "VisibilityView implements Serialize via derive in crates/nq-core/src/public.rs",
+      "data": {
+        "file": "crates/nq-core/src/public.rs",
+        "trait": "Serialize",
+        "type": "VisibilityView",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:VisibilityView:Deserialize",
+      "kind": "serialization_impl",
+      "description": "VisibilityView implements Deserialize via derive in crates/nq-core/src/public.rs",
+      "data": {
+        "file": "crates/nq-core/src/public.rs",
+        "trait": "Deserialize",
+        "type": "VisibilityView",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:VisibilityState:Serialize",
+      "kind": "serialization_impl",
+      "description": "VisibilityState implements Serialize via derive in crates/nq-core/src/public.rs",
+      "data": {
+        "file": "crates/nq-core/src/public.rs",
+        "trait": "Serialize",
+        "type": "VisibilityState",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:VisibilityState:Deserialize",
+      "kind": "serialization_impl",
+      "description": "VisibilityState implements Deserialize via derive in crates/nq-core/src/public.rs",
+      "data": {
+        "file": "crates/nq-core/src/public.rs",
+        "trait": "Deserialize",
+        "type": "VisibilityState",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:Severity:Serialize",
+      "kind": "serialization_impl",
+      "description": "Severity implements Serialize via derive in crates/nq-core/src/public.rs",
+      "data": {
+        "file": "crates/nq-core/src/public.rs",
+        "trait": "Serialize",
+        "type": "Severity",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:Severity:Deserialize",
+      "kind": "serialization_impl",
+      "description": "Severity implements Deserialize via derive in crates/nq-core/src/public.rs",
+      "data": {
+        "file": "crates/nq-core/src/public.rs",
+        "trait": "Deserialize",
+        "type": "Severity",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:PublicEvidenceReference:Serialize",
+      "kind": "serialization_impl",
+      "description": "PublicEvidenceReference implements Serialize via derive in crates/nq-core/src/public.rs",
+      "data": {
+        "file": "crates/nq-core/src/public.rs",
+        "trait": "Serialize",
+        "type": "PublicEvidenceReference",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:PublicEvidenceReference:Deserialize",
+      "kind": "serialization_impl",
+      "description": "PublicEvidenceReference implements Deserialize via derive in crates/nq-core/src/public.rs",
+      "data": {
+        "file": "crates/nq-core/src/public.rs",
+        "trait": "Deserialize",
+        "type": "PublicEvidenceReference",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:OriginMode:Serialize",
+      "kind": "serialization_impl",
+      "description": "OriginMode implements Serialize via derive in crates/nq-core/src/public.rs",
+      "data": {
+        "file": "crates/nq-core/src/public.rs",
+        "trait": "Serialize",
+        "type": "OriginMode",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:OriginMode:Deserialize",
+      "kind": "serialization_impl",
+      "description": "OriginMode implements Deserialize via derive in crates/nq-core/src/public.rs",
+      "data": {
+        "file": "crates/nq-core/src/public.rs",
+        "trait": "Deserialize",
+        "type": "OriginMode",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:StatusSnapshotV1:Serialize",
+      "kind": "serialization_impl",
+      "description": "StatusSnapshotV1 implements Serialize via derive in crates/nq-core/src/public.rs",
+      "data": {
+        "file": "crates/nq-core/src/public.rs",
+        "trait": "Serialize",
+        "type": "StatusSnapshotV1",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:StatusSnapshotV1:Deserialize",
+      "kind": "serialization_impl",
+      "description": "StatusSnapshotV1 implements Deserialize via derive in crates/nq-core/src/public.rs",
+      "data": {
+        "file": "crates/nq-core/src/public.rs",
+        "trait": "Deserialize",
+        "type": "StatusSnapshotV1",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ComponentStatus:Serialize",
+      "kind": "serialization_impl",
+      "description": "ComponentStatus implements Serialize via derive in crates/nq-core/src/public.rs",
+      "data": {
+        "file": "crates/nq-core/src/public.rs",
+        "trait": "Serialize",
+        "type": "ComponentStatus",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ComponentStatus:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ComponentStatus implements Deserialize via derive in crates/nq-core/src/public.rs",
+      "data": {
+        "file": "crates/nq-core/src/public.rs",
+        "trait": "Deserialize",
+        "type": "ComponentStatus",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ComponentKind:Serialize",
+      "kind": "serialization_impl",
+      "description": "ComponentKind implements Serialize via derive in crates/nq-core/src/public.rs",
+      "data": {
+        "file": "crates/nq-core/src/public.rs",
+        "trait": "Serialize",
+        "type": "ComponentKind",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ComponentKind:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ComponentKind implements Deserialize via derive in crates/nq-core/src/public.rs",
+      "data": {
+        "file": "crates/nq-core/src/public.rs",
+        "trait": "Deserialize",
+        "type": "ComponentKind",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:HealthState:Serialize",
+      "kind": "serialization_impl",
+      "description": "HealthState implements Serialize via derive in crates/nq-core/src/public.rs",
+      "data": {
+        "file": "crates/nq-core/src/public.rs",
+        "trait": "Serialize",
+        "type": "HealthState",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:HealthState:Deserialize",
+      "kind": "serialization_impl",
+      "description": "HealthState implements Deserialize via derive in crates/nq-core/src/public.rs",
+      "data": {
+        "file": "crates/nq-core/src/public.rs",
+        "trait": "Deserialize",
+        "type": "HealthState",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:RunCapture:Serialize",
+      "kind": "serialization_impl",
+      "description": "RunCapture implements Serialize via derive in crates/nq-core/src/runner.rs",
+      "data": {
+        "file": "crates/nq-core/src/runner.rs",
+        "trait": "Serialize",
+        "type": "RunCapture",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:RunCapture:Deserialize",
+      "kind": "serialization_impl",
+      "description": "RunCapture implements Deserialize via derive in crates/nq-core/src/runner.rs",
+      "data": {
+        "file": "crates/nq-core/src/runner.rs",
+        "trait": "Deserialize",
+        "type": "RunCapture",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:AcquisitionOutcome:Serialize",
+      "kind": "serialization_impl",
+      "description": "AcquisitionOutcome implements Serialize via derive in crates/nq-core/src/runner.rs",
+      "data": {
+        "file": "crates/nq-core/src/runner.rs",
+        "trait": "Serialize",
+        "type": "AcquisitionOutcome",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:AcquisitionOutcome:Deserialize",
+      "kind": "serialization_impl",
+      "description": "AcquisitionOutcome implements Deserialize via derive in crates/nq-core/src/runner.rs",
+      "data": {
+        "file": "crates/nq-core/src/runner.rs",
+        "trait": "Deserialize",
+        "type": "AcquisitionOutcome",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:StartupRuntimeIdentity:Serialize",
+      "kind": "serialization_impl",
+      "description": "StartupRuntimeIdentity implements Serialize via derive in crates/nq-core/src/runtime.rs",
+      "data": {
+        "file": "crates/nq-core/src/runtime.rs",
+        "trait": "Serialize",
+        "type": "StartupRuntimeIdentity",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:StartupRuntimeIdentity:Deserialize",
+      "kind": "serialization_impl",
+      "description": "StartupRuntimeIdentity implements Deserialize via derive in crates/nq-core/src/runtime.rs",
+      "data": {
+        "file": "crates/nq-core/src/runtime.rs",
+        "trait": "Deserialize",
+        "type": "StartupRuntimeIdentity",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:NativeRuntimeIdentity:Serialize",
+      "kind": "serialization_impl",
+      "description": "NativeRuntimeIdentity implements Serialize via derive in crates/nq-core/src/runtime.rs",
+      "data": {
+        "file": "crates/nq-core/src/runtime.rs",
+        "trait": "Serialize",
+        "type": "NativeRuntimeIdentity",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:NativeRuntimeIdentity:Deserialize",
+      "kind": "serialization_impl",
+      "description": "NativeRuntimeIdentity implements Deserialize via derive in crates/nq-core/src/runtime.rs",
+      "data": {
+        "file": "crates/nq-core/src/runtime.rs",
+        "trait": "Deserialize",
+        "type": "NativeRuntimeIdentity",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:RuntimeObjectRole:Serialize",
+      "kind": "serialization_impl",
+      "description": "RuntimeObjectRole implements Serialize via derive in crates/nq-core/src/runtime.rs",
+      "data": {
+        "file": "crates/nq-core/src/runtime.rs",
+        "trait": "Serialize",
+        "type": "RuntimeObjectRole",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:RuntimeObjectRole:Deserialize",
+      "kind": "serialization_impl",
+      "description": "RuntimeObjectRole implements Deserialize via derive in crates/nq-core/src/runtime.rs",
+      "data": {
+        "file": "crates/nq-core/src/runtime.rs",
+        "trait": "Deserialize",
+        "type": "RuntimeObjectRole",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:RuntimeMachine:Serialize",
+      "kind": "serialization_impl",
+      "description": "RuntimeMachine implements Serialize via derive in crates/nq-core/src/runtime.rs",
+      "data": {
+        "file": "crates/nq-core/src/runtime.rs",
+        "trait": "Serialize",
+        "type": "RuntimeMachine",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:RuntimeMachine:Deserialize",
+      "kind": "serialization_impl",
+      "description": "RuntimeMachine implements Deserialize via derive in crates/nq-core/src/runtime.rs",
+      "data": {
+        "file": "crates/nq-core/src/runtime.rs",
+        "trait": "Deserialize",
+        "type": "RuntimeMachine",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:RuntimeLinkage:Serialize",
+      "kind": "serialization_impl",
+      "description": "RuntimeLinkage implements Serialize via derive in crates/nq-core/src/runtime.rs",
+      "data": {
+        "file": "crates/nq-core/src/runtime.rs",
+        "trait": "Serialize",
+        "type": "RuntimeLinkage",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:RuntimeLinkage:Deserialize",
+      "kind": "serialization_impl",
+      "description": "RuntimeLinkage implements Deserialize via derive in crates/nq-core/src/runtime.rs",
+      "data": {
+        "file": "crates/nq-core/src/runtime.rs",
+        "trait": "Deserialize",
+        "type": "RuntimeLinkage",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:RuntimeObjectBinding:Serialize",
+      "kind": "serialization_impl",
+      "description": "RuntimeObjectBinding implements Serialize via derive in crates/nq-core/src/runtime.rs",
+      "data": {
+        "file": "crates/nq-core/src/runtime.rs",
+        "trait": "Serialize",
+        "type": "RuntimeObjectBinding",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:RuntimeObjectBinding:Deserialize",
+      "kind": "serialization_impl",
+      "description": "RuntimeObjectBinding implements Deserialize via derive in crates/nq-core/src/runtime.rs",
+      "data": {
+        "file": "crates/nq-core/src/runtime.rs",
+        "trait": "Deserialize",
+        "type": "RuntimeObjectBinding",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:RuntimeArtifactIdentity:Serialize",
+      "kind": "serialization_impl",
+      "description": "RuntimeArtifactIdentity implements Serialize via derive in crates/nq-core/src/runtime.rs",
+      "data": {
+        "file": "crates/nq-core/src/runtime.rs",
+        "trait": "Serialize",
+        "type": "RuntimeArtifactIdentity",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:RuntimeArtifactIdentity:Deserialize",
+      "kind": "serialization_impl",
+      "description": "RuntimeArtifactIdentity implements Deserialize via derive in crates/nq-core/src/runtime.rs",
+      "data": {
+        "file": "crates/nq-core/src/runtime.rs",
+        "trait": "Deserialize",
+        "type": "RuntimeArtifactIdentity",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:RuntimeArtifactKind:Serialize",
+      "kind": "serialization_impl",
+      "description": "RuntimeArtifactKind implements Serialize via derive in crates/nq-core/src/runtime.rs",
+      "data": {
+        "file": "crates/nq-core/src/runtime.rs",
+        "trait": "Serialize",
+        "type": "RuntimeArtifactKind",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:RuntimeArtifactKind:Deserialize",
+      "kind": "serialization_impl",
+      "description": "RuntimeArtifactKind implements Deserialize via derive in crates/nq-core/src/runtime.rs",
+      "data": {
+        "file": "crates/nq-core/src/runtime.rs",
+        "trait": "Deserialize",
+        "type": "RuntimeArtifactKind",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:RuntimeDirectoryIdentity:Serialize",
+      "kind": "serialization_impl",
+      "description": "RuntimeDirectoryIdentity implements Serialize via derive in crates/nq-core/src/runtime.rs",
+      "data": {
+        "file": "crates/nq-core/src/runtime.rs",
+        "trait": "Serialize",
+        "type": "RuntimeDirectoryIdentity",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:RuntimeDirectoryIdentity:Deserialize",
+      "kind": "serialization_impl",
+      "description": "RuntimeDirectoryIdentity implements Deserialize via derive in crates/nq-core/src/runtime.rs",
+      "data": {
+        "file": "crates/nq-core/src/runtime.rs",
+        "trait": "Deserialize",
+        "type": "RuntimeDirectoryIdentity",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:UnixIoPhase:Serialize",
+      "kind": "serialization_impl",
+      "description": "UnixIoPhase implements Serialize via derive in crates/nq-core/src/unix_runner.rs",
+      "data": {
+        "file": "crates/nq-core/src/unix_runner.rs",
+        "trait": "Serialize",
+        "type": "UnixIoPhase",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:UnixIoPhase:Deserialize",
+      "kind": "serialization_impl",
+      "description": "UnixIoPhase implements Deserialize via derive in crates/nq-core/src/unix_runner.rs",
+      "data": {
+        "file": "crates/nq-core/src/unix_runner.rs",
+        "trait": "Deserialize",
+        "type": "UnixIoPhase",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:UnixAcquisitionOutcome:Serialize",
+      "kind": "serialization_impl",
+      "description": "UnixAcquisitionOutcome implements Serialize via derive in crates/nq-core/src/unix_runner.rs",
+      "data": {
+        "file": "crates/nq-core/src/unix_runner.rs",
+        "trait": "Serialize",
+        "type": "UnixAcquisitionOutcome",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:UnixAcquisitionOutcome:Deserialize",
+      "kind": "serialization_impl",
+      "description": "UnixAcquisitionOutcome implements Deserialize via derive in crates/nq-core/src/unix_runner.rs",
+      "data": {
+        "file": "crates/nq-core/src/unix_runner.rs",
+        "trait": "Deserialize",
+        "type": "UnixAcquisitionOutcome",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:UnixExchangeCapture:Serialize",
+      "kind": "serialization_impl",
+      "description": "UnixExchangeCapture implements Serialize via derive in crates/nq-core/src/unix_runner.rs",
+      "data": {
+        "file": "crates/nq-core/src/unix_runner.rs",
+        "trait": "Serialize",
+        "type": "UnixExchangeCapture",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:UnixExchangeCapture:Deserialize",
+      "kind": "serialization_impl",
+      "description": "UnixExchangeCapture implements Deserialize via derive in crates/nq-core/src/unix_runner.rs",
+      "data": {
+        "file": "crates/nq-core/src/unix_runner.rs",
+        "trait": "Deserialize",
+        "type": "UnixExchangeCapture",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:EchoPayload:Deserialize",
+      "kind": "serialization_impl",
+      "description": "EchoPayload implements Deserialize via derive in crates/nq-profiles/src/conformance.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/conformance.rs",
+        "trait": "Deserialize",
+        "type": "EchoPayload",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:EchoPayload:Serialize",
+      "kind": "serialization_impl",
+      "description": "EchoPayload implements Serialize via derive in crates/nq-profiles/src/conformance.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/conformance.rs",
+        "trait": "Serialize",
+        "type": "EchoPayload",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:FixtureScope:Deserialize",
+      "kind": "serialization_impl",
+      "description": "FixtureScope implements Deserialize via derive in crates/nq-profiles/src/conformance.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/conformance.rs",
+        "trait": "Deserialize",
+        "type": "FixtureScope",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ProfileKey:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ProfileKey implements Deserialize via derive in crates/nq-profiles/src/descriptor.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/descriptor.rs",
+        "trait": "Deserialize",
+        "type": "ProfileKey",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ProfileKey:Serialize",
+      "kind": "serialization_impl",
+      "description": "ProfileKey implements Serialize via derive in crates/nq-profiles/src/descriptor.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/descriptor.rs",
+        "trait": "Serialize",
+        "type": "ProfileKey",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ProfileDigest:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ProfileDigest implements Deserialize via derive in crates/nq-profiles/src/descriptor.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/descriptor.rs",
+        "trait": "Deserialize",
+        "type": "ProfileDigest",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ProfileDigest:Serialize",
+      "kind": "serialization_impl",
+      "description": "ProfileDigest implements Serialize via derive in crates/nq-profiles/src/descriptor.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/descriptor.rs",
+        "trait": "Serialize",
+        "type": "ProfileDigest",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:VocabularyTerm:Deserialize",
+      "kind": "serialization_impl",
+      "description": "VocabularyTerm implements Deserialize via derive in crates/nq-profiles/src/descriptor.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/descriptor.rs",
+        "trait": "Deserialize",
+        "type": "VocabularyTerm",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:VocabularyTerm:Serialize",
+      "kind": "serialization_impl",
+      "description": "VocabularyTerm implements Serialize via derive in crates/nq-profiles/src/descriptor.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/descriptor.rs",
+        "trait": "Serialize",
+        "type": "VocabularyTerm",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:CardinalityLimits:Deserialize",
+      "kind": "serialization_impl",
+      "description": "CardinalityLimits implements Deserialize via derive in crates/nq-profiles/src/descriptor.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/descriptor.rs",
+        "trait": "Deserialize",
+        "type": "CardinalityLimits",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:CardinalityLimits:Serialize",
+      "kind": "serialization_impl",
+      "description": "CardinalityLimits implements Serialize via derive in crates/nq-profiles/src/descriptor.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/descriptor.rs",
+        "trait": "Serialize",
+        "type": "CardinalityLimits",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:FreshnessPolicy:Deserialize",
+      "kind": "serialization_impl",
+      "description": "FreshnessPolicy implements Deserialize via derive in crates/nq-profiles/src/descriptor.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/descriptor.rs",
+        "trait": "Deserialize",
+        "type": "FreshnessPolicy",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:FreshnessPolicy:Serialize",
+      "kind": "serialization_impl",
+      "description": "FreshnessPolicy implements Serialize via derive in crates/nq-profiles/src/descriptor.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/descriptor.rs",
+        "trait": "Serialize",
+        "type": "FreshnessPolicy",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:SubjectRules:Deserialize",
+      "kind": "serialization_impl",
+      "description": "SubjectRules implements Deserialize via derive in crates/nq-profiles/src/descriptor.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/descriptor.rs",
+        "trait": "Deserialize",
+        "type": "SubjectRules",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:SubjectRules:Serialize",
+      "kind": "serialization_impl",
+      "description": "SubjectRules implements Serialize via derive in crates/nq-profiles/src/descriptor.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/descriptor.rs",
+        "trait": "Serialize",
+        "type": "SubjectRules",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ProfileDescriptor:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ProfileDescriptor implements Deserialize via derive in crates/nq-profiles/src/descriptor.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/descriptor.rs",
+        "trait": "Deserialize",
+        "type": "ProfileDescriptor",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ProfileDescriptor:Serialize",
+      "kind": "serialization_impl",
+      "description": "ProfileDescriptor implements Serialize via derive in crates/nq-profiles/src/descriptor.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/descriptor.rs",
+        "trait": "Serialize",
+        "type": "ProfileDescriptor",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:DetectorRuleParameters:Deserialize",
+      "kind": "serialization_impl",
+      "description": "DetectorRuleParameters implements Deserialize via derive in crates/nq-profiles/src/detector.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/detector.rs",
+        "trait": "Deserialize",
+        "type": "DetectorRuleParameters",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:DetectorRuleParameters:Serialize",
+      "kind": "serialization_impl",
+      "description": "DetectorRuleParameters implements Serialize via derive in crates/nq-profiles/src/detector.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/detector.rs",
+        "trait": "Serialize",
+        "type": "DetectorRuleParameters",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:DetectorDescriptor:Deserialize",
+      "kind": "serialization_impl",
+      "description": "DetectorDescriptor implements Deserialize via derive in crates/nq-profiles/src/detector.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/detector.rs",
+        "trait": "Deserialize",
+        "type": "DetectorDescriptor",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:DetectorDescriptor:Serialize",
+      "kind": "serialization_impl",
+      "description": "DetectorDescriptor implements Serialize via derive in crates/nq-profiles/src/detector.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/detector.rs",
+        "trait": "Serialize",
+        "type": "DetectorDescriptor",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:EvidenceWatermark:Deserialize",
+      "kind": "serialization_impl",
+      "description": "EvidenceWatermark implements Deserialize via derive in crates/nq-profiles/src/detector.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/detector.rs",
+        "trait": "Deserialize",
+        "type": "EvidenceWatermark",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:EvidenceWatermark:Serialize",
+      "kind": "serialization_impl",
+      "description": "EvidenceWatermark implements Serialize via derive in crates/nq-profiles/src/detector.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/detector.rs",
+        "trait": "Serialize",
+        "type": "EvidenceWatermark",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:DetectorEvidence:Deserialize",
+      "kind": "serialization_impl",
+      "description": "DetectorEvidence implements Deserialize via derive in crates/nq-profiles/src/detector.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/detector.rs",
+        "trait": "Deserialize",
+        "type": "DetectorEvidence",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:DetectorEvidence:Serialize",
+      "kind": "serialization_impl",
+      "description": "DetectorEvidence implements Serialize via derive in crates/nq-profiles/src/detector.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/detector.rs",
+        "trait": "Serialize",
+        "type": "DetectorEvidence",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:DetectorState:Deserialize",
+      "kind": "serialization_impl",
+      "description": "DetectorState implements Deserialize via derive in crates/nq-profiles/src/detector.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/detector.rs",
+        "trait": "Deserialize",
+        "type": "DetectorState",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:DetectorState:Serialize",
+      "kind": "serialization_impl",
+      "description": "DetectorState implements Serialize via derive in crates/nq-profiles/src/detector.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/detector.rs",
+        "trait": "Serialize",
+        "type": "DetectorState",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:DetectorResult:Deserialize",
+      "kind": "serialization_impl",
+      "description": "DetectorResult implements Deserialize via derive in crates/nq-profiles/src/detector.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/detector.rs",
+        "trait": "Deserialize",
+        "type": "DetectorResult",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:DetectorResult:Serialize",
+      "kind": "serialization_impl",
+      "description": "DetectorResult implements Serialize via derive in crates/nq-profiles/src/detector.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/detector.rs",
+        "trait": "Serialize",
+        "type": "DetectorResult",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:HostSnapshotPayload:Deserialize",
+      "kind": "serialization_impl",
+      "description": "HostSnapshotPayload implements Deserialize via derive in crates/nq-profiles/src/host.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/host.rs",
+        "trait": "Deserialize",
+        "type": "HostSnapshotPayload",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:HostSnapshotPayload:Serialize",
+      "kind": "serialization_impl",
+      "description": "HostSnapshotPayload implements Serialize via derive in crates/nq-profiles/src/host.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/host.rs",
+        "trait": "Serialize",
+        "type": "HostSnapshotPayload",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:HostScope:Deserialize",
+      "kind": "serialization_impl",
+      "description": "HostScope implements Deserialize via derive in crates/nq-profiles/src/host.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/host.rs",
+        "trait": "Deserialize",
+        "type": "HostScope",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ProfileSemanticId:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ProfileSemanticId implements Deserialize via derive in crates/nq-profiles/src/identity.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/identity.rs",
+        "trait": "Deserialize",
+        "type": "ProfileSemanticId",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ProfileSemanticId:Serialize",
+      "kind": "serialization_impl",
+      "description": "ProfileSemanticId implements Serialize via derive in crates/nq-profiles/src/identity.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/identity.rs",
+        "trait": "Serialize",
+        "type": "ProfileSemanticId",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:SemanticIdPreimage:Serialize",
+      "kind": "serialization_impl",
+      "description": "SemanticIdPreimage implements Serialize via derive in crates/nq-profiles/src/identity.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/identity.rs",
+        "trait": "Serialize",
+        "type": "SemanticIdPreimage",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:SemanticReportStatus:Deserialize",
+      "kind": "serialization_impl",
+      "description": "SemanticReportStatus implements Deserialize via derive in crates/nq-profiles/src/validation.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/validation.rs",
+        "trait": "Deserialize",
+        "type": "SemanticReportStatus",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:SemanticReportStatus:Serialize",
+      "kind": "serialization_impl",
+      "description": "SemanticReportStatus implements Serialize via derive in crates/nq-profiles/src/validation.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/validation.rs",
+        "trait": "Serialize",
+        "type": "SemanticReportStatus",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:SemanticCoverageState:Deserialize",
+      "kind": "serialization_impl",
+      "description": "SemanticCoverageState implements Deserialize via derive in crates/nq-profiles/src/validation.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/validation.rs",
+        "trait": "Deserialize",
+        "type": "SemanticCoverageState",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:SemanticCoverageState:Serialize",
+      "kind": "serialization_impl",
+      "description": "SemanticCoverageState implements Serialize via derive in crates/nq-profiles/src/validation.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/validation.rs",
+        "trait": "Serialize",
+        "type": "SemanticCoverageState",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:CoverageInput:Deserialize",
+      "kind": "serialization_impl",
+      "description": "CoverageInput implements Deserialize via derive in crates/nq-profiles/src/validation.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/validation.rs",
+        "trait": "Deserialize",
+        "type": "CoverageInput",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:CoverageInput:Serialize",
+      "kind": "serialization_impl",
+      "description": "CoverageInput implements Serialize via derive in crates/nq-profiles/src/validation.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/validation.rs",
+        "trait": "Serialize",
+        "type": "CoverageInput",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ObservationInput:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ObservationInput implements Deserialize via derive in crates/nq-profiles/src/validation.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/validation.rs",
+        "trait": "Deserialize",
+        "type": "ObservationInput",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ObservationInput:Serialize",
+      "kind": "serialization_impl",
+      "description": "ObservationInput implements Serialize via derive in crates/nq-profiles/src/validation.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/validation.rs",
+        "trait": "Serialize",
+        "type": "ObservationInput",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ReportInput:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ReportInput implements Deserialize via derive in crates/nq-profiles/src/validation.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/validation.rs",
+        "trait": "Deserialize",
+        "type": "ReportInput",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ReportInput:Serialize",
+      "kind": "serialization_impl",
+      "description": "ReportInput implements Serialize via derive in crates/nq-profiles/src/validation.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/validation.rs",
+        "trait": "Serialize",
+        "type": "ReportInput",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ScopeGrant:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ScopeGrant implements Deserialize via derive in crates/nq-profiles/src/validation.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/validation.rs",
+        "trait": "Deserialize",
+        "type": "ScopeGrant",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ScopeGrant:Serialize",
+      "kind": "serialization_impl",
+      "description": "ScopeGrant implements Serialize via derive in crates/nq-profiles/src/validation.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/validation.rs",
+        "trait": "Serialize",
+        "type": "ScopeGrant",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:VantageGrant:Deserialize",
+      "kind": "serialization_impl",
+      "description": "VantageGrant implements Deserialize via derive in crates/nq-profiles/src/validation.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/validation.rs",
+        "trait": "Deserialize",
+        "type": "VantageGrant",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:VantageGrant:Serialize",
+      "kind": "serialization_impl",
+      "description": "VantageGrant implements Serialize via derive in crates/nq-profiles/src/validation.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/validation.rs",
+        "trait": "Serialize",
+        "type": "VantageGrant",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:EvidenceBasis:Deserialize",
+      "kind": "serialization_impl",
+      "description": "EvidenceBasis implements Deserialize via derive in crates/nq-profiles/src/validation.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/validation.rs",
+        "trait": "Deserialize",
+        "type": "EvidenceBasis",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:EvidenceBasis:Serialize",
+      "kind": "serialization_impl",
+      "description": "EvidenceBasis implements Serialize via derive in crates/nq-profiles/src/validation.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/validation.rs",
+        "trait": "Serialize",
+        "type": "EvidenceBasis",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:RefusalBoundary:Deserialize",
+      "kind": "serialization_impl",
+      "description": "RefusalBoundary implements Deserialize via derive in crates/nq-profiles/src/validation.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/validation.rs",
+        "trait": "Deserialize",
+        "type": "RefusalBoundary",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:RefusalBoundary:Serialize",
+      "kind": "serialization_impl",
+      "description": "RefusalBoundary implements Serialize via derive in crates/nq-profiles/src/validation.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/validation.rs",
+        "trait": "Serialize",
+        "type": "RefusalBoundary",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ProfileRefusalCode:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ProfileRefusalCode implements Deserialize via derive in crates/nq-profiles/src/validation.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/validation.rs",
+        "trait": "Deserialize",
+        "type": "ProfileRefusalCode",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ProfileRefusalCode:Serialize",
+      "kind": "serialization_impl",
+      "description": "ProfileRefusalCode implements Serialize via derive in crates/nq-profiles/src/validation.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/validation.rs",
+        "trait": "Serialize",
+        "type": "ProfileRefusalCode",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ProfileRefusal:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ProfileRefusal implements Deserialize via derive in crates/nq-profiles/src/validation.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/validation.rs",
+        "trait": "Deserialize",
+        "type": "ProfileRefusal",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ProfileRefusal:Serialize",
+      "kind": "serialization_impl",
+      "description": "ProfileRefusal implements Serialize via derive in crates/nq-profiles/src/validation.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/validation.rs",
+        "trait": "Serialize",
+        "type": "ProfileRefusal",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:AdmittedObservation:Deserialize",
+      "kind": "serialization_impl",
+      "description": "AdmittedObservation implements Deserialize via derive in crates/nq-profiles/src/validation.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/validation.rs",
+        "trait": "Deserialize",
+        "type": "AdmittedObservation",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:AdmittedObservation:Serialize",
+      "kind": "serialization_impl",
+      "description": "AdmittedObservation implements Serialize via derive in crates/nq-profiles/src/validation.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/validation.rs",
+        "trait": "Serialize",
+        "type": "AdmittedObservation",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ValidatedReport:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ValidatedReport implements Deserialize via derive in crates/nq-profiles/src/validation.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/validation.rs",
+        "trait": "Deserialize",
+        "type": "ValidatedReport",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ValidatedReport:Serialize",
+      "kind": "serialization_impl",
+      "description": "ValidatedReport implements Serialize via derive in crates/nq-profiles/src/validation.rs",
+      "data": {
+        "file": "crates/nq-profiles/src/validation.rs",
+        "trait": "Serialize",
+        "type": "ValidatedReport",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:Sha256Digest:Serialize",
+      "kind": "serialization_impl",
+      "description": "Sha256Digest implements Serialize via impl in crates/nq-protocol/src/canonical.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/canonical.rs",
+        "trait": "Serialize",
+        "type": "Sha256Digest",
+        "via": "impl"
+      }
+    },
+    {
+      "id": "serialization:Sha256Digest:Deserialize",
+      "kind": "serialization_impl",
+      "description": "Sha256Digest implements Deserialize via impl in crates/nq-protocol/src/canonical.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/canonical.rs",
+        "trait": "Deserialize",
+        "type": "Sha256Digest",
+        "via": "impl"
+      }
+    },
+    {
+      "id": "serialization:ConformanceVersionSummary:Serialize",
+      "kind": "serialization_impl",
+      "description": "ConformanceVersionSummary implements Serialize via derive in crates/nq-protocol/src/conformance.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/conformance.rs",
+        "trait": "Serialize",
+        "type": "ConformanceVersionSummary",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ConformanceReceipt:Serialize",
+      "kind": "serialization_impl",
+      "description": "ConformanceReceipt implements Serialize via derive in crates/nq-protocol/src/conformance.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/conformance.rs",
+        "trait": "Serialize",
+        "type": "ConformanceReceipt",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ConformancePhase:Serialize",
+      "kind": "serialization_impl",
+      "description": "ConformancePhase implements Serialize via derive in crates/nq-protocol/src/conformance.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/conformance.rs",
+        "trait": "Serialize",
+        "type": "ConformancePhase",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ConformanceErrorCode:Serialize",
+      "kind": "serialization_impl",
+      "description": "ConformanceErrorCode implements Serialize via derive in crates/nq-protocol/src/conformance.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/conformance.rs",
+        "trait": "Serialize",
+        "type": "ConformanceErrorCode",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ConformanceError:Serialize",
+      "kind": "serialization_impl",
+      "description": "ConformanceError implements Serialize via derive in crates/nq-protocol/src/conformance.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/conformance.rs",
+        "trait": "Serialize",
+        "type": "ConformanceError",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:SourceManifest:Deserialize",
+      "kind": "serialization_impl",
+      "description": "SourceManifest implements Deserialize via derive in crates/nq-protocol/src/conformance.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/conformance.rs",
+        "trait": "Deserialize",
+        "type": "SourceManifest",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:SourceValidEntry:Deserialize",
+      "kind": "serialization_impl",
+      "description": "SourceValidEntry implements Deserialize via derive in crates/nq-protocol/src/conformance.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/conformance.rs",
+        "trait": "Deserialize",
+        "type": "SourceValidEntry",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:SourceInvalidEntry:Deserialize",
+      "kind": "serialization_impl",
+      "description": "SourceInvalidEntry implements Deserialize via derive in crates/nq-protocol/src/conformance.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/conformance.rs",
+        "trait": "Deserialize",
+        "type": "SourceInvalidEntry",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:DigestManifest:Serialize",
+      "kind": "serialization_impl",
+      "description": "DigestManifest implements Serialize via derive in crates/nq-protocol/src/conformance.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/conformance.rs",
+        "trait": "Serialize",
+        "type": "DigestManifest",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:DigestManifestEntry:Serialize",
+      "kind": "serialization_impl",
+      "description": "DigestManifestEntry implements Serialize via derive in crates/nq-protocol/src/conformance.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/conformance.rs",
+        "trait": "Serialize",
+        "type": "DigestManifestEntry",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:NoDuplicateValue:Deserialize",
+      "kind": "serialization_impl",
+      "description": "NoDuplicateValue implements Deserialize via impl in crates/nq-protocol/src/framing.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/framing.rs",
+        "trait": "Deserialize",
+        "type": "NoDuplicateValue",
+        "via": "impl"
+      }
+    },
+    {
+      "id": "serialization:ProfileBinding:Serialize",
+      "kind": "serialization_impl",
+      "description": "ProfileBinding implements Serialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Serialize",
+        "type": "ProfileBinding",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ProfileBinding:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ProfileBinding implements Deserialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Deserialize",
+        "type": "ProfileBinding",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ScopeBinding:Serialize",
+      "kind": "serialization_impl",
+      "description": "ScopeBinding implements Serialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Serialize",
+        "type": "ScopeBinding",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ScopeBinding:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ScopeBinding implements Deserialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Deserialize",
+        "type": "ScopeBinding",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:VantageBinding:Serialize",
+      "kind": "serialization_impl",
+      "description": "VantageBinding implements Serialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Serialize",
+        "type": "VantageBinding",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:VantageBinding:Deserialize",
+      "kind": "serialization_impl",
+      "description": "VantageBinding implements Deserialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Deserialize",
+        "type": "VantageBinding",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:SubjectBinding:Serialize",
+      "kind": "serialization_impl",
+      "description": "SubjectBinding implements Serialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Serialize",
+        "type": "SubjectBinding",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:SubjectBinding:Deserialize",
+      "kind": "serialization_impl",
+      "description": "SubjectBinding implements Deserialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Deserialize",
+        "type": "SubjectBinding",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:MonotonicClock:Serialize",
+      "kind": "serialization_impl",
+      "description": "MonotonicClock implements Serialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Serialize",
+        "type": "MonotonicClock",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:MonotonicClock:Deserialize",
+      "kind": "serialization_impl",
+      "description": "MonotonicClock implements Deserialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Deserialize",
+        "type": "MonotonicClock",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:MonotonicDeadline:Serialize",
+      "kind": "serialization_impl",
+      "description": "MonotonicDeadline implements Serialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Serialize",
+        "type": "MonotonicDeadline",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:MonotonicDeadline:Deserialize",
+      "kind": "serialization_impl",
+      "description": "MonotonicDeadline implements Deserialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Deserialize",
+        "type": "MonotonicDeadline",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:CollectionBounds:Serialize",
+      "kind": "serialization_impl",
+      "description": "CollectionBounds implements Serialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Serialize",
+        "type": "CollectionBounds",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:CollectionBounds:Deserialize",
+      "kind": "serialization_impl",
+      "description": "CollectionBounds implements Deserialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Deserialize",
+        "type": "CollectionBounds",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:Checkpoint:Serialize",
+      "kind": "serialization_impl",
+      "description": "Checkpoint implements Serialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Serialize",
+        "type": "Checkpoint",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:Checkpoint:Deserialize",
+      "kind": "serialization_impl",
+      "description": "Checkpoint implements Deserialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Deserialize",
+        "type": "Checkpoint",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:HelperRequest:Serialize",
+      "kind": "serialization_impl",
+      "description": "HelperRequest implements Serialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Serialize",
+        "type": "HelperRequest",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:HelperRequest:Deserialize",
+      "kind": "serialization_impl",
+      "description": "HelperRequest implements Deserialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Deserialize",
+        "type": "HelperRequest",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:RequestEcho:Serialize",
+      "kind": "serialization_impl",
+      "description": "RequestEcho implements Serialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Serialize",
+        "type": "RequestEcho",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:RequestEcho:Deserialize",
+      "kind": "serialization_impl",
+      "description": "RequestEcho implements Deserialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Deserialize",
+        "type": "RequestEcho",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ReportStatus:Serialize",
+      "kind": "serialization_impl",
+      "description": "ReportStatus implements Serialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Serialize",
+        "type": "ReportStatus",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ReportStatus:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ReportStatus implements Deserialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Deserialize",
+        "type": "ReportStatus",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:CoverageState:Serialize",
+      "kind": "serialization_impl",
+      "description": "CoverageState implements Serialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Serialize",
+        "type": "CoverageState",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:CoverageState:Deserialize",
+      "kind": "serialization_impl",
+      "description": "CoverageState implements Deserialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Deserialize",
+        "type": "CoverageState",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:CoverageDeclaration:Serialize",
+      "kind": "serialization_impl",
+      "description": "CoverageDeclaration implements Serialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Serialize",
+        "type": "CoverageDeclaration",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:CoverageDeclaration:Deserialize",
+      "kind": "serialization_impl",
+      "description": "CoverageDeclaration implements Deserialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Deserialize",
+        "type": "CoverageDeclaration",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:Observation:Serialize",
+      "kind": "serialization_impl",
+      "description": "Observation implements Serialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Serialize",
+        "type": "Observation",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:Observation:Deserialize",
+      "kind": "serialization_impl",
+      "description": "Observation implements Deserialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Deserialize",
+        "type": "Observation",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ErrorSeverity:Serialize",
+      "kind": "serialization_impl",
+      "description": "ErrorSeverity implements Serialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Serialize",
+        "type": "ErrorSeverity",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ErrorSeverity:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ErrorSeverity implements Deserialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Deserialize",
+        "type": "ErrorSeverity",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ReportError:Serialize",
+      "kind": "serialization_impl",
+      "description": "ReportError implements Serialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Serialize",
+        "type": "ReportError",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ReportError:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ReportError implements Deserialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Deserialize",
+        "type": "ReportError",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:BackendIdentity:Serialize",
+      "kind": "serialization_impl",
+      "description": "BackendIdentity implements Serialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Serialize",
+        "type": "BackendIdentity",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:BackendIdentity:Deserialize",
+      "kind": "serialization_impl",
+      "description": "BackendIdentity implements Deserialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Deserialize",
+        "type": "BackendIdentity",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:BackendProvenance:Serialize",
+      "kind": "serialization_impl",
+      "description": "BackendProvenance implements Serialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Serialize",
+        "type": "BackendProvenance",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:BackendProvenance:Deserialize",
+      "kind": "serialization_impl",
+      "description": "BackendProvenance implements Deserialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Deserialize",
+        "type": "BackendProvenance",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:EvidenceReport:Serialize",
+      "kind": "serialization_impl",
+      "description": "EvidenceReport implements Serialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Serialize",
+        "type": "EvidenceReport",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:EvidenceReport:Deserialize",
+      "kind": "serialization_impl",
+      "description": "EvidenceReport implements Deserialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Deserialize",
+        "type": "EvidenceReport",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:RefusalBoundary:Serialize",
+      "kind": "serialization_impl",
+      "description": "RefusalBoundary implements Serialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Serialize",
+        "type": "RefusalBoundary",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:RefusalBoundary:Deserialize",
+      "kind": "serialization_impl",
+      "description": "RefusalBoundary implements Deserialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Deserialize",
+        "type": "RefusalBoundary",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:RefusalCode:Serialize",
+      "kind": "serialization_impl",
+      "description": "RefusalCode implements Serialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Serialize",
+        "type": "RefusalCode",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:RefusalCode:Deserialize",
+      "kind": "serialization_impl",
+      "description": "RefusalCode implements Deserialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Deserialize",
+        "type": "RefusalCode",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:Refusal:Serialize",
+      "kind": "serialization_impl",
+      "description": "Refusal implements Serialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Serialize",
+        "type": "Refusal",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:Refusal:Deserialize",
+      "kind": "serialization_impl",
+      "description": "Refusal implements Deserialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Deserialize",
+        "type": "Refusal",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ResponseOutcome:Serialize",
+      "kind": "serialization_impl",
+      "description": "ResponseOutcome implements Serialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Serialize",
+        "type": "ResponseOutcome",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:ResponseOutcome:Deserialize",
+      "kind": "serialization_impl",
+      "description": "ResponseOutcome implements Deserialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Deserialize",
+        "type": "ResponseOutcome",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:HelperResponse:Serialize",
+      "kind": "serialization_impl",
+      "description": "HelperResponse implements Serialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Serialize",
+        "type": "HelperResponse",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:HelperResponse:Deserialize",
+      "kind": "serialization_impl",
+      "description": "HelperResponse implements Deserialize via derive in crates/nq-protocol/src/model.rs",
+      "data": {
+        "file": "crates/nq-protocol/src/model.rs",
+        "trait": "Deserialize",
+        "type": "HelperResponse",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:AdmissionContextPreimage:Serialize",
+      "kind": "serialization_impl",
+      "description": "AdmissionContextPreimage implements Serialize via derive in crates/nq-store/src/lib.rs",
+      "data": {
+        "file": "crates/nq-store/src/lib.rs",
+        "trait": "Serialize",
+        "type": "AdmissionContextPreimage",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "serialization:JudgmentPreimage:Serialize",
+      "kind": "serialization_impl",
+      "description": "JudgmentPreimage implements Serialize via derive in crates/nq-store/src/lib.rs",
+      "data": {
+        "file": "crates/nq-store/src/lib.rs",
+        "trait": "Serialize",
+        "type": "JudgmentPreimage",
+        "via": "derive"
+      }
+    },
+    {
+      "id": "entry-point:protocol-wire",
+      "kind": "surface_entry_point",
+      "description": "surface protocol-wire entry point crates/nq-protocol/src/model.rs exists=true",
+      "data": {
+        "entry_point": "crates/nq-protocol/src/model.rs",
+        "exists": true,
+        "surface": "protocol-wire"
+      }
+    },
+    {
+      "id": "entry-point:collection-cli",
+      "kind": "surface_entry_point",
+      "description": "surface collection-cli entry point crates/nq-app/src/cli.rs exists=true",
+      "data": {
+        "entry_point": "crates/nq-app/src/cli.rs",
+        "exists": true,
+        "surface": "collection-cli"
+      }
+    },
+    {
+      "id": "entry-point:daemon-log",
+      "kind": "surface_entry_point",
+      "description": "surface daemon-log entry point crates/nq-app/src/daemon.rs exists=true",
+      "data": {
+        "entry_point": "crates/nq-app/src/daemon.rs",
+        "exists": true,
+        "surface": "daemon-log"
+      }
+    },
+    {
+      "id": "entry-point:sqlite-history",
+      "kind": "surface_entry_point",
+      "description": "surface sqlite-history entry point crates/nq-store/src/schema.sql exists=true",
+      "data": {
+        "entry_point": "crates/nq-store/src/schema.sql",
+        "exists": true,
+        "surface": "sqlite-history"
+      }
+    },
+    {
+      "id": "entry-point:status-read-model",
+      "kind": "surface_entry_point",
+      "description": "surface status-read-model entry point crates/nq-core/src/public.rs exists=true",
+      "data": {
+        "entry_point": "crates/nq-core/src/public.rs",
+        "exists": true,
+        "surface": "status-read-model"
+      }
+    },
+    {
+      "id": "entry-point:local-api",
+      "kind": "surface_entry_point",
+      "description": "surface local-api entry point crates/nq-app/src/api.rs exists=true",
+      "data": {
+        "entry_point": "crates/nq-app/src/api.rs",
+        "exists": true,
+        "surface": "local-api"
+      }
+    },
+    {
+      "id": "entry-point:cold-archive",
+      "kind": "surface_entry_point",
+      "description": "surface cold-archive entry point crates/nq-app/src/archive.rs exists=true",
+      "data": {
+        "entry_point": "crates/nq-app/src/archive.rs",
+        "exists": true,
+        "surface": "cold-archive"
+      }
+    },
+    {
+      "id": "entry-point:coarse-index-columns",
+      "kind": "surface_entry_point",
+      "description": "surface coarse-index-columns entry point crates/nq-store/src/schema.sql exists=true",
+      "data": {
+        "entry_point": "crates/nq-store/src/schema.sql",
+        "exists": true,
+        "surface": "coarse-index-columns"
+      }
+    },
+    {
+      "id": "command:AC-R4-001:protocol-wire",
+      "kind": "command_exit",
+      "description": "AC-R4-001: [\"cargo\", \"test\", \"--offline\", \"-p\", \"nq-protocol\", \"--test\", \"conformance_corpus\", \"positive_corpus_exercises_all_result_planes\", \"--\", \"--exact\"] on surface protocol-wire",
+      "data": {
+        "command": [
+          "cargo",
+          "test",
+          "--offline",
+          "-p",
+          "nq-protocol",
+          "--test",
+          "conformance_corpus",
+          "positive_corpus_exercises_all_result_planes",
+          "--",
+          "--exact"
+        ],
+        "surface": "protocol-wire"
+      }
+    },
+    {
+      "id": "command:AC-R4-001:collection-cli",
+      "kind": "command_exit",
+      "description": "AC-R4-001: [\"cargo\", \"test\", \"--offline\", \"-p\", \"nq-core\", \"engine::tests::forcing_exchange_timeout_phase_survives_dry_and_status_surfaces\", \"--\", \"--ignored\", \"--exact\"] on surface collection-cli",
+      "data": {
+        "command": [
+          "cargo",
+          "test",
+          "--offline",
+          "-p",
+          "nq-core",
+          "engine::tests::forcing_exchange_timeout_phase_survives_dry_and_status_surfaces",
+          "--",
+          "--ignored",
+          "--exact"
+        ],
+        "surface": "collection-cli"
+      }
+    },
+    {
+      "id": "command:AC-R4-001:daemon-log",
+      "kind": "command_exit",
+      "description": "AC-R4-001: [\"cargo\", \"test\", \"--offline\", \"-p\", \"nq-core\", \"engine::tests::forcing_exchange_timeout_phase_survives_dry_and_status_surfaces\", \"--\", \"--ignored\", \"--exact\"] on surface daemon-log",
+      "data": {
+        "command": [
+          "cargo",
+          "test",
+          "--offline",
+          "-p",
+          "nq-core",
+          "engine::tests::forcing_exchange_timeout_phase_survives_dry_and_status_surfaces",
+          "--",
+          "--ignored",
+          "--exact"
+        ],
+        "surface": "daemon-log"
+      }
+    },
+    {
+      "id": "command:AC-R4-001:sqlite-history",
+      "kind": "command_exit",
+      "description": "AC-R4-001: [\"cargo\", \"test\", \"--offline\", \"-p\", \"nq-core\", \"engine::tests::status_store_and_backup_preserve_same_code_distinct_detail\", \"--\", \"--exact\"] on surface sqlite-history",
+      "data": {
+        "command": [
+          "cargo",
+          "test",
+          "--offline",
+          "-p",
+          "nq-core",
+          "engine::tests::status_store_and_backup_preserve_same_code_distinct_detail",
+          "--",
+          "--exact"
+        ],
+        "surface": "sqlite-history"
+      }
+    },
+    {
+      "id": "command:AC-R4-001:status-read-model",
+      "kind": "command_exit",
+      "description": "AC-R4-001: [\"cargo\", \"test\", \"--offline\", \"-p\", \"nq-core\", \"engine::tests::forcing_exchange_timeout_phase_survives_dry_and_status_surfaces\", \"--\", \"--ignored\", \"--exact\"] on surface status-read-model",
+      "data": {
+        "command": [
+          "cargo",
+          "test",
+          "--offline",
+          "-p",
+          "nq-core",
+          "engine::tests::forcing_exchange_timeout_phase_survives_dry_and_status_surfaces",
+          "--",
+          "--ignored",
+          "--exact"
+        ],
+        "surface": "status-read-model"
+      }
+    },
+    {
+      "id": "command:AC-R4-001:local-api",
+      "kind": "command_exit",
+      "description": "AC-R4-001: [\"cargo\", \"test\", \"--offline\", \"-p\", \"nq-core\", \"engine::tests::forcing_exchange_timeout_phase_survives_dry_and_status_surfaces\", \"--\", \"--ignored\", \"--exact\"] on surface local-api",
+      "data": {
+        "command": [
+          "cargo",
+          "test",
+          "--offline",
+          "-p",
+          "nq-core",
+          "engine::tests::forcing_exchange_timeout_phase_survives_dry_and_status_surfaces",
+          "--",
+          "--ignored",
+          "--exact"
+        ],
+        "surface": "local-api"
+      }
+    },
+    {
+      "id": "command:AC-R4-001:cold-archive",
+      "kind": "command_exit",
+      "description": "AC-R4-001: [\"cargo\", \"test\", \"--offline\", \"-p\", \"nq-core\", \"engine::tests::status_store_and_backup_preserve_same_code_distinct_detail\", \"--\", \"--exact\"] on surface cold-archive",
+      "data": {
+        "command": [
+          "cargo",
+          "test",
+          "--offline",
+          "-p",
+          "nq-core",
+          "engine::tests::status_store_and_backup_preserve_same_code_distinct_detail",
+          "--",
+          "--exact"
+        ],
+        "surface": "cold-archive"
+      }
+    },
+    {
+      "id": "mutation:AC-R4-001:delete-acquisition-detail",
+      "kind": "mutation_run",
+      "description": "AC-R4-001: mutation delete-acquisition-detail (delete-detail) exit=Some(101) bit=true",
+      "data": {
+        "bit": true,
+        "exit_code": 101,
+        "mutation": "delete-acquisition-detail",
+        "obstruction": null,
+        "operator": "delete-detail"
+      }
+    },
+    {
+      "id": "command:AC-R4-003:sqlite-history",
+      "kind": "command_exit",
+      "description": "AC-R4-003: [\"cargo\", \"test\", \"--offline\", \"-p\", \"nq-core\", \"engine::tests::status_store_and_backup_preserve_same_code_distinct_detail\", \"--\", \"--exact\"] on surface sqlite-history",
+      "data": {
+        "command": [
+          "cargo",
+          "test",
+          "--offline",
+          "-p",
+          "nq-core",
+          "engine::tests::status_store_and_backup_preserve_same_code_distinct_detail",
+          "--",
+          "--exact"
+        ],
+        "surface": "sqlite-history"
+      }
+    },
+    {
+      "id": "command:AC-R4-003:status-read-model",
+      "kind": "command_exit",
+      "description": "AC-R4-003: [\"cargo\", \"test\", \"--offline\", \"-p\", \"nq-core\", \"engine::tests::forcing_exchange_timeout_phase_survives_dry_and_status_surfaces\", \"--\", \"--ignored\", \"--exact\"] on surface status-read-model",
+      "data": {
+        "command": [
+          "cargo",
+          "test",
+          "--offline",
+          "-p",
+          "nq-core",
+          "engine::tests::forcing_exchange_timeout_phase_survives_dry_and_status_surfaces",
+          "--",
+          "--ignored",
+          "--exact"
+        ],
+        "surface": "status-read-model"
+      }
+    },
+    {
+      "id": "mutation:AC-R4-003:rederive-status-detail-from-code",
+      "kind": "mutation_run",
+      "description": "AC-R4-003: mutation rederive-status-detail-from-code (recompute-from-code) exit=Some(101) bit=true",
+      "data": {
+        "bit": true,
+        "exit_code": 101,
+        "mutation": "rederive-status-detail-from-code",
+        "obstruction": null,
+        "operator": "recompute-from-code"
+      }
+    }
+  ],
+  "checks": [
+    {
+      "check_id": "projection-classified:semantic_report_status",
+      "control": "AC-R4-002",
+      "outcome": "satisfied",
+      "reason": "projection semantic_report_status is classified",
+      "evidence": [
+        "projection:crates/nq-core/src/engine.rs:semantic_report_status"
+      ]
+    },
+    {
+      "check_id": "projection-classified:acquisition_code",
+      "control": "AC-R4-002",
+      "outcome": "satisfied",
+      "reason": "projection acquisition_code is classified",
+      "evidence": [
+        "projection:crates/nq-core/src/engine.rs:acquisition_code"
+      ]
+    },
+    {
+      "check_id": "projection-classified:as_str",
+      "control": "AC-R4-002",
+      "outcome": "satisfied",
+      "reason": "projection as_str is classified",
+      "evidence": [
+        "projection:crates/nq-profiles/src/descriptor.rs:as_str"
+      ]
+    },
+    {
+      "check_id": "projection-classified:as_str",
+      "control": "AC-R4-002",
+      "outcome": "satisfied",
+      "reason": "projection as_str is classified",
+      "evidence": [
+        "projection:crates/nq-profiles/src/identity.rs:as_str"
+      ]
+    },
+    {
+      "check_id": "projection-classified:as_str",
+      "control": "AC-R4-002",
+      "outcome": "satisfied",
+      "reason": "projection as_str is classified",
+      "evidence": [
+        "projection:crates/nq-protocol/src/canonical.rs:as_str"
+      ]
+    },
+    {
+      "check_id": "forcing:AC-R4-001:protocol-wire",
+      "control": "AC-R4-001",
+      "surface": "protocol-wire",
+      "outcome": "satisfied",
+      "reason": "forcing evidence command passed",
+      "evidence": [
+        "command:AC-R4-001:protocol-wire"
+      ]
+    },
+    {
+      "check_id": "forcing:AC-R4-001:collection-cli",
+      "control": "AC-R4-001",
+      "surface": "collection-cli",
+      "outcome": "violated",
+      "reason": "forcing evidence command failed (exit Some(101))",
+      "evidence": [
+        "command:AC-R4-001:collection-cli"
+      ]
+    },
+    {
+      "check_id": "forcing:AC-R4-001:daemon-log",
+      "control": "AC-R4-001",
+      "surface": "daemon-log",
+      "outcome": "violated",
+      "reason": "forcing evidence command failed (exit Some(101))",
+      "evidence": [
+        "command:AC-R4-001:daemon-log"
+      ]
+    },
+    {
+      "check_id": "forcing:AC-R4-001:sqlite-history",
+      "control": "AC-R4-001",
+      "surface": "sqlite-history",
+      "outcome": "satisfied",
+      "reason": "forcing evidence command passed",
+      "evidence": [
+        "command:AC-R4-001:sqlite-history"
+      ]
+    },
+    {
+      "check_id": "forcing:AC-R4-001:status-read-model",
+      "control": "AC-R4-001",
+      "surface": "status-read-model",
+      "outcome": "violated",
+      "reason": "forcing evidence command failed (exit Some(101))",
+      "evidence": [
+        "command:AC-R4-001:status-read-model"
+      ]
+    },
+    {
+      "check_id": "forcing:AC-R4-001:local-api",
+      "control": "AC-R4-001",
+      "surface": "local-api",
+      "outcome": "violated",
+      "reason": "forcing evidence command failed (exit Some(101))",
+      "evidence": [
+        "command:AC-R4-001:local-api"
+      ]
+    },
+    {
+      "check_id": "forcing:AC-R4-001:cold-archive",
+      "control": "AC-R4-001",
+      "surface": "cold-archive",
+      "outcome": "satisfied",
+      "reason": "forcing evidence command passed",
+      "evidence": [
+        "command:AC-R4-001:cold-archive"
+      ]
+    },
+    {
+      "check_id": "mutation-bites:AC-R4-001:delete-acquisition-detail",
+      "control": "AC-R4-001",
+      "outcome": "satisfied",
+      "reason": "mutation delete-acquisition-detail bit (check went red)",
+      "evidence": [
+        "mutation:AC-R4-001:delete-acquisition-detail"
+      ]
+    },
+    {
+      "check_id": "forcing:AC-R4-003:sqlite-history",
+      "control": "AC-R4-003",
+      "surface": "sqlite-history",
+      "outcome": "satisfied",
+      "reason": "forcing evidence command passed",
+      "evidence": [
+        "command:AC-R4-003:sqlite-history"
+      ]
+    },
+    {
+      "check_id": "forcing:AC-R4-003:status-read-model",
+      "control": "AC-R4-003",
+      "surface": "status-read-model",
+      "outcome": "violated",
+      "reason": "forcing evidence command failed (exit Some(101))",
+      "evidence": [
+        "command:AC-R4-003:status-read-model"
+      ]
+    },
+    {
+      "check_id": "mutation-bites:AC-R4-003:rederive-status-detail-from-code",
+      "control": "AC-R4-003",
+      "outcome": "satisfied",
+      "reason": "mutation rederive-status-detail-from-code bit (check went red)",
+      "evidence": [
+        "mutation:AC-R4-003:rederive-status-detail-from-code"
+      ]
+    }
+  ],
+  "waivers": [],
+  "gate": {
+    "policies": [
+      {
+        "id": "census-fully-classified",
+        "description": "every projection classified, no forbidden serialization, all declared surface entry points present",
+        "result": "pass",
+        "detail": "0 unclassified projection(s), 0 serialization violation(s), 0 missing entry point(s)"
+      },
+      {
+        "id": "no-obstructions",
+        "description": "no evidence collection was blocked; blocked is never pass",
+        "result": "pass",
+        "detail": "0 obstruction(s)"
+      },
+      {
+        "id": "no-expired-waiver",
+        "description": "no waiver has outlived its expiry",
+        "result": "pass",
+        "detail": "none expired"
+      },
+      {
+        "id": "mutations-bite",
+        "description": "every declared mutation makes its check go red",
+        "result": "pass",
+        "detail": "2/2 bit"
+      },
+      {
+        "id": "active-controls-pass",
+        "description": "every evaluated control passes, is not applicable, or is explicitly waived",
+        "result": "fail",
+        "detail": "failing: AC-R4-001, AC-R4-003"
+      }
+    ],
+    "result": "fail"
+  }
+}

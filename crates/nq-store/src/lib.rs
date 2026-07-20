@@ -3467,6 +3467,38 @@ mod tests {
         assert!(malicious_insert.is_err());
     }
 
+    /// Release forcing case: once a submission is classified as rejected, its
+    /// stable code is only a projection.  A typed `RefusalInput` is mandatory
+    /// testimony for persistence and historical reopening; accepting `None`
+    /// makes the coarse `rejection_code` the only retained judgment.
+    #[test]
+    #[ignore = "release gate: rejected custody must retain a typed refusal"]
+    fn forcing_rejected_submission_requires_typed_refusal() {
+        let (mut store, profile_digest) = configured_store();
+        let result = store.commit_collection(&CollectionInput {
+            run: run("fixture-a", "missing-refusal", &profile_digest),
+            submission: Some(SubmissionInput {
+                submission_id: "submission-missing-refusal".to_owned(),
+                raw_bytes: b"malformed helper response\n".to_vec(),
+                received_at: TIME.to_owned(),
+                protocol_outcome: "rejected".to_owned(),
+                disposition: SubmissionDisposition::Rejected {
+                    rejection_code: Some("invalid_response".to_owned()),
+                    refusal: None,
+                },
+            }),
+        });
+
+        assert!(
+            matches!(
+                result,
+                Err(StoreError::Invariant(ref message))
+                    if message.contains("typed refusal")
+            ),
+            "rejected custody without typed refusal was accepted: {result:?}"
+        );
+    }
+
     #[test]
     fn unknown_profile_submission_remains_queryable_quarantine() {
         let mut store = Store::initialize_in_memory().expect("store initializes");

@@ -46,16 +46,34 @@ The two-phase guest script requires exact Ubuntu 24.04 and exercises:
   exact-byte restoration and a successful start; and
 - final package, service, layout, journal, and byte-hash receipts.
 
-The preserved top-level `dist/nq-ng_0.1.0_amd64.deb` predates the installed
-manifest startup gate and cannot pass the current full harness. It was retained
-only as a custody baseline and for the recorded missing-image preflight. Use a
-separately verified current candidate, such as the unpromoted artifact under
-`dist/hardening-2026-07-17/`, for a future full run.
+The top-level `dist/nq-ng_0.1.0_amd64.deb` is the preserved 2026-07-20 mint
+candidate. Its package lifecycle ran successfully, but the mint-gate audit in
+`docs/HARDENING_PROGRAM.md` found that the historical run's 50-file seal omitted
+mandatory `guest-results/RESULT` and that the package fails the release-required
+refusal-preservation gate. Do not inherit the historical pass or use those exact
+bytes for a new qualification. A future full run requires a rebuilt candidate
+that first passes the refusal-preservation preflight.
 
 There is no cross-UID or AF_UNIX skip path. The host accepts the guest result
-only when all three mandatory pass markers are present. Package purge intentionally
+only when all four mandatory pass markers are present. Package purge intentionally
 tests Debian's non-destructive behavior; it is not the separate manual evidence
 purge described by nq-ng operations.
+
+Reopen a completed run's complete evidence seal without booting a guest with:
+
+```sh
+hardening/run-noble-qemu.sh --check-evidence-seal /absolute/path/to/run
+```
+
+The reopening path must be the exact physical absolute directory (no symlink,
+symlinked ancestor, trailing slash, or dot-component alias).
+Only the top-level post-seal `RESULT`, `seal.log`, and the manifest itself are
+outside the canonical inventory. In particular, `guest-results/RESULT` and any
+other nested file named `RESULT` are sealed evidence. The verifier requires the
+manifest to cover the canonical inventory exactly before checking its hashes.
+It also admits the intentionally unsealed write-last top-level `RESULT`
+semantically: one unambiguous `result=pass`, one nonempty `completed_at`, and no
+top-level `REFUSAL` are required.
 
 Run the local non-VM checks with:
 

@@ -707,3 +707,82 @@ artifact, so the `4abc478` qualification was re-run against the renamed deb and
 The `4abc478`/`14c33792…` pass is retained as the pre-rename qualification of record;
 this entry binds the current mint-candidate artifact. **Mint gate reached — held for
 operator review; nothing pushed, nothing minted.**
+
+### Mint-gate audit and bounded qualification repair — 2026-07-20
+
+The operator-gate audit found that the preceding re-qualification is
+**cryptographically intact but not mint-sufficient**. This is an
+insufficiently sealed qualification run, not a corrupted run. The external
+directory remains untouched at
+`/home/jbeck/nqlab/nq-ng-hardening/run-2026-07-20-06aa918`:
+
+- its `ARTIFACTS.sha256` is SHA-256
+  `7ede5edb25a7f80f4e2532b5bd7bd62ff3cb74f7d2ad51a5d7d41ebb6bc68b11`;
+- all 50 entries recompute correctly and independent guest-result admission
+  still passes all four required markers;
+- the corrected canonical inventory contains 51 files; the sole path-set
+  difference is mandatory `./guest-results/RESULT` (SHA-256
+  `9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2`);
+- the original basename-wide `! -name RESULT` excluded both the intentionally
+  post-seal top-level `RESULT` and that mandatory guest verdict.
+
+The old manifest used ambient-locale ordering while the corrected canonical
+stream fixes `LC_ALL=C`, so the manifest line order also changes. The missing
+mandatory guest verdict is the sole path-set defect and is independently
+mint-blocking. Read-only review of the pre-rename
+`run-2026-07-19-4abc478` pass found the same omission: its manifest SHA-256 is
+`11eef8a74ddbb14f921c642d850de866a33688d9a0efeb0d7e9e12ae487c7237`,
+all 50 entries verify, and the same guest verdict is absent. It too remains
+historical evidence rather than a current mint qualification.
+
+The harness now excludes only exact top-level `./RESULT`, `./seal.log`, and
+`./ARTIFACTS.sha256`; requires a non-symlink `guest-results` directory plus
+`INPUTS`, the staged deb, `guest-results/RESULT`, and
+`guest-results/REQUIRED_CHECKS` as regular sealed files; and compares the
+manifest with a freshly generated canonical inventory. Hostile tests cover
+top-level versus nested `RESULT`, missing and altered mandatory evidence,
+duplicate entries, unsealed mandatory evidence, a symlinked mandatory parent,
+and an extra unsealed file. Completed-run reopening also requires one
+unambiguous write-last top-level pass result with a nonempty completion time and
+no top-level refusal; missing, contradictory, duplicate, and symlinked result
+markers are refused. The repaired read-only verifier rejects the old run's
+noncanonical inventory while the original 50 hashes remain valid.
+
+The externally owned refusal-preservation dependency recorded above is
+**release-required**, not qualification-only and not archival provenance. The
+target-owned `audit/admissibility.toml` binds the existing AC-R4 control to the
+runtime types and package surfaces; `audit/REFUSAL_PRESERVATION_CROSSWALK.md`
+enumerates the additional SQL/serde/private/boolean projections outside the
+framework's heuristic census. The authoritative pre-commit preflight ledger is
+`audit/receipts/run-2026-07-20-qualification-repair-r3/refusal-audit/ledger.json`
+(SHA-256
+`e809de2652bcdc0fd8e0bfce087ba840be38d0ba7da2d7ddc0013e7b6bc154ec`).
+Verifier identity and exact commands are in the adjacent `RECEIPT.md`.
+
+The ledger has no waiver or obstruction: its heuristic AC-R4-002 projection
+census passes and records 2/2 mutation commands as biting, but its v1 mutation
+record does not distinguish compile failure from assertion failure. The
+blocked verdict instead rests on independent forcing cases: AC-R4-001 and
+AC-R4-003 fail, and the following package defects reproduce directly:
+
+- `ExchangeTimeout { phase = write_request }` and
+  `ExchangeTimeout { phase = read_response }` become identical code-only
+  timeout testimony in dry CLI and collection/status projections;
+- same-code helper refusals with different `retriable` and structured details
+  become identical `CollectionOutcome::HelperRefused` testimony;
+- same-code profile refusals with different profile, boundary, and details
+  become identical `CollectionOutcome::Rejected` testimony; and
+- rejected store custody is accepted with no linked typed refusal.
+
+Those paths are compiled into `nq-core`/`nq-store` and therefore into packaged
+`nq`/`nqd`. Repairing them changes the package bytes. The candidate remained
+byte-identical before and after this campaign at
+`44e7bd1af43ac4d6f9543d2dc286610be43d86426334ca24ff1a05a45d24e2e0`,
+but it cannot receive a mint-sufficient qualification. No fresh QEMU run was
+started because a VM pass cannot cure this release-preflight failure.
+
+**Current gate: BLOCKED pending product repair, rebuilt package bytes, and a
+fresh corrected qualification.** No tag, mint, publish, push, or remote
+configuration occurred. The earlier re-qualification text is preserved above
+as the decision recorded at that time; this dated audit entry supersedes its
+mint-readiness conclusion without rewriting its evidence.

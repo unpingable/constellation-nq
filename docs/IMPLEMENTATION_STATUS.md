@@ -91,13 +91,18 @@ The local acceptance suite is documented in [`DEVELOPMENT.md`](DEVELOPMENT.md).
 The bounded 2026-07-17 runtime-hardening campaign is recorded separately in
 [`../hardening/CAMPAIGN_2026-07-17.md`](../hardening/CAMPAIGN_2026-07-17.md).
 Its system-cut mutation, environment-perturbed release assembly, partial-write,
-and extracted-package checks passed locally. Its Noble QEMU lifecycle, real
-cross-UID AF_UNIX custody, parent-side helper socket-mode enforcement, and
-byte-tamper/helper-drift refusals are qualified as of the sealed pass
-`run-2026-07-19-4abc478` — see the WS2 + WS5 ratification in
-[`HARDENING_PROGRAM.md`](HARDENING_PROGRAM.md) §8 for the bound
-source/image/package/harness digests and the narrow scope (Linux amd64 /
-Ubuntu 24.04 / real KVM only).
+and extracted-package checks passed locally. The Noble QEMU runs exercised the
+package lifecycle, real cross-UID AF_UNIX custody, parent-side helper
+socket-mode enforcement, and byte-tamper/helper-drift refusals. The 2026-07-20
+mint-gate audit subsequently found that the current candidate's historical run
+was insufficiently sealed: its internally valid 50-file manifest omitted
+mandatory `guest-results/RESULT`. The same audit closed the dependency's scope
+as release-required and found package-level refusal-preservation failures.
+Consequently neither historical run is a current mint qualification, and the
+exact `44e7bd1a…` candidate is blocked pending repair, rebuilt bytes, and a
+fresh qualification. See [`HARDENING_PROGRAM.md`](HARDENING_PROGRAM.md) §8 and
+[`../audit/REFUSAL_PRESERVATION_CROSSWALK.md`](../audit/REFUSAL_PRESERVATION_CROSSWALK.md)
+for the bound identities and verdict.
 Some kernel boundaries remain **not** qualified and still require the documented
 unsandboxed Linux package/VM job — executable memfd policy and the full
 `SO_PEERCRED` wrong-PID/UID/GID matrix among them. A sandbox skip is never treated

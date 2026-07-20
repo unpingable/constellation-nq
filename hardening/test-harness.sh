@@ -32,6 +32,9 @@ require_text "$host" 'restrict=on,hostfwd=tcp:127.0.0.1:'
 require_text "$host" 'expected here and ONLY here'
 require_text "$host" 'BEFORE_REBOOT_COMPLETE'
 require_text "$host" 'verify_guest_results "$output/guest-results"'
+require_text "$host" "! -path './RESULT'"
+require_text "$host" 'canonical_evidence_manifest "$output" >"$output/ARTIFACTS.sha256"'
+require_text "$host" 'verify_evidence_seal "$output"'
 require_text "$host" 'qemu-img check -- "$output/overlay.qcow2"'
 require_text "$host" 'guest_driver_sha=$(actual_hash'
 require_text "$guest" 'guest lifecycle driver bytes differ from host-bound digest'
@@ -164,6 +167,225 @@ cp -r "$gr_valid" "$gr_socketfail"
 sed 's/^SOCKET_CONTRACT_REFUSAL=pass$/SOCKET_CONTRACT_REFUSAL=fail/' \
     "$gr_valid/REQUIRED_CHECKS" >"$gr_socketfail/REQUIRED_CHECKS"
 expect_guest_refusal "$gr_socketfail" 'SOCKET_CONTRACT_REFUSAL'
+
+# The evidence manifest has one exact inventory. Only the intentionally
+# post-seal files at the run root are excluded; RESULT at every nested path,
+# including the guest admission verdict, is sealed.
+seal_valid=$scratch/seal-valid
+mkdir -p "$seal_valid/guest-results" "$seal_valid/nested"
+printf 'schema=nq.hardening.inputs.v1\n' >"$seal_valid/INPUTS"
+printf 'candidate bytes\n' >"$seal_valid/nq-ng.deb"
+printf 'pass\n' >"$seal_valid/guest-results/RESULT"
+cp "$gr_valid/REQUIRED_CHECKS" "$seal_valid/guest-results/REQUIRED_CHECKS"
+printf 'nested evidence\n' >"$seal_valid/nested/RESULT"
+printf 'result=pass\ncompleted_at=2026-07-20T00:00:00Z\n' >"$seal_valid/RESULT"
+printf 'post-seal diagnostics\n' >"$seal_valid/seal.log"
+(
+    cd "$seal_valid"
+    find . -type f \
+        ! -path './ARTIFACTS.sha256' \
+        ! -path './RESULT' \
+        ! -path './seal.log' \
+        -print0 \
+        | LC_ALL=C sort -z \
+        | xargs -0 -r sha256sum
+) >"$seal_valid/ARTIFACTS.sha256"
+
+"$host" --check-evidence-seal "$seal_valid" >/dev/null \
+    || { printf 'valid exact evidence seal was rejected\n' >&2; exit 1; }
+grep -E '  \./guest-results/RESULT$' "$seal_valid/ARTIFACTS.sha256" >/dev/null || {
+    printf 'guest-results/RESULT is absent from the evidence seal\n' >&2
+    exit 1
+}
+grep -E '  \./nested/RESULT$' "$seal_valid/ARTIFACTS.sha256" >/dev/null || {
+    printf 'nested RESULT is absent from the evidence seal\n' >&2
+    exit 1
+}
+if grep -E '  \./RESULT$' "$seal_valid/ARTIFACTS.sha256" >/dev/null; then
+    printf 'top-level post-seal RESULT was included in the evidence seal\n' >&2
+    exit 1
+fi
+if grep -E '  \./seal\.log$' "$seal_valid/ARTIFACTS.sha256" >/dev/null; then
+    printf 'top-level post-seal log was included in the evidence seal\n' >&2
+    exit 1
+fi
+manifest_entries=$(wc -l <"$seal_valid/ARTIFACTS.sha256")
+expected_entries=$(find "$seal_valid" -type f \
+    ! -path "$seal_valid/ARTIFACTS.sha256" \
+    ! -path "$seal_valid/RESULT" \
+    ! -path "$seal_valid/seal.log" | wc -l)
+((manifest_entries == expected_entries)) || {
+    printf 'valid evidence manifest coverage is not exact: expected %s, got %s\n' \
+        "$expected_entries" "$manifest_entries" >&2
+    exit 1
+}
+
+expect_seal_refusal() {
+    local dir=$1 needle=$2 status
+    set +e
+    "$host" --check-evidence-seal "$dir" \
+        >"$scratch/seal.out" 2>"$scratch/seal.err"
+    status=$?
+    set -e
+    ((status != 0)) || {
+        printf 'evidence-seal check unexpectedly passed for %s\n' "$dir" >&2
+        exit 1
+    }
+    grep -F -- "$needle" "$scratch/seal.err" >/dev/null || {
+        printf 'evidence-seal refusal for %s did not mention %q\n' "$dir" "$needle" >&2
+        cat "$scratch/seal.err" >&2
+        exit 1
+    }
+}
+
+# Reopening is bound to one exact physical absolute run path. A trailing slash
+# must not turn a symlinked root into an apparent non-symlink directory.
+seal_root_symlink=$scratch/seal-root-symlink
+ln -s "$seal_valid" "$seal_root_symlink"
+expect_seal_refusal "$seal_root_symlink/" \
+    'evidence root is not an exact physical absolute directory'
+expect_seal_refusal "$seal_valid/." \
+    'evidence root is not an exact physical absolute directory'
+
+# The top-level RESULT is outside the seal by construction and can be written
+# or augmented after sealing without changing the sealed inventory.
+seal_top_result=$scratch/seal-top-result
+cp -r "$seal_valid" "$seal_top_result"
+printf 'operator_note=outside-seal\n' >>"$seal_top_result/RESULT"
+"$host" --check-evidence-seal "$seal_top_result" >/dev/null || {
+    printf 'post-seal top-level RESULT unexpectedly invalidated the seal\n' >&2
+    exit 1
+}
+
+# Although outside the cryptographic inventory, the write-last top-level
+# completion marker is mandatory semantic evidence when reopening a completed
+# run. Missing, contradictory, or symlinked markers must not admit a seal.
+seal_top_result_missing=$scratch/seal-top-result-missing
+cp -r "$seal_valid" "$seal_top_result_missing"
+rm -f "$seal_top_result_missing/RESULT"
+expect_seal_refusal "$seal_top_result_missing" 'top-level result is not a regular non-symlink file'
+
+seal_top_result_refused=$scratch/seal-top-result-refused
+cp -r "$seal_valid" "$seal_top_result_refused"
+printf 'result=refused\ncompleted_at=2026-07-20T00:00:00Z\n' \
+    >"$seal_top_result_refused/RESULT"
+expect_seal_refusal "$seal_top_result_refused" 'top-level result is not one unambiguous completed pass'
+
+seal_top_result_duplicate=$scratch/seal-top-result-duplicate
+cp -r "$seal_valid" "$seal_top_result_duplicate"
+printf 'result=pass\ncompleted_at=2026-07-20T00:00:00Z\nresult=pass\n' \
+    >"$seal_top_result_duplicate/RESULT"
+expect_seal_refusal "$seal_top_result_duplicate" 'top-level result is not one unambiguous completed pass'
+
+seal_top_completed_duplicate=$scratch/seal-top-completed-duplicate
+cp -r "$seal_valid" "$seal_top_completed_duplicate"
+printf 'result=pass\ncompleted_at=2026-07-20T00:00:00Z\ncompleted_at=\n' \
+    >"$seal_top_completed_duplicate/RESULT"
+expect_seal_refusal "$seal_top_completed_duplicate" 'top-level result is not one unambiguous completed pass'
+
+seal_top_completed_whitespace=$scratch/seal-top-completed-whitespace
+cp -r "$seal_valid" "$seal_top_completed_whitespace"
+printf 'result=pass\ncompleted_at=   \n' >"$seal_top_completed_whitespace/RESULT"
+expect_seal_refusal "$seal_top_completed_whitespace" 'top-level result is not one unambiguous completed pass'
+
+seal_top_completed_malformed=$scratch/seal-top-completed-malformed
+cp -r "$seal_valid" "$seal_top_completed_malformed"
+printf 'result=pass\ncompleted_at=not-a-time\n' >"$seal_top_completed_malformed/RESULT"
+expect_seal_refusal "$seal_top_completed_malformed" 'top-level result is not one unambiguous completed pass'
+
+seal_top_result_symlink=$scratch/seal-top-result-symlink
+seal_external_result=$scratch/seal-external-result
+cp -r "$seal_valid" "$seal_top_result_symlink"
+printf 'result=pass\ncompleted_at=2026-07-20T00:00:00Z\n' >"$seal_external_result"
+rm -f "$seal_top_result_symlink/RESULT"
+ln -s "$seal_external_result" "$seal_top_result_symlink/RESULT"
+expect_seal_refusal "$seal_top_result_symlink" 'top-level result is not a regular non-symlink file'
+
+seal_top_refusal=$scratch/seal-top-refusal
+cp -r "$seal_valid" "$seal_top_refusal"
+printf 'result=refused\nstep=fixture\nreason=hostile contradiction\n' \
+    >"$seal_top_refusal/REFUSAL"
+expect_seal_refusal "$seal_top_refusal" 'completed run contains a top-level refusal'
+
+seal_top_refusal_dangling=$scratch/seal-top-refusal-dangling
+cp -r "$seal_valid" "$seal_top_refusal_dangling"
+ln -s "$scratch/absent-refusal-target" "$seal_top_refusal_dangling/REFUSAL"
+expect_seal_refusal "$seal_top_refusal_dangling" 'completed run contains a top-level refusal'
+
+# A nested RESULT is ordinary sealed evidence; changing it must invalidate the
+# seal even when it is not the guest admission verdict.
+seal_nested_altered=$scratch/seal-nested-altered
+cp -r "$seal_valid" "$seal_nested_altered"
+printf 'altered nested evidence\n' >"$seal_nested_altered/nested/RESULT"
+expect_seal_refusal "$seal_nested_altered" 'not an exact canonical inventory'
+
+# Omission of a mandatory admission input cannot yield a self-consistent pass.
+seal_omitted=$scratch/seal-omitted
+cp -r "$seal_valid" "$seal_omitted"
+rm -f "$seal_omitted/guest-results/RESULT"
+expect_seal_refusal "$seal_omitted" 'required sealed evidence'
+
+# Altered mandatory evidence is detected cryptographically.
+seal_altered=$scratch/seal-altered
+cp -r "$seal_valid" "$seal_altered"
+printf 'altered inputs\n' >"$seal_altered/INPUTS"
+expect_seal_refusal "$seal_altered" 'not an exact canonical inventory'
+
+# Repeating even a valid entry is not exact coverage.
+seal_duplicated=$scratch/seal-duplicated
+cp -r "$seal_valid" "$seal_duplicated"
+sed -n '1p' "$seal_duplicated/ARTIFACTS.sha256" \
+    >>"$seal_duplicated/ARTIFACTS.sha256"
+expect_seal_refusal "$seal_duplicated" 'not an exact canonical inventory'
+
+# A mandatory input that exists and passes semantically but was removed from
+# the manifest is unsealed and therefore refused.
+seal_unsealed_mandatory=$scratch/seal-unsealed-mandatory
+cp -r "$seal_valid" "$seal_unsealed_mandatory"
+grep -vE '  \./guest-results/RESULT$' \
+    "$seal_unsealed_mandatory/ARTIFACTS.sha256" \
+    >"$seal_unsealed_mandatory/ARTIFACTS.sha256.partial"
+mv "$seal_unsealed_mandatory/ARTIFACTS.sha256.partial" \
+    "$seal_unsealed_mandatory/ARTIFACTS.sha256"
+expect_seal_refusal "$seal_unsealed_mandatory" 'not an exact canonical inventory'
+
+# A symlinked parent must not let semantically valid mandatory guest inputs sit
+# outside the canonical inventory. `find` does not follow that directory
+# symlink, so the parent itself is part of the admission boundary.
+seal_symlinked_guest=$scratch/seal-symlinked-guest
+seal_external_guest=$scratch/seal-external-guest
+mkdir -p "$seal_symlinked_guest" "$seal_external_guest"
+printf 'schema=nq.hardening.inputs.v1\n' >"$seal_symlinked_guest/INPUTS"
+printf 'candidate bytes\n' >"$seal_symlinked_guest/nq-ng.deb"
+printf 'result=pass\ncompleted_at=2026-07-20T00:00:00Z\n' \
+    >"$seal_symlinked_guest/RESULT"
+cp "$gr_valid/RESULT" "$seal_external_guest/RESULT"
+cp "$gr_valid/REQUIRED_CHECKS" "$seal_external_guest/REQUIRED_CHECKS"
+ln -s "$seal_external_guest" "$seal_symlinked_guest/guest-results"
+(
+    cd "$seal_symlinked_guest"
+    find . -type f \
+        ! -path './ARTIFACTS.sha256' \
+        ! -path './RESULT' \
+        ! -path './seal.log' \
+        -print0 \
+        | LC_ALL=C sort -z \
+        | xargs -0 -r sha256sum
+) >"$seal_symlinked_guest/ARTIFACTS.sha256"
+expect_seal_refusal "$seal_symlinked_guest" 'guest-results is not a non-symlink directory'
+
+# No unsealed indirection or special filesystem object is admitted anywhere in
+# the evidence tree, even when no required path points through it.
+seal_nested_symlink=$scratch/seal-nested-symlink
+cp -r "$seal_valid" "$seal_nested_symlink"
+ln -s "$scratch/outside-evidence" "$seal_nested_symlink/nested/UNSEALED-LINK"
+expect_seal_refusal "$seal_nested_symlink" 'evidence tree contains a non-regular entry'
+
+# Exact coverage also rejects newly inserted, unmanifested evidence.
+seal_unsealed_extra=$scratch/seal-unsealed-extra
+cp -r "$seal_valid" "$seal_unsealed_extra"
+printf 'unsealed\n' >"$seal_unsealed_extra/UNSEALED"
+expect_seal_refusal "$seal_unsealed_extra" 'not an exact canonical inventory'
 
 # A real staged input with the wrong declared hash is refused.
 real_input=$scratch/real.bin
@@ -507,4 +729,4 @@ set +e; sandbox_launch; s=$?; set -e
 ((s == 1)) || { printf 'expected carrier_startup_failed (exit 1) without /run/nq/helpers, got %s\n' "$s" >&2; exit 1; }
 [[ ! -e $launched ]] || { printf 'transient unit executed without its helper runtime root\n' >&2; exit 1; }
 
-printf 'hardening harness syntax/static checks passed; guest-result, bad-hash, and stale-output negatives refused as required\n'
+printf 'hardening harness syntax/static checks passed; guest-result, evidence-seal, bad-hash, and stale-output negatives refused as required\n'
