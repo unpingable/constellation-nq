@@ -74,6 +74,12 @@ pub struct VerifyReport {
     /// Whether the preserved database opened and validated under this verifier.
     /// `None` when the archive records the source as un-openable (fails closed).
     pub historical_database_verified: Option<bool>,
+    /// Whether every admitted report reopened through its exact canonical
+    /// judgment and complete submission/run/admission/materialization chain.
+    /// `None` when history is un-openable.
+    pub historical_admitted_report_semantics_verified: Option<bool>,
+    /// Exact number of admitted reports reopened by the historical verifier.
+    pub historical_admitted_reports_verified: Option<usize>,
     /// Whether every immutable status event reopened through the versioned,
     /// typed collection-result reader. `None` when history is un-openable.
     pub historical_status_semantics_verified: Option<bool>,
@@ -93,6 +99,60 @@ pub struct VerifyReport {
     pub historical_evaluation_records_verified: Option<usize>,
     /// Always false: verification confirms history, it grants nothing.
     pub grants_authority: bool,
+}
+
+struct HistoricalSemanticCounts {
+    admitted_reports: usize,
+    status_events: usize,
+    rejected_custody_records: usize,
+    evaluations: usize,
+}
+
+fn validate_historical_semantics(store: &Store) -> Result<HistoricalSemanticCounts> {
+    let admitted_reports = nq_core::engine::validate_admitted_report_history(store)
+        .context("reopen admitted-report semantics")?;
+    let status_events = nq_core::engine::validate_status_history_v2(store)
+        .context("reopen typed status semantics")?;
+    let rejected_custody_records = nq_core::engine::validate_rejected_custody_history(store)
+        .context("reopen typed rejected-custody semantics")?;
+    let evaluations = nq_core::engine::validate_evaluation_refusal_history(store)
+        .context("reopen typed evaluation/refusal semantics")?;
+    nq_core::engine::status_snapshot_v3(store)
+        .context("reopen public V3 status evaluation semantics")?;
+    let mut after = None;
+    let mut through = None;
+    let mut public_evaluations = 0usize;
+    loop {
+        let page = nq_core::engine::evaluation_history_bounded(
+            store,
+            nq_store::MAX_PUBLIC_QUERY_ROWS,
+            after,
+            through,
+        )
+        .context("reopen public governed-evaluation history")?;
+        through = Some(page.through_sequence);
+        public_evaluations = public_evaluations
+            .checked_add(page.records.len())
+            .context("public evaluation history count overflowed")?;
+        if page.complete {
+            break;
+        }
+        after = Some(
+            page.next_after_sequence
+                .context("incomplete evaluation page lacks its continuation cursor")?,
+        );
+    }
+    if public_evaluations != evaluations {
+        bail!(
+            "public evaluation history reopened {public_evaluations} rows; typed verifier reopened {evaluations}"
+        );
+    }
+    Ok(HistoricalSemanticCounts {
+        admitted_reports,
+        status_events,
+        rejected_custody_records,
+        evaluations,
+    })
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
@@ -225,8 +285,12 @@ fn build_staging(config: &NqConfig, config_path: &Path, staging: &Path) -> Resul
     // historical meaning is not verifiable under this format.
     let db = staging.join("db/nq.db");
     let source_openable = if let Ok(store) = Store::open(&config.database_path) {
+        validate_historical_semantics(&store)
+            .context("validate source database semantics before archiving")?;
         store.backup_verified(&db)?;
         let archived_copy = Store::open(&db).context("open archive database backup for freeze")?;
+        validate_historical_semantics(&archived_copy)
+            .context("validate copied database semantics before sealing")?;
         archived_copy
             .prepare_archive_copy()
             .context("checkpoint and freeze archive database before sealing")?;
@@ -399,6 +463,8 @@ pub fn verify_archive(archive: &Path) -> Result<VerifyReport> {
     // refuses as a metadata contradiction.
     let (
         historical_database_verified,
+        historical_admitted_report_semantics_verified,
+        historical_admitted_reports_verified,
         historical_status_semantics_verified,
         historical_status_events_verified,
         historical_rejected_custody_semantics_verified,
@@ -410,20 +476,17 @@ pub fn verify_archive(archive: &Path) -> Result<VerifyReport> {
         Store::open_immutable(archive.join("db/nq.db")),
     ) {
         (true, Ok(store)) => {
-            let status_events = nq_core::engine::validate_status_history_v2(&store)
-                .context("reopen typed status semantics from the preserved database")?;
-            let rejected_custody = nq_core::engine::validate_rejected_custody_history(&store)
-                .context("reopen typed rejected-custody semantics from the preserved database")?;
-            let evaluations = nq_core::engine::validate_evaluation_refusal_history(&store)
-                .context("reopen typed evaluation/refusal semantics from the preserved database")?;
+            let counts = validate_historical_semantics(&store)?;
             (
                 Some(true),
                 Some(true),
-                Some(status_events),
+                Some(counts.admitted_reports),
                 Some(true),
-                Some(rejected_custody),
+                Some(counts.status_events),
                 Some(true),
-                Some(evaluations),
+                Some(counts.rejected_custody_records),
+                Some(true),
+                Some(counts.evaluations),
             )
         }
         (true, Err(error)) => {
@@ -436,7 +499,7 @@ pub fn verify_archive(archive: &Path) -> Result<VerifyReport> {
                 "archive records source_openable=false but its preserved database opens as a valid current store"
             );
         }
-        (false, Err(_)) => (None, None, None, None, None, None, None),
+        (false, Err(_)) => (None, None, None, None, None, None, None, None, None),
     };
 
     Ok(VerifyReport {
@@ -444,6 +507,8 @@ pub fn verify_archive(archive: &Path) -> Result<VerifyReport> {
         archive_format: metadata.archive_format,
         integrity_verified: true,
         historical_database_verified,
+        historical_admitted_report_semantics_verified,
+        historical_admitted_reports_verified,
         historical_status_semantics_verified,
         historical_status_events_verified,
         historical_rejected_custody_semantics_verified,
@@ -550,7 +615,15 @@ mod tests {
                 identity: nq_store::AdmissionIdentity {
                     profile_semantic_id: nq_protocol::Sha256Digest::parse(semantic_id.as_str())
                         .expect("semantic identity digest"),
-                    detector_identity_digest: digest("detector"),
+                    detector_identity_digest: nq_store::detector_suite_identity_digest(
+                        profile.detectors().iter().map(|detector| {
+                            detector
+                                .descriptor()
+                                .digest()
+                                .expect("compiled detector identity")
+                        }),
+                    )
+                    .expect("compiled detector suite identity"),
                     evaluator_source_digest: digest("source"),
                     evaluator_artifact_digest: digest("evaluator"),
                     helper_artifact_digest: digest("helper"),
@@ -730,6 +803,11 @@ mod tests {
         let report = verify_archive(&archive).expect("verify");
         assert!(report.integrity_verified);
         assert_eq!(report.historical_database_verified, Some(true));
+        assert_eq!(
+            report.historical_admitted_report_semantics_verified,
+            Some(true)
+        );
+        assert_eq!(report.historical_admitted_reports_verified, Some(0));
         assert_eq!(report.historical_status_semantics_verified, Some(true));
         assert_eq!(report.historical_status_events_verified, Some(0));
         assert_eq!(
@@ -1154,6 +1232,8 @@ mod tests {
         assert!(verified.integrity_verified);
         // The historical-meaning claim fails closed.
         assert_eq!(verified.historical_database_verified, None);
+        assert_eq!(verified.historical_admitted_report_semantics_verified, None);
+        assert_eq!(verified.historical_admitted_reports_verified, None);
         assert_eq!(verified.historical_status_semantics_verified, None);
         assert_eq!(verified.historical_status_events_verified, None);
         assert_eq!(

@@ -92,6 +92,12 @@ pub enum Command {
         #[command(subcommand)]
         command: StatusCommand,
     },
+    /// Export immutable governed detector-evaluation history.
+    Evaluations {
+        /// Evaluation-history workflow.
+        #[command(subcommand)]
+        command: EvaluationsCommand,
+    },
     /// Export rejected custody with its exact linked typed refusal.
     Refusals {
         /// Refusal-history workflow.
@@ -231,8 +237,25 @@ pub enum FindingsCommand {
 /// Status commands.
 #[derive(Debug, Subcommand)]
 pub enum StatusCommand {
-    /// Export `nq.status_snapshot.v2`.
+    /// Export `nq.status_snapshot.v3`.
     Export,
+}
+
+/// Governed evaluation-history commands.
+#[derive(Debug, Subcommand)]
+pub enum EvaluationsCommand {
+    /// Export one explicit `nq.evaluation_history.v1` page.
+    Export {
+        /// Maximum immutable evaluations to return.
+        #[arg(long, default_value_t = MAX_PUBLIC_QUERY_ROWS)]
+        limit: u32,
+        /// Continue after this store-wide append sequence.
+        #[arg(long)]
+        after: Option<u64>,
+        /// Freeze the history at this inclusive append sequence.
+        #[arg(long)]
+        through: Option<u64>,
+    },
 }
 
 /// Rejected-custody history commands.
@@ -318,6 +341,7 @@ pub async fn run(options: Nq) -> Result<()> {
         Command::Admin { command } => admin_command(&options.config, command, options.json),
         Command::Findings { command } => findings_command(&options.config, &command),
         Command::Status { command } => status_command(&options.config, &command),
+        Command::Evaluations { command } => evaluations_command(&options.config, &command),
         Command::Refusals { command } => refusals_command(&options.config, &command),
         Command::Query(arguments) => query_command(&options.config, &arguments),
     }
@@ -513,12 +537,31 @@ async fn collect_command(config_path: &Path, instance_id: &str, json_output: boo
     })
     .await??;
     let successful = result.is_success();
-    print_value(&result, json_output)?;
+    print_collection_outcome(&result, json_output)?;
     if successful {
         Ok(())
     } else {
         bail!("collection did not produce a complete or partial admitted report")
     }
+}
+
+fn collection_outcome_output(
+    outcome: &nq_core::CollectionOutcome,
+    json_output: bool,
+) -> Result<Vec<u8>> {
+    let frame = crate::transport::CollectionOutcomeFrame::encode(outcome)?;
+    if json_output {
+        return Ok(frame.into_wire());
+    }
+    let mut rendered = serde_json::to_vec_pretty(frame.reopened())?;
+    rendered.push(b'\n');
+    Ok(rendered)
+}
+
+fn print_collection_outcome(outcome: &nq_core::CollectionOutcome, json_output: bool) -> Result<()> {
+    let bytes = collection_outcome_output(outcome, json_output)?;
+    std::io::stdout().lock().write_all(&bytes)?;
+    Ok(())
 }
 
 fn doctor(config_path: &Path, json_output: bool) -> Result<()> {
@@ -689,8 +732,9 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                     "source_digest": source_digest,
                 }))?,
             })?;
-            // v1 has no preceding migration. Still perform all safety checks and
-            // return an explicit no-op receipt rather than silently starting.
+            // Schema v3 has no in-product predecessor migration. Still perform
+            // all safety checks and return an explicit no-op receipt rather
+            // than silently starting.
             print_value(
                 &json!({
                     "result": "already_current",
@@ -729,6 +773,37 @@ fn status_command(config_path: &Path, command: &StatusCommand) -> Result<()> {
     match command {
         StatusCommand::Export => print_value(&status_snapshot_if_supported(&store)?, true),
     }
+}
+
+fn evaluations_command(config_path: &Path, command: &EvaluationsCommand) -> Result<()> {
+    let config = NqConfig::load(config_path)?;
+    let store = Store::open_read_only(&config.database_path)?;
+    match command {
+        EvaluationsCommand::Export {
+            limit,
+            after,
+            through,
+        } => {
+            validate_evaluation_page(*limit, *after, *through)?;
+            print_value(
+                &evaluation_history_if_supported(&store, *limit, *after, *through)?,
+                true,
+            )
+        }
+    }
+}
+
+fn validate_evaluation_page(limit: u32, after: Option<u64>, through: Option<u64>) -> Result<()> {
+    if !(1..=MAX_PUBLIC_QUERY_ROWS).contains(&limit) {
+        bail!("evaluation history limit must be between 1 and {MAX_PUBLIC_QUERY_ROWS}");
+    }
+    if after.is_some() && through.is_none() {
+        bail!("evaluation history continuation requires the frozen --through bound");
+    }
+    if matches!((after, through), (Some(after), Some(through)) if after > through) {
+        bail!("evaluation history cursor cannot be greater than its frozen upper bound");
+    }
+    Ok(())
 }
 
 fn refusals_command(config_path: &Path, command: &RefusalsCommand) -> Result<()> {
@@ -869,8 +944,19 @@ fn list_findings_if_supported(store: &Store) -> Result<Vec<nq_core::FindingSnaps
     Ok(nq_core::engine::list_findings(store)?)
 }
 
-fn status_snapshot_if_supported(store: &Store) -> Result<nq_core::public::StatusSnapshotV2> {
-    Ok(nq_core::engine::status_snapshot_v2(store)?)
+fn status_snapshot_if_supported(store: &Store) -> Result<nq_core::public::StatusSnapshotV3> {
+    Ok(nq_core::engine::status_snapshot_v3(store)?)
+}
+
+fn evaluation_history_if_supported(
+    store: &Store,
+    limit: u32,
+    after: Option<u64>,
+    through: Option<u64>,
+) -> Result<nq_core::public::EvaluationHistoryPageV1> {
+    Ok(nq_core::engine::evaluation_history_bounded(
+        store, limit, after, through,
+    )?)
 }
 
 fn rejected_custody_if_supported(
@@ -1092,6 +1178,55 @@ helper_runtime_dir = "/run/nq/helpers"
     }
 
     #[test]
+    fn evaluation_export_exposes_one_exact_frozen_numeric_cursor() {
+        let options = Nq::try_parse_from([
+            "nq",
+            "evaluations",
+            "export",
+            "--limit",
+            "1",
+            "--after",
+            "2",
+            "--through",
+            "9",
+        ])
+        .expect("bounded evaluation page parses");
+        let Command::Evaluations {
+            command:
+                EvaluationsCommand::Export {
+                    limit,
+                    after,
+                    through,
+                },
+        } = options.command
+        else {
+            panic!("evaluation export command expected");
+        };
+        assert_eq!(limit, 1);
+        assert_eq!(after, Some(2));
+        assert_eq!(through, Some(9));
+        validate_evaluation_page(limit, after, through).expect("cursor is stable");
+
+        assert!(
+            Nq::try_parse_from([
+                "nq",
+                "evaluations",
+                "export",
+                "--after",
+                "2",
+                "--after",
+                "3",
+            ])
+            .is_err(),
+            "the CLI must not guess between duplicate cursors"
+        );
+        assert!(validate_evaluation_page(0, None, None).is_err());
+        assert!(validate_evaluation_page(MAX_PUBLIC_QUERY_ROWS + 1, None, None).is_err());
+        assert!(validate_evaluation_page(1, Some(2), None).is_err());
+        assert!(validate_evaluation_page(1, Some(10), Some(9)).is_err());
+    }
+
+    #[test]
     fn daemon_directory_setup_establishes_exact_modes_and_safe_runtime_root() {
         let parent = tempfile::tempdir().expect("runtime parent");
         ensure_daemon_directory(parent.path(), 0o751).expect("secure runtime parent");
@@ -1130,6 +1265,25 @@ helper_runtime_dir = "/run/nq/helpers"
     fn canonical_config_diff_ignores_toml_formatting_by_construction() {
         let bytes = canonical_json_bytes(&json!({"b": 1, "a": 2})).unwrap();
         assert_eq!(bytes, br#"{"a":2,"b":1}"#);
+    }
+
+    #[test]
+    fn structured_collection_cli_emits_exact_reopenable_v2_ndjson() {
+        let outcome = nq_core::CollectionOutcome::admitted(
+            "cli.protocol".to_owned(),
+            "run-cli-protocol".to_owned(),
+            "report-cli-protocol".to_owned(),
+            "complete".to_owned(),
+            nq_protocol::sha256_bytes(b"cli-protocol-report").into_string(),
+            Vec::new(),
+        );
+
+        let bytes = collection_outcome_output(&outcome, true)
+            .expect("structured CLI output crosses the exact result boundary");
+        let reopened = nq_core::decode_collection_outcome_ndjson(&bytes, bytes.len())
+            .expect("structured CLI result strictly reopens");
+        assert_eq!(reopened, outcome);
+        assert_eq!(bytes.last(), Some(&b'\n'));
     }
 
     #[test]

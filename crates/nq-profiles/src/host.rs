@@ -9,10 +9,10 @@ use serde_json::{Value, json};
 use crate::{
     CardinalityLimits, DETECTOR_DESCRIPTOR_SCHEMA, Detector, DetectorDescriptor, DetectorEvidence,
     DetectorInput, DetectorReport, DetectorResult, DetectorRuleParameters, DetectorState,
-    EvidenceBasis, FreshnessPolicy,
-    ProfileDescriptor, ProfileModule, ProfileProjection, ProfileRefusal, ProfileRefusalCode,
-    ProjectionResult, RefusalBoundary, SemanticCoverageState, SemanticReportStatus, SubjectRules,
-    ValidatedReport, ValidationContext, ValidationResult, VocabularyTerm,
+    EvidenceBasis, FreshnessPolicy, ProfileDescriptor, ProfileModule, ProfileProjection,
+    ProfileRefusal, ProfileRefusalCode, ProjectionResult, RefusalBoundary, SemanticCoverageState,
+    SemanticReportStatus, SubjectRules, ValidatedReport, ValidationContext, ValidationResult,
+    VocabularyTerm,
     descriptor::PROFILE_DESCRIPTOR_SCHEMA,
     validation::{ReportInput, validate_basis, validate_common},
 };
@@ -372,29 +372,41 @@ impl Detector for HostLoadPressureDetector {
             .iter()
             .find(|observation| observation.kind == "host_snapshot")
         else {
-            return DetectorResult::cannot_evaluate(
+            return DetectorResult::cannot_evaluate_with_details(
                 input,
                 descriptor,
                 "the newest report has no host snapshot",
                 vec!["Missing observations cannot establish absence".to_owned()],
+                BTreeMap::from([
+                    ("observation_kind".to_owned(), "host_snapshot".to_owned()),
+                    ("reason".to_owned(), "missing_observation".to_owned()),
+                ]),
             );
         };
         let Ok(payload) =
             serde_json::from_value::<HostSnapshotPayload>(observation.payload.clone())
         else {
-            return DetectorResult::cannot_evaluate(
+            return DetectorResult::cannot_evaluate_with_details(
                 input,
                 descriptor,
                 "the admitted host snapshot cannot be projected",
                 vec!["Projection failure requires operator inspection".to_owned()],
+                BTreeMap::from([
+                    ("observation_kind".to_owned(), "host_snapshot".to_owned()),
+                    ("reason".to_owned(), "projection_failure".to_owned()),
+                ]),
             );
         };
         let (Some(cpu_count), Some(load_1m)) = (payload.cpu_count, payload.load_1m) else {
-            return DetectorResult::cannot_evaluate(
+            return DetectorResult::cannot_evaluate_with_details(
                 input,
                 descriptor,
                 "complete load coverage has no complete load value",
                 vec!["Inconsistent admitted evidence cannot establish absence".to_owned()],
+                BTreeMap::from([
+                    ("reason".to_owned(), "inconsistent_observation".to_owned()),
+                    ("required_fields".to_owned(), "cpu_count,load_1m".to_owned()),
+                ]),
             );
         };
 
@@ -453,32 +465,35 @@ fn newest_current_report<'a>(
         .filter(|report| report.report.instance_id == input.instance_id)
         .max_by_key(|report| report.report_sequence)
     else {
-        return Err(Box::new(DetectorResult::cannot_evaluate(
+        return Err(Box::new(DetectorResult::cannot_evaluate_with_details(
             input,
             descriptor,
             "no admitted host testimony is available",
             vec!["Missing testimony cannot establish absence".to_owned()],
+            BTreeMap::from([("reason".to_owned(), "missing_testimony".to_owned())]),
         )));
     };
     let admitted = &report.report;
     if admitted.profile != descriptor.profile
         || admitted.profile_digest != descriptor.profile_digest
     {
-        return Err(Box::new(DetectorResult::cannot_evaluate(
+        return Err(Box::new(DetectorResult::cannot_evaluate_with_details(
             input,
             descriptor,
             "the newest testimony uses a different profile contract",
             vec!["Profile revisions are never silently combined".to_owned()],
+            profile_contract_mismatch_details(admitted, descriptor),
         )));
     }
     if admitted.status != SemanticReportStatus::Complete
         || admitted.coverage.get("load") != Some(&SemanticCoverageState::Complete)
     {
-        return Err(Box::new(DetectorResult::cannot_evaluate(
+        return Err(Box::new(DetectorResult::cannot_evaluate_with_details(
             input,
             descriptor,
             "the newest host testimony lacks complete load coverage",
             vec!["A newer partial or failed report is not shadowed by older success".to_owned()],
+            incomplete_load_coverage_details(admitted),
         )));
     }
 
@@ -488,14 +503,96 @@ fn newest_current_report<'a>(
     let reliance =
         Duration::seconds(i64::try_from(DESCRIPTOR.freshness.reliance_seconds).unwrap_or(i64::MAX));
     if age < Duration::zero() || age > reliance {
-        return Err(Box::new(DetectorResult::cannot_evaluate(
+        return Err(Box::new(DetectorResult::cannot_evaluate_with_details(
             input,
             descriptor,
             "the newest host testimony is outside its freshness window",
             vec!["Staleness removes reliance; it does not negate testimony".to_owned()],
+            invalid_freshness_details(age),
         )));
     }
     Ok(report)
+}
+
+fn profile_contract_mismatch_details(
+    admitted: &ValidatedReport,
+    descriptor: &DetectorDescriptor,
+) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (
+            "actual_profile_digest".to_owned(),
+            admitted.profile_digest.as_str().to_owned(),
+        ),
+        ("actual_profile_id".to_owned(), admitted.profile.id.clone()),
+        (
+            "actual_profile_version".to_owned(),
+            admitted.profile.version.to_string(),
+        ),
+        (
+            "expected_profile_digest".to_owned(),
+            descriptor.profile_digest.as_str().to_owned(),
+        ),
+        (
+            "expected_profile_id".to_owned(),
+            descriptor.profile.id.clone(),
+        ),
+        (
+            "expected_profile_version".to_owned(),
+            descriptor.profile.version.to_string(),
+        ),
+        ("reason".to_owned(), "profile_contract_mismatch".to_owned()),
+    ])
+}
+
+fn incomplete_load_coverage_details(admitted: &ValidatedReport) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (
+            "load_coverage_state".to_owned(),
+            coverage_state_name(admitted.coverage.get("load")).to_owned(),
+        ),
+        ("reason".to_owned(), "incomplete_load_coverage".to_owned()),
+        (
+            "report_status".to_owned(),
+            report_status_name(admitted.status).to_owned(),
+        ),
+    ])
+}
+
+fn invalid_freshness_details(age: Duration) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("age_seconds".to_owned(), age.num_seconds().to_string()),
+        (
+            "freshness_relation".to_owned(),
+            if age < Duration::zero() {
+                "future"
+            } else {
+                "stale"
+            }
+            .to_owned(),
+        ),
+        ("reason".to_owned(), "invalid_freshness".to_owned()),
+        (
+            "reliance_seconds".to_owned(),
+            DESCRIPTOR.freshness.reliance_seconds.to_string(),
+        ),
+    ])
+}
+
+fn report_status_name(status: SemanticReportStatus) -> &'static str {
+    match status {
+        SemanticReportStatus::Complete => "complete",
+        SemanticReportStatus::Partial => "partial",
+        SemanticReportStatus::Failed => "failed",
+    }
+}
+
+fn coverage_state_name(state: Option<&SemanticCoverageState>) -> &'static str {
+    match state {
+        Some(SemanticCoverageState::Complete) => "complete",
+        Some(SemanticCoverageState::Partial) => "partial",
+        Some(SemanticCoverageState::Unavailable) => "unavailable",
+        None => "missing",
+    }
 }
 
 fn parse_payload(
@@ -610,9 +707,15 @@ mod tests {
         // evaluation ignored the descriptor parameter and hard-coded a constant,
         // this would not hold for both thresholds.
         assert_eq!(load_pressure_state(2.5, 2000), DetectorState::Present);
-        assert_eq!(load_pressure_state(2.5, 3000), DetectorState::ExplicitlyAbsent);
+        assert_eq!(
+            load_pressure_state(2.5, 3000),
+            DetectorState::ExplicitlyAbsent
+        );
         // The boundary is inclusive at exactly the threshold.
         assert_eq!(load_pressure_state(2.0, 2000), DetectorState::Present);
-        assert_eq!(load_pressure_state(1.999, 2000), DetectorState::ExplicitlyAbsent);
+        assert_eq!(
+            load_pressure_state(1.999, 2000),
+            DetectorState::ExplicitlyAbsent
+        );
     }
 }

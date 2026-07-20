@@ -156,6 +156,20 @@ impl DetectorResult {
         summary: impl Into<String>,
         limitations: Vec<String>,
     ) -> Self {
+        Self::cannot_evaluate_with_details(input, descriptor, summary, limitations, BTreeMap::new())
+    }
+
+    /// Creates a `cannot_evaluate` result with bounded dependent facts while
+    /// retaining the typed detector boundary and refusal code as its semantic
+    /// identity.
+    #[must_use]
+    pub fn cannot_evaluate_with_details(
+        input: &DetectorInput<'_>,
+        descriptor: &DetectorDescriptor,
+        summary: impl Into<String>,
+        limitations: Vec<String>,
+        details: BTreeMap<String, String>,
+    ) -> Self {
         let summary = summary.into();
         let refusal = ProfileRefusal {
             instance_id: input.instance_id.to_owned(),
@@ -163,7 +177,7 @@ impl DetectorResult {
             boundary: RefusalBoundary::Detector,
             code: ProfileRefusalCode::CannotEvaluate,
             message: summary.clone(),
-            details: BTreeMap::new(),
+            details,
         };
         Self {
             state: DetectorState::CannotEvaluate,

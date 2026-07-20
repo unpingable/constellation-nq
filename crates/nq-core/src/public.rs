@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::engine::{CollectionOutcome, GovernedRefusal};
+use crate::engine::{CollectionOutcome, EvaluationEnvelopeV2, GovernedRefusal};
 
 /// Finding snapshot schema identifier.
 pub const FINDING_SNAPSHOT_SCHEMA: &str = "nq.finding_snapshot.v3";
@@ -11,6 +11,10 @@ pub const FINDING_SNAPSHOT_SCHEMA: &str = "nq.finding_snapshot.v3";
 pub const STATUS_SNAPSHOT_SCHEMA: &str = "nq.status_snapshot.v1";
 /// Lossless typed status snapshot schema identifier.
 pub const STATUS_SNAPSHOT_V2_SCHEMA: &str = "nq.status_snapshot.v2";
+/// Status snapshot with authoritative current evaluation results.
+pub const STATUS_SNAPSHOT_V3_SCHEMA: &str = "nq.status_snapshot.v3";
+/// Bounded immutable evaluation-history page schema identifier.
+pub const EVALUATION_HISTORY_SCHEMA: &str = "nq.evaluation_history.v1";
 /// Typed rejected-custody history schema identifier.
 pub const REJECTED_CUSTODY_SCHEMA: &str = "nq.rejected_custody.v1";
 
@@ -258,6 +262,99 @@ pub struct ComponentStatusV2 {
     pub observed_at: DateTime<Utc>,
 }
 
+/// Complete local service health snapshot with authoritative evaluation
+/// results selected from immutable evaluation history.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct StatusSnapshotV3 {
+    /// Exact DTO schema.
+    pub schema: String,
+    /// Snapshot generation time.
+    pub generated_at: DateTime<Utc>,
+    /// Highest evaluation append sequence included in this snapshot.
+    pub evaluation_through_sequence: u64,
+    /// Current independently reported components and the latest exact result
+    /// for every complete semantic evaluation lineage.
+    pub components: Vec<ComponentStatusV3>,
+}
+
+/// Typed details of one v3 component status.
+// The exact governed envelopes intentionally stay inline: boxing would alter
+// the canonical Rust carrier without changing the bounded wire document.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "detail_kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ComponentStatusDetailV3 {
+    /// Canonical result for a watcher instance.
+    Collection {
+        /// Complete versioned collection envelope.
+        result: CollectionOutcome,
+    },
+    /// Canonical result of the latest evaluation in one exact semantic lineage.
+    Evaluation {
+        /// Store-wide append sequence of this immutable evaluation.
+        sequence: u64,
+        /// Complete canonical evaluation envelope.
+        result: EvaluationEnvelopeV2,
+    },
+    /// Non-instance operational diagnostic retained as bounded JSON.
+    Diagnostic {
+        /// Exact bounded diagnostic value stored by the component.
+        value: serde_json::Value,
+    },
+}
+
+/// One component of the v3 status surface.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ComponentStatusV3 {
+    /// Component class.
+    pub kind: ComponentKind,
+    /// Stable local identity. Evaluation components use the immutable identity
+    /// of the selected canonical evaluation event.
+    pub id: String,
+    /// Coarse health state derived from the canonical detail.
+    pub state: HealthState,
+    /// Precise stable diagnostic code derived from the canonical detail.
+    pub code: String,
+    /// Typed collection, evaluation, or operational detail.
+    pub detail: ComponentStatusDetailV3,
+    /// Time the component was observed.
+    pub observed_at: DateTime<Utc>,
+}
+
+/// One immutable evaluation record and its monotone store cursor.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluationHistoryRecordV1 {
+    /// Store-wide gap-free append sequence.
+    pub sequence: u64,
+    /// Exact canonical evaluation result.
+    pub result: EvaluationEnvelopeV2,
+}
+
+/// Explicitly bounded page of immutable governed evaluation history.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluationHistoryPageV1 {
+    /// Exact DTO schema.
+    pub schema: String,
+    /// Page generation time.
+    pub generated_at: DateTime<Utc>,
+    /// Requested maximum record count.
+    pub limit: u32,
+    /// Exclusive append-sequence cursor supplied by the caller.
+    pub after_sequence: Option<u64>,
+    /// Inclusive frozen upper bound for this logical history snapshot.
+    pub through_sequence: u64,
+    /// Exact immutable records in append order.
+    pub records: Vec<EvaluationHistoryRecordV1>,
+    /// Cursor for the next page within `through_sequence`, when one exists.
+    pub next_after_sequence: Option<u64>,
+    /// True only when this page reaches `through_sequence`.
+    pub complete: bool,
+}
+
 /// Bounded, typed historical rejected-custody snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -351,6 +448,19 @@ impl StatusSnapshotV2 {
         Self {
             schema: STATUS_SNAPSHOT_V2_SCHEMA.into(),
             generated_at: Utc::now(),
+            components: Vec::new(),
+        }
+    }
+}
+
+impl StatusSnapshotV3 {
+    /// Create an empty typed snapshot. Empty is distinct from healthy.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            schema: STATUS_SNAPSHOT_V3_SCHEMA.into(),
+            generated_at: Utc::now(),
+            evaluation_through_sequence: 0,
             components: Vec::new(),
         }
     }

@@ -5,3 +5,4 @@ pub mod archive;
 pub mod cli;
 pub mod daemon;
 mod ownership;
+mod transport;

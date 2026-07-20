@@ -20,9 +20,10 @@ use nq_protocol::{
     ScopeBinding, ScopeKind, Sha256Digest, SubjectBinding, SubjectId, VantageBinding, VantageKind,
 };
 use nq_store::{
-    AdmissionIdentity, AdmissionInput, BindingEventInput, BindingMaterializationInput,
-    CanonicalDocument, CollectionInput, CoverageInput, EvaluationInput, EvaluationProfileBinding,
-    FindingEventInput, FindingEvidenceInput, GenesisInput, ObservationInput,
+    AdmissionIdentity, AdmissionInput, AdmittedCollectionCompletion, BindingEventInput,
+    BindingMaterializationInput, CanonicalDocument, CollectionInput, CoverageInput,
+    EvaluationCommitInput, EvaluationInput, EvaluationProfileBinding, EvidenceSnapshot,
+    FindingEventInput, FindingEvidenceInput, FindingSnapshotRow, GenesisInput, ObservationInput,
     ProfileDescriptorInput, RefusalInput, ReportErrorInput, ReportInput, RunInput,
     RunResultStatusInput, StatusEventInput, Store, SubmissionDisposition, SubmissionInput,
 };
@@ -34,17 +35,20 @@ use uuid::Uuid;
 use crate::admission::{
     AdmissionError, AdmissionLock, AdmissionManager, CandidateEvidence, ConformanceReceipt,
 };
-use crate::config::{Carrier, CheckpointPolicy, NqConfig, ResourceLimits, WatcherConfig};
+use crate::config::{
+    Carrier, CheckpointPolicy, NqConfig, ResourceLimits, ScopeConfig, VantageConfig, WatcherConfig,
+};
 use crate::coordination::{CoordinationError, InstanceGuard};
 use crate::evaluator_identity::EvaluatorRuntimeIdentity;
 use crate::identity::{ExecutionIdentity, VerifiedLaunch};
 use crate::public::{
-    ComponentKind, ComponentStatus, ComponentStatusDetailV2, ComponentStatusV2, ConditionState,
-    ConditionView, DetectorIdentity, FINDING_SNAPSHOT_SCHEMA, FindingSnapshotV3, HealthState,
-    OriginMode, PublicEvidenceReference, PublicProfileIdentity, REJECTED_CUSTODY_SCHEMA,
-    RejectedCustodySnapshotV1, RejectedCustodyV1, STATUS_SNAPSHOT_SCHEMA,
-    STATUS_SNAPSHOT_V2_SCHEMA, Severity, StatusSnapshotV1, StatusSnapshotV2, VisibilityState,
-    VisibilityView,
+    ComponentKind, ComponentStatus, ComponentStatusDetailV2, ComponentStatusDetailV3,
+    ComponentStatusV2, ComponentStatusV3, ConditionState, ConditionView, DetectorIdentity,
+    EVALUATION_HISTORY_SCHEMA, EvaluationHistoryPageV1, EvaluationHistoryRecordV1,
+    FINDING_SNAPSHOT_SCHEMA, FindingSnapshotV3, HealthState, OriginMode, PublicEvidenceReference,
+    PublicProfileIdentity, REJECTED_CUSTODY_SCHEMA, RejectedCustodySnapshotV1, RejectedCustodyV1,
+    STATUS_SNAPSHOT_SCHEMA, STATUS_SNAPSHOT_V2_SCHEMA, STATUS_SNAPSHOT_V3_SCHEMA, Severity,
+    StatusSnapshotV1, StatusSnapshotV2, StatusSnapshotV3, VisibilityState, VisibilityView,
 };
 use crate::runner::{AcquisitionOutcome, ExchangeTimeoutPhase, RunCapture, StdioRunner};
 use crate::unix_runner::{
@@ -155,7 +159,11 @@ pub enum BindingActionOutcome {
 }
 
 /// Exact schema of the canonical collection-result carrier.
-pub const COLLECTION_OUTCOME_SCHEMA: &str = "nq.collection_outcome.v1";
+pub const COLLECTION_OUTCOME_V1_SCHEMA: &str = "nq.collection_outcome.v1";
+/// Admitted carrier schema with exact evaluation envelopes.
+pub const COLLECTION_OUTCOME_V2_SCHEMA: &str = "nq.collection_outcome.v2";
+/// Current collection carrier schema for newly admitted results.
+pub const COLLECTION_OUTCOME_SCHEMA: &str = COLLECTION_OUTCOME_V2_SCHEMA;
 
 /// Exact schema of the canonical refusal carrier embedded in collection results.
 pub const GOVERNED_REFUSAL_SCHEMA: &str = "nq.governed_refusal.v1";
@@ -165,6 +173,8 @@ pub const RUN_RESOURCE_OUTCOME_SCHEMA: &str = "nq.run_resource_outcome.v1";
 
 /// Exact schema of persisted governed detector evaluation results.
 pub const EVALUATION_RESULT_SCHEMA: &str = "nq.evaluation_result.v1";
+/// Closed canonical envelope carrying every engine-owned evaluation identity.
+pub const EVALUATION_ENVELOPE_SCHEMA: &str = "nq.evaluation_envelope.v2";
 
 /// Closed collection-result schema identity. Deserialization rejects any other
 /// string instead of interpreting future bytes under this version.
@@ -173,6 +183,9 @@ pub enum CollectionOutcomeSchema {
     /// First lossless result transport.
     #[serde(rename = "nq.collection_outcome.v1")]
     V1,
+    /// Admitted result carrying exact committed evaluation envelopes.
+    #[serde(rename = "nq.collection_outcome.v2")]
+    V2,
 }
 
 /// Closed governed-refusal schema identity.
@@ -249,6 +262,132 @@ pub struct EvaluationProfileIdentity {
     pub profile_digest: nq_profiles::ProfileDigest,
     /// Composite descriptor/protocol/evaluator semantic identity.
     pub profile_semantic_id: ProfileSemanticId,
+}
+
+/// Exact engine-owned binding under which one detector evaluation ran.
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluationContextV1 {
+    /// Responsible watcher instance.
+    pub instance_id: String,
+    /// Bound subject identity.
+    pub subject: String,
+    /// Exact profile-owned scope.
+    pub scope: ScopeConfig,
+    /// Exact profile-owned vantage.
+    pub vantage: VantageConfig,
+}
+
+/// Closed schema identity for the complete canonical evaluation envelope.
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+pub enum EvaluationEnvelopeSchema {
+    /// First lossless envelope around the governed v1 detector payload.
+    #[serde(rename = "nq.evaluation_envelope.v2")]
+    V2,
+}
+
+/// Exact compiled detector identity used by one evaluation.
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluationDetectorIdentity {
+    /// Stable detector name.
+    pub id: String,
+    /// Compiled detector version.
+    pub version: String,
+    /// Digest of the exact compiled descriptor.
+    pub digest: String,
+}
+
+/// Instance-qualified durable watermark captured for one evaluation.
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluationWatermarkV2 {
+    /// Instance whose admitted history was evaluated.
+    pub instance_id: String,
+    /// Highest admitted report sequence visible to the evaluation.
+    pub max_report_sequence: u64,
+    /// Exact receipt time of that report, absent only for an empty watermark.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub watermark_received_at: Option<DateTime<Utc>>,
+}
+
+/// Complete canonical evaluation carrier. SQL and finding columns are strict
+/// projections of this object; they are never independent sources of meaning.
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluationEnvelopeV2 {
+    /// Closed envelope schema.
+    pub schema: EvaluationEnvelopeSchema,
+    /// Stable evaluation identity.
+    pub evaluation_id: String,
+    /// Admitted collection run that triggered this evaluation, when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger_run_id: Option<String>,
+    /// Exact watcher binding evaluated.
+    pub context: EvaluationContextV1,
+    /// Exact compiled detector evaluated.
+    pub detector: EvaluationDetectorIdentity,
+    /// Running evaluator artifact identity.
+    pub evaluator_artifact_digest: Sha256Digest,
+    /// Exact compiled profile identity.
+    pub profile: EvaluationProfileIdentity,
+    /// Evaluation start time.
+    pub started_at: DateTime<Utc>,
+    /// Evaluation completion time.
+    pub evaluated_at: DateTime<Utc>,
+    /// Instance-qualified evidence watermark.
+    pub watermark: EvaluationWatermarkV2,
+    /// Governed detector-owned result payload.
+    pub result: EvaluationResultV1,
+}
+
+impl EvaluationEnvelopeV2 {
+    fn validate(&self) -> Result<(), EngineError> {
+        if self.evaluation_id.is_empty()
+            || self.detector.id.is_empty()
+            || self.detector.version.is_empty()
+            || Sha256Digest::parse(self.detector.digest.clone()).is_err()
+            || self.context.instance_id.is_empty()
+            || self.context.subject.is_empty()
+            || self.profile != self.result.profile
+            || self.watermark.instance_id != self.context.instance_id
+            || self.result.watermark.0 != self.watermark.max_report_sequence
+            || self.started_at > self.evaluated_at
+            || self.result.condition.is_empty()
+            || (self.result.state == DetectorState::CannotEvaluate) != self.result.refusal.is_some()
+        {
+            return Err(EngineError::Invariant(
+                "evaluation envelope has inconsistent identity, context, time, watermark, profile, or refusal cardinality".into(),
+            ));
+        }
+        if let Some(refusal) = &self.result.refusal {
+            refusal.validate()?;
+            let GovernedRefusalOrigin::Profile(profile) = &refusal.origin else {
+                return Err(EngineError::Invariant(
+                    "detector evaluation refusal must be profile-origin".into(),
+                ));
+            };
+            if profile.refusal.instance_id != self.context.instance_id
+                || profile.refusal.profile != self.profile.profile
+                || profile.profile_semantic_id != self.profile.profile_semantic_id
+            {
+                return Err(EngineError::Invariant(
+                    "evaluation refusal disagrees with envelope context or profile".into(),
+                ));
+            }
+            if profile.refusal.boundary != nq_profiles::RefusalBoundary::Detector
+                || profile.refusal.code != nq_profiles::ProfileRefusalCode::CannotEvaluate
+                || profile.refusal.message != self.result.summary
+                || !self.result.evidence.is_empty()
+            {
+                return Err(EngineError::Invariant(
+                    "cannot_evaluate refusal disagrees with the exact detector producer invariant"
+                        .into(),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Exact detector result persisted without flattening a profile refusal.
@@ -1232,8 +1371,8 @@ pub enum CollectionResult {
         report_status: String,
         /// Canonical semantic digest of the admitted report.
         semantic_digest: String,
-        /// Number of detector evaluations committed from the report.
-        evaluations: usize,
+        /// Exact ordered detector evaluations committed from the report.
+        evaluations: Vec<EvaluationEnvelopeV2>,
     },
     /// The active admission could not bind a run; no helper was launched.
     AdmissionRefused {
@@ -1278,10 +1417,10 @@ impl CollectionOutcome {
         report_id: String,
         report_status: String,
         semantic_digest: String,
-        evaluations: usize,
+        evaluations: Vec<EvaluationEnvelopeV2>,
     ) -> Self {
         Self {
-            schema: CollectionOutcomeSchema::V1,
+            schema: CollectionOutcomeSchema::V2,
             instance_id,
             run_id: Some(run_id),
             result: CollectionResult::Admitted {
@@ -1379,7 +1518,7 @@ impl CollectionOutcome {
                 ))
             }
             CollectionResult::AdmissionRefused { refusal } => {
-                if self.run_id.is_some() {
+                if self.schema != CollectionOutcomeSchema::V1 || self.run_id.is_some() {
                     return Err(EngineError::Invariant(
                         "admission refusal cannot claim an unstarted run".into(),
                     ));
@@ -1393,7 +1532,7 @@ impl CollectionOutcome {
                 Ok(())
             }
             CollectionResult::Rejected { refusal } => {
-                if self.run_id.is_none() {
+                if self.schema != CollectionOutcomeSchema::V1 || self.run_id.is_none() {
                     return Err(EngineError::Invariant(
                         "rejected collection requires a run identity".into(),
                     ));
@@ -1406,19 +1545,45 @@ impl CollectionOutcome {
                 refusal.validate()?;
                 Ok(())
             }
-            CollectionResult::AcquisitionFailed { failure } => failure.validate(),
+            CollectionResult::AcquisitionFailed { failure } => {
+                if self.schema != CollectionOutcomeSchema::V1 {
+                    return Err(EngineError::Invariant(
+                        "non-admitted collection result requires v1 schema".into(),
+                    ));
+                }
+                failure.validate()
+            }
             CollectionResult::Admitted {
                 report_id,
                 report_status,
                 semantic_digest,
-                ..
+                evaluations,
             } => {
-                if report_id.is_empty()
+                let run_id = self.run_id.as_deref().unwrap_or_default();
+                let ordered = evaluations.windows(2).all(|pair| {
+                    (
+                        &pair[0].detector.id,
+                        &pair[0].detector.version,
+                        &pair[0].evaluation_id,
+                    ) < (
+                        &pair[1].detector.id,
+                        &pair[1].detector.version,
+                        &pair[1].evaluation_id,
+                    )
+                });
+                if self.schema != CollectionOutcomeSchema::V2
+                    || report_id.is_empty()
                     || !matches!(report_status.as_str(), "complete" | "partial" | "failed")
                     || Sha256Digest::parse(semantic_digest.clone()).is_err()
+                    || evaluations.iter().any(|evaluation| {
+                        evaluation.validate().is_err()
+                            || evaluation.trigger_run_id.as_deref() != Some(run_id)
+                            || evaluation.context.instance_id != self.instance_id
+                    })
+                    || !ordered
                 {
                     return Err(EngineError::Invariant(
-                        "admitted result identity, status, or semantic digest is invalid".into(),
+                        "admitted result identity, status, digest, schema, or evaluation linkage is invalid".into(),
                     ));
                 }
                 Ok(())
@@ -1442,7 +1607,42 @@ pub fn decode_collection_outcome(bytes: &[u8]) -> Result<CollectionOutcome, Engi
             EngineError::Invariant(format!("collection result cannot decode: {error}"))
         })?;
     outcome.validate()?;
+    if canonical(&outcome)?.as_bytes() != document.as_bytes() {
+        return Err(EngineError::Invariant(
+            "collection result does not round-trip to exact canonical typed bytes".into(),
+        ));
+    }
     Ok(outcome)
+}
+
+/// Decode the product's one-record NDJSON collection-result carrier.
+///
+/// Protocol framing is checked first, then the exact body is reopened through
+/// the same canonical typed decoder used for persistence and status surfaces.
+/// This prevents permissive JSON decoding from accepting duplicate fields or
+/// a noncanonical body whose last value merely happens to deserialize.
+///
+/// # Errors
+///
+/// Returns when the NDJSON framing, canonical JSON representation, nested
+/// schema, or any governed result invariant is invalid.
+pub fn decode_collection_outcome_ndjson(
+    bytes: &[u8],
+    max_bytes: usize,
+) -> Result<CollectionOutcome, EngineError> {
+    let framed: CollectionOutcome = nq_protocol::decode_ndjson(bytes, max_bytes)
+        .map_err(|error| EngineError::Protocol(error.to_string()))?;
+    framed.validate()?;
+    let body = bytes.strip_suffix(b"\n").ok_or_else(|| {
+        EngineError::Protocol("collection result NDJSON frame lacks terminal newline".into())
+    })?;
+    let exact = decode_collection_outcome(body)?;
+    if exact != framed {
+        return Err(EngineError::Invariant(
+            "framed collection result differs from exact canonical body".into(),
+        ));
+    }
+    Ok(exact)
 }
 
 fn decode_governed_refusal(bytes: &[u8], context: &str) -> Result<GovernedRefusal, EngineError> {
@@ -2086,24 +2286,58 @@ impl CollectionEngine {
                             protocol_outcome: "valid_report".into(),
                             disposition: SubmissionDisposition::Admitted(stored_report),
                         };
-                        let receipt = self.store.commit_collection(&CollectionInput {
+                        validate_evaluation_refusal_history(&self.store)?;
+                        let evaluator_artifact_digest = self
+                            .require_evaluator_identity()?
+                            .artifact_digest()
+                            .as_str()
+                            .to_owned();
+                        let collection = CollectionInput {
                             run,
                             submission: Some(submission),
-                        })?;
-                        let evaluations = self.evaluate_instance(watcher, profile)?;
-                        let outcome = CollectionOutcome::admitted(
-                            watcher.instance_id.clone(),
-                            run_id,
-                            report_id,
-                            report_status,
-                            receipt.semantic_digest.ok_or_else(|| {
-                                EngineError::Invariant(
-                                    "admitted collection returned no semantic digest".into(),
-                                )
-                            })?,
-                            evaluations,
-                        );
-                        self.record_instance_status(watcher, &outcome)?;
+                        };
+                        let (_, outcome) = self.store.commit_admitted_collection(
+                            &collection,
+                            |view, receipt| {
+                                let snapshot = view.evidence_snapshot(std::slice::from_ref(
+                                    &watcher.instance_id,
+                                ))?;
+                                let current_findings = view.finding_snapshots()?;
+                                let prepared = prepare_instance_evaluations(
+                                    watcher,
+                                    profile,
+                                    Some(&run_id),
+                                    &snapshot,
+                                    &current_findings,
+                                    &evaluator_artifact_digest,
+                                )?;
+                                let evaluations = prepared
+                                    .iter()
+                                    .map(|prepared| prepared.envelope.clone())
+                                    .collect();
+                                let outcome = CollectionOutcome::admitted(
+                                    watcher.instance_id.clone(),
+                                    run_id.clone(),
+                                    report_id.clone(),
+                                    report_status.clone(),
+                                    receipt.semantic_digest.clone().ok_or_else(|| {
+                                        EngineError::Invariant(
+                                            "admitted collection returned no semantic digest"
+                                                .into(),
+                                        )
+                                    })?,
+                                    evaluations,
+                                );
+                                Ok::<_, EngineError>(AdmittedCollectionCompletion {
+                                    status: instance_status_event(watcher, &outcome)?,
+                                    evaluations: prepared
+                                        .into_iter()
+                                        .map(|prepared| prepared.commit)
+                                        .collect(),
+                                    value: outcome,
+                                })
+                            },
+                        )?;
                         Ok(outcome)
                     }
                 }
@@ -2126,7 +2360,8 @@ impl CollectionEngine {
         )?;
         self.reconcile_pending_binding(watcher)?;
         let profile = resolve(watcher)?;
-        self.evaluate_instance(watcher, profile)
+        self.evaluate_instance(watcher, profile, None)
+            .map(|evaluations| evaluations.len())
     }
 
     /// Activate one retained historical admission under the same serialized,
@@ -2697,128 +2932,35 @@ impl CollectionEngine {
         &mut self,
         watcher: &WatcherConfig,
         profile: &'static dyn ProfileModule,
-    ) -> Result<usize, EngineError> {
+        trigger_run_id: Option<&str>,
+    ) -> Result<Vec<EvaluationEnvelopeV2>, EngineError> {
         let snapshot = self
             .store
             .evidence_snapshot(std::slice::from_ref(&watcher.instance_id))?;
-        let watermark = snapshot
-            .watermarks
-            .first()
-            .ok_or_else(|| EngineError::Invariant("missing instance watermark".into()))?;
-        let profile_version = watcher.profile.version.to_string();
-        let profile_digest = profile
-            .descriptor()
-            .digest()
-            .map_err(|error| EngineError::Canonical(error.to_string()))?;
-        let profile_semantic = profile_semantic_id(profile.descriptor())
-            .map_err(|error| EngineError::Canonical(error.to_string()))?;
-        let reports = reconstruct_detector_reports(
-            &snapshot.reports,
-            profile,
-            &watcher.profile.id,
-            &profile_version,
-            profile_digest.as_str(),
-        )?;
+        validate_evaluation_refusal_history(&self.store)?;
         let current_findings = self.store.finding_snapshots()?;
-        let subject_json = serde_json::to_string(&Value::String(watcher.subject.clone()))
-            .map_err(|error| EngineError::Canonical(error.to_string()))?;
-        // Every finding event records the running evaluator that produced it;
-        // refuse (fail closed) rather than stamp findings with a fabricated one.
         let evaluator_artifact_digest = self
             .require_evaluator_identity()?
             .artifact_digest()
             .as_str()
             .to_owned();
-        let mut count = 0;
-        for detector in profile.detectors() {
-            let evaluated_at = Utc::now();
-            let detector_input = DetectorInput {
-                instance_id: &watcher.instance_id,
-                evaluated_at,
-                watermark: EvidenceWatermark(
-                    u64::try_from(watermark.max_report_sequence).unwrap_or(u64::MAX),
-                ),
-                reports: &reports,
-            };
-            let result = detector.evaluate(&detector_input);
-            let descriptor = detector.descriptor();
-            let detector_digest = descriptor.digest().map_err(EngineError::Canonical)?;
-            let evaluation_id = Uuid::new_v4().to_string();
-            let outcome = match result.state {
-                DetectorState::Present => "condition_present",
-                DetectorState::ExplicitlyAbsent => "condition_explicitly_absent",
-                DetectorState::CannotEvaluate => "cannot_evaluate",
-            };
-            let governed_refusal = result.refusal.as_ref().map(|refusal| {
-                GovernedRefusal::profile(
-                    Uuid::new_v4().to_string(),
-                    profile_semantic.clone(),
-                    refusal.clone(),
-                )
-            });
-            let governed_result = governed_evaluation_result(
-                &result,
-                EvaluationProfileIdentity {
-                    profile: profile.descriptor().profile.clone(),
-                    profile_digest: profile_digest.clone(),
-                    profile_semantic_id: profile_semantic.clone(),
-                },
-                governed_refusal.clone(),
+        let prepared = prepare_instance_evaluations(
+            watcher,
+            profile,
+            trigger_run_id,
+            &snapshot,
+            &current_findings,
+            &evaluator_artifact_digest,
+        )?;
+        let mut evaluations = Vec::with_capacity(prepared.len());
+        for prepared in prepared {
+            self.store.commit_evaluation(
+                &prepared.commit.evaluation,
+                prepared.commit.finding.as_ref(),
             )?;
-            let refusal = governed_refusal
-                .as_ref()
-                .map(|refusal| stored_governed_refusal(refusal, evaluated_at))
-                .transpose()?;
-            let evaluation = EvaluationInput {
-                evaluation_id: evaluation_id.clone(),
-                detector_id: descriptor.id.clone(),
-                detector_version: descriptor.version.to_string(),
-                detector_digest: detector_digest.clone(),
-                evaluator_artifact_digest: evaluator_artifact_digest.clone(),
-                started_at: timestamp(evaluated_at),
-                evaluated_at: timestamp(evaluated_at),
-                outcome: outcome.into(),
-                detail: canonical(&governed_result)?,
-                profile: EvaluationProfileBinding {
-                    profile_id: watcher.profile.id.clone(),
-                    profile_version: profile_version.clone(),
-                    profile_digest: profile_digest.as_str().to_owned(),
-                    profile_semantic_id: parse_identity_digest(
-                        "profile_semantic_id",
-                        profile_semantic.as_str(),
-                    )?,
-                },
-                watermarks: snapshot.watermarks.clone(),
-                refusal,
-            };
-            let detector_version = descriptor.version.to_string();
-            let lineage = FindingLineage {
-                instance_id: &watcher.instance_id,
-                detector_id: &descriptor.id,
-                detector_version: &detector_version,
-                detector_digest: &detector_digest,
-                profile_id: &watcher.profile.id,
-                profile_version: &profile_version,
-                profile_digest: profile_digest.as_str(),
-                profile_semantic_id: profile_semantic.as_str(),
-                subject_json: &subject_json,
-            };
-            let current = find_current_finding(&current_findings, &lineage);
-            let finding = build_finding_event(
-                watcher,
-                profile,
-                descriptor,
-                &result,
-                governed_refusal.as_ref(),
-                evaluated_at,
-                current,
-                &snapshot.reports,
-            )?;
-            self.store
-                .commit_evaluation(&evaluation, finding.as_ref())?;
-            count += 1;
+            evaluations.push(prepared.envelope);
         }
-        Ok(count)
+        Ok(evaluations)
     }
 }
 
@@ -2894,6 +3036,12 @@ struct FindingLineage<'a> {
     profile_digest: &'a str,
     profile_semantic_id: &'a str,
     subject_json: &'a str,
+    basis_json: &'a str,
+}
+
+struct PreparedEvaluation {
+    envelope: EvaluationEnvelopeV2,
+    commit: EvaluationCommitInput,
 }
 
 impl FindingLineage<'_> {
@@ -2907,6 +3055,7 @@ impl FindingLineage<'_> {
             && finding.profile_digest == self.profile_digest
             && finding.profile_semantic_id == self.profile_semantic_id
             && finding.subject_json == self.subject_json
+            && finding.basis_json == self.basis_json
     }
 }
 
@@ -2915,6 +3064,191 @@ fn find_current_finding<'a>(
     lineage: &FindingLineage<'_>,
 ) -> Option<&'a nq_store::FindingSnapshotRow> {
     findings.iter().find(|finding| lineage.matches(finding))
+}
+
+#[allow(clippy::too_many_lines)]
+fn prepare_instance_evaluations(
+    watcher: &WatcherConfig,
+    profile: &'static dyn ProfileModule,
+    trigger_run_id: Option<&str>,
+    snapshot: &EvidenceSnapshot,
+    current_findings: &[FindingSnapshotRow],
+    evaluator_artifact_digest: &str,
+) -> Result<Vec<PreparedEvaluation>, EngineError> {
+    let profile_version = watcher.profile.version.to_string();
+    let profile_digest = profile
+        .descriptor()
+        .digest()
+        .map_err(|error| EngineError::Canonical(error.to_string()))?;
+    let profile_semantic = profile_semantic_id(profile.descriptor())
+        .map_err(|error| EngineError::Canonical(error.to_string()))?;
+    let matching_rows =
+        evaluation_context_rows(&snapshot.reports, watcher, profile_digest.as_str())?;
+    let reports = matching_rows
+        .iter()
+        .map(|row| reconstruct_admitted(row, profile))
+        .collect::<Result<Vec<_>, _>>()?;
+    let latest = matching_rows.iter().max_by_key(|row| row.report_sequence);
+    let evaluation_watermark = nq_store::EvaluationWatermark {
+        instance_id: watcher.instance_id.clone(),
+        max_report_sequence: latest.map_or(0, |row| row.report_sequence),
+        watermark_received_at: latest.map(|row| row.received_at.clone()),
+    };
+    let subject_json = serde_json::to_string(&Value::String(watcher.subject.clone()))
+        .map_err(|error| EngineError::Canonical(error.to_string()))?;
+    let mut prepared = Vec::new();
+    for detector in profile.detectors() {
+        // The durable timestamp format is millisecond precision. Construct the
+        // canonical envelope from that same value so historical reopening does
+        // not compare truncated SQL text with discarded sub-millisecond state.
+        let evaluated_at = parse_timestamp(&timestamp(Utc::now()))?;
+        let detector_input = DetectorInput {
+            instance_id: &watcher.instance_id,
+            evaluated_at,
+            watermark: EvidenceWatermark(
+                u64::try_from(evaluation_watermark.max_report_sequence).unwrap_or(u64::MAX),
+            ),
+            reports: &reports,
+        };
+        let result = detector.evaluate(&detector_input);
+        let descriptor = detector.descriptor();
+        let detector_digest = descriptor.digest().map_err(EngineError::Canonical)?;
+        let evaluation_id = Uuid::new_v4().to_string();
+        let outcome = match result.state {
+            DetectorState::Present => "condition_present",
+            DetectorState::ExplicitlyAbsent => "condition_explicitly_absent",
+            DetectorState::CannotEvaluate => "cannot_evaluate",
+        };
+        let governed_refusal = result.refusal.as_ref().map(|refusal| {
+            GovernedRefusal::profile(
+                Uuid::new_v4().to_string(),
+                profile_semantic.clone(),
+                refusal.clone(),
+            )
+        });
+        let evaluation_profile = EvaluationProfileIdentity {
+            profile: profile.descriptor().profile.clone(),
+            profile_digest: profile_digest.clone(),
+            profile_semantic_id: profile_semantic.clone(),
+        };
+        let governed_result = governed_evaluation_result(
+            &result,
+            evaluation_profile.clone(),
+            governed_refusal.clone(),
+        )?;
+        let envelope = EvaluationEnvelopeV2 {
+            schema: EvaluationEnvelopeSchema::V2,
+            evaluation_id: evaluation_id.clone(),
+            trigger_run_id: trigger_run_id.map(str::to_owned),
+            context: EvaluationContextV1 {
+                instance_id: watcher.instance_id.clone(),
+                subject: watcher.subject.clone(),
+                scope: watcher.scope.clone(),
+                vantage: watcher.vantage.clone(),
+            },
+            detector: EvaluationDetectorIdentity {
+                id: descriptor.id.clone(),
+                version: descriptor.version.to_string(),
+                digest: detector_digest.clone(),
+            },
+            evaluator_artifact_digest: parse_identity_digest(
+                "evaluator_artifact_digest",
+                evaluator_artifact_digest,
+            )?,
+            profile: evaluation_profile,
+            started_at: evaluated_at,
+            evaluated_at,
+            watermark: EvaluationWatermarkV2 {
+                instance_id: evaluation_watermark.instance_id.clone(),
+                max_report_sequence: u64::try_from(evaluation_watermark.max_report_sequence)
+                    .unwrap_or(u64::MAX),
+                watermark_received_at: evaluation_watermark
+                    .watermark_received_at
+                    .as_deref()
+                    .map(parse_timestamp)
+                    .transpose()?,
+            },
+            result: governed_result,
+        };
+        let refusal = governed_refusal
+            .as_ref()
+            .map(|refusal| stored_governed_refusal(refusal, evaluated_at))
+            .transpose()?;
+        let evaluation = EvaluationInput {
+            evaluation_id: evaluation_id.clone(),
+            trigger_run_id: trigger_run_id.map(str::to_owned),
+            detector_id: descriptor.id.clone(),
+            detector_version: descriptor.version.to_string(),
+            detector_digest: detector_digest.clone(),
+            evaluator_artifact_digest: evaluator_artifact_digest.to_owned(),
+            started_at: timestamp(evaluated_at),
+            evaluated_at: timestamp(evaluated_at),
+            outcome: outcome.into(),
+            detail: canonical(&envelope)?,
+            profile: EvaluationProfileBinding {
+                profile_id: watcher.profile.id.clone(),
+                profile_version: profile_version.clone(),
+                profile_digest: profile_digest.as_str().to_owned(),
+                profile_semantic_id: parse_identity_digest(
+                    "profile_semantic_id",
+                    profile_semantic.as_str(),
+                )?,
+            },
+            watermarks: vec![evaluation_watermark.clone()],
+            refusal,
+        };
+        let detector_version = descriptor.version.to_string();
+        let lineage_basis = canonical(&json!({
+            "profile_digest": profile_digest.as_str(),
+            "vantage": watcher.vantage,
+            "scope": watcher.scope,
+        }))?;
+        let lineage_basis_json = std::str::from_utf8(lineage_basis.as_bytes())
+            .map_err(|error| EngineError::Canonical(error.to_string()))?;
+        let lineage = FindingLineage {
+            instance_id: &watcher.instance_id,
+            detector_id: &descriptor.id,
+            detector_version: &detector_version,
+            detector_digest: &detector_digest,
+            profile_id: &watcher.profile.id,
+            profile_version: &profile_version,
+            profile_digest: profile_digest.as_str(),
+            profile_semantic_id: profile_semantic.as_str(),
+            subject_json: &subject_json,
+            basis_json: lineage_basis_json,
+        };
+        let current = find_current_finding(current_findings, &lineage);
+        let finding = build_finding_event(
+            watcher,
+            profile,
+            descriptor,
+            &result,
+            governed_refusal.as_ref(),
+            evaluated_at,
+            current,
+            &matching_rows,
+        )?;
+        prepared.push(PreparedEvaluation {
+            envelope,
+            commit: EvaluationCommitInput {
+                evaluation,
+                finding,
+            },
+        });
+    }
+    prepared.sort_by(|left, right| {
+        (
+            &left.envelope.detector.id,
+            &left.envelope.detector.version,
+            &left.envelope.evaluation_id,
+        )
+            .cmp(&(
+                &right.envelope.detector.id,
+                &right.envelope.detector.version,
+                &right.envelope.evaluation_id,
+            ))
+    });
+    Ok(prepared)
 }
 
 fn report_matches_profile_contract(
@@ -2928,18 +3262,53 @@ fn report_matches_profile_contract(
         && report.profile_digest == profile_digest
 }
 
-fn reconstruct_detector_reports(
-    rows: &[nq_store::AdmittedReportRow],
-    profile: &'static dyn ProfileModule,
-    profile_id: &str,
-    profile_version: &str,
+fn report_matches_evaluation_context(
+    row: &nq_store::AdmittedReportRow,
+    watcher: &WatcherConfig,
     profile_digest: &str,
-) -> Result<Vec<DetectorReport>, EngineError> {
+) -> Result<bool, EngineError> {
+    if !report_matches_profile_contract(
+        row,
+        &watcher.profile.id,
+        &watcher.profile.version.to_string(),
+        profile_digest,
+    ) {
+        return Ok(false);
+    }
+    let document = CanonicalDocument::from_canonical_bytes(row.canonical_json.clone())?;
+    if document.digest() != row.semantic_digest {
+        return Err(EngineError::Invariant(format!(
+            "admitted report {} semantic digest was substituted",
+            row.report_id
+        )));
+    }
+    let report: nq_protocol::EvidenceReport = serde_json::from_slice(document.as_bytes())
+        .map_err(|error| EngineError::Invariant(format!("stored report cannot decode: {error}")))?;
+    nq_protocol::validate_report(&report)
+        .map_err(|error| EngineError::Invariant(format!("stored report is invalid: {error}")))?;
+    Ok(report.profile.id.as_str() == watcher.profile.id
+        && report.profile.version.to_string() == watcher.profile.version.to_string()
+        && report.profile.digest.as_str() == profile_digest
+        && report.binding.subject.as_str() == watcher.subject
+        && report.binding.scope.kind.as_str() == watcher.scope.kind
+        && report.binding.scope.value == watcher.scope.value
+        && report.binding.vantage.kind.as_str() == watcher.vantage.kind
+        && report.binding.vantage.value == watcher.vantage.value)
+}
+
+fn evaluation_context_rows(
+    rows: &[nq_store::AdmittedReportRow],
+    watcher: &WatcherConfig,
+    profile_digest: &str,
+) -> Result<Vec<nq_store::AdmittedReportRow>, EngineError> {
     rows.iter()
-        .filter(|row| {
-            report_matches_profile_contract(row, profile_id, profile_version, profile_digest)
-        })
-        .map(|row| reconstruct_admitted(row, profile))
+        .filter_map(
+            |row| match report_matches_evaluation_context(row, watcher, profile_digest) {
+                Ok(true) => Some(Ok(row.clone())),
+                Ok(false) => None,
+                Err(error) => Some(Err(error)),
+            },
+        )
         .collect()
 }
 
@@ -3853,7 +4222,7 @@ fn parse_identity_digest(field: &str, value: &str) -> Result<Sha256Digest, Engin
 fn detector_identity_digest(
     profile: &'static dyn ProfileModule,
 ) -> Result<Sha256Digest, EngineError> {
-    let mut ids: Vec<String> = profile
+    let ids: Vec<String> = profile
         .detectors()
         .iter()
         .map(|detector| {
@@ -3863,9 +4232,7 @@ fn detector_identity_digest(
                 .map_err(EngineError::Canonical)
         })
         .collect::<Result<_, _>>()?;
-    ids.sort();
-    ids.dedup();
-    nq_protocol::semantic_digest(&ids).map_err(|error| EngineError::Canonical(error.to_string()))
+    nq_store::detector_suite_identity_digest(ids).map_err(EngineError::from)
 }
 
 fn governed_evaluation_result(
@@ -4034,7 +4401,7 @@ fn build_finding_event(
         freshness: canonical(&visibility.1)?,
         basis: canonical(&json!({
             "profile_digest": profile.descriptor().digest().map_err(|error| EngineError::Canonical(error.to_string()))?.as_str(),
-            "vantage": watcher.vantage.kind,
+            "vantage": watcher.vantage,
             "scope": watcher.scope,
         }))?,
         refusal: governed_refusal.map(canonical).transpose()?,
@@ -4359,17 +4726,73 @@ pub fn record_component_status(
 ///
 /// Returns when the source, backup, or verification step fails.
 pub fn backup_store(store: &Store, destination: &Path) -> Result<(), EngineError> {
+    validate_admitted_report_history(store)?;
     validate_watcher_run_history(store)?;
     validate_status_history_v2(store)?;
     validate_rejected_custody_history(store)?;
     validate_evaluation_refusal_history(store)?;
     let _artifact = store.backup_verified(destination)?;
     let reopened = Store::open(destination)?;
+    validate_admitted_report_history(&reopened)?;
     validate_watcher_run_history(&reopened)?;
     validate_status_history_v2(&reopened)?;
     validate_rejected_custody_history(&reopened)?;
     validate_evaluation_refusal_history(&reopened)?;
     Ok(())
+}
+
+/// Exhaustively authenticate every admitted report and its exact
+/// submission/run/admission chain in stable report-id order.
+///
+/// # Errors
+///
+/// Returns when association cardinality is not exact or any report fails its
+/// persisted admission/judgment/projection verification.
+pub fn validate_admitted_report_history(store: &Store) -> Result<usize, EngineError> {
+    validate_admitted_report_history_with_page_size(store, nq_store::MAX_PUBLIC_QUERY_ROWS)
+}
+
+fn validate_admitted_report_history_with_page_size(
+    store: &Store,
+    page_size: u32,
+) -> Result<usize, EngineError> {
+    store.validate_admitted_report_associations()?;
+    let mut after_report_id: Option<String> = None;
+    let mut validated = 0usize;
+    loop {
+        let page = store.admitted_report_ids_bounded(page_size, after_report_id.as_deref())?;
+        if page.is_empty() {
+            return Ok(validated);
+        }
+        let page_len = page.len();
+        for report_id in page {
+            after_report_id = Some(report_id.clone());
+            let snapshot = store
+                .verify_admitted_snapshot(&report_id)
+                .map_err(|error| {
+                    EngineError::Invariant(format!(
+                        "admitted report {report_id} failed historical reopening: {error}"
+                    ))
+                })?;
+            let typed: ValidatedReport = serde_json::from_slice(&snapshot.validated_report_json)
+                .map_err(|error| {
+                    EngineError::Invariant(format!(
+                        "admitted report {report_id} is not the strict owned validated-report schema: {error}"
+                    ))
+                })?;
+            if canonical(&typed)?.as_bytes() != snapshot.validated_report_json {
+                return Err(EngineError::Invariant(format!(
+                    "admitted report {report_id} validated judgment is not exact canonical typed bytes"
+                )));
+            }
+            validated = validated.checked_add(1).ok_or_else(|| {
+                EngineError::Invariant("admitted report history count overflowed".into())
+            })?;
+        }
+        if page_len < page_size as usize {
+            return Ok(validated);
+        }
+    }
 }
 
 /// Convert stable SQL finding rows into the exact public DTO.
@@ -4378,6 +4801,7 @@ pub fn backup_store(store: &Store, destination: &Path) -> Result<(), EngineError
 ///
 /// Returns when a durable row violates the public DTO contract.
 pub fn list_findings(store: &Store) -> Result<Vec<FindingSnapshotV3>, EngineError> {
+    validate_evaluation_refusal_history(store)?;
     store
         .finding_snapshots()?
         .into_iter()
@@ -4395,6 +4819,7 @@ pub fn list_findings_bounded(
     limit: u32,
     after_finding_id: Option<&str>,
 ) -> Result<Vec<FindingSnapshotV3>, EngineError> {
+    validate_evaluation_refusal_history(store)?;
     store
         .finding_snapshots_bounded(limit, after_finding_id)?
         .into_iter()
@@ -4408,6 +4833,11 @@ pub fn list_findings_bounded(
 ///
 /// Returns when a durable row violates the public DTO contract.
 pub fn status_snapshot(store: &Store) -> Result<StatusSnapshotV1, EngineError> {
+    if validate_evaluation_refusal_history(store)? != 0 {
+        return Err(EngineError::Invariant(
+            "nq.status_snapshot.v1 cannot emit governed evaluation results; use v3".into(),
+        ));
+    }
     let components = store
         .status_snapshots()?
         .into_iter()
@@ -4427,6 +4857,12 @@ pub fn status_snapshot(store: &Store) -> Result<StatusSnapshotV1, EngineError> {
 /// Returns when an instance row is legacy/unversioned, cannot decode as the
 /// canonical collection carrier, or disagrees with its component identity.
 pub fn status_snapshot_v2(store: &Store) -> Result<StatusSnapshotV2, EngineError> {
+    validate_status_history_v2(store)?;
+    if validate_evaluation_refusal_history(store)? != 0 {
+        return Err(EngineError::Invariant(
+            "nq.status_snapshot.v2 cannot emit governed evaluation results; use v3".into(),
+        ));
+    }
     let components = store
         .status_snapshots()?
         .into_iter()
@@ -4436,6 +4872,232 @@ pub fn status_snapshot_v2(store: &Store) -> Result<StatusSnapshotV2, EngineError
         schema: STATUS_SNAPSHOT_V2_SCHEMA.into(),
         generated_at: Utc::now(),
         components,
+    })
+}
+
+/// Build the lossless current status surface, including the latest canonical
+/// result from every exact semantic evaluation lineage.
+///
+/// The evaluation upper bound is explicit and the complete immutable history
+/// through that bound is reopened before any latest-result selection occurs.
+///
+/// # Errors
+///
+/// Returns when status history, evaluation history, a canonical carrier, or a
+/// projection/linkage invariant cannot be proved exactly.
+pub fn status_snapshot_v3(store: &Store) -> Result<StatusSnapshotV3, EngineError> {
+    const SNAPSHOT_ATTEMPTS: usize = 8;
+    let mut captured = None;
+    for _ in 0..SNAPSHOT_ATTEMPTS {
+        let status_before = store.latest_status_sequence()?;
+        // Collection commits evaluations before its admitted status row.
+        // Reading current status before the evaluation bound prevents a
+        // component from embedding an evaluation beyond that declared bound.
+        let status_rows = store.status_snapshots()?;
+        let through = store.latest_evaluation_sequence()?;
+        validate_status_history_v2(store)?;
+        let mut latest: BTreeMap<Vec<u8>, (i64, i64, EvaluationEnvelopeV2)> = BTreeMap::new();
+        visit_evaluation_history_through(
+            store,
+            nq_store::MAX_PUBLIC_QUERY_ROWS,
+            through,
+            |row, envelope| {
+                let key = evaluation_lineage_key(&envelope)?;
+                match latest.entry(key) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert((row.evaluation_revision, row.evaluation_sequence, envelope));
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry)
+                        if row.evaluation_revision > entry.get().0 =>
+                    {
+                        entry.insert((row.evaluation_revision, row.evaluation_sequence, envelope));
+                    }
+                    std::collections::btree_map::Entry::Occupied(_) => {}
+                }
+                Ok(())
+            },
+        )?;
+        let status_after = store.latest_status_sequence()?;
+        if status_before == status_after {
+            captured = Some((status_rows, through, latest));
+            break;
+        }
+    }
+    let Some((status_rows, through, latest)) = captured else {
+        return Err(EngineError::Invariant(
+            "could not capture one stable status/evaluation snapshot after 8 attempts".into(),
+        ));
+    };
+    let mut components = status_rows
+        .into_iter()
+        .map(|row| status_from_row_v3(store, row))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for (_, sequence, result) in latest.into_values() {
+        let (state, code) = evaluation_status_projection(&result);
+        components.push(ComponentStatusV3 {
+            kind: ComponentKind::Evaluation,
+            id: result.evaluation_id.clone(),
+            state,
+            code: code.to_owned(),
+            observed_at: result.evaluated_at,
+            detail: ComponentStatusDetailV3::Evaluation {
+                sequence: u64::try_from(sequence).map_err(|_| {
+                    EngineError::Invariant("negative evaluation sequence reached status".into())
+                })?,
+                result,
+            },
+        });
+    }
+    components.sort_by(|left, right| (&left.kind, &left.id).cmp(&(&right.kind, &right.id)));
+    Ok(StatusSnapshotV3 {
+        schema: STATUS_SNAPSHOT_V3_SCHEMA.into(),
+        generated_at: Utc::now(),
+        evaluation_through_sequence: u64::try_from(through)
+            .map_err(|_| EngineError::Invariant("negative evaluation snapshot boundary".into()))?,
+        components,
+    })
+}
+
+/// Return one exact, bounded page of immutable governed evaluation history.
+/// A caller can hold `through_sequence` constant across pages to obtain a
+/// finite logical snapshot while later monotone appends remain outside it.
+///
+/// # Errors
+///
+/// Returns for an invalid bound, unsupported page size, or any history whose
+/// canonical semantics and durable projections cannot be reopened exactly.
+#[allow(clippy::too_many_lines)]
+pub fn evaluation_history_bounded(
+    store: &Store,
+    limit: u32,
+    after_sequence: Option<u64>,
+    through_sequence: Option<u64>,
+) -> Result<EvaluationHistoryPageV1, EngineError> {
+    if !(1..=nq_store::MAX_PUBLIC_QUERY_ROWS).contains(&limit) {
+        return Err(EngineError::Invariant(format!(
+            "evaluation history limit must be between 1 and {}",
+            nq_store::MAX_PUBLIC_QUERY_ROWS
+        )));
+    }
+    if after_sequence.is_some() && through_sequence.is_none() {
+        return Err(EngineError::Invariant(
+            "evaluation history continuation requires its frozen upper bound".into(),
+        ));
+    }
+    let current_through = store.latest_evaluation_sequence()?;
+    let requested_through = through_sequence
+        .map(|value| {
+            i64::try_from(value)
+                .map_err(|_| EngineError::Invariant("evaluation history bound overflowed".into()))
+        })
+        .transpose()?
+        .unwrap_or(current_through);
+    let after = after_sequence
+        .map(|value| {
+            i64::try_from(value)
+                .map_err(|_| EngineError::Invariant("evaluation history cursor overflowed".into()))
+        })
+        .transpose()?;
+    if requested_through > current_through || after.is_some_and(|value| value > requested_through) {
+        return Err(EngineError::Invariant(
+            "evaluation history cursor or frozen upper bound is not present".into(),
+        ));
+    }
+
+    let page_rows = store.evaluation_refusal_history_bounded(limit, after, requested_through)?;
+    let cursor = after.unwrap_or(0);
+    let available = requested_through.checked_sub(cursor).ok_or_else(|| {
+        EngineError::Invariant("evaluation history snapshot arithmetic underflowed".into())
+    })?;
+    let expected_len = usize::try_from(available.min(i64::from(limit)))
+        .map_err(|_| EngineError::Invariant("evaluation history page length overflowed".into()))?;
+    if page_rows.len() != expected_len {
+        return Err(EngineError::Invariant(format!(
+            "evaluation history page reopened {} rows; exact frozen sequence requires {expected_len}",
+            page_rows.len()
+        )));
+    }
+
+    let mut reopened = Vec::new();
+    reopened.try_reserve(page_rows.len()).map_err(|_| {
+        EngineError::Invariant("evaluation history page allocation overflowed".into())
+    })?;
+    for (offset, row) in page_rows.into_iter().enumerate() {
+        let offset = i64::try_from(offset)
+            .map_err(|_| EngineError::Invariant("evaluation page offset overflowed".into()))?;
+        let expected_sequence = cursor
+            .checked_add(offset)
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| EngineError::Invariant("evaluation page cursor overflowed".into()))?;
+        if row.evaluation_sequence != expected_sequence {
+            return Err(EngineError::Invariant(format!(
+                "evaluation history expected sequence {expected_sequence}, reopened {}",
+                row.evaluation_sequence
+            )));
+        }
+        let envelope = validate_evaluation_refusal_row(store, &row)?;
+        reopened.push((row, envelope));
+    }
+
+    // A continuation page needs the finding state as it stood at its frozen
+    // cursor, not today's `finding_current`. Reopen one prior event for each
+    // canonical lineage represented on this page; work and retained state are
+    // therefore bounded by `limit`, independent of total immutable history.
+    let mut replay = BTreeMap::new();
+    for (_, envelope) in &reopened {
+        let lineage_key = evaluation_lineage_key(envelope)?;
+        if replay.contains_key(&lineage_key) {
+            continue;
+        }
+        let lineage = evaluation_finding_lineage(envelope)?;
+        if let Some(prior) = store.prior_finding_for_evaluation_lineage(cursor, &lineage)? {
+            if prior.event_revision <= 0 {
+                return Err(EngineError::Invariant(format!(
+                    "finding event {} has invalid prior revision {}",
+                    prior.event_id, prior.event_revision
+                )));
+            }
+            replay.insert(
+                lineage_key,
+                ReplayedFinding {
+                    finding_id: prior.finding_id,
+                    event_revision: prior.event_revision,
+                    condition_state: prior.condition_state,
+                },
+            );
+        }
+    }
+
+    let mut records = Vec::new();
+    records.try_reserve(reopened.len()).map_err(|_| {
+        EngineError::Invariant("evaluation history result allocation overflowed".into())
+    })?;
+    for (row, result) in reopened {
+        validate_evaluation_finding_replay_step(&row, &result, &mut replay)?;
+        records.push(EvaluationHistoryRecordV1 {
+            sequence: u64::try_from(row.evaluation_sequence).map_err(|_| {
+                EngineError::Invariant("negative evaluation sequence reached history".into())
+            })?,
+            result,
+        });
+    }
+    let has_more = available > i64::from(limit);
+    let next_after_sequence = if has_more {
+        records.last().map(|record| record.sequence)
+    } else {
+        None
+    };
+    Ok(EvaluationHistoryPageV1 {
+        schema: EVALUATION_HISTORY_SCHEMA.into(),
+        generated_at: Utc::now(),
+        limit,
+        after_sequence,
+        through_sequence: u64::try_from(requested_through)
+            .map_err(|_| EngineError::Invariant("negative evaluation history boundary".into()))?,
+        records,
+        next_after_sequence,
+        complete: !has_more,
     })
 }
 
@@ -4480,26 +5142,21 @@ fn validate_status_history_v2_with_page_size(
             )?;
             match &component.detail {
                 ComponentStatusDetailV2::Collection { result }
-                    if matches!(
-                        result.result,
-                        CollectionResult::AcquisitionFailed { .. }
-                            | CollectionResult::Rejected { .. }
-                    ) =>
+                    if row.run_id.as_deref() != result.run_id.as_deref() =>
                 {
-                    if row.run_id.as_deref() != result.run_id.as_deref() {
-                        return Err(EngineError::Invariant(format!(
-                            "status event {} lost its atomic non-success run association",
-                            row.status_event_id
-                        )));
-                    }
-                }
-                _ if row.run_id.is_some() => {
                     return Err(EngineError::Invariant(format!(
-                        "status event {} links a run outside the non-success result contract",
+                        "status event {} lost its atomic collection-run association",
                         row.status_event_id
                     )));
                 }
-                _ => {}
+                ComponentStatusDetailV2::Diagnostic { .. } if row.run_id.is_some() => {
+                    return Err(EngineError::Invariant(format!(
+                        "status event {} links a run outside the collection-result contract",
+                        row.status_event_id
+                    )));
+                }
+                ComponentStatusDetailV2::Collection { .. }
+                | ComponentStatusDetailV2::Diagnostic { .. } => {}
             }
             validated = validated.checked_add(1).ok_or_else(|| {
                 EngineError::Invariant("status history event count overflowed".into())
@@ -4513,12 +5170,12 @@ fn validate_status_history_v2_with_page_size(
 
 /// Exhaustively reopen every watcher run under the strict resource-outcome
 /// schema and verify its coarse SQL projection. The store additionally proves
-/// that each authoritative non-success run has exactly one atomic result link.
+/// that each completed admitted or non-success run has one atomic result link.
 ///
 /// # Errors
 ///
 /// Returns on an unsupported/unversioned resource document, a substituted
-/// acquisition projection, or missing/duplicate non-success result linkage.
+/// acquisition projection, or missing/duplicate completed-run result linkage.
 pub fn validate_watcher_run_history(store: &Store) -> Result<usize, EngineError> {
     validate_watcher_run_history_with_page_size(store, nq_store::MAX_PUBLIC_QUERY_ROWS)
 }
@@ -4527,7 +5184,7 @@ fn validate_watcher_run_history_with_page_size(
     store: &Store,
     page_size: u32,
 ) -> Result<usize, EngineError> {
-    store.validate_non_success_run_results()?;
+    store.validate_run_results()?;
     let mut after_run_id: Option<String> = None;
     let mut validated = 0usize;
     loop {
@@ -4566,46 +5223,154 @@ fn validate_evaluation_refusal_history_with_page_size(
     store: &Store,
     page_size: u32,
 ) -> Result<usize, EngineError> {
-    let mut after_evaluation_id: Option<String> = None;
-    let mut validated = 0usize;
+    let through_evaluation_sequence = store.latest_evaluation_sequence()?;
+    visit_evaluation_history_through(store, page_size, through_evaluation_sequence, |_, _| Ok(()))
+}
+
+fn visit_evaluation_history_through<F>(
+    store: &Store,
+    page_size: u32,
+    through_evaluation_sequence: i64,
+    mut visit: F,
+) -> Result<usize, EngineError>
+where
+    F: FnMut(
+        nq_store::EvaluationRefusalHistoryRow,
+        EvaluationEnvelopeV2,
+    ) -> Result<(), EngineError>,
+{
+    store.validate_evaluation_history_invariants()?;
+    let mut after_evaluation_sequence = None;
+    let mut replay = BTreeMap::new();
+    let mut reopened = 0usize;
     loop {
-        let page =
-            store.evaluation_refusal_history_bounded(page_size, after_evaluation_id.as_deref())?;
+        let page = store.evaluation_refusal_history_bounded(
+            page_size,
+            after_evaluation_sequence,
+            through_evaluation_sequence,
+        )?;
         if page.is_empty() {
-            return Ok(validated);
+            return Ok(reopened);
         }
         let page_len = page.len();
         for row in page {
-            after_evaluation_id = Some(row.evaluation_id.clone());
-            validate_evaluation_refusal_row(&row)?;
-            validated = validated.checked_add(1).ok_or_else(|| {
+            after_evaluation_sequence = Some(row.evaluation_sequence);
+            let envelope = validate_evaluation_refusal_row(store, &row)?;
+            validate_evaluation_finding_replay_step(&row, &envelope, &mut replay)?;
+            visit(row, envelope)?;
+            reopened = reopened.checked_add(1).ok_or_else(|| {
                 EngineError::Invariant("evaluation history count overflowed".into())
             })?;
         }
         if page_len < page_size as usize {
-            return Ok(validated);
+            return Ok(reopened);
         }
     }
 }
 
+#[derive(Clone)]
+struct ReplayedFinding {
+    finding_id: String,
+    event_revision: i64,
+    condition_state: String,
+}
+
+fn validate_evaluation_finding_replay_step(
+    row: &nq_store::EvaluationRefusalHistoryRow,
+    envelope: &EvaluationEnvelopeV2,
+    lineages: &mut BTreeMap<Vec<u8>, ReplayedFinding>,
+) -> Result<(), EngineError> {
+    let lineage = evaluation_lineage_key(envelope)?;
+    let prior = lineages.get(&lineage).cloned();
+    let requires_event = match envelope.result.state {
+        DetectorState::Present => true,
+        DetectorState::CannotEvaluate => prior.is_some(),
+        DetectorState::ExplicitlyAbsent => prior
+            .as_ref()
+            .is_some_and(|finding| finding.condition_state != "explicitly_absent"),
+    };
+    if requires_event != row.finding_event_id.is_some() {
+        return Err(EngineError::Invariant(format!(
+            "evaluation {} {} a finding transition required by canonical history",
+            row.evaluation_id,
+            if requires_event { "omits" } else { "invents" }
+        )));
+    }
+    let Some(event_id) = row.finding_event_id.as_deref() else {
+        return Ok(());
+    };
+    let finding_id = row.finding_id.as_deref().ok_or_else(|| {
+        EngineError::Invariant(format!("finding event {event_id} has no finding identity"))
+    })?;
+    let event_revision = row.finding_event_revision.ok_or_else(|| {
+        EngineError::Invariant(format!("finding event {event_id} has no revision"))
+    })?;
+    let condition_state = row.finding_condition_state.as_deref().ok_or_else(|| {
+        EngineError::Invariant(format!("finding event {event_id} has no condition state"))
+    })?;
+    match prior {
+        None if event_revision != 1 || row.finding_event_kind.as_deref() != Some("opened") => {
+            return Err(EngineError::Invariant(format!(
+                "finding event {event_id} does not open canonical lineage at revision one"
+            )));
+        }
+        Some(prior)
+            if finding_id != prior.finding_id || event_revision != prior.event_revision + 1 =>
+        {
+            return Err(EngineError::Invariant(format!(
+                "finding event {event_id} substitutes canonical prior lineage"
+            )));
+        }
+        _ => {}
+    }
+    lineages.insert(
+        lineage,
+        ReplayedFinding {
+            finding_id: finding_id.to_owned(),
+            event_revision,
+            condition_state: condition_state.to_owned(),
+        },
+    );
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)]
 fn validate_evaluation_refusal_row(
+    store: &Store,
     row: &nq_store::EvaluationRefusalHistoryRow,
-) -> Result<(), EngineError> {
+) -> Result<EvaluationEnvelopeV2, EngineError> {
+    if !matches!(row.refusal_count, 0 | 1)
+        || i64::from(row.refusal_id.is_some()) != row.refusal_count
+    {
+        return Err(EngineError::Invariant(format!(
+            "evaluation {} has {} typed refusal associations; expected its exact optional refusal",
+            row.evaluation_id, row.refusal_count
+        )));
+    }
+    if !matches!(row.finding_event_count, 0 | 1)
+        || i64::from(row.finding_event_id.is_some()) != row.finding_event_count
+    {
+        return Err(EngineError::Invariant(format!(
+            "evaluation {} has {} finding-event associations; expected at most one exact event",
+            row.evaluation_id, row.finding_event_count
+        )));
+    }
     let document = CanonicalDocument::from_canonical_bytes(row.detail_json.clone())?;
-    let result: EvaluationResultV1 =
+    let envelope: EvaluationEnvelopeV2 =
         serde_json::from_slice(document.as_bytes()).map_err(|error| {
             EngineError::Invariant(format!(
-                "evaluation {} cannot decode as {EVALUATION_RESULT_SCHEMA}: {error}",
+                "evaluation {} cannot decode as {EVALUATION_ENVELOPE_SCHEMA}: {error}",
                 row.evaluation_id
             ))
         })?;
-    if canonical(&result)?.as_bytes() != document.as_bytes() {
+    if canonical(&envelope)?.as_bytes() != document.as_bytes() {
         return Err(EngineError::Invariant(format!(
             "evaluation {} result is not exact canonical bytes",
             row.evaluation_id
         )));
     }
+    let result = &envelope.result;
+    envelope.validate()?;
     let compiled = nq_profiles::resolve_profile_key(&result.profile.profile).ok_or_else(|| {
         EngineError::Invariant(format!(
             "evaluation {} names uncompiled profile {}/{}",
@@ -4618,12 +5383,41 @@ fn validate_evaluation_refusal_row(
         .map_err(|error| EngineError::Canonical(error.to_string()))?;
     let compiled_semantic_id = profile_semantic_id(compiled.descriptor())
         .map_err(|error| EngineError::Canonical(error.to_string()))?;
-    if row.evaluation_profile_id != result.profile.profile.id
+    let detector = compiled
+        .detectors()
+        .iter()
+        .find(|detector| {
+            let descriptor = detector.descriptor();
+            descriptor.id == row.detector_id
+                && descriptor.version.to_string() == row.detector_version
+        })
+        .ok_or_else(|| {
+            EngineError::Invariant(format!(
+                "evaluation {} names detector {}/{} outside its compiled profile",
+                row.evaluation_id, row.detector_id, row.detector_version
+            ))
+        })?;
+    let detector_descriptor = detector.descriptor();
+    let compiled_detector_digest = detector_descriptor
+        .digest()
+        .map_err(EngineError::Canonical)?;
+    if envelope.evaluation_id != row.evaluation_id
+        || envelope.trigger_run_id != row.trigger_run_id
+        || envelope.detector.id != row.detector_id
+        || envelope.detector.version != row.detector_version
+        || envelope.detector.digest != row.detector_digest
+        || envelope.evaluator_artifact_digest.as_str() != row.evaluator_artifact_digest
+        || parse_timestamp(&row.started_at).ok() != Some(envelope.started_at)
+        || parse_timestamp(&row.evaluated_at).ok() != Some(envelope.evaluated_at)
+        || envelope.profile != result.profile
+        || row.evaluation_profile_id != envelope.profile.profile.id
         || row.evaluation_profile_version != result.profile.profile.version.to_string()
         || row.evaluation_profile_digest != result.profile.profile_digest.as_str()
         || row.evaluation_profile_semantic_id != result.profile.profile_semantic_id.as_str()
         || compiled_digest != result.profile.profile_digest
         || compiled_semantic_id != result.profile.profile_semantic_id
+        || row.detector_digest != compiled_detector_digest
+        || result.condition != detector_descriptor.condition
     {
         return Err(EngineError::Invariant(format!(
             "evaluation {} profile identity or semantic projection was substituted",
@@ -4642,6 +5436,16 @@ fn validate_evaluation_refusal_row(
             row.evaluation_id
         )));
     }
+    if row.evaluation_revision <= 0
+        || Sha256Digest::parse(row.evaluator_artifact_digest.clone()).is_err()
+        || parse_timestamp(&row.started_at).is_err()
+        || parse_timestamp(&row.evaluated_at).is_err()
+    {
+        return Err(EngineError::Invariant(format!(
+            "evaluation {} has invalid durable revision, evaluator identity, or time",
+            row.evaluation_id
+        )));
+    }
     let expected_outcome = match result.state {
         DetectorState::Present => "condition_present",
         DetectorState::ExplicitlyAbsent => "condition_explicitly_absent",
@@ -4655,6 +5459,8 @@ fn validate_evaluation_refusal_row(
             row.evaluation_id
         )));
     }
+    validate_evaluation_finding_projection(row, &envelope)?;
+    validate_evaluation_watermarks_and_evidence(store, row, &envelope)?;
 
     match (&result.refusal, &row.refusal_detail_json) {
         (None, None) => {
@@ -4713,6 +5519,564 @@ fn validate_evaluation_refusal_row(
             )));
         }
     }
+    Ok(envelope)
+}
+
+#[allow(clippy::too_many_lines)]
+fn validate_evaluation_finding_projection(
+    row: &nq_store::EvaluationRefusalHistoryRow,
+    envelope: &EvaluationEnvelopeV2,
+) -> Result<(), EngineError> {
+    let result = &envelope.result;
+    let Some(event_id) = row.finding_event_id.as_deref() else {
+        if result.state == DetectorState::Present {
+            return Err(EngineError::Invariant(format!(
+                "present evaluation {} has no durable finding event",
+                row.evaluation_id
+            )));
+        }
+        if row.finding_id.is_some()
+            || row.finding_event_revision.is_some()
+            || row.finding_instance_id.is_some()
+            || !row.finding_evidence.is_empty()
+        {
+            return Err(EngineError::Invariant(format!(
+                "evaluation {} has finding testimony without a finding event",
+                row.evaluation_id
+            )));
+        }
+        return Ok(());
+    };
+    let exact_time = row
+        .finding_evaluated_at
+        .as_deref()
+        .and_then(|value| parse_timestamp(value).ok())
+        == parse_timestamp(&row.evaluated_at).ok();
+    if row
+        .finding_event_revision
+        .is_none_or(|revision| revision <= 0)
+        || row.finding_detector_id.as_deref() != Some(row.detector_id.as_str())
+        || row.finding_detector_version.as_deref() != Some(row.detector_version.as_str())
+        || row.finding_detector_digest.as_deref() != Some(row.detector_digest.as_str())
+        || row.finding_evaluator_artifact_digest.as_deref()
+            != Some(row.evaluator_artifact_digest.as_str())
+        || row.finding_evaluation_revision != Some(row.evaluation_revision)
+        || row.finding_instance_id.as_deref() != Some(envelope.context.instance_id.as_str())
+        || row.finding_profile_id.as_deref() != Some(row.evaluation_profile_id.as_str())
+        || row.finding_profile_version.as_deref() != Some(row.evaluation_profile_version.as_str())
+        || row.finding_profile_digest.as_deref() != Some(row.evaluation_profile_digest.as_str())
+        || row.finding_condition_name.as_deref() != Some(result.condition.as_str())
+        || !exact_time
+    {
+        return Err(EngineError::Invariant(format!(
+            "finding event {event_id} substitutes its linked evaluation identity"
+        )));
+    }
+    let expected_limitations = canonical(&result.limitations)?;
+    let expected_safe_next_checks = canonical(&vec![
+        "Inspect the cited admitted evidence".to_owned(),
+        "Run `nq watcher test` if collection remains unavailable".to_owned(),
+    ])?;
+    let expected_historical_refs = canonical(&Vec::<String>::new())?;
+    let expected_subject = canonical(&envelope.context.subject)?;
+    let expected_basis = canonical(&json!({
+        "profile_digest": result.profile.profile_digest.as_str(),
+        "vantage": envelope.context.vantage,
+        "scope": envelope.context.scope,
+    }))?;
+    let canonical_field = |name: &str, value: &Option<Vec<u8>>| {
+        value
+            .as_ref()
+            .ok_or_else(|| EngineError::Invariant(format!("finding event {event_id} lacks {name}")))
+            .and_then(|bytes| {
+                CanonicalDocument::from_canonical_bytes(bytes.clone()).map_err(EngineError::from)
+            })
+    };
+    let limitations = canonical_field("limitations", &row.finding_limitations_json)?;
+    let safe_next_checks = canonical_field("safe next checks", &row.finding_safe_next_checks_json)?;
+    let freshness = canonical_field("freshness", &row.finding_freshness_json)?;
+    let basis = canonical_field("basis", &row.finding_basis_json)?;
+    let historical_refs =
+        canonical_field("historical references", &row.finding_historical_refs_json)?;
+    if limitations != expected_limitations
+        || safe_next_checks != expected_safe_next_checks
+        || historical_refs != expected_historical_refs
+        || basis != expected_basis
+        || row.finding_subject_json.as_deref() != Some(expected_subject.as_bytes())
+        || row.finding_origin_mode.as_deref() != Some("native")
+    {
+        return Err(EngineError::Invariant(format!(
+            "finding event {event_id} substitutes deterministic outward fields"
+        )));
+    }
+    let (expected_visibility, expected_freshness) = if result.state == DetectorState::CannotEvaluate
+    {
+        let watermark = row.watermarks.first();
+        match watermark {
+            None
+            | Some(nq_store::EvaluationWatermarkHistoryRow {
+                max_report_sequence: 0,
+                ..
+            }) => ("missing", json!({"state": "missing"})),
+            Some(watermark)
+                if matches!(
+                    watermark.report_status.as_deref(),
+                    Some("partial" | "failed")
+                ) =>
+            {
+                (
+                    "partial",
+                    json!({
+                        "state": watermark.report_status,
+                        "observed_at": watermark.report_observed_at,
+                    }),
+                )
+            }
+            Some(watermark) => {
+                let compiled = nq_profiles::resolve_profile_key(&result.profile.profile)
+                    .ok_or_else(|| {
+                        EngineError::Invariant("evaluation profile disappeared".into())
+                    })?;
+                let evaluated_at = parse_timestamp(&row.evaluated_at).ok();
+                let observed_at = watermark
+                    .report_observed_at
+                    .as_deref()
+                    .and_then(|value| parse_timestamp(value).ok());
+                let stale = evaluated_at
+                    .zip(observed_at)
+                    .is_none_or(|(evaluated, observed)| {
+                        evaluated.signed_duration_since(observed)
+                            > Duration::seconds(
+                                i64::try_from(compiled.descriptor().freshness.reliance_seconds)
+                                    .unwrap_or(i64::MAX),
+                            )
+                    });
+                if stale {
+                    (
+                        "stale",
+                        json!({
+                            "state": "stale",
+                            "observed_at": watermark.report_observed_at,
+                            "reliance_seconds": compiled.descriptor().freshness.reliance_seconds,
+                        }),
+                    )
+                } else {
+                    ("refused", json!({"state": "cannot_evaluate"}))
+                }
+            }
+        }
+    } else {
+        ("sufficient", json!({"state": "current"}))
+    };
+    if row.finding_visibility_state.as_deref() != Some(expected_visibility)
+        || freshness != canonical(&expected_freshness)?
+    {
+        return Err(EngineError::Invariant(format!(
+            "finding event {event_id} substitutes visibility or freshness"
+        )));
+    }
+    let expected_severity = match result.state {
+        DetectorState::Present => Some("warning"),
+        DetectorState::ExplicitlyAbsent => Some("info"),
+        DetectorState::CannotEvaluate => row.prior_finding_severity.as_deref(),
+    };
+    let expected_summary = if result.state == DetectorState::CannotEvaluate {
+        row.prior_finding_summary.as_deref()
+    } else {
+        Some(result.summary.as_str())
+    };
+    let expected_operator_state = row
+        .prior_finding_operator_work_state
+        .as_deref()
+        .or(Some("unreviewed"));
+    if row.finding_severity.as_deref() != expected_severity
+        || row.finding_summary.as_deref() != expected_summary
+        || row.finding_operator_work_state.as_deref() != expected_operator_state
+        || (row.prior_finding_event_id.is_some()
+            && row.finding_subject_json != row.prior_finding_subject_json)
+    {
+        return Err(EngineError::Invariant(format!(
+            "finding event {event_id} substitutes retained summary, severity, subject, or operator state"
+        )));
+    }
+    let newest_evidence = row
+        .finding_evidence
+        .iter()
+        .max_by_key(|evidence| evidence.report_sequence);
+    let expected_observed_at = newest_evidence.map(|evidence| evidence.report_observed_at.as_str());
+    let expected_received_at = newest_evidence.map(|evidence| evidence.report_received_at.as_str());
+    let same_optional_time = |stored: Option<&str>, expected: Option<&str>| match (stored, expected)
+    {
+        (None, None) => true,
+        (Some(stored), Some(expected)) => {
+            parse_timestamp(stored).ok() == parse_timestamp(expected).ok()
+        }
+        _ => false,
+    };
+    if !same_optional_time(row.finding_observed_at.as_deref(), expected_observed_at)
+        || !same_optional_time(row.finding_received_at.as_deref(), expected_received_at)
+        || !same_optional_time(
+            row.finding_created_at.as_deref(),
+            Some(row.evaluated_at.as_str()),
+        )
+    {
+        return Err(EngineError::Invariant(format!(
+            "finding event {event_id} substitutes evidence or creation time projections"
+        )));
+    }
+    let condition_matches = match result.state {
+        DetectorState::Present => row.finding_condition_state.as_deref() == Some("present"),
+        DetectorState::ExplicitlyAbsent => {
+            row.finding_condition_state.as_deref() == Some("explicitly_absent")
+        }
+        DetectorState::CannotEvaluate => {
+            !matches!(
+                row.finding_event_kind.as_deref(),
+                Some("opened" | "resolved")
+            ) && row.finding_visibility_state.as_deref() != Some("sufficient")
+        }
+    };
+    if !condition_matches {
+        return Err(EngineError::Invariant(format!(
+            "finding event {event_id} condition disagrees with evaluation {} outcome",
+            row.evaluation_id
+        )));
+    }
+    let expected_event_kind = match result.state {
+        DetectorState::Present if row.prior_finding_event_id.is_none() => "opened",
+        DetectorState::Present
+            if row.prior_finding_condition_state.as_deref() == Some("explicitly_absent") =>
+        {
+            "reopened"
+        }
+        DetectorState::Present | DetectorState::CannotEvaluate => "updated",
+        DetectorState::ExplicitlyAbsent => "resolved",
+    };
+    if row.finding_event_kind.as_deref() != Some(expected_event_kind)
+        || (expected_event_kind != "opened" && row.prior_finding_event_id.is_none())
+    {
+        return Err(EngineError::Invariant(format!(
+            "finding event {event_id} substitutes transition {}; expected {expected_event_kind}",
+            row.finding_event_kind.as_deref().unwrap_or("missing")
+        )));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn validate_evaluation_watermarks_and_evidence(
+    store: &Store,
+    row: &nq_store::EvaluationRefusalHistoryRow,
+    envelope: &EvaluationEnvelopeV2,
+) -> Result<(), EngineError> {
+    let result = &envelope.result;
+    for watermark in &row.watermarks {
+        let exact = if watermark.max_report_sequence == 0 {
+            watermark.watermark_received_at.is_none() && watermark.report_received_at.is_none()
+        } else {
+            watermark.max_report_sequence > 0
+                && watermark.watermark_received_at.is_some()
+                && watermark.watermark_received_at == watermark.report_received_at
+        };
+        if !exact {
+            return Err(EngineError::Invariant(format!(
+                "evaluation {} watermark {}:{} does not reopen to its exact report receipt",
+                row.evaluation_id, watermark.instance_id, watermark.max_report_sequence
+            )));
+        }
+        if watermark.max_report_sequence > 0 {
+            let canonical = watermark.report_canonical_json.as_deref().ok_or_else(|| {
+                EngineError::Invariant(format!(
+                    "evaluation {} nonempty watermark lacks canonical report",
+                    row.evaluation_id
+                ))
+            })?;
+            let digest = watermark.report_semantic_digest.as_deref().ok_or_else(|| {
+                EngineError::Invariant(format!(
+                    "evaluation {} nonempty watermark lacks report digest",
+                    row.evaluation_id
+                ))
+            })?;
+            validate_report_evaluation_context(canonical, digest, envelope, &row.evaluation_id)?;
+        } else if watermark.report_canonical_json.is_some()
+            || watermark.report_semantic_digest.is_some()
+        {
+            return Err(EngineError::Invariant(format!(
+                "evaluation {} empty watermark invents a canonical report",
+                row.evaluation_id
+            )));
+        }
+    }
+    if row.watermarks.len() != 1 {
+        return Err(EngineError::Invariant(format!(
+            "evaluation {} must carry exactly one instance watermark; found {}",
+            row.evaluation_id,
+            row.watermarks.len()
+        )));
+    }
+    let persisted_watermark = &row.watermarks[0];
+    let envelope_receipt = envelope.watermark.watermark_received_at.map(timestamp);
+    if persisted_watermark.instance_id != envelope.watermark.instance_id
+        || persisted_watermark.instance_id != envelope.context.instance_id
+        || u64::try_from(persisted_watermark.max_report_sequence).ok()
+            != Some(envelope.watermark.max_report_sequence)
+        || persisted_watermark.watermark_received_at != envelope_receipt
+        || result.watermark.0 != envelope.watermark.max_report_sequence
+    {
+        return Err(EngineError::Invariant(format!(
+            "evaluation {} envelope watermark differs from its sole persisted instance watermark",
+            row.evaluation_id
+        )));
+    }
+
+    let trigger = if let Some(run_id) = row.trigger_run_id.as_deref() {
+        let run = store.watcher_run_outcome(run_id)?.ok_or_else(|| {
+            EngineError::Invariant(format!(
+                "evaluation {} trigger run {run_id} is missing",
+                row.evaluation_id
+            ))
+        })?;
+        validate_run_profile_identity(&run)?;
+        let admission_evaluator_artifact = run
+            .admission_evaluator_artifact_digest
+            .as_deref()
+            .ok_or_else(|| {
+                EngineError::Invariant(format!(
+                    "evaluation {} trigger run {run_id} has no admission evaluator artifact identity",
+                    row.evaluation_id
+                ))
+            })?;
+        if row.evaluator_artifact_digest != admission_evaluator_artifact {
+            return Err(EngineError::Invariant(format!(
+                "evaluation {} trigger run {run_id} substitutes evaluator artifact {} for admission artifact {admission_evaluator_artifact}",
+                row.evaluation_id, row.evaluator_artifact_digest
+            )));
+        }
+        let admitted = store.admitted_collection_for_run(run_id)?.ok_or_else(|| {
+            EngineError::Invariant(format!(
+                "evaluation {} trigger run {run_id} is not admitted",
+                row.evaluation_id
+            ))
+        })?;
+        if run.profile_id != row.evaluation_profile_id
+            || run.profile_version != row.evaluation_profile_version
+            || run.profile_digest != row.evaluation_profile_digest
+        {
+            return Err(EngineError::Invariant(format!(
+                "evaluation {} trigger run {run_id} substitutes its profile binding",
+                row.evaluation_id
+            )));
+        }
+        Some((admitted.instance_id, admitted.report_sequence))
+    } else {
+        None
+    };
+
+    let refusal_instance = result
+        .refusal
+        .as_ref()
+        .map(|refusal| refusal.responsible_instance_id().to_owned());
+    let mut relevant_instances = [
+        Some(envelope.context.instance_id.clone()),
+        row.finding_instance_id.clone(),
+        refusal_instance,
+        trigger.as_ref().map(|(instance, _)| instance.clone()),
+    ]
+    .into_iter()
+    .flatten();
+    let relevant_instance = relevant_instances.next();
+    if relevant_instances.any(|candidate| Some(candidate.as_str()) != relevant_instance.as_deref())
+    {
+        return Err(EngineError::Invariant(format!(
+            "evaluation {} finding, refusal, and trigger identify different instances",
+            row.evaluation_id
+        )));
+    }
+    let relevant_watermark = if let Some(instance_id) = relevant_instance.as_deref() {
+        row.watermarks
+            .iter()
+            .find(|watermark| watermark.instance_id == instance_id)
+            .ok_or_else(|| {
+                EngineError::Invariant(format!(
+                    "evaluation {} has no watermark for responsible instance {instance_id}",
+                    row.evaluation_id
+                ))
+            })?
+    } else if let [watermark] = row.watermarks.as_slice() {
+        watermark
+    } else {
+        return Err(EngineError::Invariant(format!(
+            "evaluation {} cannot bind its canonical watermark to one persisted instance",
+            row.evaluation_id
+        )));
+    };
+    if u64::try_from(relevant_watermark.max_report_sequence).ok() != Some(result.watermark.0) {
+        return Err(EngineError::Invariant(format!(
+            "evaluation {} canonical watermark differs from persisted watermark for {}",
+            row.evaluation_id, relevant_watermark.instance_id
+        )));
+    }
+    if let Some((_, trigger_report_sequence)) = trigger
+        && trigger_report_sequence != relevant_watermark.max_report_sequence
+    {
+        return Err(EngineError::Invariant(format!(
+            "evaluation {} trigger report is not its exact persisted watermark",
+            row.evaluation_id
+        )));
+    }
+
+    for evidence in &result.evidence {
+        let stored = store
+            .admitted_evidence_reference(
+                &evidence.report_id,
+                &evidence.report_digest,
+                evidence.observation_ordinal,
+            )?
+            .ok_or_else(|| {
+                EngineError::Invariant(format!(
+                    "evaluation {} evidence {} does not identify an admitted report occurrence",
+                    row.evaluation_id, evidence.report_id
+                ))
+            })?;
+        let watermark = row
+            .watermarks
+            .iter()
+            .find(|watermark| watermark.instance_id == stored.instance_id)
+            .ok_or_else(|| {
+                EngineError::Invariant(format!(
+                    "evaluation {} evidence {} is outside every persisted instance watermark",
+                    row.evaluation_id, evidence.report_id
+                ))
+            })?;
+        let exact_observed_at = stored
+            .observation_observed_at
+            .as_deref()
+            .unwrap_or(stored.observed_at.as_str());
+        validate_report_evaluation_context(
+            &stored.canonical_json,
+            &evidence.report_digest,
+            envelope,
+            &row.evaluation_id,
+        )?;
+        if u64::try_from(stored.report_sequence).ok() != Some(evidence.report_sequence)
+            || stored.instance_id != relevant_watermark.instance_id
+            || stored.report_sequence > watermark.max_report_sequence
+            || parse_timestamp(exact_observed_at).ok() != Some(evidence.observed_at)
+            || !stored.observation_exists
+        {
+            return Err(EngineError::Invariant(format!(
+                "evaluation {} evidence {} substitutes its admitted occurrence or watermark",
+                row.evaluation_id, evidence.report_id
+            )));
+        }
+    }
+
+    if row.finding_event_id.is_none() {
+        if !row.finding_evidence.is_empty() {
+            return Err(EngineError::Invariant(format!(
+                "evaluation {} has unlinked finding evidence",
+                row.evaluation_id
+            )));
+        }
+        return Ok(());
+    }
+    if result.evidence.is_empty() {
+        let retained_exactly = if row.prior_finding_event_id.is_some() {
+            row.finding_evidence == row.prior_finding_evidence
+        } else {
+            row.finding_evidence.is_empty()
+        };
+        if !retained_exactly {
+            return Err(EngineError::Invariant(format!(
+                "evaluation {} empty result did not retain exact immediate-prior finding evidence",
+                row.evaluation_id
+            )));
+        }
+    } else if row.finding_evidence.len() != result.evidence.len() {
+        return Err(EngineError::Invariant(format!(
+            "evaluation {} finding evidence differs from its canonical result",
+            row.evaluation_id
+        )));
+    }
+    for (index, finding) in row.finding_evidence.iter().enumerate() {
+        let expected_ordinal = i64::try_from(index).unwrap_or(i64::MAX);
+        let watermark = row
+            .watermarks
+            .iter()
+            .find(|watermark| watermark.instance_id == finding.report_instance_id);
+        let exact_observed_at = finding
+            .observation_observed_at
+            .as_deref()
+            .unwrap_or(finding.report_observed_at.as_str());
+        if finding.ordinal != expected_ordinal
+            || parse_timestamp(&finding.observed_at).ok() != parse_timestamp(exact_observed_at).ok()
+            || finding.received_at != finding.report_received_at
+            || !finding.observation_exists
+            || watermark
+                .is_none_or(|watermark| finding.report_sequence > watermark.max_report_sequence)
+            || finding.report_instance_id != relevant_watermark.instance_id
+        {
+            return Err(EngineError::Invariant(format!(
+                "evaluation {} finding evidence ordinal {expected_ordinal} is not its exact canonical evidence",
+                row.evaluation_id
+            )));
+        }
+        if let Some(canonical_evidence) = result.evidence.get(index) {
+            let expected_observation = canonical_evidence.observation_ordinal.map(i64::from);
+            if finding.report_id != canonical_evidence.report_id
+                || finding.report_semantic_digest != canonical_evidence.report_digest
+                || finding.observation_ordinal != expected_observation
+                || u64::try_from(finding.report_sequence).ok()
+                    != Some(canonical_evidence.report_sequence)
+                || parse_timestamp(&finding.observed_at).ok()
+                    != Some(canonical_evidence.observed_at)
+            {
+                return Err(EngineError::Invariant(format!(
+                    "evaluation {} finding evidence ordinal {expected_ordinal} differs from its canonical result",
+                    row.evaluation_id
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_report_evaluation_context(
+    bytes: &[u8],
+    expected_digest: &str,
+    envelope: &EvaluationEnvelopeV2,
+    evaluation_id: &str,
+) -> Result<(), EngineError> {
+    let document = CanonicalDocument::from_canonical_bytes(bytes.to_vec())?;
+    if document.digest() != expected_digest {
+        return Err(EngineError::Invariant(format!(
+            "evaluation {evaluation_id} admitted report bytes do not match digest {expected_digest}"
+        )));
+    }
+    let report: nq_protocol::EvidenceReport =
+        serde_json::from_slice(document.as_bytes()).map_err(|error| {
+            EngineError::Invariant(format!(
+                "evaluation {evaluation_id} admitted report cannot decode: {error}"
+            ))
+        })?;
+    nq_protocol::validate_report(&report).map_err(|error| {
+        EngineError::Invariant(format!(
+            "evaluation {evaluation_id} admitted report is invalid: {error}"
+        ))
+    })?;
+    if report.profile.id.as_str() != envelope.profile.profile.id
+        || report.profile.version.to_string() != envelope.profile.profile.version.to_string()
+        || report.profile.digest.as_str() != envelope.profile.profile_digest.as_str()
+        || report.binding.subject.as_str() != envelope.context.subject
+        || report.binding.scope.kind.as_str() != envelope.context.scope.kind
+        || report.binding.scope.value != envelope.context.scope.value
+        || report.binding.vantage.kind.as_str() != envelope.context.vantage.kind
+        || report.binding.vantage.value != envelope.context.vantage.value
+    {
+        return Err(EngineError::Invariant(format!(
+            "evaluation {evaluation_id} admitted evidence substitutes its canonical subject, scope, vantage, or profile binding"
+        )));
+    }
     Ok(())
 }
 
@@ -4741,6 +6105,7 @@ pub fn rejected_custody_snapshot_bounded(
     limit: u32,
     after_submission_id: Option<&str>,
 ) -> Result<RejectedCustodySnapshotV1, EngineError> {
+    validate_rejected_custody_history(store)?;
     let records = store
         .rejected_custody_bounded(limit, after_submission_id)?
         .into_iter()
@@ -4804,28 +6169,34 @@ pub fn public_query(store: &Store, sql: &str, limit: u32) -> Result<Vec<Value>, 
         .join(" ")
         .to_ascii_lowercase();
     match normalized.as_str() {
-        "select * from public_finding_snapshot_v3" => store
-            .finding_snapshots_bounded(limit, None)?
-            .into_iter()
-            .map(finding_from_row)
-            .map(|result| {
-                result.and_then(|value| {
-                    serde_json::to_value(value)
-                        .map_err(|error| EngineError::Canonical(error.to_string()))
+        "select * from public_finding_snapshot_v3" => {
+            validate_evaluation_refusal_history(store)?;
+            store
+                .finding_snapshots_bounded(limit, None)?
+                .into_iter()
+                .map(finding_from_row)
+                .map(|result| {
+                    result.and_then(|value| {
+                        serde_json::to_value(value)
+                            .map_err(|error| EngineError::Canonical(error.to_string()))
+                    })
                 })
-            })
-            .collect(),
-        "select * from public_status_snapshot_v1" => store
-            .status_snapshots_bounded(limit, None)?
-            .into_iter()
-            .map(status_from_row)
-            .map(|result| {
-                result.and_then(|value| {
-                    serde_json::to_value(value)
-                        .map_err(|error| EngineError::Canonical(error.to_string()))
+                .collect()
+        }
+        "select * from public_status_snapshot_v1" => {
+            validate_status_history_v2(store)?;
+            store
+                .status_snapshots_bounded(limit, None)?
+                .into_iter()
+                .map(status_from_row)
+                .map(|result| {
+                    result.and_then(|value| {
+                        serde_json::to_value(value)
+                            .map_err(|error| EngineError::Canonical(error.to_string()))
+                    })
                 })
-            })
-            .collect(),
+                .collect()
+        }
         _ => Err(EngineError::Invariant(
             "query must be exactly `SELECT * FROM public_finding_snapshot_v3` or `SELECT * FROM public_status_snapshot_v1`"
                 .into(),
@@ -4959,11 +6330,9 @@ fn finding_from_row(row: nq_store::FindingSnapshotRow) -> Result<FindingSnapshot
 fn status_from_row(row: nq_store::StatusSnapshotRow) -> Result<ComponentStatus, EngineError> {
     let details: Value = serde_json::from_str(&row.detail_json)
         .map_err(|error| EngineError::Invariant(error.to_string()))?;
-    if row.component_kind == "instance"
-        && details.get("schema").and_then(Value::as_str) == Some(COLLECTION_OUTCOME_SCHEMA)
-    {
+    if row.component_kind == "instance" {
         return Err(EngineError::Invariant(
-            "nq.status_snapshot.v1 cannot emit a typed collection-result shape; use v2".into(),
+            "nq.status_snapshot.v1 cannot emit governed collection results; use v3".into(),
         ));
     }
     Ok(ComponentStatus {
@@ -4991,6 +6360,83 @@ fn status_from_row_v2(
     )
 }
 
+fn status_from_row_v3(
+    store: &Store,
+    row: nq_store::StatusSnapshotRow,
+) -> Result<ComponentStatusV3, EngineError> {
+    let component = status_from_row_v2(store, row)?;
+    if component.kind == ComponentKind::Evaluation {
+        return Err(EngineError::Invariant(
+            "evaluation status must be derived from canonical evaluation_runs, not status_events"
+                .into(),
+        ));
+    }
+    let detail = match component.detail {
+        ComponentStatusDetailV2::Collection { result } => {
+            ComponentStatusDetailV3::Collection { result }
+        }
+        ComponentStatusDetailV2::Diagnostic { value } => {
+            ComponentStatusDetailV3::Diagnostic { value }
+        }
+    };
+    Ok(ComponentStatusV3 {
+        kind: component.kind,
+        id: component.id,
+        state: component.state,
+        code: component.code,
+        detail,
+        observed_at: component.observed_at,
+    })
+}
+
+fn evaluation_lineage_key(envelope: &EvaluationEnvelopeV2) -> Result<Vec<u8>, EngineError> {
+    Ok(canonical(&json!({
+        "instance_id": &envelope.context.instance_id,
+        "detector": &envelope.detector,
+        "profile": &envelope.profile,
+        "subject": &envelope.context.subject,
+        "scope": &envelope.context.scope,
+        "vantage": &envelope.context.vantage,
+        "condition": &envelope.result.condition,
+    }))?
+    .as_bytes()
+    .to_vec())
+}
+
+fn evaluation_finding_lineage(
+    envelope: &EvaluationEnvelopeV2,
+) -> Result<nq_store::EvaluationFindingLineage, EngineError> {
+    let subject_json = canonical(&envelope.context.subject)?.as_bytes().to_vec();
+    let basis_json = canonical(&json!({
+        "profile_digest": envelope.result.profile.profile_digest.as_str(),
+        "vantage": &envelope.context.vantage,
+        "scope": &envelope.context.scope,
+    }))?
+    .as_bytes()
+    .to_vec();
+    Ok(nq_store::EvaluationFindingLineage {
+        instance_id: envelope.context.instance_id.clone(),
+        detector_id: envelope.detector.id.clone(),
+        detector_version: envelope.detector.version.clone(),
+        detector_digest: envelope.detector.digest.clone(),
+        profile_id: envelope.profile.profile.id.clone(),
+        profile_version: envelope.profile.profile.version.to_string(),
+        profile_digest: envelope.profile.profile_digest.as_str().to_owned(),
+        profile_semantic_id: envelope.profile.profile_semantic_id.as_str().to_owned(),
+        subject_json,
+        condition_name: envelope.result.condition.clone(),
+        basis_json,
+    })
+}
+
+fn evaluation_status_projection(envelope: &EvaluationEnvelopeV2) -> (HealthState, &'static str) {
+    match envelope.result.state {
+        DetectorState::Present => (HealthState::Healthy, "condition_present"),
+        DetectorState::ExplicitlyAbsent => (HealthState::Healthy, "condition_explicitly_absent"),
+        DetectorState::CannotEvaluate => (HealthState::Degraded, "cannot_evaluate"),
+    }
+}
+
 fn status_component_v2(
     store: &Store,
     component_kind: &str,
@@ -5001,6 +6447,11 @@ fn status_component_v2(
     observed_at: &str,
 ) -> Result<ComponentStatusV2, EngineError> {
     let kind = parse_component_kind(component_kind)?;
+    if kind == ComponentKind::Evaluation {
+        return Err(EngineError::Invariant(
+            "generic evaluation status is not authoritative; reopen evaluation_runs".into(),
+        ));
+    }
     let detail = if kind == ComponentKind::Instance {
         let result = decode_collection_outcome(detail_json.as_bytes()).map_err(|error| {
             EngineError::Invariant(format!(
@@ -5063,6 +6514,7 @@ fn status_component_v2(
     })
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_collection_run(store: &Store, result: &CollectionOutcome) -> Result<(), EngineError> {
     let Some(run_id) = result.run_id.as_deref() else {
         return Ok(());
@@ -5081,6 +6533,74 @@ fn validate_collection_run(store: &Store, result: &CollectionOutcome) -> Result<
     validate_run_profile_identity(&run)?;
 
     let resource = reopen_run_resource_outcome(&run)?;
+
+    if let CollectionResult::Admitted {
+        report_id,
+        report_status,
+        semantic_digest,
+        evaluations,
+    } = &result.result
+    {
+        let admitted = store.admitted_collection_for_run(run_id)?.ok_or_else(|| {
+            EngineError::Invariant(format!(
+                "admitted collection result for run {run_id} has no exact admitted report"
+            ))
+        })?;
+        let stored_evaluations = usize::try_from(admitted.evaluations).map_err(|_| {
+            EngineError::Invariant(format!(
+                "admitted collection run {run_id} has an invalid evaluation count"
+            ))
+        })?;
+        if admitted.run_id != run_id
+            || admitted.instance_id != result.instance_id
+            || admitted.report_id != *report_id
+            || admitted.report_status != *report_status
+            || admitted.semantic_digest != *semantic_digest
+            || stored_evaluations != evaluations.len()
+        {
+            return Err(EngineError::Invariant(format!(
+                "admitted collection result for run {run_id} substitutes its report or evaluation projections"
+            )));
+        }
+        validate_evaluation_refusal_history(store)?;
+        let mut persisted = Vec::new();
+        let through = store.latest_evaluation_sequence()?;
+        let mut after = None;
+        loop {
+            let page = store.evaluation_refusal_history_bounded(
+                nq_store::MAX_PUBLIC_QUERY_ROWS,
+                after,
+                through,
+            )?;
+            if page.is_empty() {
+                break;
+            }
+            let page_len = page.len();
+            for row in page {
+                after = Some(row.evaluation_sequence);
+                if row.trigger_run_id.as_deref() == Some(run_id) {
+                    let document = CanonicalDocument::from_canonical_bytes(row.detail_json)?;
+                    let envelope: EvaluationEnvelopeV2 =
+                        serde_json::from_slice(document.as_bytes())
+                            .map_err(|error| EngineError::Invariant(error.to_string()))?;
+                    persisted.push(envelope);
+                }
+            }
+            if page_len < nq_store::MAX_PUBLIC_QUERY_ROWS as usize {
+                break;
+            }
+        }
+        if evaluations.as_slice() != persisted.as_slice() {
+            return Err(EngineError::Invariant(format!(
+                "admitted collection run {run_id} embeds evaluations different from its exact persisted trigger sequence"
+            )));
+        }
+        store.verify_admitted_snapshot(report_id).map_err(|error| {
+            EngineError::Invariant(format!(
+                "admitted collection report {report_id} cannot be historically reopened: {error}"
+            ))
+        })?;
+    }
 
     let expected = match &result.result {
         CollectionResult::Admitted { .. } => &AcquisitionOutcome::Response,
@@ -5144,9 +6664,19 @@ fn validate_collection_run(store: &Store, result: &CollectionOutcome) -> Result<
 fn validate_run_profile_identity(
     run: &nq_store::WatcherRunOutcomeRow,
 ) -> Result<ProfileSemanticId, EngineError> {
-    if run.admission_id.is_none() {
+    let Some(admission_id) = run.admission_id.as_deref() else {
         return Err(EngineError::Invariant(format!(
             "watcher run {} has no admission proving its profile semantics",
+            run.run_id
+        )));
+    };
+    if run.admission_instance_id.as_deref() != Some(run.instance_id.as_str())
+        || run.admission_profile_id.as_deref() != Some(run.profile_id.as_str())
+        || run.admission_profile_version.as_deref() != Some(run.profile_version.as_str())
+        || run.admission_profile_digest.as_deref() != Some(run.profile_digest.as_str())
+    {
+        return Err(EngineError::Invariant(format!(
+            "watcher run {} borrowed admission {admission_id} from another instance or profile binding",
             run.run_id
         )));
     }
@@ -5169,11 +6699,13 @@ fn validate_run_profile_identity(
         .map_err(|error| EngineError::Canonical(error.to_string()))?;
     let semantic_id = profile_semantic_id(compiled.descriptor())
         .map_err(|error| EngineError::Canonical(error.to_string()))?;
+    let detector_identity = detector_identity_digest(compiled)?;
     if run.profile_digest != digest.as_str()
         || run.profile_semantic_id.as_deref() != Some(semantic_id.as_str())
+        || run.admission_detector_identity_digest.as_deref() != Some(detector_identity.as_str())
     {
         return Err(EngineError::Invariant(format!(
-            "watcher run {} profile digest or semantic identity was substituted",
+            "watcher run {} profile digest, semantic identity, or detector suite was substituted",
             run.run_id
         )));
     }
@@ -5505,7 +7037,8 @@ sys.stdout.write("\n")
                             .as_str(),
                     )
                     .expect("typed semantic identity"),
-                    detector_identity_digest: typed("detectors"),
+                    detector_identity_digest: detector_identity_digest(profile)
+                        .expect("compiled detector suite identity"),
                     evaluator_source_digest: typed("source"),
                     evaluator_artifact_digest: typed("evaluator"),
                     helper_artifact_digest: typed("helper"),
@@ -5565,6 +7098,198 @@ sys.stdout.write("\n")
         }
     }
 
+    #[allow(clippy::too_many_lines)]
+    fn commit_real_host_detector_report(
+        store: &mut Store,
+        watcher: &WatcherConfig,
+        report_id: &str,
+        suffix: &str,
+        observed_at: DateTime<Utc>,
+        load_1m: f64,
+    ) -> (DetectorReport, String) {
+        let profile: &'static dyn ProfileModule = &nq_profiles::host::MODULE;
+        let descriptor = profile.descriptor();
+        let profile_digest = descriptor.digest().expect("compiled host digest");
+        let received_at = observed_at + Duration::seconds(1);
+        let report = nq_protocol::EvidenceReport {
+            schema: nq_protocol::EVIDENCE_REPORT_SCHEMA.to_owned(),
+            profile: ProfileBinding {
+                id: ProfileId::new(descriptor.profile.id.clone()).expect("profile id"),
+                version: ProfileVersion::new(descriptor.profile.version.to_string())
+                    .expect("profile version"),
+                digest: Sha256Digest::parse(profile_digest.as_str().to_owned())
+                    .expect("profile digest"),
+            },
+            binding: SubjectBinding {
+                subject: SubjectId::new(watcher.subject.clone()).expect("host subject"),
+                scope: ScopeBinding {
+                    kind: ScopeKind::new(watcher.scope.kind.clone()).expect("host scope"),
+                    value: watcher.scope.value.clone(),
+                },
+                vantage: VantageBinding {
+                    kind: VantageKind::new(watcher.vantage.kind.clone()).expect("host vantage"),
+                    value: watcher.vantage.value.clone(),
+                },
+            },
+            observed_at,
+            status: nq_protocol::ReportStatus::Complete,
+            coverage: ["host_identity", "uptime", "load"]
+                .into_iter()
+                .map(|kind| nq_protocol::CoverageDeclaration {
+                    kind: nq_protocol::CoverageKind::new(kind).expect("coverage kind"),
+                    subject: None,
+                    state: nq_protocol::CoverageState::Complete,
+                    detail: None,
+                })
+                .collect(),
+            observations: vec![nq_protocol::Observation {
+                ordinal: 0,
+                kind: nq_protocol::ObservationKind::new("host_snapshot").expect("observation kind"),
+                subject: SubjectId::new(watcher.subject.clone()).expect("host subject"),
+                observed_at,
+                payload: json!({
+                    "evidence_basis": {
+                        "scope": {
+                            "kind": watcher.scope.kind,
+                            "value": watcher.scope.value,
+                        },
+                        "vantage": {
+                            "kind": watcher.vantage.kind,
+                            "value": watcher.vantage.value,
+                        },
+                        "access_path": "procfs",
+                        "basis": "kernel_snapshot",
+                        "regime": "normal",
+                        "capabilities_used": ["read_procfs"],
+                    },
+                    "hostname": "local",
+                    "uptime_seconds": 86_400,
+                    "cpu_count": 2,
+                    "load_1m": load_1m,
+                }),
+            }],
+            errors: Vec::new(),
+            used_capabilities: vec![Capability::new("read_procfs").expect("host capability")],
+            backend: nq_protocol::BackendProvenance {
+                implementation: nq_protocol::BackendIdentity {
+                    name: nq_protocol::ImplementationName::new("real-host-detector-fixture")
+                        .expect("backend name"),
+                    version: Some("1".to_owned()),
+                    digest: None,
+                },
+                tools: Vec::new(),
+            },
+            next_checkpoint: None,
+        };
+        nq_protocol::validate_report(&report).expect("protocol-valid host report");
+        let report_digest = nq_protocol::semantic_digest(&report).expect("host report digest");
+        let normalized = ProfileReportInput::from_protocol(&report, &report_digest)
+            .expect("normalize real host report");
+        let context = ValidationContext {
+            instance_id: watcher.instance_id.clone(),
+            request_subject: watcher.subject.clone(),
+            scope: ScopeGrant {
+                kind: watcher.scope.kind.clone(),
+                value: watcher.scope.value.clone(),
+            },
+            vantage: VantageGrant {
+                kind: watcher.vantage.kind.clone(),
+                value: watcher.vantage.value.clone(),
+            },
+            granted_capabilities: BTreeSet::from(["read_procfs".to_owned()]),
+            received_at,
+            max_observations: 1,
+            max_future_skew: Duration::seconds(5),
+        };
+        let validated = profile
+            .validate(&context, &normalized)
+            .expect("compiled host profile admits the report");
+        let admission_id = seed_compiled_admission(store, profile, &watcher.instance_id, suffix);
+        let run = test_run(
+            profile,
+            &watcher.instance_id,
+            suffix,
+            admission_id,
+            AcquisitionOutcome::Response,
+        );
+        let stored = store_report(
+            report_id,
+            watcher,
+            profile,
+            &report,
+            &validated,
+            received_at,
+        )
+        .expect("materialize host report");
+        let raw_bytes = nq_protocol::canonical_json_bytes(&report).expect("canonical host report");
+        let run_id = run.run_id.clone();
+        let evaluator_artifact_digest =
+            nq_protocol::sha256_bytes(format!("evaluator-{suffix}").as_bytes()).into_string();
+        let collection = CollectionInput {
+            run,
+            submission: Some(SubmissionInput {
+                submission_id: format!("submission-{suffix}"),
+                raw_bytes,
+                received_at: timestamp(received_at),
+                protocol_outcome: "valid_report".to_owned(),
+                disposition: SubmissionDisposition::Admitted(stored),
+            }),
+        };
+        let (receipt, ()) = store
+            .commit_admitted_collection(&collection, |view, receipt| {
+                let snapshot =
+                    view.evidence_snapshot(std::slice::from_ref(&watcher.instance_id))?;
+                let current_findings = view.finding_snapshots()?;
+                let prepared = prepare_instance_evaluations(
+                    watcher,
+                    profile,
+                    Some(&run_id),
+                    &snapshot,
+                    &current_findings,
+                    &evaluator_artifact_digest,
+                )?;
+                let evaluations = prepared
+                    .iter()
+                    .map(|prepared| prepared.envelope.clone())
+                    .collect();
+                let outcome = CollectionOutcome::admitted(
+                    watcher.instance_id.clone(),
+                    run_id.clone(),
+                    report_id.to_owned(),
+                    semantic_report_status(validated.status).to_owned(),
+                    receipt
+                        .semantic_digest
+                        .clone()
+                        .expect("admitted report digest"),
+                    evaluations,
+                );
+                Ok::<_, EngineError>(AdmittedCollectionCompletion {
+                    value: (),
+                    evaluations: prepared
+                        .into_iter()
+                        .map(|prepared| prepared.commit)
+                        .collect(),
+                    status: instance_status_event(watcher, &outcome)
+                        .expect("canonical admitted status"),
+                })
+            })
+            .expect("commit admitted host report");
+        let sequence = u64::try_from(
+            receipt
+                .report_sequence
+                .expect("admitted report has durable sequence"),
+        )
+        .expect("positive report sequence");
+        (
+            DetectorReport {
+                report_id: report_id.to_owned(),
+                report_sequence: sequence,
+                report: validated,
+            },
+            timestamp(received_at),
+        )
+    }
+
     fn commit_test_non_success(
         store: &mut Store,
         run: RunInput,
@@ -5598,6 +7323,86 @@ sys.stdout.write("\n")
                 nix::unistd::geteuid().as_raw()
             ),
         )
+    }
+
+    fn host_cannot_evaluate_envelope() -> EvaluationEnvelopeV2 {
+        let config = NqConfig::from_toml(&host_example_text()).expect("valid host config");
+        let watcher = &config.watchers[0];
+        let profile: &'static dyn ProfileModule = &nq_profiles::host::MODULE;
+        let profile_descriptor = profile.descriptor();
+        let detector = profile.detectors()[0];
+        let detector_descriptor = detector.descriptor();
+        let evaluated_at = parse_timestamp("2026-07-20T12:10:00.000Z").expect("evaluation time");
+        let source = detector.evaluate(&DetectorInput {
+            instance_id: &watcher.instance_id,
+            evaluated_at,
+            watermark: EvidenceWatermark(0),
+            reports: &[],
+        });
+        assert_eq!(source.state, DetectorState::CannotEvaluate);
+        let profile_identity = EvaluationProfileIdentity {
+            profile: profile_descriptor.profile.clone(),
+            profile_digest: profile_descriptor.digest().expect("profile digest"),
+            profile_semantic_id: profile_semantic_id(profile_descriptor)
+                .expect("profile semantic identity"),
+        };
+        let refusal = GovernedRefusal::profile(
+            "refusal-producer-invariant".to_owned(),
+            profile_identity.profile_semantic_id.clone(),
+            source
+                .refusal
+                .clone()
+                .expect("host detector returns a typed refusal"),
+        );
+        let result = governed_evaluation_result(&source, profile_identity.clone(), Some(refusal))
+            .expect("governed detector result");
+        EvaluationEnvelopeV2 {
+            schema: EvaluationEnvelopeSchema::V2,
+            evaluation_id: "evaluation-producer-invariant".to_owned(),
+            trigger_run_id: None,
+            context: EvaluationContextV1 {
+                instance_id: watcher.instance_id.clone(),
+                subject: watcher.subject.clone(),
+                scope: watcher.scope.clone(),
+                vantage: watcher.vantage.clone(),
+            },
+            detector: EvaluationDetectorIdentity {
+                id: detector_descriptor.id.clone(),
+                version: detector_descriptor.version.to_string(),
+                digest: detector_descriptor.digest().expect("detector digest"),
+            },
+            evaluator_artifact_digest: nq_protocol::sha256_bytes(b"producer-invariant-evaluator"),
+            profile: profile_identity,
+            started_at: evaluated_at,
+            evaluated_at,
+            watermark: EvaluationWatermarkV2 {
+                instance_id: watcher.instance_id.clone(),
+                max_report_sequence: 0,
+                watermark_received_at: None,
+            },
+            result,
+        }
+    }
+
+    fn evaluation_profile_refusal_mut(
+        envelope: &mut EvaluationEnvelopeV2,
+    ) -> &mut nq_profiles::ProfileRefusal {
+        let Some(GovernedRefusal {
+            origin: GovernedRefusalOrigin::Profile(profile),
+            ..
+        }) = envelope.result.refusal.as_mut()
+        else {
+            panic!("fixture evaluation must retain its profile-origin refusal")
+        };
+        &mut profile.refusal
+    }
+
+    fn assert_cannot_evaluate_producer_invariant_refused(envelope: &EvaluationEnvelopeV2) {
+        assert!(matches!(
+            envelope.validate(),
+            Err(EngineError::Invariant(message))
+                if message.contains("exact detector producer invariant")
+        ));
     }
 
     fn binding_recovery_fixture(root: &Path) -> (NqConfig, WatcherConfig, AdmissionLock) {
@@ -5778,6 +7583,7 @@ sys.stdout.write("\n")
                 profile_digest: &self.profile_digest,
                 profile_semantic_id: &self.finding.profile_semantic_id,
                 subject_json: &self.subject_json,
+                basis_json: &self.finding.basis_json,
             }
         }
 
@@ -6010,6 +7816,47 @@ sys.stdout.write("\n")
     }
 
     #[test]
+    fn evaluation_envelope_rejects_substituted_cannot_evaluate_boundary() {
+        let mut envelope = host_cannot_evaluate_envelope();
+        envelope.validate().expect("exact producer envelope");
+        evaluation_profile_refusal_mut(&mut envelope).boundary =
+            nq_profiles::RefusalBoundary::Observation;
+        assert_cannot_evaluate_producer_invariant_refused(&envelope);
+    }
+
+    #[test]
+    fn evaluation_envelope_rejects_substituted_cannot_evaluate_code() {
+        let mut envelope = host_cannot_evaluate_envelope();
+        evaluation_profile_refusal_mut(&mut envelope).code =
+            nq_profiles::ProfileRefusalCode::InvalidPayload;
+        assert_cannot_evaluate_producer_invariant_refused(&envelope);
+    }
+
+    #[test]
+    fn evaluation_envelope_rejects_substituted_cannot_evaluate_message() {
+        let mut envelope = host_cannot_evaluate_envelope();
+        evaluation_profile_refusal_mut(&mut envelope).message =
+            "substituted operator explanation".to_owned();
+        assert_cannot_evaluate_producer_invariant_refused(&envelope);
+    }
+
+    #[test]
+    fn evaluation_envelope_rejects_evidence_on_cannot_evaluate() {
+        let mut envelope = host_cannot_evaluate_envelope();
+        envelope
+            .result
+            .evidence
+            .push(nq_profiles::DetectorEvidence {
+                report_id: "substituted-report".to_owned(),
+                report_sequence: 1,
+                report_digest: nq_protocol::sha256_bytes(b"substituted-report").into_string(),
+                observation_ordinal: Some(0),
+                observed_at: envelope.evaluated_at,
+            });
+        assert_cannot_evaluate_producer_invariant_refused(&envelope);
+    }
+
+    #[test]
     fn valid_failed_report_is_not_an_acquisition_failure() {
         let outcome = CollectionOutcome::admitted(
             "x".into(),
@@ -6017,7 +7864,7 @@ sys.stdout.write("\n")
             "p".into(),
             "failed".into(),
             format!("sha256:{}", "a".repeat(64)),
-            0,
+            Vec::new(),
         );
         assert!(!outcome.is_success());
         assert!(matches!(outcome.result, CollectionResult::Admitted { .. }));
@@ -6177,6 +8024,157 @@ sys.stdout.write("\n")
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
+    fn finding_transport_uses_only_the_exact_evaluation_context_rows() {
+        let fixture = SemanticLineageFixture::new();
+        let watcher = fixture.watcher();
+        let mut other_boundary = watcher.clone();
+        other_boundary.subject = "host:other".to_owned();
+        other_boundary.scope.value = json!({"id": "other"});
+
+        let row = |sequence: i64,
+                   report_id: &str,
+                   boundary: &WatcherConfig,
+                   status: nq_protocol::ReportStatus| {
+            let report = nq_protocol::EvidenceReport {
+                schema: nq_protocol::EVIDENCE_REPORT_SCHEMA.to_owned(),
+                profile: ProfileBinding {
+                    id: ProfileId::new(fixture.profile.descriptor().profile.id.clone())
+                        .expect("profile id"),
+                    version: ProfileVersion::new(
+                        fixture.profile.descriptor().profile.version.to_string(),
+                    )
+                    .expect("profile version"),
+                    digest: Sha256Digest::parse(fixture.profile_digest.clone())
+                        .expect("profile digest"),
+                },
+                binding: SubjectBinding {
+                    subject: SubjectId::new(boundary.subject.clone()).expect("subject"),
+                    scope: ScopeBinding {
+                        kind: ScopeKind::new(boundary.scope.kind.clone()).expect("scope kind"),
+                        value: boundary.scope.value.clone(),
+                    },
+                    vantage: VantageBinding {
+                        kind: VantageKind::new(boundary.vantage.kind.clone())
+                            .expect("vantage kind"),
+                        value: boundary.vantage.value.clone(),
+                    },
+                },
+                observed_at: fixture.observed_at,
+                status,
+                coverage: Vec::new(),
+                observations: Vec::new(),
+                errors: Vec::new(),
+                used_capabilities: Vec::new(),
+                backend: nq_protocol::BackendProvenance {
+                    implementation: nq_protocol::BackendIdentity {
+                        name: nq_protocol::ImplementationName::new("context-row-fixture")
+                            .expect("implementation name"),
+                        version: Some("1".to_owned()),
+                        digest: None,
+                    },
+                    tools: Vec::new(),
+                },
+                next_checkpoint: None,
+            };
+            nq_protocol::validate_report(&report).expect("protocol-valid context row");
+            let canonical = nq_protocol::canonical_json_bytes(&report).expect("canonical report");
+            let digest = nq_protocol::semantic_digest(&report)
+                .expect("report digest")
+                .to_string();
+            nq_store::AdmittedReportRow {
+                report_sequence: sequence,
+                report_id: report_id.to_owned(),
+                instance_id: watcher.instance_id.clone(),
+                profile_id: fixture.profile.descriptor().profile.id.clone(),
+                profile_version: fixture.profile_version.clone(),
+                profile_digest: fixture.profile_digest.clone(),
+                observed_at: timestamp(fixture.observed_at),
+                received_at: timestamp(fixture.observed_at),
+                report_status: match status {
+                    nq_protocol::ReportStatus::Complete => "complete",
+                    nq_protocol::ReportStatus::Partial => "partial",
+                    nq_protocol::ReportStatus::Failed => "failed",
+                }
+                .to_owned(),
+                canonical_json: canonical,
+                semantic_digest: digest,
+            }
+        };
+
+        let matching = row(
+            1,
+            "report:owned-boundary",
+            watcher,
+            nq_protocol::ReportStatus::Partial,
+        );
+        let unrelated = row(
+            2,
+            "report:newer-other-boundary",
+            &other_boundary,
+            nq_protocol::ReportStatus::Complete,
+        );
+        let owned = evaluation_context_rows(
+            &[matching.clone(), unrelated],
+            watcher,
+            &fixture.profile_digest,
+        )
+        .expect("select exact evaluation context");
+        assert_eq!(owned, vec![matching.clone()]);
+
+        let detector_input = DetectorInput {
+            instance_id: &watcher.instance_id,
+            evaluated_at: fixture.observed_at,
+            watermark: EvidenceWatermark(1),
+            reports: &[],
+        };
+        let result = nq_profiles::DetectorResult::cannot_evaluate(
+            &detector_input,
+            fixture.descriptor(),
+            "the exact evaluation context is partial",
+            Vec::new(),
+        );
+        let refusal = GovernedRefusal::profile(
+            "refusal:owned-boundary".to_owned(),
+            profile_semantic_id(fixture.profile.descriptor()).expect("profile semantic identity"),
+            result.refusal.clone().expect("typed detector refusal"),
+        );
+        let mut current = fixture.finding.clone();
+        current.evidence_json = serde_json::to_string(&vec![PublicEvidenceReference {
+            report_id: matching.report_id.clone(),
+            semantic_digest: matching.semantic_digest.clone(),
+            observation_ordinal: None,
+            observed_at: fixture.observed_at,
+            received_at: fixture.observed_at,
+        }])
+        .expect("current evidence JSON");
+        let event = build_finding_event(
+            watcher,
+            fixture.profile,
+            fixture.descriptor(),
+            &result,
+            Some(&refusal),
+            fixture.observed_at,
+            Some(&current),
+            &owned,
+        )
+        .expect("owned-boundary finding update")
+        .expect("existing finding is updated");
+        assert_eq!(event.visibility_state, "partial");
+        assert_eq!(
+            event.freshness.as_bytes(),
+            canonical(&json!({
+                "state": "partial",
+                "observed_at": matching.observed_at,
+            }))
+            .expect("expected freshness")
+            .as_bytes()
+        );
+        assert_eq!(event.evidence.len(), 1);
+        assert_eq!(event.evidence[0].report_id, matching.report_id);
+    }
+
+    #[test]
     fn identical_semantic_reports_keep_exact_detector_evidence_identity() {
         let config = NqConfig::from_toml(&host_example_text()).expect("valid host example");
         let watcher = &config.watchers[0];
@@ -6325,16 +8323,9 @@ sys.stdout.write("\n")
         ));
         let mut engine =
             CollectionEngine::open_with_evaluator_identity(&config, Ok(evaluator)).expect("engine");
-        if let Err(error) = engine.watcher_action(&watcher, "admit") {
-            if error.to_string().contains("spawn_failed")
-                && fs::read_to_string("/proc/self/attr/current")
-                    .is_ok_and(|profile| profile.contains("unpriv_bwrap"))
-            {
-                eprintln!("skipping: sandbox AppArmor denies executable memfds");
-                return;
-            }
-            panic!("fixture admission failed: {error}");
-        }
+        engine
+            .watcher_action(&watcher, "admit")
+            .unwrap_or_else(|error| panic!("fixture admission failed: {error}"));
 
         fs::write(&mode, "helper_transient\n").expect("select transient refusal");
         let transient = engine.collect(&watcher).expect("collect transient refusal");
@@ -6475,7 +8466,10 @@ sys.stdout.write("\n")
                 instance_id: "inst-1".to_owned(),
                 identity: AdmissionIdentity {
                     profile_semantic_id: sd("semantic"),
-                    detector_identity_digest: sd("detector"),
+                    detector_identity_digest: nq_store::detector_suite_identity_digest(
+                        Vec::<String>::new(),
+                    )
+                    .expect("empty verification detector suite"),
                     evaluator_source_digest: sd("source"),
                     evaluator_artifact_digest,
                     helper_artifact_digest: sd("helper"),
@@ -6530,6 +8524,52 @@ sys.stdout.write("\n")
                 "outcome": {"outcome": "response"}
             })),
         };
+        let protocol_report = nq_protocol::EvidenceReport {
+            schema: nq_protocol::EVIDENCE_REPORT_SCHEMA.to_owned(),
+            profile: ProfileBinding {
+                id: ProfileId::new("verify.fixture").expect("profile id"),
+                version: ProfileVersion::new("1").expect("profile version"),
+                digest: Sha256Digest::parse(profile_digest.clone()).expect("profile digest"),
+            },
+            binding: SubjectBinding {
+                subject: SubjectId::new("verify:fixture").expect("subject"),
+                scope: ScopeBinding {
+                    kind: ScopeKind::new("fixture").expect("scope"),
+                    value: json!({}),
+                },
+                vantage: VantageBinding {
+                    kind: VantageKind::new("local").expect("vantage"),
+                    value: json!({}),
+                },
+            },
+            observed_at: parse_timestamp(TS).expect("time"),
+            status: nq_protocol::ReportStatus::Complete,
+            coverage: Vec::new(),
+            observations: Vec::new(),
+            errors: Vec::new(),
+            used_capabilities: Vec::new(),
+            backend: nq_protocol::BackendProvenance {
+                implementation: nq_protocol::BackendIdentity {
+                    name: nq_protocol::ImplementationName::new("fixture").expect("implementation"),
+                    version: Some("1".to_owned()),
+                    digest: None,
+                },
+                tools: Vec::new(),
+            },
+            next_checkpoint: None,
+        };
+        nq_protocol::validate_report(&protocol_report).expect("protocol report");
+        let canonical_report = canonical(&protocol_report).expect("canonical report");
+        let validated_report = doc(json!({
+            "schema": "fixture.validated_report.v1",
+            "instance_id": "inst-1",
+            "report_digest": canonical_report.digest(),
+            "profile": {"id": "verify.fixture", "version": 1},
+            "profile_digest": profile_digest,
+            "status": "complete",
+            "observed_at": TS,
+            "received_at": TS,
+        }));
         let report = ReportInput {
             report_id: "rep-1".to_owned(),
             instance_id: "inst-1".to_owned(),
@@ -6539,24 +8579,47 @@ sys.stdout.write("\n")
             observed_at: TS.to_owned(),
             received_at: TS.to_owned(),
             report_status: "complete".to_owned(),
-            canonical_report: doc(json!({"report": 1})),
-            validated_report: doc(json!({"validated": 1})),
+            canonical_report,
+            validated_report,
             next_checkpoint: None,
             admitted_at: TS.to_owned(),
             observations: Vec::new(),
             coverage: Vec::new(),
             errors: Vec::new(),
         };
+        let collection = CollectionInput {
+            run,
+            submission: Some(SubmissionInput {
+                submission_id: "sub-1".to_owned(),
+                raw_bytes: b"raw".to_vec(),
+                received_at: TS.to_owned(),
+                protocol_outcome: "valid_report".to_owned(),
+                disposition: SubmissionDisposition::Admitted(report),
+            }),
+        };
         store
-            .commit_collection(&CollectionInput {
-                run,
-                submission: Some(SubmissionInput {
-                    submission_id: "sub-1".to_owned(),
-                    raw_bytes: b"raw".to_vec(),
-                    received_at: TS.to_owned(),
-                    protocol_outcome: "valid_report".to_owned(),
-                    disposition: SubmissionDisposition::Admitted(report),
-                }),
+            .commit_admitted_collection(&collection, |_view, receipt| {
+                let outcome = CollectionOutcome::admitted(
+                    "inst-1".to_owned(),
+                    "run-1".to_owned(),
+                    "rep-1".to_owned(),
+                    "complete".to_owned(),
+                    receipt.semantic_digest.clone().expect("report digest"),
+                    Vec::new(),
+                );
+                Ok::<_, EngineError>(AdmittedCollectionCompletion {
+                    value: (),
+                    evaluations: Vec::new(),
+                    status: StatusEventInput {
+                        status_event_id: "status-run-1".to_owned(),
+                        component_kind: "instance".to_owned(),
+                        component_id: "inst-1".to_owned(),
+                        state: "healthy".to_owned(),
+                        code: "report_complete".to_owned(),
+                        detail: canonical(&outcome).expect("canonical admitted result"),
+                        observed_at: TS.to_owned(),
+                    },
+                })
             })
             .expect("commit admitted report");
         "rep-1".to_owned()
@@ -6801,7 +8864,7 @@ sys.stdout.write("\n")
             "report-admitted".to_owned(),
             "successful".to_owned(),
             nq_protocol::sha256_bytes(b"report").to_string(),
-            0,
+            Vec::new(),
         );
         let invalid_status = canonical(&invalid_status).expect("canonical invalid vocabulary");
         assert!(decode_collection_outcome(invalid_status.as_bytes()).is_err());
@@ -6954,6 +9017,216 @@ sys.stdout.write("\n")
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
+    fn real_host_detector_same_code_refusals_survive_governed_store_and_reopen() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let live = directory.path().join("real-host-evaluations.db");
+        let backup = directory.path().join("real-host-evaluations-backup.db");
+        let config = NqConfig::from_toml(&host_example_text()).expect("valid host config");
+        let watcher = &config.watchers[0];
+        let profile: &'static dyn ProfileModule = &nq_profiles::host::MODULE;
+        let profile_descriptor = profile.descriptor();
+        let profile_digest = profile_descriptor.digest().expect("profile digest");
+        let profile_semantic =
+            profile_semantic_id(profile_descriptor).expect("profile semantic identity");
+        let detector = profile.detectors()[0];
+        let detector_descriptor = detector.descriptor();
+        let detector_digest = detector_descriptor.digest().expect("detector digest");
+        let evaluator_artifact = nq_protocol::sha256_bytes(b"real-host-evaluator");
+        let evaluated_at = parse_timestamp("2026-07-20T12:10:00.000Z").expect("evaluation time");
+        let observed_at = parse_timestamp("2026-07-20T12:00:00.000Z").expect("report time");
+
+        let mut store = Store::initialize(&live).expect("evaluation store");
+        append_profile_descriptor(&mut store, profile).expect("compiled profile descriptor");
+        let commit_result = |store: &mut Store,
+                             evaluation_id: &str,
+                             refusal_id: &str,
+                             result: &nq_profiles::DetectorResult,
+                             report_sequence: u64,
+                             watermark_received_at: Option<&str>| {
+            let governed_refusal = GovernedRefusal::profile(
+                refusal_id.to_owned(),
+                profile_semantic.clone(),
+                result.refusal.clone().expect("real typed host refusal"),
+            );
+            let evaluation_profile = EvaluationProfileIdentity {
+                profile: profile_descriptor.profile.clone(),
+                profile_digest: profile_digest.clone(),
+                profile_semantic_id: profile_semantic.clone(),
+            };
+            let governed_result = governed_evaluation_result(
+                result,
+                evaluation_profile.clone(),
+                Some(governed_refusal.clone()),
+            )
+            .expect("wrap real detector result");
+            let envelope = EvaluationEnvelopeV2 {
+                schema: EvaluationEnvelopeSchema::V2,
+                evaluation_id: evaluation_id.to_owned(),
+                trigger_run_id: None,
+                context: EvaluationContextV1 {
+                    instance_id: watcher.instance_id.clone(),
+                    subject: watcher.subject.clone(),
+                    scope: watcher.scope.clone(),
+                    vantage: watcher.vantage.clone(),
+                },
+                detector: EvaluationDetectorIdentity {
+                    id: detector_descriptor.id.clone(),
+                    version: detector_descriptor.version.to_string(),
+                    digest: detector_digest.clone(),
+                },
+                evaluator_artifact_digest: evaluator_artifact.clone(),
+                profile: evaluation_profile,
+                started_at: evaluated_at,
+                evaluated_at,
+                watermark: EvaluationWatermarkV2 {
+                    instance_id: watcher.instance_id.clone(),
+                    max_report_sequence: report_sequence,
+                    watermark_received_at: watermark_received_at
+                        .map(parse_timestamp)
+                        .transpose()
+                        .expect("watermark time"),
+                },
+                result: governed_result,
+            };
+            store
+                .commit_evaluation(
+                    &EvaluationInput {
+                        evaluation_id: evaluation_id.to_owned(),
+                        trigger_run_id: None,
+                        detector_id: detector_descriptor.id.clone(),
+                        detector_version: detector_descriptor.version.to_string(),
+                        detector_digest: detector_digest.clone(),
+                        evaluator_artifact_digest: evaluator_artifact.as_str().to_owned(),
+                        started_at: timestamp(evaluated_at),
+                        evaluated_at: timestamp(evaluated_at),
+                        outcome: "cannot_evaluate".to_owned(),
+                        detail: canonical(&envelope).expect("canonical real evaluation"),
+                        profile: EvaluationProfileBinding {
+                            profile_id: profile_descriptor.profile.id.clone(),
+                            profile_version: profile_descriptor.profile.version.to_string(),
+                            profile_digest: profile_digest.as_str().to_owned(),
+                            profile_semantic_id: parse_identity_digest(
+                                "profile_semantic_id",
+                                profile_semantic.as_str(),
+                            )
+                            .expect("typed semantic identity"),
+                        },
+                        watermarks: vec![nq_store::EvaluationWatermark {
+                            instance_id: watcher.instance_id.clone(),
+                            max_report_sequence: i64::try_from(report_sequence)
+                                .expect("report sequence fits SQLite"),
+                            watermark_received_at: watermark_received_at.map(str::to_owned),
+                        }],
+                        refusal: Some(
+                            stored_governed_refusal(&governed_refusal, evaluated_at)
+                                .expect("stored real host refusal"),
+                        ),
+                    },
+                    None,
+                )
+                .expect("commit real host evaluation");
+            envelope
+        };
+
+        let missing = detector.evaluate(&DetectorInput {
+            instance_id: &watcher.instance_id,
+            evaluated_at,
+            watermark: EvidenceWatermark(0),
+            reports: &[],
+        });
+        let missing_envelope = commit_result(
+            &mut store,
+            "evaluation-real-host-missing",
+            "refusal-real-host-missing",
+            &missing,
+            0,
+            None,
+        );
+
+        let (stale_report, report_received_at) = commit_real_host_detector_report(
+            &mut store,
+            watcher,
+            "report-real-host-stale",
+            "real-host-stale",
+            observed_at,
+            1.0,
+        );
+        let report_sequence = stale_report.report_sequence;
+        let stale = detector.evaluate(&DetectorInput {
+            instance_id: &watcher.instance_id,
+            evaluated_at,
+            watermark: EvidenceWatermark(report_sequence),
+            reports: std::slice::from_ref(&stale_report),
+        });
+        let stale_envelope = commit_result(
+            &mut store,
+            "evaluation-real-host-stale",
+            "refusal-real-host-stale",
+            &stale,
+            report_sequence,
+            Some(&report_received_at),
+        );
+
+        let missing_refusal = missing.refusal.as_ref().expect("typed missing refusal");
+        let stale_refusal = stale.refusal.as_ref().expect("typed stale refusal");
+        assert_eq!(missing.state, DetectorState::CannotEvaluate);
+        assert_eq!(stale.state, DetectorState::CannotEvaluate);
+        assert_eq!(missing_refusal.code, stale_refusal.code);
+        assert_eq!(missing_refusal.boundary, stale_refusal.boundary);
+        assert_eq!(
+            missing_refusal.details.get("reason").map(String::as_str),
+            Some("missing_testimony")
+        );
+        assert_eq!(
+            stale_refusal.details.get("reason").map(String::as_str),
+            Some("invalid_freshness")
+        );
+        assert_ne!(missing_refusal.details, stale_refusal.details);
+
+        let assert_reopened = |store: &Store| {
+            let page = evaluation_history_bounded(store, 10, None, None)
+                .expect("reopen real host evaluation history");
+            assert!(page.complete);
+            assert_eq!(page.records.len(), 3);
+            assert_eq!(
+                page.records
+                    .iter()
+                    .find(|record| {
+                        record.result.evaluation_id == "evaluation-real-host-missing"
+                    })
+                    .expect("missing-testimony evaluation")
+                    .result,
+                missing_envelope
+            );
+            assert_eq!(
+                page.records
+                    .iter()
+                    .find(|record| record.result.evaluation_id == "evaluation-real-host-stale")
+                    .expect("stale-testimony evaluation")
+                    .result,
+                stale_envelope
+            );
+            let status = status_snapshot_v3(store).expect("real host v3 status");
+            let evaluation = status
+                .components
+                .iter()
+                .find(|component| component.kind == ComponentKind::Evaluation)
+                .expect("latest real host evaluation status");
+            let ComponentStatusDetailV3::Evaluation { result, .. } = &evaluation.detail else {
+                panic!("evaluation status carries exact governed envelope")
+            };
+            assert_eq!(result, &stale_envelope);
+        };
+        assert_reopened(&store);
+        store.backup_verified(&backup).expect("verified backup");
+        drop(store);
+        let reopened = Store::open(&backup).expect("reopen verified backup");
+        assert_reopened(&reopened);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
     fn exhaustive_history_pagination_crosses_one_row_pages_and_checks_late_rows() {
         let mut store = Store::initialize_in_memory().expect("pagination store");
         let profile: &'static dyn ProfileModule = &nq_profiles::host::MODULE;
@@ -6965,13 +9238,14 @@ sys.stdout.write("\n")
         let detector_digest = detector.digest().expect("detector digest");
 
         for suffix in ["a", "b"] {
+            let profile_identity = EvaluationProfileIdentity {
+                profile: profile_descriptor.profile.clone(),
+                profile_digest: profile_digest.clone(),
+                profile_semantic_id: semantic_id.clone(),
+            };
             let result = EvaluationResultV1 {
                 schema: EvaluationResultSchema::V1,
-                profile: EvaluationProfileIdentity {
-                    profile: profile_descriptor.profile.clone(),
-                    profile_digest: profile_digest.clone(),
-                    profile_semantic_id: semantic_id.clone(),
-                },
+                profile: profile_identity.clone(),
                 state: DetectorState::ExplicitlyAbsent,
                 condition: detector.condition.clone(),
                 summary: format!("explicit absence fixture {suffix}"),
@@ -6980,21 +9254,53 @@ sys.stdout.write("\n")
                 refusal: None,
                 watermark: EvidenceWatermark(0),
             };
+            let evaluation_id = format!("evaluation-page-{suffix}");
+            let evaluator_artifact = nq_protocol::sha256_bytes(b"pagination-evaluator");
+            let envelope = EvaluationEnvelopeV2 {
+                schema: EvaluationEnvelopeSchema::V2,
+                evaluation_id: evaluation_id.clone(),
+                trigger_run_id: None,
+                context: EvaluationContextV1 {
+                    instance_id: "pagination.instance".to_owned(),
+                    subject: "pagination:subject".to_owned(),
+                    scope: ScopeConfig {
+                        kind: "fixture".to_owned(),
+                        value: json!({"id": "pagination"}),
+                    },
+                    vantage: VantageConfig {
+                        kind: "local".to_owned(),
+                        value: json!({}),
+                    },
+                },
+                detector: EvaluationDetectorIdentity {
+                    id: detector.id.clone(),
+                    version: detector.version.to_string(),
+                    digest: detector_digest.clone(),
+                },
+                evaluator_artifact_digest: evaluator_artifact.clone(),
+                profile: profile_identity,
+                started_at: parse_timestamp("2026-07-20T12:00:00.000Z").expect("start"),
+                evaluated_at: parse_timestamp("2026-07-20T12:00:01.000Z").expect("end"),
+                watermark: EvaluationWatermarkV2 {
+                    instance_id: "pagination.instance".to_owned(),
+                    max_report_sequence: 0,
+                    watermark_received_at: None,
+                },
+                result,
+            };
             store
                 .commit_evaluation(
                     &EvaluationInput {
-                        evaluation_id: format!("evaluation-page-{suffix}"),
+                        evaluation_id,
+                        trigger_run_id: None,
                         detector_id: detector.id.clone(),
                         detector_version: detector.version.to_string(),
                         detector_digest: detector_digest.clone(),
-                        evaluator_artifact_digest: nq_protocol::sha256_bytes(
-                            b"pagination-evaluator",
-                        )
-                        .into_string(),
+                        evaluator_artifact_digest: evaluator_artifact.into_string(),
                         started_at: "2026-07-20T12:00:00.000Z".to_owned(),
                         evaluated_at: "2026-07-20T12:00:01.000Z".to_owned(),
                         outcome: "condition_explicitly_absent".to_owned(),
-                        detail: canonical(&result).expect("canonical evaluation result"),
+                        detail: canonical(&envelope).expect("canonical evaluation envelope"),
                         profile: EvaluationProfileBinding {
                             profile_id: profile_descriptor.profile.id.clone(),
                             profile_version: profile_descriptor.profile.version.to_string(),
@@ -7005,7 +9311,11 @@ sys.stdout.write("\n")
                             )
                             .expect("typed semantic id"),
                         },
-                        watermarks: Vec::new(),
+                        watermarks: vec![nq_store::EvaluationWatermark {
+                            instance_id: "pagination.instance".to_owned(),
+                            max_report_sequence: 0,
+                            watermark_received_at: None,
+                        }],
                         refusal: None,
                     },
                     None,
@@ -7017,6 +9327,95 @@ sys.stdout.write("\n")
                 .expect("one-row evaluation pages"),
             2
         );
+        let bare_v1 = EvaluationResultV1 {
+            schema: EvaluationResultSchema::V1,
+            profile: EvaluationProfileIdentity {
+                profile: profile_descriptor.profile.clone(),
+                profile_digest: profile_digest.clone(),
+                profile_semantic_id: semantic_id.clone(),
+            },
+            state: DetectorState::ExplicitlyAbsent,
+            condition: detector.condition.clone(),
+            summary: "historical unwrapped v1".to_owned(),
+            evidence: Vec::new(),
+            limitations: Vec::new(),
+            refusal: None,
+            watermark: EvidenceWatermark(0),
+        };
+        store
+            .commit_evaluation(
+                &EvaluationInput {
+                    evaluation_id: "evaluation-page-v1-unwrapped".to_owned(),
+                    trigger_run_id: None,
+                    detector_id: detector.id.clone(),
+                    detector_version: detector.version.to_string(),
+                    detector_digest: detector_digest.clone(),
+                    evaluator_artifact_digest: nq_protocol::sha256_bytes(b"pagination-evaluator")
+                        .into_string(),
+                    started_at: "2026-07-20T12:00:04.000Z".to_owned(),
+                    evaluated_at: "2026-07-20T12:00:05.000Z".to_owned(),
+                    outcome: "condition_explicitly_absent".to_owned(),
+                    detail: canonical(&bare_v1).expect("preserved bare v1"),
+                    profile: EvaluationProfileBinding {
+                        profile_id: profile_descriptor.profile.id.clone(),
+                        profile_version: profile_descriptor.profile.version.to_string(),
+                        profile_digest: profile_digest.as_str().to_owned(),
+                        profile_semantic_id: parse_identity_digest(
+                            "profile_semantic_id",
+                            semantic_id.as_str(),
+                        )
+                        .expect("semantic id"),
+                    },
+                    watermarks: vec![nq_store::EvaluationWatermark {
+                        instance_id: "pagination.instance".to_owned(),
+                        max_report_sequence: 0,
+                        watermark_received_at: None,
+                    }],
+                    refusal: None,
+                },
+                None,
+            )
+            .expect("retain incompatible bare v1 evaluation");
+
+        // A public page reopens only the rows it returns. The incompatible
+        // third row remains frozen into the same snapshot and fails closed
+        // when its page is requested; it cannot poison or be silently skipped
+        // by an earlier valid bounded page.
+        let first_public = evaluation_history_bounded(&store, 1, None, None)
+            .expect("first bounded page does not materialize late history");
+        assert_eq!(first_public.through_sequence, 3);
+        assert_eq!(first_public.records.len(), 1);
+        assert_eq!(
+            first_public.records[0].result.result.summary,
+            "explicit absence fixture a"
+        );
+        assert!(!first_public.complete);
+        let second_public = evaluation_history_bounded(
+            &store,
+            1,
+            first_public.next_after_sequence,
+            Some(first_public.through_sequence),
+        )
+        .expect("second valid bounded page");
+        assert_eq!(second_public.records.len(), 1);
+        assert_eq!(
+            second_public.records[0].result.result.summary,
+            "explicit absence fixture b"
+        );
+        assert!(!second_public.complete);
+        assert!(matches!(
+            evaluation_history_bounded(
+                &store,
+                1,
+                second_public.next_after_sequence,
+                Some(second_public.through_sequence),
+            ),
+            Err(EngineError::Invariant(message)) if message.contains(EVALUATION_ENVELOPE_SCHEMA)
+        ));
+        assert!(matches!(
+            validate_evaluation_refusal_history_with_page_size(&store, 1),
+            Err(EngineError::Invariant(message)) if message.contains(EVALUATION_ENVELOPE_SCHEMA)
+        ));
 
         store
             .record_status(&StatusEventInput {
@@ -7045,6 +9444,137 @@ sys.stdout.write("\n")
             Err(EngineError::Invariant(message))
                 if message.contains("not a valid versioned collection result")
         ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn public_evaluation_history_crosses_the_maximum_page_without_silent_truncation() {
+        let mut store = Store::initialize_in_memory().expect("pagination store");
+        let profile: &'static dyn ProfileModule = &nq_profiles::host::MODULE;
+        append_profile_descriptor(&mut store, profile).expect("compiled profile descriptor");
+        let profile_descriptor = profile.descriptor();
+        let profile_digest = profile_descriptor.digest().expect("profile digest");
+        let semantic_id = profile_semantic_id(profile_descriptor).expect("profile semantic id");
+        let detector = profile.detectors()[0].descriptor();
+        let detector_digest = detector.digest().expect("detector digest");
+        let evaluator_artifact = nq_protocol::sha256_bytes(b"maximum-page-evaluator");
+        let evaluation_profile = EvaluationProfileIdentity {
+            profile: profile_descriptor.profile.clone(),
+            profile_digest: profile_digest.clone(),
+            profile_semantic_id: semantic_id.clone(),
+        };
+        let context = EvaluationContextV1 {
+            instance_id: "maximum-page.instance".to_owned(),
+            subject: "host:maximum-page".to_owned(),
+            scope: ScopeConfig {
+                kind: "host".to_owned(),
+                value: json!({"id": "maximum-page"}),
+            },
+            vantage: VantageConfig {
+                kind: "local".to_owned(),
+                value: json!({}),
+            },
+        };
+
+        for index in 1..=nq_store::MAX_PUBLIC_QUERY_ROWS + 1 {
+            let evaluation_id = format!("maximum-page-evaluation-{index:04}");
+            let result = EvaluationResultV1 {
+                schema: EvaluationResultSchema::V1,
+                profile: evaluation_profile.clone(),
+                state: DetectorState::ExplicitlyAbsent,
+                condition: detector.condition.clone(),
+                summary: format!("same-code payload {index}"),
+                evidence: Vec::new(),
+                limitations: Vec::new(),
+                refusal: None,
+                watermark: EvidenceWatermark(0),
+            };
+            let envelope = EvaluationEnvelopeV2 {
+                schema: EvaluationEnvelopeSchema::V2,
+                evaluation_id: evaluation_id.clone(),
+                trigger_run_id: None,
+                context: context.clone(),
+                detector: EvaluationDetectorIdentity {
+                    id: detector.id.clone(),
+                    version: detector.version.to_string(),
+                    digest: detector_digest.clone(),
+                },
+                evaluator_artifact_digest: evaluator_artifact.clone(),
+                profile: evaluation_profile.clone(),
+                started_at: parse_timestamp("2026-07-20T12:00:00.000Z").expect("start"),
+                evaluated_at: parse_timestamp("2026-07-20T12:00:01.000Z").expect("end"),
+                watermark: EvaluationWatermarkV2 {
+                    instance_id: context.instance_id.clone(),
+                    max_report_sequence: 0,
+                    watermark_received_at: None,
+                },
+                result,
+            };
+            store
+                .commit_evaluation(
+                    &EvaluationInput {
+                        evaluation_id,
+                        trigger_run_id: None,
+                        detector_id: detector.id.clone(),
+                        detector_version: detector.version.to_string(),
+                        detector_digest: detector_digest.clone(),
+                        evaluator_artifact_digest: evaluator_artifact.to_string(),
+                        started_at: "2026-07-20T12:00:00.000Z".to_owned(),
+                        evaluated_at: "2026-07-20T12:00:01.000Z".to_owned(),
+                        outcome: "condition_explicitly_absent".to_owned(),
+                        detail: canonical(&envelope).expect("canonical evaluation envelope"),
+                        profile: EvaluationProfileBinding {
+                            profile_id: profile_descriptor.profile.id.clone(),
+                            profile_version: profile_descriptor.profile.version.to_string(),
+                            profile_digest: profile_digest.as_str().to_owned(),
+                            profile_semantic_id: parse_identity_digest(
+                                "profile_semantic_id",
+                                semantic_id.as_str(),
+                            )
+                            .expect("semantic id"),
+                        },
+                        watermarks: vec![nq_store::EvaluationWatermark {
+                            instance_id: context.instance_id.clone(),
+                            max_report_sequence: 0,
+                            watermark_received_at: None,
+                        }],
+                        refusal: None,
+                    },
+                    None,
+                )
+                .expect("commit evaluation history row");
+        }
+
+        let first = evaluation_history_bounded(&store, nq_store::MAX_PUBLIC_QUERY_ROWS, None, None)
+            .expect("first maximum-sized page");
+        assert_eq!(first.records.len(), 1_000);
+        assert!(!first.complete);
+        assert_eq!(first.next_after_sequence, Some(1_000));
+        assert_eq!(first.through_sequence, 1_001);
+        assert_eq!(
+            first.records[0].result.result.summary,
+            "same-code payload 1"
+        );
+        assert!(matches!(
+            evaluation_history_bounded(&store, 1, first.next_after_sequence, None),
+            Err(EngineError::Invariant(message))
+                if message == "evaluation history continuation requires its frozen upper bound"
+        ));
+
+        let second = evaluation_history_bounded(
+            &store,
+            nq_store::MAX_PUBLIC_QUERY_ROWS,
+            first.next_after_sequence,
+            Some(first.through_sequence),
+        )
+        .expect("late page");
+        assert_eq!(second.records.len(), 1);
+        assert!(second.complete);
+        assert_eq!(second.next_after_sequence, None);
+        assert_eq!(
+            second.records[0].result.result.summary,
+            "same-code payload 1001"
+        );
     }
 
     #[test]
@@ -7092,8 +9622,8 @@ sys.stdout.write("\n")
             let carrier =
                 CollectionOutcome::rejected(instance_id, run.run_id.clone(), refusal.clone());
             let wire = nq_protocol::encode_ndjson(&carrier).expect("encode protocol rejection");
-            let decoded: CollectionOutcome =
-                nq_protocol::decode_ndjson(&wire, wire.len()).expect("decode protocol rejection");
+            let decoded = decode_collection_outcome_ndjson(&wire, wire.len())
+                .expect("decode protocol rejection");
             assert_eq!(decoded, carrier);
             let submission = SubmissionInput {
                 submission_id: format!("submission-{suffix}"),
@@ -7415,11 +9945,29 @@ sys.stdout.write("\n")
                 .expect("profile digest")
                 .as_str()
                 .to_owned(),
+            admission_instance_id: Some("profile.binding".to_owned()),
+            admission_profile_id: Some(descriptor.profile.id.clone()),
+            admission_profile_version: Some(descriptor.profile.version.to_string()),
+            admission_profile_digest: Some(
+                descriptor
+                    .digest()
+                    .expect("profile digest")
+                    .as_str()
+                    .to_owned(),
+            ),
             profile_semantic_id: Some(
                 profile_semantic_id(descriptor)
                     .expect("profile semantic identity")
                     .as_str()
                     .to_owned(),
+            ),
+            admission_detector_identity_digest: Some(
+                detector_identity_digest(profile)
+                    .expect("detector suite identity")
+                    .into_string(),
+            ),
+            admission_evaluator_artifact_digest: Some(
+                nq_protocol::sha256_bytes(b"profile-binding-evaluator").into_string(),
             ),
             acquisition_outcome: "response".to_owned(),
             resource_outcome_json: test_run_resource(AcquisitionOutcome::Response)
@@ -7427,23 +9975,216 @@ sys.stdout.write("\n")
                 .to_vec(),
         };
         validate_run_profile_identity(&run).expect("exact compiled profile binding");
-        run.profile_digest = nq_protocol::sha256_bytes(b"substituted descriptor").into_string();
+        let mut wrong_admission_instance = run.clone();
+        wrong_admission_instance.admission_instance_id = Some("profile.other".to_owned());
+        let mut wrong_admission_profile = run.clone();
+        wrong_admission_profile.admission_profile_id = Some("nq.other".to_owned());
+        let mut wrong_admission_version = run.clone();
+        wrong_admission_version.admission_profile_version = Some("999".to_owned());
+        let mut wrong_admission_digest = run.clone();
+        wrong_admission_digest.admission_profile_digest =
+            Some(nq_protocol::sha256_bytes(b"another admission profile descriptor").into_string());
+        for substituted in [
+            wrong_admission_instance,
+            wrong_admission_profile,
+            wrong_admission_version,
+            wrong_admission_digest,
+        ] {
+            assert!(matches!(
+                validate_run_profile_identity(&substituted),
+                Err(EngineError::Invariant(message))
+                    if message.contains("borrowed admission admission-profile-binding")
+            ));
+        }
+        let substituted_digest = nq_protocol::sha256_bytes(b"substituted descriptor").into_string();
+        run.profile_digest.clone_from(&substituted_digest);
+        run.admission_profile_digest = Some(substituted_digest);
         assert!(matches!(
             validate_run_profile_identity(&run),
             Err(EngineError::Invariant(message))
-                if message.contains("profile digest or semantic identity was substituted")
+                if message.contains("profile digest, semantic identity, or detector suite was substituted")
         ));
         run.profile_digest = descriptor
             .digest()
             .expect("profile digest")
             .as_str()
             .to_owned();
+        run.admission_profile_digest = Some(run.profile_digest.clone());
         run.profile_semantic_id =
             Some(nq_protocol::sha256_bytes(b"substituted semantics").into_string());
         assert!(matches!(
             validate_run_profile_identity(&run),
             Err(EngineError::Invariant(message))
-                if message.contains("profile digest or semantic identity was substituted")
+                if message.contains("profile digest, semantic identity, or detector suite was substituted")
+        ));
+        run.profile_semantic_id = Some(
+            profile_semantic_id(descriptor)
+                .expect("profile semantic identity")
+                .as_str()
+                .to_owned(),
+        );
+        run.admission_detector_identity_digest =
+            Some(nq_protocol::sha256_bytes(b"substituted detector suite").into_string());
+        assert!(matches!(
+            validate_run_profile_identity(&run),
+            Err(EngineError::Invariant(message))
+                if message.contains("profile digest, semantic identity, or detector suite was substituted")
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn hostile_same_profile_borrowed_admission_fails_on_late_reopen() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let database = directory.path().join("borrowed-admission.db");
+        let profile: &'static dyn ProfileModule = &nq_profiles::conformance::MODULE;
+        let mut store = Store::initialize(&database).expect("initialize hostile store");
+        let owner_admission =
+            seed_compiled_admission(&mut store, profile, "binding.owner", "owner");
+        let borrower_admission =
+            seed_compiled_admission(&mut store, profile, "binding.borrower", "borrower");
+        let owner_run = test_run(
+            profile,
+            "binding.owner",
+            "a-valid",
+            owner_admission.clone(),
+            AcquisitionOutcome::Timeout,
+        );
+        let owner_outcome = CollectionOutcome::acquisition_failed(
+            "binding.owner".to_owned(),
+            owner_run.run_id.clone(),
+            AcquisitionOutcome::Timeout,
+        )
+        .expect("owner timeout result");
+        commit_test_non_success(&mut store, owner_run, None, &owner_outcome, "a-valid");
+        let borrower_run = test_run(
+            profile,
+            "binding.borrower",
+            "z-borrowed",
+            borrower_admission,
+            AcquisitionOutcome::Timeout,
+        );
+        let mut rejected_by_api = borrower_run.clone();
+        rejected_by_api.admission_id = Some(owner_admission.clone());
+        let borrower_outcome = CollectionOutcome::acquisition_failed(
+            "binding.borrower".to_owned(),
+            borrower_run.run_id.clone(),
+            AcquisitionOutcome::Timeout,
+        )
+        .expect("borrower timeout result");
+        let borrower_projection =
+            instance_status_projection(&borrower_outcome).expect("borrower status projection");
+        assert!(matches!(
+            store.commit_non_success_collection(
+                &CollectionInput {
+                    run: rejected_by_api,
+                    submission: None,
+                },
+                &RunResultStatusInput {
+                    run_id: borrower_run.run_id.clone(),
+                    status: StatusEventInput {
+                        status_event_id: "status-z-borrowed-api".to_owned(),
+                        component_kind: "instance".to_owned(),
+                        component_id: borrower_run.instance_id.clone(),
+                        state: borrower_projection.state.to_owned(),
+                        code: borrower_projection.code.to_owned(),
+                        detail: canonical(&borrower_outcome).expect("borrower result"),
+                        observed_at: "2026-07-20T12:00:01.000Z".to_owned(),
+                    },
+                },
+            ),
+            Err(nq_store::StoreError::Invariant(message))
+                if message.contains("instance or profile identity disagrees")
+        ));
+        assert_eq!(
+            validate_watcher_run_history_with_page_size(&store, 1)
+                .expect("exact owner binding reopens"),
+            1
+        );
+        drop(store);
+
+        let hostile = rusqlite::Connection::open(&database).expect("open raw hostile writer");
+        assert_eq!(
+            hostile
+                .execute(
+                    "INSERT INTO watcher_runs (
+                        run_id, request_id, instance_id, admission_id, binding_digest,
+                        checkpoint_contract_digest, profile_id, profile_version,
+                        profile_digest, carrier, started_at, deadline_at, finished_at,
+                        acquisition_outcome, execution_identity_json, resource_outcome_json
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                               ?12, ?13, ?14, ?15, ?16)",
+                    rusqlite::params![
+                        borrower_run.run_id,
+                        borrower_run.request_id,
+                        borrower_run.instance_id,
+                        owner_admission,
+                        borrower_run.binding_digest,
+                        borrower_run.checkpoint_contract_digest,
+                        borrower_run.profile_id,
+                        borrower_run.profile_version,
+                        borrower_run.profile_digest,
+                        borrower_run.carrier,
+                        borrower_run.started_at,
+                        borrower_run.deadline_at,
+                        borrower_run.finished_at,
+                        borrower_run.acquisition_outcome,
+                        borrower_run.execution_identity.as_bytes(),
+                        borrower_run.resource_outcome.as_bytes(),
+                    ],
+                )
+                .expect("insert borrowed same-profile admission outside typed API"),
+            1
+        );
+        assert_eq!(
+            hostile
+                .execute(
+                    "INSERT INTO status_events (
+                        status_event_id, component_kind, component_id, run_id,
+                        state, code, detail_json, observed_at
+                     ) VALUES (?1, 'instance', ?2, ?3, ?4, ?5, ?6, ?7)",
+                    rusqlite::params![
+                        "status-z-borrowed-hostile",
+                        &borrower_run.instance_id,
+                        &borrower_run.run_id,
+                        borrower_projection.state,
+                        borrower_projection.code,
+                        canonical(&borrower_outcome)
+                            .expect("hostile borrower result")
+                            .as_bytes(),
+                        "2026-07-20T12:00:01.000Z",
+                    ],
+                )
+                .expect("insert canonical result outside typed API"),
+            1
+        );
+        assert_eq!(
+            hostile
+                .execute(
+                    "INSERT INTO status_current (
+                        component_kind, component_id, latest_status_event_id
+                     ) VALUES ('instance', ?1, 'status-z-borrowed-hostile')",
+                    [&borrower_run.instance_id],
+                )
+                .expect("materialize hostile canonical result"),
+            1
+        );
+        drop(hostile);
+
+        let reopened = Store::open(&database).expect("physical schema-v3 store reopens");
+        let borrowed = reopened
+            .watcher_run_outcome("run-z-borrowed")
+            .expect("read hostile row")
+            .expect("borrowed run exists");
+        assert_eq!(borrowed.instance_id, "binding.borrower");
+        assert_eq!(
+            borrowed.admission_instance_id.as_deref(),
+            Some("binding.owner")
+        );
+        assert!(matches!(
+            validate_watcher_run_history_with_page_size(&reopened, 1),
+            Err(EngineError::Invariant(message))
+                if message.contains("borrowed admission admission-owner")
         ));
     }
 
@@ -7482,7 +10223,10 @@ sys.stdout.write("\n")
         .expect("typed current result");
         commit_test_non_success(&mut store, run, None, &current, "history-current");
 
-        assert!(status_snapshot_v2(&store).is_ok());
+        assert!(matches!(
+            status_snapshot_v2(&store),
+            Err(EngineError::Invariant(message)) if message.contains("not a valid versioned collection result")
+        ));
         assert!(matches!(
             validate_status_history_v2(&store),
             Err(EngineError::Invariant(message)) if message.contains("not a valid versioned collection result")
@@ -7730,11 +10474,11 @@ sys.stdout.write("\n")
         let permanent_wire =
             nq_protocol::encode_ndjson(&permanent_carrier).expect("encode permanent carrier");
         assert_ne!(transient_wire, permanent_wire);
-        let transient_decoded: CollectionOutcome =
-            nq_protocol::decode_ndjson(&transient_wire, transient_wire.len())
+        let transient_decoded =
+            decode_collection_outcome_ndjson(&transient_wire, transient_wire.len())
                 .expect("decode transient carrier");
-        let permanent_decoded: CollectionOutcome =
-            nq_protocol::decode_ndjson(&permanent_wire, permanent_wire.len())
+        let permanent_decoded =
+            decode_collection_outcome_ndjson(&permanent_wire, permanent_wire.len())
                 .expect("decode permanent carrier");
         transient_decoded
             .validate()

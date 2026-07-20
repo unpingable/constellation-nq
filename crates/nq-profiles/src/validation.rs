@@ -375,7 +375,6 @@ pub struct ProfileRefusal {
     /// Concise operator-facing explanation.
     pub message: String,
     /// Bounded machine-readable context.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub details: BTreeMap<String, String>,
 }
 

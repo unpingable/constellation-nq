@@ -25,7 +25,8 @@ use std::{
 use sha2::{Digest, Sha256};
 
 fn main() {
-    let crate_root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set"));
+    let crate_root =
+        PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set"));
     let workspace_root = crate_root
         .parent()
         .and_then(Path::parent)
@@ -54,7 +55,10 @@ fn main() {
             .to_string_lossy()
             .replace('\\', "/");
         let bytes = fs::read(file).unwrap_or_else(|error| {
-            panic!("cannot read source-closure input {}: {error}", file.display())
+            panic!(
+                "cannot read source-closure input {}: {error}",
+                file.display()
+            )
         });
         let length = u64::try_from(bytes.len()).expect("closure input fits u64");
         hasher.update(relative.as_bytes());

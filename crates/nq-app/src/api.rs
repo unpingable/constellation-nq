@@ -14,13 +14,15 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 const MAX_HTTP_REQUEST_BYTES: usize = 8 * 1024;
-const MAX_HTTP_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CONNECTIONS: usize = 64;
-const CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const REQUEST_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const MAX_FINDINGS_PER_RESPONSE: u32 = nq_store::MAX_PUBLIC_QUERY_ROWS;
 const MAX_REJECTED_CUSTODY_PER_RESPONSE: u32 = nq_store::MAX_PUBLIC_QUERY_ROWS;
+const MAX_EVALUATIONS_PER_RESPONSE: u32 = nq_store::MAX_PUBLIC_QUERY_ROWS;
 const V1_STATUS_UNREPRESENTABLE: &[u8] =
-    br#"{"error":"typed_status_requires_v2","required_endpoint":"/v2/status"}"#;
+    br#"{"error":"governed_status_requires_v3","required_endpoint":"/v3/status"}"#;
+const V2_STATUS_UNREPRESENTABLE: &[u8] =
+    br#"{"error":"typed_evaluations_require_v3","required_endpoint":"/v3/status"}"#;
 const V2_FINDINGS_UNREPRESENTABLE: &[u8] =
     br#"{"error":"governed_findings_require_v3","required_endpoint":"/v3/findings"}"#;
 
@@ -34,6 +36,13 @@ struct RejectedCustodyQuery {
 struct FindingsQuery {
     limit: u32,
     after_finding_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EvaluationHistoryQuery {
+    limit: u32,
+    after_sequence: Option<u64>,
+    through_sequence: Option<u64>,
 }
 
 /// Serve the versioned API on a permission-restricted Unix socket.
@@ -69,12 +78,8 @@ pub(crate) async fn serve_unix_listener(
         let database_path = database_path.clone();
         tasks.spawn(async move {
             let _permit = permit;
-            match tokio::time::timeout(CONNECTION_TIMEOUT, handle_connection(stream, database_path))
-                .await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => tracing::debug!(%error, "local API request failed"),
-                Err(_) => tracing::debug!("local API request timed out"),
+            if let Err(error) = handle_connection(stream, database_path).await {
+                tracing::debug!(%error, "local API request failed");
             }
         });
         while tasks.try_join_next().is_some() {}
@@ -117,12 +122,8 @@ pub(crate) async fn serve_loopback_listener(
         let database_path = database_path.clone();
         tasks.spawn(async move {
             let _permit = permit;
-            match tokio::time::timeout(CONNECTION_TIMEOUT, handle_connection(stream, database_path))
-                .await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => tracing::debug!(%error, "loopback API request failed"),
-                Err(_) => tracing::debug!("loopback API request timed out"),
+            if let Err(error) = handle_connection(stream, database_path).await {
+                tracing::debug!(%error, "loopback API request failed");
             }
         });
         while tasks.try_join_next().is_some() {}
@@ -134,7 +135,9 @@ async fn handle_connection<S>(mut stream: S, database_path: PathBuf) -> Result<(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let request = read_request(&mut stream).await?;
+    let request = tokio::time::timeout(REQUEST_READ_TIMEOUT, read_request(&mut stream))
+        .await
+        .context("timed out reading HTTP request")??;
     let first_line = request.split("\r\n").next().context("empty HTTP request")?;
     let mut parts = first_line.split_whitespace();
     let method = parts.next().unwrap_or_default();
@@ -156,6 +159,15 @@ where
     };
     match route {
         "/v1/status" => {
+            if query.is_some() {
+                return write_response(
+                    &mut stream,
+                    400,
+                    "application/json",
+                    br#"{"error":"status_query_not_supported"}"#,
+                )
+                .await;
+            }
             // Compatibility surface: its schema and representation remain v1.
             match read_status_v1(database_path).await {
                 Ok(body) => write_response(&mut stream, 200, "application/json", &body).await,
@@ -172,7 +184,40 @@ where
             }
         }
         "/v2/status" => {
-            let body = read_status_v2(database_path).await?;
+            if query.is_some() {
+                return write_response(
+                    &mut stream,
+                    400,
+                    "application/json",
+                    br#"{"error":"status_query_not_supported"}"#,
+                )
+                .await;
+            }
+            match read_status_v2(database_path).await {
+                Ok(body) => write_response(&mut stream, 200, "application/json", &body).await,
+                Err(error) if is_v2_status_representation_error(&error) => {
+                    write_response(
+                        &mut stream,
+                        409,
+                        "application/json",
+                        V2_STATUS_UNREPRESENTABLE,
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            }
+        }
+        "/v3/status" => {
+            if query.is_some() {
+                return write_response(
+                    &mut stream,
+                    400,
+                    "application/json",
+                    br#"{"error":"status_query_not_supported"}"#,
+                )
+                .await;
+            }
+            let body = read_status_v3(database_path).await?;
             write_response(&mut stream, 200, "application/json", &body).await
         }
         "/v2/findings" => {
@@ -213,8 +258,39 @@ where
                 .await?;
             write_response(&mut stream, 200, "application/json", &body).await
         }
+        "/v1/evaluations" => {
+            let query = match parse_evaluation_history_query(query) {
+                Ok(query) => query,
+                Err(detail) => {
+                    let body = serde_json::to_vec(&serde_json::json!({
+                        "error": "invalid_evaluations_query",
+                        "detail": detail,
+                    }))?;
+                    return write_response(&mut stream, 400, "application/json", &body).await;
+                }
+            };
+            let body = match read_evaluations(
+                database_path,
+                query.limit,
+                query.after_sequence,
+                query.through_sequence,
+            )
+            .await
+            {
+                Ok(body) => body,
+                Err(error) if is_evaluation_query_bound_error(&error) => {
+                    let body = serde_json::to_vec(&serde_json::json!({
+                        "error": "invalid_evaluations_query",
+                        "detail": error.to_string(),
+                    }))?;
+                    return write_response(&mut stream, 400, "application/json", &body).await;
+                }
+                Err(error) => return Err(error),
+            };
+            write_response(&mut stream, 200, "application/json", &body).await
+        }
         "/console" | "/" => {
-            let status = read_status_v2(database_path.clone()).await?;
+            let status = read_status_v3(database_path.clone()).await?;
             let findings = read_all_findings(database_path).await?;
             let body = render_console(&status, &findings);
             write_response(
@@ -250,7 +326,8 @@ fn is_v1_status_representation_error(error: &anyhow::Error) -> bool {
     matches!(
         error.downcast_ref::<nq_core::engine::EngineError>(),
         Some(nq_core::engine::EngineError::Invariant(message))
-            if message == "nq.status_snapshot.v1 cannot emit a typed collection-result shape; use v2"
+            if message == "nq.status_snapshot.v1 cannot emit governed collection results; use v3"
+                || message == "nq.status_snapshot.v1 cannot emit governed evaluation results; use v3"
     )
 }
 
@@ -261,6 +338,53 @@ async fn read_status_v2(database_path: PathBuf) -> Result<Vec<u8>> {
         serde_json::to_vec(&snapshot).map_err(anyhow::Error::from)
     })
     .await?
+}
+
+fn is_v2_status_representation_error(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<nq_core::engine::EngineError>(),
+        Some(nq_core::engine::EngineError::Invariant(message))
+            if message == "nq.status_snapshot.v2 cannot emit governed evaluation results; use v3"
+    )
+}
+
+async fn read_status_v3(database_path: PathBuf) -> Result<Vec<u8>> {
+    tokio::task::spawn_blocking(move || {
+        let store = Store::open_read_only(database_path)?;
+        let snapshot = nq_core::engine::status_snapshot_v3(&store)?;
+        serde_json::to_vec(&snapshot).map_err(anyhow::Error::from)
+    })
+    .await?
+}
+
+async fn read_evaluations(
+    database_path: PathBuf,
+    limit: u32,
+    after_sequence: Option<u64>,
+    through_sequence: Option<u64>,
+) -> Result<Vec<u8>> {
+    tokio::task::spawn_blocking(move || {
+        let store = Store::open_read_only(database_path)?;
+        let page = nq_core::engine::evaluation_history_bounded(
+            &store,
+            limit,
+            after_sequence,
+            through_sequence,
+        )?;
+        serde_json::to_vec(&page).map_err(anyhow::Error::from)
+    })
+    .await?
+}
+
+fn is_evaluation_query_bound_error(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<nq_core::engine::EngineError>(),
+        Some(nq_core::engine::EngineError::Invariant(message))
+            if message == "evaluation history cursor or frozen upper bound is not present"
+                || message == "evaluation history continuation requires its frozen upper bound"
+                || message == "evaluation history cursor overflowed"
+                || message == "evaluation history bound overflowed"
+    )
 }
 
 async fn read_findings(
@@ -415,8 +539,98 @@ fn parse_findings_query(query: Option<&str>) -> std::result::Result<FindingsQuer
     })
 }
 
+fn parse_evaluation_history_query(
+    query: Option<&str>,
+) -> std::result::Result<EvaluationHistoryQuery, &'static str> {
+    let Some(query) = query else {
+        return Ok(EvaluationHistoryQuery {
+            limit: MAX_EVALUATIONS_PER_RESPONSE,
+            after_sequence: None,
+            through_sequence: None,
+        });
+    };
+    if query.is_empty() {
+        return Err("query string must not be empty");
+    }
+
+    let mut limit = None;
+    let mut after_sequence = None;
+    let mut through_sequence = None;
+    for parameter in query.split('&') {
+        let Some((name, value)) = parameter.split_once('=') else {
+            return Err("every query parameter must have exactly one value");
+        };
+        if name.is_empty() || value.is_empty() || value.contains('=') {
+            return Err("every query parameter must have exactly one non-empty value");
+        }
+        match name {
+            "limit" => {
+                if limit.is_some() {
+                    return Err("limit must not be repeated");
+                }
+                if !is_canonical_decimal(value) {
+                    return Err("limit must be a canonical positive decimal integer");
+                }
+                let parsed = value
+                    .parse::<u32>()
+                    .map_err(|_| "limit is outside the supported integer range")?;
+                if !(1..=MAX_EVALUATIONS_PER_RESPONSE).contains(&parsed) {
+                    return Err("limit must be between 1 and 1000");
+                }
+                limit = Some(parsed);
+            }
+            "after" => {
+                if after_sequence.is_some() {
+                    return Err("after must not be repeated");
+                }
+                if !is_canonical_nonnegative_decimal(value) {
+                    return Err("after must be a canonical nonnegative decimal integer");
+                }
+                after_sequence = Some(
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| "after is outside the supported integer range")?,
+                );
+            }
+            "through" => {
+                if through_sequence.is_some() {
+                    return Err("through must not be repeated");
+                }
+                if !is_canonical_nonnegative_decimal(value) {
+                    return Err("through must be a canonical nonnegative decimal integer");
+                }
+                through_sequence = Some(
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| "through is outside the supported integer range")?,
+                );
+            }
+            _ => return Err("unknown query parameter"),
+        }
+    }
+
+    if after_sequence.is_some() && through_sequence.is_none() {
+        return Err("after requires the frozen through bound returned by the first page");
+    }
+    if after_sequence
+        .zip(through_sequence)
+        .is_some_and(|(after, through)| after > through)
+    {
+        return Err("after must not exceed through");
+    }
+    Ok(EvaluationHistoryQuery {
+        limit: limit.unwrap_or(MAX_EVALUATIONS_PER_RESPONSE),
+        after_sequence,
+        through_sequence,
+    })
+}
+
 fn is_canonical_decimal(value: &str) -> bool {
     !value.is_empty() && !value.starts_with('0') && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn is_canonical_nonnegative_decimal(value: &str) -> bool {
+    value == "0" || is_canonical_decimal(value)
 }
 
 fn is_stable_cursor_token(value: &str) -> bool {
@@ -451,9 +665,6 @@ async fn write_response<S: AsyncWrite + Unpin>(
     content_type: &str,
     body: &[u8],
 ) -> Result<()> {
-    if body.len() > MAX_HTTP_RESPONSE_BYTES {
-        bail!("HTTP response exceeds {MAX_HTTP_RESPONSE_BYTES} bytes");
-    }
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
@@ -542,11 +753,14 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+    use chrono::{DateTime, Utc};
+    use nq_core::config::{ScopeConfig, VantageConfig};
     use nq_core::engine::{
         AdmissionRefusal, AdmissionRefusalBoundary, AdmissionRefusalCode, AdmissionRefusalDetails,
-        CollectionOutcome, CollectionResult, EvaluationProfileIdentity, EvaluationResultSchema,
-        EvaluationResultV1, GovernedRefusal, GovernedRefusalOrigin, RunHardLimits,
-        RunResourceOutcomeSchema, RunResourceOutcomeV1,
+        CollectionOutcome, CollectionResult, EvaluationContextV1, EvaluationDetectorIdentity,
+        EvaluationEnvelopeSchema, EvaluationEnvelopeV2, EvaluationProfileIdentity,
+        EvaluationResultSchema, EvaluationResultV1, EvaluationWatermarkV2, GovernedRefusal,
+        GovernedRefusalOrigin, RunHardLimits, RunResourceOutcomeSchema, RunResourceOutcomeV1,
     };
     use nq_core::runner::{AcquisitionOutcome, ExchangeTimeoutPhase};
     use nq_profiles::{
@@ -663,14 +877,20 @@ mod tests {
             |profile| document(profile.descriptor()),
         );
         let digest = descriptor.digest().to_owned();
-        store
-            .append_profile_descriptor(&ProfileDescriptorInput {
-                profile_id: profile_id.to_owned(),
-                profile_version: version.to_string(),
-                descriptor,
-                recorded_at: TEST_TIME.to_owned(),
-            })
-            .expect("append fixture descriptor");
+        if store
+            .profile_descriptor(profile_id, &version.to_string(), &digest)
+            .expect("read fixture descriptor")
+            .is_none()
+        {
+            store
+                .append_profile_descriptor(&ProfileDescriptorInput {
+                    profile_id: profile_id.to_owned(),
+                    profile_version: version.to_string(),
+                    descriptor,
+                    recorded_at: TEST_TIME.to_owned(),
+                })
+                .expect("append fixture descriptor");
+        }
         digest
     }
 
@@ -718,7 +938,15 @@ mod tests {
                 identity: AdmissionIdentity {
                     profile_semantic_id: Sha256Digest::parse(semantic_id.as_str())
                         .expect("semantic identity is a digest"),
-                    detector_identity_digest: digest("detector"),
+                    detector_identity_digest: nq_store::detector_suite_identity_digest(
+                        profile.detectors().iter().map(|detector| {
+                            detector
+                                .descriptor()
+                                .digest()
+                                .expect("compiled detector identity")
+                        }),
+                    )
+                    .expect("compiled detector suite identity"),
                     evaluator_source_digest: digest("source"),
                     evaluator_artifact_digest: digest("evaluator"),
                     helper_artifact_digest: digest("helper"),
@@ -745,20 +973,20 @@ mod tests {
     struct EvaluationSurfaceFixture {
         finding_id: String,
         refusal: GovernedRefusal,
+        latest_evaluation: EvaluationEnvelopeV2,
     }
 
     #[allow(clippy::too_many_lines)]
     fn seed_present_then_refused_evaluation(
         store: &mut Store,
         suffix: &str,
-        profile_id: &str,
-        profile_version: u32,
         details: BTreeMap<String, String>,
+        with_prior_finding: bool,
     ) -> EvaluationSurfaceFixture {
-        let module = nq_profiles::resolve_profile(profile_id, profile_version)
-            .expect("evaluation fixture uses a compiled profile");
+        let module = nq_profiles::resolve_profile("nq.host", 1)
+            .expect("evaluation fixture uses the compiled host profile");
         let profile = module.descriptor().profile.clone();
-        let profile_digest = append_fixture_descriptor(store, profile_id, profile_version);
+        let profile_digest = append_fixture_descriptor(store, &profile.id, profile.version);
         let semantic_id = profile_semantic_id(module.descriptor()).expect("profile semantic ID");
         let semantic_digest = Sha256Digest::parse(semantic_id.as_str())
             .expect("profile semantic identity is a digest");
@@ -768,10 +996,22 @@ mod tests {
             profile_semantic_id: semantic_id.clone(),
         };
         let instance_id = format!("evaluation-{suffix}");
-        let detector_id = format!("transport.detector.{suffix}");
-        let detector_digest = nq_protocol::sha256_bytes(detector_id.as_bytes()).into_string();
+        let subject = format!("host:{suffix}");
+        let scope = ScopeConfig {
+            kind: "host".to_owned(),
+            value: json!({"id": suffix}),
+        };
+        let vantage = VantageConfig {
+            kind: "local".to_owned(),
+            value: json!({}),
+        };
+        let detector = module.detectors()[0].descriptor();
+        let detector_id = detector.id.clone();
+        let detector_digest = detector.digest().expect("compiled detector digest").clone();
         let finding_id = format!("finding-evaluation-{suffix}");
-        let condition = "transport.same_code";
+        let condition = detector.condition.clone();
+        let evaluated_at: DateTime<Utc> = TEST_TIME.parse().expect("fixture timestamp");
+        let evaluator_artifact_digest = nq_protocol::sha256_bytes(b"api-evaluator");
         let profile_binding = EvaluationProfileBinding {
             profile_id: profile.id.clone(),
             profile_version: profile.version.to_string(),
@@ -787,7 +1027,7 @@ mod tests {
             schema: EvaluationResultSchema::V1,
             profile: evaluation_profile.clone(),
             state: DetectorState::Present,
-            condition: condition.to_owned(),
+            condition: condition.clone(),
             summary: "condition is present".to_owned(),
             evidence: Vec::new(),
             limitations: Vec::new(),
@@ -802,17 +1042,24 @@ mod tests {
             profile_id: profile.id.clone(),
             profile_version: profile.version.to_string(),
             profile_digest: profile_digest.clone(),
-            subject: document(&json!({"instance": instance_id})),
-            condition_name: condition.to_owned(),
+            subject: document(&subject),
+            condition_name: condition.clone(),
             condition_state: "present".to_owned(),
             visibility_state: "sufficient".to_owned(),
             operator_work_state: "unreviewed".to_owned(),
             severity: "warning".to_owned(),
             summary: "condition is present".to_owned(),
             limitations: document(&Vec::<String>::new()),
-            safe_next_checks: document(&vec!["collect current evidence"]),
+            safe_next_checks: document(&vec![
+                "Inspect the cited admitted evidence".to_owned(),
+                "Run `nq watcher test` if collection remains unavailable".to_owned(),
+            ]),
             freshness: document(&json!({"state": "current"})),
-            basis: document(&json!({"profile_digest": profile_digest})),
+            basis: document(&json!({
+                "profile_digest": profile_digest,
+                "scope": scope,
+                "vantage": vantage,
+            })),
             refusal: None,
             origin_mode: "native".to_owned(),
             historical_refs: document(&Vec::<String>::new()),
@@ -821,26 +1068,55 @@ mod tests {
             created_at: TEST_TIME.to_owned(),
             evidence: Vec::new(),
         };
-        store
-            .commit_evaluation(
-                &EvaluationInput {
-                    evaluation_id: format!("evaluation-{suffix}-present"),
-                    detector_id: detector_id.clone(),
-                    detector_version: "1".to_owned(),
-                    detector_digest: detector_digest.clone(),
-                    evaluator_artifact_digest: nq_protocol::sha256_bytes(b"api-evaluator")
-                        .into_string(),
-                    started_at: TEST_TIME.to_owned(),
-                    evaluated_at: TEST_TIME.to_owned(),
-                    outcome: "condition_present".to_owned(),
-                    detail: document(&present),
-                    profile: profile_binding.clone(),
-                    watermarks: watermarks.clone(),
-                    refusal: None,
-                },
-                Some(&opened),
-            )
-            .expect("open a policy-valid present finding");
+        let present_id = format!("evaluation-{suffix}-present");
+        let present_envelope = EvaluationEnvelopeV2 {
+            schema: EvaluationEnvelopeSchema::V2,
+            evaluation_id: present_id.clone(),
+            trigger_run_id: None,
+            context: EvaluationContextV1 {
+                instance_id: instance_id.clone(),
+                subject: subject.clone(),
+                scope: scope.clone(),
+                vantage: vantage.clone(),
+            },
+            detector: EvaluationDetectorIdentity {
+                id: detector_id.clone(),
+                version: detector.version.to_string(),
+                digest: detector_digest.clone(),
+            },
+            evaluator_artifact_digest: evaluator_artifact_digest.clone(),
+            profile: evaluation_profile.clone(),
+            started_at: evaluated_at,
+            evaluated_at,
+            watermark: EvaluationWatermarkV2 {
+                instance_id: instance_id.clone(),
+                max_report_sequence: 0,
+                watermark_received_at: None,
+            },
+            result: present,
+        };
+        if with_prior_finding {
+            store
+                .commit_evaluation(
+                    &EvaluationInput {
+                        evaluation_id: present_id,
+                        trigger_run_id: None,
+                        detector_id: detector_id.clone(),
+                        detector_version: detector.version.to_string(),
+                        detector_digest: detector_digest.clone(),
+                        evaluator_artifact_digest: evaluator_artifact_digest.to_string(),
+                        started_at: TEST_TIME.to_owned(),
+                        evaluated_at: TEST_TIME.to_owned(),
+                        outcome: "condition_present".to_owned(),
+                        detail: document(&present_envelope),
+                        profile: profile_binding.clone(),
+                        watermarks: watermarks.clone(),
+                        refusal: None,
+                    },
+                    Some(&opened),
+                )
+                .expect("open a policy-valid present finding");
+        }
 
         let source_refusal = ProfileRefusal {
             instance_id: instance_id.clone(),
@@ -857,9 +1133,9 @@ mod tests {
         );
         let refused = EvaluationResultV1 {
             schema: EvaluationResultSchema::V1,
-            profile: evaluation_profile,
+            profile: evaluation_profile.clone(),
             state: DetectorState::CannotEvaluate,
-            condition: condition.to_owned(),
+            condition,
             summary: "insufficient current evidence".to_owned(),
             evidence: Vec::new(),
             limitations: vec!["evaluation refused at the typed profile boundary".to_owned()],
@@ -870,23 +1146,50 @@ mod tests {
         updated.event_id = format!("event-evaluation-{suffix}-refused");
         updated.event_kind = "updated".to_owned();
         // A refusal changes visibility, not the already-established condition.
-        updated.visibility_state = "refused".to_owned();
+        updated.visibility_state = "missing".to_owned();
         updated.limitations = document(&refused.limitations);
-        updated.freshness = document(&json!({"state": "cannot_evaluate"}));
+        updated.freshness = document(&json!({"state": "missing"}));
         updated.refusal = Some(document(&refusal));
+        let refused_id = format!("evaluation-{suffix}-refused");
+        let refused_envelope = EvaluationEnvelopeV2 {
+            schema: EvaluationEnvelopeSchema::V2,
+            evaluation_id: refused_id.clone(),
+            trigger_run_id: None,
+            context: EvaluationContextV1 {
+                instance_id: instance_id.clone(),
+                subject,
+                scope,
+                vantage,
+            },
+            detector: EvaluationDetectorIdentity {
+                id: detector_id.clone(),
+                version: detector.version.to_string(),
+                digest: detector_digest.clone(),
+            },
+            evaluator_artifact_digest: evaluator_artifact_digest.clone(),
+            profile: evaluation_profile,
+            started_at: evaluated_at,
+            evaluated_at,
+            watermark: EvaluationWatermarkV2 {
+                instance_id: instance_id.clone(),
+                max_report_sequence: 0,
+                watermark_received_at: None,
+            },
+            result: refused,
+        };
         store
             .commit_evaluation(
                 &EvaluationInput {
-                    evaluation_id: format!("evaluation-{suffix}-refused"),
+                    evaluation_id: refused_id,
+                    trigger_run_id: None,
                     detector_id,
-                    detector_version: "1".to_owned(),
+                    detector_version: detector.version.to_string(),
                     detector_digest,
-                    evaluator_artifact_digest: nq_protocol::sha256_bytes(b"api-evaluator")
-                        .into_string(),
+                    evaluator_artifact_digest: evaluator_artifact_digest.to_string(),
                     started_at: TEST_TIME.to_owned(),
                     evaluated_at: TEST_TIME.to_owned(),
                     outcome: "cannot_evaluate".to_owned(),
-                    detail: document(&refused),
+                    detail: document(&refused_envelope),
                     profile: profile_binding,
                     watermarks,
                     refusal: Some(RefusalInput {
@@ -905,13 +1208,14 @@ mod tests {
                         created_at: TEST_TIME.to_owned(),
                     }),
                 },
-                Some(&updated),
+                with_prior_finding.then_some(&updated),
             )
-            .expect("update the existing finding with typed refusal visibility");
+            .expect("commit a typed evaluation refusal");
 
         EvaluationSurfaceFixture {
             finding_id,
             refusal,
+            latest_evaluation: refused_envelope,
         }
     }
 
@@ -1214,6 +1518,75 @@ mod tests {
         }
     }
 
+    #[test]
+    fn evaluation_history_query_has_exact_numeric_snapshot_bounds() {
+        assert_eq!(
+            parse_evaluation_history_query(None).expect("default evaluation page"),
+            EvaluationHistoryQuery {
+                limit: 1_000,
+                after_sequence: None,
+                through_sequence: None,
+            }
+        );
+        assert_eq!(
+            parse_evaluation_history_query(Some("limit=1&after=0&through=9"))
+                .expect("explicit frozen page"),
+            EvaluationHistoryQuery {
+                limit: 1,
+                after_sequence: Some(0),
+                through_sequence: Some(9),
+            }
+        );
+        for invalid in [
+            "",
+            "limit=0",
+            "limit=01",
+            "limit=1001",
+            "limit=1&limit=2",
+            "after=01",
+            "after=2&after=3",
+            "after=2",
+            "through=01",
+            "through=3&through=4",
+            "after=4&through=3",
+            "unknown=1",
+            "after",
+            "after=1=2",
+        ] {
+            assert!(
+                parse_evaluation_history_query(Some(invalid)).is_err(),
+                "evaluation query must fail closed: {invalid}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn response_larger_than_one_stored_document_is_transported_exactly() {
+        let (mut client, mut server) = tokio::io::duplex(64 * 1_024);
+        let canonical_body = vec![b'x'; nq_store::MAX_STORED_JSON_BYTES + 1];
+        let writer = tokio::spawn(async move {
+            write_response(&mut server, 200, "application/json", &canonical_body)
+                .await
+                .expect("canonical response writes without semantic substitution");
+            canonical_body
+        });
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .expect("read complete canonical response");
+        let canonical_body = writer.await.expect("response writer joins");
+        let header_end = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|offset| offset + 4)
+            .expect("response has a complete HTTP header");
+        let headers = std::str::from_utf8(&response[..header_end]).expect("headers are UTF-8");
+        assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(headers.contains(&format!("Content-Length: {}\r\n", canonical_body.len())));
+        assert_eq!(&response[header_end..], canonical_body.as_slice());
+    }
+
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn v3_findings_api_preserves_same_code_evaluation_refusals() {
@@ -1223,27 +1596,154 @@ mod tests {
         let fixtures = [
             seed_present_then_refused_evaluation(
                 &mut store,
-                "conformance",
-                "nq.conformance",
-                1,
+                "alpha",
                 BTreeMap::from([
                     ("coverage".to_owned(), "reachability".to_owned()),
                     ("missing_basis".to_owned(), "active_probe".to_owned()),
                 ]),
+                true,
             ),
             seed_present_then_refused_evaluation(
                 &mut store,
-                "host",
-                "nq.host",
-                1,
+                "beta",
                 BTreeMap::from([
                     ("age_seconds".to_owned(), "121".to_owned()),
                     ("reliance_seconds".to_owned(), "60".to_owned()),
                 ]),
+                true,
             ),
         ];
+        let first_refusal = seed_present_then_refused_evaluation(
+            &mut store,
+            "first",
+            BTreeMap::from([("reason".to_owned(), "missing_testimony".to_owned())]),
+            false,
+        );
         store.validate().expect("evaluation fixture validates");
+        let direct_status = nq_core::engine::status_snapshot_v3(&store)
+            .expect("direct V3 status reopens evaluations");
+        assert_eq!(direct_status.evaluation_through_sequence, 5);
+        let direct_first = direct_status
+            .components
+            .iter()
+            .find(|component| component.id == first_refusal.latest_evaluation.evaluation_id)
+            .expect("first-ever refusal has an evaluation status component");
+        let nq_core::public::ComponentStatusDetailV3::Evaluation { result, .. } =
+            &direct_first.detail
+        else {
+            panic!("first-ever refusal must remain a typed evaluation")
+        };
+        assert_eq!(result, &first_refusal.latest_evaluation);
+        assert!(matches!(
+            nq_core::engine::status_snapshot_v2(&store),
+            Err(nq_core::engine::EngineError::Invariant(message))
+                if message == "nq.status_snapshot.v2 cannot emit governed evaluation results; use v3"
+        ));
+        let direct_findings = nq_core::engine::list_findings(&store).expect("direct findings");
+        assert_eq!(direct_findings.len(), 2);
+        assert!(
+            direct_findings
+                .iter()
+                .all(|finding| finding.finding_id != first_refusal.finding_id),
+            "first-ever cannot-evaluate must not fabricate a finding"
+        );
         drop(store);
+
+        let status = get_json("/v3/status", database.clone()).await;
+        assert_eq!(status["schema"], "nq.status_snapshot.v3");
+        let first_status = status["components"]
+            .as_array()
+            .expect("status components")
+            .iter()
+            .find(|component| component["id"] == first_refusal.latest_evaluation.evaluation_id)
+            .expect("HTTP V3 status exposes first-ever refusal");
+        assert_eq!(
+            first_status["detail"]["result"],
+            serde_json::to_value(&first_refusal.latest_evaluation)
+                .expect("first refusal envelope serializes")
+        );
+        let paired = fixtures
+            .iter()
+            .map(|fixture| {
+                status["components"]
+                    .as_array()
+                    .expect("status components")
+                    .iter()
+                    .find(|component| component["id"] == fixture.latest_evaluation.evaluation_id)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "missing evaluation status {}",
+                            fixture.latest_evaluation.evaluation_id
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(paired[0]["code"], "cannot_evaluate");
+        assert_eq!(paired[1]["code"], "cannot_evaluate");
+        assert_eq!(
+            paired[0]["detail"]["result"],
+            serde_json::to_value(&fixtures[0].latest_evaluation)
+                .expect("first pair envelope serializes")
+        );
+        assert_eq!(
+            paired[1]["detail"]["result"],
+            serde_json::to_value(&fixtures[1].latest_evaluation)
+                .expect("second pair envelope serializes")
+        );
+        assert_ne!(paired[0]["detail"], paired[1]["detail"]);
+        let (legacy_status, legacy_error) = get_response("/v2/status", database.clone()).await;
+        assert_eq!(legacy_status, 409);
+        assert_eq!(legacy_error["error"], "typed_evaluations_require_v3");
+        assert_eq!(legacy_error["required_endpoint"], "/v3/status");
+
+        let history = get_json("/v1/evaluations?limit=1000", database.clone()).await;
+        assert_eq!(history["schema"], "nq.evaluation_history.v1");
+        assert_eq!(history["through_sequence"], 5);
+        assert_eq!(history["complete"], true);
+        assert_eq!(
+            history["records"]
+                .as_array()
+                .expect("history records")
+                .len(),
+            5
+        );
+        assert!(
+            history["records"]
+                .as_array()
+                .expect("history records")
+                .iter()
+                .any(|record| record["result"]
+                    == serde_json::to_value(&first_refusal.latest_evaluation)
+                        .expect("first refusal envelope serializes"))
+        );
+
+        let first_history_page = get_json("/v1/evaluations?limit=1", database.clone()).await;
+        assert_eq!(first_history_page["complete"], false);
+        assert_eq!(first_history_page["next_after_sequence"], 1);
+        let second_history_page = get_json(
+            "/v1/evaluations?limit=1&after=1&through=5",
+            database.clone(),
+        )
+        .await;
+        assert_eq!(second_history_page["after_sequence"], 1);
+        assert_eq!(second_history_page["through_sequence"], 5);
+        assert_eq!(second_history_page["records"][0]["sequence"], 2);
+        for invalid_path in [
+            "/v1/evaluations?",
+            "/v1/evaluations?limit=0",
+            "/v1/evaluations?after=1",
+            "/v1/evaluations?after=6&through=5",
+            "/v1/evaluations?through=999",
+            "/v1/evaluations?unknown=1",
+        ] {
+            let (status, body) = get_response(invalid_path, database.clone()).await;
+            assert_eq!(status, 400, "request must fail closed: {invalid_path}");
+            assert_eq!(body["error"], "invalid_evaluations_query");
+        }
+        let (status_query, status_query_error) =
+            get_response("/v3/status?unknown=1", database.clone()).await;
+        assert_eq!(status_query, 400);
+        assert_eq!(status_query_error["error"], "status_query_not_supported");
 
         let first_page = get_json("/v3/findings?limit=1", database.clone()).await;
         let first = first_page
@@ -1272,9 +1772,9 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing finding {}", fixture.finding_id));
             assert_eq!(finding["schema"], "nq.finding_snapshot.v3");
             assert_eq!(finding["condition"]["state"], "present");
-            assert_eq!(finding["visibility"]["state"], "refused");
+            assert_eq!(finding["visibility"]["state"], "missing");
 
-            // Finding v2 deliberately embeds the independently closed
+            // Finding v3 deliberately embeds the independently closed
             // nq.governed_refusal.v1 wire object; the nested schema is the
             // explicit version boundary for this refusal payload.
             let refusal = &finding["visibility"]["refusal"];
@@ -1300,11 +1800,15 @@ mod tests {
         assert_eq!(profiles[0].refusal.code, profiles[1].refusal.code);
         assert_eq!(profiles[0].refusal.boundary, profiles[1].refusal.boundary);
         assert_ne!(reopened[0].refusal_id, reopened[1].refusal_id);
-        assert_ne!(
+        assert_eq!(
             profiles[0].profile_semantic_id,
             profiles[1].profile_semantic_id
         );
-        assert_ne!(profiles[0].refusal.profile, profiles[1].refusal.profile);
+        assert_eq!(profiles[0].refusal.profile, profiles[1].refusal.profile);
+        assert_ne!(
+            profiles[0].refusal.instance_id,
+            profiles[1].refusal.instance_id
+        );
         assert_ne!(profiles[0].refusal.details, profiles[1].refusal.details);
         assert_ne!(reopened[0], reopened[1]);
 
@@ -1620,8 +2124,8 @@ mod tests {
 
         let (v1_status, v1_error) = get_response("/v1/status", database.clone()).await;
         assert_eq!(v1_status, 409);
-        assert_eq!(v1_error["error"], "typed_status_requires_v2");
-        assert_eq!(v1_error["required_endpoint"], "/v2/status");
+        assert_eq!(v1_error["error"], "governed_status_requires_v3");
+        assert_eq!(v1_error["required_endpoint"], "/v3/status");
 
         let first_profile_page = get_json(
             "/v1/rejected-custody?limit=1&after=submission-permanent",

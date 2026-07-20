@@ -1,10 +1,10 @@
 PRAGMA application_id = 1313951303; -- "NQNG"
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;
 
 CREATE TABLE schema_metadata (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     product TEXT NOT NULL CHECK (product = 'nq-ng'),
-    schema_version INTEGER NOT NULL CHECK (schema_version = 2),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 3),
     -- Digest of the exact schema.sql artifact compiled into the writing binary.
     -- Rejects stale provisional-candidate databases at startup; it is NOT a
     -- tamper attestation of the live SQLite schema (which the structural
@@ -241,19 +241,23 @@ CREATE TABLE report_errors (
 
 CREATE TABLE evaluation_runs (
     evaluation_id TEXT PRIMARY KEY,
+    evaluation_sequence INTEGER NOT NULL UNIQUE CHECK (evaluation_sequence > 0),
     detector_id TEXT NOT NULL,
     detector_version TEXT NOT NULL,
     detector_digest TEXT NOT NULL CHECK (length(detector_digest) = 71 AND substr(detector_digest, 1, 7) = 'sha256:'),
+    evaluator_artifact_digest TEXT NOT NULL CHECK (length(evaluator_artifact_digest) = 71 AND substr(evaluator_artifact_digest, 1, 7) = 'sha256:'),
+    trigger_run_id TEXT,
     profile_id TEXT NOT NULL,
     profile_version TEXT NOT NULL,
     profile_digest TEXT NOT NULL CHECK (length(profile_digest) = 71 AND substr(profile_digest, 1, 7) = 'sha256:'),
     profile_semantic_id TEXT NOT NULL CHECK (length(profile_semantic_id) = 71 AND substr(profile_semantic_id, 1, 7) = 'sha256:'),
-    evaluation_revision INTEGER NOT NULL CHECK (evaluation_revision >= 0),
+    evaluation_revision INTEGER NOT NULL CHECK (evaluation_revision > 0),
     started_at TEXT NOT NULL,
     evaluated_at TEXT NOT NULL,
     outcome TEXT NOT NULL CHECK (outcome IN ('condition_present', 'condition_explicitly_absent', 'cannot_evaluate')),
     detail_json BLOB NOT NULL CHECK (json_valid(CAST(detail_json AS TEXT))),
     UNIQUE (detector_id, detector_version, evaluation_revision),
+    FOREIGN KEY (trigger_run_id) REFERENCES watcher_runs(run_id),
     FOREIGN KEY (profile_id, profile_version, profile_digest)
         REFERENCES profile_descriptor_snapshots(profile_id, profile_version, profile_digest)
 ) STRICT;
@@ -294,7 +298,7 @@ CREATE INDEX refusals_by_instance ON refusals(responsible_instance_id, created_a
 CREATE TABLE finding_events (
     event_id TEXT PRIMARY KEY,
     finding_id TEXT NOT NULL,
-    event_revision INTEGER NOT NULL CHECK (event_revision >= 0),
+    event_revision INTEGER NOT NULL CHECK (event_revision > 0),
     event_kind TEXT NOT NULL CHECK (event_kind IN ('opened', 'updated', 'resolved', 'reopened', 'operator_updated')),
     evaluation_id TEXT NOT NULL,
     instance_id TEXT NOT NULL,
@@ -306,7 +310,7 @@ CREATE TABLE finding_events (
     detector_digest TEXT NOT NULL CHECK (length(detector_digest) = 71 AND substr(detector_digest, 1, 7) = 'sha256:'),
     -- Artifact digest of the running evaluator (nqd) that produced this finding.
     evaluator_artifact_digest TEXT NOT NULL CHECK (length(evaluator_artifact_digest) = 71 AND substr(evaluator_artifact_digest, 1, 7) = 'sha256:'),
-    evaluation_revision INTEGER NOT NULL CHECK (evaluation_revision >= 0),
+    evaluation_revision INTEGER NOT NULL CHECK (evaluation_revision > 0),
     profile_id TEXT NOT NULL,
     profile_version TEXT NOT NULL,
     profile_digest TEXT NOT NULL CHECK (length(profile_digest) = 71 AND substr(profile_digest, 1, 7) = 'sha256:'),
@@ -430,8 +434,9 @@ CREATE TABLE status_events (
     component_kind TEXT NOT NULL CHECK (component_kind IN
         ('daemon', 'database', 'profile_catalog', 'admission', 'scheduler', 'instance', 'evaluation', 'notification')),
     component_id TEXT NOT NULL,
-    -- Present exactly for canonical run-bearing non-success results. Admission
-    -- refusals and non-instance operational status have no run identity.
+    -- Present exactly for canonical results of completed watcher runs,
+    -- including admitted reports. Admission refusals and non-instance
+    -- operational status have no run identity.
     run_id TEXT,
     state TEXT NOT NULL,
     code TEXT NOT NULL,

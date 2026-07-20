@@ -6,7 +6,6 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::Parser;
 use nq_core::config::{NqConfig, WatcherConfig};
-use serde::Serialize;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tracing::{error, info, warn};
@@ -278,10 +277,14 @@ async fn schedule_instance(
 /// independently reopenable. Log the same canonical serialization consumed by
 /// the store and public surfaces so dependent testimony is never replaced by a
 /// presentation-only projection.
-fn canonical_result_document(value: &impl Serialize) -> Result<String> {
-    let bytes = nq_protocol::canonical_json_bytes(value)
-        .context("cannot canonicalize governed collection result for daemon log")?;
-    String::from_utf8(bytes).context("canonical governed result is not UTF-8")
+fn canonical_result_document(value: &nq_core::CollectionOutcome) -> Result<String> {
+    let frame = crate::transport::CollectionOutcomeFrame::encode(value)
+        .context("cannot encode and reopen governed collection result for daemon log")?;
+    let body = frame
+        .wire()
+        .strip_suffix(b"\n")
+        .context("checked collection-result frame lacks its terminal newline")?;
+    String::from_utf8(body.to_vec()).context("canonical governed result is not UTF-8")
 }
 
 async fn wait_with_binding_watch(
