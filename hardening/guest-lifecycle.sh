@@ -144,9 +144,9 @@ wait_for_admitted_report_after() {
 
 assert_layout() {
     local state_expected=$1
-    [[ $(id -u nq) != 0 && $(id -u nq-witness) != 0 ]] || fail "package identities are root"
-    [[ $(id -u nq) != "$(id -u nq-witness)" ]] || fail "daemon and witness UIDs are equal"
-    [[ $(id -g nq) != "$(id -g nq-witness)" ]] || fail "daemon and witness GIDs are equal"
+    [[ $(id -u nq) != 0 && $(id -u nq-helper) != 0 ]] || fail "package identities are root"
+    [[ $(id -u nq) != "$(id -u nq-helper)" ]] || fail "daemon and watcher UIDs are equal"
+    [[ $(id -g nq) != "$(id -g nq-helper)" ]] || fail "daemon and watcher GIDs are equal"
     [[ $(stat -c '%U:%G:%a' /etc/nq) == root:nq:750 ]] || fail "wrong /etc/nq custody"
     [[ $(stat -c '%U:%G:%a' /var/lib/nq) == nq:nq:700 ]] || fail "wrong state custody"
     [[ $(stat -c '%U:%G:%a' /run/nq) == nq:nq:751 ]] || fail "wrong runtime custody"
@@ -193,14 +193,14 @@ install_config_and_admit() {
     runuser -u nq -- /usr/bin/nq --config="$CONFIG" init
 
     current_check=cross-uid-af-unix
-    local daemon_uid witness_uid
+    local daemon_uid watcher_uid
     daemon_uid=$(id -u nq)
-    witness_uid=$(id -u nq-witness)
-    [[ $daemon_uid != "$witness_uid" ]] || fail "cross-UID check has equal identities"
-    printf 'daemon_uid=%s\nwitness_uid=%s\ncarrier=unix\n' \
-        "$daemon_uid" "$witness_uid" >"$RESULTS/AF_UNIX_IDENTITIES"
-    run_nq witness test conformance-local
-    run_nq witness admit conformance-local
+    watcher_uid=$(id -u nq-helper)
+    [[ $daemon_uid != "$watcher_uid" ]] || fail "cross-UID check has equal identities"
+    printf 'daemon_uid=%s\nwatcher_uid=%s\ncarrier=unix\n' \
+        "$daemon_uid" "$watcher_uid" >"$RESULTS/AF_UNIX_IDENTITIES"
+    run_nq watcher test conformance-local
+    run_nq watcher admit conformance-local
     run_nq doctor
     run_nq collect conformance-local
 }
@@ -213,7 +213,7 @@ if [[ $phase == before-reboot ]]; then
     dpkg -i "$deb"
     assert_layout empty
     first_uid=$(id -u nq)
-    first_witness_uid=$(id -u nq-witness)
+    first_watcher_uid=$(id -u nq-helper)
     verify_build_info
     /usr/bin/nq protocol check >"$RESULTS/protocol-check.json"
 
@@ -221,7 +221,7 @@ if [[ $phase == before-reboot ]]; then
     dpkg -i "$deb"
     dpkg -i "$deb"
     assert_layout empty
-    [[ $(id -u nq) == "$first_uid" && $(id -u nq-witness) == "$first_witness_uid" ]] \
+    [[ $(id -u nq) == "$first_uid" && $(id -u nq-helper) == "$first_watcher_uid" ]] \
         || fail "idempotent postinst changed service identities"
 
     current_check=explicit-initialization
@@ -280,7 +280,7 @@ dpkg --remove nq-ng
 [[ -e $CONFIG && -e /var/lib/nq/nq.db ]] || fail "remove deleted retained state"
 [[ $(sha256sum "$CONFIG" | awk '{print $1}') == "$config_hash" ]] || fail \
     "remove changed retained configuration"
-getent passwd nq >/dev/null && getent passwd nq-witness >/dev/null || fail \
+getent passwd nq >/dev/null && getent passwd nq-helper >/dev/null || fail \
     "remove deleted service identities"
 
 current_check=debian-purge
@@ -288,7 +288,7 @@ dpkg --purge nq-ng
 [[ -e $CONFIG && -e /var/lib/nq/nq.db ]] || fail "Debian purge deleted retained state"
 [[ $(sha256sum "$CONFIG" | awk '{print $1}') == "$config_hash" ]] || fail \
     "Debian purge changed retained configuration"
-getent passwd nq >/dev/null && getent passwd nq-witness >/dev/null || fail \
+getent passwd nq >/dev/null && getent passwd nq-helper >/dev/null || fail \
     "Debian purge deleted service identities"
 
 current_check=reinstall-after-purge
@@ -300,14 +300,14 @@ disabled || fail "reinstall after remove/purge unexpectedly enabled nqd"
 # inode. Drift is the deliberate behavior here, not a fault -- admission is
 # pinned to the object that was admitted, and identical content does not
 # resurrect it. OPERATIONS.md: "After executable, configuration, or profile
-# drift, keep the daemon stopped and use witness rotate." Re-admission stays
+# drift, keep the daemon stopped and use watcher rotate." Re-admission stays
 # an explicit operator act, so the harness must require the refusal first.
 if run_nq doctor >"$RESULTS/reinstall-drift-doctor.log" 2>&1; then
     fail "reinstall after purge did not invalidate the admitted execution identity"
 fi
 grep -F 'working_directory_identity' "$RESULTS/reinstall-drift-doctor.log" >/dev/null || fail \
     "reinstall drift was not reported as execution-identity drift"
-run_nq witness rotate conformance-local
+run_nq watcher rotate conformance-local
 run_nq doctor
 run_nq collect conformance-local
 
@@ -419,7 +419,7 @@ grep -qx 'carrier = "unix"' "$hostile_config" || fail "hostile config is not the
 
 set +e
 active_config=$hostile_config
-run_nq witness test hostile-socket-local >"$RESULTS/bad-socket-refusal.log" 2>&1
+run_nq watcher test hostile-socket-local >"$RESULTS/bad-socket-refusal.log" 2>&1
 bad_socket_status=$?
 bad_socket_unit=$last_nq_unit
 active_config=$CONFIG

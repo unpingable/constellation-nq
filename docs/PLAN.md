@@ -12,7 +12,7 @@ The first release consists of:
 
 - `nqd`: one resident service owning scheduling, helper supervision, admission, evaluation, storage, notifications, API, and console.
 - `nq`: the complete operator CLI.
-- Out-of-process witness helpers using a stable, language-neutral protocol over stdio or supervised Unix sockets.
+- Out-of-process watcher helpers using a stable, language-neutral protocol over stdio or supervised Unix sockets.
 - SQLite storing durable cross-profile evidence facts and bounded profile payloads—not the current catalog of hardware and integrations.
 - A hard successor cut: preserve every legacy byte, inherit no legacy verdict.
 
@@ -120,7 +120,7 @@ Use human-edited TOML for intent and machine-produced canonical JSON for admissi
 
 Configuration names the instance, command, carrier, requested profile, schedule/jitter, scope/vantage, capability ceiling, execution identity, checkpoint policy, and resource limits.
 
-`nq witness admit`:
+`nq watcher admit`:
 
 1. Resolves the executable without following unsafe path replacements.
 2. Hashes the opened executable bytes and records the complete relevant execution chain: script, interpreter/wrapper, fixed argv, and available backend/tool identities.
@@ -149,7 +149,7 @@ The subprocess runner must:
 - Sanitize environment and working directory.
 - Record execution identity and resource outcomes.
 
-Commit admitted reports independently. Detector evaluation uses a consistent database watermark and explicit temporal-alignment/freshness rules rather than pretending independently scheduled witnesses formed one simultaneous generation.
+Commit admitted reports independently. Detector evaluation uses a consistent database watermark and explicit temporal-alignment/freshness rules rather than pretending independently scheduled watchers formed one simultaneous generation.
 
 Run relevant detectors after new evidence and run periodic freshness sweeps. Detectors return one of:
 
@@ -224,7 +224,7 @@ Default layout:
 - `/run/nq/nqd.sock`
 - `/run/nq/helpers/`
 
-Provide complete commands for `init`, `config check/diff/apply`, `witness test/admit/rotate/rollback`, `doctor`, `backup`, `restore`, `admin upgrade`, status/query/export, and clean uninstall versus explicit purge.
+Provide complete commands for `init`, `config check/diff/apply`, `watcher test/admit/rotate/rollback`, `doctor`, `backup`, `restore`, `admin upgrade`, status/query/export, and clean uninstall versus explicit purge.
 
 Core schema upgrades are explicit maintenance:
 

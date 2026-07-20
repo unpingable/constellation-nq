@@ -16,7 +16,7 @@ pub struct FindingSnapshotV2 {
     pub schema: String,
     /// Opaque NQ-owned identity. Consumers never reconstruct this value.
     pub finding_id: String,
-    /// Exact witness instance evaluated.
+    /// Exact watcher instance evaluated.
     pub instance_id: String,
     /// Exact compiled detector identity.
     pub detector: DetectorIdentity,
@@ -217,7 +217,7 @@ pub enum ComponentKind {
     Admission,
     /// Independent scheduler.
     Scheduler,
-    /// Witness instance.
+    /// Watcher instance.
     Instance,
     /// Detector evaluator.
     Evaluation,

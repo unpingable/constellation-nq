@@ -18,21 +18,21 @@ ensure_account_fallback() {
             --shell "$shell" \
             nq
     fi
-    if ! getent group nq-witness >/dev/null 2>&1; then
-        addgroup --system nq-witness
+    if ! getent group nq-helper >/dev/null 2>&1; then
+        addgroup --system nq-helper
     fi
-    if ! getent passwd nq-witness >/dev/null 2>&1; then
+    if ! getent passwd nq-helper >/dev/null 2>&1; then
         shell=/usr/sbin/nologin
         if [ ! -x "$shell" ]; then
             shell=/bin/false
         fi
         adduser \
             --system \
-            --ingroup nq-witness \
+            --ingroup nq-helper \
             --home /nonexistent \
             --no-create-home \
             --shell "$shell" \
-            nq-witness
+            nq-helper
     fi
 }
 

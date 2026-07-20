@@ -1,4 +1,4 @@
-//! Stable, language-neutral contracts between NQ and witness helpers.
+//! Stable, language-neutral contracts between NQ and watcher helpers.
 //!
 //! The wire format is one newline-terminated UTF-8 JSON document in each
 //! direction. This crate deliberately contains no profile semantics: it checks

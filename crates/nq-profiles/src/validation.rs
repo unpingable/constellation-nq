@@ -226,7 +226,7 @@ pub struct VantageGrant {
 /// NQ-owned runtime binding against which a profile validates testimony.
 #[derive(Clone, Debug)]
 pub struct ValidationContext {
-    /// Exact responsible witness instance.
+    /// Exact responsible watcher instance.
     pub instance_id: String,
     /// Exact request subject.
     pub request_subject: String,

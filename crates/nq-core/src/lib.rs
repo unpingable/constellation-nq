@@ -16,7 +16,7 @@ pub mod runtime;
 pub mod unix_runner;
 
 pub use admission::{AdmissionLock, AdmissionManager, AdmissionVerification};
-pub use config::{MAX_WITNESSES, NqConfig, WitnessConfig};
+pub use config::{MAX_WATCHERS, NqConfig, WatcherConfig};
 pub use coordination::{CoordinationError, InstanceGuard};
 pub use engine::{
     AdmittedReportVerification, BindingActionOutcome, CollectionEngine, CollectionOutcome,

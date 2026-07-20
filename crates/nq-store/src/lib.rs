@@ -341,7 +341,7 @@ pub struct ReportInput {
     pub observed_at: String,
     pub received_at: String,
     pub report_status: String,
-    /// The source protocol JSON as received; retained as witness material.
+    /// The source protocol JSON as received; retained as watcher material.
     pub canonical_report: CanonicalDocument,
     /// The canonical admitted judgment (`ValidatedReport`). Persisted losslessly;
     /// 3B verification checks this snapshot rather than re-deriving one. The
@@ -908,7 +908,7 @@ impl Store {
                         a.evaluator_artifact_digest, a.protocol_version,
                         a.artifact_identity_method, a.platform_runtime_version
                  FROM raw_submissions AS s
-                 JOIN witness_runs AS run ON run.run_id = s.run_id
+                 JOIN watcher_runs AS run ON run.run_id = s.run_id
                  JOIN admission_records AS a ON a.admission_id = run.admission_id
                  WHERE s.submission_id = ?1",
                 [&submission_id],
@@ -1754,7 +1754,7 @@ impl Store {
                  FROM admitted_reports AS report
                  JOIN raw_submissions AS submission
                    ON submission.submission_id = report.submission_id
-                 JOIN witness_runs AS run ON run.run_id = submission.run_id
+                 JOIN watcher_runs AS run ON run.run_id = submission.run_id
                  WHERE report.instance_id = ?1
                    AND report.next_checkpoint_json IS NOT NULL
                    AND run.checkpoint_contract_digest = ?2
@@ -2276,7 +2276,7 @@ fn validate_required_objects(connection: &Connection) -> Result<(), StoreError> 
         "admission_records",
         "instance_binding_events",
         "binding_materialization_events",
-        "witness_runs",
+        "watcher_runs",
         "raw_submissions",
         "admitted_reports",
         "observations",
@@ -2783,7 +2783,7 @@ fn insert_run(transaction: &Transaction<'_>, run: &RunInput) -> Result<(), Store
         &run.checkpoint_contract_digest,
     )?;
     transaction.execute(
-        "INSERT INTO witness_runs (
+        "INSERT INTO watcher_runs (
             run_id, request_id, instance_id, admission_id, binding_digest,
             checkpoint_contract_digest, profile_id, profile_version, profile_digest, carrier, started_at,
             deadline_at, finished_at, acquisition_outcome, execution_identity_json,
@@ -4173,7 +4173,7 @@ mod tests {
         );
         let runs: i64 = store
             .connection
-            .query_row("SELECT COUNT(*) FROM witness_runs", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM watcher_runs", [], |row| row.get(0))
             .expect("count runs");
         assert_eq!(runs, 0, "the atomic commit rolled back the run");
     }
@@ -4190,7 +4190,7 @@ mod tests {
         store
             .connection
             .execute_batch(
-                "INSERT INTO witness_runs (
+                "INSERT INTO watcher_runs (
                     run_id, request_id, instance_id, admission_id, binding_digest,
                     checkpoint_contract_digest, profile_id, profile_version, profile_digest,
                     carrier, started_at, deadline_at, finished_at, acquisition_outcome,
@@ -4500,7 +4500,7 @@ mod tests {
         store
             .connection
             .execute_batch(
-                "INSERT INTO witness_runs (
+                "INSERT INTO watcher_runs (
                     run_id, request_id, instance_id, admission_id, binding_digest,
                     checkpoint_contract_digest, profile_id, profile_version, profile_digest,
                     carrier, started_at, deadline_at, finished_at, acquisition_outcome,

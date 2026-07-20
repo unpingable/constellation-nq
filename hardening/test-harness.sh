@@ -46,14 +46,14 @@ require_text "$guest" 'BYTE_TAMPER_REFUSAL=pass'
 # The non-conforming-socket qualification must exercise the production
 # supervisor and assert the exact refused predicate, not a generic failure.
 require_text "$guest" 'SOCKET_CONTRACT_REFUSAL=pass'
-require_text "$guest" 'run_nq witness test hostile-socket-local'
+require_text "$guest" 'run_nq watcher test hostile-socket-local'
 require_text "$guest" "grep -F 'helper socket mode is'"
 require_text "$guest" 'supervisor accepted a non-conforming helper socket'
 require_text "$guest" 'a report was admitted after a refused socket'
 require_text "$guest" 'os.chmod(path, 0o660)'
 require_text "$guest" 'carrier = "unix"'
-require_text "$guest" 'run_nq witness test conformance-local'
-require_text "$guest" 'run_nq witness admit conformance-local'
+require_text "$guest" 'run_nq watcher test conformance-local'
+require_text "$guest" 'run_nq watcher admit conformance-local'
 require_text "$guest" 'run_nq collect conformance-local'
 require_text "$guest" 'reports_after_restart=$(admitted_report_count)'
 require_text "$guest" 'wait_for_admitted_report_after "$reports_after_restart" service-restart'
@@ -64,7 +64,7 @@ require_text "$guest" 'dpkg --purge nq-ng'
 # A package transaction must invalidate the admitted execution identity, and
 # re-admission must stay an explicit operator act.
 require_text "$guest" 'reinstall after purge did not invalidate the admitted execution identity'
-require_text "$guest" 'run_nq witness rotate conformance-local'
+require_text "$guest" 'run_nq watcher rotate conformance-local'
 require_text "$guest" 'systemctl reboot'
 require_text "$guest" "grep -F 'binary drift'"
 require_text "$guest" '/usr/share/nq/system-contract/manifest.json'

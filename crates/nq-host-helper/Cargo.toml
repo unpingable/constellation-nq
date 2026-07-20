@@ -1,6 +1,6 @@
 [package]
 name = "nq-host-helper"
-description = "First-party bounded witness for the compiled nq.host/v1 profile"
+description = "First-party bounded watcher for the compiled nq.host/v1 profile"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

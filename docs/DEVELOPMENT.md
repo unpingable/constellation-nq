@@ -122,7 +122,7 @@ before hashing or snapshot allocation: one artifact is capped at 32 MiB, a full
 execution/runtime chain at 64 MiB and 32 deduplicated artifacts, and the
 working-directory descriptor makes
 33 retained descriptors per verified launch. Configuration accepts at most 32
-witnesses. Even if every configured witness is a persistent helper at the
+watchers. Even if every configured watcher is a persistent helper at the
 artifact ceiling, 1,056 long-lived launch descriptors remain well below the
 packaged `LimitNOFILE=4096`; the remaining budget covers the database, API,
 sockets, pipes, and bounded concurrent construction. A separate atomic
@@ -132,7 +132,7 @@ claim. Sparse files count at their logical descriptor length. An expected
 admission identity is compared before any memfd snapshots are allocated, and
 decoded admission identities are checked against the same limits.
 
-Each witness also configures hard `RLIMIT_AS`, `RLIMIT_CPU`, `RLIMIT_NPROC`,
+Each watcher also configures hard `RLIMIT_AS`, `RLIMIT_CPU`, `RLIMIT_NPROC`,
 `RLIMIT_NOFILE`, and `RLIMIT_FSIZE`; core dumps are disabled. The run record
 persists those exact applied limits. AS and CPU are per process, FSIZE is per
 regular file, and Linux NPROC is shared by the real UID (and cumulative CPU is

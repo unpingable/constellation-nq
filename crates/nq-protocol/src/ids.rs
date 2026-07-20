@@ -121,7 +121,7 @@ macro_rules! token_type {
 token_type!(RequestId, "NQ-owned identity of one collection request.");
 token_type!(
     InstanceId,
-    "NQ-owned identity of one deployed witness instance."
+    "NQ-owned identity of one deployed watcher instance."
 );
 token_type!(ProfileId, "Stable identity of a compiled semantic profile.");
 token_type!(

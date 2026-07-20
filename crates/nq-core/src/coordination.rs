@@ -1,4 +1,4 @@
-//! Cross-process serialization for one witness instance.
+//! Cross-process serialization for one watcher instance.
 //!
 //! `SQLite` serializes individual commits, but a collection and an admission
 //! transition span helper execution, durable history, and active-lock

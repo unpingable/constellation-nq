@@ -1,4 +1,4 @@
-//! Narrow Linux child-isolation boundary for witness helper processes.
+//! Narrow Linux child-isolation boundary for watcher helper processes.
 //!
 //! This is deliberately the only NQ-ng crate permitted to contain unsafe
 //! code. Its public surface is safe: resolve one local execution account and
@@ -214,7 +214,7 @@ pub enum AccountError {
     /// No local account matched the configured name or numeric UID.
     #[error("helper execution account does not exist: {0}")]
     Unknown(String),
-    /// Root is never a valid witness execution identity.
+    /// Root is never a valid watcher execution identity.
     #[error("helper execution account {account} resolves to root identity")]
     Root {
         /// Configured account token.
@@ -468,7 +468,7 @@ fn contains_posix_acl(names: &[u8]) -> bool {
         .any(|name| name == POSIX_ACCESS_ACL || name == POSIX_DEFAULT_ACL)
 }
 
-/// Grant a witness primary group write/traverse access to a freshly created
+/// Grant a watcher primary group write/traverse access to a freshly created
 /// daemon-owned private runtime directory.
 ///
 /// The resulting mode is `0730`: the daemon retains ownership and cleanup
@@ -1245,7 +1245,7 @@ mod tests {
         }
 
         let sysusers = include_str!("../../../packaging/systemd/nq.sysusers");
-        assert!(sysusers.contains("u nq-witness"));
+        assert!(sysusers.contains("u nq-helper"));
         let tmpfiles = include_str!("../../../packaging/systemd/nq.tmpfiles");
         assert!(tmpfiles.contains("d /run/nq                     0751 nq   nq"));
         assert!(tmpfiles.contains("d /run/nq/helpers             0711 nq   nq"));
@@ -1253,7 +1253,7 @@ mod tests {
             include_str!("../../../examples/nq.toml"),
             include_str!("../../../examples/nq-host.toml"),
         ] {
-            assert!(example.contains("execution_account = \"nq-witness\""));
+            assert!(example.contains("execution_account = \"nq-helper\""));
             assert!(example.contains("working_directory = \"/usr/lib/nq/helpers\""));
             assert!(!example.contains("allow_same_identity_in_debug"));
         }

@@ -60,11 +60,11 @@ pub enum Command {
         #[command(subcommand)]
         command: ProtocolCommand,
     },
-    /// Test and manage witness admissions.
-    Witness {
-        /// Witness workflow.
+    /// Test and manage watcher admissions.
+    Watcher {
+        /// Watcher workflow.
         #[command(subcommand)]
-        command: WitnessCommand,
+        command: WatcherCommand,
     },
     /// Run one explicitly requested collection (never triggered by a read).
     Collect(InstanceArg),
@@ -145,9 +145,9 @@ pub enum ProtocolCommand {
     Check,
 }
 
-/// Witness admission operations.
+/// Watcher admission operations.
 #[derive(Debug, Subcommand)]
-pub enum WitnessCommand {
+pub enum WatcherCommand {
     /// Execute a bounded dry request without creating admission state.
     Test(InstanceArg),
     /// Conformance-test, dry-collect, and atomically activate a new lock.
@@ -260,8 +260,8 @@ pub async fn run(options: Nq) -> Result<()> {
         Command::Config { command } => config_command(&options.config, command, options.json),
         Command::Profiles { command } => profiles_command(command, options.json),
         Command::Protocol { command } => protocol_command(command, options.json),
-        Command::Witness { command } => {
-            witness_command(&options.config, command, options.json).await
+        Command::Watcher { command } => {
+            watcher_command(&options.config, command, options.json).await
         }
         Command::Collect(instance) => {
             collect_command(&options.config, &instance.instance_id, options.json).await
@@ -432,25 +432,25 @@ fn protocol_command(command: ProtocolCommand, json_output: bool) -> Result<()> {
     }
 }
 
-async fn witness_command(
+async fn watcher_command(
     config_path: &Path,
-    command: WitnessCommand,
+    command: WatcherCommand,
     json_output: bool,
 ) -> Result<()> {
     match command {
-        WitnessCommand::Test(instance) => {
-            run_witness_action(config_path, &instance.instance_id, "test", json_output).await
+        WatcherCommand::Test(instance) => {
+            run_watcher_action(config_path, &instance.instance_id, "test", json_output).await
         }
-        WitnessCommand::Admit(instance) => {
-            run_witness_action(config_path, &instance.instance_id, "admit", json_output).await
+        WatcherCommand::Admit(instance) => {
+            run_watcher_action(config_path, &instance.instance_id, "admit", json_output).await
         }
-        WitnessCommand::Rotate(instance) => {
-            run_witness_action(config_path, &instance.instance_id, "rotate", json_output).await
+        WatcherCommand::Rotate(instance) => {
+            run_watcher_action(config_path, &instance.instance_id, "rotate", json_output).await
         }
-        WitnessCommand::Rollback { instance_id, lock } => {
+        WatcherCommand::Rollback { instance_id, lock } => {
             rollback(config_path, &instance_id, &lock, json_output).await
         }
-        WitnessCommand::Revoke(instance) => {
+        WatcherCommand::Revoke(instance) => {
             revoke(config_path, &instance.instance_id, json_output).await
         }
     }
@@ -458,13 +458,13 @@ async fn witness_command(
 
 async fn collect_command(config_path: &Path, instance_id: &str, json_output: bool) -> Result<()> {
     let config = NqConfig::load(config_path)?;
-    let witness = config
-        .witness(instance_id)
+    let watcher = config
+        .watcher(instance_id)
         .with_context(|| format!("unknown instance {instance_id}"))?
         .clone();
     let result = tokio::task::spawn_blocking(move || {
         let mut engine = nq_core::CollectionEngine::open(&config)?;
-        engine.collect(&witness)
+        engine.collect(&watcher)
     })
     .await??;
     let successful = result.is_success();
@@ -482,16 +482,16 @@ fn doctor(config_path: &Path, json_output: bool) -> Result<()> {
     let store = Store::open(&config.database_path)?;
     store.validate()?;
     let mut diagnostics = Vec::new();
-    for witness in &config.witnesses {
+    for watcher in &config.watchers {
         let lock_path = config
             .admissions_dir
-            .join(format!("{}.json", witness.instance_id));
-        let profile = nq_profiles::resolve_profile(&witness.profile.id, witness.profile.version)
+            .join(format!("{}.json", watcher.instance_id));
+        let profile = nq_profiles::resolve_profile(&watcher.profile.id, watcher.profile.version)
             .expect("validated profile");
         let profile_digest = profile.descriptor().digest()?;
         let outcome = nq_core::AdmissionManager.load(&lock_path).and_then(|lock| {
             nq_core::AdmissionManager.verify(
-                witness,
+                watcher,
                 &lock,
                 profile_digest.as_str(),
                 nq_protocol::HELPER_PROTOCOL_VERSION,
@@ -499,12 +499,12 @@ fn doctor(config_path: &Path, json_output: bool) -> Result<()> {
         });
         diagnostics.push(match outcome {
             Ok(verification) => json!({
-                "instance_id": witness.instance_id,
+                "instance_id": watcher.instance_id,
                 "state": "healthy",
                 "binding_digest": verification.binding_digest,
             }),
             Err(error) => json!({
-                "instance_id": witness.instance_id,
+                "instance_id": watcher.instance_id,
                 "state": "failed",
                 "diagnostic": error.to_string(),
             }),
@@ -796,21 +796,21 @@ fn public_query_if_supported(
     Ok(nq_core::engine::public_query(store, sql, limit)?)
 }
 
-async fn run_witness_action(
+async fn run_watcher_action(
     config_path: &Path,
     instance_id: &str,
     action: &str,
     json_output: bool,
 ) -> Result<()> {
     let config = NqConfig::load(config_path)?;
-    let witness = config
-        .witness(instance_id)
+    let watcher = config
+        .watcher(instance_id)
         .with_context(|| format!("unknown instance {instance_id}"))?
         .clone();
     let action = action.to_owned();
     let result = tokio::task::spawn_blocking(move || {
         let mut engine = nq_core::CollectionEngine::open(&config)?;
-        engine.witness_action(&witness, &action)
+        engine.watcher_action(&watcher, &action)
     })
     .await??;
     print_value(&result, json_output)
@@ -869,14 +869,14 @@ async fn rollback(
     json_output: bool,
 ) -> Result<()> {
     let config = NqConfig::load(config_path)?;
-    let witness = config
-        .witness(instance_id)
+    let watcher = config
+        .watcher(instance_id)
         .with_context(|| format!("unknown instance {instance_id}"))?
         .clone();
     let historical = historical.to_path_buf();
     let outcome = tokio::task::spawn_blocking(move || {
         let mut engine = nq_core::CollectionEngine::open(&config)?;
-        engine.rollback_binding(&witness, &historical)
+        engine.rollback_binding(&watcher, &historical)
     })
     .await??;
     print_value(&outcome, json_output)
@@ -884,13 +884,13 @@ async fn rollback(
 
 async fn revoke(config_path: &Path, instance_id: &str, json_output: bool) -> Result<()> {
     let config = NqConfig::load(config_path)?;
-    let witness = config
-        .witness(instance_id)
+    let watcher = config
+        .watcher(instance_id)
         .with_context(|| format!("unknown instance {instance_id}"))?
         .clone();
     let outcome = tokio::task::spawn_blocking(move || {
         let mut engine = nq_core::CollectionEngine::open(&config)?;
-        engine.revoke_binding(&witness)
+        engine.revoke_binding(&watcher)
     })
     .await??;
     print_value(&outcome, json_output)
@@ -934,7 +934,7 @@ helper_runtime_dir = "/run/nq/helpers"
     #[test]
     fn public_query_rejects_multiple_statements() {
         let arguments = QueryArgs {
-            sql: "select * from public_status_snapshot_v1; delete from witness_runs".into(),
+            sql: "select * from public_status_snapshot_v1; delete from watcher_runs".into(),
             limit: 1,
         };
         assert!(validate_query_arguments(&arguments).is_err());

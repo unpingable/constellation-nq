@@ -7,7 +7,7 @@ if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
 fi
 
 if [ "${1:-}" = purge ]; then
-    echo "nq-ng: retaining /etc/nq, /var/lib/nq, and the nq/nq-witness accounts; see OPERATIONS.md for explicit purge"
+    echo "nq-ng: retaining /etc/nq, /var/lib/nq, and the nq/nq-helper accounts; see OPERATIONS.md for explicit purge"
 fi
 
 # Debian purge is intentionally non-destructive for NQ evidence. It does not

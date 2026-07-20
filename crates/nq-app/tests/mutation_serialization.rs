@@ -59,32 +59,32 @@ socket_path = "{}"
 admissions_dir = "{}"
 helper_runtime_dir = "{}"
 
-[[witnesses]]
+[[watchers]]
 instance_id = "concurrent.primary"
 subject = "conformance:concurrent"
 scope = {{ kind = "fixture", value = {{ id = "concurrent", nonce = "serialized" }} }}
 vantage = {{ kind = "local", value = {{}} }}
 capability_ceiling = []
 
-[witnesses.command]
+[watchers.command]
 executable = "{}"
 env = {{ NQ_CONCURRENCY_MARKER = "{}" }}
 execution_account = "{}"
 allow_same_identity_in_debug = true
 working_directory = "{}"
 
-[witnesses.profile]
+[watchers.profile]
 id = "nq.conformance"
 version = 1
 
-[witnesses.schedule]
+[watchers.schedule]
 interval_seconds = 60
 jitter_seconds = 0
 deadline_ms = 5000
 retry_backoff_seconds = 1
 max_retry_backoff_seconds = 10
 
-[witnesses.resources]
+[watchers.resources]
 max_response_bytes = 1048576
 max_stderr_bytes = 65536
 max_observations = 4
@@ -113,7 +113,7 @@ max_file_bytes = 67108864
     let admitted = command(
         nq,
         &config_path,
-        &["witness", "admit", "concurrent.primary"],
+        &["watcher", "admit", "concurrent.primary"],
     )
     .output()
     .expect("admission command");
@@ -145,7 +145,7 @@ max_file_bytes = 67108864
     let mut revoke = command(
         nq,
         &config_path,
-        &["witness", "revoke", "concurrent.primary"],
+        &["watcher", "revoke", "concurrent.primary"],
     )
     .spawn()
     .expect("revocation process");

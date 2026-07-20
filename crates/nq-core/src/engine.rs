@@ -33,7 +33,7 @@ use uuid::Uuid;
 use crate::admission::{
     AdmissionError, AdmissionLock, AdmissionManager, CandidateEvidence, ConformanceReceipt,
 };
-use crate::config::{Carrier, CheckpointPolicy, NqConfig, ResourceLimits, WitnessConfig};
+use crate::config::{Carrier, CheckpointPolicy, NqConfig, ResourceLimits, WatcherConfig};
 use crate::coordination::{CoordinationError, InstanceGuard};
 use crate::evaluator_identity::EvaluatorRuntimeIdentity;
 use crate::identity::{ExecutionIdentity, VerifiedLaunch};
@@ -48,7 +48,7 @@ use crate::unix_runner::{
     UnixAcquisitionOutcome, UnixExchangeCapture, UnixIoPhase, UnixRunner, UnixRunnerOptions,
 };
 
-/// Engine-level failures. Expected witness outcomes are returned as
+/// Engine-level failures. Expected watcher outcomes are returned as
 /// [`CollectionOutcome`] and still committed when applicable.
 #[derive(Debug, Error)]
 pub enum EngineError {
@@ -91,10 +91,10 @@ pub enum EngineError {
     Invariant(String),
 }
 
-/// Result of an operator witness test/admission workflow.
+/// Result of an operator watcher test/admission workflow.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum WitnessActionOutcome {
+pub enum WatcherActionOutcome {
     /// Dry collection validated without changing active state.
     Tested {
         /// Instance tested.
@@ -475,47 +475,47 @@ impl CollectionEngine {
     /// Returns a typed acquisition, protocol, profile, admission, or durable
     /// storage error. A failed workflow never silently refreshes a lock.
     #[allow(clippy::too_many_lines)]
-    pub fn witness_action(
+    pub fn watcher_action(
         &mut self,
-        witness: &WitnessConfig,
+        watcher: &WatcherConfig,
         action: &str,
-    ) -> Result<WitnessActionOutcome, EngineError> {
+    ) -> Result<WatcherActionOutcome, EngineError> {
         let _guard = InstanceGuard::acquire(
             &self.config.database_path,
-            &witness.instance_id,
-            &format!("witness-{action}"),
+            &watcher.instance_id,
+            &format!("watcher-{action}"),
         )?;
-        self.reconcile_pending_binding(witness)?;
+        self.reconcile_pending_binding(watcher)?;
         let previous = if matches!(action, "admit" | "rotate") {
-            self.authoritative_active_lock(witness)?
+            self.authoritative_active_lock(watcher)?
         } else {
             None
         };
-        let profile = resolve(witness)?;
+        let profile = resolve(watcher)?;
         // Bind conformance to the exact bytes that existed before the dry
         // exchange, then prove they did not change while the helper ran.
         let execution_before =
-            ExecutionIdentity::resolve_command(&witness.command).map_err(AdmissionError::from)?;
-        let launch = VerifiedLaunch::open_expected(&witness.command, &execution_before)
+            ExecutionIdentity::resolve_command(&watcher.command).map_err(AdmissionError::from)?;
+        let launch = VerifiedLaunch::open_expected(&watcher.command, &execution_before)
             .map_err(AdmissionError::from)?;
         let corpus = nq_protocol::verify_embedded_conformance_corpus()
             .map_err(|error| EngineError::Protocol(error.to_string()))?;
-        let dry = self.dry_exchange(witness, profile, launch)?;
+        let dry = self.dry_exchange(watcher, profile, launch)?;
         execution_before
             .verify_current()
             .map_err(AdmissionError::from)?;
         let status = semantic_report_status(dry.validated.status).to_owned();
         if action == "test" {
-            self.stop_unix_runner(&witness.instance_id);
-            return Ok(WitnessActionOutcome::Tested {
-                instance_id: witness.instance_id.clone(),
+            self.stop_unix_runner(&watcher.instance_id);
+            return Ok(WatcherActionOutcome::Tested {
+                instance_id: watcher.instance_id.clone(),
                 report_digest: dry.report_digest,
                 report_status: status,
             });
         }
         if !matches!(action, "admit" | "rotate") {
             return Err(EngineError::Invariant(format!(
-                "unsupported witness action {action}"
+                "unsupported watcher action {action}"
             )));
         }
 
@@ -524,7 +524,7 @@ impl CollectionEngine {
             .digest()
             .map_err(|error| EngineError::Canonical(error.to_string()))?;
         let lock = AdmissionManager::candidate_with_execution(
-            witness,
+            watcher,
             CandidateEvidence {
                 profile_digest: descriptor_digest.as_str().to_owned(),
                 protocol_version: nq_protocol::HELPER_PROTOCOL_VERSION.to_owned(),
@@ -551,7 +551,7 @@ impl CollectionEngine {
             execution_before.clone(),
         )?;
         let verification = self.admission.verify_opened_execution(
-            witness,
+            watcher,
             &lock,
             descriptor_digest.as_str(),
             nq_protocol::HELPER_PROTOCOL_VERSION,
@@ -579,12 +579,12 @@ impl CollectionEngine {
 
         let archived = previous.is_some();
         let lock_path =
-            self.transition_binding(witness, "activate", Some(&lock), previous.as_ref(), action)?;
+            self.transition_binding(watcher, "activate", Some(&lock), previous.as_ref(), action)?;
         // Every binding change creates a new helper lifetime. A dry-collection
         // process is never silently promoted into the active persistent one.
-        self.stop_unix_runner(&witness.instance_id);
-        Ok(WitnessActionOutcome::Activated {
-            instance_id: witness.instance_id.clone(),
+        self.stop_unix_runner(&watcher.instance_id);
+        Ok(WatcherActionOutcome::Activated {
+            instance_id: watcher.instance_id.clone(),
             admission_id: lock.admission_id,
             binding_digest: verification.binding_digest,
             lock_path,
@@ -599,47 +599,47 @@ impl CollectionEngine {
     /// Returns only local engine/storage failures. Expected helper, protocol,
     /// and admission outcomes are retained and returned as `CollectionOutcome`.
     #[allow(clippy::too_many_lines)]
-    pub fn collect(&mut self, witness: &WitnessConfig) -> Result<CollectionOutcome, EngineError> {
+    pub fn collect(&mut self, watcher: &WatcherConfig) -> Result<CollectionOutcome, EngineError> {
         let _guard =
-            InstanceGuard::acquire(&self.config.database_path, &witness.instance_id, "collect")?;
+            InstanceGuard::acquire(&self.config.database_path, &watcher.instance_id, "collect")?;
         // Fail closed before any persistence: a collection stamps evaluator
         // identity onto its finding events, so refuse up front when it is
         // unavailable rather than commit an admitted report and only then refuse
         // at evaluation, leaving a durable report behind.
         self.require_evaluator_identity()?;
-        self.reconcile_pending_binding(witness)?;
-        let profile = resolve(witness)?;
+        self.reconcile_pending_binding(watcher)?;
+        let profile = resolve(watcher)?;
         let descriptor_digest = profile
             .descriptor()
             .digest()
             .map_err(|error| EngineError::Canonical(error.to_string()))?;
-        let authoritative = match self.authoritative_active_lock(witness) {
+        let authoritative = match self.authoritative_active_lock(watcher) {
             Ok(Some(lock)) => lock,
             Ok(None) => {
-                self.stop_unix_runner(&witness.instance_id);
+                self.stop_unix_runner(&watcher.instance_id);
                 let outcome = CollectionOutcome::AdmissionRefused {
-                    instance_id: witness.instance_id.clone(),
+                    instance_id: watcher.instance_id.clone(),
                     diagnostic: "no active authoritative admission binding".to_owned(),
                 };
-                self.record_instance_status(witness, &outcome)?;
+                self.record_instance_status(watcher, &outcome)?;
                 return Ok(outcome);
             }
             Err(error) => {
-                self.stop_unix_runner(&witness.instance_id);
+                self.stop_unix_runner(&watcher.instance_id);
                 let outcome = CollectionOutcome::AdmissionRefused {
-                    instance_id: witness.instance_id.clone(),
+                    instance_id: watcher.instance_id.clone(),
                     diagnostic: error.to_string(),
                 };
-                self.record_instance_status(witness, &outcome)?;
+                self.record_instance_status(watcher, &outcome)?;
                 return Ok(outcome);
             }
         };
         let lock = match (|| {
             let lock = authoritative;
-            let launch = VerifiedLaunch::open_expected(&witness.command, &lock.execution)?;
+            let launch = VerifiedLaunch::open_expected(&watcher.command, &lock.execution)?;
             self.admission
                 .verify_opened_execution(
-                    witness,
+                    watcher,
                     &lock,
                     descriptor_digest.as_str(),
                     nq_protocol::HELPER_PROTOCOL_VERSION,
@@ -649,38 +649,38 @@ impl CollectionEngine {
         })() {
             Ok(binding) => binding,
             Err(error) => {
-                self.stop_unix_runner(&witness.instance_id);
+                self.stop_unix_runner(&watcher.instance_id);
                 let outcome = CollectionOutcome::AdmissionRefused {
-                    instance_id: witness.instance_id.clone(),
+                    instance_id: watcher.instance_id.clone(),
                     diagnostic: error.to_string(),
                 };
-                self.record_instance_status(witness, &outcome)?;
+                self.record_instance_status(watcher, &outcome)?;
                 return Ok(outcome);
             }
         };
         let (lock, verification, launch) = lock;
         let checkpoint_contract_digest = checkpoint_contract_digest(
-            witness,
+            watcher,
             &lock,
             &verification.binding_digest,
             descriptor_digest.as_str(),
         )?;
-        let checkpoint = match witness.checkpoint_policy {
+        let checkpoint = match watcher.checkpoint_policy {
             CheckpointPolicy::Disabled => None,
             CheckpointPolicy::AdvanceAfterAdmission => self
                 .store
-                .latest_checkpoint(&witness.instance_id, &checkpoint_contract_digest)?
+                .latest_checkpoint(&watcher.instance_id, &checkpoint_contract_digest)?
                 .map(|bytes| serde_json::from_slice(&bytes).map(|value| Checkpoint { value }))
                 .transpose()
                 .map_err(|error| {
                     EngineError::Invariant(format!("stored checkpoint cannot decode: {error}"))
                 })?,
         };
-        let request = build_request(witness, profile, &lock.granted_capabilities, checkpoint)?;
+        let request = build_request(watcher, profile, &lock.granted_capabilities, checkpoint)?;
         let request_json = nq_protocol::canonical_json_bytes(&request)
             .map_err(|error| EngineError::Canonical(error.to_string()))?;
         let capture = self.run_capture(
-            witness,
+            watcher,
             &request_json,
             Some(&verification.binding_digest),
             launch,
@@ -690,38 +690,38 @@ impl CollectionEngine {
         let run = RunInput {
             run_id: run_id.clone(),
             request_id: request.request_id.to_string(),
-            instance_id: witness.instance_id.clone(),
+            instance_id: watcher.instance_id.clone(),
             admission_id: Some(lock.admission_id.clone()),
             binding_digest: verification.binding_digest,
             checkpoint_contract_digest,
-            profile_id: witness.profile.id.clone(),
-            profile_version: witness.profile.version.to_string(),
+            profile_id: watcher.profile.id.clone(),
+            profile_version: watcher.profile.version.to_string(),
             profile_digest: descriptor_digest.as_str().to_owned(),
-            carrier: carrier_name(witness.carrier).into(),
+            carrier: carrier_name(watcher.carrier).into(),
             started_at: timestamp(capture.started_at),
             deadline_at: timestamp(
                 capture.started_at
                     + Duration::milliseconds(
-                        i64::try_from(witness.schedule.deadline_ms).unwrap_or(i64::MAX),
+                        i64::try_from(watcher.schedule.deadline_ms).unwrap_or(i64::MAX),
                     ),
             ),
             finished_at: timestamp(capture.finished_at),
             acquisition_outcome: acquisition_code(&capture.outcome).to_owned(),
             execution_identity: canonical(&lock.execution)?,
-            resource_outcome: capture_resource_document(&capture, &witness.resources)?,
+            resource_outcome: capture_resource_document(&capture, &watcher.resources)?,
         };
 
         if capture.outcome != AcquisitionOutcome::Response {
-            let submission = rejected_transport_submission(&run_id, witness, &capture)?;
+            let submission = rejected_transport_submission(&run_id, watcher, &capture)?;
             self.store
                 .commit_collection(&CollectionInput { run, submission })?;
             let outcome = CollectionOutcome::AcquisitionFailed {
-                instance_id: witness.instance_id.clone(),
+                instance_id: watcher.instance_id.clone(),
                 run_id,
                 code: acquisition_code(&capture.outcome).to_owned(),
                 detail: acquisition_detail(&capture.outcome),
             };
-            self.record_instance_status(witness, &outcome)?;
+            self.record_instance_status(watcher, &outcome)?;
             return Ok(outcome);
         }
 
@@ -730,7 +730,7 @@ impl CollectionEngine {
             Ok(response) => response,
             Err(error) => {
                 let refusal = rejection_refusal(
-                    witness,
+                    watcher,
                     "protocol",
                     "invalid_response",
                     &error.to_string(),
@@ -751,13 +751,13 @@ impl CollectionEngine {
                     submission: Some(submission),
                 })?;
                 let outcome = CollectionOutcome::Rejected {
-                    instance_id: witness.instance_id.clone(),
+                    instance_id: watcher.instance_id.clone(),
                     run_id,
                     plane: "protocol".into(),
                     code: "invalid_response".into(),
                     diagnostic: error.to_string(),
                 };
-                self.record_instance_status(witness, &outcome)?;
+                self.record_instance_status(watcher, &outcome)?;
                 return Ok(outcome);
             }
         };
@@ -790,13 +790,13 @@ impl CollectionEngine {
                     submission: Some(submission),
                 })?;
                 let outcome = CollectionOutcome::HelperRefused {
-                    instance_id: witness.instance_id.clone(),
+                    instance_id: watcher.instance_id.clone(),
                     run_id,
                     boundary,
                     code,
                     diagnostic: refusal.message,
                 };
-                self.record_instance_status(witness, &outcome)?;
+                self.record_instance_status(watcher, &outcome)?;
                 Ok(outcome)
             }
             ResponseOutcome::Report { report } => {
@@ -837,13 +837,13 @@ impl CollectionEngine {
                             submission: Some(submission),
                         })?;
                         let outcome = CollectionOutcome::Rejected {
-                            instance_id: witness.instance_id.clone(),
+                            instance_id: watcher.instance_id.clone(),
                             run_id,
                             plane: "profile".into(),
                             code,
                             diagnostic: refusal.message,
                         };
-                        self.record_instance_status(witness, &outcome)?;
+                        self.record_instance_status(watcher, &outcome)?;
                         Ok(outcome)
                     }
                     Ok(validated) => {
@@ -851,7 +851,7 @@ impl CollectionEngine {
                         let report_status = semantic_report_status(validated.status).to_owned();
                         let stored_report = store_report(
                             &report_id,
-                            witness,
+                            watcher,
                             profile,
                             &report,
                             &validated,
@@ -868,9 +868,9 @@ impl CollectionEngine {
                             run,
                             submission: Some(submission),
                         })?;
-                        let evaluations = self.evaluate_instance(witness, profile)?;
+                        let evaluations = self.evaluate_instance(watcher, profile)?;
                         let outcome = CollectionOutcome::Admitted {
-                            instance_id: witness.instance_id.clone(),
+                            instance_id: watcher.instance_id.clone(),
                             run_id,
                             report_id,
                             report_status,
@@ -881,7 +881,7 @@ impl CollectionEngine {
                             })?,
                             evaluations,
                         };
-                        self.record_instance_status(witness, &outcome)?;
+                        self.record_instance_status(watcher, &outcome)?;
                         Ok(outcome)
                     }
                 }
@@ -896,15 +896,15 @@ impl CollectionEngine {
     ///
     /// Returns when the profile is unavailable, admitted evidence cannot be
     /// reconstructed, or the evaluation cannot be committed atomically.
-    pub fn freshness_sweep(&mut self, witness: &WitnessConfig) -> Result<usize, EngineError> {
+    pub fn freshness_sweep(&mut self, watcher: &WatcherConfig) -> Result<usize, EngineError> {
         let _guard = InstanceGuard::acquire(
             &self.config.database_path,
-            &witness.instance_id,
+            &watcher.instance_id,
             "freshness-sweep",
         )?;
-        self.reconcile_pending_binding(witness)?;
-        let profile = resolve(witness)?;
-        self.evaluate_instance(witness, profile)
+        self.reconcile_pending_binding(watcher)?;
+        let profile = resolve(watcher)?;
+        self.evaluate_instance(watcher, profile)
     }
 
     /// Activate one retained historical admission under the same serialized,
@@ -917,20 +917,20 @@ impl CollectionEngine {
     /// materialized durably.
     pub fn rollback_binding(
         &mut self,
-        witness: &WitnessConfig,
+        watcher: &WatcherConfig,
         historical: &Path,
     ) -> Result<BindingActionOutcome, EngineError> {
         let _guard = InstanceGuard::acquire(
             &self.config.database_path,
-            &witness.instance_id,
-            "witness-rollback",
+            &watcher.instance_id,
+            "watcher-rollback",
         )?;
-        self.reconcile_pending_binding(witness)?;
-        let previous = self.authoritative_active_lock(witness)?;
-        let profile = resolve(witness)?;
+        self.reconcile_pending_binding(watcher)?;
+        let previous = self.authoritative_active_lock(watcher)?;
+        let profile = resolve(watcher)?;
         let lock = self.admission.load(historical)?;
         let verification = self.admission.verify(
-            witness,
+            watcher,
             &lock,
             profile
                 .descriptor()
@@ -945,7 +945,7 @@ impl CollectionEngine {
                 lock.admission_id
             ))
         })?;
-        if durable.instance_id != witness.instance_id
+        if durable.instance_id != watcher.instance_id
             || durable.lock_json != canonical(&lock)?.as_bytes()
         {
             return Err(EngineError::Invariant(format!(
@@ -954,15 +954,15 @@ impl CollectionEngine {
             )));
         }
         let lock_path = self.transition_binding(
-            witness,
+            watcher,
             "rollback",
             Some(&lock),
             previous.as_ref(),
             "operator_rollback",
         )?;
-        self.stop_unix_runner(&witness.instance_id);
+        self.stop_unix_runner(&watcher.instance_id);
         Ok(BindingActionOutcome::RolledBack {
-            instance_id: witness.instance_id.clone(),
+            instance_id: watcher.instance_id.clone(),
             admission_id: lock.admission_id,
             binding_digest: verification.binding_digest,
             lock_path,
@@ -979,32 +979,32 @@ impl CollectionEngine {
     /// transition/materialization cannot complete.
     pub fn revoke_binding(
         &mut self,
-        witness: &WitnessConfig,
+        watcher: &WatcherConfig,
     ) -> Result<BindingActionOutcome, EngineError> {
         let _guard = InstanceGuard::acquire(
             &self.config.database_path,
-            &witness.instance_id,
-            "witness-revoke",
+            &watcher.instance_id,
+            "watcher-revoke",
         )?;
-        self.reconcile_pending_binding(witness)?;
-        let previous = self.authoritative_active_lock(witness)?.ok_or_else(|| {
+        self.reconcile_pending_binding(watcher)?;
+        let previous = self.authoritative_active_lock(watcher)?.ok_or_else(|| {
             EngineError::Invariant(format!(
                 "instance {} has no active authoritative admission",
-                witness.instance_id
+                watcher.instance_id
             ))
         })?;
         let admission_id = previous.admission_id.clone();
         let retained_lock = history_lock_path(&self.config.admissions_dir, &previous);
         self.transition_binding(
-            witness,
+            watcher,
             "revoke",
             None,
             Some(&previous),
             "operator_revocation",
         )?;
-        self.stop_unix_runner(&witness.instance_id);
+        self.stop_unix_runner(&watcher.instance_id);
         Ok(BindingActionOutcome::Revoked {
-            instance_id: witness.instance_id.clone(),
+            instance_id: watcher.instance_id.clone(),
             admission_id,
             retained_lock,
         })
@@ -1012,7 +1012,7 @@ impl CollectionEngine {
 
     fn transition_binding(
         &mut self,
-        witness: &WitnessConfig,
+        watcher: &WatcherConfig,
         event_kind: &str,
         desired_lock: Option<&AdmissionLock>,
         previous_lock: Option<&AdmissionLock>,
@@ -1027,7 +1027,7 @@ impl CollectionEngine {
         let plan = BindingMaterializationPlan {
             schema: BINDING_MATERIALIZATION_PLAN_SCHEMA.to_owned(),
             operation_id: operation_id.clone(),
-            instance_id: witness.instance_id.clone(),
+            instance_id: watcher.instance_id.clone(),
             binding_event_id: binding_event_id.clone(),
             admissions_root: AdmissionRootIdentity::resolve(&self.config.admissions_dir)?,
             desired_lock: desired_lock.cloned(),
@@ -1038,7 +1038,7 @@ impl CollectionEngine {
         let occurred_at = timestamp(Utc::now());
         let event = BindingEventInput {
             binding_event_id: binding_event_id.clone(),
-            instance_id: witness.instance_id.clone(),
+            instance_id: watcher.instance_id.clone(),
             event_kind: event_kind.to_owned(),
             admission_id: desired_lock.map(|lock| lock.admission_id.clone()),
             binding_digest,
@@ -1053,7 +1053,7 @@ impl CollectionEngine {
         let intent = BindingMaterializationInput {
             materialization_event_id: Uuid::new_v4().to_string(),
             operation_id: operation_id.clone(),
-            instance_id: witness.instance_id.clone(),
+            instance_id: watcher.instance_id.clone(),
             binding_event_id: binding_event_id.clone(),
             phase: "intent".to_owned(),
             occurred_at,
@@ -1068,13 +1068,13 @@ impl CollectionEngine {
                 &plan,
                 &plan_document,
             )?)?;
-        Ok(self.active_lock_path(witness))
+        Ok(self.active_lock_path(watcher))
     }
 
-    fn reconcile_pending_binding(&mut self, witness: &WitnessConfig) -> Result<bool, EngineError> {
+    fn reconcile_pending_binding(&mut self, watcher: &WatcherConfig) -> Result<bool, EngineError> {
         let Some(pending) = self
             .store
-            .pending_binding_materialization(&witness.instance_id)?
+            .pending_binding_materialization(&watcher.instance_id)?
         else {
             return Ok(false);
         };
@@ -1088,7 +1088,7 @@ impl CollectionEngine {
             })?;
         plan.validate()?;
         if plan.operation_id != pending.operation_id
-            || plan.instance_id != witness.instance_id
+            || plan.instance_id != watcher.instance_id
             || plan.binding_event_id != pending.binding_event_id
         {
             return Err(EngineError::Invariant(format!(
@@ -1101,7 +1101,7 @@ impl CollectionEngine {
             .complete_binding_materialization(&binding_materialization_completion(
                 &plan, &document,
             )?)?;
-        self.stop_unix_runner(&witness.instance_id);
+        self.stop_unix_runner(&watcher.instance_id);
         Ok(true)
     }
 
@@ -1170,15 +1170,15 @@ impl CollectionEngine {
 
     fn authoritative_active_lock(
         &self,
-        witness: &WitnessConfig,
+        watcher: &WatcherConfig,
     ) -> Result<Option<AdmissionLock>, EngineError> {
-        let active_path = self.active_lock_path(witness);
-        let latest = self.store.latest_binding(&witness.instance_id)?;
+        let active_path = self.active_lock_path(watcher);
+        let latest = self.store.latest_binding(&watcher.instance_id)?;
         let Some(latest) = latest else {
             if active_path.exists() {
                 return Err(EngineError::Invariant(format!(
                     "instance {} has an active lock but no authoritative binding event",
-                    witness.instance_id
+                    watcher.instance_id
                 )));
             }
             return Ok(None);
@@ -1187,7 +1187,7 @@ impl CollectionEngine {
             if active_path.exists() {
                 return Err(EngineError::Invariant(format!(
                     "instance {} is durably {} but still has an active lock",
-                    witness.instance_id, latest.event_kind
+                    watcher.instance_id, latest.event_kind
                 )));
             }
             return Ok(None);
@@ -1211,8 +1211,8 @@ impl CollectionEngine {
                 ))
             })?;
         let expected_digest = self.admission.binding_digest(&expected)?;
-        if durable.instance_id != witness.instance_id
-            || expected.instance_id != witness.instance_id
+        if durable.instance_id != watcher.instance_id
+            || expected.instance_id != watcher.instance_id
             || expected.admission_id != admission_id
             || expected_digest != latest.binding_digest
         {
@@ -1225,7 +1225,7 @@ impl CollectionEngine {
         if materialized != expected {
             return Err(EngineError::Invariant(format!(
                 "active lock materialization for {} differs from authoritative admission {}",
-                witness.instance_id, admission_id
+                watcher.instance_id, admission_id
             )));
         }
         Ok(Some(materialized))
@@ -1233,14 +1233,14 @@ impl CollectionEngine {
 
     fn dry_exchange(
         &mut self,
-        witness: &WitnessConfig,
+        watcher: &WatcherConfig,
         profile: &'static dyn ProfileModule,
         launch: VerifiedLaunch,
     ) -> Result<DryExchange, EngineError> {
-        let request = build_request(witness, profile, &witness.capability_ceiling, None)?;
+        let request = build_request(watcher, profile, &watcher.capability_ceiling, None)?;
         let request_json = nq_protocol::canonical_json_bytes(&request)
             .map_err(|error| EngineError::Canonical(error.to_string()))?;
-        let capture = self.run_capture(witness, &request_json, None, launch);
+        let capture = self.run_capture(watcher, &request_json, None, launch);
         if capture.outcome != AcquisitionOutcome::Response {
             return Err(dry_collection_error(&capture.outcome));
         }
@@ -1268,26 +1268,26 @@ impl CollectionEngine {
 
     fn run_capture(
         &mut self,
-        witness: &WitnessConfig,
+        watcher: &WatcherConfig,
         request_json: &[u8],
         binding_digest: Option<&str>,
         launch: VerifiedLaunch,
     ) -> RunCapture {
-        let deadline = StdDuration::from_millis(witness.schedule.deadline_ms);
-        match witness.carrier {
+        let deadline = StdDuration::from_millis(watcher.schedule.deadline_ms);
+        match watcher.carrier {
             Carrier::Stdio => {
                 self.runner
-                    .run_verified(&launch, request_json, deadline, &witness.resources)
+                    .run_verified(&launch, request_json, deadline, &watcher.resources)
             }
             Carrier::Unix => {
-                self.run_unix_capture(witness, request_json, deadline, binding_digest, launch)
+                self.run_unix_capture(watcher, request_json, deadline, binding_digest, launch)
             }
         }
     }
 
     fn run_unix_capture(
         &mut self,
-        witness: &WitnessConfig,
+        watcher: &WatcherConfig,
         request_json: &[u8],
         deadline: StdDuration,
         binding_digest: Option<&str>,
@@ -1297,24 +1297,24 @@ impl CollectionEngine {
         let started = Instant::now();
         if self
             .unix_runners
-            .get(&witness.instance_id)
+            .get(&watcher.instance_id)
             .is_some_and(|active| active.binding_digest.as_deref() != binding_digest)
         {
-            self.stop_unix_runner(&witness.instance_id);
+            self.stop_unix_runner(&watcher.instance_id);
         }
-        if !self.unix_runners.contains_key(&witness.instance_id) {
+        if !self.unix_runners.contains_key(&watcher.instance_id) {
             let options = UnixRunnerOptions::for_account(
                 &self.config.helper_runtime_dir,
-                &witness.instance_id,
+                &watcher.instance_id,
                 deadline,
-                witness.resources.max_stderr_bytes,
+                watcher.resources.max_stderr_bytes,
                 launch.execution_account(),
             )
-            .with_isolation_limits(witness.resources.isolation_limits());
+            .with_isolation_limits(watcher.resources.isolation_limits());
             match UnixRunner::launch_verified(launch, options) {
                 Ok(runner) => {
                     self.unix_runners.insert(
-                        witness.instance_id.clone(),
+                        watcher.instance_id.clone(),
                         BoundUnixRunner {
                             binding_digest: binding_digest.map(str::to_owned),
                             runner,
@@ -1340,18 +1340,18 @@ impl CollectionEngine {
         let remaining = deadline.saturating_sub(started.elapsed());
         let exchange = self
             .unix_runners
-            .get_mut(&witness.instance_id)
+            .get_mut(&watcher.instance_id)
             .expect("runner inserted above")
             .runner
             .exchange(
                 request_json,
                 remaining,
-                witness.resources.max_response_bytes,
+                watcher.resources.max_response_bytes,
             );
         let keep_running = exchange.outcome == UnixAcquisitionOutcome::Response;
         let capture = normalize_unix_capture(started_at, started, exchange);
         if !keep_running {
-            self.stop_unix_runner(&witness.instance_id);
+            self.stop_unix_runner(&watcher.instance_id);
         }
         capture
     }
@@ -1372,16 +1372,16 @@ impl CollectionEngine {
     /// Returns only unexpected local errors while reading a present lock.
     pub fn quiesce_if_binding_changed(
         &mut self,
-        witness: &WitnessConfig,
+        watcher: &WatcherConfig,
     ) -> Result<bool, EngineError> {
         let Some(expected) = self
             .unix_runners
-            .get(&witness.instance_id)
+            .get(&watcher.instance_id)
             .and_then(|active| active.binding_digest.clone())
         else {
             return Ok(false);
         };
-        let path = self.active_lock_path(witness);
+        let path = self.active_lock_path(watcher);
         let actual = self
             .admission
             .load(&path)
@@ -1389,22 +1389,22 @@ impl CollectionEngine {
         match actual {
             Ok(actual) if actual == expected => Ok(false),
             Ok(_) | Err(AdmissionError::Io { .. }) => {
-                self.stop_unix_runner(&witness.instance_id);
+                self.stop_unix_runner(&watcher.instance_id);
                 Ok(true)
             }
             Err(error) => Err(error.into()),
         }
     }
 
-    fn active_lock_path(&self, witness: &WitnessConfig) -> PathBuf {
+    fn active_lock_path(&self, watcher: &WatcherConfig) -> PathBuf {
         self.config
             .admissions_dir
-            .join(format!("{}.json", witness.instance_id))
+            .join(format!("{}.json", watcher.instance_id))
     }
 
     fn record_instance_status(
         &mut self,
-        witness: &WitnessConfig,
+        watcher: &WatcherConfig,
         outcome: &CollectionOutcome,
     ) -> Result<(), EngineError> {
         let (state, code) = match outcome {
@@ -1423,7 +1423,7 @@ impl CollectionEngine {
         self.store.record_status(&StatusEventInput {
             status_event_id: Uuid::new_v4().to_string(),
             component_kind: "instance".into(),
-            component_id: witness.instance_id.clone(),
+            component_id: watcher.instance_id.clone(),
             state: state.into(),
             code: code.into(),
             detail: canonical(outcome)?,
@@ -1435,17 +1435,17 @@ impl CollectionEngine {
     #[allow(clippy::too_many_lines)]
     fn evaluate_instance(
         &mut self,
-        witness: &WitnessConfig,
+        watcher: &WatcherConfig,
         profile: &'static dyn ProfileModule,
     ) -> Result<usize, EngineError> {
         let snapshot = self
             .store
-            .evidence_snapshot(std::slice::from_ref(&witness.instance_id))?;
+            .evidence_snapshot(std::slice::from_ref(&watcher.instance_id))?;
         let watermark = snapshot
             .watermarks
             .first()
             .ok_or_else(|| EngineError::Invariant("missing instance watermark".into()))?;
-        let profile_version = witness.profile.version.to_string();
+        let profile_version = watcher.profile.version.to_string();
         let profile_digest = profile
             .descriptor()
             .digest()
@@ -1453,12 +1453,12 @@ impl CollectionEngine {
         let reports = reconstruct_detector_reports(
             &snapshot.reports,
             profile,
-            &witness.profile.id,
+            &watcher.profile.id,
             &profile_version,
             profile_digest.as_str(),
         )?;
         let current_findings = self.store.finding_snapshots()?;
-        let subject_json = serde_json::to_string(&Value::String(witness.subject.clone()))
+        let subject_json = serde_json::to_string(&Value::String(watcher.subject.clone()))
             .map_err(|error| EngineError::Canonical(error.to_string()))?;
         // Every finding event records the running evaluator that produced it;
         // refuse (fail closed) rather than stamp findings with a fabricated one.
@@ -1471,7 +1471,7 @@ impl CollectionEngine {
         for detector in profile.detectors() {
             let evaluated_at = Utc::now();
             let detector_input = DetectorInput {
-                instance_id: &witness.instance_id,
+                instance_id: &watcher.instance_id,
                 evaluated_at,
                 watermark: EvidenceWatermark(
                     u64::try_from(watermark.max_report_sequence).unwrap_or(u64::MAX),
@@ -1517,18 +1517,18 @@ impl CollectionEngine {
             };
             let detector_version = descriptor.version.to_string();
             let lineage = FindingLineage {
-                instance_id: &witness.instance_id,
+                instance_id: &watcher.instance_id,
                 detector_id: &descriptor.id,
                 detector_version: &detector_version,
                 detector_digest: &detector_digest,
-                profile_id: &witness.profile.id,
+                profile_id: &watcher.profile.id,
                 profile_version: &profile_version,
                 profile_digest: profile_digest.as_str(),
                 subject_json: &subject_json,
             };
             let current = find_current_finding(&current_findings, &lineage);
             let finding = build_finding_event(
-                witness,
+                watcher,
                 profile,
                 descriptor,
                 &result,
@@ -1746,11 +1746,11 @@ fn binding_materialization_completion(
     })
 }
 
-fn resolve(witness: &WitnessConfig) -> Result<&'static dyn ProfileModule, EngineError> {
-    nq_profiles::resolve_profile(&witness.profile.id, witness.profile.version).ok_or_else(|| {
+fn resolve(watcher: &WatcherConfig) -> Result<&'static dyn ProfileModule, EngineError> {
+    nq_profiles::resolve_profile(&watcher.profile.id, watcher.profile.version).ok_or_else(|| {
         EngineError::UnknownProfile {
-            id: witness.profile.id.clone(),
-            version: witness.profile.version,
+            id: watcher.profile.id.clone(),
+            version: watcher.profile.version,
         }
     })
 }
@@ -1762,36 +1762,36 @@ fn resolve(witness: &WitnessConfig) -> Result<&'static dyn ProfileModule, Engine
 ///
 /// Returns the exact instance and catalog vocabulary mismatch.
 pub fn validate_compiled_config(config: &NqConfig) -> Result<(), EngineError> {
-    for witness in &config.witnesses {
-        let profile = resolve(witness)?;
+    for watcher in &config.watchers {
+        let profile = resolve(watcher)?;
         let descriptor = profile.descriptor();
-        if !witness.subject.starts_with(&descriptor.subjects.namespace) {
+        if !watcher.subject.starts_with(&descriptor.subjects.namespace) {
             return Err(EngineError::Profile(format!(
                 "instance {} subject is outside profile namespace {}",
-                witness.instance_id, descriptor.subjects.namespace
+                watcher.instance_id, descriptor.subjects.namespace
             )));
         }
         if !descriptor
             .scope_kinds
             .iter()
-            .any(|term| term.name == witness.scope.kind)
+            .any(|term| term.name == watcher.scope.kind)
         {
             return Err(EngineError::Profile(format!(
                 "instance {} uses unknown scope kind {}",
-                witness.instance_id, witness.scope.kind
+                watcher.instance_id, watcher.scope.kind
             )));
         }
         if !descriptor
             .vantages
             .iter()
-            .any(|term| term.name == witness.vantage.kind)
+            .any(|term| term.name == watcher.vantage.kind)
         {
             return Err(EngineError::Profile(format!(
                 "instance {} uses unknown vantage {}",
-                witness.instance_id, witness.vantage.kind
+                watcher.instance_id, watcher.vantage.kind
             )));
         }
-        if let Some(capability) = witness.capability_ceiling.iter().find(|capability| {
+        if let Some(capability) = watcher.capability_ceiling.iter().find(|capability| {
             !descriptor
                 .capabilities
                 .iter()
@@ -1799,23 +1799,23 @@ pub fn validate_compiled_config(config: &NqConfig) -> Result<(), EngineError> {
         }) {
             return Err(EngineError::Profile(format!(
                 "instance {} capability ceiling contains profile-unknown {}",
-                witness.instance_id, capability
+                watcher.instance_id, capability
             )));
         }
         let context = ValidationContext {
-            instance_id: witness.instance_id.clone(),
-            request_subject: witness.subject.clone(),
+            instance_id: watcher.instance_id.clone(),
+            request_subject: watcher.subject.clone(),
             scope: ScopeGrant {
-                kind: witness.scope.kind.clone(),
-                value: witness.scope.value.clone(),
+                kind: watcher.scope.kind.clone(),
+                value: watcher.scope.value.clone(),
             },
             vantage: VantageGrant {
-                kind: witness.vantage.kind.clone(),
-                value: witness.vantage.value.clone(),
+                kind: watcher.vantage.kind.clone(),
+                value: watcher.vantage.value.clone(),
             },
-            granted_capabilities: witness.capability_ceiling.clone(),
+            granted_capabilities: watcher.capability_ceiling.clone(),
             received_at: Utc::now(),
-            max_observations: u32::try_from(witness.resources.max_observations)
+            max_observations: u32::try_from(watcher.resources.max_observations)
                 .unwrap_or(u32::MAX)
                 .min(descriptor.limits.max_observations),
             max_future_skew: Duration::seconds(60),
@@ -1823,7 +1823,7 @@ pub fn validate_compiled_config(config: &NqConfig) -> Result<(), EngineError> {
         profile.validate_binding(&context).map_err(|refusal| {
             EngineError::Profile(format!(
                 "instance {} binding refused at {:?}/{:?}: {}",
-                witness.instance_id, refusal.boundary, refusal.code, refusal.message
+                watcher.instance_id, refusal.boundary, refusal.code, refusal.message
             ))
         })?;
     }
@@ -1841,24 +1841,24 @@ pub fn validate_compiled_config(config: &NqConfig) -> Result<(), EngineError> {
 ///
 /// Returns when the contract cannot be represented as bounded canonical JSON.
 pub fn checkpoint_contract_digest(
-    witness: &WitnessConfig,
+    watcher: &WatcherConfig,
     lock: &AdmissionLock,
     binding_digest: &str,
     profile_digest: &str,
 ) -> Result<String, EngineError> {
     Ok(canonical(&json!({
         "schema": "nq.checkpoint_contract.v1",
-        "instance_id": witness.instance_id,
+        "instance_id": watcher.instance_id,
         "admission_id": lock.admission_id,
         "binding_digest": binding_digest,
         "profile": {
-            "id": witness.profile.id,
-            "version": witness.profile.version,
+            "id": watcher.profile.id,
+            "version": watcher.profile.version,
             "digest": profile_digest,
         },
-        "subject": witness.subject,
-        "scope": witness.scope,
-        "vantage": witness.vantage,
+        "subject": watcher.subject,
+        "scope": watcher.scope,
+        "vantage": watcher.vantage,
         "granted_capabilities": lock.granted_capabilities,
     }))?
     .digest()
@@ -1866,7 +1866,7 @@ pub fn checkpoint_contract_digest(
 }
 
 fn build_request(
-    witness: &WitnessConfig,
+    watcher: &WatcherConfig,
     profile: &'static dyn ProfileModule,
     granted: &BTreeSet<String>,
     checkpoint: Option<Checkpoint>,
@@ -1879,7 +1879,7 @@ fn build_request(
         schema: nq_protocol::HELPER_REQUEST_SCHEMA.into(),
         protocol_version: nq_protocol::HELPER_PROTOCOL_VERSION.into(),
         request_id: token(RequestId::new(Uuid::new_v4().to_string()))?,
-        instance_id: token(InstanceId::new(witness.instance_id.clone()))?,
+        instance_id: token(InstanceId::new(watcher.instance_id.clone()))?,
         profile: ProfileBinding {
             id: token(ProfileId::new(descriptor.profile.id.clone()))?,
             version: token(ProfileVersion::new(descriptor.profile.version.to_string()))?,
@@ -1887,14 +1887,14 @@ fn build_request(
                 .map_err(|error| EngineError::Token(error.to_string()))?,
         },
         binding: SubjectBinding {
-            subject: token(SubjectId::new(witness.subject.clone()))?,
+            subject: token(SubjectId::new(watcher.subject.clone()))?,
             scope: ScopeBinding {
-                kind: token(ScopeKind::new(witness.scope.kind.clone()))?,
-                value: witness.scope.value.clone(),
+                kind: token(ScopeKind::new(watcher.scope.kind.clone()))?,
+                value: watcher.scope.value.clone(),
             },
             vantage: VantageBinding {
-                kind: token(VantageKind::new(witness.vantage.kind.clone()))?,
-                value: witness.vantage.value.clone(),
+                kind: token(VantageKind::new(watcher.vantage.kind.clone()))?,
+                value: watcher.vantage.value.clone(),
             },
         },
         granted_capabilities: granted
@@ -1905,12 +1905,12 @@ fn build_request(
         deadline: MonotonicDeadline {
             clock: MonotonicClock::LinuxBoottime,
             expires_at_ns: boottime_ns()?
-                .saturating_add(witness.schedule.deadline_ms.saturating_mul(1_000_000)),
+                .saturating_add(watcher.schedule.deadline_ms.saturating_mul(1_000_000)),
         },
         bounds: CollectionBounds {
-            max_response_bytes: u32::try_from(witness.resources.max_response_bytes)
+            max_response_bytes: u32::try_from(watcher.resources.max_response_bytes)
                 .unwrap_or(u32::MAX),
-            max_observations: u32::try_from(witness.resources.max_observations)
+            max_observations: u32::try_from(watcher.resources.max_observations)
                 .unwrap_or(u32::MAX)
                 .min(descriptor.limits.max_observations),
             max_payload_bytes: descriptor.limits.max_payload_bytes,
@@ -1926,7 +1926,7 @@ fn build_request(
 
 fn store_report(
     report_id: &str,
-    witness: &WitnessConfig,
+    watcher: &WatcherConfig,
     profile: &'static dyn ProfileModule,
     report: &nq_protocol::EvidenceReport,
     validated: &ValidatedReport,
@@ -1995,7 +1995,7 @@ fn store_report(
         .collect::<Result<_, EngineError>>()?;
     Ok(ReportInput {
         report_id: report_id.to_owned(),
-        instance_id: witness.instance_id.clone(),
+        instance_id: watcher.instance_id.clone(),
         profile_id: profile.descriptor().profile.id.clone(),
         profile_version: profile.descriptor().profile.version.to_string(),
         profile_digest: profile
@@ -2025,7 +2025,7 @@ fn store_report(
 
 fn rejected_transport_submission(
     run_id: &str,
-    witness: &WitnessConfig,
+    watcher: &WatcherConfig,
     capture: &RunCapture,
 ) -> Result<Option<SubmissionInput>, EngineError> {
     let retains_exact_submission = !capture.stdout.is_empty()
@@ -2040,7 +2040,7 @@ fn rejected_transport_submission(
     }
     let code = acquisition_code(&capture.outcome).to_owned();
     let refusal = rejection_refusal(
-        witness,
+        watcher,
         "acquisition",
         &code,
         "helper bytes did not form a successful protocol exchange",
@@ -2059,7 +2059,7 @@ fn rejected_transport_submission(
 }
 
 fn rejection_refusal(
-    witness: &WitnessConfig,
+    watcher: &WatcherConfig,
     source: &str,
     code: &str,
     message: &str,
@@ -2068,7 +2068,7 @@ fn rejection_refusal(
     Ok(RefusalInput {
         refusal_id: Uuid::new_v4().to_string(),
         source_kind: source.into(),
-        responsible_instance_id: witness.instance_id.clone(),
+        responsible_instance_id: watcher.instance_id.clone(),
         boundary: source.into(),
         code: code.into(),
         detail: canonical(&json!({"message": message}))?,
@@ -2185,7 +2185,7 @@ fn detector_identity_digest(
 
 #[allow(clippy::too_many_lines)]
 fn build_finding_event(
-    witness: &WitnessConfig,
+    watcher: &WatcherConfig,
     profile: &'static dyn ProfileModule,
     descriptor: &nq_profiles::DetectorDescriptor,
     result: &nq_profiles::DetectorResult,
@@ -2266,7 +2266,7 @@ fn build_finding_event(
         event_id: Uuid::new_v4().to_string(),
         finding_id,
         event_kind: event_kind.into(),
-        instance_id: witness.instance_id.clone(),
+        instance_id: watcher.instance_id.clone(),
         profile_id: profile.descriptor().profile.id.clone(),
         profile_version: profile.descriptor().profile.version.to_string(),
         profile_digest: profile
@@ -2275,7 +2275,7 @@ fn build_finding_event(
             .map_err(|error| EngineError::Canonical(error.to_string()))?
             .as_str()
             .into(),
-        subject: canonical(&witness.subject)?,
+        subject: canonical(&watcher.subject)?,
         condition_name: descriptor.condition.clone(),
         condition_state: if result.state == DetectorState::CannotEvaluate {
             current.map_or("cannot_evaluate", |finding| {
@@ -2305,13 +2305,13 @@ fn build_finding_event(
         limitations: canonical(&result.limitations)?,
         safe_next_checks: canonical(&vec![
             "Inspect the cited admitted evidence".to_owned(),
-            "Run `nq witness test` if collection remains unavailable".to_owned(),
+            "Run `nq watcher test` if collection remains unavailable".to_owned(),
         ])?,
         freshness: canonical(&visibility.1)?,
         basis: canonical(&json!({
             "profile_digest": profile.descriptor().digest().map_err(|error| EngineError::Canonical(error.to_string()))?.as_str(),
-            "vantage": witness.vantage.kind,
-            "scope": witness.scope,
+            "vantage": watcher.vantage.kind,
+            "scope": watcher.scope,
         }))?,
         refusal: result.refusal.as_ref().map(canonical).transpose()?,
         origin_mode: "native".into(),
@@ -2593,7 +2593,7 @@ fn acquisition_detail(outcome: &AcquisitionOutcome) -> Option<String> {
 /// Preserves the stable acquisition code and appends `acquisition_detail` when
 /// the outcome carries one, mirroring the daemon path's `AcquisitionFailed`
 /// (code + detail). A refusal family whose members share one coarse code but
-/// carry distinct dependent witnesses -- every `carrier_startup_failed` variant:
+/// carry distinct dependent watchers -- every `carrier_startup_failed` variant:
 /// wrong socket mode, wrong owner, spawn failure, startup timeout -- must not be
 /// exported through a code-only projection that collapses those distinctions.
 fn dry_collection_error(outcome: &AcquisitionOutcome) -> EngineError {
@@ -2942,7 +2942,7 @@ mod tests {
 
     fn host_example_text() -> String {
         include_str!("../../../examples/nq-host.toml").replace(
-            "execution_account = \"nq-witness\"",
+            "execution_account = \"nq-helper\"",
             &format!(
                 "execution_account = \"{}\"\nallow_same_identity_in_debug = true",
                 nix::unistd::geteuid().as_raw()
@@ -2950,13 +2950,13 @@ mod tests {
         )
     }
 
-    fn binding_recovery_fixture(root: &Path) -> (NqConfig, WitnessConfig, AdmissionLock) {
+    fn binding_recovery_fixture(root: &Path) -> (NqConfig, WatcherConfig, AdmissionLock) {
         fs::create_dir(root.join("admissions")).expect("fixture admissions root");
         let helper = root.join("helper.sh");
         fs::write(&helper, b"#!/bin/sh\nexit 0\n").expect("fixture helper");
         fs::set_permissions(&helper, fs::Permissions::from_mode(0o755))
             .expect("fixture helper mode");
-        let witness = WitnessConfig {
+        let watcher = WatcherConfig {
             instance_id: "recovery.primary".to_owned(),
             command: CommandConfig {
                 executable: helper,
@@ -2991,13 +2991,13 @@ mod tests {
             socket_path: root.join("nqd.sock"),
             admissions_dir: root.join("admissions"),
             helper_runtime_dir: root.join("helpers"),
-            witnesses: vec![witness.clone()],
+            watchers: vec![watcher.clone()],
         };
-        let profile = resolve(&witness).expect("compiled fixture profile");
+        let profile = resolve(&watcher).expect("compiled fixture profile");
         let corpus = nq_protocol::verify_embedded_conformance_corpus().expect("corpus");
         let lock = AdmissionManager
             .candidate(
-                &witness,
+                &watcher,
                 CandidateEvidence {
                     profile_digest: profile
                         .descriptor()
@@ -3018,7 +3018,7 @@ mod tests {
                 },
             )
             .expect("candidate lock");
-        (config, witness, lock)
+        (config, watcher, lock)
     }
 
     struct SemanticLineageFixture {
@@ -3037,7 +3037,7 @@ mod tests {
     impl SemanticLineageFixture {
         fn new() -> Self {
             let config = NqConfig::from_toml(&host_example_text()).expect("valid host example");
-            let witness = &config.witnesses[0];
+            let watcher = &config.watchers[0];
             let profile: &'static dyn ProfileModule = &nq_profiles::host::MODULE;
             let descriptor = profile.detectors()[0].descriptor();
             let detector_version = descriptor.version.to_string();
@@ -3049,13 +3049,13 @@ mod tests {
                 .expect("compiled profile digest")
                 .as_str()
                 .to_owned();
-            let subject_json = serde_json::to_string(&Value::String(witness.subject.clone()))
+            let subject_json = serde_json::to_string(&Value::String(watcher.subject.clone()))
                 .expect("subject JSON");
             let observed_at = Utc::now();
             let semantic_digest = format!("sha256:{}", "a".repeat(64));
             let finding = nq_store::FindingSnapshotRow {
                 finding_id: "finding:old-lineage".to_owned(),
-                instance_id: witness.instance_id.clone(),
+                instance_id: watcher.instance_id.clone(),
                 detector_id: descriptor.id.clone(),
                 detector_version: detector_version.clone(),
                 detector_digest: detector_digest.clone(),
@@ -3103,8 +3103,8 @@ mod tests {
             }
         }
 
-        fn witness(&self) -> &WitnessConfig {
-            &self.config.witnesses[0]
+        fn watcher(&self) -> &WatcherConfig {
+            &self.config.watchers[0]
         }
 
         fn descriptor(&self) -> &'static nq_profiles::DetectorDescriptor {
@@ -3113,11 +3113,11 @@ mod tests {
 
         fn lineage(&self) -> FindingLineage<'_> {
             FindingLineage {
-                instance_id: &self.witness().instance_id,
+                instance_id: &self.watcher().instance_id,
                 detector_id: &self.descriptor().id,
                 detector_version: &self.detector_version,
                 detector_digest: &self.detector_digest,
-                profile_id: &self.witness().profile.id,
+                profile_id: &self.watcher().profile.id,
                 profile_version: &self.profile_version,
                 profile_digest: &self.profile_digest,
                 subject_json: &self.subject_json,
@@ -3133,8 +3133,8 @@ mod tests {
             nq_store::AdmittedReportRow {
                 report_sequence,
                 report_id: report_id.to_owned(),
-                instance_id: self.witness().instance_id.clone(),
-                profile_id: self.witness().profile.id.clone(),
+                instance_id: self.watcher().instance_id.clone(),
+                profile_id: self.watcher().profile.id.clone(),
                 profile_version: self.profile_version.clone(),
                 profile_digest: self.profile_digest.clone(),
                 observed_at: timestamp(self.observed_at),
@@ -3165,8 +3165,8 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn pending_authoritative_binding_is_reconciled_but_untracked_tampering_is_not() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let (config, witness, lock) = binding_recovery_fixture(directory.path());
-        let profile = resolve(&witness).expect("profile");
+        let (config, watcher, lock) = binding_recovery_fixture(directory.path());
+        let profile = resolve(&watcher).expect("profile");
         let mut store = Store::initialize(&config.database_path).expect("initialize store");
         append_profile_descriptor(&mut store, profile).expect("descriptor");
         store
@@ -3214,7 +3214,7 @@ mod tests {
         let plan = BindingMaterializationPlan {
             schema: BINDING_MATERIALIZATION_PLAN_SCHEMA.to_owned(),
             operation_id: operation_id.clone(),
-            instance_id: witness.instance_id.clone(),
+            instance_id: watcher.instance_id.clone(),
             binding_event_id: binding_event_id.clone(),
             admissions_root: AdmissionRootIdentity::resolve(&config.admissions_dir)
                 .expect("admissions root identity"),
@@ -3227,7 +3227,7 @@ mod tests {
             .begin_binding_transition(
                 &BindingEventInput {
                     binding_event_id: binding_event_id.clone(),
-                    instance_id: witness.instance_id.clone(),
+                    instance_id: watcher.instance_id.clone(),
                     event_kind: "activate".to_owned(),
                     admission_id: Some(lock.admission_id.clone()),
                     binding_digest: AdmissionManager
@@ -3240,7 +3240,7 @@ mod tests {
                 &BindingMaterializationInput {
                     materialization_event_id: Uuid::new_v4().to_string(),
                     operation_id,
-                    instance_id: witness.instance_id.clone(),
+                    instance_id: watcher.instance_id.clone(),
                     binding_event_id,
                     phase: "intent".to_owned(),
                     occurred_at: timestamp(Utc::now()),
@@ -3258,13 +3258,13 @@ mod tests {
         fs::create_dir(&drifting_config.admissions_dir).expect("drifting admissions root");
         let mut drifting = CollectionEngine::open(&drifting_config).expect("drifting engine");
         assert!(matches!(
-            drifting.reconcile_pending_binding(&witness),
+            drifting.reconcile_pending_binding(&watcher),
             Err(EngineError::Invariant(message)) if message.contains("different admissions root")
         ));
         assert!(
             drifting
                 .store
-                .pending_binding_materialization(&witness.instance_id)
+                .pending_binding_materialization(&watcher.instance_id)
                 .expect("pending after drift refusal")
                 .is_some(),
             "config drift must leave the original intent recoverable"
@@ -3280,12 +3280,12 @@ mod tests {
         let mut recovered = CollectionEngine::open(&config).expect("recovered engine");
         assert!(
             recovered
-                .reconcile_pending_binding(&witness)
+                .reconcile_pending_binding(&watcher)
                 .expect("reconcile pending intent")
         );
         assert_eq!(
             recovered
-                .authoritative_active_lock(&witness)
+                .authoritative_active_lock(&watcher)
                 .expect("authoritative lock")
                 .expect("active lock"),
             lock
@@ -3293,7 +3293,7 @@ mod tests {
         assert!(
             recovered
                 .store
-                .pending_binding_materialization(&witness.instance_id)
+                .pending_binding_materialization(&watcher.instance_id)
                 .expect("pending query")
                 .is_none()
         );
@@ -3303,7 +3303,7 @@ mod tests {
         let corpus = nq_protocol::verify_embedded_conformance_corpus().expect("corpus");
         let forged = AdmissionManager
             .candidate(
-                &witness,
+                &watcher,
                 CandidateEvidence {
                     profile_digest: lock.profile.digest.clone(),
                     protocol_version: nq_protocol::HELPER_PROTOCOL_VERSION.to_owned(),
@@ -3323,7 +3323,7 @@ mod tests {
             .activate(&config.admissions_dir, &forged)
             .expect("tamper with materialization");
         assert!(matches!(
-            recovered.authoritative_active_lock(&witness),
+            recovered.authoritative_active_lock(&watcher),
             Err(EngineError::Invariant(message)) if message.contains("differs from authoritative")
         ));
         assert_eq!(
@@ -3408,14 +3408,14 @@ mod tests {
         let old_report = fixture.report(1, "report:old-lineage", &fixture.semantic_digest);
         assert!(report_matches_profile_contract(
             &old_report,
-            &fixture.witness().profile.id,
+            &fixture.watcher().profile.id,
             &fixture.profile_version,
             &fixture.profile_digest,
         ));
         assert!(
             !report_matches_profile_contract(
                 &old_report,
-                &fixture.witness().profile.id,
+                &fixture.watcher().profile.id,
                 &fixture.profile_version,
                 &changed_profile_digest,
             ),
@@ -3435,10 +3435,10 @@ mod tests {
         };
         let changed_current = find_current_finding(&findings, &changed_detector_lineage);
         assert!(changed_current.is_none());
-        let witness = fixture.witness();
+        let watcher = fixture.watcher();
         let descriptor = fixture.descriptor();
         let detector_input = DetectorInput {
-            instance_id: &witness.instance_id,
+            instance_id: &watcher.instance_id,
             evaluated_at: fixture.observed_at,
             watermark: EvidenceWatermark(1),
             reports: &[],
@@ -3467,7 +3467,7 @@ mod tests {
             watermark: EvidenceWatermark(2),
         };
         let opened = build_finding_event(
-            witness,
+            watcher,
             fixture.profile,
             descriptor,
             &present,
@@ -3482,7 +3482,7 @@ mod tests {
         assert_eq!(opened.evidence[0].report_id, "report:new-lineage");
 
         let event = build_finding_event(
-            witness,
+            watcher,
             fixture.profile,
             descriptor,
             &cannot_evaluate,
@@ -3500,7 +3500,7 @@ mod tests {
     #[test]
     fn identical_semantic_reports_keep_exact_detector_evidence_identity() {
         let config = NqConfig::from_toml(&host_example_text()).expect("valid host example");
-        let witness = &config.witnesses[0];
+        let watcher = &config.watchers[0];
         let profile: &'static dyn ProfileModule = &nq_profiles::host::MODULE;
         let descriptor = profile.detectors()[0].descriptor();
         let semantic_digest = format!("sha256:{}", "a".repeat(64));
@@ -3517,7 +3517,7 @@ mod tests {
             |report_sequence, report_id: &str, received_at: &str| nq_store::AdmittedReportRow {
                 report_sequence,
                 report_id: report_id.to_owned(),
-                instance_id: witness.instance_id.clone(),
+                instance_id: watcher.instance_id.clone(),
                 profile_id: profile.descriptor().profile.id.clone(),
                 profile_version: profile.descriptor().profile.version.to_string(),
                 profile_digest: profile_digest.clone(),
@@ -3548,7 +3548,7 @@ mod tests {
         };
 
         let event = build_finding_event(
-            witness,
+            watcher,
             profile,
             descriptor,
             &result,
@@ -3565,7 +3565,7 @@ mod tests {
         let mut mismatched = result;
         mismatched.evidence[0].report_sequence = 1;
         let error = build_finding_event(
-            witness,
+            watcher,
             profile,
             descriptor,
             &mismatched,
@@ -3580,7 +3580,7 @@ mod tests {
     #[test]
     fn collection_fails_closed_when_evaluator_identity_is_unresolved() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let (config, witness, _lock) = binding_recovery_fixture(directory.path());
+        let (config, watcher, _lock) = binding_recovery_fixture(directory.path());
         Store::initialize(&config.database_path).expect("initialize store");
 
         // An unresolved (unsupported/unverifiable) identity refuses collection
@@ -3592,7 +3592,7 @@ mod tests {
         )
         .expect("engine opens");
         let error = refusing
-            .collect(&witness)
+            .collect(&watcher)
             .expect_err("collection refuses without a resolved evaluator identity");
         assert!(matches!(
             error,
@@ -3610,7 +3610,7 @@ mod tests {
         let mut ready =
             CollectionEngine::open_with_evaluator_identity(&config, Ok(identity)).expect("engine");
         let outcome = ready
-            .collect(&witness)
+            .collect(&watcher)
             .expect("collection clears the identity gate");
         assert!(matches!(
             outcome,
@@ -3720,7 +3720,7 @@ mod tests {
     #[test]
     fn verify_admitted_passes_when_snapshot_and_runtime_agree() {
         let dir = tempfile::tempdir().expect("dir");
-        let (config, _witness, _lock) = binding_recovery_fixture(dir.path());
+        let (config, _watcher, _lock) = binding_recovery_fixture(dir.path());
         let artifact = nq_protocol::sha256_bytes(b"evaluator-artifact");
         let report = seed_admitted_report(
             &config.database_path,
@@ -3744,7 +3744,7 @@ mod tests {
     #[test]
     fn verify_admitted_refuses_evaluator_artifact_drift() {
         let dir = tempfile::tempdir().expect("dir");
-        let (config, _witness, _lock) = binding_recovery_fixture(dir.path());
+        let (config, _watcher, _lock) = binding_recovery_fixture(dir.path());
         let report = seed_admitted_report(
             &config.database_path,
             nq_protocol::sha256_bytes(b"admitted-artifact"),
@@ -3763,7 +3763,7 @@ mod tests {
     #[test]
     fn verify_admitted_refuses_when_the_identity_method_changed() {
         let dir = tempfile::tempdir().expect("dir");
-        let (config, _witness, _lock) = binding_recovery_fixture(dir.path());
+        let (config, _watcher, _lock) = binding_recovery_fixture(dir.path());
         let artifact = nq_protocol::sha256_bytes(b"artifact");
         // Admitted under an older observation method; digests are not comparable.
         let report = seed_admitted_report(
@@ -3786,7 +3786,7 @@ mod tests {
     #[test]
     fn verify_admitted_records_platform_drift_without_refusing() {
         let dir = tempfile::tempdir().expect("dir");
-        let (config, _witness, _lock) = binding_recovery_fixture(dir.path());
+        let (config, _watcher, _lock) = binding_recovery_fixture(dir.path());
         let artifact = nq_protocol::sha256_bytes(b"artifact");
         let report = seed_admitted_report(
             &config.database_path,
@@ -3814,7 +3814,7 @@ mod tests {
     #[test]
     fn verify_admitted_fails_closed_when_current_identity_is_unavailable() {
         let dir = tempfile::tempdir().expect("dir");
-        let (config, _witness, _lock) = binding_recovery_fixture(dir.path());
+        let (config, _watcher, _lock) = binding_recovery_fixture(dir.path());
         // The snapshot authenticates, but the current identity cannot be
         // observed, so drift cannot be assessed and verification fails closed.
         let report = seed_admitted_report(
@@ -3899,13 +3899,13 @@ mod tests {
     }
 
     /// Forcing case for refusal preservation: a refusal family whose members
-    /// share one coarse code but carry distinct dependent witnesses must stay
+    /// share one coarse code but carry distinct dependent watchers must stay
     /// distinguishable through EVERY operator-facing and archival surface, not
     /// merely internally. `carrier_startup_failed` covers a refused socket mode,
     /// a spawn failure, and a startup timeout alike, so any surface that exports
     /// only the code laundering-collapses them.
     ///
-    /// Regression: through 2026-07-19 the `nq witness test` dry-collection path
+    /// Regression: through 2026-07-19 the `nq watcher test` dry-collection path
     /// exported only the code, so a helper-directory-missing failure (run
     /// 0a2938c) and a 30s startup timeout (run a4faf06) were byte-identical
     /// `carrier_startup_failed` to the operator. This proves the two now stay
@@ -3924,7 +3924,7 @@ mod tests {
         assert_eq!(acquisition_code(&mode), "carrier_startup_failed");
         assert_eq!(acquisition_code(&timeout), "carrier_startup_failed");
 
-        // CLI surface (`nq witness test` dry collection): the stable code is
+        // CLI surface (`nq watcher test` dry collection): the stable code is
         // retained and the distinct detail is appended, so the two differ.
         let cli_mode = dry_collection_error(&mode).to_string();
         let cli_timeout = dry_collection_error(&timeout).to_string();

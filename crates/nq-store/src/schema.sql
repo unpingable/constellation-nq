@@ -95,7 +95,7 @@ CREATE TABLE binding_materialization_events (
 CREATE INDEX binding_materialization_by_instance
     ON binding_materialization_events(instance_id, materialization_sequence);
 
-CREATE TABLE witness_runs (
+CREATE TABLE watcher_runs (
     run_id TEXT PRIMARY KEY,
     request_id TEXT NOT NULL UNIQUE,
     instance_id TEXT NOT NULL,
@@ -114,7 +114,7 @@ CREATE TABLE witness_runs (
     resource_outcome_json BLOB NOT NULL CHECK (json_valid(CAST(resource_outcome_json AS TEXT))),
     FOREIGN KEY (admission_id) REFERENCES admission_records(admission_id)
 ) STRICT;
-CREATE INDEX witness_runs_by_instance ON witness_runs(instance_id, started_at, run_id);
+CREATE INDEX watcher_runs_by_instance ON watcher_runs(instance_id, started_at, run_id);
 
 CREATE TABLE raw_submissions (
     submission_id TEXT PRIMARY KEY,
@@ -127,7 +127,7 @@ CREATE TABLE raw_submissions (
     rejection_code TEXT,
     CHECK ((admission_outcome = 'admitted' AND rejection_code IS NULL)
         OR admission_outcome = 'rejected'),
-    FOREIGN KEY (run_id) REFERENCES witness_runs(run_id)
+    FOREIGN KEY (run_id) REFERENCES watcher_runs(run_id)
 ) STRICT;
 CREATE INDEX raw_submissions_by_digest ON raw_submissions(raw_sha256);
 
@@ -142,7 +142,7 @@ CREATE TABLE admitted_reports (
     observed_at TEXT NOT NULL,
     received_at TEXT NOT NULL,
     report_status TEXT NOT NULL CHECK (report_status IN ('complete', 'partial', 'failed')),
-    -- Source protocol JSON as received. Retained as witness material; the
+    -- Source protocol JSON as received. Retained as watcher material; the
     -- admitted judgment below does not substitute for it, nor it for the judgment.
     canonical_json BLOB NOT NULL CHECK (length(canonical_json) <= 16777216 AND json_valid(CAST(canonical_json AS TEXT))),
     semantic_digest TEXT NOT NULL CHECK (length(semantic_digest) = 71 AND substr(semantic_digest, 1, 7) = 'sha256:'),
@@ -179,14 +179,14 @@ END;
 -- has a complete admission context, and the report is bound to exactly that
 -- context. The join reaches the admission through submission -> run ->
 -- admission_id; a null admission_id yields no matching row, so an admitted
--- report from a context-less run is refused. witness_runs.admission_id stays
+-- report from a context-less run is refused. watcher_runs.admission_id stays
 -- globally nullable (refused/failed runs legitimately have none).
 CREATE TRIGGER admitted_reports_bind_admission_context
 BEFORE INSERT ON admitted_reports
 WHEN (
     SELECT COUNT(*)
     FROM raw_submissions AS s
-    JOIN witness_runs AS r ON r.run_id = s.run_id
+    JOIN watcher_runs AS r ON r.run_id = s.run_id
     JOIN admission_records AS a ON a.admission_id = r.admission_id
     WHERE s.submission_id = NEW.submission_id
       AND a.admission_context_digest = NEW.admission_context_digest
@@ -276,7 +276,7 @@ CREATE TABLE refusals (
     detail_json BLOB NOT NULL CHECK (json_valid(CAST(detail_json AS TEXT))),
     created_at TEXT NOT NULL,
     CHECK (run_id IS NOT NULL OR evaluation_id IS NOT NULL),
-    FOREIGN KEY (run_id) REFERENCES witness_runs(run_id),
+    FOREIGN KEY (run_id) REFERENCES watcher_runs(run_id),
     FOREIGN KEY (submission_id) REFERENCES raw_submissions(submission_id),
     FOREIGN KEY (evaluation_id) REFERENCES evaluation_runs(evaluation_id)
 ) STRICT;
@@ -525,8 +525,8 @@ CREATE TRIGGER immutable_instance_binding_events_update BEFORE UPDATE ON instanc
 CREATE TRIGGER immutable_instance_binding_events_delete BEFORE DELETE ON instance_binding_events BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER immutable_binding_materialization_events_update BEFORE UPDATE ON binding_materialization_events BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER immutable_binding_materialization_events_delete BEFORE DELETE ON binding_materialization_events BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
-CREATE TRIGGER immutable_witness_runs_update BEFORE UPDATE ON witness_runs BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
-CREATE TRIGGER immutable_witness_runs_delete BEFORE DELETE ON witness_runs BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
+CREATE TRIGGER immutable_watcher_runs_update BEFORE UPDATE ON watcher_runs BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
+CREATE TRIGGER immutable_watcher_runs_delete BEFORE DELETE ON watcher_runs BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER immutable_raw_submissions_update BEFORE UPDATE ON raw_submissions BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER immutable_raw_submissions_delete BEFORE DELETE ON raw_submissions BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER immutable_admitted_reports_update BEFORE UPDATE ON admitted_reports BEGIN SELECT RAISE(ABORT, 'append-only table'); END;

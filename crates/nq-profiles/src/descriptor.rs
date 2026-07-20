@@ -81,7 +81,7 @@ pub struct CardinalityLimits {
 pub struct FreshnessPolicy {
     /// Maximum age at which an observation may be relied upon.
     pub reliance_seconds: u64,
-    /// Maximum skew when a detector explicitly composes witnesses.
+    /// Maximum skew when a detector explicitly composes watchers.
     pub alignment_seconds: u64,
 }
 

@@ -1,4 +1,4 @@
-//! Explicit, drift-detecting witness admission locks.
+//! Explicit, drift-detecting watcher admission locks.
 
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
-use crate::config::WitnessConfig;
+use crate::config::WatcherConfig;
 use crate::identity::{ExecutionIdentity, IdentityError};
 
 /// Exact admission document schema.
@@ -22,7 +22,7 @@ pub const ADMISSION_SCHEMA: &str = "nq.admission_lock.v1";
 /// Hard upper bound for one canonical admission document.
 const MAX_ADMISSION_LOCK_BYTES: u64 = 1_048_576;
 
-/// Machine-produced active witness binding.
+/// Machine-produced active watcher binding.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AdmissionLock {
@@ -198,17 +198,17 @@ impl AdmissionManager {
     /// executable/interpreter chain cannot be identified safely.
     pub fn candidate(
         &self,
-        witness: &WitnessConfig,
+        watcher: &WatcherConfig,
         evidence: CandidateEvidence,
     ) -> Result<AdmissionLock, AdmissionError> {
-        let execution = ExecutionIdentity::resolve_command(&witness.command)?;
-        Self::candidate_with_execution(witness, evidence, execution)
+        let execution = ExecutionIdentity::resolve_command(&watcher.command)?;
+        Self::candidate_with_execution(watcher, evidence, execution)
     }
 
     /// Build a candidate from the exact descriptor-bound identity used by the
     /// dry collection.
     pub(crate) fn candidate_with_execution(
-        witness: &WitnessConfig,
+        watcher: &WatcherConfig,
         evidence: CandidateEvidence,
         execution: ExecutionIdentity,
     ) -> Result<AdmissionLock, AdmissionError> {
@@ -224,18 +224,18 @@ impl AdmissionManager {
         }
         let granted_capabilities = evidence
             .declared_capabilities
-            .intersection(&witness.capability_ceiling)
+            .intersection(&watcher.capability_ceiling)
             .cloned()
             .collect();
         Ok(AdmissionLock {
             schema: ADMISSION_SCHEMA.into(),
             admission_id: uuid::Uuid::new_v4().to_string(),
-            instance_id: witness.instance_id.clone(),
-            config_digest: config_digest(witness)?,
+            instance_id: watcher.instance_id.clone(),
+            config_digest: config_digest(watcher)?,
             execution,
             profile: AdmittedProfile {
-                id: witness.profile.id.clone(),
-                version: witness.profile.version,
+                id: watcher.profile.id.clone(),
+                version: watcher.profile.version,
                 digest: evidence.profile_digest,
             },
             protocol_version: evidence.protocol_version,
@@ -355,14 +355,14 @@ impl AdmissionManager {
     /// diagnostics when the active binding has drifted.
     pub fn verify(
         &self,
-        witness: &WitnessConfig,
+        watcher: &WatcherConfig,
         lock: &AdmissionLock,
         compiled_profile_digest: &str,
         protocol_version: &str,
     ) -> Result<AdmissionVerification, AdmissionError> {
-        let current_execution = ExecutionIdentity::resolve_command(&witness.command)?;
+        let current_execution = ExecutionIdentity::resolve_command(&watcher.command)?;
         (*self).verify_opened_execution(
-            witness,
+            watcher,
             lock,
             compiled_profile_digest,
             protocol_version,
@@ -374,39 +374,39 @@ impl AdmissionManager {
     /// descriptors that will be used for this launch.
     pub(crate) fn verify_opened_execution(
         self,
-        witness: &WitnessConfig,
+        watcher: &WatcherConfig,
         lock: &AdmissionLock,
         compiled_profile_digest: &str,
         protocol_version: &str,
         current_execution: &ExecutionIdentity,
     ) -> Result<AdmissionVerification, AdmissionError> {
         lock.validate_shape()?;
-        if lock.instance_id != witness.instance_id || lock.config_digest != config_digest(witness)?
+        if lock.instance_id != watcher.instance_id || lock.config_digest != config_digest(watcher)?
         {
             return Err(AdmissionError::ConfigDrift {
-                instance_id: witness.instance_id.clone(),
+                instance_id: watcher.instance_id.clone(),
             });
         }
-        if lock.profile.id != witness.profile.id
-            || lock.profile.version != witness.profile.version
+        if lock.profile.id != watcher.profile.id
+            || lock.profile.version != watcher.profile.version
             || lock.profile.digest != compiled_profile_digest
         {
             return Err(AdmissionError::ProfileDrift {
-                instance_id: witness.instance_id.clone(),
+                instance_id: watcher.instance_id.clone(),
                 message: "configured or compiled profile identity differs".into(),
             });
         }
         if lock.protocol_version != protocol_version {
             return Err(AdmissionError::ProtocolDrift {
-                instance_id: witness.instance_id.clone(),
+                instance_id: watcher.instance_id.clone(),
             });
         }
         if !lock
             .granted_capabilities
-            .is_subset(&witness.capability_ceiling)
+            .is_subset(&watcher.capability_ceiling)
         {
             return Err(AdmissionError::Malformed {
-                instance_id: witness.instance_id.clone(),
+                instance_id: watcher.instance_id.clone(),
                 message: "granted capability escapes configured ceiling".into(),
             });
         }
@@ -414,7 +414,7 @@ impl AdmissionManager {
         let current_corpus =
             nq_protocol::verify_embedded_conformance_corpus().map_err(|error| {
                 AdmissionError::ConformanceDrift {
-                    instance_id: witness.instance_id.clone(),
+                    instance_id: watcher.instance_id.clone(),
                     message: format!("embedded corpus no longer verifies: {error}"),
                 }
             })?;
@@ -425,7 +425,7 @@ impl AdmissionManager {
             || lock.protocol_version != current_corpus.version.protocol_version
         {
             return Err(AdmissionError::ConformanceDrift {
-                instance_id: witness.instance_id.clone(),
+                instance_id: watcher.instance_id.clone(),
                 message: "embedded verifier version, corpus digest, fixture count, or protocol identity differs"
                     .into(),
             });
@@ -485,8 +485,8 @@ impl AdmissionLock {
     }
 }
 
-fn config_digest(witness: &WitnessConfig) -> Result<String, AdmissionError> {
-    canonical_json(witness).map(|bytes| digest_bytes(&bytes))
+fn config_digest(watcher: &WatcherConfig) -> Result<String, AdmissionError> {
+    canonical_json(watcher).map(|bytes| digest_bytes(&bytes))
 }
 
 fn canonical_json<T: Serialize>(value: &T) -> Result<Vec<u8>, AdmissionError> {
@@ -577,8 +577,8 @@ mod tests {
 
     use super::*;
 
-    fn witness(path: PathBuf, workdir: PathBuf) -> WitnessConfig {
-        WitnessConfig {
+    fn watcher(path: PathBuf, workdir: PathBuf) -> WatcherConfig {
+        WatcherConfig {
             instance_id: "fixture.primary".into(),
             command: CommandConfig {
                 executable: path,
@@ -609,11 +609,11 @@ mod tests {
         }
     }
 
-    fn candidate(manager: AdmissionManager, witness: &WitnessConfig) -> AdmissionLock {
+    fn candidate(manager: AdmissionManager, watcher: &WatcherConfig) -> AdmissionLock {
         let corpus = nq_protocol::verify_embedded_conformance_corpus().unwrap();
         manager
             .candidate(
-                witness,
+                watcher,
                 CandidateEvidence {
                     profile_digest: format!("sha256:{}", "a".repeat(64)),
                     protocol_version: nq_protocol::HELPER_PROTOCOL_VERSION.into(),
@@ -640,8 +640,8 @@ mod tests {
         let helper = dir.path().join("helper");
         fs::write(&helper, b"executable").unwrap();
         fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
-        let witness = witness(helper, dir.path().to_path_buf());
-        let lock = candidate(AdmissionManager, &witness);
+        let watcher = watcher(helper, dir.path().to_path_buf());
+        let lock = candidate(AdmissionManager, &watcher);
         assert_eq!(
             lock.granted_capabilities,
             BTreeSet::from(["fixture.read".into()])
@@ -661,16 +661,16 @@ mod tests {
         let helper = dir.path().join("helper");
         fs::write(&helper, b"executable").unwrap();
         fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
-        let witness = witness(helper, dir.path().to_path_buf());
+        let watcher = watcher(helper, dir.path().to_path_buf());
         let manager = AdmissionManager;
-        let lock = candidate(manager, &witness);
+        let lock = candidate(manager, &watcher);
         let admissions = dir.path().join("admissions");
         let path = manager.activate(&admissions, &lock).unwrap();
         let loaded = manager.load(&path).unwrap();
         assert_eq!(loaded, lock);
         manager
             .verify(
-                &witness,
+                &watcher,
                 &loaded,
                 &format!("sha256:{}", "a".repeat(64)),
                 nq_protocol::HELPER_PROTOCOL_VERSION,
@@ -708,24 +708,24 @@ mod tests {
         let helper = dir.path().join("helper");
         fs::write(&helper, b"executable").unwrap();
         fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
-        let mut witness = witness(helper.clone(), dir.path().to_path_buf());
+        let mut watcher = watcher(helper.clone(), dir.path().to_path_buf());
         let manager = AdmissionManager;
-        let lock = candidate(manager, &witness);
-        witness.vantage.kind = "changed".into();
+        let lock = candidate(manager, &watcher);
+        watcher.vantage.kind = "changed".into();
         assert!(matches!(
             manager.verify(
-                &witness,
+                &watcher,
                 &lock,
                 &format!("sha256:{}", "a".repeat(64)),
                 nq_protocol::HELPER_PROTOCOL_VERSION
             ),
             Err(AdmissionError::ConfigDrift { .. })
         ));
-        witness.vantage.kind = "local".into();
+        watcher.vantage.kind = "local".into();
         fs::write(helper, b"different").unwrap();
         assert!(matches!(
             manager.verify(
-                &witness,
+                &watcher,
                 &lock,
                 &format!("sha256:{}", "a".repeat(64)),
                 nq_protocol::HELPER_PROTOCOL_VERSION
@@ -743,15 +743,15 @@ mod tests {
         fs::write(&replacement, b"different executable").unwrap();
         fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
         fs::set_permissions(&replacement, fs::Permissions::from_mode(0o755)).unwrap();
-        let witness = witness(helper, dir.path().to_path_buf());
+        let watcher = watcher(helper, dir.path().to_path_buf());
         let manager = AdmissionManager;
-        let mut lock = candidate(manager, &witness);
-        let mut redirected = witness.command.clone();
+        let mut lock = candidate(manager, &watcher);
+        let mut redirected = watcher.command.clone();
         redirected.executable = replacement;
         lock.execution = ExecutionIdentity::resolve_command(&redirected).unwrap();
         assert!(matches!(
             manager.verify(
-                &witness,
+                &watcher,
                 &lock,
                 &format!("sha256:{}", "a".repeat(64)),
                 nq_protocol::HELPER_PROTOCOL_VERSION
@@ -766,13 +766,13 @@ mod tests {
         let helper = dir.path().join("helper");
         fs::write(&helper, b"executable").unwrap();
         fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
-        let witness = witness(helper, dir.path().to_path_buf());
+        let watcher = watcher(helper, dir.path().to_path_buf());
         let manager = AdmissionManager;
-        let mut lock = candidate(manager, &witness);
+        let mut lock = candidate(manager, &watcher);
         lock.conformance.protocol_corpus_digest = format!("sha256:{}", "c".repeat(64));
         assert!(matches!(
             manager.verify(
-                &witness,
+                &watcher,
                 &lock,
                 &format!("sha256:{}", "a".repeat(64)),
                 nq_protocol::HELPER_PROTOCOL_VERSION

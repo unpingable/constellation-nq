@@ -7,7 +7,7 @@ Maintainer: NQ contributors
 Depends: libc6, python3 (>= 3.8), adduser
 Conflicts: nq
 Description: local-first operational evidence service
- NQ-ng supervises bounded witness helpers, admits versioned evidence, stores
+ NQ-ng supervises bounded watcher helpers, admits versioned evidence, stores
  durable local custody records, and exposes a read-only local operator view.
  This package is a developer preview and does not initialize or migrate state
  during installation.

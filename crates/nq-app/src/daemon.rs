@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use nq_core::config::{NqConfig, WitnessConfig};
+use nq_core::config::{NqConfig, WatcherConfig};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tracing::{error, info, warn};
@@ -61,7 +61,7 @@ pub async fn run(options: Nqd) -> Result<()> {
         "independent",
         "unknown",
         "loading_instances",
-        &serde_json::json!({"instance_count": config.witnesses.len()}),
+        &serde_json::json!({"instance_count": config.watchers.len()}),
     )?;
     drop(store);
 
@@ -94,7 +94,7 @@ pub async fn run(options: Nqd) -> Result<()> {
         "independent",
         "healthy",
         "instances_loaded",
-        &serde_json::json!({"instance_count": config.witnesses.len()}),
+        &serde_json::json!({"instance_count": config.watchers.len()}),
     )?;
     drop(ready_store);
     let mut services = JoinSet::new();
@@ -112,18 +112,18 @@ pub async fn run(options: Nqd) -> Result<()> {
     }
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    for witness in config.witnesses.clone() {
+    for watcher in config.watchers.clone() {
         let config = config.clone();
         let shutdown = shutdown_rx.clone();
-        services.spawn(async move { schedule_instance(config, witness, shutdown).await });
+        services.spawn(async move { schedule_instance(config, watcher, shutdown).await });
     }
-    for witness in config.witnesses.clone() {
+    for watcher in config.watchers.clone() {
         let config = config.clone();
         let shutdown = shutdown_rx.clone();
-        services.spawn(async move { sweep_freshness(config, witness, shutdown).await });
+        services.spawn(async move { sweep_freshness(config, watcher, shutdown).await });
     }
 
-    info!(instances = config.witnesses.len(), "nqd started");
+    info!(instances = config.watchers.len(), "nqd started");
     tokio::select! {
         signal = tokio::signal::ctrl_c() => {
             signal.context("cannot listen for shutdown signal")?;
@@ -155,9 +155,9 @@ pub async fn run(options: Nqd) -> Result<()> {
 
 async fn collect_once(config: NqConfig) -> Result<()> {
     let mut tasks = JoinSet::new();
-    for witness in config.witnesses.clone() {
+    for watcher in config.watchers.clone() {
         let config = config.clone();
-        tasks.spawn(async move { collect_one(config, witness).await });
+        tasks.spawn(async move { collect_one(config, watcher).await });
     }
     let mut failures = 0;
     while let Some(result) = tasks.join_next().await {
@@ -185,10 +185,10 @@ async fn collect_once(config: NqConfig) -> Result<()> {
 
 async fn schedule_instance(
     config: NqConfig,
-    witness: WitnessConfig,
+    watcher: WatcherConfig,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
-    let jitter_cap = witness.schedule.jitter_seconds;
+    let jitter_cap = watcher.schedule.jitter_seconds;
     let jitter = if jitter_cap == 0 {
         0
     } else {
@@ -206,43 +206,43 @@ async fn schedule_instance(
 
     let mut engine =
         tokio::task::spawn_blocking(move || nq_core::CollectionEngine::open(&config)).await??;
-    let mut backoff = witness.schedule.retry_backoff_seconds;
+    let mut backoff = watcher.schedule.retry_backoff_seconds;
     loop {
         if *shutdown.borrow() {
             return Ok(());
         }
-        let collection_witness = witness.clone();
+        let collection_watcher = watcher.clone();
         let (returned_engine, outcome) = tokio::task::spawn_blocking(move || {
-            let outcome = engine.collect(&collection_witness);
+            let outcome = engine.collect(&collection_watcher);
             (engine, outcome)
         })
         .await?;
         engine = returned_engine;
         let delay = match outcome {
             Ok(outcome) if outcome.is_success() => {
-                backoff = witness.schedule.retry_backoff_seconds;
-                info!(instance = %witness.instance_id, "collection admitted and evaluated");
-                witness.schedule.interval_seconds
+                backoff = watcher.schedule.retry_backoff_seconds;
+                info!(instance = %watcher.instance_id, "collection admitted and evaluated");
+                watcher.schedule.interval_seconds
             }
             Ok(outcome) => {
-                warn!(instance = %witness.instance_id, ?outcome, "collection retained without admitted report");
+                warn!(instance = %watcher.instance_id, ?outcome, "collection retained without admitted report");
                 let delay = backoff.max(1);
                 backoff = backoff
                     .saturating_mul(2)
-                    .min(witness.schedule.max_retry_backoff_seconds.max(1));
+                    .min(watcher.schedule.max_retry_backoff_seconds.max(1));
                 delay
             }
             Err(error) => {
-                error!(instance = %witness.instance_id, %error, "collection engine error");
+                error!(instance = %watcher.instance_id, %error, "collection engine error");
                 let delay = backoff.max(1);
                 backoff = backoff
                     .saturating_mul(2)
-                    .min(witness.schedule.max_retry_backoff_seconds.max(1));
+                    .min(watcher.schedule.max_retry_backoff_seconds.max(1));
                 delay
             }
         };
         let (returned_engine, shutdown_requested) =
-            wait_with_binding_watch(engine, &witness, Duration::from_secs(delay), &mut shutdown)
+            wait_with_binding_watch(engine, &watcher, Duration::from_secs(delay), &mut shutdown)
                 .await?;
         engine = returned_engine;
         if shutdown_requested {
@@ -253,7 +253,7 @@ async fn schedule_instance(
 
 async fn wait_with_binding_watch(
     mut engine: nq_core::CollectionEngine,
-    witness: &WitnessConfig,
+    watcher: &WatcherConfig,
     delay: Duration,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<(nq_core::CollectionEngine, bool)> {
@@ -271,16 +271,16 @@ async fn wait_with_binding_watch(
                 return Ok((engine, true));
             }
         }
-        let check_witness = witness.clone();
+        let check_watcher = watcher.clone();
         let (returned_engine, quiesced) = tokio::task::spawn_blocking(move || {
-            let result = engine.quiesce_if_binding_changed(&check_witness);
+            let result = engine.quiesce_if_binding_changed(&check_watcher);
             (engine, result)
         })
         .await?;
         engine = returned_engine;
         if quiesced? {
             warn!(
-                instance = %witness.instance_id,
+                instance = %watcher.instance_id,
                 "persistent helper quiesced after admission binding changed"
             );
         }
@@ -289,21 +289,21 @@ async fn wait_with_binding_watch(
 
 async fn collect_one(
     config: NqConfig,
-    witness: WitnessConfig,
+    watcher: WatcherConfig,
 ) -> Result<nq_core::CollectionOutcome> {
     Ok(tokio::task::spawn_blocking(move || {
         let mut engine = nq_core::CollectionEngine::open(&config)?;
-        engine.collect(&witness)
+        engine.collect(&watcher)
     })
     .await??)
 }
 
 async fn sweep_freshness(
     config: NqConfig,
-    witness: WitnessConfig,
+    watcher: WatcherConfig,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
-    let profile = nq_profiles::resolve_profile(&witness.profile.id, witness.profile.version)
+    let profile = nq_profiles::resolve_profile(&watcher.profile.id, watcher.profile.version)
         .context("freshness sweep profile is not compiled")?;
     let reliance = profile.descriptor().freshness.reliance_seconds;
     let interval = (reliance / 2).clamp(1, 60);
@@ -316,19 +316,19 @@ async fn sweep_freshness(
             }
         }
         let sweep_config = config.clone();
-        let sweep_witness = witness.clone();
+        let sweep_watcher = watcher.clone();
         let result = tokio::task::spawn_blocking(move || {
             let mut engine = nq_core::CollectionEngine::open(&sweep_config)?;
-            engine.freshness_sweep(&sweep_witness)
+            engine.freshness_sweep(&sweep_watcher)
         })
         .await?;
         match result {
             Ok(count) => tracing::debug!(
-                instance = %witness.instance_id,
+                instance = %watcher.instance_id,
                 evaluations = count,
                 "freshness sweep committed"
             ),
-            Err(error) => warn!(instance = %witness.instance_id, %error, "freshness sweep failed"),
+            Err(error) => warn!(instance = %watcher.instance_id, %error, "freshness sweep failed"),
         }
     }
 }

@@ -48,7 +48,7 @@ use crate::identity::VerifiedLaunch;
 /// Environment variable containing the NQ-owned Unix socket pathname.
 pub const NQ_HELPER_SOCKET_ENV: &str = "NQ_HELPER_SOCKET";
 
-/// Environment variable containing the NQ-owned witness instance identifier.
+/// Environment variable containing the NQ-owned watcher instance identifier.
 pub const NQ_HELPER_INSTANCE_ENV: &str = "NQ_HELPER_INSTANCE_ID";
 
 /// Environment variable through which the supervisor declares the UID that owns

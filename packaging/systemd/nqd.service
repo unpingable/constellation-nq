@@ -47,7 +47,7 @@ OOMPolicy=stop
 # account, transfer exact socket custody, and terminate a distinct-UID process
 # group. The child launcher clears every capability before helper exec.
 # In particular,
-# do not add PrivateDevices=yes: hardware witnesses may eventually need
+# do not add PrivateDevices=yes: hardware watchers may eventually need
 # explicitly managed device access.
 NoNewPrivileges=yes
 PrivateTmp=yes

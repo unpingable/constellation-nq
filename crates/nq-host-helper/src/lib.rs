@@ -1,4 +1,4 @@
-//! First-party, one-shot stdio witness for the compiled `nq.host/v1` profile.
+//! First-party, one-shot stdio watcher for the compiled `nq.host/v1` profile.
 //!
 //! The helper performs no scheduling, admission, evaluation, notification, or
 //! remediation. It accepts one bounded protocol request, observes only the

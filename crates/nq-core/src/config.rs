@@ -17,11 +17,11 @@ pub const CONFIG_SCHEMA: &str = "nq.config.v1";
 /// Maximum accepted UTF-8 configuration document size.
 pub const MAX_CONFIG_BYTES: usize = 1_048_576;
 
-/// Maximum independently scheduled witness instances in one daemon.
+/// Maximum independently scheduled watcher instances in one daemon.
 ///
 /// Together with the per-launch descriptor cap, this keeps the service's
 /// worst-case retained helper descriptors below the packaged `LimitNOFILE`.
-pub const MAX_WITNESSES: usize = 32;
+pub const MAX_WATCHERS: usize = 32;
 
 /// One strictly parsed configuration and the exact source bytes that produced it.
 ///
@@ -66,15 +66,15 @@ pub struct NqConfig {
     /// Root for NQ-owned private persistent-helper socket directories.
     #[serde(default = "default_helper_runtime_dir")]
     pub helper_runtime_dir: PathBuf,
-    /// Independently scheduled witness instances.
+    /// Independently scheduled watcher instances.
     #[serde(default)]
-    pub witnesses: Vec<WitnessConfig>,
+    pub watchers: Vec<WatcherConfig>,
 }
 
-/// NQ-owned witness deployment binding.
+/// NQ-owned watcher deployment binding.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WitnessConfig {
+pub struct WatcherConfig {
     /// Stable, operator-chosen instance identifier.
     pub instance_id: String,
     /// Fixed executable and argument vector.
@@ -372,19 +372,19 @@ impl NqConfig {
         require_absolute("socket_path", &self.socket_path)?;
         require_absolute("admissions_dir", &self.admissions_dir)?;
         require_absolute("helper_runtime_dir", &self.helper_runtime_dir)?;
-        if self.witnesses.len() > MAX_WITNESSES {
+        if self.watchers.len() > MAX_WATCHERS {
             return Err(invalid(
-                "witnesses",
-                format!("at most {MAX_WITNESSES} witness instances are accepted"),
+                "watchers",
+                format!("at most {MAX_WATCHERS} watcher instances are accepted"),
             ));
         }
 
         let mut ids = HashSet::new();
-        for (index, witness) in self.witnesses.iter().enumerate() {
-            let base = format!("witnesses[{index}]");
-            if witness.instance_id.is_empty()
-                || witness.instance_id.len() > 128
-                || !witness
+        for (index, watcher) in self.watchers.iter().enumerate() {
+            let base = format!("watchers[{index}]");
+            if watcher.instance_id.is_empty()
+                || watcher.instance_id.len() > 128
+                || !watcher
                     .instance_id
                     .chars()
                     .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
@@ -394,7 +394,7 @@ impl NqConfig {
                     "must be 1..=128 ASCII identifier characters",
                 ));
             }
-            if !ids.insert(&witness.instance_id) {
+            if !ids.insert(&watcher.instance_id) {
                 return Err(invalid(
                     format!("{base}.instance_id"),
                     "duplicate instance identifier",
@@ -402,15 +402,15 @@ impl NqConfig {
             }
             require_absolute(
                 format!("{base}.command.executable"),
-                &witness.command.executable,
+                &watcher.command.executable,
             )?;
             require_absolute(
                 format!("{base}.command.working_directory"),
-                &witness.command.working_directory,
+                &watcher.command.working_directory,
             )?;
             nq_helper_sandbox::resolve_account(
-                &witness.command.execution_account,
-                witness.command.allow_same_identity_in_debug,
+                &watcher.command.execution_account,
+                watcher.command.allow_same_identity_in_debug,
             )
             .map_err(|error| {
                 invalid(
@@ -418,8 +418,8 @@ impl NqConfig {
                     error.to_string(),
                 )
             })?;
-            if witness.command.args.len() > 128
-                || witness
+            if watcher.command.args.len() > 128
+                || watcher
                     .command
                     .args
                     .iter()
@@ -430,8 +430,8 @@ impl NqConfig {
                     "at most 128 arguments of at most 4096 bytes are accepted",
                 ));
             }
-            if witness.command.env.len() > 64
-                || witness
+            if watcher.command.env.len() > 64
+                || watcher
                     .command
                     .env
                     .values()
@@ -442,19 +442,19 @@ impl NqConfig {
                     "at most 64 variables with values of at most 4096 bytes are accepted",
                 ));
             }
-            if witness.profile.id.is_empty() || witness.profile.version == 0 {
+            if watcher.profile.id.is_empty() || watcher.profile.version == 0 {
                 return Err(invalid(
                     format!("{base}.profile"),
                     "invalid profile identity",
                 ));
             }
-            validate_binding_token(&format!("{base}.subject"), &witness.subject)?;
-            validate_binding_token(&format!("{base}.scope.kind"), &witness.scope.kind)?;
-            validate_binding_token(&format!("{base}.vantage.kind"), &witness.vantage.kind)?;
-            let scope_bytes = serde_json::to_vec(&witness.scope.value)
+            validate_binding_token(&format!("{base}.subject"), &watcher.subject)?;
+            validate_binding_token(&format!("{base}.scope.kind"), &watcher.scope.kind)?;
+            validate_binding_token(&format!("{base}.vantage.kind"), &watcher.vantage.kind)?;
+            let scope_bytes = serde_json::to_vec(&watcher.scope.value)
                 .map_err(|error| invalid(format!("{base}.scope.value"), error.to_string()))?
                 .len();
-            let vantage_bytes = serde_json::to_vec(&witness.vantage.value)
+            let vantage_bytes = serde_json::to_vec(&watcher.vantage.value)
                 .map_err(|error| invalid(format!("{base}.vantage.value"), error.to_string()))?
                 .len();
             if scope_bytes > 65_536 || vantage_bytes > 65_536 {
@@ -463,81 +463,81 @@ impl NqConfig {
                     "binding JSON exceeds 65536 bytes",
                 ));
             }
-            if witness.schedule.interval_seconds == 0 {
+            if watcher.schedule.interval_seconds == 0 {
                 return Err(invalid(
                     format!("{base}.schedule.interval_seconds"),
                     "must be non-zero",
                 ));
             }
-            if witness.schedule.interval_seconds > 31_536_000
-                || witness.schedule.jitter_seconds > witness.schedule.interval_seconds
+            if watcher.schedule.interval_seconds > 31_536_000
+                || watcher.schedule.jitter_seconds > watcher.schedule.interval_seconds
             {
                 return Err(invalid(
                     format!("{base}.schedule"),
                     "interval is capped at one year and jitter may not exceed interval",
                 ));
             }
-            if !(10..=3_600_000).contains(&witness.schedule.deadline_ms) {
+            if !(10..=3_600_000).contains(&watcher.schedule.deadline_ms) {
                 return Err(invalid(
                     format!("{base}.schedule.deadline_ms"),
                     "must be between 10 and 3600000",
                 ));
             }
-            if witness.schedule.retry_backoff_seconds > witness.schedule.max_retry_backoff_seconds {
+            if watcher.schedule.retry_backoff_seconds > watcher.schedule.max_retry_backoff_seconds {
                 return Err(invalid(
                     format!("{base}.schedule"),
                     "initial retry backoff exceeds maximum",
                 ));
             }
-            if !(256..=16_777_216).contains(&witness.resources.max_response_bytes) {
+            if !(256..=16_777_216).contains(&watcher.resources.max_response_bytes) {
                 return Err(invalid(
                     format!("{base}.resources.max_response_bytes"),
                     "must be between 256 and 16777216",
                 ));
             }
-            if witness.resources.max_stderr_bytes > 1_048_576 {
+            if watcher.resources.max_stderr_bytes > 1_048_576 {
                 return Err(invalid(
                     format!("{base}.resources.max_stderr_bytes"),
                     "must be no greater than 1048576",
                 ));
             }
-            if !(1..=100_000).contains(&witness.resources.max_observations) {
+            if !(1..=100_000).contains(&watcher.resources.max_observations) {
                 return Err(invalid(
                     format!("{base}.resources.max_observations"),
                     "must be between 1 and 100000",
                 ));
             }
-            if !(67_108_864..=4_294_967_296).contains(&witness.resources.max_address_space_bytes) {
+            if !(67_108_864..=4_294_967_296).contains(&watcher.resources.max_address_space_bytes) {
                 return Err(invalid(
                     format!("{base}.resources.max_address_space_bytes"),
                     "must be between 67108864 and 4294967296",
                 ));
             }
-            if !(1..=3_600).contains(&witness.resources.max_cpu_seconds) {
+            if !(1..=3_600).contains(&watcher.resources.max_cpu_seconds) {
                 return Err(invalid(
                     format!("{base}.resources.max_cpu_seconds"),
                     "must be between 1 and 3600",
                 ));
             }
-            if !(1..=256).contains(&witness.resources.max_processes) {
+            if !(1..=256).contains(&watcher.resources.max_processes) {
                 return Err(invalid(
                     format!("{base}.resources.max_processes"),
                     "must be between 1 and 256",
                 ));
             }
-            if !(64..=1_024).contains(&witness.resources.max_open_files) {
+            if !(64..=1_024).contains(&watcher.resources.max_open_files) {
                 return Err(invalid(
                     format!("{base}.resources.max_open_files"),
                     "must be between 64 and 1024",
                 ));
             }
-            if witness.resources.max_file_bytes > 1_073_741_824 {
+            if watcher.resources.max_file_bytes > 1_073_741_824 {
                 return Err(invalid(
                     format!("{base}.resources.max_file_bytes"),
                     "must be no greater than 1073741824",
                 ));
             }
-            for key in witness.command.env.keys() {
+            for key in watcher.command.env.keys() {
                 if !valid_env_key(key)
                     || key.starts_with("LD_")
                     || key.starts_with("DYLD_")
@@ -575,13 +575,13 @@ impl NqConfig {
                     ));
                 }
             }
-            if witness.capability_ceiling.len() > 256 {
+            if watcher.capability_ceiling.len() > 256 {
                 return Err(invalid(
                     format!("{base}.capability_ceiling"),
                     "at most 256 capabilities are accepted",
                 ));
             }
-            for capability in &witness.capability_ceiling {
+            for capability in &watcher.capability_ceiling {
                 validate_binding_token(&format!("{base}.capability_ceiling"), capability)?;
             }
         }
@@ -590,10 +590,10 @@ impl NqConfig {
 
     /// Resolve one configured instance.
     #[must_use]
-    pub fn witness(&self, instance_id: &str) -> Option<&WitnessConfig> {
-        self.witnesses
+    pub fn watcher(&self, instance_id: &str) -> Option<&WatcherConfig> {
+        self.watchers
             .iter()
-            .find(|witness| witness.instance_id == instance_id)
+            .find(|watcher| watcher.instance_id == instance_id)
     }
 }
 
@@ -709,21 +709,21 @@ schema = "nq.config.v1"
 database_path = "/var/lib/nq/nq.db"
 admissions_dir = "/var/lib/nq/admissions"
 
-[[witnesses]]
+[[watchers]]
 instance_id = "host.primary"
 subject = "host:local"
 scope = {{ kind = "host", value = {{ id = "local" }} }}
 vantage = {{ kind = "local", value = {{}} }}
 capability_ceiling = ["host.read"]
 
-[witnesses.command]
+[watchers.command]
 executable = "/usr/lib/nq/nq-host-helper"
 args = ["--stdio"]
 execution_account = "{}"
 allow_same_identity_in_debug = true
 working_directory = "/var/empty"
 
-[witnesses.profile]
+[watchers.profile]
 id = "nq.host"
 version = 1
 "#,
@@ -734,8 +734,8 @@ version = 1
     #[test]
     fn parses_minimal_strict_config() {
         let config = NqConfig::from_toml(&minimal()).expect("valid config");
-        assert_eq!(config.witnesses[0].schedule.deadline_ms, 30_000);
-        assert_eq!(config.witnesses[0].carrier, Carrier::Stdio);
+        assert_eq!(config.watchers[0].schedule.deadline_ms, 30_000);
+        assert_eq!(config.watchers[0].carrier, Carrier::Stdio);
     }
 
     #[test]
@@ -752,34 +752,34 @@ version = 1
         let text = format!(
             "{}\n{}",
             minimal(),
-            minimal().split("[[witnesses]]").nth(1).unwrap()
+            minimal().split("[[watchers]]").nth(1).unwrap()
         );
         assert!(NqConfig::from_toml(&text).is_err());
     }
 
     #[test]
-    fn rejects_more_than_the_proven_witness_descriptor_budget() {
+    fn rejects_more_than_the_proven_watcher_descriptor_budget() {
         let mut config = NqConfig::from_toml(&minimal()).expect("valid config");
-        let template = config.witnesses[0].clone();
-        config.witnesses = (0..=MAX_WITNESSES)
+        let template = config.watchers[0].clone();
+        config.watchers = (0..=MAX_WATCHERS)
             .map(|index| {
-                let mut witness = template.clone();
-                witness.instance_id = format!("host.{index}");
-                witness
+                let mut watcher = template.clone();
+                watcher.instance_id = format!("host.{index}");
+                watcher
             })
             .collect();
 
         assert!(matches!(
             config.validate(),
             Err(ConfigError::Invalid { path, message })
-                if path == "witnesses" && message.contains("at most 32")
+                if path == "watchers" && message.contains("at most 32")
         ));
     }
 
     #[test]
     fn rejects_os_resource_limits_outside_the_compiled_ceiling() {
         let mut config = NqConfig::from_toml(&minimal()).expect("valid config");
-        config.witnesses[0].resources.max_address_space_bytes = 67_108_863;
+        config.watchers[0].resources.max_address_space_bytes = 67_108_863;
         assert!(matches!(
             config.validate(),
             Err(ConfigError::Invalid { path, .. })
@@ -787,7 +787,7 @@ version = 1
         ));
 
         let mut config = NqConfig::from_toml(&minimal()).expect("valid config");
-        config.witnesses[0].resources.max_cpu_seconds = 3_601;
+        config.watchers[0].resources.max_cpu_seconds = 3_601;
         assert!(matches!(
             config.validate(),
             Err(ConfigError::Invalid { path, .. })
@@ -795,7 +795,7 @@ version = 1
         ));
 
         let mut config = NqConfig::from_toml(&minimal()).expect("valid config");
-        config.witnesses[0].resources.max_processes = 257;
+        config.watchers[0].resources.max_processes = 257;
         assert!(matches!(
             config.validate(),
             Err(ConfigError::Invalid { path, .. })
@@ -803,7 +803,7 @@ version = 1
         ));
 
         let mut config = NqConfig::from_toml(&minimal()).expect("valid config");
-        config.witnesses[0].resources.max_open_files = 63;
+        config.watchers[0].resources.max_open_files = 63;
         assert!(matches!(
             config.validate(),
             Err(ConfigError::Invalid { path, .. })
@@ -811,7 +811,7 @@ version = 1
         ));
 
         let mut config = NqConfig::from_toml(&minimal()).expect("valid config");
-        config.witnesses[0].resources.max_file_bytes = 1_073_741_825;
+        config.watchers[0].resources.max_file_bytes = 1_073_741_825;
         assert!(matches!(
             config.validate(),
             Err(ConfigError::Invalid { path, .. })
@@ -829,7 +829,7 @@ version = 1
             let text = minimal().replace(
                 "working_directory = \"/var/empty\"",
                 &format!(
-                    "working_directory = \"/var/empty\"\n[witnesses.command.env]\n{key} = \"{value}\""
+                    "working_directory = \"/var/empty\"\n[watchers.command.env]\n{key} = \"{value}\""
                 ),
             );
             assert!(NqConfig::from_toml(&text).is_err());

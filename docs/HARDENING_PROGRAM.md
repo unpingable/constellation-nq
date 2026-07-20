@@ -223,7 +223,7 @@ admission_context = {
   report→submission→run→admission, and execution identity already includes the helper
   root / interpreter+argument chain / account / cwd
   (`nq-helper-sandbox/src/identity.rs:59-94`). So the beta work is **not** a new
-  context column; it is: (a) close the nullable seam — `witness_runs.admission_id` is
+  context column; it is: (a) close the nullable seam — `watcher_runs.admission_id` is
   nullable (`schema.sql:80`) exactly where the law needs it mandatory for
   admitted-report-producing runs; (b) add the *new* semantic-identity fields (rule-IR
   digest, evaluator digest, detector semantic id — §3A, which don't exist yet); (c)
@@ -483,7 +483,7 @@ Reconciled by amendment `f4e2585`:
   config identity) live in the **`admission_records`** context object; the report
   binds to it via an explicit `admission_context_id`/digest, not several nullable
   joins.
-- `witness_runs.admission_id` stays nullable (refused/failed runs legitimately
+- `watcher_runs.admission_id` stays nullable (refused/failed runs legitimately
   have none); enforce the conditional law — *a run that produced an admitted
   report has a complete admission context* — via a trigger in the same atomic
   transaction. No global `NOT NULL`.

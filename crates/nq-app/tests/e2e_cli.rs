@@ -49,31 +49,31 @@ socket_path = "{}"
 admissions_dir = "{}"
 helper_runtime_dir = "{}"
 
-[[witnesses]]
+[[watchers]]
 instance_id = "conformance.primary"
 subject = "conformance:fixture-e2e"
 scope = {{ kind = "fixture", value = {{ id = "fixture-e2e", nonce = "e2e-nonce" }} }}
 vantage = {{ kind = "local", value = {{}} }}
 capability_ceiling = []
 
-[witnesses.command]
+[watchers.command]
 executable = "{}"
 execution_account = "{}"
 allow_same_identity_in_debug = true
 working_directory = "{}"
 
-[witnesses.profile]
+[watchers.profile]
 id = "nq.conformance"
 version = 1
 
-[witnesses.schedule]
+[watchers.schedule]
 interval_seconds = 60
 jitter_seconds = 0
 deadline_ms = 5000
 retry_backoff_seconds = 1
 max_retry_backoff_seconds = 10
 
-[witnesses.resources]
+[watchers.resources]
 max_response_bytes = 1048576
 max_stderr_bytes = 65536
 max_observations = 4
@@ -103,7 +103,7 @@ max_file_bytes = 67108864
     let tested_output = run(
         nq,
         &config_path,
-        &["witness", "test", "conformance.primary"],
+        &["watcher", "test", "conformance.primary"],
     );
     if !tested_output.status.success()
         && String::from_utf8_lossy(&tested_output.stderr).contains("spawn_failed")
@@ -120,7 +120,7 @@ max_file_bytes = 67108864
     let admitted = success(run(
         nq,
         &config_path,
-        &["witness", "admit", "conformance.primary"],
+        &["watcher", "admit", "conformance.primary"],
     ));
     assert_eq!(admitted["outcome"], "activated");
     assert!(admissions.join("conformance.primary.json").is_file());
@@ -159,7 +159,7 @@ max_file_bytes = 67108864
     let revoked = success(run(
         nq,
         &config_path,
-        &["witness", "revoke", "conformance.primary"],
+        &["watcher", "revoke", "conformance.primary"],
     ));
     assert_eq!(revoked["outcome"], "revoked");
     assert!(!admissions.join("conformance.primary.json").exists());
@@ -178,7 +178,7 @@ max_file_bytes = 67108864
     let rolled_back = success(run(
         nq,
         &config_path,
-        &["witness", "rollback", "conformance.primary", &retained],
+        &["watcher", "rollback", "conformance.primary", &retained],
     ));
     assert_eq!(rolled_back["outcome"], "rolled_back");
     assert!(admissions.join("conformance.primary.json").is_file());

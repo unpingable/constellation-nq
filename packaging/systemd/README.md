@@ -1,15 +1,15 @@
 # systemd integration
 
 `nqd.service` runs the daemon as the unprivileged `nq` account and the packaged
-helpers as the separate `nq-witness` account. A configured name or numeric UID
+helpers as the separate `nq-helper` account. A configured name or numeric UID
 is resolved during admission, and its exact UID/primary GID is bound into the
 execution identity. Root, the daemon UID, and the daemon primary GID are
 refused.
 
 The default account is shared convenience, not a security boundary between
-witnesses. Every helper using `nq-witness` occupies the same Unix-identity
+watchers. Every helper using `nq-helper` occupies the same Unix-identity
 failure and denial-of-service domain. Deploy separate admitted helper accounts
-where witnesses do not share trust and availability requirements.
+where watchers do not share trust and availability requirements.
 
 The daemon receives only `CAP_SETUID`, `CAP_SETGID`, `CAP_CHOWN`, and
 `CAP_KILL`. They are respectively needed to enter the admitted account, clear
@@ -55,9 +55,9 @@ ACL, and protected real-directory ancestors.
 
 The service is not started by package installation. Before enabling it, an
 operator must create `/etc/nq/nq.toml`, run `nq init`, admit each configured
-witness, and run `nq doctor`. Admission and doctor must use the documented
+watcher, and run `nq doctor`. Admission and doctor must use the documented
 transient maintenance unit because both execute or runtime-verify under the
-separate witness UID; a plain `sudo -u nq` process lacks the four narrowly
+separate watcher UID; a plain `sudo -u nq` process lacks the four narrowly
 bounded parent capabilities. See `docs/OPERATIONS.md`.
 
 ## Why there is no `nqd.socket`

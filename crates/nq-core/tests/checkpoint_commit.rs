@@ -117,14 +117,14 @@ socket_path = "{}"
 admissions_dir = "{}"
 helper_runtime_dir = "{}"
 
-[[witnesses]]
+[[watchers]]
 instance_id = "checkpoint.primary"
 subject = "conformance:checkpoint"
 scope = {{ kind = "fixture", value = {{ id = "checkpoint", nonce = "expected-nonce" }} }}
 vantage = {{ kind = "local", value = {{}} }}
 checkpoint_policy = "advance_after_admission"
 
-[witnesses.command]
+[watchers.command]
 executable = "/usr/bin/python3"
 args = ["{}"]
 env = {{ CHECKPOINT_STATE = "{}", CHECKPOINT_LOG = "{}" }}
@@ -132,18 +132,18 @@ execution_account = "{}"
 allow_same_identity_in_debug = true
 working_directory = "{}"
 
-[witnesses.profile]
+[watchers.profile]
 id = "nq.conformance"
 version = 1
 
-[witnesses.schedule]
+[watchers.schedule]
 interval_seconds = 60
 jitter_seconds = 0
 deadline_ms = 5000
 retry_backoff_seconds = 1
 max_retry_backoff_seconds = 10
 
-[witnesses.resources]
+[watchers.resources]
 max_response_bytes = 1048576
 max_stderr_bytes = 65536
 max_observations = 1
@@ -217,12 +217,12 @@ fn only_committed_admitted_reports_advance_the_next_request_checkpoint() {
     append_profile_descriptor(&mut store, profile).expect("append profile descriptor");
     drop(store);
 
-    let witness = config
-        .witness("checkpoint.primary")
-        .expect("configured witness")
+    let watcher = config
+        .watcher("checkpoint.primary")
+        .expect("configured watcher")
         .clone();
     let mut engine = CollectionEngine::open(&config).expect("open collection engine");
-    let admission = engine.witness_action(&witness, "admit");
+    let admission = engine.watcher_action(&watcher, "admit");
     if admission.as_ref().is_err_and(|error| {
         error.to_string().contains("spawn_failed")
             && fs::read_to_string("/proc/self/attr/current")
@@ -234,28 +234,28 @@ fn only_committed_admitted_reports_advance_the_next_request_checkpoint() {
     admission.expect("dry collection and admission succeed");
 
     assert!(matches!(
-        engine.collect(&witness).expect("first collection"),
+        engine.collect(&watcher).expect("first collection"),
         CollectionOutcome::Admitted { .. }
     ));
     assert!(matches!(
-        engine.collect(&witness).expect("rejected collection"),
+        engine.collect(&watcher).expect("rejected collection"),
         CollectionOutcome::Rejected { ref plane, .. } if plane == "profile"
     ));
     assert!(matches!(
         engine
-            .collect(&witness)
+            .collect(&watcher)
             .expect("second admitted collection"),
         CollectionOutcome::Admitted { .. }
     ));
     assert!(matches!(
-        engine.collect(&witness).expect("third admitted collection"),
+        engine.collect(&watcher).expect("third admitted collection"),
         CollectionOutcome::Admitted { .. }
     ));
     engine
-        .witness_action(&witness, "rotate")
+        .watcher_action(&watcher, "rotate")
         .expect("rotation obtains a new admission binding");
     assert!(matches!(
-        engine.collect(&witness).expect("post-rotation collection"),
+        engine.collect(&watcher).expect("post-rotation collection"),
         CollectionOutcome::Admitted { .. }
     ));
     drop(engine);
@@ -270,7 +270,7 @@ fn only_committed_admitted_reports_advance_the_next_request_checkpoint() {
     let binding_digest = manager.binding_digest(&lock).expect("binding digest");
     let profile_digest = profile.descriptor().digest().expect("profile digest");
     let contract =
-        checkpoint_contract_digest(&witness, &lock, &binding_digest, profile_digest.as_str())
+        checkpoint_contract_digest(&watcher, &lock, &binding_digest, profile_digest.as_str())
             .expect("checkpoint contract");
     let latest: Value = serde_json::from_slice(
         &store

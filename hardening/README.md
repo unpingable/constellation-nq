@@ -34,7 +34,7 @@ The two-phase guest script requires exact Ubuntu 24.04 and exercises:
 - clean install and two empty-state reinstalls;
 - explicit configuration/database initialization;
 - persistent Unix-carrier test, admission, doctor, and collection with
-  provably distinct `nq` and `nq-witness` UIDs and GIDs;
+  provably distinct `nq` and `nq-helper` UIDs and GIDs;
 - explicit enable, start, restart, stop, start, and enabled-service reboot,
   with a newly admitted report required after each start, restart, and reboot;
 - a stopped-state reinstall that must preserve configuration and database

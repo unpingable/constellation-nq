@@ -37,19 +37,19 @@ The packaged defaults are:
 | Private supervised-helper runtime directory | `/run/nq/helpers/` |
 | Loopback console (opt-in; off by default) | `http://127.0.0.1:8787/` when enabled |
 
-`nqd` runs as `nq:nq`; packaged witnesses default to the separate
-`nq-witness:nq-witness` identity. Configuration may name another local account
+`nqd` runs as `nq:nq`; packaged watchers default to the separate
+`nq-helper:nq-helper` identity. Configuration may name another local account
 or decimal UID, but it must resolve through the account database to an exact
 non-root UID and primary GID. Admission records both. A helper may share
 neither the daemon UID nor its primary GID. State and admissions are mode
 `0700`; membership in the `nq` group grants access to the local API socket, not
 direct database access. Only add trusted local readers to that group.
 
-The packaged `nq-witness` account is a convenient default, not per-instance
+The packaged `nq-helper` account is a convenient default, not per-instance
 containment. Helpers that share it also share a Unix identity and therefore a
 failure and denial-of-service domain: a compromised helper can consume that
 identity's resources and may interfere with peer processes permitted to the
-same UID. Use distinct dedicated execution accounts when witnesses have
+same UID. Use distinct dedicated execution accounts when watchers have
 different trust, availability, backend, or privilege boundaries; each account
 is admitted independently.
 
@@ -134,7 +134,7 @@ sudo -u nq nq --config /etc/nq/nq.toml config check
 Review and replace the sample nonce before admission. The sample's helper path
 is `/usr/lib/nq/helpers/nq_conformance_helper.py`; a source-tree execution must
 use a candidate configuration with the helper's absolute source path instead.
-One daemon accepts at most 32 witness instances. Each admitted launch chain is
+One daemon accepts at most 32 watcher instances. Each admitted launch chain is
 also bounded to 32 byte artifacts, 32 MiB per artifact, and 64 MiB in total;
 live sealed launch snapshots share a 512 MiB process ceiling. `config check`,
 admission, and daemon drift verification fail closed when the relevant boundary
@@ -147,7 +147,7 @@ existing incompatible database:
 sudo -u nq nq --config /etc/nq/nq.toml init
 ```
 
-With the sample witness configured, `doctor` is expected to report a missing
+With the sample watcher configured, `doctor` is expected to report a missing
 admission until the next section is complete. That is a useful failed state,
 not a reason to create a lock by hand.
 
@@ -159,15 +159,15 @@ sudo -u nq nq --config /etc/nq/nq.toml init \
   --legacy-manifest-digest sha256:LOWERCASE_64_HEX_DIGEST
 ```
 
-## Test and admit a witness
+## Test and admit a watcher
 
 Test performs a bounded dry exchange but creates no admission state. Admit
 runs the same bounded exchange, records admission history, and commits an
 authoritative binding event plus a recoverable active-lock materialization:
 
 The `nq` account deliberately has no capabilities in an ordinary login shell,
-so a direct `sudo -u nq nq witness test/admit/rotate` cannot enter the separate
-witness identity. Define this maintenance helper in the operator's current
+so a direct `sudo -u nq nq watcher test/admit/rotate` cannot enter the separate
+watcher identity. Define this maintenance helper in the operator's current
 shell. `systemd-run` passes the argv directly—there is no shell evaluation—and
 runs `nq` as `nq:nq` with the same four-capability ceiling as `nqd`:
 
@@ -217,9 +217,9 @@ reaps a distinct-UID helper. The child clears every capability and enables
 `no_new_privs` before helper exec. The transient unit also mirrors the daemon's
 filesystem, home, temporary-directory, namespace, kernel, and address-family
 restrictions; keep it synchronized with `nqd.service`. Use it for commands that
-execute or runtime-verify a witness: `witness test/admit/rotate/rollback`,
+execute or runtime-verify a watcher: `watcher test/admit/rotate/rollback`,
 `collect`, and `doctor`. In particular, `doctor` and rollback trace the current
-runtime loader under the admitted witness UID, so they are not capability-free
+runtime loader under the admitted watcher UID, so they are not capability-free
 inspection operations. Configuration, initialization, backup, restore,
 upgrade, query, status, findings, and other pure exports remain capability-free
 `sudo -u nq nq ...` operations.
@@ -227,9 +227,9 @@ upgrade, query, status, findings, and other pure exports remain capability-free
 ```sh
 sudo -u nq nq protocol check
 nq_helper_command --config /etc/nq/nq.toml \
-  witness test conformance-local
+  watcher test conformance-local
 nq_helper_command --config /etc/nq/nq.toml \
-  witness admit conformance-local
+  watcher admit conformance-local
 nq_helper_command --config /etc/nq/nq.toml doctor
 ```
 
@@ -300,19 +300,19 @@ for protocol conformance and cross-language testing only, not a supported
 production helper or SDK.
 
 After executable, configuration, or profile drift, keep the daemon stopped and
-use `witness rotate`. It archives the previous active lock under the admissions
+use `watcher rotate`. It archives the previous active lock under the admissions
 history:
 
 ```sh
 sudo systemctl stop nqd.service
 nq_helper_command --config /etc/nq/nq.toml \
-  witness rotate conformance-local
+  watcher rotate conformance-local
 nq_helper_command --config /etc/nq/nq.toml doctor
 sudo systemctl start nqd.service
 ```
 
 The package also ships `examples/nq-host.toml`, which uses the native
-`nq-host-helper` and the compiled `nq.host/v1` profile. Merge its witness table
+`nq-host-helper` and the compiled `nq.host/v1` profile. Merge its watcher table
 into the active configuration (or use it as the initial alternative), then run
 the same test/admit workflow. Its capability ceiling is explicit; the helper
 cannot expand it at runtime.
@@ -321,12 +321,12 @@ Rollback requires an exact retained lock path and re-verifies it against the
 current bytes, configuration, protocol, and compiled profile:
 
 ```sh
-nq_helper_command --config /etc/nq/nq.toml witness rollback \
+nq_helper_command --config /etc/nq/nq.toml watcher rollback \
   conformance-local \
   /var/lib/nq/admissions/history/conformance-local/ADMISSION_ID/conformance-local.json
 ```
 
-`witness revoke INSTANCE` retains the admission under durable history and the
+`watcher revoke INSTANCE` retains the admission under durable history and the
 derived history path, then removes the active materialization. It is safe to
 run while `nqd` is active: the per-instance transition waits for an already
 bound collection to finish, prevents a new one from starting, and the daemon
@@ -389,7 +389,7 @@ sudo nq --config /etc/nq/nq.toml config apply /tmp/nq.toml.candidate
 sudo chown root:nq /etc/nq/nq.toml
 sudo chmod 0640 /etc/nq/nq.toml
 sudo -u nq nq --config /etc/nq/nq.toml config check
-nq_helper_command --config /etc/nq/nq.toml witness admit INSTANCE
+nq_helper_command --config /etc/nq/nq.toml watcher admit INSTANCE
 nq_helper_command --config /etc/nq/nq.toml doctor
 sudo systemctl start nqd.service
 ```
@@ -472,7 +472,7 @@ assumed.
 pre-removal hook fails the transaction if systemctl fails or cannot verify the
 unit is exactly `inactive`.
 `apt purge nq-ng` also leaves `/etc/nq`, `/var/lib/nq`, all admissions and
-backups, and the `nq` and `nq-witness` accounts intact. Package lifecycle hooks
+backups, and the `nq` and `nq-helper` accounts intact. Package lifecycle hooks
 never interpret uninstall as authorization to destroy evidence.
 
 An explicit local purge is manual and irreversible. First remove the package,
@@ -482,8 +482,8 @@ uses either package identity. Then run the fixed-path removal deliberately:
 ```sh
 sudo systemctl disable --now nqd.service 2>/dev/null || true
 sudo rm -rf --one-file-system /etc/nq /var/lib/nq /run/nq
-sudo userdel nq-witness 2>/dev/null || true
-sudo groupdel nq-witness 2>/dev/null || true
+sudo userdel nq-helper 2>/dev/null || true
+sudo groupdel nq-helper 2>/dev/null || true
 sudo userdel nq 2>/dev/null || true
 sudo groupdel nq 2>/dev/null || true
 ```
