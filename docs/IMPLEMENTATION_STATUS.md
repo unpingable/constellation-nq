@@ -20,11 +20,36 @@ The repository implements the stage-one operational spine:
   and compiled detector evaluation;
 - explicit helper test/admission/rotation/rollback/revocation with immutable
   admission history and drift refusal;
-- a generic append-only SQLite evidence substrate, exact raw and semantic
-  identities, rejected custody, evaluation watermarks, finding events, public
-  views, backup/restore, and an upgrade receipt skeleton;
+- a schema-v3 append-only SQLite evidence substrate, exact raw and semantic
+  identities, mandatory typed refusal linkage for rejected custody, exact
+  compiled-profile evaluation identity, store-wide evaluation sequence,
+  optional trigger-run linkage, full context and evaluator identity, evaluation
+  watermarks, finding events, public views, backup/restore, and an upgrade
+  receipt skeleton; old schema v1 and v2 data are preserved as incompatible
+  history and are never silently rewritten;
+- one atomic admitted-completion boundary: SQLite assigns the report sequence
+  inside the transaction, detectors build exact watermarks from that pending
+  report, and the run, custody, report, evaluations/refusals/findings, and V2
+  run-linked status become visible together. Every completed run requires one
+  canonical result. Reopening also binds the exact evaluation set to the
+  admission's detector-suite and evaluator-artifact identities, rejecting
+  omission, duplication, extension, or substitution even when stored rows and
+  the outward carrier were changed coherently;
+- versioned governed collection/evaluation/refusal carriers: non-admitted
+  collection results remain V1, admitted results are V2 with their exact
+  ordered `EvaluationEnvelopeV2` set, and the outer evaluation envelope wraps
+  `EvaluationResultV1` without semantic erasure. They preserve
+  exchange-timeout phase, retryability, structured details, profile semantic
+  identity and boundary, and stable refusal linkage through storage, protocol,
+  daemon/API, CLI/status, backup, and immutable cold-archive reopening;
 - consistent finding/status DTOs through CLI export, local Unix HTTP API,
-  bounded public SQL, and an opt-in (off-by-default) loopback server-rendered console;
+  bounded public SQL, and an opt-in (off-by-default) loopback server-rendered
+  console; current typed status is V3, governed findings are V3, and immutable
+  evaluation history is exposed through bounded, frozen
+  `nq.evaluation_history.v1` pages (`/v1/evaluations` and
+  `nq evaluations export`). V2 status returns an explicit conflict whenever
+  evaluations exist, and older routes fail explicitly when they cannot
+  represent the current carrier;
 - a native host profile/helper plus the conformance fixture profile;
 - strict, bounded `SystemSpecV1` validation and deterministic compilation into
   schema-domain-separated `ScopeCut` proposals, ratification-bound cuts,
@@ -99,12 +124,18 @@ was insufficiently sealed: its internally valid 50-file manifest omitted
 mandatory `guest-results/RESULT`. The same audit closed the dependency's scope
 as release-required and found package-level refusal-preservation failures.
 Consequently neither historical run is a current mint qualification, and the
-exact `44e7bd1a…` candidate is blocked pending repair, rebuilt bytes, and a
-fresh qualification. See [`HARDENING_PROGRAM.md`](HARDENING_PROGRAM.md) §8 and
+exact `44e7bd1a…` candidate remains blocked and cannot inherit the current
+source repair. See [`HARDENING_PROGRAM.md`](HARDENING_PROGRAM.md) §8 and
 [`../audit/REFUSAL_PRESERVATION_CROSSWALK.md`](../audit/REFUSAL_PRESERVATION_CROSSWALK.md)
 for the scope, and
 [`../audit/receipts/run-2026-07-20-qualification-repair-r4/RECEIPT.md`](../audit/receipts/run-2026-07-20-qualification-repair-r4/RECEIPT.md)
 for the authoritative clean-pin blocked verdict.
+The semantic transport repair is implemented in the current working source,
+including authoritative V3 evaluation status/history and real host-detector
+same-code refusals carried through the governed store/status/backup/reopen path,
+with cross-boundary finding contamination refused. Its new clean-pinned admissibility ledger,
+rebuilt package identity, and fresh VM qualification are still pending. This
+is not a ready or inherited release verdict.
 Some kernel boundaries remain **not** qualified and still require the documented
 unsandboxed Linux package/VM job — executable memfd policy and the full
 `SO_PEERCRED` wrong-PID/UID/GID matrix among them. A sandbox skip is never treated

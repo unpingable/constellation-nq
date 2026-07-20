@@ -9,7 +9,7 @@ The walkthrough below uses the one-shot `stdio` conformance specimen; the same
 protocol exchange is also supported by a supervised persistent `unix` helper
 carrier with private sockets and peer-credential checks. The preview includes
 compiled profiles, admission locks, explicit collection, a resident scheduler,
-SQLite schema v1, verified SQLite backup/restore, read-only exports, the Unix
+SQLite schema v3, verified SQLite backup/restore, read-only exports, the Unix
 API, and an opt-in loopback console. A real historical
 migration chain, notifications, retention automation, privileged hardware
 helpers, and package-driven upgrades are not implemented yet.
@@ -150,6 +150,15 @@ sudo -u nq nq --config /etc/nq/nq.toml init
 With the sample watcher configured, `doctor` is expected to report a missing
 admission until the next section is complete. That is a useful failed state,
 not a reason to create a lock by hand.
+
+The current binary accepts only SQLite schema v3. It does not migrate schema-v1
+or schema-v2 history or infer admission context, evaluation identity, typed
+refusal linkage, or profile semantic identity that was never stored. `init`,
+normal open, backup/restore, and daemon startup therefore refuse either old
+schema without rewriting it. A file-backed regression proves even a
+provisional v2 database remains byte-identical after refusal. Preserve
+incompatible bytes first with a cold archive; such an archive records
+`source_openable=false` and makes no semantic-reopen claim.
 
 At a hard successor cut, provide the already-created immutable legacy manifest
 digest; this records a reference and imports no legacy finding state:
@@ -348,26 +357,64 @@ read the same durable model:
 
 ```sh
 sudo -u nq nq --config /etc/nq/nq.toml status export
+sudo -u nq nq --config /etc/nq/nq.toml evaluations export --limit 1000
 sudo -u nq nq --config /etc/nq/nq.toml findings export --format jsonl
+sudo -u nq nq --config /etc/nq/nq.toml refusals export --limit 100
 sudo -u nq nq --config /etc/nq/nq.toml query \
-  'select * from public_status_snapshot_v1' --limit 100
-curl --unix-socket /run/nq/nqd.sock http://localhost/v1/status
-curl --unix-socket /run/nq/nqd.sock http://localhost/v2/findings
+  'select * from public_finding_snapshot_v3' --limit 100
+curl --unix-socket /run/nq/nqd.sock http://localhost/v3/status
+curl --unix-socket /run/nq/nqd.sock \
+  'http://localhost/v1/evaluations?limit=1000'
+curl --unix-socket /run/nq/nqd.sock 'http://localhost/v3/findings?limit=100'
+curl --unix-socket /run/nq/nqd.sock \
+  'http://localhost/v1/rejected-custody?limit=100'
 ```
 
-The SQL command accepts exactly a bounded `SELECT *` from either documented
-finding or status public view. It is an inspection surface, never detector
-semantics.
+The SQL command accepts exactly a bounded `SELECT *` from
+`public_finding_snapshot_v3` or `public_status_snapshot_v1`. It is an
+inspection surface, never detector semantics. Finding and rejected-custody API
+pages use stable `after` cursors; repeat the request with the last returned
+`finding_id` or `submission_id`. Evaluation history uses a store-wide monotone
+`evaluation_sequence`: retain the first page's inclusive `through_sequence`,
+then pass its `next_after_sequence` as exclusive `after` with that same
+`through` value. This freezes one finite logical snapshot while later
+evaluations append beyond it. `nq evaluations export` accepts the equivalent
+`--after` and `--through` options. Limits are 1–1000 and malformed, repeated,
+escaped, out-of-range, or unfrozen cursors fail closed. `/v1/status` remains a
+compatibility surface and returns an explicit upgrade response when typed
+results cannot be represented. `/v2/status` returns 409 with `/v3/status` as
+the required endpoint whenever governed evaluation history exists.
+`/v2/findings` likewise returns an explicit response requiring `/v3/findings`;
+none of these routes flatten the current carrier.
 
 Reports are ordered by a sequence allocated when SQLite commits them. Detector
 recency therefore does not depend on observation clocks or digest sorting.
-Evaluations receive a database-assigned revision for each detector version, and
-the store also orders each finding's internal event history; failed
-transactions do not create durable revisions. Evidence is accepted only from
-the exact committed report occurrence in the evaluation snapshot, including
-its report identity and semantic digest. Public snapshots expose the NQ-owned
-identity, digest, and relevant times. Consumers must not reconstruct finding
-identities or infer evidence order from clocks or hashes.
+For an admitted collection, sequence allocation happens inside the same
+immediate transaction that writes raw custody, the report, its exact detector
+evaluation/refusal/finding set, and the canonical V2 run-linked status. No
+reader can observe a report without its result chain; historical stores with a
+missing result, a partial/extra evaluation set, detector-suite omission or
+duplication, or an evaluator artifact that differs from the admission fail
+semantic reopening. Matching carrier and row edits cannot bypass those
+admission-bound identities.
+Evaluations receive a database-assigned revision for each detector version and
+a gap-free store-wide `evaluation_sequence`; the store independently orders
+each finding's internal event history. Failed transactions do not create
+durable revisions or append-sequence values. Every persisted evaluation is an
+`EvaluationEnvelopeV2` binding its optional triggering run, responsible
+instance, subject, full scope and vantage, detector and evaluator identities,
+profile identity, times, watermark, and inner `EvaluationResultV1`. Evidence
+is accepted only from the exact committed report occurrence in the evaluation
+snapshot, including its report identity and semantic digest. Public snapshots
+expose the NQ-owned identity, digest, and relevant times. Consumers must not
+reconstruct finding identities or infer evidence order from clocks or hashes.
+
+A first-ever `CannotEvaluate` intentionally creates no finding: missing
+testimony cannot manufacture a condition or a green absence. It still appears
+as an authoritative evaluation component in `nq.status_snapshot.v3` and as an
+immutable record in `nq.evaluation_history.v1`. A later refused evaluation for
+an existing condition may retain that finding with refused visibility, but the
+finding is not the source from which the evaluation is reconstructed.
 
 ## Apply configuration safely
 
@@ -439,6 +486,35 @@ sudo systemctl start nqd.service
 If validation fails, leave `nqd` stopped. Move the failed restored file aside
 and restore the quarantined database and matching sidecars as one set.
 
+## Cold archive and historical reopen
+
+Create a cold archive at a new destination, then verify it with the exact
+preserved verifier:
+
+```sh
+sudo -u nq nq --config /etc/nq/nq.toml admin archive \
+  --destination /SAFE/ARCHIVES/nq-ARCHIVE-ID
+/SAFE/ARCHIVES/nq-ARCHIVE-ID/bin/nq --config /etc/nq/nq.toml \
+  admin archive-verify /SAFE/ARCHIVES/nq-ARCHIVE-ID
+```
+
+Creation uses a verified online backup, checkpoints the standalone copy out of
+WAL mode, normalizes the preserved verifier to mode `0755`, and seals an exact
+file inventory. Verification requires the archive format, schema artifact,
+tool version, archived-binary digest, and executing verifier bytes to agree. It
+opens `db/nq.db` through SQLite immutable mode and exhaustively reopens every
+admitted judgment and materialized child row, watcher-run outcome, immutable
+status event, rejected-custody refusal, and complete evaluation envelope with
+any finding/refusal link. It also invokes the V3 status read model and pages
+the public evaluation history through one frozen upper bound, requiring its
+count to equal the exhaustive validator. Verification is read-only: repeated
+checks must leave every sealed byte and path unchanged.
+
+An archive of an incompatible database is integrity custody only. It records
+`source_openable=false`, does not claim typed historical semantics, and cannot
+be downgraded from a valid current store merely by resealing metadata. Archive
+verification never grants current standing or authority.
+
 ## Binary and schema upgrade
 
 The Debian scripts stop `nqd` before replacing binaries and do not restart it.
@@ -453,14 +529,14 @@ nq_helper_command --config /etc/nq/nq.toml doctor
 sudo systemctl start nqd.service
 ```
 
-Schema v1 is the first schema, so the preview's `admin upgrade` currently
-creates/verifies a digest-addressed backup and returns `already_current`; it
-does not contain a migration from any other schema. `nqd` and the command both
-reject incompatible schemas. Validation compares the compiled definitions of
+Schema v3 is the current schema. The preview's `admin upgrade` creates and
+semantically verifies a digest-addressed backup and returns `already_current`
+only for an already-compatible v3 store. It contains no v1-to-v3 or v2-to-v3
+migration; `nqd` and the command reject either old or otherwise incompatible
+schema before any rewrite. Validation compares the compiled definitions of
 tables, indexes, triggers, and views as well as the application and schema
 version, so a same-named object with changed SQL is refused. Do not force
-startup or edit SQLite metadata. A release that introduces schema v2 is not
-operationally usable until its real, tested migration and receipt path ships.
+startup, edit SQLite metadata, or relabel old rows as typed testimony.
 
 Rollback means reinstalling the matching previous binaries and using `nq
 restore` with their verified pre-upgrade backup. Reverse migration is not

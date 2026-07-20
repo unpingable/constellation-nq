@@ -1,11 +1,12 @@
 # NQ-ng correspondence manifest for the release-required refusal-preservation
-# gate. The external framework supplies the AC-R4 policy; this file binds that
-# policy to NQ-ng's existing types and surfaces.
+# gate. The external framework supplies AC-R4; this target-owned object binds
+# the control to NQ-ng's typed carriers and actual testimonial surfaces.
 
 schema = "admissibility-audit.manifest/v1"
 
 [target]
 name = "nq-ng"
+campaign = "AC-AUDIT-1"
 pin = "auto"
 source_roots = [
   "crates/nq-core/src",
@@ -15,11 +16,187 @@ source_roots = [
   "crates/nq-profiles/src",
 ]
 
+[[bindings]]
+role = "rich_packet"
+symbol = "nq_core::engine::CollectionOutcome"
+file = "crates/nq-core/src/engine.rs"
+
+[[bindings]]
+role = "rich_packet"
+symbol = "nq_core::engine::GovernedRefusal"
+file = "crates/nq-core/src/engine.rs"
+
+[[bindings]]
+role = "rich_packet"
+symbol = "nq_core::engine::RunResourceOutcomeV1"
+file = "crates/nq-core/src/engine.rs"
+
+[[bindings]]
+role = "rich_packet"
+symbol = "nq_core::engine::AdmissionRefusal"
+file = "crates/nq-core/src/engine.rs"
+
+[[bindings]]
+role = "rich_packet"
+symbol = "nq_core::engine::EvaluationEnvelopeV2"
+file = "crates/nq-core/src/engine.rs"
+
+[[bindings]]
+role = "rich_packet"
+symbol = "nq_core::engine::EvaluationResultV1"
+file = "crates/nq-core/src/engine.rs"
+
+[[bindings]]
+role = "rich_packet"
+symbol = "nq_core::public::FindingSnapshotV3"
+file = "crates/nq-core/src/public.rs"
+
+[[bindings]]
+role = "rich_packet"
+symbol = "nq_core::public::StatusSnapshotV3"
+file = "crates/nq-core/src/public.rs"
+
+[[bindings]]
+role = "rich_packet"
+symbol = "nq_core::public::EvaluationHistoryPageV1"
+file = "crates/nq-core/src/public.rs"
+
+[[bindings]]
+role = "testimonial_renderer"
+symbol = "nq_core::engine::status_snapshot_v3"
+file = "crates/nq-core/src/engine.rs"
+
+[[bindings]]
+role = "testimonial_renderer"
+symbol = "nq_core::engine::evaluation_history_bounded"
+file = "crates/nq-core/src/engine.rs"
+
+[[bindings]]
+role = "testimonial_renderer"
+symbol = "nq_core::engine::list_findings_bounded"
+file = "crates/nq-core/src/engine.rs"
+
+[[bindings]]
+role = "testimonial_renderer"
+symbol = "nq_core::engine::rejected_custody_snapshot_bounded"
+file = "crates/nq-core/src/engine.rs"
+
+[[bindings]]
+role = "testimonial_renderer"
+symbol = "nq_app::transport::CollectionOutcomeFrame::encode"
+file = "crates/nq-app/src/transport.rs"
+
+[[bindings]]
+role = "testimonial_renderer"
+symbol = "nq_app::daemon::canonical_result_document"
+file = "crates/nq-app/src/daemon.rs"
+
+[[bindings]]
+role = "testimonial_renderer"
+symbol = "nq_app::api::handle_connection"
+file = "crates/nq-app/src/api.rs"
+
+[[bindings]]
+role = "testimonial_renderer"
+symbol = "nq_app::cli::status_command"
+file = "crates/nq-app/src/cli.rs"
+
+[[bindings]]
+role = "testimonial_renderer"
+symbol = "nq_app::cli::collect_command"
+file = "crates/nq-app/src/cli.rs"
+
+[[bindings]]
+role = "testimonial_renderer"
+symbol = "nq_app::cli::findings_command"
+file = "crates/nq-app/src/cli.rs"
+
+[[bindings]]
+role = "testimonial_renderer"
+symbol = "nq_app::cli::evaluations_command"
+file = "crates/nq-app/src/cli.rs"
+
+[[bindings]]
+role = "testimonial_renderer"
+symbol = "nq_app::cli::refusals_command"
+file = "crates/nq-app/src/cli.rs"
+
+[[bindings]]
+role = "testimonial_renderer"
+symbol = "nq_app::archive::create_archive"
+file = "crates/nq-app/src/archive.rs"
+
+[[bindings]]
+role = "testimonial_renderer"
+symbol = "nq_app::archive::verify_archive"
+file = "crates/nq-app/src/archive.rs"
+
+[[bindings]]
+role = "coarse_projection"
+symbol = "nq_core::engine::acquisition_code"
+file = "crates/nq-core/src/engine.rs"
+
+[[bindings]]
+role = "coarse_projection"
+symbol = "nq_core::engine::CollectionOutcome::is_success"
+file = "crates/nq-core/src/engine.rs"
+
+[[bindings]]
+role = "stored_detail_renderer"
+symbol = "nq_core::engine::status_component_v2"
+file = "crates/nq-core/src/engine.rs"
+
+[[bindings]]
+role = "stored_detail_renderer"
+symbol = "nq_core::engine::decode_collection_outcome_ndjson"
+file = "crates/nq-core/src/engine.rs"
+
+[[bindings]]
+role = "stored_detail_renderer"
+symbol = "nq_core::engine::rejected_custody_from_row"
+file = "crates/nq-core/src/engine.rs"
+
+[[bindings]]
+role = "stored_detail_renderer"
+symbol = "nq_core::engine::validate_admitted_report_history"
+file = "crates/nq-core/src/engine.rs"
+
+[[bindings]]
+role = "stored_detail_renderer"
+symbol = "nq_core::engine::validate_watcher_run_history"
+file = "crates/nq-core/src/engine.rs"
+
+[[bindings]]
+role = "stored_detail_renderer"
+symbol = "nq_core::engine::validate_status_history_v2"
+file = "crates/nq-core/src/engine.rs"
+
+[[bindings]]
+role = "stored_detail_renderer"
+symbol = "nq_core::engine::validate_rejected_custody_history"
+file = "crates/nq-core/src/engine.rs"
+
+[[bindings]]
+role = "stored_detail_renderer"
+symbol = "nq_core::engine::validate_evaluation_refusal_history"
+file = "crates/nq-core/src/engine.rs"
+
+[[bindings]]
+role = "stored_detail_renderer"
+symbol = "nq_core::engine::finding_from_row"
+file = "crates/nq-core/src/engine.rs"
+
 [[surfaces]]
 id = "protocol-wire"
 kind = "wire"
 class = "testimonial"
-entry_point = "crates/nq-protocol/src/model.rs"
+entry_point = "crates/nq-protocol/src/framing.rs"
+
+[[surfaces]]
+id = "product-result-wire"
+kind = "wire"
+class = "testimonial"
+entry_point = "crates/nq-app/src/transport.rs"
 
 [[surfaces]]
 id = "collection-cli"
@@ -69,7 +246,20 @@ forbidden_uses = [
   "archive testimony without the linked typed payload",
 ]
 
+[[surfaces]]
+id = "success-control-flow"
+kind = "cli"
+class = "non_testimonial"
+entry_point = "crates/nq-core/src/engine.rs"
+allowed_uses = ["scheduler cadence selection", "process exit selection after rendering the full result"]
+forbidden_uses = [
+  "refusal diagnosis",
+  "stored judgment",
+  "replacement for the typed collection result",
+]
+
 [[projections]]
+file = "crates/nq-core/src/engine.rs"
 function = "acquisition_code"
 runtime_type = "nq_core::runner::AcquisitionOutcome"
 classification = "non_testimonial"
@@ -77,154 +267,346 @@ allowed_uses = ["stable comparison", "bounded indexing", "metrics grouping"]
 forbidden_uses = [
   "operator diagnosis",
   "qualification predicate",
-  "archive testimony without resource_outcome_json",
+  "archive testimony without the exact AcquisitionFailure.outcome",
 ]
 
 [[projections]]
+file = "crates/nq-core/src/engine.rs"
 function = "semantic_report_status"
 runtime_type = "nq_profiles::SemanticReportStatus"
 classification = "internal"
-allowed_uses = ["exact enum token rendering"]
+allowed_uses = ["exact enum-token rendering"]
 forbidden_uses = ["refusal diagnosis"]
 
 [[projections]]
+file = "crates/nq-profiles/src/descriptor.rs"
+owner_type = "ProfileDigest"
 function = "as_str"
 runtime_type = "nq_profiles::ProfileDigest"
 classification = "internal"
-allowed_uses = ["digest token rendering"]
+allowed_uses = ["digest-token rendering"]
 forbidden_uses = ["qualification result"]
 
 [[projections]]
+file = "crates/nq-profiles/src/identity.rs"
+owner_type = "ProfileSemanticId"
 function = "as_str"
 runtime_type = "nq_profiles::ProfileSemanticId"
 classification = "internal"
-allowed_uses = ["semantic identity token rendering"]
+allowed_uses = ["semantic-identity-token rendering"]
 forbidden_uses = ["qualification result"]
 
 [[projections]]
+file = "crates/nq-protocol/src/canonical.rs"
+owner_type = "Sha256Digest"
 function = "as_str"
 runtime_type = "nq_protocol::Sha256Digest"
 classification = "internal"
-allowed_uses = ["digest token rendering"]
+allowed_uses = ["digest-token rendering"]
 forbidden_uses = ["qualification result"]
 
-# The framework's function-shaped static census cannot discover SQL columns or
-# serde discriminants. They are declared here explicitly so that the target's
-# correspondence object, not the heuristic, owns their classification.
-[[projections]]
-function = "watcher_runs.acquisition_outcome"
-runtime_type = "nq_core::runner::AcquisitionOutcome"
-classification = "non_testimonial"
-allowed_uses = ["stable run indexing when resource_outcome_json is retained"]
-forbidden_uses = ["operator diagnosis", "archive testimony without resource_outcome_json"]
-
-[[projections]]
-function = "refusals.source_kind"
-runtime_type = "nq_store::RefusalInput"
-classification = "non_testimonial"
-allowed_uses = ["source-family indexing when boundary and detail_json are retained"]
-forbidden_uses = ["refusal diagnosis", "qualification predicate"]
-
-[[projections]]
-function = "raw_submissions.rejection_code"
-runtime_type = "nq_store::SubmissionDisposition"
-classification = "non_testimonial"
-allowed_uses = ["rejected-custody indexing when a typed refusal is linked"]
-forbidden_uses = ["standalone refusal testimony", "generic error replacement"]
-
-[[projections]]
-function = "status_events.code"
-runtime_type = "nq_core::CollectionOutcome"
-classification = "non_testimonial"
-allowed_uses = ["status grouping when canonical detail_json is retained"]
-forbidden_uses = ["standalone operator diagnosis", "re-deriving detail"]
-
-[[projections]]
-function = "binding_events.event_kind"
-runtime_type = "nq_store::BindingEventInput"
-classification = "non_testimonial"
-allowed_uses = ["active-binding state projection when reason_code and detail_json are retained"]
-forbidden_uses = ["standalone lifecycle cause"]
-
-[[projections]]
-function = "binding_events.reason_code"
-runtime_type = "nq_store::BindingEventInput"
-classification = "non_testimonial"
-allowed_uses = ["lifecycle reason indexing when event_kind and detail_json are retained"]
-forbidden_uses = ["standalone binding-event testimony"]
-
-[[projections]]
-function = "ResponseOutcome.kind"
-runtime_type = "nq_protocol::ResponseOutcome"
-classification = "internal"
-allowed_uses = ["serde tagged-union discrimination with the complete nested payload"]
-forbidden_uses = ["standalone refusal reason"]
-
-[[projections]]
-function = "refusal_source"
-runtime_type = "str (serialized refusal boundary token)"
-classification = "non_testimonial"
-allowed_uses = ["source-family indexing when the exact boundary and canonical refusal remain linked"]
-forbidden_uses = ["standalone refusal diagnosis", "generic error replacement"]
-
-[[projections]]
-function = "is_success"
-runtime_type = "nq_core::CollectionOutcome"
-classification = "non_testimonial"
-allowed_uses = ["scheduler cadence selection", "process exit selection after rendering the full outcome"]
-forbidden_uses = ["refusal diagnosis", "stored judgment", "replacement for the typed outcome"]
+# SQL columns, serde discriminants, and the boolean `is_success` method are not
+# function-shaped string projections, so the framework census cannot discover
+# them. Their non-testimonial classifications and exact linked-payload rules
+# are owned by REFUSAL_PRESERVATION_CROSSWALK.md.
 
 [controls.AC-R4-001]
 runtime_type = "nq_core::runner::AcquisitionOutcome"
 coarse_projection = "acquisition_code"
 testimonial_surfaces = [
+  "protocol-wire",
+  "product-result-wire",
   "collection-cli",
   "daemon-log",
   "sqlite-history",
   "status-read-model",
   "local-api",
+  "cold-archive",
 ]
-non_testimonial_surfaces = ["coarse-index-columns"]
+non_testimonial_surfaces = ["coarse-index-columns", "success-control-flow"]
 
-[[controls.AC-R4-001.surface_evidence]]
-surface = "collection-cli"
-command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::forcing_exchange_timeout_phase_survives_dry_and_status_surfaces", "--", "--ignored", "--exact"]
+[[controls.AC-R4-001.evidence_commands]]
+id = "helper-protocol-wire-preserves-refusal-pair"
+kind = "surface_forcing"
+surface = "protocol-wire"
+command = ["cargo", "test", "--offline", "-p", "nq-protocol", "--test", "conformance_corpus", "same_code_distinct_refusals_remain_distinct_on_wire", "--", "--exact"]
 
-[[controls.AC-R4-001.surface_evidence]]
-surface = "daemon-log"
-command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::forcing_exchange_timeout_phase_survives_dry_and_status_surfaces", "--", "--ignored", "--exact"]
+[[controls.AC-R4-001.evidence_commands]]
+id = "governed-result-wire-preserves-helper-payload-pair"
+kind = "surface_forcing"
+surface = "product-result-wire"
+command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::forcing_protocol_refusal_dependent_fields_survive_collection_status", "--", "--exact"]
 
-[[controls.AC-R4-001.surface_evidence]]
-surface = "sqlite-history"
-command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::status_store_and_backup_preserve_same_code_distinct_detail", "--", "--exact"]
+[[controls.AC-R4-001.evidence_commands]]
+id = "admitted-wire-requires-exact-evaluation-envelopes"
+kind = "surface_forcing"
+surface = "product-result-wire"
+command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::collection_outcome_wire_codec_rejects_omitted_extra_duplicate_and_substituted_fields", "--", "--exact"]
 
-[[controls.AC-R4-001.surface_evidence]]
+[[controls.AC-R4-001.evidence_commands]]
+id = "product-result-frame-reopens-exactly"
+kind = "surface_forcing"
+surface = "product-result-wire"
+command = ["cargo", "test", "--offline", "-p", "nq-app", "transport::tests::admitted_v2_outbound_frame_is_exactly_reopenable", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "product-result-frame-refuses-invalid-source"
+kind = "surface_forcing"
+surface = "product-result-wire"
+command = ["cargo", "test", "--offline", "-p", "nq-app", "transport::tests::invalid_outbound_result_is_refused_before_serialization", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "real-host-detector-preserves-structured-refusal-pair"
+kind = "surface_forcing"
 surface = "status-read-model"
-command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::forcing_exchange_timeout_phase_survives_dry_and_status_surfaces", "--", "--ignored", "--exact"]
+command = ["cargo", "test", "--offline", "-p", "nq-profiles", "--test", "profile_validation", "host_detector_same_code_refusals_preserve_distinct_structured_details", "--", "--exact"]
 
-[[controls.AC-R4-001.surface_evidence]]
+[[controls.AC-R4-001.evidence_commands]]
+id = "real-host-detector-pair-survives-governed-store-reopen"
+kind = "surface_forcing"
+surface = "status-read-model"
+command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::real_host_detector_same_code_refusals_survive_governed_store_and_reopen", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "finding-uses-only-exact-evaluation-context"
+kind = "surface_forcing"
+surface = "status-read-model"
+command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::finding_transport_uses_only_the_exact_evaluation_context_rows", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "actual-helper-collection-preserves-refusals-through-status"
+kind = "surface_forcing"
+surface = "status-read-model"
+command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::collect_persists_exact_helper_and_profile_refusals_through_status", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "cli-preserves-all-governed-pairs"
+kind = "surface_forcing"
+surface = "collection-cli"
+command = ["cargo", "test", "--offline", "-p", "nq-app", "--test", "semantic_surfaces", "cli_and_cold_archive_reopen_exact_same_code_refusal_payloads", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "structured-collection-cli-reopens-v2-wire"
+kind = "surface_forcing"
+surface = "collection-cli"
+command = ["cargo", "test", "--offline", "-p", "nq-app", "cli::tests::structured_collection_cli_emits_exact_reopenable_v2_ndjson", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "cli-dry-watcher-preserves-helper-pair"
+kind = "surface_forcing"
+surface = "collection-cli"
+command = ["cargo", "test", "--offline", "-p", "nq-app", "--test", "semantic_surfaces", "structured_watcher_test_emits_the_canonical_typed_refusal", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "cli-evaluation-cursor-is-exact-and-frozen"
+kind = "surface_forcing"
+surface = "collection-cli"
+command = ["cargo", "test", "--offline", "-p", "nq-app", "cli::tests::evaluation_export_exposes_one_exact_frozen_numeric_cursor", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "cli-refusal-cursor-is-exact-and-unique"
+kind = "surface_forcing"
+surface = "collection-cli"
+command = ["cargo", "test", "--offline", "-p", "nq-app", "cli::tests::refusal_export_exposes_one_exact_immutable_cursor", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "daemon-log-preserves-helper-pair"
+kind = "surface_forcing"
+surface = "daemon-log"
+command = ["cargo", "test", "--offline", "-p", "nq-app", "daemon::tests::daemon_result_document_preserves_same_code_refusal_payloads", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "sqlite-preserves-linked-refusal-pair"
+kind = "surface_forcing"
+surface = "sqlite-history"
+command = ["cargo", "test", "--offline", "-p", "nq-store", "tests::same_code_refusal_payloads_and_links_survive_backup_and_reopen", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "sqlite-refuses-bare-rejected-custody"
+kind = "surface_forcing"
+surface = "sqlite-history"
+command = ["cargo", "test", "--offline", "-p", "nq-store", "tests::forcing_rejected_submission_requires_typed_refusal", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "admitted-chain-commits-as-one-unit"
+kind = "surface_forcing"
+surface = "sqlite-history"
+command = ["cargo", "test", "--offline", "-p", "nq-store", "tests::admitted_report_evaluations_and_result_rollback_as_one_unit", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "historical-admitted-chain-requires-run-result"
+kind = "surface_forcing"
+surface = "sqlite-history"
+command = ["cargo", "test", "--offline", "-p", "nq-store", "tests::historical_admitted_report_without_run_result_fails_closed", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "historical-admitted-result-requires-exact-evaluation-set"
+kind = "surface_forcing"
+surface = "sqlite-history"
+command = ["cargo", "test", "--offline", "-p", "nq-store", "tests::historical_partial_evaluation_set_cannot_reopen_as_admitted_result", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "completed-response-run-requires-canonical-result"
+kind = "surface_forcing"
+surface = "sqlite-history"
+command = ["cargo", "test", "--offline", "-p", "nq-store", "tests::historical_response_run_without_result_fails_closed", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "admitted-suite-and-evaluator-bindings-rollback-atomically"
+kind = "surface_forcing"
+surface = "sqlite-history"
+command = ["cargo", "test", "--offline", "-p", "nq-store", "tests::admitted_detector_suite_and_evaluator_binding_fail_atomically", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "historical-admitted-suite-omission-fails-closed"
+kind = "surface_forcing"
+surface = "sqlite-history"
+command = ["cargo", "test", "--offline", "-p", "nq-store", "tests::historical_reopen_rejects_omitted_admission_detector_suite", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "historical-admitted-evaluator-substitution-fails-closed"
+kind = "surface_forcing"
+surface = "sqlite-history"
+command = ["cargo", "test", "--offline", "-p", "nq-store", "tests::historical_reopen_rejects_substituted_admission_evaluator_artifact", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "historical-admitted-evaluation-order-fails-closed"
+kind = "surface_forcing"
+surface = "sqlite-history"
+command = ["cargo", "test", "--offline", "-p", "nq-store", "tests::historical_reopen_rejects_reordered_admitted_evaluation_sequence", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "evaluation-refusal-boundary-is-producer-closed"
+kind = "surface_forcing"
+surface = "status-read-model"
+command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::evaluation_envelope_rejects_substituted_cannot_evaluate_boundary", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "evaluation-refusal-code-is-producer-closed"
+kind = "surface_forcing"
+surface = "status-read-model"
+command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::evaluation_envelope_rejects_substituted_cannot_evaluate_code", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "evaluation-refusal-message-is-producer-closed"
+kind = "surface_forcing"
+surface = "status-read-model"
+command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::evaluation_envelope_rejects_substituted_cannot_evaluate_message", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "evaluation-refusal-cannot-borrow-affirmative-evidence"
+kind = "surface_forcing"
+surface = "status-read-model"
+command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::evaluation_envelope_rejects_evidence_on_cannot_evaluate", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "historical-run-cannot-borrow-another-instance-admission"
+kind = "surface_forcing"
+surface = "sqlite-history"
+command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::hostile_same_profile_borrowed_admission_fails_on_late_reopen", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "api-transports-large-canonical-response-exactly"
+kind = "surface_forcing"
 surface = "local-api"
-command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::forcing_exchange_timeout_phase_survives_dry_and_status_surfaces", "--", "--ignored", "--exact"]
+command = ["cargo", "test", "--offline", "-p", "nq-app", "api::tests::response_larger_than_one_stored_document_is_transported_exactly", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "status-preserves-timeout-phase-pair"
+kind = "surface_forcing"
+surface = "status-read-model"
+command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::forcing_exchange_timeout_phase_survives_dry_and_status_surfaces", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "status-preserves-profile-pair"
+kind = "surface_forcing"
+surface = "status-read-model"
+command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::forcing_profile_refusal_identity_survives_collection_status", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "status-backup-preserves-admission-refusal-pair"
+kind = "surface_forcing"
+surface = "status-read-model"
+command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::same_code_admission_upstream_refusal_pair_survives_status_backup_reopen", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "wire-custody-status-preserve-protocol-rejection-pair"
+kind = "surface_forcing"
+surface = "product-result-wire"
+command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::same_code_protocol_rejection_pair_survives_wire_custody_status_backup_reopen", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "api-v2-preserves-all-governed-pairs"
+kind = "surface_forcing"
+surface = "local-api"
+command = ["cargo", "test", "--offline", "-p", "nq-app", "api::tests::v2_api_preserves_same_code_refusals_and_v1_route_stays_v1", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "api-v3-status-history-and-findings-preserve-evaluation-pair"
+kind = "surface_forcing"
+surface = "local-api"
+command = ["cargo", "test", "--offline", "-p", "nq-app", "api::tests::v3_findings_api_preserves_same_code_evaluation_refusals", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "api-evaluation-cursor-is-exact-and-frozen"
+kind = "surface_forcing"
+surface = "local-api"
+command = ["cargo", "test", "--offline", "-p", "nq-app", "api::tests::evaluation_history_query_has_exact_numeric_snapshot_bounds", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "archive-reopens-all-governed-pairs"
+kind = "surface_forcing"
+surface = "cold-archive"
+command = ["cargo", "test", "--offline", "-p", "nq-app", "--test", "semantic_surfaces", "cli_and_cold_archive_reopen_exact_same_code_refusal_payloads", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "cli-pages-complete-custody-pair"
+kind = "surface_forcing"
+surface = "collection-cli"
+command = ["cargo", "test", "--offline", "-p", "nq-app", "--test", "custody_pagination", "cli_pages_same_code_refusals_without_losing_payloads", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "evaluation-pair-survives-cli-backup-archive"
+kind = "surface_forcing"
+surface = "cold-archive"
+command = ["cargo", "test", "--offline", "-p", "nq-app", "--test", "evaluation_refusal_surfaces", "same_code_evaluation_refusals_survive_backup_cli_and_cold_archive", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "immutable-archive-open-preserves-sealed-inventory"
+kind = "surface_forcing"
+surface = "cold-archive"
+command = ["cargo", "test", "--offline", "-p", "nq-store", "tests::immutable_open_preserves_prepared_archive_bytes_and_file_inventory", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "archive-validators-cross-every-history-page"
+kind = "surface_forcing"
+surface = "cold-archive"
+command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::exhaustive_history_pagination_crosses_one_row_pages_and_checks_late_rows", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "public-evaluation-history-crosses-maximum-page"
+kind = "surface_forcing"
+surface = "status-read-model"
+command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::public_evaluation_history_crosses_the_maximum_page_without_silent_truncation", "--", "--exact"]
 
 [[controls.AC-R4-001.mutations]]
-id = "delete-acquisition-detail"
+id = "erase-exchange-timeout-phase"
 operator = "delete-detail"
 file = "crates/nq-core/src/engine.rs"
-find = """        AcquisitionOutcome::SpawnFailed { message }
-        | AcquisitionOutcome::RequestWriteFailed { message }
-        | AcquisitionOutcome::MalformedFraming { message }
-        | AcquisitionOutcome::MalformedJson { message }
-        | AcquisitionOutcome::Disconnect { message }
-        | AcquisitionOutcome::CarrierStartupFailed { message }
-        | AcquisitionOutcome::IoFailed { message } => Some(message.clone()),"""
-replace = """        AcquisitionOutcome::SpawnFailed { message }
-        | AcquisitionOutcome::RequestWriteFailed { message }
-        | AcquisitionOutcome::MalformedFraming { message }
-        | AcquisitionOutcome::MalformedJson { message }
-        | AcquisitionOutcome::Disconnect { message }
-        | AcquisitionOutcome::IoFailed { message } => Some(message.clone()),
-        AcquisitionOutcome::CarrierStartupFailed { .. } => None,"""
-command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::carrier_startup_detail_survives_the_cli_and_archival_surfaces", "--", "--exact"]
+find = '''        Some(Self {
+            class,
+            retry,
+            outcome,
+        })'''
+replace = '''        Some(Self {
+            class,
+            retry,
+            outcome: match outcome {
+                AcquisitionOutcome::ExchangeTimeout { .. } => AcquisitionOutcome::Timeout,
+                exact => exact,
+            },
+        })'''
+command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::forcing_exchange_timeout_phase_survives_dry_and_status_surfaces", "--", "--exact"]
 expect = "check_fails"
 
 [controls.AC-R4-002]
@@ -233,22 +615,69 @@ coarse_projection = "acquisition_code"
 
 [controls.AC-R4-003]
 runtime_type = "nq_core::CollectionOutcome"
-coarse_projection = "status_events.code"
-testimonial_surfaces = ["sqlite-history", "status-read-model"]
+testimonial_surfaces = [
+  "sqlite-history",
+  "status-read-model",
+  "collection-cli",
+  "local-api",
+  "cold-archive",
+]
 
-[[controls.AC-R4-003.surface_evidence]]
+[[controls.AC-R4-003.evidence_commands]]
+id = "sqlite-reopens-stored-refusal-detail"
+kind = "surface_forcing"
 surface = "sqlite-history"
+command = ["cargo", "test", "--offline", "-p", "nq-store", "tests::same_code_refusal_payloads_and_links_survive_backup_and_reopen", "--", "--exact"]
+
+[[controls.AC-R4-003.evidence_commands]]
+id = "status-renders-canonical-stored-result"
+kind = "surface_forcing"
+surface = "status-read-model"
 command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::status_store_and_backup_preserve_same_code_distinct_detail", "--", "--exact"]
 
-[[controls.AC-R4-003.surface_evidence]]
-surface = "status-read-model"
-command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::forcing_exchange_timeout_phase_survives_dry_and_status_surfaces", "--", "--ignored", "--exact"]
+[[controls.AC-R4-003.evidence_commands]]
+id = "cli-renders-stored-result"
+kind = "surface_forcing"
+surface = "collection-cli"
+command = ["cargo", "test", "--offline", "-p", "nq-app", "--test", "semantic_surfaces", "cli_and_cold_archive_reopen_exact_same_code_refusal_payloads", "--", "--exact"]
+
+[[controls.AC-R4-003.evidence_commands]]
+id = "api-renders-stored-result"
+kind = "surface_forcing"
+surface = "local-api"
+command = ["cargo", "test", "--offline", "-p", "nq-app", "api::tests::v2_api_preserves_same_code_refusals_and_v1_route_stays_v1", "--", "--exact"]
+
+[[controls.AC-R4-003.evidence_commands]]
+id = "archive-renders-preserved-result"
+kind = "surface_forcing"
+surface = "cold-archive"
+command = ["cargo", "test", "--offline", "-p", "nq-app", "--test", "semantic_surfaces", "cli_and_cold_archive_reopen_exact_same_code_refusal_payloads", "--", "--exact"]
 
 [[controls.AC-R4-003.mutations]]
 id = "rederive-status-detail-from-code"
 operator = "recompute-from-code"
 file = "crates/nq-core/src/engine.rs"
-find = "            detail: canonical(outcome)?,"
-replace = "            detail: canonical(&json!({\"code\": code}))?,"
+find = '''        let result = decode_collection_outcome(detail_json.as_bytes()).map_err(|error| {
+            EngineError::Invariant(format!(
+                "instance status {component_id} is not a valid versioned collection result: {error}"
+            ))
+        })?;'''
+replace = '''        let stored_result = decode_collection_outcome(detail_json.as_bytes()).map_err(|error| {
+            EngineError::Invariant(format!(
+                "instance status {component_id} is not a valid versioned collection result: {error}"
+            ))
+        })?;
+        let result = if code == "collection_failed" {
+            CollectionOutcome::acquisition_failed(
+                component_id.clone(),
+                stored_result
+                    .run_id
+                    .clone()
+                    .unwrap_or_else(|| "code-derived-run".to_owned()),
+                AcquisitionOutcome::Timeout,
+            )?
+        } else {
+            stored_result
+        };'''
 command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::status_store_and_backup_preserve_same_code_distinct_detail", "--", "--exact"]
 expect = "check_fails"
