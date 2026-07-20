@@ -1322,28 +1322,40 @@ impl Store {
              ORDER BY run.started_at, submission.submission_id
              LIMIT ?1",
         )?;
-        let rows = statement.query_map([limit], |row| {
-            Ok(RejectedCustodyRow {
-                submission_id: row.get(0)?,
-                run_id: row.get(1)?,
-                request_id: row.get(2)?,
-                instance_id: row.get(3)?,
-                profile_id: row.get(4)?,
-                profile_version: row.get(5)?,
-                profile_digest: row.get(6)?,
-                raw_sha256: row.get(7)?,
-                received_at: row.get(8)?,
-                protocol_outcome: row.get(9)?,
-                refusal_id: row.get(10)?,
-                source_kind: row.get(11)?,
-                responsible_instance_id: row.get(12)?,
-                boundary: row.get(13)?,
-                code: row.get(14)?,
-                detail_json: row.get(15)?,
-                created_at: row.get(16)?,
-            })
-        })?;
+        let rows = statement.query_map([limit], rejected_custody_row)?;
         rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    /// Reopen one rejected custody artifact by its stable refusal identity.
+    ///
+    /// The same store-wide semantic validation as bounded enumeration runs
+    /// before lookup, so an ambiguous or invalid historical association refuses
+    /// instead of being selected by accident.
+    pub fn rejected_custody_by_refusal_id(
+        &self,
+        refusal_id: &str,
+    ) -> Result<Option<RejectedCustodyRow>, StoreError> {
+        validate_refusal_invariants(&self.connection)?;
+        self.connection
+            .query_row(
+                "SELECT submission.submission_id, submission.run_id, run.request_id,
+                        run.instance_id, run.profile_id, run.profile_version,
+                        run.profile_digest, submission.raw_sha256,
+                        submission.received_at, submission.protocol_outcome,
+                        refusal.refusal_id, refusal.source_kind,
+                        refusal.responsible_instance_id, refusal.boundary,
+                        refusal.code, refusal.detail_json, refusal.created_at
+                 FROM raw_submissions AS submission
+                 JOIN watcher_runs AS run ON run.run_id = submission.run_id
+                 JOIN refusals AS refusal
+                   ON refusal.submission_id = submission.submission_id
+                 WHERE submission.admission_outcome = 'rejected'
+                   AND refusal.refusal_id = ?1",
+                [refusal_id],
+                rejected_custody_row,
+            )
+            .optional()
             .map_err(StoreError::from)
     }
 
@@ -2732,6 +2744,28 @@ fn validate_public_limit(limit: u32) -> Result<(), StoreError> {
             "public query limit must be between 1 and {MAX_PUBLIC_QUERY_ROWS}"
         )))
     }
+}
+
+fn rejected_custody_row(row: &rusqlite::Row<'_>) -> Result<RejectedCustodyRow, rusqlite::Error> {
+    Ok(RejectedCustodyRow {
+        submission_id: row.get(0)?,
+        run_id: row.get(1)?,
+        request_id: row.get(2)?,
+        instance_id: row.get(3)?,
+        profile_id: row.get(4)?,
+        profile_version: row.get(5)?,
+        profile_digest: row.get(6)?,
+        raw_sha256: row.get(7)?,
+        received_at: row.get(8)?,
+        protocol_outcome: row.get(9)?,
+        refusal_id: row.get(10)?,
+        source_kind: row.get(11)?,
+        responsible_instance_id: row.get(12)?,
+        boundary: row.get(13)?,
+        code: row.get(14)?,
+        detail_json: row.get(15)?,
+        created_at: row.get(16)?,
+    })
 }
 
 fn validate_document_size(size: usize) -> Result<(), StoreError> {

@@ -200,6 +200,18 @@ fn rejected_custody_is_byte_exact_and_is_not_a_report() {
     assert_eq!(rows[0].refusal_id, "refusal-rej");
     assert_eq!(rows[0].code, "malformed");
     assert_eq!(rows[0].detail_json, br#"{"offset":7,"reason":"malformed"}"#);
+    assert_eq!(
+        store
+            .rejected_custody_by_refusal_id("refusal-rej")
+            .expect("lookup rejection by stable refusal id"),
+        Some(rows[0].clone())
+    );
+    assert_eq!(
+        store
+            .rejected_custody_by_refusal_id("refusal-missing")
+            .expect("missing refusal lookup is not an error"),
+        None
+    );
 }
 
 #[test]
