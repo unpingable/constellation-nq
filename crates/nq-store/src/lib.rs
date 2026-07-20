@@ -363,8 +363,10 @@ pub struct ReportInput {
 pub enum SubmissionDisposition {
     /// The bytes remain a rejected custody artifact and never reach detectors.
     Rejected {
-        rejection_code: Option<String>,
-        refusal: Option<RefusalInput>,
+        /// Mandatory typed testimony justifying rejected custody. The coarse
+        /// `raw_submissions.rejection_code` projection is derived from this
+        /// object's code; callers cannot supply an independent value.
+        refusal: RefusalInput,
     },
     /// The bytes produced a strictly validated report.
     Admitted(ReportInput),
@@ -393,6 +395,35 @@ pub struct CollectionReceipt {
     pub raw_sha256: Option<String>,
     pub semantic_digest: Option<String>,
     pub report_sequence: Option<i64>,
+    /// Stable identity of the typed refusal linked to rejected custody.
+    pub refusal_id: Option<String>,
+}
+
+/// One rejected custody artifact with its exact, mandatory typed refusal.
+///
+/// Raw bytes remain available through [`Store::raw_submission_bytes`]; this
+/// bounded row carries their digest and the semantic linkage needed to enumerate
+/// and historically reopen rejected custody without reconstructing testimony.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RejectedCustodyRow {
+    pub submission_id: String,
+    pub run_id: String,
+    pub request_id: String,
+    pub instance_id: String,
+    pub profile_id: String,
+    pub profile_version: String,
+    pub profile_digest: String,
+    pub raw_sha256: String,
+    pub received_at: String,
+    pub protocol_outcome: String,
+    pub refusal_id: String,
+    pub source_kind: String,
+    pub responsible_instance_id: String,
+    pub boundary: String,
+    pub code: String,
+    /// Exact canonical refusal document persisted in `refusals.detail_json`.
+    pub detail_json: Vec<u8>,
+    pub created_at: String,
 }
 
 /// Stored profile descriptor identity and exact canonical descriptor bytes.
@@ -713,6 +744,7 @@ impl Store {
             )));
         }
         validate_stored_digests(&self.connection)?;
+        validate_refusal_invariants(&self.connection)?;
         validate_projection_invariants(&self.connection)
     }
 
@@ -1161,12 +1193,13 @@ impl Store {
             raw_sha256: None,
             semantic_digest: None,
             report_sequence: None,
+            refusal_id: None,
         };
         if let Some(submission) = &collection.submission {
             let raw_sha256 = sha256_digest(&submission.raw_bytes);
             let (admission_outcome, rejection_code) = match &submission.disposition {
-                SubmissionDisposition::Rejected { rejection_code, .. } => {
-                    ("rejected", rejection_code.as_deref())
+                SubmissionDisposition::Rejected { refusal } => {
+                    ("rejected", Some(refusal.code.as_str()))
                 }
                 SubmissionDisposition::Admitted(_) => ("admitted", None),
             };
@@ -1189,21 +1222,20 @@ impl Store {
             receipt.raw_sha256 = Some(raw_sha256);
 
             match &submission.disposition {
-                SubmissionDisposition::Rejected { refusal, .. } => {
-                    if let Some(refusal) = refusal {
-                        insert_refusal(
-                            &transaction,
-                            refusal,
-                            Some(&collection.run.run_id),
-                            Some(&submission.submission_id),
-                            None,
-                            Some((
-                                &collection.run.profile_id,
-                                &collection.run.profile_version,
-                                &collection.run.profile_digest,
-                            )),
-                        )?;
-                    }
+                SubmissionDisposition::Rejected { refusal } => {
+                    insert_refusal(
+                        &transaction,
+                        refusal,
+                        Some(&collection.run.run_id),
+                        Some(&submission.submission_id),
+                        None,
+                        Some((
+                            &collection.run.profile_id,
+                            &collection.run.profile_version,
+                            &collection.run.profile_digest,
+                        )),
+                    )?;
+                    receipt.refusal_id = Some(refusal.refusal_id.clone());
                 }
                 SubmissionDisposition::Admitted(report) => {
                     // A run that produced an admitted report must carry a
@@ -1261,6 +1293,57 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()
+            .map_err(StoreError::from)
+    }
+
+    /// Enumerate rejected custody with its exact linked typed refusal.
+    ///
+    /// The result is bounded and ordered by immutable run/submission identity.
+    /// Validation guarantees that every returned rejection has exactly one
+    /// matching refusal; this method never guesses from a coarse code or log.
+    pub fn rejected_custody(&self, limit: u32) -> Result<Vec<RejectedCustodyRow>, StoreError> {
+        validate_public_limit(limit)?;
+        // Refuse rather than expose a partial or ambiguous history if the live
+        // connection has acquired an invalid row since it was opened.
+        validate_refusal_invariants(&self.connection)?;
+        let mut statement = self.connection.prepare(
+            "SELECT submission.submission_id, submission.run_id, run.request_id,
+                    run.instance_id, run.profile_id, run.profile_version,
+                    run.profile_digest, submission.raw_sha256,
+                    submission.received_at, submission.protocol_outcome,
+                    refusal.refusal_id, refusal.source_kind,
+                    refusal.responsible_instance_id, refusal.boundary,
+                    refusal.code, refusal.detail_json, refusal.created_at
+             FROM raw_submissions AS submission
+             JOIN watcher_runs AS run ON run.run_id = submission.run_id
+             JOIN refusals AS refusal
+               ON refusal.submission_id = submission.submission_id
+             WHERE submission.admission_outcome = 'rejected'
+             ORDER BY run.started_at, submission.submission_id
+             LIMIT ?1",
+        )?;
+        let rows = statement.query_map([limit], |row| {
+            Ok(RejectedCustodyRow {
+                submission_id: row.get(0)?,
+                run_id: row.get(1)?,
+                request_id: row.get(2)?,
+                instance_id: row.get(3)?,
+                profile_id: row.get(4)?,
+                profile_version: row.get(5)?,
+                profile_digest: row.get(6)?,
+                raw_sha256: row.get(7)?,
+                received_at: row.get(8)?,
+                protocol_outcome: row.get(9)?,
+                refusal_id: row.get(10)?,
+                source_kind: row.get(11)?,
+                responsible_instance_id: row.get(12)?,
+                boundary: row.get(13)?,
+                code: row.get(14)?,
+                detail_json: row.get(15)?,
+                created_at: row.get(16)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
             .map_err(StoreError::from)
     }
 
@@ -2418,6 +2501,97 @@ fn validate_stored_digests(connection: &Connection) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Prove that every rejected custody row has one exact typed refusal and that
+/// every duplicated projection agrees with the refusal's originating run.
+///
+/// Schema v1 already stores the full association in `refusals.submission_id`;
+/// these semantic checks make that existing representation fail closed without
+/// inventing testimony for historical rows or changing the schema artifact.
+fn validate_refusal_invariants(connection: &Connection) -> Result<(), StoreError> {
+    let missing_or_duplicate: Option<(String, i64)> = connection
+        .query_row(
+            "SELECT submission.submission_id, COUNT(refusal.refusal_id)
+             FROM raw_submissions AS submission
+             LEFT JOIN refusals AS refusal
+               ON refusal.submission_id = submission.submission_id
+             WHERE submission.admission_outcome = 'rejected'
+             GROUP BY submission.submission_id
+             HAVING COUNT(refusal.refusal_id) <> 1
+             ORDER BY submission.submission_id
+             LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((submission_id, count)) = missing_or_duplicate {
+        return Err(StoreError::Integrity(format!(
+            "rejected custody {submission_id} requires exactly one typed refusal; found {count}"
+        )));
+    }
+
+    let admitted_link: Option<String> = connection
+        .query_row(
+            "SELECT submission.submission_id
+             FROM raw_submissions AS submission
+             JOIN refusals AS refusal
+               ON refusal.submission_id = submission.submission_id
+             WHERE submission.admission_outcome <> 'rejected'
+             ORDER BY submission.submission_id
+             LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(submission_id) = admitted_link {
+        return Err(StoreError::Integrity(format!(
+            "admitted custody {submission_id} is incorrectly linked to a typed refusal"
+        )));
+    }
+
+    let mismatch: Option<String> = connection
+        .query_row(
+            "SELECT submission.submission_id
+             FROM raw_submissions AS submission
+             JOIN watcher_runs AS run ON run.run_id = submission.run_id
+             JOIN refusals AS refusal
+               ON refusal.submission_id = submission.submission_id
+             WHERE submission.admission_outcome = 'rejected'
+               AND (
+                    submission.rejection_code IS NOT refusal.code
+                 OR refusal.run_id IS NOT submission.run_id
+                 OR refusal.responsible_instance_id IS NOT run.instance_id
+                 OR refusal.profile_id IS NOT run.profile_id
+                 OR refusal.profile_version IS NOT run.profile_version
+                 OR refusal.profile_digest IS NOT run.profile_digest
+                 OR refusal.evaluation_id IS NOT NULL
+               )
+             ORDER BY submission.submission_id
+             LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(submission_id) = mismatch {
+        return Err(StoreError::Integrity(format!(
+            "rejected custody {submission_id} has a typed refusal whose code or run identity does not match"
+        )));
+    }
+
+    let mut statement =
+        connection.prepare("SELECT refusal_id, detail_json FROM refusals ORDER BY refusal_id")?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let refusal_id: String = row.get(0)?;
+        let detail_json: Vec<u8> = row.get(1)?;
+        CanonicalDocument::from_canonical_bytes(detail_json).map_err(|error| {
+            StoreError::Integrity(format!(
+                "typed refusal {refusal_id} detail is not exact canonical JSON: {error}"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 fn validate_projection_invariants(connection: &Connection) -> Result<(), StoreError> {
     let bindings_without_intent: i64 = connection.query_row(
         "SELECT COUNT(*) FROM instance_binding_events AS binding
@@ -2588,10 +2762,8 @@ fn validate_collection(collection: &CollectionInput) -> Result<(), StoreError> {
         )));
     }
     match &submission.disposition {
-        SubmissionDisposition::Rejected { refusal, .. } => {
-            if let Some(refusal) = refusal
-                && refusal.responsible_instance_id != collection.run.instance_id
-            {
+        SubmissionDisposition::Rejected { refusal } => {
+            if refusal.responsible_instance_id != collection.run.instance_id {
                 return Err(StoreError::Invariant(
                     "refusal lost the run's exact responsible instance".to_owned(),
                 ));
@@ -3215,6 +3387,11 @@ mod tests {
 
     fn configured_store() -> (Store, String) {
         let mut store = Store::initialize_in_memory().expect("store initializes");
+        let profile_digest = append_fixture_descriptor(&mut store);
+        (store, profile_digest)
+    }
+
+    fn append_fixture_descriptor(store: &mut Store) -> String {
         let descriptor = document(json!({
             "profile_id": "fixture.health",
             "profile_version": "1",
@@ -3229,7 +3406,7 @@ mod tests {
                 recorded_at: TIME.to_owned(),
             })
             .expect("descriptor appends");
-        (store, profile_digest)
+        profile_digest
     }
 
     fn typed_digest(label: &str) -> Sha256Digest {
@@ -3378,6 +3555,152 @@ mod tests {
             .expect("collection commits")
     }
 
+    fn commit_rejected(
+        store: &mut Store,
+        suffix: &str,
+        profile_digest: &str,
+        refusal_id: &str,
+        code: &str,
+        detail: CanonicalDocument,
+    ) -> CollectionReceipt {
+        store
+            .commit_collection(&CollectionInput {
+                run: run("fixture-a", suffix, profile_digest),
+                submission: Some(SubmissionInput {
+                    submission_id: format!("submission-{suffix}"),
+                    raw_bytes: format!("raw-{suffix}\n").into_bytes(),
+                    received_at: TIME.to_owned(),
+                    protocol_outcome: "valid_refusal".to_owned(),
+                    disposition: SubmissionDisposition::Rejected {
+                        refusal: RefusalInput {
+                            refusal_id: refusal_id.to_owned(),
+                            source_kind: "protocol".to_owned(),
+                            responsible_instance_id: "fixture-a".to_owned(),
+                            boundary: "collection".to_owned(),
+                            code: code.to_owned(),
+                            detail,
+                            created_at: TIME.to_owned(),
+                        },
+                    },
+                }),
+            })
+            .expect("rejected collection commits")
+    }
+
+    #[derive(Clone, Copy)]
+    enum HistoricalRefusalDefect {
+        WrongRun,
+        WrongInstance,
+        WrongProfileId,
+        WrongProfileVersion,
+        WrongProfileDigest,
+        WrongCode,
+        NonCanonicalDetail,
+    }
+
+    /// Model an existing schema-v1 database written outside the typed Store API.
+    /// The schema can represent these rows, but the product must refuse to reopen
+    /// any association that cannot prove its exact typed refusal linkage.
+    fn historical_rejection_with(defect: HistoricalRefusalDefect) -> Store {
+        let (mut store, profile_digest) = configured_store();
+        let suffix = "historical";
+        store
+            .commit_collection(&CollectionInput {
+                run: run("fixture-a", suffix, &profile_digest),
+                submission: None,
+            })
+            .expect("historical run commits");
+        if matches!(defect, HistoricalRefusalDefect::WrongRun) {
+            store
+                .commit_collection(&CollectionInput {
+                    run: run("fixture-b", "other", &profile_digest),
+                    submission: None,
+                })
+                .expect("alternate historical run commits");
+        }
+
+        let raw = b"historical rejected bytes\n";
+        store
+            .connection
+            .execute(
+                "INSERT INTO raw_submissions (
+                    submission_id, run_id, raw_bytes, raw_sha256, received_at,
+                    protocol_outcome, admission_outcome, rejection_code
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'rejected', ?7)",
+                params![
+                    "submission-historical",
+                    "run-historical",
+                    raw,
+                    sha256_digest(raw),
+                    TIME,
+                    "valid_refusal",
+                    "collection_failed",
+                ],
+            )
+            .expect("historical custody appends");
+
+        let refusal_run = if matches!(defect, HistoricalRefusalDefect::WrongRun) {
+            "run-other"
+        } else {
+            "run-historical"
+        };
+        let responsible = if matches!(defect, HistoricalRefusalDefect::WrongInstance) {
+            "fixture-b"
+        } else {
+            "fixture-a"
+        };
+        let profile_id = if matches!(defect, HistoricalRefusalDefect::WrongProfileId) {
+            "other.profile"
+        } else {
+            "fixture.health"
+        };
+        let profile_version = if matches!(defect, HistoricalRefusalDefect::WrongProfileVersion) {
+            "2"
+        } else {
+            "1"
+        };
+        let refusal_profile_digest =
+            if matches!(defect, HistoricalRefusalDefect::WrongProfileDigest) {
+                digest("other-profile")
+            } else {
+                profile_digest
+            };
+        let refusal_code = if matches!(defect, HistoricalRefusalDefect::WrongCode) {
+            "other_code"
+        } else {
+            "collection_failed"
+        };
+        let detail: &[u8] = if matches!(defect, HistoricalRefusalDefect::NonCanonicalDetail) {
+            br#"{ "retriable": true, "details": {"attempt": 1} }"#
+        } else {
+            br#"{"details":{"attempt":1},"retriable":true}"#
+        };
+        store
+            .connection
+            .execute(
+                "INSERT INTO refusals (
+                    refusal_id, source_kind, responsible_instance_id, boundary,
+                    code, run_id, submission_id, evaluation_id, profile_id,
+                    profile_version, profile_digest, detail_json, created_at
+                 ) VALUES (?1, 'protocol', ?2, 'collection', ?3, ?4, ?5,
+                           NULL, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    "refusal-historical",
+                    responsible,
+                    refusal_code,
+                    refusal_run,
+                    "submission-historical",
+                    profile_id,
+                    profile_version,
+                    refusal_profile_digest,
+                    detail,
+                    TIME,
+                ],
+            )
+            .expect("historical refusal appends");
+        store
+    }
+
     #[test]
     fn initialization_is_explicit_and_version_gated() {
         let directory = tempdir().expect("temp dir");
@@ -3424,8 +3747,7 @@ mod tests {
                     received_at: TIME.to_owned(),
                     protocol_outcome: "malformed_framing".to_owned(),
                     disposition: SubmissionDisposition::Rejected {
-                        rejection_code: Some("malformed_json".to_owned()),
-                        refusal: Some(RefusalInput {
+                        refusal: RefusalInput {
                             refusal_id: "refusal-rejected".to_owned(),
                             source_kind: "protocol".to_owned(),
                             responsible_instance_id: "fixture-a".to_owned(),
@@ -3433,7 +3755,7 @@ mod tests {
                             code: "malformed_json".to_owned(),
                             detail: document(json!({"offset": 1})),
                             created_at: TIME.to_owned(),
-                        }),
+                        },
                     },
                 }),
             })
@@ -3467,36 +3789,213 @@ mod tests {
         assert!(malicious_insert.is_err());
     }
 
-    /// Release forcing case: once a submission is classified as rejected, its
-    /// stable code is only a projection.  A typed `RefusalInput` is mandatory
-    /// testimony for persistence and historical reopening; accepting `None`
-    /// makes the coarse `rejection_code` the only retained judgment.
+    /// Release regression: a historical/raw writer cannot append rejected
+    /// custody without the typed testimony required for reopening.
     #[test]
-    #[ignore = "release gate: rejected custody must retain a typed refusal"]
     fn forcing_rejected_submission_requires_typed_refusal() {
         let (mut store, profile_digest) = configured_store();
-        let result = store.commit_collection(&CollectionInput {
-            run: run("fixture-a", "missing-refusal", &profile_digest),
-            submission: Some(SubmissionInput {
-                submission_id: "submission-missing-refusal".to_owned(),
-                raw_bytes: b"malformed helper response\n".to_vec(),
-                received_at: TIME.to_owned(),
-                protocol_outcome: "rejected".to_owned(),
-                disposition: SubmissionDisposition::Rejected {
-                    rejection_code: Some("invalid_response".to_owned()),
-                    refusal: None,
-                },
-            }),
-        });
-
+        let raw = b"malformed helper response\n";
+        store
+            .commit_collection(&CollectionInput {
+                run: run("fixture-a", "missing-refusal", &profile_digest),
+                submission: None,
+            })
+            .expect("run commits before hostile raw insertion");
+        store
+            .connection
+            .execute(
+                "INSERT INTO raw_submissions (
+                    submission_id, run_id, raw_bytes, raw_sha256, received_at,
+                    protocol_outcome, admission_outcome, rejection_code
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'rejected', ?7)",
+                params![
+                    "submission-missing-refusal",
+                    "run-missing-refusal",
+                    raw,
+                    sha256_digest(raw),
+                    TIME,
+                    "rejected",
+                    "invalid_response",
+                ],
+            )
+            .expect("schema v1 deliberately permits the historical hostile row");
+        let result = store.validate();
         assert!(
             matches!(
                 result,
-                Err(StoreError::Invariant(ref message))
+                Err(StoreError::Integrity(ref message))
                     if message.contains("typed refusal")
             ),
-            "rejected custody without typed refusal was accepted: {result:?}"
+            "rejected custody without typed refusal reopened: {result:?}"
         );
+    }
+
+    #[test]
+    fn same_code_refusal_payloads_and_links_survive_backup_and_reopen() {
+        let directory = tempdir().expect("temp dir");
+        let live = directory.path().join("live.db");
+        let backup = directory.path().join("backup.db");
+        let mut store = Store::initialize(&live).expect("store initializes");
+        let profile_digest = append_fixture_descriptor(&mut store);
+
+        let transient_detail = document(json!({
+            "responsible_instance_id": "fixture-a",
+            "boundary": "collection",
+            "code": "collection_failed",
+            "message": "backend collection failed",
+            "retriable": true,
+            "details": {"attempt": 1, "errno": "EAGAIN"},
+        }));
+        let permanent_detail = document(json!({
+            "responsible_instance_id": "fixture-a",
+            "boundary": "collection",
+            "code": "collection_failed",
+            "message": "backend collection failed",
+            "retriable": false,
+            "details": {"device": "nvme0", "errno": "ENODEV"},
+        }));
+        let transient = commit_rejected(
+            &mut store,
+            "a-transient",
+            &profile_digest,
+            "refusal-transient",
+            "collection_failed",
+            transient_detail,
+        );
+        let permanent = commit_rejected(
+            &mut store,
+            "b-permanent",
+            &profile_digest,
+            "refusal-permanent",
+            "collection_failed",
+            permanent_detail,
+        );
+        assert_eq!(transient.refusal_id.as_deref(), Some("refusal-transient"));
+        assert_eq!(permanent.refusal_id.as_deref(), Some("refusal-permanent"));
+
+        let live_rows = store.rejected_custody(10).expect("enumerate live custody");
+        assert_eq!(live_rows.len(), 2);
+        assert_eq!(live_rows[0].code, live_rows[1].code);
+        assert_eq!(live_rows[0].code, "collection_failed");
+        assert_ne!(live_rows[0].refusal_id, live_rows[1].refusal_id);
+        assert_ne!(live_rows[0].detail_json, live_rows[1].detail_json);
+        let first: Value = serde_json::from_slice(&live_rows[0].detail_json).expect("first detail");
+        let second: Value =
+            serde_json::from_slice(&live_rows[1].detail_json).expect("second detail");
+        assert_eq!(first["retriable"], true);
+        assert_eq!(second["retriable"], false);
+        assert_eq!(first["details"]["errno"], "EAGAIN");
+        assert_eq!(second["details"]["errno"], "ENODEV");
+
+        store.backup_verified(&backup).expect("verified backup");
+        drop(store);
+        let reopened = Store::open(&backup).expect("backup reopens");
+        assert_eq!(
+            reopened.rejected_custody(10).expect("reopened custody"),
+            live_rows
+        );
+        assert_eq!(
+            reopened
+                .raw_submission_bytes("submission-a-transient")
+                .expect("reopened raw bytes"),
+            Some(b"raw-a-transient\n".to_vec())
+        );
+    }
+
+    #[test]
+    fn refusal_linkage_validation_rejects_duplicate_and_admitted_links() {
+        let (mut duplicate, profile_digest) = configured_store();
+        commit_rejected(
+            &mut duplicate,
+            "duplicate",
+            &profile_digest,
+            "refusal-first",
+            "collection_failed",
+            document(json!({"details": {"attempt": 1}, "retriable": true})),
+        );
+        duplicate
+            .connection
+            .execute(
+                "INSERT INTO refusals (
+                    refusal_id, source_kind, responsible_instance_id, boundary,
+                    code, run_id, submission_id, evaluation_id, profile_id,
+                    profile_version, profile_digest, detail_json, created_at
+                 ) VALUES (?1, 'protocol', 'fixture-a', 'collection',
+                           'collection_failed', 'run-duplicate',
+                           'submission-duplicate', NULL, 'fixture.health', '1',
+                           ?2, ?3, ?4)",
+                params![
+                    "refusal-second",
+                    profile_digest,
+                    br#"{"details":{"attempt":2},"retriable":false}"#,
+                    TIME,
+                ],
+            )
+            .expect("schema v1 permits duplicate historical linkage");
+        assert!(matches!(
+            duplicate.validate(),
+            Err(StoreError::Integrity(message))
+                if message.contains("exactly one typed refusal") && message.contains("found 2")
+        ));
+
+        let (mut admitted, admitted_profile_digest) = configured_store();
+        commit_admitted(
+            &mut admitted,
+            "fixture-a",
+            "admitted-link",
+            &admitted_profile_digest,
+            document(json!({"report": "admitted-link"})),
+            b"admitted bytes".to_vec(),
+        );
+        admitted
+            .connection
+            .execute(
+                "INSERT INTO refusals (
+                    refusal_id, source_kind, responsible_instance_id, boundary,
+                    code, run_id, submission_id, evaluation_id, profile_id,
+                    profile_version, profile_digest, detail_json, created_at
+                 ) VALUES (?1, 'protocol', 'fixture-a', 'collection',
+                           'collection_failed', 'run-admitted-link',
+                           'submission-admitted-link', NULL, 'fixture.health', '1',
+                           ?2, ?3, ?4)",
+                params![
+                    "refusal-on-admitted",
+                    admitted_profile_digest,
+                    br#"{"details":{},"retriable":false}"#,
+                    TIME,
+                ],
+            )
+            .expect("schema v1 permits hostile admitted linkage");
+        assert!(matches!(
+            admitted.validate(),
+            Err(StoreError::Integrity(message))
+                if message.contains("admitted custody") && message.contains("typed refusal")
+        ));
+    }
+
+    #[test]
+    fn historical_refusal_mismatches_and_noncanonical_detail_fail_closed() {
+        for defect in [
+            HistoricalRefusalDefect::WrongRun,
+            HistoricalRefusalDefect::WrongInstance,
+            HistoricalRefusalDefect::WrongProfileId,
+            HistoricalRefusalDefect::WrongProfileVersion,
+            HistoricalRefusalDefect::WrongProfileDigest,
+            HistoricalRefusalDefect::WrongCode,
+        ] {
+            let store = historical_rejection_with(defect);
+            assert!(matches!(
+                store.validate(),
+                Err(StoreError::Integrity(message)) if message.contains("does not match")
+            ));
+        }
+
+        let noncanonical = historical_rejection_with(HistoricalRefusalDefect::NonCanonicalDetail);
+        assert!(matches!(
+            noncanonical.validate(),
+            Err(StoreError::Integrity(message))
+                if message.contains("not exact canonical JSON")
+        ));
     }
 
     #[test]
@@ -3515,8 +4014,7 @@ mod tests {
                     received_at: TIME.to_owned(),
                     protocol_outcome: "valid_json".to_owned(),
                     disposition: SubmissionDisposition::Rejected {
-                        rejection_code: Some("unknown_profile".to_owned()),
-                        refusal: Some(RefusalInput {
+                        refusal: RefusalInput {
                             refusal_id: "refusal-unknown".to_owned(),
                             source_kind: "profile".to_owned(),
                             responsible_instance_id: "fixture-unknown".to_owned(),
@@ -3524,7 +4022,7 @@ mod tests {
                             code: "unknown_profile".to_owned(),
                             detail: document(json!({"profile_id": "unknown.profile"})),
                             created_at: TIME.to_owned(),
-                        }),
+                        },
                     },
                 }),
             })

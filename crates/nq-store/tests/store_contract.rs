@@ -11,7 +11,7 @@
 use nq_protocol::Sha256Digest;
 use nq_store::{
     AdmissionIdentity, AdmissionInput, CanonicalDocument, CollectionInput, ProfileDescriptorInput,
-    ReportInput, RunInput, Store, SubmissionDisposition, SubmissionInput,
+    RefusalInput, ReportInput, RunInput, Store, SubmissionDisposition, SubmissionInput,
 };
 use serde_json::{Value, json};
 
@@ -160,7 +160,7 @@ fn rejected_custody_is_byte_exact_and_is_not_a_report() {
     let mut store = Store::initialize_in_memory().expect("initialize");
     let profile_digest = seed_descriptor(&mut store);
     let raw = b"exact rejected helper bytes".to_vec();
-    store
+    let receipt = store
         .commit_collection(&CollectionInput {
             run: run("rej", None, &profile_digest),
             submission: Some(SubmissionInput {
@@ -169,12 +169,20 @@ fn rejected_custody_is_byte_exact_and_is_not_a_report() {
                 received_at: TS.to_owned(),
                 protocol_outcome: "protocol_error".to_owned(),
                 disposition: SubmissionDisposition::Rejected {
-                    rejection_code: Some("malformed".to_owned()),
-                    refusal: None,
+                    refusal: RefusalInput {
+                        refusal_id: "refusal-rej".to_owned(),
+                        source_kind: "protocol".to_owned(),
+                        responsible_instance_id: INSTANCE.to_owned(),
+                        boundary: "response_frame".to_owned(),
+                        code: "malformed".to_owned(),
+                        detail: doc(json!({"offset": 7, "reason": "malformed"})),
+                        created_at: TS.to_owned(),
+                    },
                 },
             }),
         })
         .expect("commit rejected collection");
+    assert_eq!(receipt.refusal_id.as_deref(), Some("refusal-rej"));
     assert_eq!(
         store.raw_submission_bytes("submission-rej").expect("query"),
         Some(raw),
@@ -187,6 +195,11 @@ fn rejected_custody_is_byte_exact_and_is_not_a_report() {
         None,
         "a rejected submission never becomes an admitted report"
     );
+    let rows = store.rejected_custody(10).expect("enumerate rejection");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].refusal_id, "refusal-rej");
+    assert_eq!(rows[0].code, "malformed");
+    assert_eq!(rows[0].detail_json, br#"{"offset":7,"reason":"malformed"}"#);
 }
 
 #[test]
