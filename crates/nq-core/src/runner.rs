@@ -50,10 +50,20 @@ impl RunCapture {
     }
 }
 
+/// Closed phase vocabulary for persistent-carrier exchange timeouts.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExchangeTimeoutPhase {
+    /// The admitted request frame could not be written before the deadline.
+    WriteRequest,
+    /// A complete response frame was not read before the deadline.
+    ReadResponse,
+}
+
 /// Acquisition outcomes. Protocol and admission results are deliberately not
 /// represented here.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AcquisitionOutcome {
     /// One validly framed JSON object and a zero exit code were obtained.
     Response,
@@ -71,8 +81,8 @@ pub enum AcquisitionOutcome {
     Timeout,
     /// A persistent-carrier deadline expired in a named exchange phase.
     ExchangeTimeout {
-        /// Stable phase name such as `write_request` or `read_response`.
-        phase: String,
+        /// Closed phase at which the exchange deadline expired.
+        phase: ExchangeTimeoutPhase,
     },
     /// Stdout exceeded the configured bound.
     OutputTooLarge,

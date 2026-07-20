@@ -53,9 +53,9 @@ pub const EVALUATOR_SOURCE_DIGEST: &str = env!("NQ_PROFILES_SOURCE_DIGEST");
 ///
 /// Binds the descriptor digest, the evaluator source closure, and the protocol
 /// semantics label. This is *intended* to pin the meaning under which an admitted
-/// report is produced — but it is not yet consumed by production admission or
-/// storage (that wiring is workstream 1 slice 3); today `ValidatedReport` still
-/// records only the descriptor digest.
+/// report is produced. Production admission records it, and every governed
+/// profile/evaluation refusal transports and reopens it alongside the declared
+/// profile key so equal key/version values cannot erase implementation drift.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct ProfileSemanticId(nq_protocol::Sha256Digest);
@@ -125,9 +125,21 @@ mod tests {
         // Changing ANY field must change the id, so no field (in particular the
         // source closure or the protocol version) can be silently dropped from
         // the preimage without this test failing.
-        assert_ne!(base, compose_semantic_id("s2", "p", "d", "src").expect("id"));
-        assert_ne!(base, compose_semantic_id("s", "p2", "d", "src").expect("id"));
-        assert_ne!(base, compose_semantic_id("s", "p", "d2", "src").expect("id"));
-        assert_ne!(base, compose_semantic_id("s", "p", "d", "src2").expect("id"));
+        assert_ne!(
+            base,
+            compose_semantic_id("s2", "p", "d", "src").expect("id")
+        );
+        assert_ne!(
+            base,
+            compose_semantic_id("s", "p2", "d", "src").expect("id")
+        );
+        assert_ne!(
+            base,
+            compose_semantic_id("s", "p", "d2", "src").expect("id")
+        );
+        assert_ne!(
+            base,
+            compose_semantic_id("s", "p", "d", "src2").expect("id")
+        );
     }
 }

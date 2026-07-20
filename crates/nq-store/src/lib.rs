@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -41,7 +42,7 @@ static EXPECTED_SCHEMA_FINGERPRINT: LazyLock<Result<String, String>> = LazyLock:
 });
 
 /// The only schema version understood by this crate.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Hard ceiling for one page returned through the public read model helpers.
 pub const MAX_PUBLIC_QUERY_ROWS: u32 = 1_000;
@@ -298,6 +299,8 @@ pub struct RefusalInput {
     pub responsible_instance_id: String,
     pub boundary: String,
     pub code: String,
+    /// Exact compiled profile semantic identity for profile-origin refusals.
+    pub profile_semantic_id: Option<String>,
     pub detail: CanonicalDocument,
     pub created_at: String,
 }
@@ -413,6 +416,11 @@ pub struct RejectedCustodyRow {
     pub profile_id: String,
     pub profile_version: String,
     pub profile_digest: String,
+    /// Admission governing the originating run. A profile-origin refusal must
+    /// have one; historical unbound runs retain `None` and cannot be upgraded.
+    pub admission_id: Option<String>,
+    /// Exact compiled profile semantic identity from that admission.
+    pub profile_semantic_id: Option<String>,
     pub raw_sha256: String,
     pub received_at: String,
     pub protocol_outcome: String,
@@ -424,6 +432,22 @@ pub struct RejectedCustodyRow {
     /// Exact canonical refusal document persisted in `refusals.detail_json`.
     pub detail_json: Vec<u8>,
     pub created_at: String,
+}
+
+/// Authoritative persisted acquisition testimony and profile binding for one
+/// watcher run. The resource document remains exact canonical bytes so core can
+/// reopen it under the versioned product schema without store-level guessing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WatcherRunOutcomeRow {
+    pub run_id: String,
+    pub instance_id: String,
+    pub admission_id: Option<String>,
+    pub profile_id: String,
+    pub profile_version: String,
+    pub profile_digest: String,
+    pub profile_semantic_id: Option<String>,
+    pub acquisition_outcome: String,
+    pub resource_outcome_json: Vec<u8>,
 }
 
 /// Stored profile descriptor identity and exact canonical descriptor bytes.
@@ -591,7 +615,7 @@ pub struct Store {
 }
 
 impl Store {
-    /// Explicitly create a v1 store. Existing schemas are never overwritten.
+    /// Explicitly create a v2 store. Existing schemas are never overwritten.
     pub fn initialize(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref();
         let existed = path.exists();
@@ -623,7 +647,7 @@ impl Store {
         Ok(store)
     }
 
-    /// Open only an already-initialized, exactly compatible v1 store.
+    /// Open only an already-initialized, exactly compatible v2 store.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref();
         if !path.is_file() || std::fs::metadata(path)?.len() == 0 {
@@ -642,6 +666,88 @@ impl Store {
         store.validate()?;
         configure_connection(&store.connection, true)?;
         Ok(store)
+    }
+
+    /// Open an exactly compatible store for verification without permitting
+    /// SQLite to rewrite database bytes or create journal sidecars.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        if !path.is_file() || std::fs::metadata(path)?.len() == 0 {
+            return Err(StoreError::NotInitialized(path.to_path_buf()));
+        }
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        connection.pragma_update(None, "query_only", "ON")?;
+        let store = Self {
+            connection,
+            path: Some(path.to_path_buf()),
+        };
+        store.validate()?;
+        Ok(store)
+    }
+
+    /// Open a sealed archive database through SQLite's immutable URI mode.
+    /// SQLite neither consults nor creates journal/WAL sidecars for this handle.
+    pub fn open_immutable(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+        let path = path.as_ref();
+        if !path.is_file() || std::fs::metadata(path)?.len() == 0 {
+            return Err(StoreError::NotInitialized(path.to_path_buf()));
+        }
+        let canonical_path = std::fs::canonicalize(path)?;
+        let mut uri = String::from("file:");
+        for byte in canonical_path.as_os_str().as_bytes() {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-' | b'~') {
+                uri.push(char::from(*byte));
+            } else {
+                uri.push('%');
+                uri.push(char::from(HEX[usize::from(byte >> 4)]));
+                uri.push(char::from(HEX[usize::from(byte & 0x0f)]));
+            }
+        }
+        uri.push_str("?immutable=1&mode=ro");
+        let connection = Connection::open_with_flags(
+            uri,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_URI,
+        )?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        let store = Self {
+            connection,
+            path: Some(canonical_path),
+        };
+        store.validate()?;
+        Ok(store)
+    }
+
+    /// Checkpoint a writable backup copy and leave it in rollback-journal mode
+    /// before archive inventory and sealing.
+    pub fn prepare_archive_copy(&self) -> Result<(), StoreError> {
+        let checkpoint: (i64, i64, i64) =
+            self.connection
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?;
+        if checkpoint.0 != 0 || checkpoint.1 != checkpoint.2 {
+            return Err(StoreError::Integrity(format!(
+                "archive checkpoint did not complete: busy={}, log={}, checkpointed={}",
+                checkpoint.0, checkpoint.1, checkpoint.2
+            )));
+        }
+        let journal_mode: String =
+            self.connection
+                .pragma_update_and_check(None, "journal_mode", "DELETE", |row| row.get(0))?;
+        if !journal_mode.eq_ignore_ascii_case("delete") {
+            return Err(StoreError::Integrity(format!(
+                "archive copy remained in journal mode {journal_mode}"
+            )));
+        }
+        self.validate()
     }
 
     /// Construct an initialized in-memory store, primarily for conformance tests.
@@ -745,6 +851,8 @@ impl Store {
         }
         validate_stored_digests(&self.connection)?;
         validate_refusal_invariants(&self.connection)?;
+        validate_non_success_run_results(&self.connection)?;
+        validate_evaluation_refusal_invariants(&self.connection)?;
         validate_projection_invariants(&self.connection)
     }
 
@@ -1186,100 +1294,31 @@ impl Store {
         collection: &CollectionInput,
     ) -> Result<CollectionReceipt, StoreError> {
         validate_collection(collection)?;
-        let transaction = self.immediate_transaction()?;
-        insert_run(&transaction, &collection.run)?;
-
-        let mut receipt = CollectionReceipt {
-            raw_sha256: None,
-            semantic_digest: None,
-            report_sequence: None,
-            refusal_id: None,
-        };
-        if let Some(submission) = &collection.submission {
-            let raw_sha256 = sha256_digest(&submission.raw_bytes);
-            let (admission_outcome, rejection_code) = match &submission.disposition {
-                SubmissionDisposition::Rejected { refusal } => {
-                    ("rejected", Some(refusal.code.as_str()))
-                }
-                SubmissionDisposition::Admitted(_) => ("admitted", None),
-            };
-            transaction.execute(
-                "INSERT INTO raw_submissions (
-                    submission_id, run_id, raw_bytes, raw_sha256, received_at,
-                    protocol_outcome, admission_outcome, rejection_code
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    submission.submission_id,
-                    collection.run.run_id,
-                    submission.raw_bytes,
-                    raw_sha256,
-                    submission.received_at,
-                    submission.protocol_outcome,
-                    admission_outcome,
-                    rejection_code,
-                ],
-            )?;
-            receipt.raw_sha256 = Some(raw_sha256);
-
-            match &submission.disposition {
-                SubmissionDisposition::Rejected { refusal } => {
-                    insert_refusal(
-                        &transaction,
-                        refusal,
-                        Some(&collection.run.run_id),
-                        Some(&submission.submission_id),
-                        None,
-                        Some((
-                            &collection.run.profile_id,
-                            &collection.run.profile_version,
-                            &collection.run.profile_digest,
-                        )),
-                    )?;
-                    receipt.refusal_id = Some(refusal.refusal_id.clone());
-                }
-                SubmissionDisposition::Admitted(report) => {
-                    // A run that produced an admitted report must carry a
-                    // complete admission context. Resolve it here (fail closed)
-                    // and bind the report to exactly that context; the trigger
-                    // rejects any other value at the database boundary.
-                    let admission_id = collection.run.admission_id.as_deref().ok_or_else(|| {
-                        StoreError::Invariant(
-                            "an admitted report requires a run bound to an admission".to_owned(),
-                        )
-                    })?;
-                    let (admission_instance_id, admission_context_digest): (String, String) =
-                        transaction
-                            .query_row(
-                                "SELECT instance_id, admission_context_digest FROM admission_records
-                                 WHERE admission_id = ?1",
-                                [admission_id],
-                                |row| Ok((row.get(0)?, row.get(1)?)),
-                            )
-                            .optional()?
-                            .ok_or_else(|| {
-                                StoreError::Invariant(format!(
-                                    "run admission {admission_id} is not recorded; cannot bind report context"
-                                ))
-                            })?;
-                    // The named admission must govern this run's own instance; a
-                    // run may not borrow another instance's admission context.
-                    if admission_instance_id != collection.run.instance_id {
-                        return Err(StoreError::Invariant(format!(
-                            "run instance {} cannot bind admission {admission_id} of instance {admission_instance_id}",
-                            collection.run.instance_id
-                        )));
-                    }
-                    let sequence = insert_report(
-                        &transaction,
-                        &submission.submission_id,
-                        report,
-                        &admission_context_digest,
-                    )?;
-                    receipt.semantic_digest = Some(report.canonical_report.digest().to_owned());
-                    receipt.report_sequence = Some(sequence);
-                }
-            }
+        if is_non_success_collection(collection) {
+            return Err(StoreError::Invariant(
+                "run-bearing non-success collection requires commit_non_success_collection".into(),
+            ));
         }
+        let transaction = self.immediate_transaction()?;
+        let receipt = insert_collection(&transaction, collection)?;
+        transaction.commit()?;
+        Ok(receipt)
+    }
+
+    /// Atomically append one run-bearing non-success collection and its exact
+    /// canonical instance result. A process interruption can expose neither
+    /// half without the other.
+    pub fn commit_non_success_collection(
+        &mut self,
+        collection: &CollectionInput,
+        result: &RunResultStatusInput,
+    ) -> Result<CollectionReceipt, StoreError> {
+        validate_collection(collection)?;
+        validate_non_success_input(collection, result)?;
+        let transaction = self.immediate_transaction()?;
+        let receipt = insert_collection(&transaction, collection)?;
+        validate_refusal_invariants(&transaction)?;
+        insert_status_event(&transaction, &result.status, Some(&result.run_id))?;
         transaction.commit()?;
         Ok(receipt)
     }
@@ -1294,6 +1333,99 @@ impl Store {
             )
             .optional()
             .map_err(StoreError::from)
+    }
+
+    /// Reopen the authoritative acquisition testimony and admitted profile
+    /// binding for one exact watcher run.
+    pub fn watcher_run_outcome(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<WatcherRunOutcomeRow>, StoreError> {
+        let row = self
+            .connection
+            .query_row(
+                "SELECT run.run_id, run.instance_id, run.admission_id,
+                        run.profile_id, run.profile_version, run.profile_digest,
+                        admission.profile_semantic_id, run.acquisition_outcome,
+                        run.resource_outcome_json
+                 FROM watcher_runs AS run
+                 LEFT JOIN admission_records AS admission
+                   ON admission.admission_id = run.admission_id
+                 WHERE run.run_id = ?1",
+                [run_id],
+                |row| {
+                    Ok(WatcherRunOutcomeRow {
+                        run_id: row.get(0)?,
+                        instance_id: row.get(1)?,
+                        admission_id: row.get(2)?,
+                        profile_id: row.get(3)?,
+                        profile_version: row.get(4)?,
+                        profile_digest: row.get(5)?,
+                        profile_semantic_id: row.get(6)?,
+                        acquisition_outcome: row.get(7)?,
+                        resource_outcome_json: row.get(8)?,
+                    })
+                },
+            )
+            .optional()?;
+        if let Some(row) = &row {
+            CanonicalDocument::from_canonical_bytes(row.resource_outcome_json.clone()).map_err(
+                |error| {
+                    StoreError::Integrity(format!(
+                        "watcher run {} resource outcome is not exact canonical JSON: {error}",
+                        row.run_id
+                    ))
+                },
+            )?;
+        }
+        Ok(row)
+    }
+
+    /// Exhaustively page authoritative watcher-run acquisition testimony by
+    /// stable run identity.
+    pub fn watcher_run_outcomes_bounded(
+        &self,
+        limit: u32,
+        after_run_id: Option<&str>,
+    ) -> Result<Vec<WatcherRunOutcomeRow>, StoreError> {
+        validate_public_limit(limit)?;
+        let mut statement = self.connection.prepare(
+            "SELECT run.run_id, run.instance_id, run.admission_id,
+                    run.profile_id, run.profile_version, run.profile_digest,
+                    admission.profile_semantic_id, run.acquisition_outcome,
+                    run.resource_outcome_json
+             FROM watcher_runs AS run
+             LEFT JOIN admission_records AS admission
+               ON admission.admission_id = run.admission_id
+             WHERE ?1 IS NULL OR run.run_id > ?1
+             ORDER BY run.run_id
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![after_run_id, limit], |row| {
+            Ok(WatcherRunOutcomeRow {
+                run_id: row.get(0)?,
+                instance_id: row.get(1)?,
+                admission_id: row.get(2)?,
+                profile_id: row.get(3)?,
+                profile_version: row.get(4)?,
+                profile_digest: row.get(5)?,
+                profile_semantic_id: row.get(6)?,
+                acquisition_outcome: row.get(7)?,
+                resource_outcome_json: row.get(8)?,
+            })
+        })?;
+        let rows = rows.collect::<Result<Vec<_>, _>>()?;
+        for row in &rows {
+            CanonicalDocument::from_canonical_bytes(row.resource_outcome_json.clone()).map_err(
+                |error| {
+                    StoreError::Integrity(format!(
+                        "watcher run {} resource outcome is not exact canonical JSON: {error}",
+                        row.run_id
+                    ))
+                },
+            )?;
+        }
+        Ok(rows)
     }
 
     /// Enumerate rejected custody with its exact linked typed refusal.
@@ -1322,13 +1454,16 @@ impl Store {
         let mut statement = self.connection.prepare(
             "SELECT submission.submission_id, submission.run_id, run.request_id,
                     run.instance_id, run.profile_id, run.profile_version,
-                    run.profile_digest, submission.raw_sha256,
+                    run.profile_digest, run.admission_id,
+                    admission.profile_semantic_id, submission.raw_sha256,
                     submission.received_at, submission.protocol_outcome,
                     refusal.refusal_id, refusal.source_kind,
                     refusal.responsible_instance_id, refusal.boundary,
                     refusal.code, refusal.detail_json, refusal.created_at
              FROM raw_submissions AS submission
              JOIN watcher_runs AS run ON run.run_id = submission.run_id
+             LEFT JOIN admission_records AS admission
+               ON admission.admission_id = run.admission_id
              JOIN refusals AS refusal
                ON refusal.submission_id = submission.submission_id
              WHERE submission.admission_outcome = 'rejected'
@@ -1356,13 +1491,16 @@ impl Store {
             .query_row(
                 "SELECT submission.submission_id, submission.run_id, run.request_id,
                         run.instance_id, run.profile_id, run.profile_version,
-                        run.profile_digest, submission.raw_sha256,
+                        run.profile_digest, run.admission_id,
+                        admission.profile_semantic_id, submission.raw_sha256,
                         submission.received_at, submission.protocol_outcome,
                         refusal.refusal_id, refusal.source_kind,
                         refusal.responsible_instance_id, refusal.boundary,
                         refusal.code, refusal.detail_json, refusal.created_at
                  FROM raw_submissions AS submission
                  JOIN watcher_runs AS run ON run.run_id = submission.run_id
+                 LEFT JOIN admission_records AS admission
+                   ON admission.admission_id = run.admission_id
                  JOIN refusals AS refusal
                    ON refusal.submission_id = submission.submission_id
                  WHERE submission.admission_outcome = 'rejected'
@@ -1452,9 +1590,21 @@ pub struct EvaluationInput {
     pub evaluated_at: String,
     pub outcome: String,
     pub detail: CanonicalDocument,
+    /// Exact compiled profile identity under which the detector evaluated.
+    pub profile: EvaluationProfileBinding,
     /// Exact watermarks returned by [`Store::evidence_snapshot`].
     pub watermarks: Vec<EvaluationWatermark>,
     pub refusal: Option<RefusalInput>,
+}
+
+/// Required profile identity for every detector evaluation, independent of
+/// whether a finding event is emitted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvaluationProfileBinding {
+    pub profile_id: String,
+    pub profile_version: String,
+    pub profile_digest: String,
+    pub profile_semantic_id: Sha256Digest,
 }
 
 /// One exact admitted evidence reference used by a finding event.
@@ -1529,7 +1679,7 @@ pub struct EvidenceSnapshot {
     pub reports: Vec<AdmittedReportRow>,
 }
 
-/// One row from the stable `nq.finding_snapshot.v2` public read model.
+/// One row from the stable `nq.finding_snapshot.v3` public read model.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FindingSnapshotRow {
     pub finding_id: String,
@@ -1541,6 +1691,7 @@ pub struct FindingSnapshotRow {
     pub profile_id: String,
     pub profile_version: String,
     pub profile_digest: String,
+    pub profile_semantic_id: String,
     pub subject_json: String,
     pub condition_name: String,
     pub condition_state: String,
@@ -1558,6 +1709,8 @@ pub struct FindingSnapshotRow {
     pub observed_at: Option<String>,
     pub received_at: Option<String>,
     pub evaluated_at: String,
+    pub evaluation_id: String,
+    pub evaluation_refusal_json: Option<String>,
     pub evidence_json: String,
 }
 
@@ -1579,10 +1732,40 @@ pub struct StatusEventRow {
     pub status_event_id: String,
     pub component_kind: String,
     pub component_id: String,
+    /// Exact originating run for canonical non-success collection results.
+    pub run_id: Option<String>,
     pub state: String,
     pub code: String,
     pub detail_json: String,
     pub observed_at: String,
+}
+
+/// One immutable detector evaluation with its exact optional governed refusal
+/// and optional finding-event copy, ordered by stable evaluation identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvaluationRefusalHistoryRow {
+    pub evaluation_id: String,
+    pub outcome: String,
+    pub detail_json: Vec<u8>,
+    pub evaluation_profile_id: String,
+    pub evaluation_profile_version: String,
+    pub evaluation_profile_digest: String,
+    pub evaluation_profile_semantic_id: String,
+    pub refusal_id: Option<String>,
+    pub source_kind: Option<String>,
+    pub responsible_instance_id: Option<String>,
+    pub boundary: Option<String>,
+    pub code: Option<String>,
+    pub profile_id: Option<String>,
+    pub profile_version: Option<String>,
+    pub profile_digest: Option<String>,
+    pub profile_semantic_id: Option<String>,
+    pub refusal_detail_json: Option<Vec<u8>>,
+    pub finding_event_id: Option<String>,
+    pub finding_profile_id: Option<String>,
+    pub finding_profile_version: Option<String>,
+    pub finding_profile_digest: Option<String>,
+    pub finding_refusal_json: Option<Vec<u8>>,
 }
 
 /// An immutable status event followed by a rebuildable projection update.
@@ -1595,6 +1778,16 @@ pub struct StatusEventInput {
     pub code: String,
     pub detail: CanonicalDocument,
     pub observed_at: String,
+}
+
+/// Canonical non-success result committed in the same transaction as its run,
+/// optional custody bytes, and mandatory typed refusal.
+#[derive(Clone, Debug)]
+pub struct RunResultStatusInput {
+    /// Exact run created by the accompanying collection input.
+    pub run_id: String,
+    /// Instance status whose canonical detail carries that same run identity.
+    pub status: StatusEventInput,
 }
 
 /// A durable notification request.
@@ -1890,6 +2083,7 @@ impl Store {
     }
 
     /// Commit an evaluation, its consistent watermark, optional refusal, and finding event.
+    #[allow(clippy::too_many_lines)]
     pub fn commit_evaluation(
         &mut self,
         evaluation: &EvaluationInput,
@@ -1900,6 +2094,7 @@ impl Store {
             "evaluator_artifact_digest",
             &evaluation.evaluator_artifact_digest,
         )?;
+        validate_digest("profile_digest", &evaluation.profile.profile_digest)?;
         if (evaluation.outcome == "cannot_evaluate") != evaluation.refusal.is_some() {
             return Err(StoreError::Invariant(
                 "cannot_evaluate requires exactly one typed refusal".to_owned(),
@@ -1923,13 +2118,18 @@ impl Store {
         transaction.execute(
             "INSERT INTO evaluation_runs (
                 evaluation_id, detector_id, detector_version, detector_digest,
+                profile_id, profile_version, profile_digest, profile_semantic_id,
                 evaluation_revision, started_at, evaluated_at, outcome, detail_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 evaluation.evaluation_id,
                 evaluation.detector_id,
                 evaluation.detector_version,
                 evaluation.detector_digest,
+                evaluation.profile.profile_id,
+                evaluation.profile.profile_version,
+                evaluation.profile.profile_digest,
+                evaluation.profile.profile_semantic_id.as_str(),
                 evaluation_revision,
                 evaluation.started_at,
                 evaluation.evaluated_at,
@@ -1963,13 +2163,30 @@ impl Store {
         }
 
         if let Some(refusal) = &evaluation.refusal {
+            if refusal.source_kind != "profile"
+                || !evaluation
+                    .watermarks
+                    .iter()
+                    .any(|watermark| watermark.instance_id == refusal.responsible_instance_id)
+                || refusal.profile_semantic_id.as_deref()
+                    != Some(evaluation.profile.profile_semantic_id.as_str())
+            {
+                return Err(StoreError::Invariant(
+                    "evaluation refusal disagrees with its required profile semantic binding"
+                        .into(),
+                ));
+            }
             insert_refusal(
                 &transaction,
                 refusal,
                 None,
                 None,
                 Some(&evaluation.evaluation_id),
-                None,
+                Some((
+                    &evaluation.profile.profile_id,
+                    &evaluation.profile.profile_version,
+                    &evaluation.profile.profile_digest,
+                )),
             )?;
         }
         if let Some(finding) = finding {
@@ -1996,12 +2213,13 @@ impl Store {
         let mut statement = self.connection.prepare(
             "SELECT finding_id, instance_id, detector_id, detector_version,
                     detector_digest, evaluation_revision, profile_id, profile_version,
-                    profile_digest, subject_json, condition_name, condition_state, visibility_state,
+                    profile_digest, profile_semantic_id, subject_json, condition_name,
+                    condition_state, visibility_state,
                     operator_work_state, severity, summary, limitations_json,
                     safe_next_checks_json, freshness_json, basis_json, refusal_json,
                     origin_mode, historical_refs_json, observed_at, received_at,
-                    evaluated_at, evidence_json
-             FROM public_finding_snapshot_v2 ORDER BY finding_id",
+                    evaluated_at, evaluation_id, evaluation_refusal_json, evidence_json
+             FROM public_finding_snapshot_v3 ORDER BY finding_id",
         )?;
         let rows = statement.query_map([], |row| {
             Ok(FindingSnapshotRow {
@@ -2014,24 +2232,27 @@ impl Store {
                 profile_id: row.get(6)?,
                 profile_version: row.get(7)?,
                 profile_digest: row.get(8)?,
-                subject_json: row.get(9)?,
-                condition_name: row.get(10)?,
-                condition_state: row.get(11)?,
-                visibility_state: row.get(12)?,
-                operator_work_state: row.get(13)?,
-                severity: row.get(14)?,
-                summary: row.get(15)?,
-                limitations_json: row.get(16)?,
-                safe_next_checks_json: row.get(17)?,
-                freshness_json: row.get(18)?,
-                basis_json: row.get(19)?,
-                refusal_json: row.get(20)?,
-                origin_mode: row.get(21)?,
-                historical_refs_json: row.get(22)?,
-                observed_at: row.get(23)?,
-                received_at: row.get(24)?,
-                evaluated_at: row.get(25)?,
-                evidence_json: row.get(26)?,
+                profile_semantic_id: row.get(9)?,
+                subject_json: row.get(10)?,
+                condition_name: row.get(11)?,
+                condition_state: row.get(12)?,
+                visibility_state: row.get(13)?,
+                operator_work_state: row.get(14)?,
+                severity: row.get(15)?,
+                summary: row.get(16)?,
+                limitations_json: row.get(17)?,
+                safe_next_checks_json: row.get(18)?,
+                freshness_json: row.get(19)?,
+                basis_json: row.get(20)?,
+                refusal_json: row.get(21)?,
+                origin_mode: row.get(22)?,
+                historical_refs_json: row.get(23)?,
+                observed_at: row.get(24)?,
+                received_at: row.get(25)?,
+                evaluated_at: row.get(26)?,
+                evaluation_id: row.get(27)?,
+                evaluation_refusal_json: row.get(28)?,
+                evidence_json: row.get(29)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()
@@ -2048,12 +2269,13 @@ impl Store {
         let mut statement = self.connection.prepare(
             "SELECT finding_id, instance_id, detector_id, detector_version,
                     detector_digest, evaluation_revision, profile_id, profile_version,
-                    profile_digest, subject_json, condition_name, condition_state, visibility_state,
+                    profile_digest, profile_semantic_id, subject_json, condition_name,
+                    condition_state, visibility_state,
                     operator_work_state, severity, summary, limitations_json,
                     safe_next_checks_json, freshness_json, basis_json, refusal_json,
                     origin_mode, historical_refs_json, observed_at, received_at,
-                    evaluated_at, evidence_json
-             FROM public_finding_snapshot_v2
+                    evaluated_at, evaluation_id, evaluation_refusal_json, evidence_json
+             FROM public_finding_snapshot_v3
              WHERE ?1 IS NULL OR finding_id > ?1
              ORDER BY finding_id LIMIT ?2",
         )?;
@@ -2068,24 +2290,27 @@ impl Store {
                 profile_id: row.get(6)?,
                 profile_version: row.get(7)?,
                 profile_digest: row.get(8)?,
-                subject_json: row.get(9)?,
-                condition_name: row.get(10)?,
-                condition_state: row.get(11)?,
-                visibility_state: row.get(12)?,
-                operator_work_state: row.get(13)?,
-                severity: row.get(14)?,
-                summary: row.get(15)?,
-                limitations_json: row.get(16)?,
-                safe_next_checks_json: row.get(17)?,
-                freshness_json: row.get(18)?,
-                basis_json: row.get(19)?,
-                refusal_json: row.get(20)?,
-                origin_mode: row.get(21)?,
-                historical_refs_json: row.get(22)?,
-                observed_at: row.get(23)?,
-                received_at: row.get(24)?,
-                evaluated_at: row.get(25)?,
-                evidence_json: row.get(26)?,
+                profile_semantic_id: row.get(9)?,
+                subject_json: row.get(10)?,
+                condition_name: row.get(11)?,
+                condition_state: row.get(12)?,
+                visibility_state: row.get(13)?,
+                operator_work_state: row.get(14)?,
+                severity: row.get(15)?,
+                summary: row.get(16)?,
+                limitations_json: row.get(17)?,
+                safe_next_checks_json: row.get(18)?,
+                freshness_json: row.get(19)?,
+                basis_json: row.get(20)?,
+                refusal_json: row.get(21)?,
+                origin_mode: row.get(22)?,
+                historical_refs_json: row.get(23)?,
+                observed_at: row.get(24)?,
+                received_at: row.get(25)?,
+                evaluated_at: row.get(26)?,
+                evaluation_id: row.get(27)?,
+                evaluation_refusal_json: row.get(28)?,
+                evidence_json: row.get(29)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()
@@ -2095,32 +2320,7 @@ impl Store {
     /// Append a status event and atomically advance only its rebuildable pointer.
     pub fn record_status(&mut self, status: &StatusEventInput) -> Result<(), StoreError> {
         let transaction = self.immediate_transaction()?;
-        transaction.execute(
-            "INSERT INTO status_events (
-                status_event_id, component_kind, component_id, state, code,
-                detail_json, observed_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                status.status_event_id,
-                status.component_kind,
-                status.component_id,
-                status.state,
-                status.code,
-                status.detail.as_bytes(),
-                status.observed_at,
-            ],
-        )?;
-        transaction.execute(
-            "INSERT INTO status_current (component_kind, component_id, latest_status_event_id)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(component_kind, component_id) DO UPDATE
-             SET latest_status_event_id = excluded.latest_status_event_id",
-            params![
-                status.component_kind,
-                status.component_id,
-                status.status_event_id,
-            ],
-        )?;
+        insert_status_event(&transaction, status, None)?;
         transaction.commit()?;
         Ok(())
     }
@@ -2194,7 +2394,8 @@ impl Store {
         }
         let mut statement = self.connection.prepare(
             "SELECT status_sequence, status_event_id, component_kind,
-                    component_id, state, code, CAST(detail_json AS TEXT), observed_at
+                    component_id, run_id, state, code,
+                    CAST(detail_json AS TEXT), observed_at
              FROM status_events
              WHERE status_sequence > COALESCE(?1, 0)
              ORDER BY status_sequence
@@ -2206,10 +2407,78 @@ impl Store {
                 status_event_id: row.get(1)?,
                 component_kind: row.get(2)?,
                 component_id: row.get(3)?,
-                state: row.get(4)?,
-                code: row.get(5)?,
-                detail_json: row.get(6)?,
-                observed_at: row.get(7)?,
+                run_id: row.get(4)?,
+                state: row.get(5)?,
+                code: row.get(6)?,
+                detail_json: row.get(7)?,
+                observed_at: row.get(8)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    /// Prove every non-success watcher run has exactly one atomically linked
+    /// canonical instance result and that no successful run borrows such a
+    /// link.
+    pub fn validate_non_success_run_results(&self) -> Result<(), StoreError> {
+        validate_non_success_run_results(&self.connection)
+    }
+
+    /// Read one bounded immutable page of evaluations with exact refusal and
+    /// finding-event associations. The cursor is the stable evaluation UUID.
+    pub fn evaluation_refusal_history_bounded(
+        &self,
+        limit: u32,
+        after_evaluation_id: Option<&str>,
+    ) -> Result<Vec<EvaluationRefusalHistoryRow>, StoreError> {
+        validate_public_limit(limit)?;
+        validate_evaluation_refusal_invariants(&self.connection)?;
+        let mut statement = self.connection.prepare(
+            "SELECT evaluation.evaluation_id, evaluation.outcome,
+                    evaluation.detail_json, evaluation.profile_id,
+                    evaluation.profile_version, evaluation.profile_digest,
+                    evaluation.profile_semantic_id, refusal.refusal_id,
+                    refusal.source_kind, refusal.responsible_instance_id,
+                    refusal.boundary, refusal.code, refusal.profile_id,
+                    refusal.profile_version, refusal.profile_digest,
+                    refusal.profile_semantic_id, refusal.detail_json,
+                    finding.event_id, finding.profile_id,
+                    finding.profile_version, finding.profile_digest,
+                    finding.refusal_json
+             FROM evaluation_runs AS evaluation
+             LEFT JOIN refusals AS refusal
+               ON refusal.evaluation_id = evaluation.evaluation_id
+             LEFT JOIN finding_events AS finding
+               ON finding.evaluation_id = evaluation.evaluation_id
+             WHERE ?1 IS NULL OR evaluation.evaluation_id > ?1
+             ORDER BY evaluation.evaluation_id
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![after_evaluation_id, limit], |row| {
+            Ok(EvaluationRefusalHistoryRow {
+                evaluation_id: row.get(0)?,
+                outcome: row.get(1)?,
+                detail_json: row.get(2)?,
+                evaluation_profile_id: row.get(3)?,
+                evaluation_profile_version: row.get(4)?,
+                evaluation_profile_digest: row.get(5)?,
+                evaluation_profile_semantic_id: row.get(6)?,
+                refusal_id: row.get(7)?,
+                source_kind: row.get(8)?,
+                responsible_instance_id: row.get(9)?,
+                boundary: row.get(10)?,
+                code: row.get(11)?,
+                profile_id: row.get(12)?,
+                profile_version: row.get(13)?,
+                profile_digest: row.get(14)?,
+                profile_semantic_id: row.get(15)?,
+                refusal_detail_json: row.get(16)?,
+                finding_event_id: row.get(17)?,
+                finding_profile_id: row.get(18)?,
+                finding_profile_version: row.get(19)?,
+                finding_profile_digest: row.get(20)?,
+                finding_refusal_json: row.get(21)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>()
@@ -2462,7 +2731,7 @@ fn validate_required_objects(connection: &Connection) -> Result<(), StoreError> 
         "status_current",
     ];
     const VIEWS: &[&str] = &[
-        "public_finding_snapshot_v2",
+        "public_finding_snapshot_v3",
         "public_status_snapshot_v1",
         "public_notification_status_v1",
     ];
@@ -2584,10 +2853,31 @@ fn validate_stored_digests(connection: &Connection) -> Result<(), StoreError> {
 /// Prove that every rejected custody row has one exact typed refusal and that
 /// every duplicated projection agrees with the refusal's originating run.
 ///
-/// Schema v1 already stores the full association in `refusals.submission_id`;
-/// these semantic checks make that existing representation fail closed without
-/// inventing testimony for historical rows or changing the schema artifact.
+/// Schema v2 stores the full association in `refusals.submission_id`; these
+/// semantic checks make that representation fail closed without inventing
+/// testimony for historical rows.
+#[allow(clippy::too_many_lines)]
 fn validate_refusal_invariants(connection: &Connection) -> Result<(), StoreError> {
+    let invalid_association: Option<String> = connection
+        .query_row(
+            "SELECT refusal_id FROM refusals
+             WHERE NOT (
+                    (run_id IS NOT NULL AND submission_id IS NOT NULL
+                     AND evaluation_id IS NULL)
+                 OR (run_id IS NULL AND submission_id IS NULL
+                     AND evaluation_id IS NOT NULL)
+             )
+             ORDER BY refusal_id LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(refusal_id) = invalid_association {
+        return Err(StoreError::Integrity(format!(
+            "typed refusal {refusal_id} is orphaned or cross-linked across identity models"
+        )));
+    }
+
     let missing_or_duplicate: Option<(String, i64)> = connection
         .query_row(
             "SELECT submission.submission_id, COUNT(refusal.refusal_id)
@@ -2635,6 +2925,8 @@ fn validate_refusal_invariants(connection: &Connection) -> Result<(), StoreError
              JOIN watcher_runs AS run ON run.run_id = submission.run_id
              JOIN refusals AS refusal
                ON refusal.submission_id = submission.submission_id
+             LEFT JOIN admission_records AS admission
+               ON admission.admission_id = run.admission_id
              WHERE submission.admission_outcome = 'rejected'
                AND (
                     submission.rejection_code IS NOT refusal.code
@@ -2644,6 +2936,17 @@ fn validate_refusal_invariants(connection: &Connection) -> Result<(), StoreError
                  OR refusal.profile_version IS NOT run.profile_version
                  OR refusal.profile_digest IS NOT run.profile_digest
                  OR refusal.evaluation_id IS NOT NULL
+                 OR (refusal.source_kind = 'profile' AND (
+                        run.admission_id IS NULL
+                     OR admission.admission_id IS NULL
+                     OR admission.instance_id IS NOT run.instance_id
+                     OR admission.profile_id IS NOT run.profile_id
+                     OR admission.profile_version IS NOT run.profile_version
+                     OR admission.profile_digest IS NOT run.profile_digest
+                     OR refusal.profile_semantic_id IS NOT admission.profile_semantic_id
+                 ))
+                 OR (refusal.source_kind <> 'profile'
+                     AND refusal.profile_semantic_id IS NOT NULL)
                )
              ORDER BY submission.submission_id
              LIMIT 1",
@@ -2666,6 +2969,220 @@ fn validate_refusal_invariants(connection: &Connection) -> Result<(), StoreError
         CanonicalDocument::from_canonical_bytes(detail_json).map_err(|error| {
             StoreError::Integrity(format!(
                 "typed refusal {refusal_id} detail is not exact canonical JSON: {error}"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+/// A non-success run is exactly a failed acquisition or a response whose raw
+/// submission was rejected. Such a run must have one status event linked by
+/// `status_events.run_id`; admission-refused statuses have no run and are out of
+/// scope, while admitted success remains deliberately outside this obligation.
+fn validate_non_success_run_results(connection: &Connection) -> Result<(), StoreError> {
+    let missing_or_duplicate: Option<(String, i64)> = connection
+        .query_row(
+            "SELECT run.run_id, COUNT(status.status_event_id)
+             FROM watcher_runs AS run
+             LEFT JOIN status_events AS status ON status.run_id = run.run_id
+             WHERE run.acquisition_outcome <> 'response'
+                OR json_extract(run.resource_outcome_json, '$.outcome.outcome') <> 'response'
+                OR EXISTS (
+                    SELECT 1 FROM raw_submissions AS submission
+                    WHERE submission.run_id = run.run_id
+                      AND submission.admission_outcome = 'rejected'
+                )
+             GROUP BY run.run_id
+             HAVING COUNT(status.status_event_id) <> 1
+             ORDER BY run.run_id
+             LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((run_id, count)) = missing_or_duplicate {
+        return Err(StoreError::Integrity(format!(
+            "non-success watcher run {run_id} requires exactly one canonical run-linked result; found {count}"
+        )));
+    }
+
+    let invalid_link: Option<String> = connection
+        .query_row(
+            "SELECT status.run_id
+             FROM status_events AS status
+             JOIN watcher_runs AS run ON run.run_id = status.run_id
+             WHERE status.run_id IS NOT NULL
+               AND (
+                    status.component_kind <> 'instance'
+                 OR status.component_id <> run.instance_id
+                 OR (
+                      run.acquisition_outcome = 'response'
+                      AND json_extract(run.resource_outcome_json, '$.outcome.outcome') = 'response'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM raw_submissions AS submission
+                          WHERE submission.run_id = run.run_id
+                            AND submission.admission_outcome = 'rejected'
+                      )
+                 )
+               )
+             ORDER BY status.run_id
+             LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(run_id) = invalid_link {
+        return Err(StoreError::Integrity(format!(
+            "status event has invalid canonical non-success run link {run_id}"
+        )));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn validate_evaluation_refusal_invariants(connection: &Connection) -> Result<(), StoreError> {
+    let wrong_count: Option<(String, String, i64)> = connection
+        .query_row(
+            "SELECT evaluation.evaluation_id, evaluation.outcome,
+                    COUNT(refusal.refusal_id)
+             FROM evaluation_runs AS evaluation
+             LEFT JOIN refusals AS refusal
+               ON refusal.evaluation_id = evaluation.evaluation_id
+             GROUP BY evaluation.evaluation_id
+             HAVING (evaluation.outcome = 'cannot_evaluate'
+                     AND COUNT(refusal.refusal_id) <> 1)
+                 OR (evaluation.outcome <> 'cannot_evaluate'
+                     AND COUNT(refusal.refusal_id) <> 0)
+             ORDER BY evaluation.evaluation_id
+             LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    if let Some((evaluation_id, outcome, count)) = wrong_count {
+        return Err(StoreError::Integrity(format!(
+            "evaluation {evaluation_id} outcome {outcome} has {count} typed refusals"
+        )));
+    }
+
+    let duplicate_finding: Option<(String, i64)> = connection
+        .query_row(
+            "SELECT evaluation_id, COUNT(event_id)
+             FROM finding_events
+             GROUP BY evaluation_id HAVING COUNT(event_id) > 1
+             ORDER BY evaluation_id LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((evaluation_id, count)) = duplicate_finding {
+        return Err(StoreError::Integrity(format!(
+            "evaluation {evaluation_id} has {count} finding events; expected at most one"
+        )));
+    }
+
+    let substituted_lineage: Option<String> = connection
+        .query_row(
+            "SELECT event.event_id
+             FROM finding_events AS event
+             JOIN evaluation_runs AS evaluation
+               ON evaluation.evaluation_id = event.evaluation_id
+             WHERE (event.event_revision = 1 AND event.event_kind <> 'opened')
+                OR (event.event_revision > 1 AND NOT EXISTS (
+                    SELECT 1
+                    FROM finding_events AS prior
+                    JOIN evaluation_runs AS prior_evaluation
+                      ON prior_evaluation.evaluation_id = prior.evaluation_id
+                    WHERE prior.finding_id = event.finding_id
+                      AND prior.event_revision = event.event_revision - 1
+                      AND event.event_kind <> 'opened'
+                      AND prior.instance_id = event.instance_id
+                      AND prior.detector_id = event.detector_id
+                      AND prior.detector_version = event.detector_version
+                      AND prior.detector_digest = event.detector_digest
+                      AND prior.profile_id = event.profile_id
+                      AND prior.profile_version = event.profile_version
+                      AND prior.profile_digest = event.profile_digest
+                      AND prior_evaluation.profile_semantic_id = evaluation.profile_semantic_id
+                      AND prior.subject_json = event.subject_json
+                      AND prior.condition_name = event.condition_name
+                ))
+             ORDER BY event.event_id
+             LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(event_id) = substituted_lineage {
+        return Err(StoreError::Integrity(format!(
+            "finding event {event_id} substitutes immutable finding lineage"
+        )));
+    }
+
+    let mismatch: Option<String> = connection
+        .query_row(
+            "SELECT evaluation.evaluation_id
+             FROM evaluation_runs AS evaluation
+             LEFT JOIN refusals AS refusal
+               ON refusal.evaluation_id = evaluation.evaluation_id
+             LEFT JOIN finding_events AS finding
+               ON finding.evaluation_id = evaluation.evaluation_id
+             WHERE (refusal.refusal_id IS NOT NULL AND (
+                       refusal.source_kind <> 'profile'
+                    OR refusal.profile_id IS NULL
+                    OR refusal.profile_version IS NULL
+                    OR refusal.profile_digest IS NULL
+                    OR refusal.profile_semantic_id IS NULL
+                    OR refusal.profile_id IS NOT evaluation.profile_id
+                    OR refusal.profile_version IS NOT evaluation.profile_version
+                    OR refusal.profile_digest IS NOT evaluation.profile_digest
+                    OR refusal.profile_semantic_id IS NOT evaluation.profile_semantic_id
+                    OR NOT EXISTS (
+                        SELECT 1 FROM evaluation_watermarks AS watermark
+                        WHERE watermark.evaluation_id = evaluation.evaluation_id
+                          AND watermark.instance_id = refusal.responsible_instance_id
+                    )
+                 ))
+                OR (finding.event_id IS NOT NULL AND (
+                       finding.profile_id IS NOT evaluation.profile_id
+                    OR finding.profile_version IS NOT evaluation.profile_version
+                    OR finding.profile_digest IS NOT evaluation.profile_digest
+                    OR (refusal.refusal_id IS NULL AND finding.refusal_json IS NOT NULL)
+                    OR (refusal.refusal_id IS NOT NULL
+                        AND finding.refusal_json IS NOT refusal.detail_json)
+                 ))
+                OR (evaluation.outcome = 'cannot_evaluate'
+                    AND finding.event_id IS NOT NULL
+                    AND (
+                         finding.visibility_state = 'sufficient'
+                      OR NOT EXISTS (
+                          SELECT 1 FROM finding_events AS prior
+                          WHERE prior.finding_id = finding.finding_id
+                            AND prior.event_revision = finding.event_revision - 1
+                            AND prior.condition_state = finding.condition_state
+                      )
+                    ))
+             ORDER BY evaluation.evaluation_id
+             LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(evaluation_id) = mismatch {
+        return Err(StoreError::Integrity(format!(
+            "evaluation {evaluation_id} has inconsistent governed refusal or finding linkage"
+        )));
+    }
+
+    let mut evaluations = connection
+        .prepare("SELECT evaluation_id, detail_json FROM evaluation_runs ORDER BY evaluation_id")?;
+    let mut rows = evaluations.query([])?;
+    while let Some(row) = rows.next()? {
+        let evaluation_id: String = row.get(0)?;
+        let detail: Vec<u8> = row.get(1)?;
+        CanonicalDocument::from_canonical_bytes(detail).map_err(|error| {
+            StoreError::Integrity(format!(
+                "evaluation {evaluation_id} detail is not exact canonical JSON: {error}"
             ))
         })?;
     }
@@ -2823,16 +3340,18 @@ fn rejected_custody_row(row: &rusqlite::Row<'_>) -> Result<RejectedCustodyRow, r
         profile_id: row.get(4)?,
         profile_version: row.get(5)?,
         profile_digest: row.get(6)?,
-        raw_sha256: row.get(7)?,
-        received_at: row.get(8)?,
-        protocol_outcome: row.get(9)?,
-        refusal_id: row.get(10)?,
-        source_kind: row.get(11)?,
-        responsible_instance_id: row.get(12)?,
-        boundary: row.get(13)?,
-        code: row.get(14)?,
-        detail_json: row.get(15)?,
-        created_at: row.get(16)?,
+        admission_id: row.get(7)?,
+        profile_semantic_id: row.get(8)?,
+        raw_sha256: row.get(9)?,
+        received_at: row.get(10)?,
+        protocol_outcome: row.get(11)?,
+        refusal_id: row.get(12)?,
+        source_kind: row.get(13)?,
+        responsible_instance_id: row.get(14)?,
+        boundary: row.get(15)?,
+        code: row.get(16)?,
+        detail_json: row.get(17)?,
+        created_at: row.get(18)?,
     })
 }
 
@@ -2846,6 +3365,7 @@ fn validate_document_size(size: usize) -> Result<(), StoreError> {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_collection(collection: &CollectionInput) -> Result<(), StoreError> {
     validate_digest("binding_digest", &collection.run.binding_digest)?;
     validate_digest(
@@ -2853,6 +3373,52 @@ fn validate_collection(collection: &CollectionInput) -> Result<(), StoreError> {
         &collection.run.checkpoint_contract_digest,
     )?;
     validate_digest("profile_digest", &collection.run.profile_digest)?;
+    let resource: Value = serde_json::from_slice(collection.run.resource_outcome.as_bytes())
+        .map_err(|error| {
+            StoreError::Invariant(format!("run resource outcome cannot decode: {error}"))
+        })?;
+    if resource.get("schema").and_then(Value::as_str) != Some("nq.run_resource_outcome.v1") {
+        return Err(StoreError::Invariant(
+            "run resource outcome has unsupported or missing schema".into(),
+        ));
+    }
+    let exact_outcome = resource
+        .pointer("/outcome/outcome")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            StoreError::Invariant(
+                "run resource outcome lacks exact typed acquisition outcome".into(),
+            )
+        })?;
+    let projected_outcome = match exact_outcome {
+        "exchange_timeout" => "timeout",
+        "response"
+        | "spawn_failed"
+        | "request_write_failed"
+        | "timeout"
+        | "output_too_large"
+        | "stderr_too_large"
+        | "eof"
+        | "malformed_framing"
+        | "malformed_json"
+        | "exit_nonzero"
+        | "helper_exited"
+        | "disconnect"
+        | "carrier_startup_failed"
+        | "not_running"
+        | "io_failed" => exact_outcome,
+        _ => {
+            return Err(StoreError::Invariant(format!(
+                "run resource outcome has unknown acquisition variant {exact_outcome}"
+            )));
+        }
+    };
+    if projected_outcome != collection.run.acquisition_outcome {
+        return Err(StoreError::Invariant(format!(
+            "run acquisition projection {} disagrees with exact resource outcome {exact_outcome}",
+            collection.run.acquisition_outcome
+        )));
+    }
     let Some(submission) = &collection.submission else {
         return Ok(());
     };
@@ -3051,11 +3617,196 @@ fn insert_materialization_event(
     Ok(())
 }
 
+fn validate_non_success_input(
+    collection: &CollectionInput,
+    result: &RunResultStatusInput,
+) -> Result<(), StoreError> {
+    if result.run_id != collection.run.run_id {
+        return Err(StoreError::Invariant(format!(
+            "canonical result run {} does not match collection run {}",
+            result.run_id, collection.run.run_id
+        )));
+    }
+    if result.status.component_kind != "instance"
+        || result.status.component_id != collection.run.instance_id
+    {
+        return Err(StoreError::Invariant(
+            "run-bearing result must be an instance status for the collection instance".into(),
+        ));
+    }
+    if !is_non_success_collection(collection) {
+        return Err(StoreError::Invariant(
+            "atomic non-success commit requires failed acquisition or rejected custody".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_non_success_collection(collection: &CollectionInput) -> bool {
+    collection.run.acquisition_outcome != "response"
+        || collection.submission.as_ref().is_some_and(|submission| {
+            matches!(
+                submission.disposition,
+                SubmissionDisposition::Rejected { .. }
+            )
+        })
+}
+
+fn insert_collection(
+    transaction: &Transaction<'_>,
+    collection: &CollectionInput,
+) -> Result<CollectionReceipt, StoreError> {
+    insert_run(transaction, &collection.run)?;
+    let mut receipt = CollectionReceipt {
+        raw_sha256: None,
+        semantic_digest: None,
+        report_sequence: None,
+        refusal_id: None,
+    };
+    let Some(submission) = &collection.submission else {
+        return Ok(receipt);
+    };
+    let raw_sha256 = sha256_digest(&submission.raw_bytes);
+    let (admission_outcome, rejection_code) = match &submission.disposition {
+        SubmissionDisposition::Rejected { refusal } => ("rejected", Some(refusal.code.as_str())),
+        SubmissionDisposition::Admitted(_) => ("admitted", None),
+    };
+    transaction.execute(
+        "INSERT INTO raw_submissions (
+            submission_id, run_id, raw_bytes, raw_sha256, received_at,
+            protocol_outcome, admission_outcome, rejection_code
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            submission.submission_id,
+            collection.run.run_id,
+            submission.raw_bytes,
+            raw_sha256,
+            submission.received_at,
+            submission.protocol_outcome,
+            admission_outcome,
+            rejection_code,
+        ],
+    )?;
+    receipt.raw_sha256 = Some(raw_sha256);
+
+    match &submission.disposition {
+        SubmissionDisposition::Rejected { refusal } => {
+            insert_refusal(
+                transaction,
+                refusal,
+                Some(&collection.run.run_id),
+                Some(&submission.submission_id),
+                None,
+                Some((
+                    &collection.run.profile_id,
+                    &collection.run.profile_version,
+                    &collection.run.profile_digest,
+                )),
+            )?;
+            receipt.refusal_id = Some(refusal.refusal_id.clone());
+        }
+        SubmissionDisposition::Admitted(report) => {
+            let admission_id = collection.run.admission_id.as_deref().ok_or_else(|| {
+                StoreError::Invariant(
+                    "an admitted report requires a run bound to an admission".to_owned(),
+                )
+            })?;
+            let (admission_instance_id, admission_context_digest): (String, String) = transaction
+                .query_row(
+                    "SELECT instance_id, admission_context_digest FROM admission_records
+                     WHERE admission_id = ?1",
+                    [admission_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?
+                .ok_or_else(|| {
+                    StoreError::Invariant(format!(
+                        "run admission {admission_id} is not recorded; cannot bind report context"
+                    ))
+                })?;
+            if admission_instance_id != collection.run.instance_id {
+                return Err(StoreError::Invariant(format!(
+                    "run instance {} cannot bind admission {admission_id} of instance {admission_instance_id}",
+                    collection.run.instance_id
+                )));
+            }
+            let sequence = insert_report(
+                transaction,
+                &submission.submission_id,
+                report,
+                &admission_context_digest,
+            )?;
+            receipt.semantic_digest = Some(report.canonical_report.digest().to_owned());
+            receipt.report_sequence = Some(sequence);
+        }
+    }
+    Ok(receipt)
+}
+
+fn insert_status_event(
+    transaction: &Transaction<'_>,
+    status: &StatusEventInput,
+    run_id: Option<&str>,
+) -> Result<(), StoreError> {
+    transaction.execute(
+        "INSERT INTO status_events (
+            status_event_id, component_kind, component_id, run_id, state, code,
+            detail_json, observed_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            status.status_event_id,
+            status.component_kind,
+            status.component_id,
+            run_id,
+            status.state,
+            status.code,
+            status.detail.as_bytes(),
+            status.observed_at,
+        ],
+    )?;
+    transaction.execute(
+        "INSERT INTO status_current (component_kind, component_id, latest_status_event_id)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(component_kind, component_id) DO UPDATE
+         SET latest_status_event_id = excluded.latest_status_event_id",
+        params![
+            status.component_kind,
+            status.component_id,
+            status.status_event_id,
+        ],
+    )?;
+    Ok(())
+}
+
 fn insert_run(transaction: &Transaction<'_>, run: &RunInput) -> Result<(), StoreError> {
     validate_digest(
         "checkpoint_contract_digest",
         &run.checkpoint_contract_digest,
     )?;
+    if let Some(admission_id) = &run.admission_id {
+        let binding: Option<(String, String, String, String)> = transaction
+            .query_row(
+                "SELECT instance_id, profile_id, profile_version, profile_digest
+                 FROM admission_records WHERE admission_id = ?1",
+                [admission_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let Some((instance_id, profile_id, profile_version, profile_digest)) = binding else {
+            return Err(StoreError::Invariant(format!(
+                "watcher run names missing admission {admission_id}"
+            )));
+        };
+        if run.instance_id != instance_id
+            || run.profile_id != profile_id
+            || run.profile_version != profile_version
+            || run.profile_digest != profile_digest
+        {
+            return Err(StoreError::Invariant(format!(
+                "watcher run cannot bind admission {admission_id}: instance or profile identity disagrees"
+            )));
+        }
+    }
     transaction.execute(
         "INSERT INTO watcher_runs (
             run_id, request_id, instance_id, admission_id, binding_digest,
@@ -3192,6 +3943,23 @@ fn insert_refusal(
     evaluation_id: Option<&str>,
     profile: Option<(&str, &str, &str)>,
 ) -> Result<(), StoreError> {
+    if refusal.source_kind == "profile" {
+        let semantic = refusal.profile_semantic_id.as_deref().ok_or_else(|| {
+            StoreError::Invariant(
+                "profile-origin refusal requires a profile semantic identity".into(),
+            )
+        })?;
+        validate_digest("profile_semantic_id", semantic)?;
+        if profile.is_none() {
+            return Err(StoreError::Invariant(
+                "profile-origin refusal requires an exact profile binding".into(),
+            ));
+        }
+    } else if refusal.profile_semantic_id.is_some() {
+        return Err(StoreError::Invariant(
+            "non-profile refusal cannot carry a profile semantic projection".into(),
+        ));
+    }
     let (profile_id, profile_version, profile_digest) = profile
         .map_or((None, None, None), |(id, version, digest)| {
             (Some(id), Some(version), Some(digest))
@@ -3200,8 +3968,8 @@ fn insert_refusal(
         "INSERT INTO refusals (
             refusal_id, source_kind, responsible_instance_id, boundary, code,
             run_id, submission_id, evaluation_id, profile_id, profile_version,
-            profile_digest, detail_json, created_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            profile_digest, profile_semantic_id, detail_json, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             refusal.refusal_id,
             refusal.source_kind,
@@ -3214,6 +3982,7 @@ fn insert_refusal(
             profile_id,
             profile_version,
             profile_digest,
+            refusal.profile_semantic_id,
             refusal.detail.as_bytes(),
             refusal.created_at,
         ],
@@ -3260,6 +4029,24 @@ fn validate_finding_against_evaluation(
     evaluation: &EvaluationInput,
 ) -> Result<(), StoreError> {
     validate_digest("profile_digest", &finding.profile_digest)?;
+    if finding.profile_id != evaluation.profile.profile_id
+        || finding.profile_version != evaluation.profile.profile_version
+        || finding.profile_digest != evaluation.profile.profile_digest
+    {
+        return Err(StoreError::Invariant(
+            "finding profile binding disagrees with its evaluation".into(),
+        ));
+    }
+    if finding.refusal.as_ref().map(CanonicalDocument::as_bytes)
+        != evaluation
+            .refusal
+            .as_ref()
+            .map(|refusal| refusal.detail.as_bytes())
+    {
+        return Err(StoreError::Invariant(
+            "finding refusal must be the exact canonical evaluation refusal".into(),
+        ));
+    }
     if finding.event_kind == "resolved"
         && (evaluation.outcome != "condition_explicitly_absent"
             || finding.condition_state != "explicitly_absent"
@@ -3287,6 +4074,11 @@ fn validate_finding_against_evaluation(
             "a detector refusal cannot resolve a finding".to_owned(),
         ));
     }
+    if evaluation.outcome == "cannot_evaluate" && finding.event_kind == "opened" {
+        return Err(StoreError::Invariant(
+            "a detector refusal cannot open a finding without a prior present condition".into(),
+        ));
+    }
     validate_ordered_unique(
         "finding evidence",
         finding.evidence.iter().map(|evidence| evidence.ordinal),
@@ -3301,14 +4093,14 @@ fn insert_finding_event(
     finding: &FindingEventInput,
     watermarks: &[EvaluationWatermark],
 ) -> Result<(), StoreError> {
-    let current: Option<(i64, String)> = transaction
+    let current: Option<(i64, String, String)> = transaction
         .query_row(
-            "SELECT e.event_revision, e.event_kind
+            "SELECT e.event_revision, e.event_kind, e.condition_state
              FROM finding_current AS c
              JOIN finding_events AS e ON e.event_id = c.latest_event_id
              WHERE c.finding_id = ?1",
             [&finding.finding_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
     match &current {
@@ -3324,7 +4116,67 @@ fn insert_finding_event(
         }
         _ => {}
     }
-    let event_revision = current.as_ref().map_or(Ok(1_i64), |(revision, _)| {
+    if current.is_some() {
+        let same_lineage: bool = transaction.query_row(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM finding_current AS current
+                JOIN finding_events AS prior
+                  ON prior.event_id = current.latest_event_id
+                JOIN evaluation_runs AS prior_evaluation
+                  ON prior_evaluation.evaluation_id = prior.evaluation_id
+                WHERE current.finding_id = ?1
+                  AND prior.instance_id = ?2
+                  AND prior.detector_id = ?3
+                  AND prior.detector_version = ?4
+                  AND prior.detector_digest = ?5
+                  AND prior.profile_id = ?6
+                  AND prior.profile_version = ?7
+                  AND prior.profile_digest = ?8
+                  AND prior_evaluation.profile_semantic_id = ?9
+                  AND prior.subject_json = ?10
+                  AND prior.condition_name = ?11
+             )",
+            params![
+                finding.finding_id,
+                finding.instance_id,
+                evaluation.detector_id,
+                evaluation.detector_version,
+                evaluation.detector_digest,
+                finding.profile_id,
+                finding.profile_version,
+                finding.profile_digest,
+                evaluation.profile.profile_semantic_id.as_str(),
+                finding.subject.as_bytes(),
+                finding.condition_name,
+            ],
+            |row| row.get(0),
+        )?;
+        if !same_lineage {
+            return Err(StoreError::Invariant(
+                "finding update cannot substitute immutable detector, profile, subject, or condition lineage"
+                    .into(),
+            ));
+        }
+    }
+    if evaluation.outcome == "cannot_evaluate" {
+        let Some((_, _, current_condition_state)) = &current else {
+            return Err(StoreError::Invariant(
+                "a detector refusal cannot create a finding without prior condition state".into(),
+            ));
+        };
+        if finding.visibility_state == "sufficient" {
+            return Err(StoreError::Invariant(
+                "a detector refusal cannot claim sufficient evidence visibility".into(),
+            ));
+        }
+        if &finding.condition_state != current_condition_state {
+            return Err(StoreError::Invariant(
+                "a detector refusal must retain the prior finding condition state".into(),
+            ));
+        }
+    }
+    let event_revision = current.as_ref().map_or(Ok(1_i64), |(revision, _, _)| {
         revision
             .checked_add(1)
             .ok_or_else(|| StoreError::Invariant("finding revision space is exhausted".to_owned()))
@@ -3575,7 +4427,47 @@ mod tests {
             finished_at: "2026-07-16T12:00:01.000Z".to_owned(),
             acquisition_outcome: "response".to_owned(),
             execution_identity: document(json!({"uid": 991})),
-            resource_outcome: document(json!({"exit_code": 0})),
+            resource_outcome: document(json!({
+                "schema": "nq.run_resource_outcome.v1",
+                "duration_ms": 1,
+                "exit_code": 0,
+                "hard_limits": {
+                    "address_space_bytes_per_process": 1,
+                    "cpu_seconds_per_process": 1,
+                    "processes_per_execution_uid": 1,
+                    "open_files_per_process": 1,
+                    "file_bytes_per_regular_file": 1,
+                    "core_bytes": 0
+                },
+                "stdout_bytes_retained": 0,
+                "stderr_bytes_retained": 0,
+                "stderr_hex": "",
+                "outcome": {"outcome": "response"}
+            })),
+        }
+    }
+
+    fn evaluation_profile(profile_digest: &str) -> EvaluationProfileBinding {
+        EvaluationProfileBinding {
+            profile_id: "fixture.health".to_owned(),
+            profile_version: "1".to_owned(),
+            profile_digest: profile_digest.to_owned(),
+            profile_semantic_id: typed_digest("profile-semantic"),
+        }
+    }
+
+    fn non_success_status(run_id: &str, instance_id: &str, suffix: &str) -> RunResultStatusInput {
+        RunResultStatusInput {
+            run_id: run_id.to_owned(),
+            status: StatusEventInput {
+                status_event_id: format!("status-{suffix}"),
+                component_kind: "instance".to_owned(),
+                component_id: instance_id.to_owned(),
+                state: "failed".to_owned(),
+                code: "collection_failed".to_owned(),
+                detail: document(json!({"run_id": run_id})),
+                observed_at: TIME.to_owned(),
+            },
         }
     }
 
@@ -3665,27 +4557,30 @@ mod tests {
         code: &str,
         detail: CanonicalDocument,
     ) -> CollectionReceipt {
-        store
-            .commit_collection(&CollectionInput {
-                run: run("fixture-a", suffix, profile_digest),
-                submission: Some(SubmissionInput {
-                    submission_id: format!("submission-{suffix}"),
-                    raw_bytes: format!("raw-{suffix}\n").into_bytes(),
-                    received_at: TIME.to_owned(),
-                    protocol_outcome: "valid_refusal".to_owned(),
-                    disposition: SubmissionDisposition::Rejected {
-                        refusal: RefusalInput {
-                            refusal_id: refusal_id.to_owned(),
-                            source_kind: "protocol".to_owned(),
-                            responsible_instance_id: "fixture-a".to_owned(),
-                            boundary: "collection".to_owned(),
-                            code: code.to_owned(),
-                            detail,
-                            created_at: TIME.to_owned(),
-                        },
+        let collection = CollectionInput {
+            run: run("fixture-a", suffix, profile_digest),
+            submission: Some(SubmissionInput {
+                submission_id: format!("submission-{suffix}"),
+                raw_bytes: format!("raw-{suffix}\n").into_bytes(),
+                received_at: TIME.to_owned(),
+                protocol_outcome: "valid_refusal".to_owned(),
+                disposition: SubmissionDisposition::Rejected {
+                    refusal: RefusalInput {
+                        refusal_id: refusal_id.to_owned(),
+                        source_kind: "protocol".to_owned(),
+                        responsible_instance_id: "fixture-a".to_owned(),
+                        boundary: "collection".to_owned(),
+                        code: code.to_owned(),
+                        profile_semantic_id: None,
+                        detail,
+                        created_at: TIME.to_owned(),
                     },
-                }),
-            })
+                },
+            }),
+        };
+        let result = non_success_status(&collection.run.run_id, "fixture-a", suffix);
+        store
+            .commit_non_success_collection(&collection, &result)
             .expect("rejected collection commits")
     }
 
@@ -3700,9 +4595,9 @@ mod tests {
         NonCanonicalDetail,
     }
 
-    /// Model an existing schema-v1 database written outside the typed Store API.
-    /// The schema can represent these rows, but the product must refuse to reopen
-    /// any association that cannot prove its exact typed refusal linkage.
+    /// Model rows written outside the typed Store API. The physical schema can
+    /// represent them, but semantic reopening must refuse any association that
+    /// cannot prove its exact typed refusal linkage.
     fn historical_rejection_with(defect: HistoricalRefusalDefect) -> Store {
         let (mut store, profile_digest) = configured_store();
         let suffix = "historical";
@@ -3820,16 +4715,28 @@ mod tests {
         ));
         store
             .connection
-            .pragma_update(None, "user_version", 2)
-            .expect("test changes version");
+            .pragma_update(None, "user_version", 1)
+            .expect("mark fixture as an incompatible v1 store");
         drop(store);
+        let v1_bytes = std::fs::read(&path).expect("read v1 sentinel");
+        let v1_digest = nq_protocol::sha256_bytes(&v1_bytes);
         assert!(matches!(
             Store::open(&path),
             Err(StoreError::SchemaVersionMismatch {
-                found: 2,
+                found: 1,
                 supported: SCHEMA_VERSION
             })
         ));
+        let after_open = std::fs::read(&path).expect("reread refused v1 sentinel");
+        assert_eq!(
+            after_open, v1_bytes,
+            "failed open must not rewrite v1 bytes"
+        );
+        assert_eq!(
+            nq_protocol::sha256_bytes(&after_open),
+            v1_digest,
+            "failed open must preserve the exact v1 file identity"
+        );
 
         let empty_path = directory.path().join("empty.db");
         std::fs::File::create(&empty_path).expect("empty file");
@@ -3837,30 +4744,79 @@ mod tests {
     }
 
     #[test]
+    fn immutable_open_preserves_prepared_archive_bytes_and_file_inventory() {
+        let directory = tempdir().expect("temp dir");
+        let path = directory.path().join("sealed.db");
+        let store = Store::initialize(&path).expect("initialize sealed store");
+        store
+            .prepare_archive_copy()
+            .expect("checkpoint and freeze archive copy");
+        drop(store);
+        let inventory = || {
+            let mut names = std::fs::read_dir(directory.path())
+                .expect("read inventory")
+                .map(|entry| {
+                    entry
+                        .expect("inventory entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+        let before_inventory = inventory();
+        let before = std::fs::read(&path).expect("read sealed database");
+        let before_digest = nq_protocol::sha256_bytes(&before);
+
+        for _ in 0..2 {
+            let store = Store::open_immutable(&path).expect("immutable reopen");
+            store.validate().expect("immutable validation");
+            drop(store);
+        }
+
+        let after = std::fs::read(&path).expect("reread sealed database");
+        assert_eq!(
+            after, before,
+            "read-only verification changed database bytes"
+        );
+        assert_eq!(nq_protocol::sha256_bytes(&after), before_digest);
+        assert_eq!(
+            inventory(),
+            before_inventory,
+            "read-only verification created or removed a SQLite sidecar"
+        );
+    }
+
+    #[test]
     fn raw_submission_is_byte_exact_and_rejected_evidence_is_isolated() {
         let (mut store, profile_digest) = configured_store();
         let raw = vec![0, 0xff, b'\n', b'{', b'}', 0];
-        let receipt = store
-            .commit_collection(&CollectionInput {
-                run: run("fixture-a", "rejected", &profile_digest),
-                submission: Some(SubmissionInput {
-                    submission_id: "submission-rejected".to_owned(),
-                    raw_bytes: raw.clone(),
-                    received_at: TIME.to_owned(),
-                    protocol_outcome: "malformed_framing".to_owned(),
-                    disposition: SubmissionDisposition::Rejected {
-                        refusal: RefusalInput {
-                            refusal_id: "refusal-rejected".to_owned(),
-                            source_kind: "protocol".to_owned(),
-                            responsible_instance_id: "fixture-a".to_owned(),
-                            boundary: "response_frame".to_owned(),
-                            code: "malformed_json".to_owned(),
-                            detail: document(json!({"offset": 1})),
-                            created_at: TIME.to_owned(),
-                        },
+        let collection = CollectionInput {
+            run: run("fixture-a", "rejected", &profile_digest),
+            submission: Some(SubmissionInput {
+                submission_id: "submission-rejected".to_owned(),
+                raw_bytes: raw.clone(),
+                received_at: TIME.to_owned(),
+                protocol_outcome: "malformed_framing".to_owned(),
+                disposition: SubmissionDisposition::Rejected {
+                    refusal: RefusalInput {
+                        refusal_id: "refusal-rejected".to_owned(),
+                        source_kind: "protocol".to_owned(),
+                        responsible_instance_id: "fixture-a".to_owned(),
+                        boundary: "response_frame".to_owned(),
+                        code: "malformed_json".to_owned(),
+                        profile_semantic_id: None,
+                        detail: document(json!({"offset": 1})),
+                        created_at: TIME.to_owned(),
                     },
-                }),
-            })
+                },
+            }),
+        };
+        let result = non_success_status(&collection.run.run_id, "fixture-a", "rejected");
+        let receipt = store
+            .commit_non_success_collection(&collection, &result)
             .expect("rejected custody commits");
         assert_eq!(
             receipt.raw_sha256,
@@ -3889,6 +4845,85 @@ mod tests {
             params![profile_digest, TIME, digest("bad-report")],
         );
         assert!(malicious_insert.is_err());
+    }
+
+    #[test]
+    fn non_success_commit_is_atomic_and_ordinary_path_fails_closed() {
+        let (mut store, profile_digest) = configured_store();
+        let rejected = |suffix: &str| CollectionInput {
+            run: run("fixture-a", suffix, &profile_digest),
+            submission: Some(SubmissionInput {
+                submission_id: format!("submission-{suffix}"),
+                raw_bytes: format!("rejected-{suffix}\n").into_bytes(),
+                received_at: TIME.to_owned(),
+                protocol_outcome: "rejected".to_owned(),
+                disposition: SubmissionDisposition::Rejected {
+                    refusal: RefusalInput {
+                        refusal_id: format!("refusal-{suffix}"),
+                        source_kind: "protocol".to_owned(),
+                        responsible_instance_id: "fixture-a".to_owned(),
+                        boundary: "response".to_owned(),
+                        code: "invalid_response".to_owned(),
+                        profile_semantic_id: None,
+                        detail: document(json!({"fixture": suffix})),
+                        created_at: TIME.to_owned(),
+                    },
+                },
+            }),
+        };
+
+        let ordinary = rejected("ordinary");
+        assert!(matches!(
+            store.commit_collection(&ordinary),
+            Err(StoreError::Invariant(message))
+                if message.contains("commit_non_success_collection")
+        ));
+
+        store
+            .record_status(&StatusEventInput {
+                status_event_id: "status-duplicate".to_owned(),
+                component_kind: "database".to_owned(),
+                component_id: "primary".to_owned(),
+                state: "healthy".to_owned(),
+                code: "ok".to_owned(),
+                detail: document(json!({})),
+                observed_at: TIME.to_owned(),
+            })
+            .expect("seed duplicate status identity");
+        let atomic = rejected("rollback");
+        let mut result = non_success_status(&atomic.run.run_id, "fixture-a", "rollback");
+        result.status.status_event_id = "status-duplicate".to_owned();
+        assert!(
+            store
+                .commit_non_success_collection(&atomic, &result)
+                .is_err()
+        );
+
+        for (table, column, identity) in [
+            ("watcher_runs", "run_id", "run-rollback"),
+            ("raw_submissions", "submission_id", "submission-rollback"),
+            ("refusals", "refusal_id", "refusal-rollback"),
+        ] {
+            let count: i64 = store
+                .connection
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?1"),
+                    [identity],
+                    |row| row.get(0),
+                )
+                .expect("count rolled-back row");
+            assert_eq!(count, 0, "{table} survived failed atomic commit");
+        }
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM watcher_runs", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("count all runs"),
+            0,
+            "ordinary and failed atomic paths must leave no watcher run"
+        );
     }
 
     /// Release regression: a historical/raw writer cannot append rejected
@@ -3920,7 +4955,7 @@ mod tests {
                     "invalid_response",
                 ],
             )
-            .expect("schema v1 deliberately permits the historical hostile row");
+            .expect("physical schema permits the historical hostile row");
         let result = store.validate();
         assert!(
             matches!(
@@ -4048,7 +5083,7 @@ mod tests {
                     TIME,
                 ],
             )
-            .expect("schema v1 permits duplicate historical linkage");
+            .expect("physical schema permits duplicate historical linkage");
         assert!(matches!(
             duplicate.validate(),
             Err(StoreError::Integrity(message))
@@ -4082,7 +5117,7 @@ mod tests {
                     TIME,
                 ],
             )
-            .expect("schema v1 permits hostile admitted linkage");
+            .expect("physical schema permits hostile admitted linkage");
         assert!(matches!(
             admitted.validate(),
             Err(StoreError::Integrity(message))
@@ -4122,27 +5157,33 @@ mod tests {
         let mut unknown_run = run("fixture-unknown", "unknown", &unknown_digest);
         unknown_run.profile_id = "unknown.profile".to_owned();
         unknown_run.profile_version = "99".to_owned();
-        store
-            .commit_collection(&CollectionInput {
-                run: unknown_run,
-                submission: Some(SubmissionInput {
-                    submission_id: "submission-unknown".to_owned(),
-                    raw_bytes: b"{\"claimed_profile\":\"unknown.profile\"}\n".to_vec(),
-                    received_at: TIME.to_owned(),
-                    protocol_outcome: "valid_json".to_owned(),
-                    disposition: SubmissionDisposition::Rejected {
-                        refusal: RefusalInput {
-                            refusal_id: "refusal-unknown".to_owned(),
-                            source_kind: "profile".to_owned(),
-                            responsible_instance_id: "fixture-unknown".to_owned(),
-                            boundary: "profile_registry".to_owned(),
-                            code: "unknown_profile".to_owned(),
-                            detail: document(json!({"profile_id": "unknown.profile"})),
-                            created_at: TIME.to_owned(),
-                        },
+        let collection = CollectionInput {
+            run: unknown_run,
+            submission: Some(SubmissionInput {
+                submission_id: "submission-unknown".to_owned(),
+                raw_bytes: b"{\"claimed_profile\":\"unknown.profile\"}\n".to_vec(),
+                received_at: TIME.to_owned(),
+                protocol_outcome: "valid_json".to_owned(),
+                disposition: SubmissionDisposition::Rejected {
+                    refusal: RefusalInput {
+                        refusal_id: "refusal-unknown".to_owned(),
+                        // An unknown profile has no compiled profile
+                        // semantic identity; retain it as upstream protocol
+                        // quarantine rather than inventing profile meaning.
+                        source_kind: "protocol".to_owned(),
+                        responsible_instance_id: "fixture-unknown".to_owned(),
+                        boundary: "profile_registry".to_owned(),
+                        code: "unknown_profile".to_owned(),
+                        profile_semantic_id: None,
+                        detail: document(json!({"profile_id": "unknown.profile"})),
+                        created_at: TIME.to_owned(),
                     },
-                }),
-            })
+                },
+            }),
+        };
+        let result = non_success_status(&collection.run.run_id, "fixture-unknown", "unknown");
+        store
+            .commit_non_success_collection(&collection, &result)
             .expect("unknown profile is retained as rejected custody");
         assert!(
             store
@@ -4251,6 +5292,7 @@ mod tests {
             evaluated_at: TIME.to_owned(),
             outcome: "condition_present".to_owned(),
             detail: document(json!({})),
+            profile: evaluation_profile(&profile_digest),
             watermarks: snapshot.watermarks.clone(),
             refusal: None,
         };
@@ -4293,6 +5335,23 @@ mod tests {
             .expect("finding opens");
         assert_eq!(opened_receipt.evaluation_revision, 1);
 
+        let mut substituted_semantics = evaluation.clone();
+        substituted_semantics.evaluation_id = "evaluation-substituted-semantics".to_owned();
+        substituted_semantics.profile.profile_semantic_id = typed_digest("other-semantics");
+        let mut substituted_lineage = opened.clone();
+        substituted_lineage.event_id = "event-substituted-semantics".to_owned();
+        substituted_lineage.event_kind = "updated".to_owned();
+        let error = store
+            .commit_evaluation(&substituted_semantics, Some(&substituted_lineage))
+            .expect_err("same descriptor with different semantics cannot reuse a finding");
+        assert!(matches!(error, StoreError::Invariant(message)
+            if message.contains("immutable detector, profile, subject, or condition lineage")));
+
+        let stale_refusal = document(json!({
+            "boundary": "detector",
+            "code": "evidence_stale",
+            "responsible_instance_id": "fixture-a"
+        }));
         let refused_evaluation = EvaluationInput {
             evaluation_id: "evaluation-refused".to_owned(),
             detector_id: "fixture.unhealthy".to_owned(),
@@ -4303,14 +5362,16 @@ mod tests {
             evaluated_at: TIME.to_owned(),
             outcome: "cannot_evaluate".to_owned(),
             detail: document(json!({})),
+            profile: evaluation_profile(&profile_digest),
             watermarks: snapshot.watermarks.clone(),
             refusal: Some(RefusalInput {
                 refusal_id: "evaluation-refusal".to_owned(),
-                source_kind: "evaluation".to_owned(),
+                source_kind: "profile".to_owned(),
                 responsible_instance_id: "fixture-a".to_owned(),
                 boundary: "detector".to_owned(),
                 code: "evidence_stale".to_owned(),
-                detail: document(json!({})),
+                profile_semantic_id: Some(typed_digest("profile-semantic").into_string()),
+                detail: stale_refusal.clone(),
                 created_at: TIME.to_owned(),
             }),
         };
@@ -4319,11 +5380,25 @@ mod tests {
         stale_update.event_kind = "updated".to_owned();
         stale_update.visibility_state = "stale".to_owned();
         stale_update.freshness = document(json!({"state": "stale"}));
-        stale_update.refusal = Some(document(json!({
-            "boundary": "detector",
-            "code": "evidence_stale",
-            "responsible_instance_id": "fixture-a"
-        })));
+        stale_update.refusal = Some(stale_refusal);
+        let mut substituted_condition = stale_update.clone();
+        substituted_condition.event_id = "event-substituted-condition".to_owned();
+        substituted_condition.condition_state = "explicitly_absent".to_owned();
+        let error = store
+            .commit_evaluation(&refused_evaluation, Some(&substituted_condition))
+            .expect_err("a refusal cannot substitute prior condition state");
+        assert!(matches!(error, StoreError::Invariant(message)
+            if message.contains("retain the prior finding condition state")));
+
+        let mut sufficient_refusal = stale_update.clone();
+        sufficient_refusal.event_id = "event-sufficient-refusal".to_owned();
+        sufficient_refusal.visibility_state = "sufficient".to_owned();
+        let error = store
+            .commit_evaluation(&refused_evaluation, Some(&sufficient_refusal))
+            .expect_err("a refusal cannot claim sufficient visibility");
+        assert!(matches!(error, StoreError::Invariant(message)
+            if message.contains("cannot claim sufficient")));
+
         let stale_receipt = store
             .commit_evaluation(&refused_evaluation, Some(&stale_update))
             .expect("staleness updates visibility without negating the condition");
@@ -4342,6 +5417,12 @@ mod tests {
         assert_eq!(stale_evidence[0]["semantic_digest"], report_digest);
         assert_eq!(stale_evidence[0]["observation_ordinal"], 0);
 
+        let resolution_refusal = document(json!({
+            "boundary": "detector",
+            "code": "evidence_stale",
+            "responsible_instance_id": "fixture-a",
+            "attempt": "resolution"
+        }));
         let refused_resolution_evaluation = EvaluationInput {
             evaluation_id: "evaluation-refused-resolution".to_owned(),
             detector_id: "fixture.unhealthy".to_owned(),
@@ -4352,14 +5433,16 @@ mod tests {
             evaluated_at: TIME.to_owned(),
             outcome: "cannot_evaluate".to_owned(),
             detail: document(json!({})),
+            profile: evaluation_profile(&profile_digest),
             watermarks: snapshot.watermarks.clone(),
             refusal: Some(RefusalInput {
                 refusal_id: "evaluation-refusal-resolution".to_owned(),
-                source_kind: "evaluation".to_owned(),
+                source_kind: "profile".to_owned(),
                 responsible_instance_id: "fixture-a".to_owned(),
                 boundary: "detector".to_owned(),
                 code: "evidence_stale".to_owned(),
-                detail: document(json!({})),
+                profile_semantic_id: Some(typed_digest("profile-semantic").into_string()),
+                detail: resolution_refusal.clone(),
                 created_at: TIME.to_owned(),
             }),
         };
@@ -4368,6 +5451,7 @@ mod tests {
         invalid_resolution.event_kind = "resolved".to_owned();
         invalid_resolution.condition_state = "explicitly_absent".to_owned();
         invalid_resolution.visibility_state = "sufficient".to_owned();
+        invalid_resolution.refusal = Some(resolution_refusal);
         let error = store
             .commit_evaluation(&refused_resolution_evaluation, Some(&invalid_resolution))
             .expect_err("a refusal cannot resolve an active finding");
@@ -4391,6 +5475,7 @@ mod tests {
             evaluated_at: TIME.to_owned(),
             outcome: "condition_explicitly_absent".to_owned(),
             detail: document(json!({})),
+            profile: evaluation_profile(&profile_digest),
             watermarks: snapshot.watermarks,
             refusal: None,
         };
@@ -4433,6 +5518,44 @@ mod tests {
             .collect::<Result<_, _>>()
             .expect("read event revisions");
         assert_eq!(event_revisions, vec![1, 2, 3]);
+
+        let mut historical_evaluation = absence;
+        historical_evaluation.evaluation_id = "evaluation-hostile-lineage".to_owned();
+        let historical_receipt = store
+            .commit_evaluation(&historical_evaluation, None)
+            .expect("append evaluation for hostile historical event");
+        assert_eq!(historical_receipt.evaluation_revision, 4);
+        store
+            .connection
+            .execute(
+                "INSERT INTO finding_events (
+                    event_id, finding_id, event_revision, event_kind, evaluation_id,
+                    instance_id, detector_id, detector_version, detector_digest,
+                    evaluator_artifact_digest, evaluation_revision, profile_id,
+                    profile_version, profile_digest, subject_json, condition_name,
+                    condition_state, visibility_state, operator_work_state, severity,
+                    summary, limitations_json, safe_next_checks_json, freshness_json,
+                    basis_json, refusal_json, origin_mode, historical_refs_json,
+                    observed_at, received_at, evaluated_at, created_at
+                 )
+                 SELECT 'event-hostile-lineage', finding_id, 4, 'updated',
+                        'evaluation-hostile-lineage', instance_id, detector_id,
+                        detector_version, detector_digest, evaluator_artifact_digest,
+                        4, profile_id, profile_version, profile_digest,
+                        CAST('{\"fixture\":\"substituted\"}' AS BLOB), condition_name,
+                        condition_state, visibility_state, operator_work_state, severity,
+                        summary, limitations_json, safe_next_checks_json, freshness_json,
+                        basis_json, refusal_json, origin_mode, historical_refs_json,
+                        observed_at, received_at, evaluated_at, created_at
+                 FROM finding_events WHERE event_id = 'event-resolved'",
+                [],
+            )
+            .expect("schema permits hostile historical lineage for validator regression");
+        assert!(matches!(
+            store.validate(),
+            Err(StoreError::Integrity(message))
+                if message.contains("substitutes immutable finding lineage")
+        ));
     }
 
     #[test]
@@ -4971,6 +6094,18 @@ mod tests {
         assert!(
             matches!(error, StoreError::Invariant(message) if message.contains("cannot bind admission"))
         );
+
+        let mut substituted_profile = run("instance-a", "profile-substitution", &profile_digest);
+        substituted_profile.admission_id = Some("admission-a".to_owned());
+        substituted_profile.profile_digest = digest("substituted-profile-descriptor");
+        let error = store
+            .commit_collection(&CollectionInput {
+                run: substituted_profile,
+                submission: None,
+            })
+            .expect_err("a run cannot substitute its admission profile digest");
+        assert!(matches!(error, StoreError::Invariant(message)
+            if message.contains("cannot bind admission")));
     }
 
     #[test]

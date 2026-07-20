@@ -92,6 +92,12 @@ pub enum Command {
         #[command(subcommand)]
         command: StatusCommand,
     },
+    /// Export rejected custody with its exact linked typed refusal.
+    Refusals {
+        /// Refusal-history workflow.
+        #[command(subcommand)]
+        command: RefusalsCommand,
+    },
     /// Execute a single bounded read-only query over documented public views.
     Query(QueryArgs),
 }
@@ -214,7 +220,7 @@ pub enum AdminCommand {
 /// Finding commands.
 #[derive(Debug, Subcommand)]
 pub enum FindingsCommand {
-    /// Export `nq.finding_snapshot.v2` records.
+    /// Export `nq.finding_snapshot.v3` records.
     Export {
         /// Output format.
         #[arg(long, value_enum, default_value_t = ExportFormat::Json)]
@@ -225,8 +231,46 @@ pub enum FindingsCommand {
 /// Status commands.
 #[derive(Debug, Subcommand)]
 pub enum StatusCommand {
-    /// Export `nq.status_snapshot.v1`.
+    /// Export `nq.status_snapshot.v2`.
     Export,
+}
+
+/// Rejected-custody history commands.
+#[derive(Debug, Subcommand)]
+pub enum RefusalsCommand {
+    /// Export a bounded `nq.rejected_custody.v1` snapshot.
+    Export {
+        /// Maximum immutable rejection records to return.
+        #[arg(long, default_value_t = MAX_PUBLIC_QUERY_ROWS)]
+        limit: u32,
+        /// Continue after this immutable submission identity.
+        #[arg(long)]
+        after: Option<String>,
+    },
+}
+
+/// Closed schema identity for structured watcher-action failures.
+#[derive(Debug, Clone, Copy, Serialize)]
+enum WatcherActionErrorSchema {
+    #[serde(rename = "nq.watcher_action_error.v1")]
+    V1,
+}
+
+/// Versioned, structured non-success result from a watcher dry action.
+#[derive(Serialize)]
+struct WatcherActionErrorV1<'a> {
+    schema: WatcherActionErrorSchema,
+    instance_id: &'a str,
+    action: &'a str,
+    failure: WatcherActionFailureV1<'a>,
+}
+
+/// Exact typed failure carried by the watcher-action envelope.
+#[derive(Serialize)]
+#[serde(tag = "kind", content = "payload", rename_all = "snake_case")]
+enum WatcherActionFailureV1<'a> {
+    GovernedRefusal(&'a nq_core::engine::GovernedRefusal),
+    AcquisitionFailure(&'a nq_core::engine::AcquisitionFailure),
 }
 
 /// Public export format.
@@ -274,6 +318,7 @@ pub async fn run(options: Nq) -> Result<()> {
         Command::Admin { command } => admin_command(&options.config, command, options.json),
         Command::Findings { command } => findings_command(&options.config, &command),
         Command::Status { command } => status_command(&options.config, &command),
+        Command::Refusals { command } => refusals_command(&options.config, &command),
         Command::Query(arguments) => query_command(&options.config, &arguments),
     }
 }
@@ -479,7 +524,7 @@ async fn collect_command(config_path: &Path, instance_id: &str, json_output: boo
 fn doctor(config_path: &Path, json_output: bool) -> Result<()> {
     let config = NqConfig::load(config_path)?;
     validate_compiled_profiles(&config)?;
-    let store = Store::open(&config.database_path)?;
+    let store = Store::open_read_only(&config.database_path)?;
     store.validate()?;
     let mut diagnostics = Vec::new();
     for watcher in &config.watchers {
@@ -661,7 +706,7 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
 
 fn findings_command(config_path: &Path, command: &FindingsCommand) -> Result<()> {
     let config = NqConfig::load(config_path)?;
-    let store = Store::open(&config.database_path)?;
+    let store = Store::open_read_only(&config.database_path)?;
     let findings = list_findings_if_supported(&store)?;
     match command {
         FindingsCommand::Export {
@@ -680,16 +725,47 @@ fn findings_command(config_path: &Path, command: &FindingsCommand) -> Result<()>
 
 fn status_command(config_path: &Path, command: &StatusCommand) -> Result<()> {
     let config = NqConfig::load(config_path)?;
-    let store = Store::open(&config.database_path)?;
+    let store = Store::open_read_only(&config.database_path)?;
     match command {
         StatusCommand::Export => print_value(&status_snapshot_if_supported(&store)?, true),
     }
 }
 
+fn refusals_command(config_path: &Path, command: &RefusalsCommand) -> Result<()> {
+    let config = NqConfig::load(config_path)?;
+    let store = Store::open_read_only(&config.database_path)?;
+    match command {
+        RefusalsCommand::Export { limit, after } => {
+            validate_refusal_page(*limit, after.as_deref())?;
+            print_value(
+                &rejected_custody_if_supported(&store, *limit, after.as_deref())?,
+                true,
+            )
+        }
+    }
+}
+
+fn validate_refusal_page(limit: u32, after_submission_id: Option<&str>) -> Result<()> {
+    if !(1..=MAX_PUBLIC_QUERY_ROWS).contains(&limit) {
+        bail!("refusal limit must be between 1 and {MAX_PUBLIC_QUERY_ROWS}");
+    }
+    if after_submission_id.is_some_and(|cursor| !is_stable_submission_cursor(cursor)) {
+        bail!("refusal cursor must be a stable submission-ID token");
+    }
+    Ok(())
+}
+
+fn is_stable_submission_cursor(value: &str) -> bool {
+    (1..=255).contains(&value.len())
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':' | b'/' | b'@')
+        })
+}
+
 fn query_command(config_path: &Path, arguments: &QueryArgs) -> Result<()> {
     validate_query_arguments(arguments)?;
     let config = NqConfig::load(config_path)?;
-    let store = Store::open(&config.database_path)?;
+    let store = Store::open_read_only(&config.database_path)?;
     let rows = public_query_if_supported(&store, &arguments.sql, arguments.limit)?;
     print_value(&rows, true)
 }
@@ -762,6 +838,15 @@ fn print_value(value: &impl Serialize, json_output: bool) -> Result<()> {
     Ok(())
 }
 
+fn print_canonical_value(value: &impl Serialize) -> Result<()> {
+    let bytes = nq_protocol::canonical_json_bytes(value)?;
+    println!(
+        "{}",
+        String::from_utf8(bytes).context("canonical JSON is not UTF-8")?
+    );
+    Ok(())
+}
+
 // These narrow adapters isolate application wiring from the generic store API.
 // They are filled by the store integration once its independently tested slice
 // lands.
@@ -780,12 +865,24 @@ fn store_backup_if_supported(store: &Store, destination: &Path) -> Result<()> {
     Ok(nq_core::engine::backup_store(store, destination)?)
 }
 
-fn list_findings_if_supported(store: &Store) -> Result<Vec<nq_core::FindingSnapshotV2>> {
+fn list_findings_if_supported(store: &Store) -> Result<Vec<nq_core::FindingSnapshotV3>> {
     Ok(nq_core::engine::list_findings(store)?)
 }
 
-fn status_snapshot_if_supported(store: &Store) -> Result<nq_core::StatusSnapshotV1> {
-    Ok(nq_core::engine::status_snapshot(store)?)
+fn status_snapshot_if_supported(store: &Store) -> Result<nq_core::public::StatusSnapshotV2> {
+    Ok(nq_core::engine::status_snapshot_v2(store)?)
+}
+
+fn rejected_custody_if_supported(
+    store: &Store,
+    limit: u32,
+    after_submission_id: Option<&str>,
+) -> Result<nq_core::public::RejectedCustodySnapshotV1> {
+    Ok(nq_core::engine::rejected_custody_snapshot_bounded(
+        store,
+        limit,
+        after_submission_id,
+    )?)
 }
 
 fn public_query_if_supported(
@@ -807,13 +904,50 @@ async fn run_watcher_action(
         .watcher(instance_id)
         .with_context(|| format!("unknown instance {instance_id}"))?
         .clone();
-    let action = action.to_owned();
+    let engine_action = action.to_owned();
     let result = tokio::task::spawn_blocking(move || {
         let mut engine = nq_core::CollectionEngine::open(&config)?;
-        engine.watcher_action(&watcher, &action)
+        engine.watcher_action(&watcher, &engine_action)
     })
-    .await??;
-    print_value(&result, json_output)
+    .await?;
+    match result {
+        Ok(result) => print_value(&result, json_output),
+        Err(error) => {
+            // In structured mode, expected dry-exchange refusals and
+            // acquisition failures are emitted as their exact canonical typed
+            // objects before the process exits non-zero. The application does
+            // not replace them with a display string or infer fields from a
+            // coarse error code.
+            if json_output
+                && let Some(envelope) = watcher_action_error_envelope(instance_id, action, &error)
+            {
+                print_canonical_value(&envelope)?;
+            }
+            Err(error.into())
+        }
+    }
+}
+
+fn watcher_action_error_envelope<'a>(
+    instance_id: &'a str,
+    action: &'a str,
+    error: &'a nq_core::engine::EngineError,
+) -> Option<WatcherActionErrorV1<'a>> {
+    let failure = match error {
+        nq_core::engine::EngineError::GovernedRefusal(refusal) => {
+            WatcherActionFailureV1::GovernedRefusal(refusal)
+        }
+        nq_core::engine::EngineError::AcquisitionFailed(failure) => {
+            WatcherActionFailureV1::AcquisitionFailure(failure)
+        }
+        _ => return None,
+    };
+    Some(WatcherActionErrorV1 {
+        schema: WatcherActionErrorSchema::V1,
+        instance_id,
+        action,
+        failure,
+    })
 }
 
 fn ensure_daemon_directory(path: &Path, mode: u32) -> Result<()> {
@@ -899,7 +1033,8 @@ async fn revoke(config_path: &Path, instance_id: &str, json_output: bool) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nq_protocol::canonical_json_bytes;
+    use nq_core::engine::{EngineError, GovernedRefusal};
+    use nq_protocol::{InstanceId, Refusal, RefusalBoundary, RefusalCode, canonical_json_bytes};
 
     fn config_fixture() -> &'static str {
         r#"schema = "nq.config.v1"
@@ -914,6 +1049,46 @@ helper_runtime_dir = "/run/nq/helpers"
     fn command_tree_exposes_required_operator_workflows() {
         use clap::CommandFactory;
         Nq::command().debug_assert();
+    }
+
+    #[test]
+    fn refusal_export_exposes_one_exact_immutable_cursor() {
+        let options = Nq::try_parse_from([
+            "nq",
+            "refusals",
+            "export",
+            "--limit",
+            "1",
+            "--after",
+            "submission-first",
+        ])
+        .expect("bounded refusal page parses");
+        let Command::Refusals {
+            command: RefusalsCommand::Export { limit, after },
+        } = options.command
+        else {
+            panic!("refusal export command expected");
+        };
+        assert_eq!(limit, 1);
+        assert_eq!(after.as_deref(), Some("submission-first"));
+        validate_refusal_page(limit, after.as_deref()).expect("cursor is stable");
+
+        assert!(
+            Nq::try_parse_from([
+                "nq",
+                "refusals",
+                "export",
+                "--after",
+                "submission-first",
+                "--after",
+                "submission-second",
+            ])
+            .is_err(),
+            "the CLI must not guess between duplicate cursors"
+        );
+        assert!(validate_refusal_page(0, None).is_err());
+        assert!(validate_refusal_page(MAX_PUBLIC_QUERY_ROWS + 1, None).is_err());
+        assert!(validate_refusal_page(1, Some("submission%2Dfirst")).is_err());
     }
 
     #[test]
@@ -955,6 +1130,37 @@ helper_runtime_dir = "/run/nq/helpers"
     fn canonical_config_diff_ignores_toml_formatting_by_construction() {
         let bytes = canonical_json_bytes(&json!({"b": 1, "a": 2})).unwrap();
         assert_eq!(bytes, br#"{"a":2,"b":1}"#);
+    }
+
+    #[test]
+    fn structured_watcher_error_is_the_exact_governed_refusal() {
+        let refusal = GovernedRefusal::helper(
+            "refusal-cli".to_owned(),
+            Refusal {
+                responsible_instance_id: InstanceId::new("cli-transport").expect("instance token"),
+                boundary: RefusalBoundary::Collection,
+                code: RefusalCode::CollectionFailed,
+                message: "backend collection failed".to_owned(),
+                retriable: true,
+                details: json!({"attempt": 1, "errno": "EAGAIN"}),
+            },
+        );
+        let error = EngineError::GovernedRefusal(Box::new(refusal.clone()));
+        let envelope = watcher_action_error_envelope("cli-transport", "test", &error)
+            .expect("governed refusal is structured");
+        let value = serde_json::to_value(&envelope).expect("envelope serializes");
+        assert_eq!(value["schema"], "nq.watcher_action_error.v1");
+        assert_eq!(value["instance_id"], "cli-transport");
+        assert_eq!(value["action"], "test");
+        assert_eq!(value["failure"]["kind"], "governed_refusal");
+        assert_eq!(
+            value["failure"]["payload"],
+            serde_json::to_value(&refusal).expect("refusal serializes")
+        );
+        assert_eq!(
+            canonical_json_bytes(&envelope).expect("structured CLI error canonicalizes"),
+            canonical_json_bytes(&value).expect("envelope value canonicalizes")
+        );
     }
 
     #[test]

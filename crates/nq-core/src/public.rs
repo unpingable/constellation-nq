@@ -3,15 +3,21 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::engine::{CollectionOutcome, GovernedRefusal};
+
 /// Finding snapshot schema identifier.
-pub const FINDING_SNAPSHOT_SCHEMA: &str = "nq.finding_snapshot.v2";
+pub const FINDING_SNAPSHOT_SCHEMA: &str = "nq.finding_snapshot.v3";
 /// Status snapshot schema identifier.
 pub const STATUS_SNAPSHOT_SCHEMA: &str = "nq.status_snapshot.v1";
+/// Lossless typed status snapshot schema identifier.
+pub const STATUS_SNAPSHOT_V2_SCHEMA: &str = "nq.status_snapshot.v2";
+/// Typed rejected-custody history schema identifier.
+pub const REJECTED_CUSTODY_SCHEMA: &str = "nq.rejected_custody.v1";
 
 /// One current bounded operational diagnosis.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct FindingSnapshotV2 {
+pub struct FindingSnapshotV3 {
     /// Exact DTO schema.
     pub schema: String,
     /// Opaque NQ-owned identity. Consumers never reconstruct this value.
@@ -77,6 +83,8 @@ pub struct PublicProfileIdentity {
     pub version: u32,
     /// Canonical descriptor digest.
     pub digest: String,
+    /// Composite compiled profile/protocol/evaluator semantic identity.
+    pub semantic_id: String,
 }
 
 /// Current detector condition.
@@ -113,7 +121,7 @@ pub struct VisibilityView {
     /// Profile-owned basis/vantage detail.
     pub basis: serde_json::Value,
     /// Typed refusal when evaluation cannot proceed.
-    pub refusal: Option<serde_json::Value>,
+    pub refusal: Option<GovernedRefusal>,
 }
 
 /// Reliance state of the evidence plane.
@@ -203,6 +211,91 @@ pub struct ComponentStatus {
     pub observed_at: DateTime<Utc>,
 }
 
+/// Complete local service health snapshot whose instance results are decoded
+/// into the versioned canonical collection carrier.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct StatusSnapshotV2 {
+    /// Exact DTO schema.
+    pub schema: String,
+    /// Snapshot generation time.
+    pub generated_at: DateTime<Utc>,
+    /// Current independently reported component states.
+    pub components: Vec<ComponentStatusV2>,
+}
+
+/// Typed details of one v2 component status.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "detail_kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ComponentStatusDetailV2 {
+    /// Canonical result for a watcher instance.
+    Collection {
+        /// Complete versioned collection envelope.
+        result: CollectionOutcome,
+    },
+    /// Non-instance operational diagnostic retained as bounded JSON.
+    Diagnostic {
+        /// Exact bounded diagnostic value stored by the component.
+        value: serde_json::Value,
+    },
+}
+
+/// One component of the v2 status surface.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ComponentStatusV2 {
+    /// Component class.
+    pub kind: ComponentKind,
+    /// Stable local component identity.
+    pub id: String,
+    /// Coarse health state.
+    pub state: HealthState,
+    /// Precise stable diagnostic code.
+    pub code: String,
+    /// Typed collection result or non-instance diagnostic.
+    pub detail: ComponentStatusDetailV2,
+    /// Time the component was observed.
+    pub observed_at: DateTime<Utc>,
+}
+
+/// Bounded, typed historical rejected-custody snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RejectedCustodySnapshotV1 {
+    /// Exact DTO schema.
+    pub schema: String,
+    /// Snapshot generation time.
+    pub generated_at: DateTime<Utc>,
+    /// Immutable rejected submissions with their linked canonical refusals.
+    pub records: Vec<RejectedCustodyV1>,
+}
+
+/// One immutable rejected submission and its exact linked typed refusal.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RejectedCustodyV1 {
+    /// NQ-owned raw-submission identity.
+    pub submission_id: String,
+    /// NQ-owned collection-run identity.
+    pub run_id: String,
+    /// Originating helper request identity.
+    pub request_id: String,
+    /// Responsible watcher instance.
+    pub instance_id: String,
+    /// Exact compiled profile identity bound to the run.
+    pub profile: PublicProfileIdentity,
+    /// Digest of the byte-exact rejected helper output.
+    pub raw_sha256: String,
+    /// NQ receive time.
+    pub received_at: DateTime<Utc>,
+    /// Stable protocol processing outcome.
+    pub protocol_outcome: String,
+    /// Exact canonical refusal linked by stable refusal ID.
+    pub refusal: GovernedRefusal,
+    /// Refusal creation time.
+    pub created_at: DateTime<Utc>,
+}
+
 /// Status component classes.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -245,6 +338,18 @@ impl StatusSnapshotV1 {
     pub fn empty() -> Self {
         Self {
             schema: STATUS_SNAPSHOT_SCHEMA.into(),
+            generated_at: Utc::now(),
+            components: Vec::new(),
+        }
+    }
+}
+
+impl StatusSnapshotV2 {
+    /// Create an empty typed snapshot. Empty is distinct from healthy.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            schema: STATUS_SNAPSHOT_V2_SCHEMA.into(),
             generated_at: Utc::now(),
             components: Vec::new(),
         }

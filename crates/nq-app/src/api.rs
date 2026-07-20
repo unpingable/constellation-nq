@@ -17,7 +17,24 @@ const MAX_HTTP_REQUEST_BYTES: usize = 8 * 1024;
 const MAX_HTTP_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CONNECTIONS: usize = 64;
 const CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-const MAX_FINDINGS_PER_RESPONSE: u32 = 1_000;
+const MAX_FINDINGS_PER_RESPONSE: u32 = nq_store::MAX_PUBLIC_QUERY_ROWS;
+const MAX_REJECTED_CUSTODY_PER_RESPONSE: u32 = nq_store::MAX_PUBLIC_QUERY_ROWS;
+const V1_STATUS_UNREPRESENTABLE: &[u8] =
+    br#"{"error":"typed_status_requires_v2","required_endpoint":"/v2/status"}"#;
+const V2_FINDINGS_UNREPRESENTABLE: &[u8] =
+    br#"{"error":"governed_findings_require_v3","required_endpoint":"/v3/findings"}"#;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RejectedCustodyQuery {
+    limit: u32,
+    after_submission_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FindingsQuery {
+    limit: u32,
+    after_finding_id: Option<String>,
+}
 
 /// Serve the versioned API on a permission-restricted Unix socket.
 ///
@@ -112,6 +129,7 @@ pub(crate) async fn serve_loopback_listener(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn handle_connection<S>(mut stream: S, database_path: PathBuf) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -132,18 +150,72 @@ where
         .await;
     }
 
-    match path.split('?').next().unwrap_or(path) {
+    let (route, query) = match path.split_once('?') {
+        Some((route, query)) => (route, Some(query)),
+        None => (path, None),
+    };
+    match route {
         "/v1/status" => {
-            let body = read_status(database_path).await?;
+            // Compatibility surface: its schema and representation remain v1.
+            match read_status_v1(database_path).await {
+                Ok(body) => write_response(&mut stream, 200, "application/json", &body).await,
+                Err(error) if is_v1_status_representation_error(&error) => {
+                    write_response(
+                        &mut stream,
+                        409,
+                        "application/json",
+                        V1_STATUS_UNREPRESENTABLE,
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            }
+        }
+        "/v2/status" => {
+            let body = read_status_v2(database_path).await?;
             write_response(&mut stream, 200, "application/json", &body).await
         }
         "/v2/findings" => {
-            let body = read_findings(database_path).await?;
+            write_response(
+                &mut stream,
+                409,
+                "application/json",
+                V2_FINDINGS_UNREPRESENTABLE,
+            )
+            .await
+        }
+        "/v3/findings" => {
+            let query = match parse_findings_query(query) {
+                Ok(query) => query,
+                Err(detail) => {
+                    let body = serde_json::to_vec(&serde_json::json!({
+                        "error": "invalid_findings_query",
+                        "detail": detail,
+                    }))?;
+                    return write_response(&mut stream, 400, "application/json", &body).await;
+                }
+            };
+            let body = read_findings(database_path, query.limit, query.after_finding_id).await?;
+            write_response(&mut stream, 200, "application/json", &body).await
+        }
+        "/v1/rejected-custody" => {
+            let query = match parse_rejected_custody_query(query) {
+                Ok(query) => query,
+                Err(detail) => {
+                    let body = serde_json::to_vec(&serde_json::json!({
+                        "error": "invalid_rejected_custody_query",
+                        "detail": detail,
+                    }))?;
+                    return write_response(&mut stream, 400, "application/json", &body).await;
+                }
+            };
+            let body = read_rejected_custody(database_path, query.limit, query.after_submission_id)
+                .await?;
             write_response(&mut stream, 200, "application/json", &body).await
         }
         "/console" | "/" => {
-            let status = read_status(database_path.clone()).await?;
-            let findings = read_findings(database_path).await?;
+            let status = read_status_v2(database_path.clone()).await?;
+            let findings = read_all_findings(database_path).await?;
             let body = render_console(&status, &findings);
             write_response(
                 &mut stream,
@@ -165,23 +237,193 @@ where
     }
 }
 
-async fn read_status(database_path: PathBuf) -> Result<Vec<u8>> {
+async fn read_status_v1(database_path: PathBuf) -> Result<Vec<u8>> {
     tokio::task::spawn_blocking(move || {
-        let store = Store::open(database_path)?;
+        let store = Store::open_read_only(database_path)?;
         let snapshot = nq_core::engine::status_snapshot(&store)?;
         serde_json::to_vec(&snapshot).map_err(anyhow::Error::from)
     })
     .await?
 }
 
-async fn read_findings(database_path: PathBuf) -> Result<Vec<u8>> {
+fn is_v1_status_representation_error(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<nq_core::engine::EngineError>(),
+        Some(nq_core::engine::EngineError::Invariant(message))
+            if message == "nq.status_snapshot.v1 cannot emit a typed collection-result shape; use v2"
+    )
+}
+
+async fn read_status_v2(database_path: PathBuf) -> Result<Vec<u8>> {
     tokio::task::spawn_blocking(move || {
-        let store = Store::open(database_path)?;
+        let store = Store::open_read_only(database_path)?;
+        let snapshot = nq_core::engine::status_snapshot_v2(&store)?;
+        serde_json::to_vec(&snapshot).map_err(anyhow::Error::from)
+    })
+    .await?
+}
+
+async fn read_findings(
+    database_path: PathBuf,
+    limit: u32,
+    after_finding_id: Option<String>,
+) -> Result<Vec<u8>> {
+    tokio::task::spawn_blocking(move || {
+        let store = Store::open_read_only(database_path)?;
         let findings =
-            nq_core::engine::list_findings_bounded(&store, MAX_FINDINGS_PER_RESPONSE, None)?;
+            nq_core::engine::list_findings_bounded(&store, limit, after_finding_id.as_deref())?;
         serde_json::to_vec(&findings).map_err(anyhow::Error::from)
     })
     .await?
+}
+
+async fn read_all_findings(database_path: PathBuf) -> Result<Vec<u8>> {
+    tokio::task::spawn_blocking(move || {
+        let store = Store::open_read_only(database_path)?;
+        let findings = nq_core::engine::list_findings(&store)?;
+        serde_json::to_vec(&findings).map_err(anyhow::Error::from)
+    })
+    .await?
+}
+
+async fn read_rejected_custody(
+    database_path: PathBuf,
+    limit: u32,
+    after_submission_id: Option<String>,
+) -> Result<Vec<u8>> {
+    tokio::task::spawn_blocking(move || {
+        let store = Store::open_read_only(database_path)?;
+        let snapshot = nq_core::engine::rejected_custody_snapshot_bounded(
+            &store,
+            limit,
+            after_submission_id.as_deref(),
+        )?;
+        serde_json::to_vec(&snapshot).map_err(anyhow::Error::from)
+    })
+    .await?
+}
+
+fn parse_rejected_custody_query(
+    query: Option<&str>,
+) -> std::result::Result<RejectedCustodyQuery, &'static str> {
+    let Some(query) = query else {
+        return Ok(RejectedCustodyQuery {
+            limit: MAX_REJECTED_CUSTODY_PER_RESPONSE,
+            after_submission_id: None,
+        });
+    };
+    if query.is_empty() {
+        return Err("query string must not be empty");
+    }
+
+    let mut limit = None;
+    let mut after_submission_id = None;
+    for parameter in query.split('&') {
+        let Some((name, value)) = parameter.split_once('=') else {
+            return Err("every query parameter must have exactly one value");
+        };
+        if name.is_empty() || value.is_empty() || value.contains('=') {
+            return Err("every query parameter must have exactly one non-empty value");
+        }
+        match name {
+            "limit" => {
+                if limit.is_some() {
+                    return Err("limit must not be repeated");
+                }
+                if !is_canonical_decimal(value) {
+                    return Err("limit must be a canonical positive decimal integer");
+                }
+                let parsed = value
+                    .parse::<u32>()
+                    .map_err(|_| "limit is outside the supported integer range")?;
+                if !(1..=MAX_REJECTED_CUSTODY_PER_RESPONSE).contains(&parsed) {
+                    return Err("limit must be between 1 and 1000");
+                }
+                limit = Some(parsed);
+            }
+            "after" => {
+                if after_submission_id.is_some() {
+                    return Err("after must not be repeated");
+                }
+                if !is_stable_cursor_token(value) {
+                    return Err("after must be an unescaped stable submission-ID token");
+                }
+                after_submission_id = Some(value.to_owned());
+            }
+            _ => return Err("unknown query parameter"),
+        }
+    }
+
+    Ok(RejectedCustodyQuery {
+        limit: limit.unwrap_or(MAX_REJECTED_CUSTODY_PER_RESPONSE),
+        after_submission_id,
+    })
+}
+
+fn parse_findings_query(query: Option<&str>) -> std::result::Result<FindingsQuery, &'static str> {
+    let Some(query) = query else {
+        return Ok(FindingsQuery {
+            limit: MAX_FINDINGS_PER_RESPONSE,
+            after_finding_id: None,
+        });
+    };
+    if query.is_empty() {
+        return Err("query string must not be empty");
+    }
+
+    let mut limit = None;
+    let mut after_finding_id = None;
+    for parameter in query.split('&') {
+        let Some((name, value)) = parameter.split_once('=') else {
+            return Err("every query parameter must have exactly one value");
+        };
+        if name.is_empty() || value.is_empty() || value.contains('=') {
+            return Err("every query parameter must have exactly one non-empty value");
+        }
+        match name {
+            "limit" => {
+                if limit.is_some() {
+                    return Err("limit must not be repeated");
+                }
+                if !is_canonical_decimal(value) {
+                    return Err("limit must be a canonical positive decimal integer");
+                }
+                let parsed = value
+                    .parse::<u32>()
+                    .map_err(|_| "limit is outside the supported integer range")?;
+                if !(1..=MAX_FINDINGS_PER_RESPONSE).contains(&parsed) {
+                    return Err("limit must be between 1 and 1000");
+                }
+                limit = Some(parsed);
+            }
+            "after" => {
+                if after_finding_id.is_some() {
+                    return Err("after must not be repeated");
+                }
+                if !is_stable_cursor_token(value) {
+                    return Err("after must be an unescaped stable finding-ID token");
+                }
+                after_finding_id = Some(value.to_owned());
+            }
+            _ => return Err("unknown query parameter"),
+        }
+    }
+
+    Ok(FindingsQuery {
+        limit: limit.unwrap_or(MAX_FINDINGS_PER_RESPONSE),
+        after_finding_id,
+    })
+}
+
+fn is_canonical_decimal(value: &str) -> bool {
+    !value.is_empty() && !value.starts_with('0') && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn is_stable_cursor_token(value: &str) -> bool {
+    (1..=255).contains(&value.len())
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':' | b'/' | b'@')
+        })
 }
 
 async fn read_request<S: AsyncRead + Unpin>(stream: &mut S) -> Result<String> {
@@ -214,6 +456,8 @@ async fn write_response<S: AsyncWrite + Unpin>(
     }
     let reason = match status {
         200 => "OK",
+        400 => "Bad Request",
+        409 => "Conflict",
         404 => "Not Found",
         405 => "Method Not Allowed",
         _ => "Error",
@@ -295,7 +539,591 @@ pub fn parse_loopback(value: &str) -> Result<SocketAddr> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
+    use nq_core::engine::{
+        AdmissionRefusal, AdmissionRefusalBoundary, AdmissionRefusalCode, AdmissionRefusalDetails,
+        CollectionOutcome, CollectionResult, EvaluationProfileIdentity, EvaluationResultSchema,
+        EvaluationResultV1, GovernedRefusal, GovernedRefusalOrigin, RunHardLimits,
+        RunResourceOutcomeSchema, RunResourceOutcomeV1,
+    };
+    use nq_core::runner::{AcquisitionOutcome, ExchangeTimeoutPhase};
+    use nq_profiles::{
+        DetectorState, EvidenceWatermark, ProfileKey, ProfileRefusal, ProfileRefusalCode,
+        RefusalBoundary as ProfileRefusalBoundary, profile_semantic_id,
+    };
+    use nq_protocol::{InstanceId, Refusal, RefusalBoundary, RefusalCode, Sha256Digest};
+    use nq_store::{
+        AdmissionIdentity, AdmissionInput, CanonicalDocument, CollectionInput, EvaluationInput,
+        EvaluationProfileBinding, EvaluationWatermark, FindingEventInput, ProfileDescriptorInput,
+        RefusalInput, RunInput, RunResultStatusInput, StatusEventInput, SubmissionDisposition,
+        SubmissionInput,
+    };
+    use serde_json::{Value, json};
+
+    const TEST_TIME: &str = "2026-07-20T12:00:00Z";
+
+    fn document(value: &impl serde::Serialize) -> CanonicalDocument {
+        CanonicalDocument::from_serializable(value).expect("fixture document canonicalizes")
+    }
+
+    fn helper_rejection(
+        instance_id: &str,
+        run_id: &str,
+        refusal_id: &str,
+        retriable: bool,
+        details: Value,
+    ) -> (CollectionOutcome, GovernedRefusal) {
+        let refusal = GovernedRefusal::helper(
+            refusal_id.to_owned(),
+            Refusal {
+                responsible_instance_id: InstanceId::new(instance_id).expect("instance token"),
+                boundary: RefusalBoundary::Collection,
+                code: RefusalCode::CollectionFailed,
+                message: "backend collection failed".to_owned(),
+                retriable,
+                details,
+            },
+        );
+        (
+            CollectionOutcome::rejected(instance_id.to_owned(), run_id.to_owned(), refusal.clone()),
+            refusal,
+        )
+    }
+
+    fn helper_admission_refusal(
+        instance_id: &str,
+        refusal_id: &str,
+        retriable: bool,
+        details: Value,
+    ) -> (CollectionOutcome, GovernedRefusal) {
+        let refusal = GovernedRefusal::helper(
+            refusal_id.to_owned(),
+            Refusal {
+                responsible_instance_id: InstanceId::new(instance_id).expect("instance token"),
+                boundary: RefusalBoundary::Collection,
+                code: RefusalCode::CollectionFailed,
+                message: "helper refused before run admission".to_owned(),
+                retriable,
+                details,
+            },
+        );
+        let admission = AdmissionRefusal {
+            responsible_instance_id: instance_id.to_owned(),
+            boundary: AdmissionRefusalBoundary::Protocol,
+            code: AdmissionRefusalCode::UpstreamRefusal,
+            details: AdmissionRefusalDetails::Governed {
+                refusal: Box::new(refusal.clone()),
+            },
+        };
+        (
+            CollectionOutcome::admission_refused(instance_id.to_owned(), admission),
+            refusal,
+        )
+    }
+
+    fn profile_rejection(
+        instance_id: &str,
+        run_id: &str,
+        refusal_id: &str,
+        profile_id: &str,
+        profile_version: u32,
+        boundary: ProfileRefusalBoundary,
+        details: BTreeMap<String, String>,
+    ) -> (CollectionOutcome, GovernedRefusal) {
+        let profile = nq_profiles::resolve_profile(profile_id, profile_version)
+            .expect("profile refusal fixture uses a compiled profile");
+        let refusal = GovernedRefusal::profile(
+            refusal_id.to_owned(),
+            profile_semantic_id(profile.descriptor()).expect("profile semantic identity"),
+            ProfileRefusal {
+                instance_id: instance_id.to_owned(),
+                profile: ProfileKey::new(profile_id, profile_version),
+                boundary,
+                code: ProfileRefusalCode::InvalidPayload,
+                message: "payload is invalid".to_owned(),
+                details,
+            },
+        );
+        (
+            CollectionOutcome::rejected(instance_id.to_owned(), run_id.to_owned(), refusal.clone()),
+            refusal,
+        )
+    }
+
+    fn append_fixture_descriptor(store: &mut Store, profile_id: &str, version: u32) -> String {
+        let descriptor = nq_profiles::resolve_profile(profile_id, version).map_or_else(
+            || {
+                document(&json!({
+                    "profile": {"id": profile_id, "version": version},
+                    "fixture": "semantic-transport",
+                }))
+            },
+            |profile| document(profile.descriptor()),
+        );
+        let digest = descriptor.digest().to_owned();
+        store
+            .append_profile_descriptor(&ProfileDescriptorInput {
+                profile_id: profile_id.to_owned(),
+                profile_version: version.to_string(),
+                descriptor,
+                recorded_at: TEST_TIME.to_owned(),
+            })
+            .expect("append fixture descriptor");
+        digest
+    }
+
+    fn resource_document(
+        outcome: AcquisitionOutcome,
+        stdout_bytes_retained: usize,
+    ) -> CanonicalDocument {
+        document(&RunResourceOutcomeV1 {
+            schema: RunResourceOutcomeSchema::V1,
+            duration_ms: 1,
+            exit_code: Some(0),
+            hard_limits: RunHardLimits {
+                address_space_bytes_per_process: 1,
+                cpu_seconds_per_process: 1,
+                processes_per_execution_uid: 1,
+                open_files_per_process: 1,
+                file_bytes_per_regular_file: 1,
+                core_bytes: 0,
+            },
+            stdout_bytes_retained,
+            stderr_bytes_retained: 0,
+            stderr_hex: String::new(),
+            outcome,
+        })
+    }
+
+    fn append_run_admission(
+        store: &mut Store,
+        suffix: &str,
+        instance_id: &str,
+        profile_id: &str,
+        profile_version: u32,
+        profile_digest: &str,
+    ) -> String {
+        let profile = nq_profiles::resolve_profile(profile_id, profile_version)
+            .expect("run admission uses a compiled profile");
+        let semantic_id =
+            profile_semantic_id(profile.descriptor()).expect("compiled profile semantic identity");
+        let admission_id = format!("admission-{suffix}");
+        let digest = |label: &str| nq_protocol::sha256_bytes(label.as_bytes());
+        store
+            .append_admission(&AdmissionInput {
+                admission_id: admission_id.clone(),
+                instance_id: instance_id.to_owned(),
+                identity: AdmissionIdentity {
+                    profile_semantic_id: Sha256Digest::parse(semantic_id.as_str())
+                        .expect("semantic identity is a digest"),
+                    detector_identity_digest: digest("detector"),
+                    evaluator_source_digest: digest("source"),
+                    evaluator_artifact_digest: digest("evaluator"),
+                    helper_artifact_digest: digest("helper"),
+                    config_digest: digest("config"),
+                    protocol_version: nq_protocol::HELPER_PROTOCOL_VERSION.to_owned(),
+                    target_triple: "fixture-target".to_owned(),
+                    artifact_identity_method: "fixture".to_owned(),
+                    platform_runtime_version: "fixture".to_owned(),
+                },
+                execution_chain: document(&json!({"fixture": true})),
+                profile_id: profile_id.to_owned(),
+                profile_version: profile_version.to_string(),
+                profile_digest: profile_digest.to_owned(),
+                capability_grant: document(&json!([])),
+                conformance: document(&json!({"fixture": true})),
+                lock: document(&json!({"fixture": true})),
+                admitted_at: TEST_TIME.to_owned(),
+                operator_identity: document(&json!({"fixture": true})),
+            })
+            .expect("append governing run admission");
+        admission_id
+    }
+
+    struct EvaluationSurfaceFixture {
+        finding_id: String,
+        refusal: GovernedRefusal,
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn seed_present_then_refused_evaluation(
+        store: &mut Store,
+        suffix: &str,
+        profile_id: &str,
+        profile_version: u32,
+        details: BTreeMap<String, String>,
+    ) -> EvaluationSurfaceFixture {
+        let module = nq_profiles::resolve_profile(profile_id, profile_version)
+            .expect("evaluation fixture uses a compiled profile");
+        let profile = module.descriptor().profile.clone();
+        let profile_digest = append_fixture_descriptor(store, profile_id, profile_version);
+        let semantic_id = profile_semantic_id(module.descriptor()).expect("profile semantic ID");
+        let semantic_digest = Sha256Digest::parse(semantic_id.as_str())
+            .expect("profile semantic identity is a digest");
+        let evaluation_profile = EvaluationProfileIdentity {
+            profile: profile.clone(),
+            profile_digest: module.descriptor().digest().expect("profile digest"),
+            profile_semantic_id: semantic_id.clone(),
+        };
+        let instance_id = format!("evaluation-{suffix}");
+        let detector_id = format!("transport.detector.{suffix}");
+        let detector_digest = nq_protocol::sha256_bytes(detector_id.as_bytes()).into_string();
+        let finding_id = format!("finding-evaluation-{suffix}");
+        let condition = "transport.same_code";
+        let profile_binding = EvaluationProfileBinding {
+            profile_id: profile.id.clone(),
+            profile_version: profile.version.to_string(),
+            profile_digest: profile_digest.clone(),
+            profile_semantic_id: semantic_digest,
+        };
+        let watermarks = vec![EvaluationWatermark {
+            instance_id: instance_id.clone(),
+            max_report_sequence: 0,
+            watermark_received_at: None,
+        }];
+        let present = EvaluationResultV1 {
+            schema: EvaluationResultSchema::V1,
+            profile: evaluation_profile.clone(),
+            state: DetectorState::Present,
+            condition: condition.to_owned(),
+            summary: "condition is present".to_owned(),
+            evidence: Vec::new(),
+            limitations: Vec::new(),
+            refusal: None,
+            watermark: EvidenceWatermark(0),
+        };
+        let opened = FindingEventInput {
+            event_id: format!("event-evaluation-{suffix}-opened"),
+            finding_id: finding_id.clone(),
+            event_kind: "opened".to_owned(),
+            instance_id: instance_id.clone(),
+            profile_id: profile.id.clone(),
+            profile_version: profile.version.to_string(),
+            profile_digest: profile_digest.clone(),
+            subject: document(&json!({"instance": instance_id})),
+            condition_name: condition.to_owned(),
+            condition_state: "present".to_owned(),
+            visibility_state: "sufficient".to_owned(),
+            operator_work_state: "unreviewed".to_owned(),
+            severity: "warning".to_owned(),
+            summary: "condition is present".to_owned(),
+            limitations: document(&Vec::<String>::new()),
+            safe_next_checks: document(&vec!["collect current evidence"]),
+            freshness: document(&json!({"state": "current"})),
+            basis: document(&json!({"profile_digest": profile_digest})),
+            refusal: None,
+            origin_mode: "native".to_owned(),
+            historical_refs: document(&Vec::<String>::new()),
+            observed_at: None,
+            received_at: None,
+            created_at: TEST_TIME.to_owned(),
+            evidence: Vec::new(),
+        };
+        store
+            .commit_evaluation(
+                &EvaluationInput {
+                    evaluation_id: format!("evaluation-{suffix}-present"),
+                    detector_id: detector_id.clone(),
+                    detector_version: "1".to_owned(),
+                    detector_digest: detector_digest.clone(),
+                    evaluator_artifact_digest: nq_protocol::sha256_bytes(b"api-evaluator")
+                        .into_string(),
+                    started_at: TEST_TIME.to_owned(),
+                    evaluated_at: TEST_TIME.to_owned(),
+                    outcome: "condition_present".to_owned(),
+                    detail: document(&present),
+                    profile: profile_binding.clone(),
+                    watermarks: watermarks.clone(),
+                    refusal: None,
+                },
+                Some(&opened),
+            )
+            .expect("open a policy-valid present finding");
+
+        let source_refusal = ProfileRefusal {
+            instance_id: instance_id.clone(),
+            profile,
+            boundary: ProfileRefusalBoundary::Detector,
+            code: ProfileRefusalCode::CannotEvaluate,
+            message: "insufficient current evidence".to_owned(),
+            details,
+        };
+        let refusal = GovernedRefusal::profile(
+            format!("refusal-evaluation-{suffix}"),
+            semantic_id,
+            source_refusal,
+        );
+        let refused = EvaluationResultV1 {
+            schema: EvaluationResultSchema::V1,
+            profile: evaluation_profile,
+            state: DetectorState::CannotEvaluate,
+            condition: condition.to_owned(),
+            summary: "insufficient current evidence".to_owned(),
+            evidence: Vec::new(),
+            limitations: vec!["evaluation refused at the typed profile boundary".to_owned()],
+            refusal: Some(refusal.clone()),
+            watermark: EvidenceWatermark(0),
+        };
+        let mut updated = opened;
+        updated.event_id = format!("event-evaluation-{suffix}-refused");
+        updated.event_kind = "updated".to_owned();
+        // A refusal changes visibility, not the already-established condition.
+        updated.visibility_state = "refused".to_owned();
+        updated.limitations = document(&refused.limitations);
+        updated.freshness = document(&json!({"state": "cannot_evaluate"}));
+        updated.refusal = Some(document(&refusal));
+        store
+            .commit_evaluation(
+                &EvaluationInput {
+                    evaluation_id: format!("evaluation-{suffix}-refused"),
+                    detector_id,
+                    detector_version: "1".to_owned(),
+                    detector_digest,
+                    evaluator_artifact_digest: nq_protocol::sha256_bytes(b"api-evaluator")
+                        .into_string(),
+                    started_at: TEST_TIME.to_owned(),
+                    evaluated_at: TEST_TIME.to_owned(),
+                    outcome: "cannot_evaluate".to_owned(),
+                    detail: document(&refused),
+                    profile: profile_binding,
+                    watermarks,
+                    refusal: Some(RefusalInput {
+                        refusal_id: refusal.refusal_id.clone(),
+                        source_kind: "profile".to_owned(),
+                        responsible_instance_id: instance_id,
+                        boundary: "detector".to_owned(),
+                        code: "cannot_evaluate".to_owned(),
+                        profile_semantic_id: Some(match &refusal.origin {
+                            GovernedRefusalOrigin::Profile(profile) => {
+                                profile.profile_semantic_id.as_str().to_owned()
+                            }
+                            _ => unreachable!("fixture refusal is profile-origin"),
+                        }),
+                        detail: document(&refusal),
+                        created_at: TEST_TIME.to_owned(),
+                    }),
+                },
+                Some(&updated),
+            )
+            .expect("update the existing finding with typed refusal visibility");
+
+        EvaluationSurfaceFixture {
+            finding_id,
+            refusal,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn seed_rejected_result(
+        store: &mut Store,
+        profile_id: &str,
+        profile_version: u32,
+        profile_digest: &str,
+        suffix: &str,
+        outcome: &CollectionOutcome,
+        refusal: &GovernedRefusal,
+        state: &str,
+        status_code: &str,
+    ) {
+        let instance_id = outcome.instance_id().to_owned();
+        let run_id = outcome.run_id.as_deref().expect("rejection has run");
+        let (source_kind, boundary, code, profile_semantic_id, protocol_outcome) =
+            match &refusal.origin {
+                GovernedRefusalOrigin::Helper(source) => (
+                    "protocol",
+                    serde_json::to_value(source.boundary).expect("boundary serializes"),
+                    serde_json::to_value(source.code).expect("code serializes"),
+                    None,
+                    "valid_refusal",
+                ),
+                GovernedRefusalOrigin::Profile(source) => (
+                    "profile",
+                    serde_json::to_value(source.refusal.boundary).expect("boundary serializes"),
+                    serde_json::to_value(source.refusal.code).expect("code serializes"),
+                    Some(source.profile_semantic_id.as_str().to_owned()),
+                    "valid_report",
+                ),
+                other => panic!("unsupported fixture refusal origin: {other:?}"),
+            };
+        let admission_id = append_run_admission(
+            store,
+            suffix,
+            &instance_id,
+            profile_id,
+            profile_version,
+            profile_digest,
+        );
+        let collection = CollectionInput {
+            run: RunInput {
+                run_id: run_id.to_owned(),
+                request_id: format!("request-{suffix}"),
+                instance_id: instance_id.clone(),
+                admission_id: Some(admission_id),
+                binding_digest: nq_protocol::sha256_bytes(b"binding").into_string(),
+                checkpoint_contract_digest: nq_protocol::sha256_bytes(b"checkpoint").into_string(),
+                profile_id: profile_id.to_owned(),
+                profile_version: profile_version.to_string(),
+                profile_digest: profile_digest.to_owned(),
+                carrier: "stdio".to_owned(),
+                started_at: TEST_TIME.to_owned(),
+                deadline_at: TEST_TIME.to_owned(),
+                finished_at: TEST_TIME.to_owned(),
+                acquisition_outcome: "response".to_owned(),
+                execution_identity: document(&json!({"fixture": true})),
+                resource_outcome: resource_document(
+                    AcquisitionOutcome::Response,
+                    format!("rejected-{suffix}").len(),
+                ),
+            },
+            submission: Some(SubmissionInput {
+                submission_id: format!("submission-{suffix}"),
+                raw_bytes: format!("rejected-{suffix}").into_bytes(),
+                received_at: TEST_TIME.to_owned(),
+                protocol_outcome: protocol_outcome.to_owned(),
+                disposition: SubmissionDisposition::Rejected {
+                    refusal: RefusalInput {
+                        refusal_id: refusal.refusal_id.clone(),
+                        source_kind: source_kind.to_owned(),
+                        responsible_instance_id: instance_id.clone(),
+                        boundary: boundary.as_str().expect("boundary is token").to_owned(),
+                        code: code.as_str().expect("code is token").to_owned(),
+                        profile_semantic_id,
+                        detail: document(refusal),
+                        created_at: TEST_TIME.to_owned(),
+                    },
+                },
+            }),
+        };
+        store
+            .commit_non_success_collection(
+                &collection,
+                &RunResultStatusInput {
+                    run_id: run_id.to_owned(),
+                    status: StatusEventInput {
+                        status_event_id: uuid::Uuid::new_v4().to_string(),
+                        component_kind: "instance".to_owned(),
+                        component_id: instance_id,
+                        state: state.to_owned(),
+                        code: status_code.to_owned(),
+                        detail: document(outcome),
+                        observed_at: TEST_TIME.to_owned(),
+                    },
+                },
+            )
+            .expect("atomically commit rejected custody and canonical status");
+    }
+
+    fn seed_acquisition_result(
+        store: &mut Store,
+        profile_digest: &str,
+        suffix: &str,
+        outcome: &CollectionOutcome,
+    ) {
+        let instance_id = outcome.instance_id().to_owned();
+        let run_id = outcome.run_id.as_deref().expect("acquisition has run");
+        let CollectionResult::AcquisitionFailed { failure } = &outcome.result else {
+            panic!("acquisition fixture must carry acquisition failure");
+        };
+        let admission_id = append_run_admission(
+            store,
+            suffix,
+            &instance_id,
+            "nq.conformance",
+            1,
+            profile_digest,
+        );
+        let collection = CollectionInput {
+            run: RunInput {
+                run_id: run_id.to_owned(),
+                request_id: format!("request-{suffix}"),
+                instance_id: instance_id.clone(),
+                admission_id: Some(admission_id),
+                binding_digest: nq_protocol::sha256_bytes(b"binding").into_string(),
+                checkpoint_contract_digest: nq_protocol::sha256_bytes(b"checkpoint").into_string(),
+                profile_id: "nq.conformance".to_owned(),
+                profile_version: "1".to_owned(),
+                profile_digest: profile_digest.to_owned(),
+                carrier: "unix".to_owned(),
+                started_at: TEST_TIME.to_owned(),
+                deadline_at: TEST_TIME.to_owned(),
+                finished_at: TEST_TIME.to_owned(),
+                acquisition_outcome: "timeout".to_owned(),
+                execution_identity: document(&json!({"fixture": true})),
+                resource_outcome: resource_document(failure.outcome.clone(), 0),
+            },
+            submission: None,
+        };
+        store
+            .commit_non_success_collection(
+                &collection,
+                &RunResultStatusInput {
+                    run_id: run_id.to_owned(),
+                    status: StatusEventInput {
+                        status_event_id: uuid::Uuid::new_v4().to_string(),
+                        component_kind: "instance".to_owned(),
+                        component_id: instance_id,
+                        state: "failed".to_owned(),
+                        code: "collection_failed".to_owned(),
+                        detail: document(outcome),
+                        observed_at: TEST_TIME.to_owned(),
+                    },
+                },
+            )
+            .expect("atomically commit acquisition failure and canonical status");
+    }
+
+    fn seed_admission_refusal_status(store: &mut Store, outcome: &CollectionOutcome) {
+        store
+            .record_status(&StatusEventInput {
+                status_event_id: uuid::Uuid::new_v4().to_string(),
+                component_kind: "instance".to_owned(),
+                component_id: outcome.instance_id().to_owned(),
+                state: "failed".to_owned(),
+                code: "admission_refused".to_owned(),
+                detail: document(outcome),
+                observed_at: TEST_TIME.to_owned(),
+            })
+            .expect("persist exact typed admission refusal status");
+    }
+
+    async fn get_response(path: &str, database_path: PathBuf) -> (u16, Value) {
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(handle_connection(server, database_path));
+        client
+            .write_all(format!("GET {path} HTTP/1.1\r\nHost: local\r\n\r\n").as_bytes())
+            .await
+            .expect("write request");
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .expect("read response");
+        task.await
+            .expect("request task joins")
+            .expect("request succeeds");
+        let response = String::from_utf8(response).expect("HTTP response is UTF-8");
+        let (headers, body) = response
+            .split_once("\r\n\r\n")
+            .expect("HTTP response has body");
+        let status = headers
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|status| status.parse().ok())
+            .expect("HTTP status code");
+        (
+            status,
+            serde_json::from_str(body).expect("HTTP body is JSON"),
+        )
+    }
+
+    async fn get_json(path: &str, database_path: PathBuf) -> Value {
+        let (status, body) = get_response(path, database_path).await;
+        assert_eq!(status, 200);
+        body
+    }
 
     #[test]
     fn console_binding_is_loopback_only() {
@@ -309,5 +1137,581 @@ mod tests {
         let html = render_console(br#"{"x":"<script>"}"#, b"[]");
         assert!(!html.contains("<script>"));
         assert!(html.contains("&lt;script&gt;"));
+    }
+
+    #[test]
+    fn rejected_custody_query_is_strict_and_unescaped() {
+        assert_eq!(
+            parse_rejected_custody_query(None).expect("default page"),
+            RejectedCustodyQuery {
+                limit: 1_000,
+                after_submission_id: None,
+            }
+        );
+        assert_eq!(
+            parse_rejected_custody_query(Some("after=submission-a&limit=1"))
+                .expect("explicit bounded page"),
+            RejectedCustodyQuery {
+                limit: 1,
+                after_submission_id: Some("submission-a".to_owned()),
+            }
+        );
+        for invalid in [
+            "",
+            "limit=0",
+            "limit=01",
+            "limit=1001",
+            "limit=1&limit=2",
+            "after=one&after=two",
+            "after=submission%2Done",
+            "after=submission+one",
+            "unknown=value",
+            "limit",
+            "limit=1=2",
+            "limit=1&&after=submission-one",
+        ] {
+            assert!(
+                parse_rejected_custody_query(Some(invalid)).is_err(),
+                "query must fail closed: {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn findings_query_is_strict_and_unescaped() {
+        assert_eq!(
+            parse_findings_query(None).expect("default page"),
+            FindingsQuery {
+                limit: 1_000,
+                after_finding_id: None,
+            }
+        );
+        assert_eq!(
+            parse_findings_query(Some("limit=1&after=finding-a")).expect("explicit bounded page"),
+            FindingsQuery {
+                limit: 1,
+                after_finding_id: Some("finding-a".to_owned()),
+            }
+        );
+        for invalid in [
+            "",
+            "limit=0",
+            "limit=01",
+            "limit=1001",
+            "limit=1&limit=2",
+            "after=one&after=two",
+            "after=finding%2Done",
+            "after=finding+one",
+            "unknown=value",
+            "limit",
+            "limit=1=2",
+            "limit=1&&after=finding-one",
+        ] {
+            assert!(
+                parse_findings_query(Some(invalid)).is_err(),
+                "query must fail closed: {invalid}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn v3_findings_api_preserves_same_code_evaluation_refusals() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database = directory.path().join("nq.db");
+        let mut store = Store::initialize(&database).expect("initialize store");
+        let fixtures = [
+            seed_present_then_refused_evaluation(
+                &mut store,
+                "conformance",
+                "nq.conformance",
+                1,
+                BTreeMap::from([
+                    ("coverage".to_owned(), "reachability".to_owned()),
+                    ("missing_basis".to_owned(), "active_probe".to_owned()),
+                ]),
+            ),
+            seed_present_then_refused_evaluation(
+                &mut store,
+                "host",
+                "nq.host",
+                1,
+                BTreeMap::from([
+                    ("age_seconds".to_owned(), "121".to_owned()),
+                    ("reliance_seconds".to_owned(), "60".to_owned()),
+                ]),
+            ),
+        ];
+        store.validate().expect("evaluation fixture validates");
+        drop(store);
+
+        let first_page = get_json("/v3/findings?limit=1", database.clone()).await;
+        let first = first_page
+            .as_array()
+            .expect("first findings page is an array");
+        assert_eq!(first.len(), 1);
+        let cursor = first[0]["finding_id"]
+            .as_str()
+            .expect("finding ID is a cursor");
+        let second_page = get_json(
+            &format!("/v3/findings?after={cursor}&limit=1"),
+            database.clone(),
+        )
+        .await;
+        let second = second_page
+            .as_array()
+            .expect("second findings page is an array");
+        assert_eq!(second.len(), 1);
+        let findings = [first[0].clone(), second[0].clone()];
+        assert_eq!(findings.len(), fixtures.len());
+        let mut reopened = Vec::new();
+        for fixture in &fixtures {
+            let finding = findings
+                .iter()
+                .find(|finding| finding["finding_id"] == fixture.finding_id)
+                .unwrap_or_else(|| panic!("missing finding {}", fixture.finding_id));
+            assert_eq!(finding["schema"], "nq.finding_snapshot.v3");
+            assert_eq!(finding["condition"]["state"], "present");
+            assert_eq!(finding["visibility"]["state"], "refused");
+
+            // Finding v2 deliberately embeds the independently closed
+            // nq.governed_refusal.v1 wire object; the nested schema is the
+            // explicit version boundary for this refusal payload.
+            let refusal = &finding["visibility"]["refusal"];
+            assert_eq!(refusal["schema"], "nq.governed_refusal.v1");
+            assert_eq!(
+                refusal,
+                &serde_json::to_value(&fixture.refusal).expect("expected refusal serializes")
+            );
+            let typed: GovernedRefusal = serde_json::from_value(refusal.clone())
+                .expect("API refusal strictly typed-decodes");
+            assert_eq!(typed, fixture.refusal);
+            reopened.push(typed);
+        }
+
+        let profiles = reopened
+            .iter()
+            .map(|refusal| match &refusal.origin {
+                GovernedRefusalOrigin::Profile(profile) => profile,
+                other => panic!("evaluation refusal lost profile origin: {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(profiles[0].refusal.code, ProfileRefusalCode::CannotEvaluate);
+        assert_eq!(profiles[0].refusal.code, profiles[1].refusal.code);
+        assert_eq!(profiles[0].refusal.boundary, profiles[1].refusal.boundary);
+        assert_ne!(reopened[0].refusal_id, reopened[1].refusal_id);
+        assert_ne!(
+            profiles[0].profile_semantic_id,
+            profiles[1].profile_semantic_id
+        );
+        assert_ne!(profiles[0].refusal.profile, profiles[1].refusal.profile);
+        assert_ne!(profiles[0].refusal.details, profiles[1].refusal.details);
+        assert_ne!(reopened[0], reopened[1]);
+
+        for invalid_path in [
+            "/v3/findings?",
+            "/v3/findings?limit=0",
+            "/v3/findings?limit=1001",
+            "/v3/findings?limit=1&limit=2",
+            "/v3/findings?after=one&after=two",
+            "/v3/findings?after=finding%2Done",
+            "/v3/findings?unknown=value",
+        ] {
+            let (status, body) = get_response(invalid_path, database.clone()).await;
+            assert_eq!(status, 400, "request must fail closed: {invalid_path}");
+            assert_eq!(body["error"], "invalid_findings_query");
+            assert!(
+                body["detail"]
+                    .as_str()
+                    .is_some_and(|detail| !detail.is_empty())
+            );
+        }
+
+        let (v2_status, v2_error) = get_response("/v2/findings", database).await;
+        assert_eq!(v2_status, 409);
+        assert_eq!(v2_error["error"], "governed_findings_require_v3");
+        assert_eq!(v2_error["required_endpoint"], "/v3/findings");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn v2_api_preserves_same_code_refusals_and_v1_route_stays_v1() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database = directory.path().join("nq.db");
+        let mut store = Store::initialize(&database).expect("initialize store");
+        let profile_digest = append_fixture_descriptor(&mut store, "nq.conformance", 1);
+        let conformance_digest = profile_digest.clone();
+        let host_digest = append_fixture_descriptor(&mut store, "nq.host", 1);
+        drop(store);
+
+        // `/v1/status` remains the unchanged compatibility contract. A v1
+        // reader does not reinterpret v2 collection documents.
+        let v1 = get_json("/v1/status", database.clone()).await;
+        assert_eq!(v1["schema"], "nq.status_snapshot.v1");
+        let mut store = Store::open(&database).expect("reopen store");
+
+        let (transient, transient_refusal) = helper_rejection(
+            "transport-transient",
+            "run-transient",
+            "refusal-transient",
+            true,
+            json!({"attempt": 1, "errno": "EAGAIN"}),
+        );
+        let (permanent, permanent_refusal) = helper_rejection(
+            "transport-permanent",
+            "run-permanent",
+            "refusal-permanent",
+            false,
+            json!({"device": "nvme0", "errno": "ENODEV"}),
+        );
+        seed_rejected_result(
+            &mut store,
+            "nq.conformance",
+            1,
+            &profile_digest,
+            "transient",
+            &transient,
+            &transient_refusal,
+            "degraded",
+            "helper_refused",
+        );
+        seed_rejected_result(
+            &mut store,
+            "nq.conformance",
+            1,
+            &profile_digest,
+            "permanent",
+            &permanent,
+            &permanent_refusal,
+            "degraded",
+            "helper_refused",
+        );
+
+        let timeout_write = CollectionOutcome::acquisition_failed(
+            "timeout-write".to_owned(),
+            "run-timeout-write".to_owned(),
+            AcquisitionOutcome::ExchangeTimeout {
+                phase: ExchangeTimeoutPhase::WriteRequest,
+            },
+        )
+        .expect("write timeout carrier");
+        let timeout_read = CollectionOutcome::acquisition_failed(
+            "timeout-read".to_owned(),
+            "run-timeout-read".to_owned(),
+            AcquisitionOutcome::ExchangeTimeout {
+                phase: ExchangeTimeoutPhase::ReadResponse,
+            },
+        )
+        .expect("read timeout carrier");
+        seed_acquisition_result(&mut store, &profile_digest, "timeout-write", &timeout_write);
+        seed_acquisition_result(&mut store, &profile_digest, "timeout-read", &timeout_read);
+
+        let (profile_report, report_refusal) = profile_rejection(
+            "profile-report",
+            "run-profile-report",
+            "refusal-profile-report",
+            "nq.conformance",
+            1,
+            ProfileRefusalBoundary::Report,
+            BTreeMap::from([("field".to_owned(), "status".to_owned())]),
+        );
+        let (profile_observation, observation_refusal) = profile_rejection(
+            "profile-observation",
+            "run-profile-observation",
+            "refusal-profile-observation",
+            "nq.host",
+            1,
+            ProfileRefusalBoundary::Observation,
+            BTreeMap::from([("ordinal".to_owned(), "4".to_owned())]),
+        );
+        seed_rejected_result(
+            &mut store,
+            "nq.conformance",
+            1,
+            &conformance_digest,
+            "profile-report",
+            &profile_report,
+            &report_refusal,
+            "failed",
+            "report_rejected",
+        );
+        seed_rejected_result(
+            &mut store,
+            "nq.host",
+            1,
+            &host_digest,
+            "profile-observation",
+            &profile_observation,
+            &observation_refusal,
+            "failed",
+            "report_rejected",
+        );
+
+        let (admission_transient, admission_transient_refusal) = helper_admission_refusal(
+            "admission-transient",
+            "refusal-admission-transient",
+            true,
+            json!({"attempt": 2, "errno": "EAGAIN"}),
+        );
+        let (admission_permanent, admission_permanent_refusal) = helper_admission_refusal(
+            "admission-permanent",
+            "refusal-admission-permanent",
+            false,
+            json!({"device": "nvme1", "errno": "ENODEV"}),
+        );
+        seed_admission_refusal_status(&mut store, &admission_transient);
+        seed_admission_refusal_status(&mut store, &admission_permanent);
+
+        // Exercise the direct typed status reader before the HTTP encoding
+        // layer. Equal outward admission codes do not erase the nested helper
+        // retryability, details, or refusal identities.
+        let direct = nq_core::engine::status_snapshot_v2(&store).expect("direct typed status");
+        let direct_result = |id: &str| {
+            let component = direct
+                .components
+                .iter()
+                .find(|component| component.id == id)
+                .unwrap_or_else(|| panic!("missing direct admission status {id}"));
+            let nq_core::public::ComponentStatusDetailV2::Collection { result } = &component.detail
+            else {
+                panic!("admission status must carry a typed collection result")
+            };
+            result
+        };
+        assert_eq!(direct_result("admission-transient"), &admission_transient);
+        assert_eq!(direct_result("admission-permanent"), &admission_permanent);
+        assert_ne!(
+            direct_result("admission-transient"),
+            direct_result("admission-permanent")
+        );
+        drop(store);
+
+        let v2 = get_json("/v2/status", database.clone()).await;
+        assert_eq!(v2["schema"], "nq.status_snapshot.v2");
+        let component = |id: &str| {
+            v2["components"]
+                .as_array()
+                .expect("status components")
+                .iter()
+                .find(|component| component["id"] == id)
+                .unwrap_or_else(|| panic!("missing component {id}"))
+        };
+        let transient_component = component("transport-transient");
+        let permanent_component = component("transport-permanent");
+        assert_eq!(transient_component["code"], "helper_refused");
+        assert_eq!(permanent_component["code"], "helper_refused");
+        assert_eq!(
+            transient_component["detail"]["result"],
+            serde_json::to_value(&transient).expect("transient serializes")
+        );
+        assert_eq!(
+            permanent_component["detail"]["result"],
+            serde_json::to_value(&permanent).expect("permanent serializes")
+        );
+        assert_ne!(transient_component["detail"], permanent_component["detail"]);
+
+        let timeout_write_component = component("timeout-write");
+        let timeout_read_component = component("timeout-read");
+        assert_eq!(timeout_write_component["code"], "collection_failed");
+        assert_eq!(timeout_read_component["code"], "collection_failed");
+        assert_eq!(
+            timeout_write_component["detail"]["result"],
+            serde_json::to_value(&timeout_write).expect("write timeout serializes")
+        );
+        assert_eq!(
+            timeout_read_component["detail"]["result"],
+            serde_json::to_value(&timeout_read).expect("read timeout serializes")
+        );
+        assert_eq!(
+            timeout_write_component["detail"]["result"]["result"]["failure"]["class"],
+            "timeout"
+        );
+        assert_eq!(
+            timeout_read_component["detail"]["result"]["result"]["failure"]["class"],
+            "timeout"
+        );
+        assert_eq!(
+            timeout_write_component["detail"]["result"]["result"]["failure"]["outcome"]["phase"],
+            "write_request"
+        );
+        assert_eq!(
+            timeout_read_component["detail"]["result"]["result"]["failure"]["outcome"]["phase"],
+            "read_response"
+        );
+        assert_ne!(
+            timeout_write_component["detail"],
+            timeout_read_component["detail"]
+        );
+
+        let report_component = component("profile-report");
+        let observation_component = component("profile-observation");
+        assert_eq!(report_component["code"], "report_rejected");
+        assert_eq!(observation_component["code"], "report_rejected");
+        assert_eq!(
+            report_component["detail"]["result"],
+            serde_json::to_value(&profile_report).expect("report refusal serializes")
+        );
+        assert_eq!(
+            observation_component["detail"]["result"],
+            serde_json::to_value(&profile_observation).expect("observation refusal serializes")
+        );
+        let report_status_refusal = &report_component["detail"]["result"]["result"]["refusal"];
+        let observation_status_refusal =
+            &observation_component["detail"]["result"]["result"]["refusal"];
+        assert_eq!(
+            report_status_refusal["origin"]["payload"]["refusal"]["profile"]["id"],
+            "nq.conformance"
+        );
+        assert_eq!(
+            report_status_refusal["origin"]["payload"]["refusal"]["boundary"],
+            "report"
+        );
+        assert_eq!(
+            observation_status_refusal["origin"]["payload"]["refusal"]["profile"]["id"],
+            "nq.host"
+        );
+        assert_eq!(
+            observation_status_refusal["origin"]["payload"]["refusal"]["boundary"],
+            "observation"
+        );
+        assert_ne!(
+            report_status_refusal["refusal_id"],
+            observation_status_refusal["refusal_id"]
+        );
+        assert_ne!(report_status_refusal, observation_status_refusal);
+
+        let admission_transient_component = component("admission-transient");
+        let admission_permanent_component = component("admission-permanent");
+        assert_eq!(admission_transient_component["code"], "admission_refused");
+        assert_eq!(admission_permanent_component["code"], "admission_refused");
+        assert_eq!(
+            admission_transient_component["detail"]["result"],
+            serde_json::to_value(&admission_transient).expect("transient admission serializes")
+        );
+        assert_eq!(
+            admission_permanent_component["detail"]["result"],
+            serde_json::to_value(&admission_permanent).expect("permanent admission serializes")
+        );
+        let transient_admission_refusal =
+            &admission_transient_component["detail"]["result"]["result"]["refusal"];
+        let permanent_admission_refusal =
+            &admission_permanent_component["detail"]["result"]["result"]["refusal"];
+        assert_eq!(transient_admission_refusal["code"], "upstream_refusal");
+        assert_eq!(permanent_admission_refusal["code"], "upstream_refusal");
+        assert_eq!(
+            transient_admission_refusal["details"]["refusal"],
+            serde_json::to_value(&admission_transient_refusal)
+                .expect("nested transient helper refusal serializes")
+        );
+        assert_eq!(
+            permanent_admission_refusal["details"]["refusal"],
+            serde_json::to_value(&admission_permanent_refusal)
+                .expect("nested permanent helper refusal serializes")
+        );
+        assert_eq!(
+            transient_admission_refusal["details"]["refusal"]["origin"]["payload"]["retriable"],
+            true
+        );
+        assert_eq!(
+            permanent_admission_refusal["details"]["refusal"]["origin"]["payload"]["retriable"],
+            false
+        );
+        assert_ne!(transient_admission_refusal, permanent_admission_refusal);
+
+        let (v1_status, v1_error) = get_response("/v1/status", database.clone()).await;
+        assert_eq!(v1_status, 409);
+        assert_eq!(v1_error["error"], "typed_status_requires_v2");
+        assert_eq!(v1_error["required_endpoint"], "/v2/status");
+
+        let first_profile_page = get_json(
+            "/v1/rejected-custody?limit=1&after=submission-permanent",
+            database.clone(),
+        )
+        .await;
+        let first_profile_records = first_profile_page["records"]
+            .as_array()
+            .expect("first profile page records");
+        assert_eq!(first_profile_records.len(), 1);
+        assert_eq!(
+            first_profile_records[0]["submission_id"],
+            "submission-profile-observation"
+        );
+        assert_eq!(
+            first_profile_records[0]["refusal"],
+            serde_json::to_value(&observation_refusal).expect("observation refusal serializes")
+        );
+
+        let second_profile_page = get_json(
+            "/v1/rejected-custody?after=submission-profile-observation&limit=1",
+            database.clone(),
+        )
+        .await;
+        let second_profile_records = second_profile_page["records"]
+            .as_array()
+            .expect("second profile page records");
+        assert_eq!(second_profile_records.len(), 1);
+        assert_eq!(
+            second_profile_records[0]["submission_id"],
+            "submission-profile-report"
+        );
+        assert_eq!(
+            second_profile_records[0]["refusal"],
+            serde_json::to_value(&report_refusal).expect("report refusal serializes")
+        );
+        assert_eq!(
+            first_profile_records[0]["refusal"]["origin"]["payload"]["code"],
+            second_profile_records[0]["refusal"]["origin"]["payload"]["code"]
+        );
+        assert_ne!(
+            first_profile_records[0]["refusal"],
+            second_profile_records[0]["refusal"]
+        );
+
+        for invalid_path in [
+            "/v1/rejected-custody?",
+            "/v1/rejected-custody?limit=0",
+            "/v1/rejected-custody?limit=1001",
+            "/v1/rejected-custody?limit=1&limit=2",
+            "/v1/rejected-custody?after=one&after=two",
+            "/v1/rejected-custody?after=submission%2Dpermanent",
+            "/v1/rejected-custody?unknown=value",
+        ] {
+            let (status, body) = get_response(invalid_path, database.clone()).await;
+            assert_eq!(status, 400, "request must fail closed: {invalid_path}");
+            assert_eq!(body["error"], "invalid_rejected_custody_query");
+            assert!(
+                body["detail"]
+                    .as_str()
+                    .is_some_and(|detail| !detail.is_empty())
+            );
+        }
+
+        let custody = get_json("/v1/rejected-custody", database).await;
+        assert_eq!(custody["schema"], "nq.rejected_custody.v1");
+        let records = custody["records"].as_array().expect("custody records");
+        assert_eq!(records.len(), 4);
+        let custody_refusal = |id: &str| {
+            &records
+                .iter()
+                .find(|record| record["refusal"]["refusal_id"] == id)
+                .unwrap_or_else(|| panic!("missing custody refusal {id}"))["refusal"]
+        };
+        let transient_custody = custody_refusal("refusal-transient");
+        let permanent_custody = custody_refusal("refusal-permanent");
+        assert_eq!(transient_custody["origin"]["payload"]["retriable"], true);
+        assert_eq!(permanent_custody["origin"]["payload"]["retriable"], false);
+        assert_ne!(
+            transient_custody["refusal_id"],
+            permanent_custody["refusal_id"]
+        );
+        assert_ne!(transient_custody, permanent_custody);
+        assert_eq!(
+            custody_refusal("refusal-profile-report"),
+            report_status_refusal
+        );
+        assert_eq!(
+            custody_refusal("refusal-profile-observation"),
+            observation_status_refusal
+        );
     }
 }

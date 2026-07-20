@@ -5,8 +5,8 @@ use std::path::Path;
 
 use nq_core::config::NqConfig;
 use nq_core::engine::{
-    CollectionEngine, CollectionOutcome, append_profile_descriptor, checkpoint_contract_digest,
-    validate_compiled_config,
+    CollectionEngine, CollectionResult, GovernedRefusalOrigin, append_profile_descriptor,
+    checkpoint_contract_digest, validate_compiled_config,
 };
 use nq_profiles::resolve_profile;
 use nq_store::Store;
@@ -234,29 +234,37 @@ fn only_committed_admitted_reports_advance_the_next_request_checkpoint() {
     admission.expect("dry collection and admission succeed");
 
     assert!(matches!(
-        engine.collect(&watcher).expect("first collection"),
-        CollectionOutcome::Admitted { .. }
+        engine.collect(&watcher).expect("first collection").result,
+        CollectionResult::Admitted { .. }
     ));
     assert!(matches!(
-        engine.collect(&watcher).expect("rejected collection"),
-        CollectionOutcome::Rejected { ref plane, .. } if plane == "profile"
+        engine.collect(&watcher).expect("rejected collection").result,
+        CollectionResult::Rejected { refusal }
+            if matches!(refusal.origin, GovernedRefusalOrigin::Profile(_))
     ));
     assert!(matches!(
         engine
             .collect(&watcher)
-            .expect("second admitted collection"),
-        CollectionOutcome::Admitted { .. }
+            .expect("second admitted collection")
+            .result,
+        CollectionResult::Admitted { .. }
     ));
     assert!(matches!(
-        engine.collect(&watcher).expect("third admitted collection"),
-        CollectionOutcome::Admitted { .. }
+        engine
+            .collect(&watcher)
+            .expect("third admitted collection")
+            .result,
+        CollectionResult::Admitted { .. }
     ));
     engine
         .watcher_action(&watcher, "rotate")
         .expect("rotation obtains a new admission binding");
     assert!(matches!(
-        engine.collect(&watcher).expect("post-rotation collection"),
-        CollectionOutcome::Admitted { .. }
+        engine
+            .collect(&watcher)
+            .expect("post-rotation collection")
+            .result,
+        CollectionResult::Admitted { .. }
     ));
     drop(engine);
 

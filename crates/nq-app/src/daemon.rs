@@ -6,6 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::Parser;
 use nq_core::config::{NqConfig, WatcherConfig};
+use serde::Serialize;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tracing::{error, info, warn};
@@ -163,11 +164,21 @@ async fn collect_once(config: NqConfig) -> Result<()> {
     while let Some(result) = tasks.join_next().await {
         match result {
             Ok(Ok(outcome)) if outcome.is_success() => {
-                info!(instance = %outcome.instance_id(), "collection admitted");
+                let governed_result = canonical_result_document(&outcome)?;
+                info!(
+                    instance = %outcome.instance_id(),
+                    governed_result = %governed_result,
+                    "collection admitted"
+                );
             }
             Ok(Ok(outcome)) => {
                 failures += 1;
-                warn!(instance = %outcome.instance_id(), ?outcome, "collection did not admit a report");
+                let governed_result = canonical_result_document(&outcome)?;
+                warn!(
+                    instance = %outcome.instance_id(),
+                    governed_result = %governed_result,
+                    "collection did not admit a report"
+                );
             }
             Ok(Err(error)) => {
                 failures += 1;
@@ -221,11 +232,21 @@ async fn schedule_instance(
         let delay = match outcome {
             Ok(outcome) if outcome.is_success() => {
                 backoff = watcher.schedule.retry_backoff_seconds;
-                info!(instance = %watcher.instance_id, "collection admitted and evaluated");
+                let governed_result = canonical_result_document(&outcome)?;
+                info!(
+                    instance = %watcher.instance_id,
+                    governed_result = %governed_result,
+                    "collection admitted and evaluated"
+                );
                 watcher.schedule.interval_seconds
             }
             Ok(outcome) => {
-                warn!(instance = %watcher.instance_id, ?outcome, "collection retained without admitted report");
+                let governed_result = canonical_result_document(&outcome)?;
+                warn!(
+                    instance = %watcher.instance_id,
+                    governed_result = %governed_result,
+                    "collection retained without admitted report"
+                );
                 let delay = backoff.max(1);
                 backoff = backoff
                     .saturating_mul(2)
@@ -249,6 +270,18 @@ async fn schedule_instance(
             return Ok(());
         }
     }
+}
+
+/// Render the exact versioned result document for structured daemon logs.
+///
+/// Debug formatting is a Rust implementation detail and is neither stable nor
+/// independently reopenable. Log the same canonical serialization consumed by
+/// the store and public surfaces so dependent testimony is never replaced by a
+/// presentation-only projection.
+fn canonical_result_document(value: &impl Serialize) -> Result<String> {
+    let bytes = nq_protocol::canonical_json_bytes(value)
+        .context("cannot canonicalize governed collection result for daemon log")?;
+    String::from_utf8(bytes).context("canonical governed result is not UTF-8")
 }
 
 async fn wait_with_binding_watch(
@@ -348,6 +381,9 @@ fn initialize_tracing() {
 #[cfg(test)]
 mod tests {
     use clap::CommandFactory;
+    use nq_core::engine::{CollectionOutcome, GovernedRefusal};
+    use nq_protocol::{InstanceId, Refusal, RefusalBoundary, RefusalCode};
+    use serde_json::json;
 
     use super::*;
 
@@ -363,6 +399,61 @@ mod tests {
         assert!(
             parsed.console_address.is_none(),
             "the loopback console must be off unless explicitly configured"
+        );
+    }
+
+    #[test]
+    fn daemon_result_document_preserves_same_code_refusal_payloads() {
+        let outcome = |run_id: &str, refusal_id: &str, retriable, details| {
+            CollectionOutcome::rejected(
+                "daemon-transport".to_owned(),
+                run_id.to_owned(),
+                GovernedRefusal::helper(
+                    refusal_id.to_owned(),
+                    Refusal {
+                        responsible_instance_id: InstanceId::new("daemon-transport")
+                            .expect("instance token"),
+                        boundary: RefusalBoundary::Collection,
+                        code: RefusalCode::CollectionFailed,
+                        message: "backend collection failed".to_owned(),
+                        retriable,
+                        details,
+                    },
+                ),
+            )
+        };
+        let transient = outcome(
+            "run-transient",
+            "refusal-transient",
+            true,
+            json!({"attempt": 1, "errno": "EAGAIN"}),
+        );
+        let permanent = outcome(
+            "run-permanent",
+            "refusal-permanent",
+            false,
+            json!({"device": "nvme0", "errno": "ENODEV"}),
+        );
+        let transient_value = serde_json::to_value(&transient).expect("transient serializes");
+        let permanent_value = serde_json::to_value(&permanent).expect("permanent serializes");
+        assert_ne!(
+            transient_value["result"]["refusal"]["refusal_id"],
+            permanent_value["result"]["refusal"]["refusal_id"]
+        );
+
+        let transient_log = canonical_result_document(&transient).expect("canonical log document");
+        let permanent_log = canonical_result_document(&permanent).expect("canonical log document");
+        assert_eq!(
+            transient_log.into_bytes(),
+            nq_protocol::canonical_json_bytes(&transient).expect("canonical transient")
+        );
+        assert_eq!(
+            permanent_log.into_bytes(),
+            nq_protocol::canonical_json_bytes(&permanent).expect("canonical permanent")
+        );
+        assert_ne!(
+            nq_protocol::canonical_json_bytes(&transient).expect("canonical transient"),
+            nq_protocol::canonical_json_bytes(&permanent).expect("canonical permanent")
         );
     }
 

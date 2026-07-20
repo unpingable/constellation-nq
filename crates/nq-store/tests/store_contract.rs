@@ -11,7 +11,8 @@
 use nq_protocol::Sha256Digest;
 use nq_store::{
     AdmissionIdentity, AdmissionInput, CanonicalDocument, CollectionInput, ProfileDescriptorInput,
-    RefusalInput, ReportInput, RunInput, Store, SubmissionDisposition, SubmissionInput,
+    RefusalInput, ReportInput, RunInput, RunResultStatusInput, StatusEventInput, Store,
+    SubmissionDisposition, SubmissionInput,
 };
 use serde_json::{Value, json};
 
@@ -95,7 +96,23 @@ fn run(suffix: &str, admission_id: Option<&str>, profile_digest: &str) -> RunInp
         finished_at: TS.to_owned(),
         acquisition_outcome: "response".to_owned(),
         execution_identity: doc(json!({})),
-        resource_outcome: doc(json!({})),
+        resource_outcome: doc(json!({
+            "schema": "nq.run_resource_outcome.v1",
+            "duration_ms": 1,
+            "exit_code": 0,
+            "hard_limits": {
+                "address_space_bytes_per_process": 1,
+                "cpu_seconds_per_process": 1,
+                "processes_per_execution_uid": 1,
+                "open_files_per_process": 1,
+                "file_bytes_per_regular_file": 1,
+                "core_bytes": 0
+            },
+            "stdout_bytes_retained": 0,
+            "stderr_bytes_retained": 0,
+            "stderr_hex": "",
+            "outcome": {"outcome": "response"}
+        })),
     }
 }
 
@@ -160,27 +177,41 @@ fn rejected_custody_is_byte_exact_and_is_not_a_report() {
     let mut store = Store::initialize_in_memory().expect("initialize");
     let profile_digest = seed_descriptor(&mut store);
     let raw = b"exact rejected helper bytes".to_vec();
-    let receipt = store
-        .commit_collection(&CollectionInput {
-            run: run("rej", None, &profile_digest),
-            submission: Some(SubmissionInput {
-                submission_id: "submission-rej".to_owned(),
-                raw_bytes: raw.clone(),
-                received_at: TS.to_owned(),
-                protocol_outcome: "protocol_error".to_owned(),
-                disposition: SubmissionDisposition::Rejected {
-                    refusal: RefusalInput {
-                        refusal_id: "refusal-rej".to_owned(),
-                        source_kind: "protocol".to_owned(),
-                        responsible_instance_id: INSTANCE.to_owned(),
-                        boundary: "response_frame".to_owned(),
-                        code: "malformed".to_owned(),
-                        detail: doc(json!({"offset": 7, "reason": "malformed"})),
-                        created_at: TS.to_owned(),
-                    },
+    let collection = CollectionInput {
+        run: run("rej", None, &profile_digest),
+        submission: Some(SubmissionInput {
+            submission_id: "submission-rej".to_owned(),
+            raw_bytes: raw.clone(),
+            received_at: TS.to_owned(),
+            protocol_outcome: "protocol_error".to_owned(),
+            disposition: SubmissionDisposition::Rejected {
+                refusal: RefusalInput {
+                    refusal_id: "refusal-rej".to_owned(),
+                    source_kind: "protocol".to_owned(),
+                    responsible_instance_id: INSTANCE.to_owned(),
+                    boundary: "response_frame".to_owned(),
+                    code: "malformed".to_owned(),
+                    profile_semantic_id: None,
+                    detail: doc(json!({"offset": 7, "reason": "malformed"})),
+                    created_at: TS.to_owned(),
                 },
-            }),
-        })
+            },
+        }),
+    };
+    let result = RunResultStatusInput {
+        run_id: collection.run.run_id.clone(),
+        status: StatusEventInput {
+            status_event_id: "status-rej".to_owned(),
+            component_kind: "instance".to_owned(),
+            component_id: INSTANCE.to_owned(),
+            state: "failed".to_owned(),
+            code: "collection_failed".to_owned(),
+            detail: doc(json!({"run_id": collection.run.run_id})),
+            observed_at: TS.to_owned(),
+        },
+    };
+    let receipt = store
+        .commit_non_success_collection(&collection, &result)
         .expect("commit rejected collection");
     assert_eq!(receipt.refusal_id.as_deref(), Some("refusal-rej"));
     assert_eq!(

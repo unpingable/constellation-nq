@@ -1,10 +1,10 @@
 PRAGMA application_id = 1313951303; -- "NQNG"
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 
 CREATE TABLE schema_metadata (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     product TEXT NOT NULL CHECK (product = 'nq-ng'),
-    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 2),
     -- Digest of the exact schema.sql artifact compiled into the writing binary.
     -- Rejects stale provisional-candidate databases at startup; it is NOT a
     -- tamper attestation of the live SQLite schema (which the structural
@@ -244,12 +244,18 @@ CREATE TABLE evaluation_runs (
     detector_id TEXT NOT NULL,
     detector_version TEXT NOT NULL,
     detector_digest TEXT NOT NULL CHECK (length(detector_digest) = 71 AND substr(detector_digest, 1, 7) = 'sha256:'),
+    profile_id TEXT NOT NULL,
+    profile_version TEXT NOT NULL,
+    profile_digest TEXT NOT NULL CHECK (length(profile_digest) = 71 AND substr(profile_digest, 1, 7) = 'sha256:'),
+    profile_semantic_id TEXT NOT NULL CHECK (length(profile_semantic_id) = 71 AND substr(profile_semantic_id, 1, 7) = 'sha256:'),
     evaluation_revision INTEGER NOT NULL CHECK (evaluation_revision >= 0),
     started_at TEXT NOT NULL,
     evaluated_at TEXT NOT NULL,
     outcome TEXT NOT NULL CHECK (outcome IN ('condition_present', 'condition_explicitly_absent', 'cannot_evaluate')),
     detail_json BLOB NOT NULL CHECK (json_valid(CAST(detail_json AS TEXT))),
-    UNIQUE (detector_id, detector_version, evaluation_revision)
+    UNIQUE (detector_id, detector_version, evaluation_revision),
+    FOREIGN KEY (profile_id, profile_version, profile_digest)
+        REFERENCES profile_descriptor_snapshots(profile_id, profile_version, profile_digest)
 ) STRICT;
 
 CREATE TABLE evaluation_watermarks (
@@ -273,9 +279,12 @@ CREATE TABLE refusals (
     profile_id TEXT,
     profile_version TEXT,
     profile_digest TEXT,
+    profile_semantic_id TEXT CHECK (profile_semantic_id IS NULL OR
+        (length(profile_semantic_id) = 71 AND substr(profile_semantic_id, 1, 7) = 'sha256:')),
     detail_json BLOB NOT NULL CHECK (json_valid(CAST(detail_json AS TEXT))),
     created_at TEXT NOT NULL,
-    CHECK (run_id IS NOT NULL OR evaluation_id IS NOT NULL),
+    CHECK ((run_id IS NOT NULL AND submission_id IS NOT NULL AND evaluation_id IS NULL)
+        OR (run_id IS NULL AND submission_id IS NULL AND evaluation_id IS NOT NULL)),
     FOREIGN KEY (run_id) REFERENCES watcher_runs(run_id),
     FOREIGN KEY (submission_id) REFERENCES raw_submissions(submission_id),
     FOREIGN KEY (evaluation_id) REFERENCES evaluation_runs(evaluation_id)
@@ -421,13 +430,19 @@ CREATE TABLE status_events (
     component_kind TEXT NOT NULL CHECK (component_kind IN
         ('daemon', 'database', 'profile_catalog', 'admission', 'scheduler', 'instance', 'evaluation', 'notification')),
     component_id TEXT NOT NULL,
+    -- Present exactly for canonical run-bearing non-success results. Admission
+    -- refusals and non-instance operational status have no run identity.
+    run_id TEXT,
     state TEXT NOT NULL,
     code TEXT NOT NULL,
     detail_json BLOB NOT NULL CHECK (json_valid(CAST(detail_json AS TEXT))),
-    observed_at TEXT NOT NULL
+    observed_at TEXT NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES watcher_runs(run_id)
 ) STRICT;
 CREATE INDEX status_events_by_component
     ON status_events(component_kind, component_id, status_sequence);
+CREATE UNIQUE INDEX status_events_by_run
+    ON status_events(run_id) WHERE run_id IS NOT NULL;
 
 -- This is a rebuildable projection. All source history remains in status_events.
 CREATE TABLE status_current (
@@ -438,7 +453,7 @@ CREATE TABLE status_current (
     FOREIGN KEY (latest_status_event_id) REFERENCES status_events(status_event_id)
 ) STRICT;
 
-CREATE VIEW public_finding_snapshot_v2 AS
+CREATE VIEW public_finding_snapshot_v3 AS
 SELECT
     f.finding_id,
     e.instance_id,
@@ -446,9 +461,10 @@ SELECT
     e.detector_version,
     e.detector_digest,
     e.evaluation_revision,
-    e.profile_id,
-    e.profile_version,
-    e.profile_digest,
+    evaluation.profile_id,
+    evaluation.profile_version,
+    evaluation.profile_digest,
+    evaluation.profile_semantic_id,
     CAST(e.subject_json AS TEXT) AS subject_json,
     e.condition_name,
     e.condition_state,
@@ -466,6 +482,12 @@ SELECT
     e.observed_at,
     e.received_at,
     e.evaluated_at,
+    e.evaluation_id,
+    (
+        SELECT CAST(refusal.detail_json AS TEXT)
+        FROM refusals AS refusal
+        WHERE refusal.evaluation_id = e.evaluation_id
+    ) AS evaluation_refusal_json,
     COALESCE((
         SELECT json_group_array(json_object(
             'report_id', ordered.report_id,
@@ -482,7 +504,8 @@ SELECT
         ) AS ordered
     ), '[]') AS evidence_json
 FROM finding_current AS f
-JOIN finding_events AS e ON e.event_id = f.latest_event_id;
+JOIN finding_events AS e ON e.event_id = f.latest_event_id
+JOIN evaluation_runs AS evaluation ON evaluation.evaluation_id = e.evaluation_id;
 
 CREATE VIEW public_status_snapshot_v1 AS
 SELECT

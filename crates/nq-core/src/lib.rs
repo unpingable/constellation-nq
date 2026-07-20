@@ -19,8 +19,19 @@ pub use admission::{AdmissionLock, AdmissionManager, AdmissionVerification};
 pub use config::{MAX_WATCHERS, NqConfig, WatcherConfig};
 pub use coordination::{CoordinationError, InstanceGuard};
 pub use engine::{
-    AdmittedReportVerification, BindingActionOutcome, CollectionEngine, CollectionOutcome,
-    PlatformObservation, VerificationRefusal,
+    AcquisitionFailure, AcquisitionFailureClass, AcquisitionRefusal, AdmissionRefusal,
+    AdmissionRefusalBoundary, AdmissionRefusalCode, AdmissionRefusalDetails,
+    AdmittedReportVerification, BindingActionOutcome, COLLECTION_OUTCOME_SCHEMA, CollectionEngine,
+    CollectionOutcome, CollectionOutcomeSchema, CollectionResult, EVALUATION_RESULT_SCHEMA,
+    EvaluationResultSchema, EvaluationResultV1, GOVERNED_REFUSAL_SCHEMA, GovernedProfileRefusal,
+    GovernedRefusal, GovernedRefusalOrigin, GovernedRefusalSchema, JsonErrorCategory,
+    PlatformObservation, ProtocolCanonicalizationFailure, ProtocolRejection,
+    ProtocolRejectionBoundary, ProtocolRejectionCode, ProtocolRejectionFailure,
+    ProtocolValidationFailure, RUN_RESOURCE_OUTCOME_SCHEMA, RetryDisposition, RunHardLimits,
+    RunResourceOutcomeSchema, RunResourceOutcomeV1, StructuredJsonError, VerificationRefusal,
+    decode_collection_outcome, rejected_custody_snapshot, rejected_custody_snapshot_bounded,
+    status_snapshot_v2, validate_evaluation_refusal_history, validate_rejected_custody_history,
+    validate_status_history_v2, validate_watcher_run_history,
 };
 pub use evaluator_identity::{EvaluatorIdentityError, EvaluatorRuntimeIdentity};
 pub use identity::{
@@ -28,8 +39,12 @@ pub use identity::{
     MAX_LAUNCH_ARTIFACTS, MAX_LAUNCH_RETAINED_FDS, MAX_LAUNCH_TOTAL_BYTES,
     MAX_RESIDENT_LAUNCH_BYTES, VerifiedLaunch,
 };
-pub use public::{FindingSnapshotV2, StatusSnapshotV1};
-pub use runner::{AcquisitionFailure, StdioRunner};
+pub use public::{
+    ComponentStatusDetailV2, ComponentStatusV2, FindingSnapshotV3, REJECTED_CUSTODY_SCHEMA,
+    RejectedCustodySnapshotV1, RejectedCustodyV1, STATUS_SNAPSHOT_V2_SCHEMA, StatusSnapshotV1,
+    StatusSnapshotV2,
+};
+pub use runner::{ExchangeTimeoutPhase, StdioRunner};
 pub use runtime::{
     NativeRuntimeIdentity, RuntimeArtifactIdentity, RuntimeArtifactKind, RuntimeDirectoryIdentity,
     RuntimeLinkage, RuntimeMachine, RuntimeObjectBinding, RuntimeObjectRole,

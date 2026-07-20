@@ -1,6 +1,7 @@
 //! End-to-end collection, admission, evaluation, and public read-model wiring.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::fs::{self, File};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -10,8 +11,8 @@ use std::time::{Duration as StdDuration, Instant};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use nq_profiles::{
     DetectorInput, DetectorReport, DetectorState, EVALUATOR_SOURCE_DIGEST, EvidenceWatermark,
-    ProfileModule, ReportInput as ProfileReportInput, ScopeGrant, SemanticReportStatus,
-    ValidatedReport, ValidationContext, VantageGrant, profile_semantic_id,
+    ProfileModule, ProfileSemanticId, ReportInput as ProfileReportInput, ScopeGrant,
+    SemanticReportStatus, ValidatedReport, ValidationContext, VantageGrant, profile_semantic_id,
 };
 use nq_protocol::{
     Capability, Checkpoint, CollectionBounds, HelperRequest, InstanceId, MonotonicClock,
@@ -20,10 +21,10 @@ use nq_protocol::{
 };
 use nq_store::{
     AdmissionIdentity, AdmissionInput, BindingEventInput, BindingMaterializationInput,
-    CanonicalDocument, CollectionInput, CoverageInput, EvaluationInput, FindingEventInput,
-    FindingEvidenceInput, GenesisInput, ObservationInput, ProfileDescriptorInput, RefusalInput,
-    ReportErrorInput, ReportInput, RunInput, StatusEventInput, Store, SubmissionDisposition,
-    SubmissionInput,
+    CanonicalDocument, CollectionInput, CoverageInput, EvaluationInput, EvaluationProfileBinding,
+    FindingEventInput, FindingEvidenceInput, GenesisInput, ObservationInput,
+    ProfileDescriptorInput, RefusalInput, ReportErrorInput, ReportInput, RunInput,
+    RunResultStatusInput, StatusEventInput, Store, SubmissionDisposition, SubmissionInput,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -38,12 +39,14 @@ use crate::coordination::{CoordinationError, InstanceGuard};
 use crate::evaluator_identity::EvaluatorRuntimeIdentity;
 use crate::identity::{ExecutionIdentity, VerifiedLaunch};
 use crate::public::{
-    ComponentKind, ComponentStatus, ConditionState, ConditionView, DetectorIdentity,
-    FINDING_SNAPSHOT_SCHEMA, FindingSnapshotV2, HealthState, OriginMode, PublicEvidenceReference,
-    PublicProfileIdentity, STATUS_SNAPSHOT_SCHEMA, Severity, StatusSnapshotV1, VisibilityState,
+    ComponentKind, ComponentStatus, ComponentStatusDetailV2, ComponentStatusV2, ConditionState,
+    ConditionView, DetectorIdentity, FINDING_SNAPSHOT_SCHEMA, FindingSnapshotV3, HealthState,
+    OriginMode, PublicEvidenceReference, PublicProfileIdentity, REJECTED_CUSTODY_SCHEMA,
+    RejectedCustodySnapshotV1, RejectedCustodyV1, STATUS_SNAPSHOT_SCHEMA,
+    STATUS_SNAPSHOT_V2_SCHEMA, Severity, StatusSnapshotV1, StatusSnapshotV2, VisibilityState,
     VisibilityView,
 };
-use crate::runner::{AcquisitionOutcome, RunCapture, StdioRunner};
+use crate::runner::{AcquisitionOutcome, ExchangeTimeoutPhase, RunCapture, StdioRunner};
 use crate::unix_runner::{
     UnixAcquisitionOutcome, UnixExchangeCapture, UnixIoPhase, UnixRunner, UnixRunnerOptions,
 };
@@ -89,6 +92,12 @@ pub enum EngineError {
     /// Durable data contradicted an invariant expected after admission.
     #[error("engine invariant failed: {0}")]
     Invariant(String),
+    /// An expected, canonical refusal returned by a dry watcher exchange.
+    #[error("{0}")]
+    GovernedRefusal(Box<GovernedRefusal>),
+    /// A typed acquisition failure returned by a dry watcher exchange.
+    #[error("{0}")]
+    AcquisitionFailed(Box<AcquisitionFailure>),
 }
 
 /// Result of an operator watcher test/admission workflow.
@@ -145,88 +154,1193 @@ pub enum BindingActionOutcome {
     },
 }
 
-/// Persisted outcome of one scheduled or explicitly requested collection.
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum CollectionOutcome {
-    /// A report passed acquisition, protocol, and profile admission and was
-    /// committed. `failed` remains a valid report status, not a transport error.
-    Admitted {
-        /// Exact instance.
+/// Exact schema of the canonical collection-result carrier.
+pub const COLLECTION_OUTCOME_SCHEMA: &str = "nq.collection_outcome.v1";
+
+/// Exact schema of the canonical refusal carrier embedded in collection results.
+pub const GOVERNED_REFUSAL_SCHEMA: &str = "nq.governed_refusal.v1";
+
+/// Exact schema of persisted watcher-run resource and acquisition testimony.
+pub const RUN_RESOURCE_OUTCOME_SCHEMA: &str = "nq.run_resource_outcome.v1";
+
+/// Exact schema of persisted governed detector evaluation results.
+pub const EVALUATION_RESULT_SCHEMA: &str = "nq.evaluation_result.v1";
+
+/// Closed collection-result schema identity. Deserialization rejects any other
+/// string instead of interpreting future bytes under this version.
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+pub enum CollectionOutcomeSchema {
+    /// First lossless result transport.
+    #[serde(rename = "nq.collection_outcome.v1")]
+    V1,
+}
+
+/// Closed governed-refusal schema identity.
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+pub enum GovernedRefusalSchema {
+    /// First lossless refusal transport.
+    #[serde(rename = "nq.governed_refusal.v1")]
+    V1,
+}
+
+/// Closed schema identity for persisted watcher-run resource testimony.
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+pub enum RunResourceOutcomeSchema {
+    /// First exact acquisition/resource envelope.
+    #[serde(rename = "nq.run_resource_outcome.v1")]
+    V1,
+}
+
+/// Exact hard limits recorded with one watcher run.
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunHardLimits {
+    /// Maximum virtual address space for each helper process.
+    pub address_space_bytes_per_process: u64,
+    /// Maximum CPU seconds for each helper process.
+    pub cpu_seconds_per_process: u64,
+    /// Maximum processes under the execution identity.
+    pub processes_per_execution_uid: u64,
+    /// Maximum open files for each helper process.
+    pub open_files_per_process: u64,
+    /// Maximum bytes for each regular file.
+    pub file_bytes_per_regular_file: u64,
+    /// Core files are always disabled.
+    pub core_bytes: u64,
+}
+
+/// Versioned authoritative acquisition testimony persisted on `watcher_runs`.
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunResourceOutcomeV1 {
+    /// Closed resource-outcome schema identity.
+    pub schema: RunResourceOutcomeSchema,
+    /// Monotonic elapsed duration.
+    pub duration_ms: u64,
+    /// Helper exit code when one was obtained.
+    pub exit_code: Option<i32>,
+    /// Exact enforced resource ceilings.
+    pub hard_limits: RunHardLimits,
+    /// Number of retained standard-output bytes.
+    pub stdout_bytes_retained: usize,
+    /// Number of retained standard-error bytes.
+    pub stderr_bytes_retained: usize,
+    /// Exact retained standard error encoded losslessly as lowercase hex.
+    pub stderr_hex: String,
+    /// Exact typed acquisition outcome, including timeout phase and details.
+    pub outcome: AcquisitionOutcome,
+}
+
+/// Closed schema identity for governed detector evaluation results.
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+pub enum EvaluationResultSchema {
+    /// First evaluation carrier using canonical governed refusals.
+    #[serde(rename = "nq.evaluation_result.v1")]
+    V1,
+}
+
+/// Canonical compiled profile identity governing a detector evaluation.
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluationProfileIdentity {
+    /// Declared profile key/version.
+    pub profile: nq_profiles::ProfileKey,
+    /// Canonical descriptor identity.
+    pub profile_digest: nq_profiles::ProfileDigest,
+    /// Composite descriptor/protocol/evaluator semantic identity.
+    pub profile_semantic_id: ProfileSemanticId,
+}
+
+/// Exact detector result persisted without flattening a profile refusal.
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluationResultV1 {
+    /// Closed result schema.
+    pub schema: EvaluationResultSchema,
+    /// Exact compiled profile identity under which evaluation occurred.
+    pub profile: EvaluationProfileIdentity,
+    /// Exact detector state.
+    pub state: DetectorState,
+    /// Detector-owned condition identity.
+    pub condition: String,
+    /// Bounded detector summary.
+    pub summary: String,
+    /// Exact admitted evidence references.
+    pub evidence: Vec<nq_profiles::DetectorEvidence>,
+    /// Material evaluation limitations.
+    pub limitations: Vec<String>,
+    /// Canonical governed refusal required for `CannotEvaluate`.
+    pub refusal: Option<GovernedRefusal>,
+    /// Exact database watermark used by the detector.
+    pub watermark: EvidenceWatermark,
+}
+
+/// Whether a later independent acquisition can be classified as retryable
+/// without guessing from an operator-facing message.
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryDisposition {
+    /// A later independent attempt may succeed.
+    Retriable,
+    /// Repeating the same admitted request cannot repair this failure.
+    NonRetriable,
+    /// The source outcome does not prove either classification.
+    Unspecified,
+}
+
+/// Stable coarse classification retained alongside the exact acquisition
+/// outcome. The exact outcome remains authoritative; this value is an index,
+/// not a substitute for dependent fields such as timeout phase.
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcquisitionFailureClass {
+    /// The helper process could not be created.
+    SpawnFailed,
+    /// The canonical request could not be written to the helper.
+    RequestWriteFailed,
+    /// A one-shot or phase-specific exchange deadline expired.
+    Timeout,
+    /// Standard output exceeded the admitted byte limit.
+    OutputTooLarge,
+    /// Standard error exceeded the admitted byte limit.
+    StderrTooLarge,
+    /// The helper returned no response bytes.
+    Eof,
+    /// Returned bytes violated the one-frame transport contract.
+    MalformedFraming,
+    /// Returned bytes were not valid JSON for protocol processing.
+    MalformedJson,
+    /// A one-shot helper exited unsuccessfully.
+    ExitNonzero,
+    /// A persistent helper exited before completing the exchange.
+    HelperExited,
+    /// The persistent transport disconnected before a complete response.
+    Disconnect,
+    /// The supervised persistent carrier could not become ready.
+    CarrierStartupFailed,
+    /// No persistent helper connection existed for the exchange.
+    NotRunning,
+    /// Another process I/O or wait operation failed.
+    IoFailed,
+}
+
+/// Lossless acquisition failure: a stable class and retry disposition paired
+/// with the complete source outcome.
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcquisitionFailure {
+    /// Stable coarse index for querying the failure family.
+    pub class: AcquisitionFailureClass,
+    /// Retry classification proved by the originating boundary.
+    pub retry: RetryDisposition,
+    /// Complete authoritative acquisition outcome, including dependent fields.
+    pub outcome: AcquisitionOutcome,
+}
+
+/// Acquisition refusal linked to retained raw custody. The responsible
+/// instance is explicit because an acquisition outcome itself has no identity.
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcquisitionRefusal {
+    /// Watcher instance responsible for the retained raw submission.
+    pub responsible_instance_id: String,
+    /// Exact acquisition failure that justified rejection.
+    pub failure: AcquisitionFailure,
+}
+
+impl AcquisitionFailure {
+    /// Convert one non-response acquisition outcome exactly once at the engine
+    /// boundary. `Response` is not a failure and therefore has no carrier.
+    #[must_use]
+    pub fn from_outcome(outcome: AcquisitionOutcome) -> Option<Self> {
+        let (class, retry) = match &outcome {
+            AcquisitionOutcome::Response => return None,
+            AcquisitionOutcome::SpawnFailed { .. } => (
+                AcquisitionFailureClass::SpawnFailed,
+                RetryDisposition::Unspecified,
+            ),
+            AcquisitionOutcome::RequestWriteFailed { .. } => (
+                AcquisitionFailureClass::RequestWriteFailed,
+                RetryDisposition::Unspecified,
+            ),
+            AcquisitionOutcome::Timeout | AcquisitionOutcome::ExchangeTimeout { .. } => (
+                AcquisitionFailureClass::Timeout,
+                RetryDisposition::Unspecified,
+            ),
+            AcquisitionOutcome::OutputTooLarge => (
+                AcquisitionFailureClass::OutputTooLarge,
+                RetryDisposition::Unspecified,
+            ),
+            AcquisitionOutcome::StderrTooLarge => (
+                AcquisitionFailureClass::StderrTooLarge,
+                RetryDisposition::Unspecified,
+            ),
+            AcquisitionOutcome::Eof => {
+                (AcquisitionFailureClass::Eof, RetryDisposition::Unspecified)
+            }
+            AcquisitionOutcome::MalformedFraming { .. } => (
+                AcquisitionFailureClass::MalformedFraming,
+                RetryDisposition::Unspecified,
+            ),
+            AcquisitionOutcome::MalformedJson { .. } => (
+                AcquisitionFailureClass::MalformedJson,
+                RetryDisposition::Unspecified,
+            ),
+            AcquisitionOutcome::ExitNonzero { .. } => (
+                AcquisitionFailureClass::ExitNonzero,
+                RetryDisposition::Unspecified,
+            ),
+            AcquisitionOutcome::HelperExited { .. } => (
+                AcquisitionFailureClass::HelperExited,
+                RetryDisposition::Unspecified,
+            ),
+            AcquisitionOutcome::Disconnect { .. } => (
+                AcquisitionFailureClass::Disconnect,
+                RetryDisposition::Unspecified,
+            ),
+            AcquisitionOutcome::CarrierStartupFailed { .. } => (
+                AcquisitionFailureClass::CarrierStartupFailed,
+                RetryDisposition::Unspecified,
+            ),
+            AcquisitionOutcome::NotRunning => (
+                AcquisitionFailureClass::NotRunning,
+                RetryDisposition::Unspecified,
+            ),
+            AcquisitionOutcome::IoFailed { .. } => (
+                AcquisitionFailureClass::IoFailed,
+                RetryDisposition::Unspecified,
+            ),
+        };
+        Some(Self {
+            class,
+            retry,
+            outcome,
+        })
+    }
+
+    /// Verify that query projections agree with the authoritative outcome.
+    ///
+    /// # Errors
+    ///
+    /// Returns when a persisted or transported class/retry projection was
+    /// substituted for the values proved by the exact acquisition outcome.
+    pub fn validate(&self) -> Result<(), EngineError> {
+        let expected = Self::from_outcome(self.outcome.clone()).ok_or_else(|| {
+            EngineError::Invariant("response cannot be represented as acquisition failure".into())
+        })?;
+        if self.class != expected.class || self.retry != expected.retry {
+            return Err(EngineError::Invariant(
+                "acquisition failure projections disagree with its exact outcome".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for AcquisitionFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match serde_json::to_string(self) {
+            Ok(encoded) => formatter.write_str(&encoded),
+            Err(_) => formatter.write_str("acquisition failure could not be rendered"),
+        }
+    }
+}
+
+/// Exact admission boundary that refused a collection before helper launch.
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionRefusalBoundary {
+    /// Lookup or verification of the active admission binding.
+    ActiveBinding,
+    /// Verification of the executable or runtime identity.
+    ExecutionIdentity,
+    /// Admission-time conformance execution or comparison.
+    Conformance,
+    /// Durable store access or invariant enforcement.
+    Storage,
+    /// Per-instance lock acquisition or coordination.
+    Coordination,
+    /// Compiled profile resolution or validation.
+    Profile,
+    /// Helper protocol identity, framing, or validation.
+    Protocol,
+    /// Canonical serialization of governed material.
+    Serialization,
+    /// Filesystem materialization of an admitted binding.
+    Materialization,
+    /// An internal invariant not attributable to another boundary.
+    Internal,
+}
+
+/// Stable admission refusal code. Dependent information remains in the typed
+/// details value and is never reconstructed from this projection.
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionRefusalCode {
+    /// No active binding exists for the watcher instance.
+    MissingActiveBinding,
+    /// The helper executable identity could not be verified.
+    BinaryIdentityInvalid,
+    /// Config bytes no longer match the active admission.
+    ConfigDrift,
+    /// Compiled profile identity no longer matches the admission.
+    ProfileDrift,
+    /// Helper protocol identity no longer matches the admission.
+    ProtocolDrift,
+    /// The durable or materialized binding could not be decoded.
+    MalformedBinding,
+    /// Admission conformance did not pass.
+    ConformanceFailed,
+    /// Reopened conformance evidence differs from the active admission.
+    ConformanceDrift,
+    /// A store operation failed.
+    StoreFailure,
+    /// Per-instance coordination failed.
+    CoordinationFailure,
+    /// The configured profile is not compiled into this product.
+    UnknownProfile,
+    /// A protocol identity token was invalid.
+    InvalidIdentityToken,
+    /// Protocol processing failed outside a retained collection run.
+    ProtocolFailure,
+    /// Profile processing failed outside a retained collection run.
+    ProfileFailure,
+    /// Canonical serialization failed.
+    CanonicalizationFailure,
+    /// An admission filesystem object could not be materialized.
+    MaterializationFailure,
+    /// A required engine invariant did not hold.
+    InvariantViolation,
+    /// A typed refusal or acquisition failure propagated from an earlier boundary.
+    UpstreamRefusal,
+}
+
+/// Structured dependent admission-refusal payload.
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AdmissionRefusalDetails {
+    /// The refusal code is complete without dependent details.
+    None,
+    /// Executable identity verification failed.
+    BinaryIdentity {
+        /// Exact identity-verifier reason.
+        message: String,
+    },
+    /// Configuration no longer matches an active binding.
+    ConfigDrift {
+        /// Instance identity recorded by the binding verifier.
+        observed_instance_id: String,
+    },
+    /// Profile identity no longer matches an active binding.
+    ProfileDrift {
+        /// Instance identity recorded by the binding verifier.
+        observed_instance_id: String,
+        /// Exact profile mismatch proved by verification.
+        message: String,
+    },
+    /// Protocol identity no longer matches an active binding.
+    ProtocolDrift {
+        /// Instance identity recorded by the binding verifier.
+        observed_instance_id: String,
+    },
+    /// An active binding could not be decoded or satisfy its invariants.
+    MalformedBinding {
+        /// Instance identity decoded before the malformed field, or `unknown`.
+        observed_instance_id: String,
+        /// Exact malformed-binding reason.
+        message: String,
+    },
+    /// Admission conformance did not pass.
+    ConformanceFailed {
+        /// Exact conformance failure.
+        message: String,
+    },
+    /// Reopened conformance evidence differs from the active admission.
+    ConformanceDrift {
+        /// Instance identity recorded by the conformance verifier.
+        observed_instance_id: String,
+        /// Exact conformance mismatch.
+        message: String,
+    },
+    /// Durable store access or verification failed.
+    Storage {
+        /// Exact store diagnostic.
+        message: String,
+    },
+    /// Per-instance coordination failed.
+    Coordination {
+        /// Exact coordination diagnostic.
+        message: String,
+    },
+    /// Identity of a configured profile that could not be resolved.
+    ProfileIdentity {
+        /// Stable profile identifier.
+        id: String,
+        /// Exact profile version.
+        version: u32,
+    },
+    /// A protocol identity token was invalid.
+    IdentityToken {
+        /// Exact token diagnostic.
+        message: String,
+    },
+    /// Protocol processing failed outside retained run custody.
+    Protocol {
+        /// Exact protocol diagnostic.
+        message: String,
+    },
+    /// Profile processing failed outside retained run custody.
+    ProfileProcessing {
+        /// Exact profile diagnostic.
+        message: String,
+    },
+    /// Canonical serialization failed.
+    Canonicalization {
+        /// Exact canonicalization diagnostic.
+        message: String,
+    },
+    /// An admission filesystem object could not be materialized.
+    Materialization {
+        /// Exact path when the source error retained one.
+        path: Option<String>,
+        /// Exact filesystem diagnostic.
+        message: String,
+    },
+    /// An internal engine invariant failed.
+    Invariant {
+        /// Exact invariant diagnostic.
+        message: String,
+    },
+    /// An upstream governed refusal preserved without projection.
+    Governed {
+        /// Complete canonical refusal.
+        refusal: Box<GovernedRefusal>,
+    },
+    /// An upstream acquisition failure preserved without projection.
+    Acquisition {
+        /// Complete acquisition failure.
+        failure: AcquisitionFailure,
+    },
+}
+
+/// Canonical refusal produced before a run exists.
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdmissionRefusal {
+    /// Watcher instance whose admission was refused.
+    pub responsible_instance_id: String,
+    /// Exact boundary that refused admission.
+    pub boundary: AdmissionRefusalBoundary,
+    /// Stable refusal classification.
+    pub code: AdmissionRefusalCode,
+    /// Dependent typed facts required to interpret the code.
+    pub details: AdmissionRefusalDetails,
+}
+
+impl AdmissionRefusal {
+    /// Validate the refusal's dependent payload and responsible instance.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the code selects the wrong detail variant, a nested typed
+    /// refusal is invalid, or its responsible instance differs from this
+    /// admission refusal.
+    #[allow(clippy::too_many_lines)]
+    pub fn validate(&self) -> Result<(), EngineError> {
+        if self.responsible_instance_id.is_empty() {
+            return Err(EngineError::Invariant(
+                "admission refusal responsible instance cannot be empty".into(),
+            ));
+        }
+        let valid = match (&self.boundary, &self.code, &self.details) {
+            (
+                AdmissionRefusalBoundary::ActiveBinding,
+                AdmissionRefusalCode::MissingActiveBinding,
+                AdmissionRefusalDetails::None,
+            ) => true,
+            (
+                AdmissionRefusalBoundary::ExecutionIdentity,
+                AdmissionRefusalCode::BinaryIdentityInvalid,
+                AdmissionRefusalDetails::BinaryIdentity { message },
+            )
+            | (
+                AdmissionRefusalBoundary::Conformance,
+                AdmissionRefusalCode::ConformanceFailed,
+                AdmissionRefusalDetails::ConformanceFailed { message },
+            )
+            | (
+                AdmissionRefusalBoundary::Storage,
+                AdmissionRefusalCode::StoreFailure,
+                AdmissionRefusalDetails::Storage { message },
+            )
+            | (
+                AdmissionRefusalBoundary::Coordination,
+                AdmissionRefusalCode::CoordinationFailure,
+                AdmissionRefusalDetails::Coordination { message },
+            )
+            | (
+                AdmissionRefusalBoundary::Protocol,
+                AdmissionRefusalCode::InvalidIdentityToken,
+                AdmissionRefusalDetails::IdentityToken { message },
+            )
+            | (
+                AdmissionRefusalBoundary::Protocol,
+                AdmissionRefusalCode::ProtocolFailure,
+                AdmissionRefusalDetails::Protocol { message },
+            )
+            | (
+                AdmissionRefusalBoundary::Profile,
+                AdmissionRefusalCode::ProfileFailure,
+                AdmissionRefusalDetails::ProfileProcessing { message },
+            )
+            | (
+                AdmissionRefusalBoundary::Serialization,
+                AdmissionRefusalCode::CanonicalizationFailure,
+                AdmissionRefusalDetails::Canonicalization { message },
+            )
+            | (
+                AdmissionRefusalBoundary::Materialization,
+                AdmissionRefusalCode::MaterializationFailure,
+                AdmissionRefusalDetails::Materialization { message, .. },
+            )
+            | (
+                AdmissionRefusalBoundary::Internal,
+                AdmissionRefusalCode::InvariantViolation,
+                AdmissionRefusalDetails::Invariant { message },
+            ) => !message.is_empty(),
+            (
+                AdmissionRefusalBoundary::ActiveBinding,
+                AdmissionRefusalCode::ConfigDrift,
+                AdmissionRefusalDetails::ConfigDrift {
+                    observed_instance_id,
+                },
+            )
+            | (
+                AdmissionRefusalBoundary::ActiveBinding,
+                AdmissionRefusalCode::ProtocolDrift,
+                AdmissionRefusalDetails::ProtocolDrift {
+                    observed_instance_id,
+                },
+            ) => !observed_instance_id.is_empty(),
+            (
+                AdmissionRefusalBoundary::ActiveBinding,
+                AdmissionRefusalCode::ProfileDrift,
+                AdmissionRefusalDetails::ProfileDrift {
+                    observed_instance_id,
+                    message,
+                },
+            )
+            | (
+                AdmissionRefusalBoundary::ActiveBinding,
+                AdmissionRefusalCode::MalformedBinding,
+                AdmissionRefusalDetails::MalformedBinding {
+                    observed_instance_id,
+                    message,
+                },
+            )
+            | (
+                AdmissionRefusalBoundary::Conformance,
+                AdmissionRefusalCode::ConformanceDrift,
+                AdmissionRefusalDetails::ConformanceDrift {
+                    observed_instance_id,
+                    message,
+                },
+            ) => !observed_instance_id.is_empty() && !message.is_empty(),
+            (
+                AdmissionRefusalBoundary::Profile,
+                AdmissionRefusalCode::UnknownProfile,
+                AdmissionRefusalDetails::ProfileIdentity { id, .. },
+            ) => !id.is_empty(),
+            (
+                _,
+                AdmissionRefusalCode::UpstreamRefusal,
+                AdmissionRefusalDetails::Governed { refusal },
+            ) => {
+                refusal.validate()?;
+                if refusal.responsible_instance_id() != self.responsible_instance_id {
+                    return Err(EngineError::Invariant(
+                        "nested governed refusal lost its admission instance association".into(),
+                    ));
+                }
+                true
+            }
+            (
+                _,
+                AdmissionRefusalCode::UpstreamRefusal,
+                AdmissionRefusalDetails::Acquisition { failure },
+            ) => {
+                failure.validate()?;
+                true
+            }
+            _ => false,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(EngineError::Invariant(
+                "admission refusal code disagrees with its typed details".into(),
+            ))
+        }
+    }
+}
+
+/// Typed classification of a response that could not be decoded and validated
+/// as the exact helper protocol response.
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JsonErrorCategory {
+    /// An underlying reader or writer failed.
+    Io,
+    /// JSON syntax was malformed.
+    Syntax,
+    /// Valid JSON could not be mapped to the required data type.
+    Data,
+    /// Input ended before a complete JSON value was available.
+    Eof,
+}
+
+/// Structured JSON parser/serializer error facts. The diagnostic is dependent
+/// context; category and location remain independently typed.
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StructuredJsonError {
+    /// Stable serde JSON error category.
+    pub category: JsonErrorCategory,
+    /// One-based source line, or zero when unavailable.
+    pub line: usize,
+    /// One-based source column, or zero when unavailable.
+    pub column: usize,
+    /// Exact parser diagnostic retained as dependent context.
+    pub diagnostic: String,
+}
+
+/// Structured canonicalization failure mirror.
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProtocolCanonicalizationFailure {
+    /// Serialization into canonical JSON failed.
+    Serialization {
+        /// Structured serializer failure.
+        error: StructuredJsonError,
+    },
+    /// An integer could not be represented exactly in canonical JSON.
+    UnsafeInteger {
+        /// Exact decimal integer value that was rejected.
+        value: String,
+    },
+}
+
+/// Exhaustive owned mirror of `nq_protocol::ValidationError` suitable for
+/// versioned persistence and reopening.
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProtocolValidationFailure {
+    /// A protocol document declared the wrong schema identity.
+    InvalidSchema {
+        /// Kind of document being validated.
+        document: String,
+        /// Required schema identity.
+        expected: String,
+        /// Schema identity actually supplied.
+        actual: String,
+    },
+    /// The helper used an incompatible protocol version.
+    InvalidProtocolVersion {
+        /// Required protocol version.
+        expected: String,
+        /// Protocol version actually supplied.
+        actual: String,
+    },
+    /// A named protocol field failed a semantic predicate.
+    InvalidField {
+        /// Stable field path.
+        field: String,
+        /// Exact validation reason.
+        reason: String,
+    },
+    /// A bounded collection exceeded its admitted cardinality.
+    BoundExceeded {
+        /// Stable field path for the bounded collection.
+        field: String,
+        /// Maximum admitted cardinality.
+        limit: usize,
+        /// Cardinality actually supplied.
+        actual: usize,
+    },
+    /// A field that must be unique contained a duplicate value.
+    Duplicate {
+        /// Stable field path.
+        field: String,
+        /// Exact duplicated value.
+        value: String,
+    },
+    /// A response did not echo a request-bound field exactly.
+    EchoMismatch {
+        /// Stable field path that disagreed.
+        field: String,
+    },
+    /// A helper claimed a capability outside its grant.
+    CapabilityEscape {
+        /// Exact escaped capability.
+        capability: nq_protocol::Capability,
+    },
+    /// Canonicalization of a named field failed during validation.
+    Canonicalization {
+        /// Stable field path.
+        field: String,
+        /// Exact canonicalization failure.
+        source: ProtocolCanonicalizationFailure,
+    },
+}
+
+/// Typed classification of a response that could not be decoded and validated
+/// as the exact helper protocol response.
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProtocolRejectionFailure {
+    /// The response frame exceeded the admitted byte bound.
+    FrameTooLarge {
+        /// Maximum admitted frame size in bytes.
+        limit: usize,
+        /// Actual frame size in bytes.
+        actual: usize,
+    },
+    /// The response did not contain exactly one LF-terminated frame.
+    InvalidFraming,
+    /// The framed response was not valid JSON of the required shape.
+    InvalidJson {
+        /// Structured parser failure.
+        error: StructuredJsonError,
+    },
+    /// The decoded protocol response failed semantic validation.
+    Validation {
+        /// Exact validation failure.
+        error: ProtocolValidationFailure,
+    },
+    /// Canonical response verification failed.
+    Canonicalization {
+        /// Exact canonicalization failure.
+        error: ProtocolCanonicalizationFailure,
+    },
+}
+
+/// Canonical protocol-plane rejection created from one exact parse failure.
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtocolRejectionBoundary {
+    /// Parsing and validation of helper response bytes.
+    Response,
+}
+
+/// Closed protocol-rejection vocabulary.
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtocolRejectionCode {
+    /// The response could not satisfy the helper response contract.
+    InvalidResponse,
+}
+
+/// Canonical protocol-plane rejection created from one exact parse failure.
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProtocolRejection {
+    /// Watcher instance responsible for the rejected response.
+    pub responsible_instance_id: String,
+    /// Exact protocol boundary that rejected the bytes.
+    pub boundary: ProtocolRejectionBoundary,
+    /// Stable coarse rejection classification.
+    pub code: ProtocolRejectionCode,
+    /// Complete typed dependent failure.
+    pub failure: ProtocolRejectionFailure,
+}
+
+/// A compiled-profile refusal bound to the exact semantic implementation that
+/// produced it. Profile key/version identifies the declared namespace; this
+/// identity additionally binds descriptor, protocol semantics, and evaluator
+/// source closure.
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GovernedProfileRefusal {
+    /// Exact semantic identity of the compiled profile implementation.
+    pub profile_semantic_id: ProfileSemanticId,
+    /// Complete typed refusal returned by that compiled profile boundary.
+    #[serde(with = "strict_profile_refusal")]
+    pub refusal: nq_profiles::ProfileRefusal,
+}
+
+/// Exact refusal origin. Helper and profile variants embed their authoritative
+/// source objects rather than copying selected display fields.
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+#[serde(
+    tag = "kind",
+    content = "payload",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum GovernedRefusalOrigin {
+    /// Acquisition failed after raw bytes requiring custody were retained.
+    Acquisition(AcquisitionRefusal),
+    /// Helper response bytes failed protocol parsing or validation.
+    Protocol(ProtocolRejection),
+    /// The helper returned an explicit protocol refusal.
+    Helper(nq_protocol::Refusal),
+    /// The compiled profile rejected an otherwise valid report.
+    Profile(GovernedProfileRefusal),
+}
+
+mod strict_profile_refusal {
+    use std::collections::BTreeMap;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize)]
+    struct StrictProfileRefusalRef<'a> {
+        instance_id: &'a str,
+        profile: &'a nq_profiles::ProfileKey,
+        boundary: nq_profiles::RefusalBoundary,
+        code: nq_profiles::ProfileRefusalCode,
+        message: &'a str,
+        details: &'a BTreeMap<String, String>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct StrictProfileRefusal {
         instance_id: String,
-        /// NQ-owned run ID.
-        run_id: String,
-        /// NQ-owned immutable report ID.
+        profile: nq_profiles::ProfileKey,
+        boundary: nq_profiles::RefusalBoundary,
+        code: nq_profiles::ProfileRefusalCode,
+        message: String,
+        details: BTreeMap<String, String>,
+    }
+
+    pub(super) fn serialize<S>(
+        refusal: &nq_profiles::ProfileRefusal,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        StrictProfileRefusalRef {
+            instance_id: &refusal.instance_id,
+            profile: &refusal.profile,
+            boundary: refusal.boundary,
+            code: refusal.code,
+            message: &refusal.message,
+            details: &refusal.details,
+        }
+        .serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<nq_profiles::ProfileRefusal, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let refusal = StrictProfileRefusal::deserialize(deserializer)?;
+        Ok(nq_profiles::ProfileRefusal {
+            instance_id: refusal.instance_id,
+            profile: refusal.profile,
+            boundary: refusal.boundary,
+            code: refusal.code,
+            message: refusal.message,
+            details: refusal.details,
+        })
+    }
+}
+
+/// Stable, explicitly versioned refusal carrier reused by persistence, dry
+/// watcher errors, collection results, status, API, CLI, and historical reopen.
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GovernedRefusal {
+    /// Closed refusal-carrier schema identity.
+    pub schema: GovernedRefusalSchema,
+    /// Stable NQ-owned refusal identity used for durable linkage.
+    pub refusal_id: String,
+    /// Complete authoritative refusal from its originating boundary.
+    pub origin: GovernedRefusalOrigin,
+}
+
+impl GovernedRefusal {
+    /// Wrap a retained acquisition refusal in the canonical carrier.
+    #[must_use]
+    pub fn acquisition(refusal_id: String, refusal: AcquisitionRefusal) -> Self {
+        Self {
+            schema: GovernedRefusalSchema::V1,
+            refusal_id,
+            origin: GovernedRefusalOrigin::Acquisition(refusal),
+        }
+    }
+
+    /// Wrap a protocol response rejection in the canonical carrier.
+    #[must_use]
+    pub fn protocol(refusal_id: String, refusal: ProtocolRejection) -> Self {
+        Self {
+            schema: GovernedRefusalSchema::V1,
+            refusal_id,
+            origin: GovernedRefusalOrigin::Protocol(refusal),
+        }
+    }
+
+    /// Wrap an explicit helper refusal in the canonical carrier.
+    #[must_use]
+    pub fn helper(refusal_id: String, refusal: nq_protocol::Refusal) -> Self {
+        Self {
+            schema: GovernedRefusalSchema::V1,
+            refusal_id,
+            origin: GovernedRefusalOrigin::Helper(refusal),
+        }
+    }
+
+    /// Wrap a compiled-profile refusal in the canonical carrier.
+    #[must_use]
+    pub fn profile(
+        refusal_id: String,
+        profile_semantic_id: ProfileSemanticId,
+        refusal: nq_profiles::ProfileRefusal,
+    ) -> Self {
+        Self {
+            schema: GovernedRefusalSchema::V1,
+            refusal_id,
+            origin: GovernedRefusalOrigin::Profile(GovernedProfileRefusal {
+                profile_semantic_id,
+                refusal,
+            }),
+        }
+    }
+
+    /// Return the responsible watcher instance from the authoritative origin.
+    #[must_use]
+    pub fn responsible_instance_id(&self) -> &str {
+        match &self.origin {
+            GovernedRefusalOrigin::Acquisition(refusal) => &refusal.responsible_instance_id,
+            GovernedRefusalOrigin::Protocol(refusal) => &refusal.responsible_instance_id,
+            GovernedRefusalOrigin::Helper(refusal) => refusal.responsible_instance_id.as_str(),
+            GovernedRefusalOrigin::Profile(profile) => &profile.refusal.instance_id,
+        }
+    }
+
+    /// Validate stable identity and origin-specific dependent invariants.
+    ///
+    /// # Errors
+    ///
+    /// Returns when a refusal lacks a stable identity or an acquisition-origin
+    /// refusal contains projections that disagree with its exact outcome.
+    pub fn validate(&self) -> Result<(), EngineError> {
+        if self.refusal_id.is_empty() {
+            return Err(EngineError::Invariant(
+                "governed refusal identity cannot be empty".into(),
+            ));
+        }
+        if self.responsible_instance_id().is_empty() {
+            return Err(EngineError::Invariant(
+                "governed refusal responsible instance cannot be empty".into(),
+            ));
+        }
+        match &self.origin {
+            GovernedRefusalOrigin::Acquisition(refusal) => refusal.failure.validate()?,
+            GovernedRefusalOrigin::Protocol(_) => {}
+            GovernedRefusalOrigin::Helper(refusal) => {
+                let expected = match refusal.code {
+                    nq_protocol::RefusalCode::UnsupportedProtocol => {
+                        nq_protocol::RefusalBoundary::Protocol
+                    }
+                    nq_protocol::RefusalCode::UnknownProfile
+                    | nq_protocol::RefusalCode::ProfileDigestMismatch => {
+                        nq_protocol::RefusalBoundary::Profile
+                    }
+                    nq_protocol::RefusalCode::UnsupportedScope => {
+                        nq_protocol::RefusalBoundary::Scope
+                    }
+                    nq_protocol::RefusalCode::UnsupportedVantage => {
+                        nq_protocol::RefusalBoundary::Vantage
+                    }
+                    nq_protocol::RefusalCode::CapabilityDenied => {
+                        nq_protocol::RefusalBoundary::Capability
+                    }
+                    nq_protocol::RefusalCode::DeadlineExpired => {
+                        nq_protocol::RefusalBoundary::Deadline
+                    }
+                    nq_protocol::RefusalCode::BoundsUnsupported
+                    | nq_protocol::RefusalCode::ResourceExhausted => {
+                        nq_protocol::RefusalBoundary::Resource
+                    }
+                    nq_protocol::RefusalCode::CheckpointInvalid => {
+                        nq_protocol::RefusalBoundary::Checkpoint
+                    }
+                    nq_protocol::RefusalCode::CollectionFailed => {
+                        nq_protocol::RefusalBoundary::Collection
+                    }
+                    nq_protocol::RefusalCode::InternalError => {
+                        nq_protocol::RefusalBoundary::Internal
+                    }
+                };
+                if refusal.boundary != expected || refusal.message.is_empty() {
+                    return Err(EngineError::Invariant(
+                        "helper refusal code, boundary, or message is invalid".into(),
+                    ));
+                }
+            }
+            GovernedRefusalOrigin::Profile(profile) => {
+                let refusal = &profile.refusal;
+                if refusal.profile.id.is_empty() || refusal.message.is_empty() {
+                    return Err(EngineError::Invariant(
+                        "profile refusal identity or message is empty".into(),
+                    ));
+                }
+                let compiled =
+                    nq_profiles::resolve_profile_key(&refusal.profile).ok_or_else(|| {
+                        EngineError::Invariant(format!(
+                            "profile refusal names uncompiled profile {}/{}",
+                            refusal.profile.id, refusal.profile.version
+                        ))
+                    })?;
+                let expected = profile_semantic_id(compiled.descriptor())
+                    .map_err(|error| EngineError::Canonical(error.to_string()))?;
+                if profile.profile_semantic_id != expected {
+                    return Err(EngineError::Invariant(format!(
+                        "profile refusal semantic identity disagrees with compiled profile {}/{}",
+                        refusal.profile.id, refusal.profile.version
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for GovernedRefusal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match serde_json::to_string(self) {
+            Ok(encoded) => formatter.write_str(&encoded),
+            Err(_) => formatter.write_str("governed refusal could not be rendered"),
+        }
+    }
+}
+
+/// Typed result inside the versioned collection envelope.
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CollectionResult {
+    /// A report passed acquisition, protocol, and profile admission.
+    Admitted {
+        /// Stable NQ-owned admitted-report identity.
         report_id: String,
-        /// Helper-declared, profile-validated report state.
+        /// Exact profile-validated report status.
         report_status: String,
-        /// Canonical semantic identity.
+        /// Canonical semantic digest of the admitted report.
         semantic_digest: String,
-        /// Number of compiled detector revisions evaluated.
+        /// Number of detector evaluations committed from the report.
         evaluations: usize,
     },
     /// The active admission could not bind a run; no helper was launched.
     AdmissionRefused {
-        /// Exact instance.
-        instance_id: String,
-        /// Typed operator diagnostic.
-        diagnostic: String,
+        /// Complete typed admission refusal.
+        refusal: AdmissionRefusal,
     },
-    /// Process acquisition failed; only a run record exists.
+    /// The exact process/carrier acquisition failure.
     AcquisitionFailed {
-        /// Exact instance.
-        instance_id: String,
-        /// NQ-owned run ID.
-        run_id: String,
-        /// Acquisition outcome code.
-        code: String,
-        /// Exact diagnostic carried by the outcome, when it has one.
-        ///
-        /// The code alone cannot distinguish a refused socket mode from a
-        /// spawn failure, so a supervised daemon that logs only the code
-        /// cannot explain its own refusal. Preserve the variant's message.
-        detail: Option<String>,
+        /// Complete typed acquisition failure.
+        failure: AcquisitionFailure,
     },
-    /// A response was retained as rejected custody and never entered detectors.
+    /// Protocol, helper, or profile refusal retained as rejected custody.
     Rejected {
-        /// Exact instance.
-        instance_id: String,
-        /// NQ-owned run ID.
-        run_id: String,
-        /// Exact rejecting plane.
-        plane: String,
-        /// Typed diagnostic code.
-        code: String,
-        /// Operator-facing explanation.
-        diagnostic: String,
-    },
-    /// A valid helper refusal was retained separately from transport and report
-    /// failure.
-    HelperRefused {
-        /// Exact instance.
-        instance_id: String,
-        /// NQ-owned run ID.
-        run_id: String,
-        /// Exact refusal boundary.
-        boundary: String,
-        /// Typed helper refusal code.
-        code: String,
-        /// Operator-facing explanation.
-        diagnostic: String,
+        /// Stable linked governed refusal.
+        refusal: GovernedRefusal,
     },
 }
 
+/// Persisted canonical result of one scheduled or explicitly requested
+/// collection. Common association fields occur once and every dependent result
+/// remains in its authoritative typed object.
+#[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CollectionOutcome {
+    /// Closed collection-carrier schema identity.
+    pub schema: CollectionOutcomeSchema,
+    /// Exact watcher instance associated with the result.
+    pub instance_id: String,
+    /// Stable run identity, absent only when admission prevented a run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    /// Complete typed result payload.
+    pub result: CollectionResult,
+}
+
 impl CollectionOutcome {
+    /// Construct an admitted collection result with its durable identities.
+    #[must_use]
+    pub fn admitted(
+        instance_id: String,
+        run_id: String,
+        report_id: String,
+        report_status: String,
+        semantic_digest: String,
+        evaluations: usize,
+    ) -> Self {
+        Self {
+            schema: CollectionOutcomeSchema::V1,
+            instance_id,
+            run_id: Some(run_id),
+            result: CollectionResult::Admitted {
+                report_id,
+                report_status,
+                semantic_digest,
+                evaluations,
+            },
+        }
+    }
+
+    /// Construct an admission refusal for an attempt that created no run.
+    #[must_use]
+    pub fn admission_refused(instance_id: String, refusal: AdmissionRefusal) -> Self {
+        Self {
+            schema: CollectionOutcomeSchema::V1,
+            instance_id,
+            run_id: None,
+            result: CollectionResult::AdmissionRefused { refusal },
+        }
+    }
+
+    /// Construct a failure only from a non-response acquisition outcome.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant error when passed the successful `Response`
+    /// outcome, which cannot justify an acquisition failure.
+    pub fn acquisition_failed(
+        instance_id: String,
+        run_id: String,
+        outcome: AcquisitionOutcome,
+    ) -> Result<Self, EngineError> {
+        let failure = AcquisitionFailure::from_outcome(outcome).ok_or_else(|| {
+            EngineError::Invariant("response cannot be represented as acquisition failure".into())
+        })?;
+        Ok(Self {
+            schema: CollectionOutcomeSchema::V1,
+            instance_id,
+            run_id: Some(run_id),
+            result: CollectionResult::AcquisitionFailed { failure },
+        })
+    }
+
+    /// Construct a rejected result linked to its stable governed refusal.
+    #[must_use]
+    pub fn rejected(instance_id: String, run_id: String, refusal: GovernedRefusal) -> Self {
+        Self {
+            schema: CollectionOutcomeSchema::V1,
+            instance_id,
+            run_id: Some(run_id),
+            result: CollectionResult::Rejected { refusal },
+        }
+    }
+
     /// Exact responsible instance.
     #[must_use]
     pub fn instance_id(&self) -> &str {
-        match self {
-            Self::Admitted { instance_id, .. }
-            | Self::AdmissionRefused { instance_id, .. }
-            | Self::AcquisitionFailed { instance_id, .. }
-            | Self::Rejected { instance_id, .. }
-            | Self::HelperRefused { instance_id, .. } => instance_id,
-        }
+        &self.instance_id
     }
 
     /// Whether scheduling should resume at its normal cadence. A valid `failed`
@@ -234,10 +1348,118 @@ impl CollectionOutcome {
     #[must_use]
     pub fn is_success(&self) -> bool {
         matches!(
-            self,
-            Self::Admitted { report_status, .. } if report_status != "failed"
+            &self.result,
+            CollectionResult::Admitted { report_status, .. } if report_status != "failed"
         )
     }
+
+    /// Validate cross-field associations after deserializing persisted bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant error if run presence, instance association, or
+    /// source outcome contradicts the typed result variant.
+    pub fn validate(&self) -> Result<(), EngineError> {
+        if self.instance_id.is_empty() {
+            return Err(EngineError::Invariant(
+                "collection result instance identity cannot be empty".into(),
+            ));
+        }
+        if self.run_id.as_deref() == Some("") {
+            return Err(EngineError::Invariant(
+                "collection result run identity cannot be empty".into(),
+            ));
+        }
+        match &self.result {
+            CollectionResult::Admitted { .. } | CollectionResult::AcquisitionFailed { .. }
+                if self.run_id.is_none() =>
+            {
+                Err(EngineError::Invariant(
+                    "collection result requires a run identity".into(),
+                ))
+            }
+            CollectionResult::AdmissionRefused { refusal } => {
+                if self.run_id.is_some() {
+                    return Err(EngineError::Invariant(
+                        "admission refusal cannot claim an unstarted run".into(),
+                    ));
+                }
+                refusal.validate()?;
+                if refusal.responsible_instance_id != self.instance_id {
+                    return Err(EngineError::Invariant(
+                        "admission refusal lost its responsible instance".into(),
+                    ));
+                }
+                Ok(())
+            }
+            CollectionResult::Rejected { refusal } => {
+                if self.run_id.is_none() {
+                    return Err(EngineError::Invariant(
+                        "rejected collection requires a run identity".into(),
+                    ));
+                }
+                if refusal.responsible_instance_id() != self.instance_id {
+                    return Err(EngineError::Invariant(
+                        "governed refusal lost its responsible instance".into(),
+                    ));
+                }
+                refusal.validate()?;
+                Ok(())
+            }
+            CollectionResult::AcquisitionFailed { failure } => failure.validate(),
+            CollectionResult::Admitted {
+                report_id,
+                report_status,
+                semantic_digest,
+                ..
+            } => {
+                if report_id.is_empty()
+                    || !matches!(report_status.as_str(), "complete" | "partial" | "failed")
+                    || Sha256Digest::parse(semantic_digest.clone()).is_err()
+                {
+                    return Err(EngineError::Invariant(
+                        "admitted result identity, status, or semantic digest is invalid".into(),
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Decode an exact canonical collection-result document and validate all
+/// dependent typed invariants.
+///
+/// # Errors
+///
+/// Returns when bytes are not exact canonical JSON, the strict nested schema
+/// cannot decode, or any identity, projection, association, or vocabulary
+/// invariant fails validation.
+pub fn decode_collection_outcome(bytes: &[u8]) -> Result<CollectionOutcome, EngineError> {
+    let document = CanonicalDocument::from_canonical_bytes(bytes.to_vec())?;
+    let outcome: CollectionOutcome =
+        serde_json::from_slice(document.as_bytes()).map_err(|error| {
+            EngineError::Invariant(format!("collection result cannot decode: {error}"))
+        })?;
+    outcome.validate()?;
+    Ok(outcome)
+}
+
+fn decode_governed_refusal(bytes: &[u8], context: &str) -> Result<GovernedRefusal, EngineError> {
+    let document = CanonicalDocument::from_canonical_bytes(bytes.to_vec())?;
+    let refusal: GovernedRefusal =
+        serde_json::from_slice(document.as_bytes()).map_err(|error| {
+            EngineError::Invariant(format!(
+                "{context} cannot decode as governed refusal: {error}"
+            ))
+        })?;
+    refusal.validate()?;
+    if canonical(&refusal)?.as_bytes() != document.as_bytes() {
+        return Err(EngineError::Invariant(format!(
+            "{context} does not round-trip to exact canonical bytes"
+        )));
+    }
+    Ok(refusal)
 }
 
 /// End-to-end collection, admission, evaluation, and public read-model engine
@@ -617,19 +1839,27 @@ impl CollectionEngine {
             Ok(Some(lock)) => lock,
             Ok(None) => {
                 self.stop_unix_runner(&watcher.instance_id);
-                let outcome = CollectionOutcome::AdmissionRefused {
-                    instance_id: watcher.instance_id.clone(),
-                    diagnostic: "no active authoritative admission binding".to_owned(),
-                };
+                let outcome = CollectionOutcome::admission_refused(
+                    watcher.instance_id.clone(),
+                    AdmissionRefusal {
+                        responsible_instance_id: watcher.instance_id.clone(),
+                        boundary: AdmissionRefusalBoundary::ActiveBinding,
+                        code: AdmissionRefusalCode::MissingActiveBinding,
+                        details: AdmissionRefusalDetails::None,
+                    },
+                );
                 self.record_instance_status(watcher, &outcome)?;
                 return Ok(outcome);
             }
             Err(error) => {
                 self.stop_unix_runner(&watcher.instance_id);
-                let outcome = CollectionOutcome::AdmissionRefused {
-                    instance_id: watcher.instance_id.clone(),
-                    diagnostic: error.to_string(),
-                };
+                let refusal = admission_refusal_from_engine(
+                    &watcher.instance_id,
+                    AdmissionRefusalBoundary::ActiveBinding,
+                    error,
+                );
+                let outcome =
+                    CollectionOutcome::admission_refused(watcher.instance_id.clone(), refusal);
                 self.record_instance_status(watcher, &outcome)?;
                 return Ok(outcome);
             }
@@ -650,10 +1880,9 @@ impl CollectionEngine {
             Ok(binding) => binding,
             Err(error) => {
                 self.stop_unix_runner(&watcher.instance_id);
-                let outcome = CollectionOutcome::AdmissionRefused {
-                    instance_id: watcher.instance_id.clone(),
-                    diagnostic: error.to_string(),
-                };
+                let refusal = admission_refusal(&watcher.instance_id, error);
+                let outcome =
+                    CollectionOutcome::admission_refused(watcher.instance_id.clone(), refusal);
                 self.record_instance_status(watcher, &outcome)?;
                 return Ok(outcome);
             }
@@ -712,16 +1941,18 @@ impl CollectionEngine {
         };
 
         if capture.outcome != AcquisitionOutcome::Response {
-            let submission = rejected_transport_submission(&run_id, watcher, &capture)?;
-            self.store
-                .commit_collection(&CollectionInput { run, submission })?;
-            let outcome = CollectionOutcome::AcquisitionFailed {
-                instance_id: watcher.instance_id.clone(),
-                run_id,
-                code: acquisition_code(&capture.outcome).to_owned(),
-                detail: acquisition_detail(&capture.outcome),
+            let (submission, custody_refusal) =
+                rejected_transport_submission(&run_id, watcher, &capture)?;
+            let outcome = if let Some(refusal) = custody_refusal {
+                CollectionOutcome::rejected(watcher.instance_id.clone(), run_id, refusal)
+            } else {
+                CollectionOutcome::acquisition_failed(
+                    watcher.instance_id.clone(),
+                    run_id,
+                    capture.outcome.clone(),
+                )?
             };
-            self.record_instance_status(watcher, &outcome)?;
+            self.commit_non_success_collection(watcher, run, submission, &outcome)?;
             return Ok(outcome);
         }
 
@@ -729,81 +1960,81 @@ impl CollectionEngine {
         let response = match nq_protocol::parse_response(&request, &raw) {
             Ok(response) => response,
             Err(error) => {
-                let refusal = rejection_refusal(
-                    watcher,
-                    "protocol",
-                    "invalid_response",
-                    &error.to_string(),
-                    &run_id,
-                )?;
+                let refusal = GovernedRefusal::protocol(
+                    Uuid::new_v4().to_string(),
+                    protocol_rejection(&watcher.instance_id, error),
+                );
+                let stored_refusal = stored_governed_refusal(&refusal, capture.finished_at)?;
                 let submission = SubmissionInput {
                     submission_id: Uuid::new_v4().to_string(),
                     raw_bytes: raw,
                     received_at: timestamp(capture.finished_at),
                     protocol_outcome: "rejected".into(),
                     disposition: SubmissionDisposition::Rejected {
-                        rejection_code: Some("invalid_response".into()),
-                        refusal: Some(refusal),
+                        refusal: stored_refusal,
                     },
                 };
-                self.store.commit_collection(&CollectionInput {
-                    run,
-                    submission: Some(submission),
-                })?;
-                let outcome = CollectionOutcome::Rejected {
-                    instance_id: watcher.instance_id.clone(),
-                    run_id,
-                    plane: "protocol".into(),
-                    code: "invalid_response".into(),
-                    diagnostic: error.to_string(),
-                };
-                self.record_instance_status(watcher, &outcome)?;
+                let outcome =
+                    CollectionOutcome::rejected(watcher.instance_id.clone(), run_id, refusal);
+                self.commit_non_success_collection(watcher, run, Some(submission), &outcome)?;
                 return Ok(outcome);
             }
         };
 
         match response.outcome {
             ResponseOutcome::Refusal { refusal } => {
-                let boundary = enum_token(&refusal.boundary)?;
-                let code = enum_token(&refusal.code)?;
-                let stored_refusal = RefusalInput {
-                    refusal_id: Uuid::new_v4().to_string(),
-                    source_kind: refusal_source(&boundary).into(),
-                    responsible_instance_id: refusal.responsible_instance_id.to_string(),
-                    boundary: boundary.clone(),
-                    code: code.clone(),
-                    detail: canonical(&refusal)?,
-                    created_at: timestamp(capture.finished_at),
-                };
+                let refusal = GovernedRefusal::helper(Uuid::new_v4().to_string(), refusal);
+                let stored_refusal = stored_governed_refusal(&refusal, capture.finished_at)?;
                 let submission = SubmissionInput {
                     submission_id: Uuid::new_v4().to_string(),
                     raw_bytes: raw,
                     received_at: timestamp(capture.finished_at),
                     protocol_outcome: "valid_refusal".into(),
                     disposition: SubmissionDisposition::Rejected {
-                        rejection_code: Some(code.clone()),
-                        refusal: Some(stored_refusal),
+                        refusal: stored_refusal,
                     },
                 };
-                self.store.commit_collection(&CollectionInput {
-                    run,
-                    submission: Some(submission),
-                })?;
-                let outcome = CollectionOutcome::HelperRefused {
-                    instance_id: watcher.instance_id.clone(),
-                    run_id,
-                    boundary,
-                    code,
-                    diagnostic: refusal.message,
-                };
-                self.record_instance_status(watcher, &outcome)?;
+                let outcome =
+                    CollectionOutcome::rejected(watcher.instance_id.clone(), run_id, refusal);
+                self.commit_non_success_collection(watcher, run, Some(submission), &outcome)?;
                 Ok(outcome)
             }
             ResponseOutcome::Report { report } => {
                 let report_digest = nq_protocol::semantic_digest(&report)
                     .map_err(|error| EngineError::Canonical(error.to_string()))?;
-                let normalized = ProfileReportInput::from_protocol(&report, &report_digest)
-                    .map_err(|error| EngineError::Profile(error.to_string()))?;
+                let normalized = match ProfileReportInput::from_protocol(&report, &report_digest) {
+                    Ok(normalized) => normalized,
+                    Err(error) => {
+                        let refusal = governed_profile_refusal(
+                            Uuid::new_v4().to_string(),
+                            profile,
+                            profile_normalization_refusal(&watcher.instance_id, profile, &error),
+                        )?;
+                        let stored_refusal =
+                            stored_governed_refusal(&refusal, capture.finished_at)?;
+                        let submission = SubmissionInput {
+                            submission_id: Uuid::new_v4().to_string(),
+                            raw_bytes: raw,
+                            received_at: timestamp(capture.finished_at),
+                            protocol_outcome: "valid_report".into(),
+                            disposition: SubmissionDisposition::Rejected {
+                                refusal: stored_refusal,
+                            },
+                        };
+                        let outcome = CollectionOutcome::rejected(
+                            watcher.instance_id.clone(),
+                            run_id,
+                            refusal,
+                        );
+                        self.commit_non_success_collection(
+                            watcher,
+                            run,
+                            Some(submission),
+                            &outcome,
+                        )?;
+                        return Ok(outcome);
+                    }
+                };
                 let context = ValidationContext::from_request(
                     &request,
                     capture.finished_at,
@@ -811,39 +2042,30 @@ impl CollectionEngine {
                 );
                 match profile.validate(&context, &normalized) {
                     Err(refusal) => {
-                        let code = enum_token(&refusal.code)?;
-                        let boundary = enum_token(&refusal.boundary)?;
-                        let stored_refusal = RefusalInput {
-                            refusal_id: Uuid::new_v4().to_string(),
-                            source_kind: "profile".into(),
-                            responsible_instance_id: refusal.instance_id.clone(),
-                            boundary: boundary.clone(),
-                            code: code.clone(),
-                            detail: canonical(&refusal)?,
-                            created_at: timestamp(capture.finished_at),
-                        };
+                        let refusal =
+                            governed_profile_refusal(Uuid::new_v4().to_string(), profile, refusal)?;
+                        let stored_refusal =
+                            stored_governed_refusal(&refusal, capture.finished_at)?;
                         let submission = SubmissionInput {
                             submission_id: Uuid::new_v4().to_string(),
                             raw_bytes: raw,
                             received_at: timestamp(capture.finished_at),
                             protocol_outcome: "valid_report".into(),
                             disposition: SubmissionDisposition::Rejected {
-                                rejection_code: Some(code.clone()),
-                                refusal: Some(stored_refusal),
+                                refusal: stored_refusal,
                             },
                         };
-                        self.store.commit_collection(&CollectionInput {
-                            run,
-                            submission: Some(submission),
-                        })?;
-                        let outcome = CollectionOutcome::Rejected {
-                            instance_id: watcher.instance_id.clone(),
+                        let outcome = CollectionOutcome::rejected(
+                            watcher.instance_id.clone(),
                             run_id,
-                            plane: "profile".into(),
-                            code,
-                            diagnostic: refusal.message,
-                        };
-                        self.record_instance_status(watcher, &outcome)?;
+                            refusal,
+                        );
+                        self.commit_non_success_collection(
+                            watcher,
+                            run,
+                            Some(submission),
+                            &outcome,
+                        )?;
                         Ok(outcome)
                     }
                     Ok(validated) => {
@@ -869,18 +2091,18 @@ impl CollectionEngine {
                             submission: Some(submission),
                         })?;
                         let evaluations = self.evaluate_instance(watcher, profile)?;
-                        let outcome = CollectionOutcome::Admitted {
-                            instance_id: watcher.instance_id.clone(),
+                        let outcome = CollectionOutcome::admitted(
+                            watcher.instance_id.clone(),
                             run_id,
                             report_id,
                             report_status,
-                            semantic_digest: receipt.semantic_digest.ok_or_else(|| {
+                            receipt.semantic_digest.ok_or_else(|| {
                                 EngineError::Invariant(
                                     "admitted collection returned no semantic digest".into(),
                                 )
                             })?,
                             evaluations,
-                        };
+                        );
                         self.record_instance_status(watcher, &outcome)?;
                         Ok(outcome)
                     }
@@ -1242,24 +2464,51 @@ impl CollectionEngine {
             .map_err(|error| EngineError::Canonical(error.to_string()))?;
         let capture = self.run_capture(watcher, &request_json, None, launch);
         if capture.outcome != AcquisitionOutcome::Response {
-            return Err(dry_collection_error(&capture.outcome));
+            let failure = AcquisitionFailure::from_outcome(capture.outcome).ok_or_else(|| {
+                EngineError::Invariant("response cannot be a dry acquisition failure".into())
+            })?;
+            return Err(EngineError::AcquisitionFailed(Box::new(failure)));
         }
-        let response = nq_protocol::parse_response(&request, &capture.stdout)
-            .map_err(|error| EngineError::Protocol(error.to_string()))?;
-        let ResponseOutcome::Report { report } = response.outcome else {
-            return Err(EngineError::Protocol(
-                "helper refused the admission dry collection".into(),
-            ));
+        let response = match nq_protocol::parse_response(&request, &capture.stdout) {
+            Ok(response) => response,
+            Err(error) => {
+                return Err(EngineError::GovernedRefusal(Box::new(
+                    GovernedRefusal::protocol(
+                        Uuid::new_v4().to_string(),
+                        protocol_rejection(&watcher.instance_id, error),
+                    ),
+                )));
+            }
+        };
+        let report = match response.outcome {
+            ResponseOutcome::Report { report } => report,
+            ResponseOutcome::Refusal { refusal } => {
+                return Err(EngineError::GovernedRefusal(Box::new(
+                    GovernedRefusal::helper(Uuid::new_v4().to_string(), refusal),
+                )));
+            }
         };
         let digest = nq_protocol::semantic_digest(&report)
             .map_err(|error| EngineError::Canonical(error.to_string()))?;
-        let input = ProfileReportInput::from_protocol(&report, &digest)
-            .map_err(|error| EngineError::Profile(error.to_string()))?;
+        let input = match ProfileReportInput::from_protocol(&report, &digest) {
+            Ok(input) => input,
+            Err(error) => {
+                let refusal = profile_normalization_refusal(&watcher.instance_id, profile, &error);
+                return Err(EngineError::GovernedRefusal(Box::new(
+                    governed_profile_refusal(Uuid::new_v4().to_string(), profile, refusal)?,
+                )));
+            }
+        };
         let context =
             ValidationContext::from_request(&request, capture.finished_at, Duration::seconds(60));
-        let validated = profile
-            .validate(&context, &input)
-            .map_err(|refusal| EngineError::Profile(refusal.message))?;
+        let validated = match profile.validate(&context, &input) {
+            Ok(validated) => validated,
+            Err(refusal) => {
+                return Err(EngineError::GovernedRefusal(Box::new(
+                    governed_profile_refusal(Uuid::new_v4().to_string(), profile, refusal)?,
+                )));
+            }
+        };
         Ok(DryExchange {
             report_digest: digest.to_string(),
             validated,
@@ -1407,28 +2656,39 @@ impl CollectionEngine {
         watcher: &WatcherConfig,
         outcome: &CollectionOutcome,
     ) -> Result<(), EngineError> {
-        let (state, code) = match outcome {
-            CollectionOutcome::Admitted { report_status, .. } if report_status == "complete" => {
-                ("healthy", "report_complete")
-            }
-            CollectionOutcome::Admitted { report_status, .. } if report_status == "partial" => {
-                ("degraded", "report_partial")
-            }
-            CollectionOutcome::Admitted { .. } => ("failed", "report_failed"),
-            CollectionOutcome::AdmissionRefused { .. } => ("failed", "admission_refused"),
-            CollectionOutcome::AcquisitionFailed { .. } => ("failed", "collection_failed"),
-            CollectionOutcome::Rejected { .. } => ("failed", "report_rejected"),
-            CollectionOutcome::HelperRefused { .. } => ("degraded", "helper_refused"),
-        };
-        self.store.record_status(&StatusEventInput {
-            status_event_id: Uuid::new_v4().to_string(),
-            component_kind: "instance".into(),
-            component_id: watcher.instance_id.clone(),
-            state: state.into(),
-            code: code.into(),
-            detail: canonical(outcome)?,
-            observed_at: timestamp(Utc::now()),
+        if outcome.instance_id != watcher.instance_id {
+            return Err(EngineError::Invariant(format!(
+                "cannot record instance status {} from result for {}",
+                watcher.instance_id, outcome.instance_id
+            )));
+        }
+        let status = instance_status_event(watcher, outcome)?;
+        self.store.record_status(&status)?;
+        Ok(())
+    }
+
+    fn commit_non_success_collection(
+        &mut self,
+        watcher: &WatcherConfig,
+        run: RunInput,
+        submission: Option<SubmissionInput>,
+        outcome: &CollectionOutcome,
+    ) -> Result<(), EngineError> {
+        let run_id = outcome.run_id.as_deref().ok_or_else(|| {
+            EngineError::Invariant("non-success collection outcome has no run identity".into())
         })?;
+        if run.run_id != run_id {
+            return Err(EngineError::Invariant(format!(
+                "non-success outcome run {run_id} disagrees with collection run {}",
+                run.run_id
+            )));
+        }
+        let result = RunResultStatusInput {
+            run_id: run_id.to_owned(),
+            status: instance_status_event(watcher, outcome)?,
+        };
+        self.store
+            .commit_non_success_collection(&CollectionInput { run, submission }, &result)?;
         Ok(())
     }
 
@@ -1449,6 +2709,8 @@ impl CollectionEngine {
         let profile_digest = profile
             .descriptor()
             .digest()
+            .map_err(|error| EngineError::Canonical(error.to_string()))?;
+        let profile_semantic = profile_semantic_id(profile.descriptor())
             .map_err(|error| EngineError::Canonical(error.to_string()))?;
         let reports = reconstruct_detector_reports(
             &snapshot.reports,
@@ -1487,20 +2749,25 @@ impl CollectionEngine {
                 DetectorState::ExplicitlyAbsent => "condition_explicitly_absent",
                 DetectorState::CannotEvaluate => "cannot_evaluate",
             };
-            let refusal = result
-                .refusal
+            let governed_refusal = result.refusal.as_ref().map(|refusal| {
+                GovernedRefusal::profile(
+                    Uuid::new_v4().to_string(),
+                    profile_semantic.clone(),
+                    refusal.clone(),
+                )
+            });
+            let governed_result = governed_evaluation_result(
+                &result,
+                EvaluationProfileIdentity {
+                    profile: profile.descriptor().profile.clone(),
+                    profile_digest: profile_digest.clone(),
+                    profile_semantic_id: profile_semantic.clone(),
+                },
+                governed_refusal.clone(),
+            )?;
+            let refusal = governed_refusal
                 .as_ref()
-                .map(|refusal| {
-                    Ok::<RefusalInput, EngineError>(RefusalInput {
-                        refusal_id: Uuid::new_v4().to_string(),
-                        source_kind: "evaluation".into(),
-                        responsible_instance_id: refusal.instance_id.clone(),
-                        boundary: enum_token(&refusal.boundary)?,
-                        code: enum_token(&refusal.code)?,
-                        detail: canonical(refusal)?,
-                        created_at: timestamp(evaluated_at),
-                    })
-                })
+                .map(|refusal| stored_governed_refusal(refusal, evaluated_at))
                 .transpose()?;
             let evaluation = EvaluationInput {
                 evaluation_id: evaluation_id.clone(),
@@ -1511,7 +2778,16 @@ impl CollectionEngine {
                 started_at: timestamp(evaluated_at),
                 evaluated_at: timestamp(evaluated_at),
                 outcome: outcome.into(),
-                detail: canonical(&result)?,
+                detail: canonical(&governed_result)?,
+                profile: EvaluationProfileBinding {
+                    profile_id: watcher.profile.id.clone(),
+                    profile_version: profile_version.clone(),
+                    profile_digest: profile_digest.as_str().to_owned(),
+                    profile_semantic_id: parse_identity_digest(
+                        "profile_semantic_id",
+                        profile_semantic.as_str(),
+                    )?,
+                },
                 watermarks: snapshot.watermarks.clone(),
                 refusal,
             };
@@ -1524,6 +2800,7 @@ impl CollectionEngine {
                 profile_id: &watcher.profile.id,
                 profile_version: &profile_version,
                 profile_digest: profile_digest.as_str(),
+                profile_semantic_id: profile_semantic.as_str(),
                 subject_json: &subject_json,
             };
             let current = find_current_finding(&current_findings, &lineage);
@@ -1532,6 +2809,7 @@ impl CollectionEngine {
                 profile,
                 descriptor,
                 &result,
+                governed_refusal.as_ref(),
                 evaluated_at,
                 current,
                 &snapshot.reports,
@@ -1544,6 +2822,67 @@ impl CollectionEngine {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InstanceStatusProjection {
+    state: &'static str,
+    code: &'static str,
+}
+
+fn instance_status_projection(
+    outcome: &CollectionOutcome,
+) -> Result<InstanceStatusProjection, EngineError> {
+    outcome.validate()?;
+    let (state, code) = match &outcome.result {
+        CollectionResult::Admitted { report_status, .. } if report_status == "complete" => {
+            ("healthy", "report_complete")
+        }
+        CollectionResult::Admitted { report_status, .. } if report_status == "partial" => {
+            ("degraded", "report_partial")
+        }
+        CollectionResult::Admitted { .. } => ("failed", "report_failed"),
+        CollectionResult::AdmissionRefused { .. } => ("failed", "admission_refused"),
+        CollectionResult::AcquisitionFailed { .. }
+        | CollectionResult::Rejected {
+            refusal:
+                GovernedRefusal {
+                    origin: GovernedRefusalOrigin::Acquisition(_),
+                    ..
+                },
+        } => ("failed", "collection_failed"),
+        CollectionResult::Rejected {
+            refusal:
+                GovernedRefusal {
+                    origin: GovernedRefusalOrigin::Helper(_),
+                    ..
+                },
+        } => ("degraded", "helper_refused"),
+        CollectionResult::Rejected { .. } => ("failed", "report_rejected"),
+    };
+    Ok(InstanceStatusProjection { state, code })
+}
+
+fn instance_status_event(
+    watcher: &WatcherConfig,
+    outcome: &CollectionOutcome,
+) -> Result<StatusEventInput, EngineError> {
+    if outcome.instance_id != watcher.instance_id {
+        return Err(EngineError::Invariant(format!(
+            "cannot construct instance status {} from result for {}",
+            watcher.instance_id, outcome.instance_id
+        )));
+    }
+    let projection = instance_status_projection(outcome)?;
+    Ok(StatusEventInput {
+        status_event_id: Uuid::new_v4().to_string(),
+        component_kind: "instance".into(),
+        component_id: watcher.instance_id.clone(),
+        state: projection.state.into(),
+        code: projection.code.into(),
+        detail: canonical(outcome)?,
+        observed_at: timestamp(Utc::now()),
+    })
+}
+
 #[derive(Clone, Copy)]
 struct FindingLineage<'a> {
     instance_id: &'a str,
@@ -1553,6 +2892,7 @@ struct FindingLineage<'a> {
     profile_id: &'a str,
     profile_version: &'a str,
     profile_digest: &'a str,
+    profile_semantic_id: &'a str,
     subject_json: &'a str,
 }
 
@@ -1565,6 +2905,7 @@ impl FindingLineage<'_> {
             && finding.profile_id == self.profile_id
             && finding.profile_version == self.profile_version
             && finding.profile_digest == self.profile_digest
+            && finding.profile_semantic_id == self.profile_semantic_id
             && finding.subject_json == self.subject_json
     }
 }
@@ -2024,10 +3365,10 @@ fn store_report(
 }
 
 fn rejected_transport_submission(
-    run_id: &str,
+    _run_id: &str,
     watcher: &WatcherConfig,
     capture: &RunCapture,
-) -> Result<Option<SubmissionInput>, EngineError> {
+) -> Result<(Option<SubmissionInput>, Option<GovernedRefusal>), EngineError> {
     let retains_exact_submission = !capture.stdout.is_empty()
         && matches!(
             capture.outcome,
@@ -2036,66 +3377,410 @@ fn rejected_transport_submission(
                 | AcquisitionOutcome::ExitNonzero { .. }
         );
     if !retains_exact_submission {
-        return Ok(None);
+        return Ok((None, None));
     }
-    let code = acquisition_code(&capture.outcome).to_owned();
-    let refusal = rejection_refusal(
-        watcher,
-        "acquisition",
-        &code,
-        "helper bytes did not form a successful protocol exchange",
-        run_id,
-    )?;
-    Ok(Some(SubmissionInput {
+    let failure = AcquisitionFailure::from_outcome(capture.outcome.clone()).ok_or_else(|| {
+        EngineError::Invariant("response cannot justify rejected transport custody".into())
+    })?;
+    let refusal = GovernedRefusal::acquisition(
+        Uuid::new_v4().to_string(),
+        AcquisitionRefusal {
+            responsible_instance_id: watcher.instance_id.clone(),
+            failure,
+        },
+    );
+    let stored_refusal = stored_governed_refusal(&refusal, capture.finished_at)?;
+    let submission = SubmissionInput {
         submission_id: Uuid::new_v4().to_string(),
         raw_bytes: capture.stdout.clone(),
         received_at: timestamp(capture.finished_at),
         protocol_outcome: "not_validated".into(),
         disposition: SubmissionDisposition::Rejected {
-            rejection_code: Some(code),
-            refusal: Some(refusal),
+            refusal: stored_refusal,
         },
-    }))
+    };
+    Ok((Some(submission), Some(refusal)))
 }
 
-fn rejection_refusal(
-    watcher: &WatcherConfig,
-    source: &str,
-    code: &str,
-    message: &str,
-    _run_id: &str,
+fn protocol_rejection(instance_id: &str, error: nq_protocol::FramingError) -> ProtocolRejection {
+    let failure = match error {
+        nq_protocol::FramingError::TooLarge { limit, actual } => {
+            ProtocolRejectionFailure::FrameTooLarge { limit, actual }
+        }
+        nq_protocol::FramingError::NotExactlyOneLine => ProtocolRejectionFailure::InvalidFraming,
+        nq_protocol::FramingError::Json(error) => ProtocolRejectionFailure::InvalidJson {
+            error: structured_json_error(&error),
+        },
+        nq_protocol::FramingError::Validation(error) => ProtocolRejectionFailure::Validation {
+            error: protocol_validation_failure(error),
+        },
+        nq_protocol::FramingError::Canonicalization(error) => {
+            ProtocolRejectionFailure::Canonicalization {
+                error: protocol_canonicalization_failure(error),
+            }
+        }
+    };
+    ProtocolRejection {
+        responsible_instance_id: instance_id.to_owned(),
+        boundary: ProtocolRejectionBoundary::Response,
+        code: ProtocolRejectionCode::InvalidResponse,
+        failure,
+    }
+}
+
+fn profile_normalization_refusal(
+    instance_id: &str,
+    profile: &'static dyn ProfileModule,
+    error: &nq_profiles::ReportNormalizationError,
+) -> nq_profiles::ProfileRefusal {
+    nq_profiles::ProfileRefusal {
+        instance_id: instance_id.to_owned(),
+        profile: profile.descriptor().profile.clone(),
+        boundary: nq_profiles::RefusalBoundary::Report,
+        code: nq_profiles::ProfileRefusalCode::InvalidPayload,
+        message: "protocol report could not enter profile validation".into(),
+        details: BTreeMap::from([
+            ("stage".into(), "protocol_normalization".into()),
+            ("error".into(), error.to_string()),
+        ]),
+    }
+}
+
+fn governed_profile_refusal(
+    refusal_id: String,
+    profile: &'static dyn ProfileModule,
+    refusal: nq_profiles::ProfileRefusal,
+) -> Result<GovernedRefusal, EngineError> {
+    if refusal.profile != profile.descriptor().profile {
+        return Err(EngineError::Invariant(format!(
+            "profile refusal for {}/{} was produced at compiled profile boundary {}/{}",
+            refusal.profile.id,
+            refusal.profile.version,
+            profile.descriptor().profile.id,
+            profile.descriptor().profile.version
+        )));
+    }
+    let semantic_id = profile_semantic_id(profile.descriptor())
+        .map_err(|error| EngineError::Canonical(error.to_string()))?;
+    Ok(GovernedRefusal::profile(refusal_id, semantic_id, refusal))
+}
+
+fn structured_json_error(error: &serde_json::Error) -> StructuredJsonError {
+    let category = match error.classify() {
+        serde_json::error::Category::Io => JsonErrorCategory::Io,
+        serde_json::error::Category::Syntax => JsonErrorCategory::Syntax,
+        serde_json::error::Category::Data => JsonErrorCategory::Data,
+        serde_json::error::Category::Eof => JsonErrorCategory::Eof,
+    };
+    StructuredJsonError {
+        category,
+        line: error.line(),
+        column: error.column(),
+        diagnostic: error.to_string(),
+    }
+}
+
+fn protocol_canonicalization_failure(
+    error: nq_protocol::CanonicalizationError,
+) -> ProtocolCanonicalizationFailure {
+    match error {
+        nq_protocol::CanonicalizationError::Serialization(error) => {
+            ProtocolCanonicalizationFailure::Serialization {
+                error: structured_json_error(&error),
+            }
+        }
+        nq_protocol::CanonicalizationError::UnsafeInteger(value) => {
+            ProtocolCanonicalizationFailure::UnsafeInteger { value }
+        }
+    }
+}
+
+fn protocol_validation_failure(error: nq_protocol::ValidationError) -> ProtocolValidationFailure {
+    match error {
+        nq_protocol::ValidationError::InvalidSchema {
+            document,
+            expected,
+            actual,
+        } => ProtocolValidationFailure::InvalidSchema {
+            document: document.to_owned(),
+            expected: expected.to_owned(),
+            actual,
+        },
+        nq_protocol::ValidationError::InvalidProtocolVersion { expected, actual } => {
+            ProtocolValidationFailure::InvalidProtocolVersion {
+                expected: expected.to_owned(),
+                actual,
+            }
+        }
+        nq_protocol::ValidationError::InvalidField { field, reason } => {
+            ProtocolValidationFailure::InvalidField {
+                field: field.to_owned(),
+                reason,
+            }
+        }
+        nq_protocol::ValidationError::BoundExceeded {
+            field,
+            limit,
+            actual,
+        } => ProtocolValidationFailure::BoundExceeded {
+            field: field.to_owned(),
+            limit,
+            actual,
+        },
+        nq_protocol::ValidationError::Duplicate { field, value } => {
+            ProtocolValidationFailure::Duplicate {
+                field: field.to_owned(),
+                value,
+            }
+        }
+        nq_protocol::ValidationError::EchoMismatch { field } => {
+            ProtocolValidationFailure::EchoMismatch {
+                field: field.to_owned(),
+            }
+        }
+        nq_protocol::ValidationError::CapabilityEscape(capability) => {
+            ProtocolValidationFailure::CapabilityEscape { capability }
+        }
+        nq_protocol::ValidationError::Canonicalization { field, source } => {
+            ProtocolValidationFailure::Canonicalization {
+                field: field.to_owned(),
+                source: protocol_canonicalization_failure(source),
+            }
+        }
+    }
+}
+
+fn stored_governed_refusal(
+    refusal: &GovernedRefusal,
+    created_at: DateTime<Utc>,
 ) -> Result<RefusalInput, EngineError> {
+    refusal.validate()?;
+    let (source_kind, boundary, code) = governed_refusal_projections(refusal)?;
     Ok(RefusalInput {
-        refusal_id: Uuid::new_v4().to_string(),
-        source_kind: source.into(),
-        responsible_instance_id: watcher.instance_id.clone(),
-        boundary: source.into(),
-        code: code.into(),
-        detail: canonical(&json!({"message": message}))?,
-        created_at: timestamp(Utc::now()),
+        refusal_id: refusal.refusal_id.clone(),
+        source_kind,
+        responsible_instance_id: refusal.responsible_instance_id().to_owned(),
+        boundary,
+        code,
+        profile_semantic_id: match &refusal.origin {
+            GovernedRefusalOrigin::Profile(profile) => {
+                Some(profile.profile_semantic_id.as_str().to_owned())
+            }
+            _ => None,
+        },
+        detail: canonical(refusal)?,
+        created_at: timestamp(created_at),
     })
+}
+
+fn governed_refusal_projections(
+    refusal: &GovernedRefusal,
+) -> Result<(String, String, String), EngineError> {
+    let (source_kind, boundary, code) = match &refusal.origin {
+        GovernedRefusalOrigin::Acquisition(refusal) => (
+            "acquisition".to_owned(),
+            "acquisition".to_owned(),
+            enum_token(&refusal.failure.class)?,
+        ),
+        GovernedRefusalOrigin::Protocol(refusal) => (
+            "protocol".to_owned(),
+            enum_token(&refusal.boundary)?,
+            enum_token(&refusal.code)?,
+        ),
+        // Origin and semantic boundary are independent. Every valid helper
+        // ResponseOutcome refusal is helper-protocol testimony even when its
+        // exact refusing boundary is profile, collection, or resource.
+        GovernedRefusalOrigin::Helper(source) => (
+            "protocol".to_owned(),
+            enum_token(&source.boundary)?,
+            enum_token(&source.code)?,
+        ),
+        GovernedRefusalOrigin::Profile(profile) => (
+            "profile".to_owned(),
+            enum_token(&profile.refusal.boundary)?,
+            enum_token(&profile.refusal.code)?,
+        ),
+    };
+    Ok((source_kind, boundary, code))
+}
+
+fn admission_refusal_from_engine(
+    instance_id: &str,
+    fallback_boundary: AdmissionRefusalBoundary,
+    error: EngineError,
+) -> AdmissionRefusal {
+    let (boundary, code, details) = match error {
+        EngineError::Admission(error) => return admission_refusal(instance_id, error),
+        EngineError::Store(error) => (
+            AdmissionRefusalBoundary::Storage,
+            AdmissionRefusalCode::StoreFailure,
+            AdmissionRefusalDetails::Storage {
+                message: error.to_string(),
+            },
+        ),
+        EngineError::Coordination(error) => (
+            AdmissionRefusalBoundary::Coordination,
+            AdmissionRefusalCode::CoordinationFailure,
+            AdmissionRefusalDetails::Coordination {
+                message: error.to_string(),
+            },
+        ),
+        EngineError::Io(error) => (
+            AdmissionRefusalBoundary::Materialization,
+            AdmissionRefusalCode::MaterializationFailure,
+            AdmissionRefusalDetails::Materialization {
+                path: None,
+                message: error.to_string(),
+            },
+        ),
+        EngineError::UnknownProfile { id, version } => (
+            AdmissionRefusalBoundary::Profile,
+            AdmissionRefusalCode::UnknownProfile,
+            AdmissionRefusalDetails::ProfileIdentity { id, version },
+        ),
+        EngineError::Token(message) => (
+            AdmissionRefusalBoundary::Protocol,
+            AdmissionRefusalCode::InvalidIdentityToken,
+            AdmissionRefusalDetails::IdentityToken { message },
+        ),
+        EngineError::Protocol(message) => (
+            AdmissionRefusalBoundary::Protocol,
+            AdmissionRefusalCode::ProtocolFailure,
+            AdmissionRefusalDetails::Protocol { message },
+        ),
+        EngineError::Profile(message) => (
+            AdmissionRefusalBoundary::Profile,
+            AdmissionRefusalCode::ProfileFailure,
+            AdmissionRefusalDetails::ProfileProcessing { message },
+        ),
+        EngineError::Canonical(message) => (
+            AdmissionRefusalBoundary::Serialization,
+            AdmissionRefusalCode::CanonicalizationFailure,
+            AdmissionRefusalDetails::Canonicalization { message },
+        ),
+        EngineError::Invariant(message) => (
+            AdmissionRefusalBoundary::Internal,
+            AdmissionRefusalCode::InvariantViolation,
+            AdmissionRefusalDetails::Invariant { message },
+        ),
+        EngineError::GovernedRefusal(refusal) => (
+            fallback_boundary,
+            AdmissionRefusalCode::UpstreamRefusal,
+            AdmissionRefusalDetails::Governed { refusal },
+        ),
+        EngineError::AcquisitionFailed(failure) => (
+            fallback_boundary,
+            AdmissionRefusalCode::UpstreamRefusal,
+            AdmissionRefusalDetails::Acquisition { failure: *failure },
+        ),
+    };
+    AdmissionRefusal {
+        responsible_instance_id: instance_id.to_owned(),
+        boundary,
+        code,
+        details,
+    }
+}
+
+fn admission_refusal(instance_id: &str, error: AdmissionError) -> AdmissionRefusal {
+    let (boundary, code, details) = match error {
+        AdmissionError::Binary(error) => (
+            AdmissionRefusalBoundary::ExecutionIdentity,
+            AdmissionRefusalCode::BinaryIdentityInvalid,
+            AdmissionRefusalDetails::BinaryIdentity {
+                message: error.to_string(),
+            },
+        ),
+        AdmissionError::ConfigDrift { instance_id } => (
+            AdmissionRefusalBoundary::ActiveBinding,
+            AdmissionRefusalCode::ConfigDrift,
+            AdmissionRefusalDetails::ConfigDrift {
+                observed_instance_id: instance_id,
+            },
+        ),
+        AdmissionError::ProfileDrift {
+            instance_id,
+            message,
+        } => (
+            AdmissionRefusalBoundary::ActiveBinding,
+            AdmissionRefusalCode::ProfileDrift,
+            AdmissionRefusalDetails::ProfileDrift {
+                observed_instance_id: instance_id,
+                message,
+            },
+        ),
+        AdmissionError::ProtocolDrift { instance_id } => (
+            AdmissionRefusalBoundary::ActiveBinding,
+            AdmissionRefusalCode::ProtocolDrift,
+            AdmissionRefusalDetails::ProtocolDrift {
+                observed_instance_id: instance_id,
+            },
+        ),
+        AdmissionError::Malformed {
+            instance_id,
+            message,
+        } => (
+            AdmissionRefusalBoundary::ActiveBinding,
+            AdmissionRefusalCode::MalformedBinding,
+            AdmissionRefusalDetails::MalformedBinding {
+                observed_instance_id: instance_id,
+                message,
+            },
+        ),
+        AdmissionError::ConformanceFailed(message) => (
+            AdmissionRefusalBoundary::Conformance,
+            AdmissionRefusalCode::ConformanceFailed,
+            AdmissionRefusalDetails::ConformanceFailed { message },
+        ),
+        AdmissionError::ConformanceDrift {
+            instance_id,
+            message,
+        } => (
+            AdmissionRefusalBoundary::Conformance,
+            AdmissionRefusalCode::ConformanceDrift,
+            AdmissionRefusalDetails::ConformanceDrift {
+                observed_instance_id: instance_id,
+                message,
+            },
+        ),
+        AdmissionError::Io { path, source } => (
+            AdmissionRefusalBoundary::Materialization,
+            AdmissionRefusalCode::MaterializationFailure,
+            AdmissionRefusalDetails::Materialization {
+                path: Some(path.display().to_string()),
+                message: source.to_string(),
+            },
+        ),
+    };
+    AdmissionRefusal {
+        responsible_instance_id: instance_id.to_owned(),
+        boundary,
+        code,
+        details,
+    }
 }
 
 fn capture_resource_document(
     capture: &RunCapture,
     limits: &ResourceLimits,
 ) -> Result<CanonicalDocument, EngineError> {
-    canonical(&json!({
-        "duration_ms": capture.duration_ms,
-        "exit_code": capture.exit_code,
-        "hard_limits": {
-            "address_space_bytes_per_process": limits.max_address_space_bytes,
-            "cpu_seconds_per_process": limits.max_cpu_seconds,
-            "processes_per_execution_uid": limits.max_processes,
-            "open_files_per_process": limits.max_open_files,
-            "file_bytes_per_regular_file": limits.max_file_bytes,
-            "core_bytes": 0,
+    canonical(&RunResourceOutcomeV1 {
+        schema: RunResourceOutcomeSchema::V1,
+        duration_ms: capture.duration_ms,
+        exit_code: capture.exit_code,
+        hard_limits: RunHardLimits {
+            address_space_bytes_per_process: limits.max_address_space_bytes,
+            cpu_seconds_per_process: limits.max_cpu_seconds,
+            processes_per_execution_uid: limits.max_processes,
+            open_files_per_process: limits.max_open_files,
+            file_bytes_per_regular_file: limits.max_file_bytes,
+            core_bytes: 0,
         },
-        "stdout_bytes_retained": capture.stdout.len(),
-        "stderr_bytes_retained": capture.stderr.len(),
-        "stderr_hex": hex::encode(&capture.stderr),
-        "outcome": capture.outcome,
-    }))
+        stdout_bytes_retained: capture.stdout.len(),
+        stderr_bytes_retained: capture.stderr.len(),
+        stderr_hex: hex::encode(&capture.stderr),
+        outcome: capture.outcome.clone(),
+    })
 }
 
 fn reconstruct_admitted(
@@ -2183,12 +3868,51 @@ fn detector_identity_digest(
     nq_protocol::semantic_digest(&ids).map_err(|error| EngineError::Canonical(error.to_string()))
 }
 
-#[allow(clippy::too_many_lines)]
+fn governed_evaluation_result(
+    result: &nq_profiles::DetectorResult,
+    profile: EvaluationProfileIdentity,
+    refusal: Option<GovernedRefusal>,
+) -> Result<EvaluationResultV1, EngineError> {
+    if (result.state == DetectorState::CannotEvaluate) != refusal.is_some() {
+        return Err(EngineError::Invariant(
+            "cannot_evaluate requires exactly one canonical governed refusal".into(),
+        ));
+    }
+    match (&result.refusal, &refusal) {
+        (
+            Some(source),
+            Some(GovernedRefusal {
+                origin: GovernedRefusalOrigin::Profile(governed),
+                ..
+            }),
+        ) if source == &governed.refusal => {}
+        (None, None) => {}
+        _ => {
+            return Err(EngineError::Invariant(
+                "governed evaluation refusal differs from the detector source refusal".into(),
+            ));
+        }
+    }
+    Ok(EvaluationResultV1 {
+        schema: EvaluationResultSchema::V1,
+        profile,
+        state: result.state,
+        condition: result.condition.clone(),
+        summary: result.summary.clone(),
+        evidence: result.evidence.clone(),
+        limitations: result.limitations.clone(),
+        refusal,
+        watermark: result.watermark,
+    })
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn build_finding_event(
     watcher: &WatcherConfig,
     profile: &'static dyn ProfileModule,
     descriptor: &nq_profiles::DetectorDescriptor,
     result: &nq_profiles::DetectorResult,
+    governed_refusal: Option<&GovernedRefusal>,
     evaluated_at: DateTime<Utc>,
     current: Option<&nq_store::FindingSnapshotRow>,
     rows: &[nq_store::AdmittedReportRow],
@@ -2313,7 +4037,7 @@ fn build_finding_event(
             "vantage": watcher.vantage.kind,
             "scope": watcher.scope,
         }))?,
-        refusal: result.refusal.as_ref().map(canonical).transpose()?,
+        refusal: governed_refusal.map(canonical).transpose()?,
         origin_mode: "native".into(),
         historical_refs: canonical(&Vec::<String>::new())?,
         observed_at: newest.map(|row| row.observed_at.clone()),
@@ -2497,10 +4221,9 @@ fn unix_acquisition_outcome(outcome: UnixAcquisitionOutcome) -> AcquisitionOutco
         }
         UnixAcquisitionOutcome::Timeout { phase } => AcquisitionOutcome::ExchangeTimeout {
             phase: match phase {
-                UnixIoPhase::WriteRequest => "write_request",
-                UnixIoPhase::ReadResponse => "read_response",
-            }
-            .into(),
+                UnixIoPhase::WriteRequest => ExchangeTimeoutPhase::WriteRequest,
+                UnixIoPhase::ReadResponse => ExchangeTimeoutPhase::ReadResponse,
+            },
         },
         UnixAcquisitionOutcome::OutputTooLarge => AcquisitionOutcome::OutputTooLarge,
         UnixAcquisitionOutcome::StderrTooLarge => AcquisitionOutcome::StderrTooLarge,
@@ -2553,63 +4276,6 @@ fn acquisition_code(outcome: &AcquisitionOutcome) -> &'static str {
         AcquisitionOutcome::CarrierStartupFailed { .. } => "carrier_startup_failed",
         AcquisitionOutcome::NotRunning => "not_running",
         AcquisitionOutcome::IoFailed { .. } => "io_failed",
-    }
-}
-
-/// Exact diagnostic carried by an acquisition outcome, when it has one.
-///
-/// Codes are a stable vocabulary, not an explanation. `carrier_startup_failed`
-/// covers every supervised-startup refusal — wrong socket mode, wrong owner,
-/// spawn failure, startup timeout — so a caller holding only the code cannot
-/// say which predicate refused. Callers that report a failure to an operator
-/// must report this alongside the code.
-fn acquisition_detail(outcome: &AcquisitionOutcome) -> Option<String> {
-    match outcome {
-        AcquisitionOutcome::SpawnFailed { message }
-        | AcquisitionOutcome::RequestWriteFailed { message }
-        | AcquisitionOutcome::MalformedFraming { message }
-        | AcquisitionOutcome::MalformedJson { message }
-        | AcquisitionOutcome::Disconnect { message }
-        | AcquisitionOutcome::CarrierStartupFailed { message }
-        | AcquisitionOutcome::IoFailed { message } => Some(message.clone()),
-        AcquisitionOutcome::ExitNonzero { code } | AcquisitionOutcome::HelperExited { code } => {
-            Some(code.map_or_else(
-                || "terminated by signal".to_owned(),
-                |code| format!("exit code {code}"),
-            ))
-        }
-        AcquisitionOutcome::ExchangeTimeout { .. }
-        | AcquisitionOutcome::Response
-        | AcquisitionOutcome::Timeout
-        | AcquisitionOutcome::OutputTooLarge
-        | AcquisitionOutcome::StderrTooLarge
-        | AcquisitionOutcome::Eof
-        | AcquisitionOutcome::NotRunning => None,
-    }
-}
-
-/// Operator-facing error for a dry collection that did not return a response.
-///
-/// Preserves the stable acquisition code and appends `acquisition_detail` when
-/// the outcome carries one, mirroring the daemon path's `AcquisitionFailed`
-/// (code + detail). A refusal family whose members share one coarse code but
-/// carry distinct dependent watchers -- every `carrier_startup_failed` variant:
-/// wrong socket mode, wrong owner, spawn failure, startup timeout -- must not be
-/// exported through a code-only projection that collapses those distinctions.
-fn dry_collection_error(outcome: &AcquisitionOutcome) -> EngineError {
-    let code = acquisition_code(outcome);
-    let message = match acquisition_detail(outcome) {
-        Some(detail) => format!("dry collection acquisition outcome {code}: {detail}"),
-        None => format!("dry collection acquisition outcome {code}"),
-    };
-    EngineError::Protocol(message)
-}
-
-fn refusal_source(boundary: &str) -> &'static str {
-    match boundary {
-        "protocol" => "protocol",
-        "profile" | "scope" | "vantage" | "capability" | "checkpoint" => "profile",
-        _ => "acquisition",
     }
 }
 
@@ -2693,7 +4359,16 @@ pub fn record_component_status(
 ///
 /// Returns when the source, backup, or verification step fails.
 pub fn backup_store(store: &Store, destination: &Path) -> Result<(), EngineError> {
+    validate_watcher_run_history(store)?;
+    validate_status_history_v2(store)?;
+    validate_rejected_custody_history(store)?;
+    validate_evaluation_refusal_history(store)?;
     let _artifact = store.backup_verified(destination)?;
+    let reopened = Store::open(destination)?;
+    validate_watcher_run_history(&reopened)?;
+    validate_status_history_v2(&reopened)?;
+    validate_rejected_custody_history(&reopened)?;
+    validate_evaluation_refusal_history(&reopened)?;
     Ok(())
 }
 
@@ -2702,7 +4377,7 @@ pub fn backup_store(store: &Store, destination: &Path) -> Result<(), EngineError
 /// # Errors
 ///
 /// Returns when a durable row violates the public DTO contract.
-pub fn list_findings(store: &Store) -> Result<Vec<FindingSnapshotV2>, EngineError> {
+pub fn list_findings(store: &Store) -> Result<Vec<FindingSnapshotV3>, EngineError> {
     store
         .finding_snapshots()?
         .into_iter()
@@ -2719,7 +4394,7 @@ pub fn list_findings_bounded(
     store: &Store,
     limit: u32,
     after_finding_id: Option<&str>,
-) -> Result<Vec<FindingSnapshotV2>, EngineError> {
+) -> Result<Vec<FindingSnapshotV3>, EngineError> {
     store
         .finding_snapshots_bounded(limit, after_finding_id)?
         .into_iter()
@@ -2745,6 +4420,377 @@ pub fn status_snapshot(store: &Store) -> Result<StatusSnapshotV1, EngineError> {
     })
 }
 
+/// Convert stable SQL status rows into the lossless typed v2 DTO.
+///
+/// # Errors
+///
+/// Returns when an instance row is legacy/unversioned, cannot decode as the
+/// canonical collection carrier, or disagrees with its component identity.
+pub fn status_snapshot_v2(store: &Store) -> Result<StatusSnapshotV2, EngineError> {
+    let components = store
+        .status_snapshots()?
+        .into_iter()
+        .map(|row| status_from_row_v2(store, row))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(StatusSnapshotV2 {
+        schema: STATUS_SNAPSHOT_V2_SCHEMA.into(),
+        generated_at: Utc::now(),
+        components,
+    })
+}
+
+/// Validate every immutable status event through the strict v2 reopening path.
+///
+/// This audits history rather than only the rebuildable current projection, so
+/// a legacy, substituted, or semantically invalid older instance event cannot
+/// be hidden by a newer valid event.
+///
+/// # Errors
+///
+/// Returns when any page cannot be read or any event violates the v2 component,
+/// canonical collection, status-projection, or linked-refusal contract.
+pub fn validate_status_history_v2(store: &Store) -> Result<usize, EngineError> {
+    const PAGE_SIZE: u32 = 256;
+    validate_status_history_v2_with_page_size(store, PAGE_SIZE)
+}
+
+fn validate_status_history_v2_with_page_size(
+    store: &Store,
+    page_size: u32,
+) -> Result<usize, EngineError> {
+    validate_watcher_run_history_with_page_size(store, page_size)?;
+    let mut after_sequence = None;
+    let mut validated = 0usize;
+    loop {
+        let page = store.status_history_bounded(page_size, after_sequence)?;
+        if page.is_empty() {
+            return Ok(validated);
+        }
+        let page_len = page.len();
+        for row in page {
+            after_sequence = Some(row.status_sequence);
+            let component = status_component_v2(
+                store,
+                &row.component_kind,
+                row.component_id,
+                &row.state,
+                row.code,
+                &row.detail_json,
+                &row.observed_at,
+            )?;
+            match &component.detail {
+                ComponentStatusDetailV2::Collection { result }
+                    if matches!(
+                        result.result,
+                        CollectionResult::AcquisitionFailed { .. }
+                            | CollectionResult::Rejected { .. }
+                    ) =>
+                {
+                    if row.run_id.as_deref() != result.run_id.as_deref() {
+                        return Err(EngineError::Invariant(format!(
+                            "status event {} lost its atomic non-success run association",
+                            row.status_event_id
+                        )));
+                    }
+                }
+                _ if row.run_id.is_some() => {
+                    return Err(EngineError::Invariant(format!(
+                        "status event {} links a run outside the non-success result contract",
+                        row.status_event_id
+                    )));
+                }
+                _ => {}
+            }
+            validated = validated.checked_add(1).ok_or_else(|| {
+                EngineError::Invariant("status history event count overflowed".into())
+            })?;
+        }
+        if page_len < page_size as usize {
+            return Ok(validated);
+        }
+    }
+}
+
+/// Exhaustively reopen every watcher run under the strict resource-outcome
+/// schema and verify its coarse SQL projection. The store additionally proves
+/// that each authoritative non-success run has exactly one atomic result link.
+///
+/// # Errors
+///
+/// Returns on an unsupported/unversioned resource document, a substituted
+/// acquisition projection, or missing/duplicate non-success result linkage.
+pub fn validate_watcher_run_history(store: &Store) -> Result<usize, EngineError> {
+    validate_watcher_run_history_with_page_size(store, nq_store::MAX_PUBLIC_QUERY_ROWS)
+}
+
+fn validate_watcher_run_history_with_page_size(
+    store: &Store,
+    page_size: u32,
+) -> Result<usize, EngineError> {
+    store.validate_non_success_run_results()?;
+    let mut after_run_id: Option<String> = None;
+    let mut validated = 0usize;
+    loop {
+        let page = store.watcher_run_outcomes_bounded(page_size, after_run_id.as_deref())?;
+        if page.is_empty() {
+            return Ok(validated);
+        }
+        let page_len = page.len();
+        for run in page {
+            after_run_id = Some(run.run_id.clone());
+            reopen_run_resource_outcome(&run)?;
+            validate_run_profile_identity(&run)?;
+            validated = validated.checked_add(1).ok_or_else(|| {
+                EngineError::Invariant("watcher run history count overflowed".into())
+            })?;
+        }
+        if page_len < page_size as usize {
+            return Ok(validated);
+        }
+    }
+}
+
+/// Exhaustively reopen every immutable detector evaluation and prove that its
+/// canonical result, refusal row, and optional finding-event copy carry the
+/// same governed refusal bytes and stable identity.
+///
+/// # Errors
+///
+/// Returns when any evaluation is unversioned, has an invalid refusal count,
+/// substitutes profile semantics, or disagrees with its finding event.
+pub fn validate_evaluation_refusal_history(store: &Store) -> Result<usize, EngineError> {
+    validate_evaluation_refusal_history_with_page_size(store, nq_store::MAX_PUBLIC_QUERY_ROWS)
+}
+
+fn validate_evaluation_refusal_history_with_page_size(
+    store: &Store,
+    page_size: u32,
+) -> Result<usize, EngineError> {
+    let mut after_evaluation_id: Option<String> = None;
+    let mut validated = 0usize;
+    loop {
+        let page =
+            store.evaluation_refusal_history_bounded(page_size, after_evaluation_id.as_deref())?;
+        if page.is_empty() {
+            return Ok(validated);
+        }
+        let page_len = page.len();
+        for row in page {
+            after_evaluation_id = Some(row.evaluation_id.clone());
+            validate_evaluation_refusal_row(&row)?;
+            validated = validated.checked_add(1).ok_or_else(|| {
+                EngineError::Invariant("evaluation history count overflowed".into())
+            })?;
+        }
+        if page_len < page_size as usize {
+            return Ok(validated);
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn validate_evaluation_refusal_row(
+    row: &nq_store::EvaluationRefusalHistoryRow,
+) -> Result<(), EngineError> {
+    let document = CanonicalDocument::from_canonical_bytes(row.detail_json.clone())?;
+    let result: EvaluationResultV1 =
+        serde_json::from_slice(document.as_bytes()).map_err(|error| {
+            EngineError::Invariant(format!(
+                "evaluation {} cannot decode as {EVALUATION_RESULT_SCHEMA}: {error}",
+                row.evaluation_id
+            ))
+        })?;
+    if canonical(&result)?.as_bytes() != document.as_bytes() {
+        return Err(EngineError::Invariant(format!(
+            "evaluation {} result is not exact canonical bytes",
+            row.evaluation_id
+        )));
+    }
+    let compiled = nq_profiles::resolve_profile_key(&result.profile.profile).ok_or_else(|| {
+        EngineError::Invariant(format!(
+            "evaluation {} names uncompiled profile {}/{}",
+            row.evaluation_id, result.profile.profile.id, result.profile.profile.version
+        ))
+    })?;
+    let compiled_digest = compiled
+        .descriptor()
+        .digest()
+        .map_err(|error| EngineError::Canonical(error.to_string()))?;
+    let compiled_semantic_id = profile_semantic_id(compiled.descriptor())
+        .map_err(|error| EngineError::Canonical(error.to_string()))?;
+    if row.evaluation_profile_id != result.profile.profile.id
+        || row.evaluation_profile_version != result.profile.profile.version.to_string()
+        || row.evaluation_profile_digest != result.profile.profile_digest.as_str()
+        || row.evaluation_profile_semantic_id != result.profile.profile_semantic_id.as_str()
+        || compiled_digest != result.profile.profile_digest
+        || compiled_semantic_id != result.profile.profile_semantic_id
+    {
+        return Err(EngineError::Invariant(format!(
+            "evaluation {} profile identity or semantic projection was substituted",
+            row.evaluation_id
+        )));
+    }
+    if row.finding_event_id.is_some()
+        && (row.finding_profile_id.as_deref() != Some(row.evaluation_profile_id.as_str())
+            || row.finding_profile_version.as_deref()
+                != Some(row.evaluation_profile_version.as_str())
+            || row.finding_profile_digest.as_deref()
+                != Some(row.evaluation_profile_digest.as_str()))
+    {
+        return Err(EngineError::Invariant(format!(
+            "evaluation {} finding profile binding was substituted",
+            row.evaluation_id
+        )));
+    }
+    let expected_outcome = match result.state {
+        DetectorState::Present => "condition_present",
+        DetectorState::ExplicitlyAbsent => "condition_explicitly_absent",
+        DetectorState::CannotEvaluate => "cannot_evaluate",
+    };
+    if row.outcome != expected_outcome
+        || (result.state == DetectorState::CannotEvaluate) != result.refusal.is_some()
+    {
+        return Err(EngineError::Invariant(format!(
+            "evaluation {} coarse outcome disagrees with its governed result",
+            row.evaluation_id
+        )));
+    }
+
+    match (&result.refusal, &row.refusal_detail_json) {
+        (None, None) => {
+            if row.refusal_id.is_some() || row.finding_refusal_json.is_some() {
+                return Err(EngineError::Invariant(format!(
+                    "successful evaluation {} carries refusal projections",
+                    row.evaluation_id
+                )));
+            }
+        }
+        (Some(refusal), Some(stored)) => {
+            let reopened = decode_governed_refusal(
+                stored,
+                &format!("evaluation {} refusal", row.evaluation_id),
+            )?;
+            let (source_kind, boundary, code) = governed_refusal_projections(&reopened)?;
+            let GovernedRefusalOrigin::Profile(profile) = &reopened.origin else {
+                return Err(EngineError::Invariant(format!(
+                    "evaluation {} refusal is not profile-origin",
+                    row.evaluation_id
+                )));
+            };
+            if refusal != &reopened
+                || row.refusal_id.as_deref() != Some(reopened.refusal_id.as_str())
+                || row.source_kind.as_deref() != Some(source_kind.as_str())
+                || row.responsible_instance_id.as_deref()
+                    != Some(reopened.responsible_instance_id())
+                || row.boundary.as_deref() != Some(boundary.as_str())
+                || row.code.as_deref() != Some(code.as_str())
+                || row.profile_id.as_deref() != Some(profile.refusal.profile.id.as_str())
+                || row.profile_version.as_deref()
+                    != Some(profile.refusal.profile.version.to_string().as_str())
+                || row.profile_digest.as_deref() != Some(result.profile.profile_digest.as_str())
+                || row.profile_semantic_id.as_deref() != Some(profile.profile_semantic_id.as_str())
+                || profile.refusal.profile != result.profile.profile
+                || profile.profile_semantic_id != result.profile.profile_semantic_id
+            {
+                return Err(EngineError::Invariant(format!(
+                    "evaluation {} refusal projections or semantic identity were substituted",
+                    row.evaluation_id
+                )));
+            }
+            if let Some(finding_refusal) = &row.finding_refusal_json
+                && finding_refusal != stored
+            {
+                return Err(EngineError::Invariant(format!(
+                    "evaluation {} finding refusal differs from its refusal row",
+                    row.evaluation_id
+                )));
+            }
+        }
+        _ => {
+            return Err(EngineError::Invariant(format!(
+                "evaluation {} result and refusal row disagree",
+                row.evaluation_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Reopen bounded rejected custody as exact typed refusal testimony.
+///
+/// # Errors
+///
+/// Fails closed when stored canonical bytes are unversioned, fail to decode,
+/// or disagree with any stable SQL projection or originating run identity.
+pub fn rejected_custody_snapshot(
+    store: &Store,
+    limit: u32,
+) -> Result<RejectedCustodySnapshotV1, EngineError> {
+    rejected_custody_snapshot_bounded(store, limit, None)
+}
+
+/// Reopen one bounded page of rejected custody after an immutable submission
+/// identity, validating every result against its originating run.
+///
+/// # Errors
+///
+/// Returns when the cursor/limit is invalid or any row fails canonical refusal,
+/// profile-semantic, acquisition, or run linkage validation.
+pub fn rejected_custody_snapshot_bounded(
+    store: &Store,
+    limit: u32,
+    after_submission_id: Option<&str>,
+) -> Result<RejectedCustodySnapshotV1, EngineError> {
+    let records = store
+        .rejected_custody_bounded(limit, after_submission_id)?
+        .into_iter()
+        .map(|row| rejected_custody_from_row(store, row))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(RejectedCustodySnapshotV1 {
+        schema: REJECTED_CUSTODY_SCHEMA.into(),
+        generated_at: Utc::now(),
+        records,
+    })
+}
+
+/// Exhaustively reopen and validate immutable rejected-custody history.
+///
+/// The bounded public snapshot is intentionally not used as an archive receipt:
+/// this validator pages by immutable submission identity until no rows remain.
+///
+/// # Errors
+///
+/// Returns when paging fails or any row cannot prove exact canonical refusal,
+/// projection, instance, run, or profile association.
+pub fn validate_rejected_custody_history(store: &Store) -> Result<usize, EngineError> {
+    validate_rejected_custody_history_with_page_size(store, nq_store::MAX_PUBLIC_QUERY_ROWS)
+}
+
+fn validate_rejected_custody_history_with_page_size(
+    store: &Store,
+    page_size: u32,
+) -> Result<usize, EngineError> {
+    let mut after_submission_id: Option<String> = None;
+    let mut validated = 0usize;
+    loop {
+        let page = store.rejected_custody_bounded(page_size, after_submission_id.as_deref())?;
+        if page.is_empty() {
+            return Ok(validated);
+        }
+        let page_len = page.len();
+        for row in page {
+            after_submission_id = Some(row.submission_id.clone());
+            rejected_custody_from_row(store, row)?;
+            validated = validated.checked_add(1).ok_or_else(|| {
+                EngineError::Invariant("rejected custody count overflowed".into())
+            })?;
+        }
+        if page_len < page_size as usize {
+            return Ok(validated);
+        }
+    }
+}
+
 /// Run a bounded read-only public-view query.
 ///
 /// # Errors
@@ -2758,7 +4804,7 @@ pub fn public_query(store: &Store, sql: &str, limit: u32) -> Result<Vec<Value>, 
         .join(" ")
         .to_ascii_lowercase();
     match normalized.as_str() {
-        "select * from public_finding_snapshot_v2" => store
+        "select * from public_finding_snapshot_v3" => store
             .finding_snapshots_bounded(limit, None)?
             .into_iter()
             .map(finding_from_row)
@@ -2781,16 +4827,69 @@ pub fn public_query(store: &Store, sql: &str, limit: u32) -> Result<Vec<Value>, 
             })
             .collect(),
         _ => Err(EngineError::Invariant(
-            "query must be exactly `SELECT * FROM public_finding_snapshot_v2` or `SELECT * FROM public_status_snapshot_v1`"
+            "query must be exactly `SELECT * FROM public_finding_snapshot_v3` or `SELECT * FROM public_status_snapshot_v1`"
                 .into(),
         )),
     }
 }
 
-fn finding_from_row(row: nq_store::FindingSnapshotRow) -> Result<FindingSnapshotV2, EngineError> {
+#[allow(clippy::too_many_lines)]
+fn finding_from_row(row: nq_store::FindingSnapshotRow) -> Result<FindingSnapshotV3, EngineError> {
     let evidence: Vec<PublicEvidenceReference> = serde_json::from_str(&row.evidence_json)
         .map_err(|error| EngineError::Invariant(format!("invalid evidence view JSON: {error}")))?;
-    Ok(FindingSnapshotV2 {
+    let profile_version = row.profile_version.parse().map_err(|error| {
+        EngineError::Invariant(format!("finding profile version is invalid: {error}"))
+    })?;
+    let profile_key = nq_profiles::ProfileKey::new(row.profile_id.clone(), profile_version);
+    let compiled = nq_profiles::resolve_profile_key(&profile_key).ok_or_else(|| {
+        EngineError::Invariant(format!(
+            "finding {} names uncompiled profile {}/{}",
+            row.finding_id, row.profile_id, row.profile_version
+        ))
+    })?;
+    let compiled_digest = compiled
+        .descriptor()
+        .digest()
+        .map_err(|error| EngineError::Canonical(error.to_string()))?;
+    let compiled_semantic_id = profile_semantic_id(compiled.descriptor())
+        .map_err(|error| EngineError::Canonical(error.to_string()))?;
+    if row.profile_digest != compiled_digest.as_str()
+        || row.profile_semantic_id != compiled_semantic_id.as_str()
+    {
+        return Err(EngineError::Invariant(format!(
+            "finding {} profile digest or semantic identity was substituted",
+            row.finding_id
+        )));
+    }
+    if row.refusal_json != row.evaluation_refusal_json {
+        return Err(EngineError::Invariant(format!(
+            "finding {} refusal differs from evaluation {} canonical refusal",
+            row.finding_id, row.evaluation_id
+        )));
+    }
+    let refusal = row
+        .refusal_json
+        .as_deref()
+        .map(|value| {
+            decode_governed_refusal(
+                value.as_bytes(),
+                &format!("finding {} refusal", row.finding_id),
+            )
+        })
+        .transpose()?;
+    if let Some(GovernedRefusal {
+        origin: GovernedRefusalOrigin::Profile(profile),
+        ..
+    }) = &refusal
+        && (profile.refusal.profile != profile_key
+            || profile.profile_semantic_id.as_str() != row.profile_semantic_id)
+    {
+        return Err(EngineError::Invariant(format!(
+            "finding {} profile identity disagrees with its governed refusal",
+            row.finding_id
+        )));
+    }
+    Ok(FindingSnapshotV3 {
         schema: FINDING_SNAPSHOT_SCHEMA.into(),
         finding_id: row.finding_id,
         instance_id: row.instance_id,
@@ -2804,11 +4903,9 @@ fn finding_from_row(row: nq_store::FindingSnapshotRow) -> Result<FindingSnapshot
         },
         profile: PublicProfileIdentity {
             id: row.profile_id,
-            version: row
-                .profile_version
-                .parse()
-                .map_err(|error| EngineError::Invariant(format!("profile version: {error}")))?,
+            version: profile_version,
             digest: row.profile_digest,
+            semantic_id: row.profile_semantic_id,
         },
         subject: serde_json::from_str(&row.subject_json)
             .map_err(|error| EngineError::Invariant(error.to_string()))?,
@@ -2824,11 +4921,7 @@ fn finding_from_row(row: nq_store::FindingSnapshotRow) -> Result<FindingSnapshot
                 .map_err(|error| EngineError::Invariant(error.to_string()))?,
             basis: serde_json::from_str(&row.basis_json)
                 .map_err(|error| EngineError::Invariant(error.to_string()))?,
-            refusal: row
-                .refusal_json
-                .map(|value| serde_json::from_str(&value))
-                .transpose()
-                .map_err(|error| EngineError::Invariant(error.to_string()))?,
+            refusal,
         },
         operator_work_state: row.operator_work_state,
         severity: parse_severity(&row.severity)?,
@@ -2864,35 +4957,380 @@ fn finding_from_row(row: nq_store::FindingSnapshotRow) -> Result<FindingSnapshot
 }
 
 fn status_from_row(row: nq_store::StatusSnapshotRow) -> Result<ComponentStatus, EngineError> {
+    let details: Value = serde_json::from_str(&row.detail_json)
+        .map_err(|error| EngineError::Invariant(error.to_string()))?;
+    if row.component_kind == "instance"
+        && details.get("schema").and_then(Value::as_str) == Some(COLLECTION_OUTCOME_SCHEMA)
+    {
+        return Err(EngineError::Invariant(
+            "nq.status_snapshot.v1 cannot emit a typed collection-result shape; use v2".into(),
+        ));
+    }
     Ok(ComponentStatus {
-        kind: match row.component_kind.as_str() {
-            "daemon" => ComponentKind::Daemon,
-            "database" => ComponentKind::Database,
-            "profile_catalog" => ComponentKind::ProfileCatalog,
-            "admission" => ComponentKind::Admission,
-            "scheduler" => ComponentKind::Scheduler,
-            "instance" => ComponentKind::Instance,
-            "evaluation" => ComponentKind::Evaluation,
-            "notification" => ComponentKind::Notification,
-            value => return Err(EngineError::Invariant(format!("unknown component {value}"))),
-        },
+        kind: parse_component_kind(&row.component_kind)?,
         id: row.component_id,
-        state: match row.state.as_str() {
-            "healthy" => HealthState::Healthy,
-            "degraded" => HealthState::Degraded,
-            "failed" => HealthState::Failed,
-            "unknown" => HealthState::Unknown,
-            value => {
-                return Err(EngineError::Invariant(format!(
-                    "unknown health state {value}"
-                )));
-            }
-        },
+        state: parse_health_state(&row.state)?,
         code: row.code,
-        details: serde_json::from_str(&row.detail_json)
-            .map_err(|error| EngineError::Invariant(error.to_string()))?,
+        details,
         observed_at: parse_timestamp(&row.observed_at)?,
     })
+}
+
+fn status_from_row_v2(
+    store: &Store,
+    row: nq_store::StatusSnapshotRow,
+) -> Result<ComponentStatusV2, EngineError> {
+    status_component_v2(
+        store,
+        &row.component_kind,
+        row.component_id,
+        &row.state,
+        row.code,
+        &row.detail_json,
+        &row.observed_at,
+    )
+}
+
+fn status_component_v2(
+    store: &Store,
+    component_kind: &str,
+    component_id: String,
+    state: &str,
+    code: String,
+    detail_json: &str,
+    observed_at: &str,
+) -> Result<ComponentStatusV2, EngineError> {
+    let kind = parse_component_kind(component_kind)?;
+    let detail = if kind == ComponentKind::Instance {
+        let result = decode_collection_outcome(detail_json.as_bytes()).map_err(|error| {
+            EngineError::Invariant(format!(
+                "instance status {component_id} is not a valid versioned collection result: {error}"
+            ))
+        })?;
+        if result.instance_id != component_id {
+            return Err(EngineError::Invariant(format!(
+                "instance status {} embeds result for {}",
+                component_id, result.instance_id
+            )));
+        }
+        let projection = instance_status_projection(&result)?;
+        if state != projection.state || code != projection.code {
+            return Err(EngineError::Invariant(format!(
+                "instance status {component_id} projects ({state}, {code}) but its typed result requires ({}, {})",
+                projection.state, projection.code
+            )));
+        }
+        validate_collection_run(store, &result)?;
+        if let CollectionResult::Rejected { refusal } = &result.result {
+            let run_id = result.run_id.as_deref().ok_or_else(|| {
+                EngineError::Invariant(format!(
+                    "rejected instance status {component_id} has no run identity"
+                ))
+            })?;
+            let custody_row = store
+                .rejected_custody_by_refusal_id(&refusal.refusal_id)?
+                .ok_or_else(|| {
+                    EngineError::Invariant(format!(
+                        "rejected instance status {} names refusal {} without linked custody",
+                        component_id, refusal.refusal_id
+                    ))
+                })?;
+            let custody = rejected_custody_from_row(store, custody_row)?;
+            if custody.run_id != run_id
+                || custody.instance_id != result.instance_id
+                || custody.refusal != *refusal
+            {
+                return Err(EngineError::Invariant(format!(
+                    "rejected instance status {} disagrees with linked refusal {} or run {}",
+                    component_id, refusal.refusal_id, run_id
+                )));
+            }
+        }
+        ComponentStatusDetailV2::Collection { result }
+    } else {
+        ComponentStatusDetailV2::Diagnostic {
+            value: serde_json::from_str(detail_json)
+                .map_err(|error| EngineError::Invariant(error.to_string()))?,
+        }
+    };
+    Ok(ComponentStatusV2 {
+        kind,
+        id: component_id,
+        state: parse_health_state(state)?,
+        code,
+        detail,
+        observed_at: parse_timestamp(observed_at)?,
+    })
+}
+
+fn validate_collection_run(store: &Store, result: &CollectionOutcome) -> Result<(), EngineError> {
+    let Some(run_id) = result.run_id.as_deref() else {
+        return Ok(());
+    };
+    let run = store.watcher_run_outcome(run_id)?.ok_or_else(|| {
+        EngineError::Invariant(format!(
+            "collection result names watcher run {run_id} that is not persisted"
+        ))
+    })?;
+    if run.run_id != run_id || run.instance_id != result.instance_id {
+        return Err(EngineError::Invariant(format!(
+            "collection result run {run_id} disagrees with persisted run instance {}",
+            run.instance_id
+        )));
+    }
+    validate_run_profile_identity(&run)?;
+
+    let resource = reopen_run_resource_outcome(&run)?;
+
+    let expected = match &result.result {
+        CollectionResult::Admitted { .. } => &AcquisitionOutcome::Response,
+        CollectionResult::AdmissionRefused { .. } => {
+            return Err(EngineError::Invariant(
+                "admission-refused result cannot name a watcher run".into(),
+            ));
+        }
+        CollectionResult::AcquisitionFailed { failure } => &failure.outcome,
+        CollectionResult::Rejected { refusal } => match &refusal.origin {
+            GovernedRefusalOrigin::Acquisition(acquisition) => &acquisition.failure.outcome,
+            GovernedRefusalOrigin::Protocol(_)
+            | GovernedRefusalOrigin::Helper(_)
+            | GovernedRefusalOrigin::Profile(_) => &AcquisitionOutcome::Response,
+        },
+    };
+    if resource.outcome != *expected {
+        return Err(EngineError::Invariant(format!(
+            "collection result for run {run_id} substitutes acquisition testimony from persisted resource outcome"
+        )));
+    }
+
+    if let CollectionResult::Rejected {
+        refusal:
+            GovernedRefusal {
+                origin: GovernedRefusalOrigin::Profile(profile),
+                ..
+            },
+    } = &result.result
+    {
+        let compiled =
+            nq_profiles::resolve_profile_key(&profile.refusal.profile).ok_or_else(|| {
+                EngineError::Invariant(format!(
+                    "profile refusal for run {run_id} names uncompiled profile {}/{}",
+                    profile.refusal.profile.id, profile.refusal.profile.version
+                ))
+            })?;
+        let compiled_digest = compiled
+            .descriptor()
+            .digest()
+            .map_err(|error| EngineError::Canonical(error.to_string()))?;
+        let stored_semantic_id = run.profile_semantic_id.as_deref().ok_or_else(|| {
+            EngineError::Invariant(format!(
+                "profile refusal for run {run_id} has no persisted admission semantic identity"
+            ))
+        })?;
+        if run.admission_id.is_none()
+            || stored_semantic_id != profile.profile_semantic_id.as_str()
+            || run.profile_id != profile.refusal.profile.id
+            || run.profile_version != profile.refusal.profile.version.to_string()
+            || run.profile_digest != compiled_digest.as_str()
+        {
+            return Err(EngineError::Invariant(format!(
+                "profile refusal for run {run_id} disagrees with its persisted profile semantic identity"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_run_profile_identity(
+    run: &nq_store::WatcherRunOutcomeRow,
+) -> Result<ProfileSemanticId, EngineError> {
+    if run.admission_id.is_none() {
+        return Err(EngineError::Invariant(format!(
+            "watcher run {} has no admission proving its profile semantics",
+            run.run_id
+        )));
+    }
+    let version = run.profile_version.parse().map_err(|error| {
+        EngineError::Invariant(format!(
+            "watcher run {} profile version is invalid: {error}",
+            run.run_id
+        ))
+    })?;
+    let key = nq_profiles::ProfileKey::new(run.profile_id.clone(), version);
+    let compiled = nq_profiles::resolve_profile_key(&key).ok_or_else(|| {
+        EngineError::Invariant(format!(
+            "watcher run {} names uncompiled profile {}/{}",
+            run.run_id, run.profile_id, run.profile_version
+        ))
+    })?;
+    let digest = compiled
+        .descriptor()
+        .digest()
+        .map_err(|error| EngineError::Canonical(error.to_string()))?;
+    let semantic_id = profile_semantic_id(compiled.descriptor())
+        .map_err(|error| EngineError::Canonical(error.to_string()))?;
+    if run.profile_digest != digest.as_str()
+        || run.profile_semantic_id.as_deref() != Some(semantic_id.as_str())
+    {
+        return Err(EngineError::Invariant(format!(
+            "watcher run {} profile digest or semantic identity was substituted",
+            run.run_id
+        )));
+    }
+    Ok(semantic_id)
+}
+
+fn reopen_run_resource_outcome(
+    run: &nq_store::WatcherRunOutcomeRow,
+) -> Result<RunResourceOutcomeV1, EngineError> {
+    let document = CanonicalDocument::from_canonical_bytes(run.resource_outcome_json.clone())?;
+    let resource: RunResourceOutcomeV1 = serde_json::from_slice(document.as_bytes()).map_err(
+        |error| {
+            EngineError::Invariant(format!(
+                "watcher run {} resource outcome cannot decode as {RUN_RESOURCE_OUTCOME_SCHEMA}: {error}",
+                run.run_id
+            ))
+        },
+    )?;
+    if canonical(&resource)?.as_bytes() != document.as_bytes() {
+        return Err(EngineError::Invariant(format!(
+            "watcher run {} resource outcome does not round-trip canonically",
+            run.run_id
+        )));
+    }
+    let stderr = hex::decode(&resource.stderr_hex).map_err(|error| {
+        EngineError::Invariant(format!(
+            "watcher run {} stderr testimony is not exact hexadecimal bytes: {error}",
+            run.run_id
+        ))
+    })?;
+    if stderr.len() != resource.stderr_bytes_retained {
+        return Err(EngineError::Invariant(format!(
+            "watcher run {} stderr length disagrees with its retained bytes",
+            run.run_id
+        )));
+    }
+    if run.acquisition_outcome != acquisition_code(&resource.outcome) {
+        return Err(EngineError::Invariant(format!(
+            "watcher run {} acquisition projection {} disagrees with its exact resource outcome",
+            run.run_id, run.acquisition_outcome
+        )));
+    }
+    Ok(resource)
+}
+
+fn rejected_custody_from_row(
+    store: &Store,
+    row: nq_store::RejectedCustodyRow,
+) -> Result<RejectedCustodyV1, EngineError> {
+    let document = CanonicalDocument::from_canonical_bytes(row.detail_json.clone())?;
+    let refusal: GovernedRefusal =
+        serde_json::from_slice(document.as_bytes()).map_err(|error| {
+            EngineError::Invariant(format!(
+                "typed refusal {} cannot decode: {error}",
+                row.refusal_id
+            ))
+        })?;
+    refusal.validate()?;
+    let profile_semantic_id = row.profile_semantic_id.clone().ok_or_else(|| {
+        EngineError::Invariant(format!(
+            "rejected custody {} has no admission proving its profile semantics",
+            row.submission_id
+        ))
+    })?;
+    if row.admission_id.is_none() {
+        return Err(EngineError::Invariant(format!(
+            "rejected custody {} is not linked to an admission",
+            row.submission_id
+        )));
+    }
+    if canonical(&refusal)?.as_bytes() != document.as_bytes() {
+        return Err(EngineError::Invariant(format!(
+            "typed refusal {} does not round-trip to its exact canonical bytes",
+            row.refusal_id
+        )));
+    }
+    let (source_kind, boundary, code) = governed_refusal_projections(&refusal)?;
+    let expected_protocol_outcome = match &refusal.origin {
+        GovernedRefusalOrigin::Acquisition(_) => "not_validated",
+        GovernedRefusalOrigin::Protocol(_) => "rejected",
+        GovernedRefusalOrigin::Helper(_) => "valid_refusal",
+        GovernedRefusalOrigin::Profile(_) => "valid_report",
+    };
+    if refusal.refusal_id != row.refusal_id
+        || refusal.responsible_instance_id() != row.responsible_instance_id
+        || row.responsible_instance_id != row.instance_id
+        || source_kind != row.source_kind
+        || boundary != row.boundary
+        || code != row.code
+        || row.protocol_outcome != expected_protocol_outcome
+    {
+        return Err(EngineError::Invariant(format!(
+            "rejected custody {} disagrees with its canonical refusal projections",
+            row.submission_id
+        )));
+    }
+    if let GovernedRefusalOrigin::Profile(profile_refusal) = &refusal.origin
+        && (profile_refusal.refusal.profile.id != row.profile_id
+            || profile_refusal.refusal.profile.version.to_string() != row.profile_version
+            || row.admission_id.is_none()
+            || row.profile_semantic_id.as_deref()
+                != Some(profile_refusal.profile_semantic_id.as_str()))
+    {
+        return Err(EngineError::Invariant(format!(
+            "rejected custody {} profile semantic identity disagrees with its refusal",
+            row.submission_id
+        )));
+    }
+    validate_collection_run(
+        store,
+        &CollectionOutcome::rejected(row.instance_id.clone(), row.run_id.clone(), refusal.clone()),
+    )?;
+    Ok(RejectedCustodyV1 {
+        submission_id: row.submission_id,
+        run_id: row.run_id,
+        request_id: row.request_id,
+        instance_id: row.instance_id,
+        profile: PublicProfileIdentity {
+            id: row.profile_id,
+            version: row.profile_version.parse().map_err(|error| {
+                EngineError::Invariant(format!("invalid rejected-custody profile version: {error}"))
+            })?,
+            digest: row.profile_digest,
+            semantic_id: profile_semantic_id,
+        },
+        raw_sha256: row.raw_sha256,
+        received_at: parse_timestamp(&row.received_at)?,
+        protocol_outcome: row.protocol_outcome,
+        refusal,
+        created_at: parse_timestamp(&row.created_at)?,
+    })
+}
+
+fn parse_component_kind(value: &str) -> Result<ComponentKind, EngineError> {
+    match value {
+        "daemon" => Ok(ComponentKind::Daemon),
+        "database" => Ok(ComponentKind::Database),
+        "profile_catalog" => Ok(ComponentKind::ProfileCatalog),
+        "admission" => Ok(ComponentKind::Admission),
+        "scheduler" => Ok(ComponentKind::Scheduler),
+        "instance" => Ok(ComponentKind::Instance),
+        "evaluation" => Ok(ComponentKind::Evaluation),
+        "notification" => Ok(ComponentKind::Notification),
+        _ => Err(EngineError::Invariant(format!("unknown component {value}"))),
+    }
+}
+
+fn parse_health_state(value: &str) -> Result<HealthState, EngineError> {
+    match value {
+        "healthy" => Ok(HealthState::Healthy),
+        "degraded" => Ok(HealthState::Degraded),
+        "failed" => Ok(HealthState::Failed),
+        "unknown" => Ok(HealthState::Unknown),
+        _ => Err(EngineError::Invariant(format!(
+            "unknown health state {value}"
+        ))),
+    }
 }
 
 fn parse_condition(value: &str) -> Result<ConditionState, EngineError> {
@@ -2939,6 +5377,218 @@ mod tests {
     };
 
     use super::*;
+
+    const SEMANTIC_TRANSPORT_HELPER: &str = r#"import datetime
+import json
+import os
+import pathlib
+import sys
+
+request = json.load(sys.stdin)
+mode = pathlib.Path(os.environ["NQ_TEST_MODE"]).read_text(encoding="utf-8").strip()
+echo = dict(request)
+del echo["schema"]
+
+if mode.startswith("helper_"):
+    transient = mode == "helper_transient"
+    refusal = {
+        "responsible_instance_id": request["instance_id"],
+        "boundary": "collection",
+        "code": "collection_failed",
+        "message": "backend collection failed",
+        "retriable": transient,
+        "details": {
+            "errno": "EAGAIN" if transient else "ENODEV",
+            "attempt": 1 if transient else 2,
+        },
+    }
+    outcome = {"kind": "refusal", "refusal": refusal}
+else:
+    observed_at = (
+        datetime.datetime.now(datetime.timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
+    binding = request["binding"]
+    nonce = binding["scope"]["value"]["nonce"]
+    report = {
+        "schema": "nq.evidence_report.v1",
+        "profile": request["profile"],
+        "binding": binding,
+        "observed_at": observed_at,
+        "status": "complete",
+        "coverage": [{"kind": "echo", "state": "complete"}],
+        "observations": [{
+            "ordinal": 0,
+            "kind": "echo",
+            "subject": binding["subject"],
+            "observed_at": observed_at,
+            "payload": {
+                "evidence_basis": {
+                    "scope": binding["scope"],
+                    "vantage": binding["vantage"],
+                    "access_path": "process",
+                    "basis": "request_echo",
+                    "regime": "conformance",
+                    "capabilities_used": [],
+                },
+                "nonce": nonce,
+            },
+        }],
+        "errors": [],
+        "used_capabilities": [],
+        "backend": {
+            "implementation": {"name": "semantic-transport-fixture", "version": "1"},
+            "tools": [],
+        },
+    }
+    if mode == "profile_reject":
+        del report["observations"][0]["payload"]["nonce"]
+    outcome = {"kind": "report", "report": report}
+
+response = {"schema": "nq.helper.response.v1", "echo": echo, "outcome": outcome}
+json.dump(response, sys.stdout, sort_keys=True, separators=(",", ":"))
+sys.stdout.write("\n")
+"#;
+
+    fn test_run_resource(outcome: AcquisitionOutcome) -> CanonicalDocument {
+        canonical(&RunResourceOutcomeV1 {
+            schema: RunResourceOutcomeSchema::V1,
+            duration_ms: 1,
+            exit_code: (outcome == AcquisitionOutcome::Response).then_some(0),
+            hard_limits: RunHardLimits {
+                address_space_bytes_per_process: 1,
+                cpu_seconds_per_process: 1,
+                processes_per_execution_uid: 1,
+                open_files_per_process: 1,
+                file_bytes_per_regular_file: 1,
+                core_bytes: 0,
+            },
+            stdout_bytes_retained: 0,
+            stderr_bytes_retained: 0,
+            stderr_hex: String::new(),
+            outcome,
+        })
+        .expect("canonical run resource")
+    }
+
+    fn seed_compiled_admission(
+        store: &mut Store,
+        profile: &'static dyn ProfileModule,
+        instance_id: &str,
+        suffix: &str,
+    ) -> String {
+        let descriptor = profile.descriptor();
+        let profile_digest = descriptor.digest().expect("profile digest");
+        if store
+            .profile_descriptor(
+                &descriptor.profile.id,
+                &descriptor.profile.version.to_string(),
+                profile_digest.as_str(),
+            )
+            .expect("profile descriptor lookup")
+            .is_none()
+        {
+            append_profile_descriptor(store, profile).expect("append compiled descriptor");
+        }
+        let admission_id = format!("admission-{suffix}");
+        let typed = |label: &str| nq_protocol::sha256_bytes(format!("{label}-{suffix}").as_bytes());
+        store
+            .append_admission(&AdmissionInput {
+                admission_id: admission_id.clone(),
+                instance_id: instance_id.to_owned(),
+                identity: AdmissionIdentity {
+                    profile_semantic_id: parse_identity_digest(
+                        "profile_semantic_id",
+                        profile_semantic_id(descriptor)
+                            .expect("profile semantic identity")
+                            .as_str(),
+                    )
+                    .expect("typed semantic identity"),
+                    detector_identity_digest: typed("detectors"),
+                    evaluator_source_digest: typed("source"),
+                    evaluator_artifact_digest: typed("evaluator"),
+                    helper_artifact_digest: typed("helper"),
+                    config_digest: typed("config"),
+                    protocol_version: nq_protocol::HELPER_PROTOCOL_VERSION.to_owned(),
+                    target_triple: "x86_64-unknown-linux-gnu".to_owned(),
+                    artifact_identity_method: "test-fixture".to_owned(),
+                    platform_runtime_version: "test".to_owned(),
+                },
+                execution_chain: canonical(&json!({"fixture": suffix})).expect("execution"),
+                profile_id: descriptor.profile.id.clone(),
+                profile_version: descriptor.profile.version.to_string(),
+                profile_digest: profile_digest.as_str().to_owned(),
+                capability_grant: canonical(&json!([])).expect("capability grant"),
+                conformance: canonical(&json!({"passed": true})).expect("conformance"),
+                lock: canonical(&json!({"fixture": suffix})).expect("lock"),
+                admitted_at: "2026-07-20T12:00:00.000Z".to_owned(),
+                operator_identity: canonical(&json!({"uid": 991})).expect("operator"),
+            })
+            .expect("append compiled admission");
+        admission_id
+    }
+
+    fn test_run(
+        profile: &'static dyn ProfileModule,
+        instance_id: &str,
+        suffix: &str,
+        admission_id: String,
+        outcome: AcquisitionOutcome,
+    ) -> RunInput {
+        let descriptor = profile.descriptor();
+        RunInput {
+            run_id: format!("run-{suffix}"),
+            request_id: format!("request-{suffix}"),
+            instance_id: instance_id.to_owned(),
+            admission_id: Some(admission_id),
+            binding_digest: nq_protocol::sha256_bytes(format!("binding-{suffix}").as_bytes())
+                .into_string(),
+            checkpoint_contract_digest: nq_protocol::sha256_bytes(
+                format!("checkpoint-{suffix}").as_bytes(),
+            )
+            .into_string(),
+            profile_id: descriptor.profile.id.clone(),
+            profile_version: descriptor.profile.version.to_string(),
+            profile_digest: descriptor
+                .digest()
+                .expect("profile digest")
+                .as_str()
+                .to_owned(),
+            carrier: "stdio".to_owned(),
+            started_at: "2026-07-20T12:00:00.000Z".to_owned(),
+            deadline_at: "2026-07-20T12:00:10.000Z".to_owned(),
+            finished_at: "2026-07-20T12:00:01.000Z".to_owned(),
+            acquisition_outcome: acquisition_code(&outcome).to_owned(),
+            execution_identity: canonical(&json!({"fixture": suffix})).expect("execution"),
+            resource_outcome: test_run_resource(outcome),
+        }
+    }
+
+    fn commit_test_non_success(
+        store: &mut Store,
+        run: RunInput,
+        submission: Option<SubmissionInput>,
+        outcome: &CollectionOutcome,
+        suffix: &str,
+    ) -> nq_store::CollectionReceipt {
+        let projection = instance_status_projection(outcome).expect("status projection");
+        let result = RunResultStatusInput {
+            run_id: run.run_id.clone(),
+            status: StatusEventInput {
+                status_event_id: format!("status-{suffix}"),
+                component_kind: "instance".to_owned(),
+                component_id: run.instance_id.clone(),
+                state: projection.state.to_owned(),
+                code: projection.code.to_owned(),
+                detail: canonical(outcome).expect("canonical collection result"),
+                observed_at: "2026-07-20T12:00:01.000Z".to_owned(),
+            },
+        };
+        store
+            .commit_non_success_collection(&CollectionInput { run, submission }, &result)
+            .expect("commit atomic non-success fixture")
+    }
 
     fn host_example_text() -> String {
         include_str!("../../../examples/nq-host.toml").replace(
@@ -3063,6 +5713,10 @@ mod tests {
                 profile_id: profile.descriptor().profile.id.clone(),
                 profile_version: profile_version.clone(),
                 profile_digest: profile_digest.clone(),
+                profile_semantic_id: profile_semantic_id(profile.descriptor())
+                    .expect("compiled profile semantic identity")
+                    .as_str()
+                    .to_owned(),
                 subject_json: subject_json.clone(),
                 condition_name: descriptor.condition.clone(),
                 condition_state: "present".to_owned(),
@@ -3080,6 +5734,8 @@ mod tests {
                 observed_at: Some(timestamp(observed_at)),
                 received_at: Some(timestamp(observed_at)),
                 evaluated_at: timestamp(observed_at),
+                evaluation_id: "evaluation:old-lineage".to_owned(),
+                evaluation_refusal_json: None,
                 evidence_json: serde_json::to_string(&vec![PublicEvidenceReference {
                     report_id: "report:old-lineage".to_owned(),
                     semantic_digest: semantic_digest.clone(),
@@ -3120,6 +5776,7 @@ mod tests {
                 profile_id: &self.watcher().profile.id,
                 profile_version: &self.profile_version,
                 profile_digest: &self.profile_digest,
+                profile_semantic_id: &self.finding.profile_semantic_id,
                 subject_json: &self.subject_json,
             }
         }
@@ -3354,16 +6011,16 @@ mod tests {
 
     #[test]
     fn valid_failed_report_is_not_an_acquisition_failure() {
-        let outcome = CollectionOutcome::Admitted {
-            instance_id: "x".into(),
-            run_id: "r".into(),
-            report_id: "p".into(),
-            report_status: "failed".into(),
-            semantic_digest: format!("sha256:{}", "a".repeat(64)),
-            evaluations: 0,
-        };
+        let outcome = CollectionOutcome::admitted(
+            "x".into(),
+            "r".into(),
+            "p".into(),
+            "failed".into(),
+            format!("sha256:{}", "a".repeat(64)),
+            0,
+        );
         assert!(!outcome.is_success());
-        assert!(matches!(outcome, CollectionOutcome::Admitted { .. }));
+        assert!(matches!(outcome.result, CollectionResult::Admitted { .. }));
     }
 
     #[test]
@@ -3380,6 +6037,7 @@ mod tests {
         let changed_detector_digest = format!("sha256:{}", "b".repeat(64));
         let changed_profile_version = "999".to_owned();
         let changed_profile_digest = format!("sha256:{}", "c".repeat(64));
+        let changed_profile_semantic_id = format!("sha256:{}", "d".repeat(64));
         let changed_lineages = [
             FindingLineage {
                 detector_version: &changed_detector_version,
@@ -3397,6 +6055,10 @@ mod tests {
                 profile_digest: &changed_profile_digest,
                 ..exact
             },
+            FindingLineage {
+                profile_semantic_id: &changed_profile_semantic_id,
+                ..exact
+            },
         ];
         for changed in changed_lineages {
             assert!(
@@ -3404,6 +6066,21 @@ mod tests {
                 "a changed semantic identity must start a distinct lineage"
             );
         }
+
+        let mut substituted_public_digest = fixture.finding.clone();
+        substituted_public_digest.profile_digest = changed_profile_digest.clone();
+        assert!(matches!(
+            finding_from_row(substituted_public_digest),
+            Err(EngineError::Invariant(message))
+                if message.contains("profile digest or semantic identity was substituted")
+        ));
+        let mut substituted_public_semantics = fixture.finding.clone();
+        substituted_public_semantics.profile_semantic_id = changed_profile_semantic_id;
+        assert!(matches!(
+            finding_from_row(substituted_public_semantics),
+            Err(EngineError::Invariant(message))
+                if message.contains("profile digest or semantic identity was substituted")
+        ));
 
         let old_report = fixture.report(1, "report:old-lineage", &fixture.semantic_digest);
         assert!(report_matches_profile_contract(
@@ -3471,6 +6148,7 @@ mod tests {
             fixture.profile,
             descriptor,
             &present,
+            None,
             fixture.observed_at,
             changed_current,
             std::slice::from_ref(&new_report),
@@ -3486,6 +6164,7 @@ mod tests {
             fixture.profile,
             descriptor,
             &cannot_evaluate,
+            None,
             fixture.observed_at,
             changed_current,
             &[],
@@ -3552,6 +6231,7 @@ mod tests {
             profile,
             descriptor,
             &result,
+            None,
             observed_at + Duration::seconds(2),
             None,
             &rows,
@@ -3569,6 +6249,7 @@ mod tests {
             profile,
             descriptor,
             &mismatched,
+            None,
             observed_at + Duration::seconds(2),
             None,
             &rows,
@@ -3613,13 +6294,161 @@ mod tests {
             .collect(&watcher)
             .expect("collection clears the identity gate");
         assert!(matches!(
-            outcome,
-            CollectionOutcome::AdmissionRefused { .. }
+            outcome.result,
+            CollectionResult::AdmissionRefused { .. }
         ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn collect_persists_exact_helper_and_profile_refusals_through_status() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (mut config, mut watcher, _lock) = binding_recovery_fixture(directory.path());
+        let script = directory.path().join("semantic_transport_helper.py");
+        let mode = directory.path().join("semantic_transport.mode");
+        fs::write(&script, SEMANTIC_TRANSPORT_HELPER).expect("write helper script");
+        fs::write(&mode, "report\n").expect("write initial helper mode");
+        watcher.command.executable = PathBuf::from("/usr/bin/python3");
+        watcher.command.args = vec![script.to_string_lossy().into_owned()];
+        watcher.command.env = BTreeMap::from([(
+            "NQ_TEST_MODE".to_owned(),
+            mode.to_string_lossy().into_owned(),
+        )]);
+        config.watchers = vec![watcher.clone()];
+
+        let mut store = Store::initialize(&config.database_path).expect("initialize store");
+        append_profile_descriptor(&mut store, resolve(&watcher).expect("profile"))
+            .expect("profile descriptor");
+        drop(store);
+        let evaluator = EvaluatorRuntimeIdentity::for_test(nq_protocol::sha256_bytes(
+            b"semantic-transport-evaluator",
+        ));
+        let mut engine =
+            CollectionEngine::open_with_evaluator_identity(&config, Ok(evaluator)).expect("engine");
+        if let Err(error) = engine.watcher_action(&watcher, "admit") {
+            if error.to_string().contains("spawn_failed")
+                && fs::read_to_string("/proc/self/attr/current")
+                    .is_ok_and(|profile| profile.contains("unpriv_bwrap"))
+            {
+                eprintln!("skipping: sandbox AppArmor denies executable memfds");
+                return;
+            }
+            panic!("fixture admission failed: {error}");
+        }
+
+        fs::write(&mode, "helper_transient\n").expect("select transient refusal");
+        let transient = engine.collect(&watcher).expect("collect transient refusal");
+        transient.validate().expect("valid transient carrier");
+        let transient_id = match &transient.result {
+            CollectionResult::Rejected {
+                refusal:
+                    GovernedRefusal {
+                        refusal_id,
+                        origin: GovernedRefusalOrigin::Helper(refusal),
+                        ..
+                    },
+            } => {
+                assert!(refusal.retriable);
+                assert_eq!(refusal.details["errno"], "EAGAIN");
+                refusal_id.clone()
+            }
+            other => panic!("expected helper refusal, got {other:?}"),
+        };
+        let transient_status = status_snapshot_v2(&engine.store).expect("transient status");
+        let transient_component = transient_status
+            .components
+            .iter()
+            .find(|component| component.id == watcher.instance_id)
+            .expect("transient component");
+        assert_eq!(transient_component.code, "helper_refused");
+        assert_eq!(transient_component.state, HealthState::Degraded);
+
+        fs::write(&mode, "helper_permanent\n").expect("select permanent refusal");
+        let permanent = engine.collect(&watcher).expect("collect permanent refusal");
+        permanent.validate().expect("valid permanent carrier");
+        let permanent_id = match &permanent.result {
+            CollectionResult::Rejected {
+                refusal:
+                    GovernedRefusal {
+                        refusal_id,
+                        origin: GovernedRefusalOrigin::Helper(refusal),
+                        ..
+                    },
+            } => {
+                assert!(!refusal.retriable);
+                assert_eq!(refusal.details["errno"], "ENODEV");
+                refusal_id.clone()
+            }
+            other => panic!("expected helper refusal, got {other:?}"),
+        };
+        assert_ne!(transient_id, permanent_id);
+
+        fs::write(&mode, "profile_reject\n").expect("select profile refusal");
+        let profile = engine.collect(&watcher).expect("collect profile refusal");
+        profile.validate().expect("valid profile carrier");
+        match &profile.result {
+            CollectionResult::Rejected {
+                refusal:
+                    GovernedRefusal {
+                        origin: GovernedRefusalOrigin::Profile(refusal),
+                        ..
+                    },
+            } => {
+                assert_eq!(refusal.refusal.profile.id, "nq.conformance");
+                assert_eq!(
+                    refusal.refusal.boundary,
+                    nq_profiles::RefusalBoundary::Observation
+                );
+                assert!(!refusal.refusal.details.is_empty());
+            }
+            other => panic!("expected profile refusal, got {other:?}"),
+        }
+        let profile_status = status_snapshot_v2(&engine.store).expect("profile status");
+        let profile_component = profile_status
+            .components
+            .iter()
+            .find(|component| component.id == watcher.instance_id)
+            .expect("profile component");
+        assert_eq!(profile_component.code, "report_rejected");
+        assert_eq!(profile_component.state, HealthState::Failed);
+
+        assert_eq!(
+            validate_rejected_custody_history(&engine.store).expect("custody history"),
+            3
+        );
+        assert_eq!(
+            validate_status_history_v2(&engine.store).expect("status history"),
+            3
+        );
+    }
+
+    #[test]
+    fn normalization_failure_maps_to_typed_profile_refusal() {
+        let refusal = profile_normalization_refusal(
+            "normalization.primary",
+            &nq_profiles::conformance::MODULE,
+            &nq_profiles::ReportNormalizationError::ProfileVersion("v-next".to_owned()),
+        );
+        assert_eq!(refusal.instance_id, "normalization.primary");
+        assert_eq!(refusal.boundary, nq_profiles::RefusalBoundary::Report);
+        assert_eq!(
+            refusal.code,
+            nq_profiles::ProfileRefusalCode::InvalidPayload
+        );
+        assert_eq!(
+            refusal.details.get("stage").map(String::as_str),
+            Some("protocol_normalization")
+        );
+        let semantic_id = profile_semantic_id(nq_profiles::conformance::MODULE.descriptor())
+            .expect("profile semantic identity");
+        GovernedRefusal::profile("normalization-refusal".to_owned(), semantic_id, refusal)
+            .validate()
+            .expect("typed normalization refusal");
     }
 
     /// Seed one admitted report with a chosen recorded evaluator identity, so a
     /// verification against a chosen *current* identity can be exercised.
+    #[allow(clippy::too_many_lines)]
     fn seed_admitted_report(
         db_path: &Path,
         evaluator_artifact_digest: Sha256Digest,
@@ -3683,7 +6512,23 @@ mod tests {
             finished_at: TS.to_owned(),
             acquisition_outcome: "response".to_owned(),
             execution_identity: doc(json!({})),
-            resource_outcome: doc(json!({})),
+            resource_outcome: doc(json!({
+                "schema": "nq.run_resource_outcome.v1",
+                "duration_ms": 1,
+                "exit_code": 0,
+                "hard_limits": {
+                    "address_space_bytes_per_process": 1,
+                    "cpu_seconds_per_process": 1,
+                    "processes_per_execution_uid": 1,
+                    "open_files_per_process": 1,
+                    "file_bytes_per_regular_file": 1,
+                    "core_bytes": 0
+                },
+                "stdout_bytes_retained": 0,
+                "stderr_bytes_retained": 0,
+                "stderr_hex": "",
+                "outcome": {"outcome": "response"}
+            })),
         };
         let report = ReportInput {
             report_id: "rep-1".to_owned(),
@@ -3709,7 +6554,7 @@ mod tests {
                     submission_id: "sub-1".to_owned(),
                     raw_bytes: b"raw".to_vec(),
                     received_at: TS.to_owned(),
-                    protocol_outcome: "valid_exchange".to_owned(),
+                    protocol_outcome: "valid_report".to_owned(),
                     disposition: SubmissionDisposition::Admitted(report),
                 }),
             })
@@ -3834,216 +6679,914 @@ mod tests {
         ));
     }
 
-    /// A supervised daemon must be able to explain its own acquisition
-    /// refusal. `carrier_startup_failed` is one code covering every
-    /// supervised-startup predicate, so dropping the message leaves an
-    /// operator unable to tell a refused socket mode from a spawn failure.
-    ///
-    /// Regression: the 2026-07-18 sealed VM run refused at
-    /// `explicit-service-lifecycle` with four `carrier_startup_failed`
-    /// outcomes and no recoverable cause, because this detail was discarded.
     #[test]
-    fn acquisition_detail_preserves_the_exact_startup_diagnostic() {
-        let refused = AcquisitionOutcome::CarrierStartupFailed {
+    fn acquisition_failed_outcome_preserves_exact_same_code_payload() {
+        let socket_mode = AcquisitionOutcome::CarrierStartupFailed {
             message: "helper socket mode is 0o660; expected 0o600".to_owned(),
         };
         let spawn = AcquisitionOutcome::CarrierStartupFailed {
             message: "could not spawn Unix helper: Permission denied (os error 13)".to_owned(),
         };
+        assert_eq!(acquisition_code(&socket_mode), acquisition_code(&spawn));
 
-        // The code is a stable vocabulary, not an explanation: both refusals
-        // share it, so the code alone cannot distinguish them.
-        assert_eq!(acquisition_code(&refused), "carrier_startup_failed");
-        assert_eq!(acquisition_code(&spawn), "carrier_startup_failed");
-        assert_ne!(acquisition_detail(&refused), acquisition_detail(&spawn));
-
-        assert_eq!(
-            acquisition_detail(&refused).as_deref(),
-            Some("helper socket mode is 0o660; expected 0o600")
-        );
-        assert_eq!(
-            acquisition_detail(&AcquisitionOutcome::HelperExited { code: Some(2) }).as_deref(),
-            Some("exit code 2")
-        );
-        assert_eq!(
-            acquisition_detail(&AcquisitionOutcome::HelperExited { code: None }).as_deref(),
-            Some("terminated by signal")
-        );
-        // Outcomes that genuinely carry no diagnostic must not invent one.
-        assert!(acquisition_detail(&AcquisitionOutcome::Timeout).is_none());
-        assert!(acquisition_detail(&AcquisitionOutcome::Eof).is_none());
+        let first = CollectionOutcome::acquisition_failed(
+            "conformance-local".to_owned(),
+            "00000000-0000-4000-8000-000000000000".to_owned(),
+            socket_mode.clone(),
+        )
+        .expect("typed acquisition failure");
+        let second = CollectionOutcome::acquisition_failed(
+            "conformance-local".to_owned(),
+            "00000000-0000-4000-8000-000000000000".to_owned(),
+            spawn.clone(),
+        )
+        .expect("typed acquisition failure");
+        let first_bytes = canonical(&first).expect("canonical first outcome");
+        let second_bytes = canonical(&second).expect("canonical second outcome");
+        assert_ne!(first_bytes.as_bytes(), second_bytes.as_bytes());
+        let reopened = decode_collection_outcome(first_bytes.as_bytes()).expect("reopen outcome");
+        assert_eq!(reopened, first);
+        assert!(format!("{first:?}").contains("helper socket mode is 0o660"));
     }
 
-    /// The reported outcome must carry the diagnostic, not merely compute it:
-    /// the daemon logs `CollectionOutcome`, so a dropped field is invisible.
     #[test]
-    fn acquisition_failed_outcome_reports_its_detail() {
-        let outcome = CollectionOutcome::AcquisitionFailed {
-            instance_id: "conformance-local".to_owned(),
-            run_id: "0b8c140b-84ab-41f8-a473-fe77444ed64f".to_owned(),
-            code: acquisition_code(&AcquisitionOutcome::CarrierStartupFailed {
-                message: "helper socket mode is 0o660; expected 0o600".to_owned(),
-            })
-            .to_owned(),
-            detail: acquisition_detail(&AcquisitionOutcome::CarrierStartupFailed {
-                message: "helper socket mode is 0o660; expected 0o600".to_owned(),
-            }),
+    fn canonical_carrier_rejects_substituted_acquisition_projections() {
+        let outcome = CollectionOutcome::acquisition_failed(
+            "conformance-local".to_owned(),
+            "run-timeout".to_owned(),
+            AcquisitionOutcome::ExchangeTimeout {
+                phase: ExchangeTimeoutPhase::WriteRequest,
+            },
+        )
+        .expect("typed timeout");
+
+        let mut wrong_class = serde_json::to_value(&outcome).expect("serialize carrier");
+        wrong_class["result"]["failure"]["class"] = json!("eof");
+        let wrong_class: CollectionOutcome =
+            serde_json::from_value(wrong_class).expect("shape remains decodable");
+        assert!(wrong_class.validate().is_err());
+
+        let mut wrong_retry = serde_json::to_value(&outcome).expect("serialize carrier");
+        wrong_retry["result"]["failure"]["retry"] = json!("retriable");
+        let wrong_retry: CollectionOutcome =
+            serde_json::from_value(wrong_retry).expect("shape remains decodable");
+        assert!(wrong_retry.validate().is_err());
+    }
+
+    #[test]
+    fn collection_outcome_wire_codec_rejects_omitted_extra_duplicate_and_substituted_fields() {
+        let outcome = CollectionOutcome::acquisition_failed(
+            "conformance-local".to_owned(),
+            "run-wire".to_owned(),
+            AcquisitionOutcome::ExchangeTimeout {
+                phase: ExchangeTimeoutPhase::WriteRequest,
+            },
+        )
+        .expect("typed timeout");
+        let exact = canonical(&outcome).expect("canonical carrier");
+        assert_eq!(
+            decode_collection_outcome(exact.as_bytes()).expect("strict round trip"),
+            outcome
+        );
+
+        let mut omitted = serde_json::to_value(&outcome).expect("carrier value");
+        omitted["result"]
+            .as_object_mut()
+            .expect("result object")
+            .remove("failure");
+        let omitted = nq_protocol::canonical_json_bytes(&omitted).expect("canonical omission");
+        assert!(decode_collection_outcome(&omitted).is_err());
+
+        let mut extra = serde_json::to_value(&outcome).expect("carrier value");
+        extra
+            .as_object_mut()
+            .expect("carrier object")
+            .insert("inferred_detail".to_owned(), json!("write_request"));
+        let extra = nq_protocol::canonical_json_bytes(&extra).expect("canonical extra field");
+        assert!(decode_collection_outcome(&extra).is_err());
+
+        let mut nested_extra = serde_json::to_value(&outcome).expect("carrier value");
+        nested_extra["result"]["failure"]["outcome"]
+            .as_object_mut()
+            .expect("acquisition outcome object")
+            .insert("unsealed_detail".to_owned(), json!("must not be ignored"));
+        let nested_extra =
+            nq_protocol::canonical_json_bytes(&nested_extra).expect("canonical nested extra");
+        assert!(decode_collection_outcome(&nested_extra).is_err());
+
+        let duplicate = format!(
+            "{{\"instance_id\":\"conformance-local\",{}}}",
+            String::from_utf8_lossy(exact.as_bytes())
+                .trim_start_matches('{')
+                .trim_end_matches('}')
+        );
+        assert!(decode_collection_outcome(duplicate.as_bytes()).is_err());
+
+        let mut substituted = serde_json::to_value(&outcome).expect("carrier value");
+        substituted["result"]["failure"]["outcome"]["phase"] = json!("read_response");
+        let substituted =
+            nq_protocol::canonical_json_bytes(&substituted).expect("canonical substitution");
+        let reopened = decode_collection_outcome(&substituted).expect("valid distinct timeout");
+        assert_ne!(reopened, outcome);
+
+        let mut mismatched = serde_json::to_value(&outcome).expect("carrier value");
+        mismatched["result"]["failure"]["class"] = json!("eof");
+        let mismatched =
+            nq_protocol::canonical_json_bytes(&mismatched).expect("canonical mismatch");
+        assert!(decode_collection_outcome(&mismatched).is_err());
+
+        let invalid_status = CollectionOutcome::admitted(
+            "conformance-local".to_owned(),
+            "run-admitted".to_owned(),
+            "report-admitted".to_owned(),
+            "successful".to_owned(),
+            nq_protocol::sha256_bytes(b"report").to_string(),
+            0,
+        );
+        let invalid_status = canonical(&invalid_status).expect("canonical invalid vocabulary");
+        assert!(decode_collection_outcome(invalid_status.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn collection_outcome_validation_checks_nested_admission_payloads_and_instances() {
+        let nested = GovernedRefusal::helper(
+            "refusal-nested".to_owned(),
+            nq_protocol::Refusal {
+                responsible_instance_id: InstanceId::new("other.instance").expect("instance"),
+                boundary: nq_protocol::RefusalBoundary::Collection,
+                code: nq_protocol::RefusalCode::CollectionFailed,
+                message: "collection failed".to_owned(),
+                retriable: true,
+                details: json!({"errno": "EAGAIN"}),
+            },
+        );
+        let wrong_instance = CollectionOutcome::admission_refused(
+            "admission.primary".to_owned(),
+            AdmissionRefusal {
+                responsible_instance_id: "admission.primary".to_owned(),
+                boundary: AdmissionRefusalBoundary::Conformance,
+                code: AdmissionRefusalCode::UpstreamRefusal,
+                details: AdmissionRefusalDetails::Governed {
+                    refusal: Box::new(nested),
+                },
+            },
+        );
+        assert!(wrong_instance.validate().is_err());
+
+        let invalid_acquisition = CollectionOutcome::admission_refused(
+            "admission.primary".to_owned(),
+            AdmissionRefusal {
+                responsible_instance_id: "admission.primary".to_owned(),
+                boundary: AdmissionRefusalBoundary::Conformance,
+                code: AdmissionRefusalCode::UpstreamRefusal,
+                details: AdmissionRefusalDetails::Acquisition {
+                    failure: AcquisitionFailure {
+                        class: AcquisitionFailureClass::Eof,
+                        retry: RetryDisposition::Unspecified,
+                        outcome: AcquisitionOutcome::Timeout,
+                    },
+                },
+            },
+        );
+        assert!(invalid_acquisition.validate().is_err());
+    }
+
+    #[test]
+    fn same_code_admission_upstream_refusal_pair_survives_status_backup_reopen() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let live = directory.path().join("admission-pair.db");
+        let backup = directory.path().join("admission-pair-backup.db");
+        let mut store = Store::initialize(&live).expect("status store");
+        let make = |instance: &str, refusal_id: &str, retriable: bool, errno: &str| {
+            let responsible = InstanceId::new(instance).expect("instance token");
+            CollectionOutcome::admission_refused(
+                instance.to_owned(),
+                AdmissionRefusal {
+                    responsible_instance_id: instance.to_owned(),
+                    boundary: AdmissionRefusalBoundary::Conformance,
+                    code: AdmissionRefusalCode::UpstreamRefusal,
+                    details: AdmissionRefusalDetails::Governed {
+                        refusal: Box::new(GovernedRefusal::helper(
+                            refusal_id.to_owned(),
+                            nq_protocol::Refusal {
+                                responsible_instance_id: responsible,
+                                boundary: nq_protocol::RefusalBoundary::Collection,
+                                code: nq_protocol::RefusalCode::CollectionFailed,
+                                message: "backend collection failed".to_owned(),
+                                retriable,
+                                details: json!({"errno": errno}),
+                            },
+                        )),
+                    },
+                },
+            )
         };
-
-        assert!(!outcome.is_success());
-        let rendered = format!("{outcome:?}");
-        assert!(
-            rendered.contains("helper socket mode is 0o660"),
-            "the logged outcome must name the refused predicate: {rendered}"
+        let transient = make("admission.transient", "admission-refusal-a", true, "EAGAIN");
+        let permanent = make(
+            "admission.permanent",
+            "admission-refusal-b",
+            false,
+            "ENODEV",
         );
+        assert_eq!(
+            instance_status_projection(&transient).expect("transient projection"),
+            instance_status_projection(&permanent).expect("permanent projection")
+        );
+        assert_ne!(
+            canonical(&transient).expect("transient canonical"),
+            canonical(&permanent).expect("permanent canonical")
+        );
+        for (suffix, outcome) in [("transient", &transient), ("permanent", &permanent)] {
+            let projection = instance_status_projection(outcome).expect("projection");
+            store
+                .record_status(&StatusEventInput {
+                    status_event_id: format!("status-admission-{suffix}"),
+                    component_kind: "instance".to_owned(),
+                    component_id: outcome.instance_id.clone(),
+                    state: projection.state.to_owned(),
+                    code: projection.code.to_owned(),
+                    detail: canonical(outcome).expect("canonical admission refusal"),
+                    observed_at: "2026-07-20T12:00:00.000Z".to_owned(),
+                })
+                .expect("record admission refusal status");
+        }
+        let assert_pair = |store: &Store| {
+            let status = status_snapshot_v2(store).expect("typed admission status");
+            let nested = |instance: &str| {
+                let component = status
+                    .components
+                    .iter()
+                    .find(|component| component.id == instance)
+                    .expect("admission component");
+                assert_eq!(component.code, "admission_refused");
+                let ComponentStatusDetailV2::Collection { result } = &component.detail else {
+                    panic!("admission status must remain a collection result")
+                };
+                let CollectionResult::AdmissionRefused { refusal } = &result.result else {
+                    panic!("admission refusal variant")
+                };
+                let AdmissionRefusalDetails::Governed { refusal } = &refusal.details else {
+                    panic!("nested governed refusal")
+                };
+                let GovernedRefusalOrigin::Helper(helper) = &refusal.origin else {
+                    panic!("nested helper refusal")
+                };
+                (helper.retriable, helper.details.clone())
+            };
+            assert_eq!(
+                nested("admission.transient"),
+                (true, json!({"errno": "EAGAIN"}))
+            );
+            assert_eq!(
+                nested("admission.permanent"),
+                (false, json!({"errno": "ENODEV"}))
+            );
+            assert_eq!(
+                validate_status_history_v2(store).expect("admission status history"),
+                2
+            );
+        };
+        assert_pair(&store);
+        store.backup_verified(&backup).expect("verified backup");
+        drop(store);
+        let reopened = Store::open(&backup).expect("reopen backup");
+        assert_pair(&reopened);
     }
 
-    /// Same-code refusal testimony must survive the actual status-store path,
-    /// the shared public DTO, and a verified archival backup.  This positive
-    /// case complements the ignored release-forcing cases below: it passes for
-    /// already-preserved acquisition diagnostics and bites any mutation that
-    /// replaces the canonical outcome with a code-only status detail.
     #[test]
+    fn exhaustive_history_pagination_crosses_one_row_pages_and_checks_late_rows() {
+        let mut store = Store::initialize_in_memory().expect("pagination store");
+        let profile: &'static dyn ProfileModule = &nq_profiles::host::MODULE;
+        append_profile_descriptor(&mut store, profile).expect("compiled profile descriptor");
+        let profile_descriptor = profile.descriptor();
+        let profile_digest = profile_descriptor.digest().expect("profile digest");
+        let semantic_id = profile_semantic_id(profile_descriptor).expect("profile semantic id");
+        let detector = profile.detectors()[0].descriptor();
+        let detector_digest = detector.digest().expect("detector digest");
+
+        for suffix in ["a", "b"] {
+            let result = EvaluationResultV1 {
+                schema: EvaluationResultSchema::V1,
+                profile: EvaluationProfileIdentity {
+                    profile: profile_descriptor.profile.clone(),
+                    profile_digest: profile_digest.clone(),
+                    profile_semantic_id: semantic_id.clone(),
+                },
+                state: DetectorState::ExplicitlyAbsent,
+                condition: detector.condition.clone(),
+                summary: format!("explicit absence fixture {suffix}"),
+                evidence: Vec::new(),
+                limitations: Vec::new(),
+                refusal: None,
+                watermark: EvidenceWatermark(0),
+            };
+            store
+                .commit_evaluation(
+                    &EvaluationInput {
+                        evaluation_id: format!("evaluation-page-{suffix}"),
+                        detector_id: detector.id.clone(),
+                        detector_version: detector.version.to_string(),
+                        detector_digest: detector_digest.clone(),
+                        evaluator_artifact_digest: nq_protocol::sha256_bytes(
+                            b"pagination-evaluator",
+                        )
+                        .into_string(),
+                        started_at: "2026-07-20T12:00:00.000Z".to_owned(),
+                        evaluated_at: "2026-07-20T12:00:01.000Z".to_owned(),
+                        outcome: "condition_explicitly_absent".to_owned(),
+                        detail: canonical(&result).expect("canonical evaluation result"),
+                        profile: EvaluationProfileBinding {
+                            profile_id: profile_descriptor.profile.id.clone(),
+                            profile_version: profile_descriptor.profile.version.to_string(),
+                            profile_digest: profile_digest.as_str().to_owned(),
+                            profile_semantic_id: parse_identity_digest(
+                                "profile_semantic_id",
+                                semantic_id.as_str(),
+                            )
+                            .expect("typed semantic id"),
+                        },
+                        watermarks: Vec::new(),
+                        refusal: None,
+                    },
+                    None,
+                )
+                .expect("commit paged evaluation");
+        }
+        assert_eq!(
+            validate_evaluation_refusal_history_with_page_size(&store, 1)
+                .expect("one-row evaluation pages"),
+            2
+        );
+
+        store
+            .record_status(&StatusEventInput {
+                status_event_id: "status-page-valid".to_owned(),
+                component_kind: "database".to_owned(),
+                component_id: "primary".to_owned(),
+                state: "healthy".to_owned(),
+                code: "ok".to_owned(),
+                detail: canonical(&json!({"integrity": "ok"})).expect("diagnostic detail"),
+                observed_at: "2026-07-20T12:00:02.000Z".to_owned(),
+            })
+            .expect("valid first status page");
+        store
+            .record_status(&StatusEventInput {
+                status_event_id: "status-page-malformed-late".to_owned(),
+                component_kind: "instance".to_owned(),
+                component_id: "late.invalid".to_owned(),
+                state: "degraded".to_owned(),
+                code: "collection_failed".to_owned(),
+                detail: canonical(&json!({"legacy": "untyped"})).expect("hostile detail"),
+                observed_at: "2026-07-20T12:00:03.000Z".to_owned(),
+            })
+            .expect("store hostile late status");
+        assert!(matches!(
+            validate_status_history_v2_with_page_size(&store, 1),
+            Err(EngineError::Invariant(message))
+                if message.contains("not a valid versioned collection result")
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn same_code_protocol_rejection_pair_survives_wire_custody_status_backup_reopen() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let live = directory.path().join("protocol-pair.db");
+        let backup = directory.path().join("protocol-pair-backup.db");
+        let mut store = Store::initialize(&live).expect("protocol store");
+        let profile: &'static dyn ProfileModule = &nq_profiles::conformance::MODULE;
+        let failures = [
+            ("framing", ProtocolRejectionFailure::InvalidFraming),
+            (
+                "json",
+                ProtocolRejectionFailure::InvalidJson {
+                    error: StructuredJsonError {
+                        category: JsonErrorCategory::Syntax,
+                        line: 1,
+                        column: 8,
+                        diagnostic: "expected value".to_owned(),
+                    },
+                },
+            ),
+        ];
+        let mut carriers = Vec::new();
+        for (suffix, failure) in failures {
+            let instance_id = format!("protocol.{suffix}");
+            let admission = seed_compiled_admission(&mut store, profile, &instance_id, suffix);
+            let run = test_run(
+                profile,
+                &instance_id,
+                suffix,
+                admission,
+                AcquisitionOutcome::Response,
+            );
+            let refusal = GovernedRefusal::protocol(
+                format!("protocol-refusal-{suffix}"),
+                ProtocolRejection {
+                    responsible_instance_id: instance_id.clone(),
+                    boundary: ProtocolRejectionBoundary::Response,
+                    code: ProtocolRejectionCode::InvalidResponse,
+                    failure,
+                },
+            );
+            let carrier =
+                CollectionOutcome::rejected(instance_id, run.run_id.clone(), refusal.clone());
+            let wire = nq_protocol::encode_ndjson(&carrier).expect("encode protocol rejection");
+            let decoded: CollectionOutcome =
+                nq_protocol::decode_ndjson(&wire, wire.len()).expect("decode protocol rejection");
+            assert_eq!(decoded, carrier);
+            let submission = SubmissionInput {
+                submission_id: format!("submission-{suffix}"),
+                raw_bytes: format!("invalid-{suffix}\n").into_bytes(),
+                received_at: "2026-07-20T12:00:01.000Z".to_owned(),
+                protocol_outcome: "rejected".to_owned(),
+                disposition: SubmissionDisposition::Rejected {
+                    refusal: stored_governed_refusal(
+                        &refusal,
+                        DateTime::parse_from_rfc3339("2026-07-20T12:00:01.000Z")
+                            .expect("time")
+                            .with_timezone(&Utc),
+                    )
+                    .expect("stored protocol refusal"),
+                },
+            };
+            commit_test_non_success(&mut store, run, Some(submission), &carrier, suffix);
+            carriers.push(carrier);
+        }
+        assert_ne!(
+            canonical(&carriers[0]).expect("framing canonical"),
+            canonical(&carriers[1]).expect("json canonical")
+        );
+        let assert_pair = |store: &Store| {
+            let custody = rejected_custody_snapshot(store, 10).expect("typed custody");
+            assert_eq!(custody.records.len(), 2);
+            let mut failures = custody
+                .records
+                .iter()
+                .map(|record| {
+                    assert_eq!(record.protocol_outcome, "rejected");
+                    let GovernedRefusalOrigin::Protocol(protocol) = &record.refusal.origin else {
+                        panic!("protocol refusal origin")
+                    };
+                    assert_eq!(protocol.code, ProtocolRejectionCode::InvalidResponse);
+                    protocol.failure.clone()
+                })
+                .collect::<Vec<_>>();
+            failures.sort_by_key(|failure| {
+                matches!(failure, ProtocolRejectionFailure::InvalidJson { .. })
+            });
+            assert!(matches!(
+                failures[0],
+                ProtocolRejectionFailure::InvalidFraming
+            ));
+            assert!(matches!(
+                failures[1],
+                ProtocolRejectionFailure::InvalidJson { .. }
+            ));
+            assert_eq!(
+                validate_status_history_v2(store).expect("protocol status history"),
+                2
+            );
+            assert_eq!(
+                validate_watcher_run_history_with_page_size(store, 1)
+                    .expect("one-row watcher-run pages"),
+                2
+            );
+            assert_eq!(
+                validate_status_history_v2_with_page_size(store, 1).expect("one-row status pages"),
+                2
+            );
+            assert_eq!(
+                validate_rejected_custody_history(store).expect("protocol custody history"),
+                2
+            );
+            assert_eq!(
+                validate_rejected_custody_history_with_page_size(store, 1)
+                    .expect("one-row custody pages"),
+                2
+            );
+        };
+        assert_pair(&store);
+        backup_store(&store, &backup).expect("semantic backup");
+        drop(store);
+        let reopened = Store::open(&backup).expect("reopen protocol backup");
+        assert_pair(&reopened);
+
+        let mut hostile = Store::initialize_in_memory().expect("hostile protocol store");
+        let instance_id = "protocol.substituted";
+        let admission =
+            seed_compiled_admission(&mut hostile, profile, instance_id, "protocol-substituted");
+        let run = test_run(
+            profile,
+            instance_id,
+            "protocol-substituted",
+            admission,
+            AcquisitionOutcome::Response,
+        );
+        let refusal = GovernedRefusal::protocol(
+            "protocol-refusal-substituted".to_owned(),
+            ProtocolRejection {
+                responsible_instance_id: instance_id.to_owned(),
+                boundary: ProtocolRejectionBoundary::Response,
+                code: ProtocolRejectionCode::InvalidResponse,
+                failure: ProtocolRejectionFailure::InvalidFraming,
+            },
+        );
+        let carrier = CollectionOutcome::rejected(
+            instance_id.to_owned(),
+            run.run_id.clone(),
+            refusal.clone(),
+        );
+        let submission = SubmissionInput {
+            submission_id: "submission-protocol-substituted".to_owned(),
+            raw_bytes: b"invalid framing\n".to_vec(),
+            received_at: "2026-07-20T12:00:01.000Z".to_owned(),
+            // A protocol parse rejection cannot be relabeled as a valid helper
+            // refusal merely because both are rejected custody.
+            protocol_outcome: "valid_refusal".to_owned(),
+            disposition: SubmissionDisposition::Rejected {
+                refusal: stored_governed_refusal(
+                    &refusal,
+                    DateTime::parse_from_rfc3339("2026-07-20T12:00:01.000Z")
+                        .expect("time")
+                        .with_timezone(&Utc),
+                )
+                .expect("stored refusal"),
+            },
+        };
+        commit_test_non_success(
+            &mut hostile,
+            run,
+            Some(submission),
+            &carrier,
+            "protocol-substituted",
+        );
+        assert!(matches!(
+            rejected_custody_snapshot(&hostile, 10),
+            Err(EngineError::Invariant(message))
+                if message.contains("canonical refusal projections")
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
     fn status_store_and_backup_preserve_same_code_distinct_detail() {
         let directory = tempfile::tempdir().expect("fixture directory");
         let (mut config, first_watcher, _lock) = binding_recovery_fixture(directory.path());
         let mut second_watcher = first_watcher.clone();
         second_watcher.instance_id = "recovery.secondary".to_owned();
         config.watchers.push(second_watcher.clone());
-
         drop(Store::initialize(&config.database_path).expect("initialize status store"));
         let mut engine = CollectionEngine::open(&config).expect("open engine");
-        let outcome = |watcher: &WatcherConfig, message: &str| {
-            let acquisition = AcquisitionOutcome::CarrierStartupFailed {
-                message: message.to_owned(),
-            };
-            CollectionOutcome::AcquisitionFailed {
-                instance_id: watcher.instance_id.clone(),
-                run_id: "00000000-0000-4000-8000-000000000000".to_owned(),
-                code: acquisition_code(&acquisition).to_owned(),
-                detail: acquisition_detail(&acquisition),
-            }
+        let outcome = |watcher: &WatcherConfig, run_id: &str, message: &str| {
+            CollectionOutcome::acquisition_failed(
+                watcher.instance_id.clone(),
+                run_id.to_owned(),
+                AcquisitionOutcome::CarrierStartupFailed {
+                    message: message.to_owned(),
+                },
+            )
+            .expect("typed acquisition outcome")
         };
         let first_message = "helper socket mode is 0o660; expected 0o600";
         let second_message = "could not spawn Unix helper: Permission denied (os error 13)";
-        engine
-            .record_instance_status(&first_watcher, &outcome(&first_watcher, first_message))
-            .expect("record first refusal status");
-        engine
-            .record_instance_status(&second_watcher, &outcome(&second_watcher, second_message))
-            .expect("record second refusal status");
+        let profile: &'static dyn ProfileModule = &nq_profiles::conformance::MODULE;
+        let first_failure = AcquisitionOutcome::CarrierStartupFailed {
+            message: first_message.to_owned(),
+        };
+        let first_admission = seed_compiled_admission(
+            &mut engine.store,
+            profile,
+            &first_watcher.instance_id,
+            "status-first",
+        );
+        let first_run = test_run(
+            profile,
+            &first_watcher.instance_id,
+            "status-first",
+            first_admission,
+            first_failure,
+        );
+        let first_outcome = outcome(&first_watcher, &first_run.run_id, first_message);
+        commit_test_non_success(
+            &mut engine.store,
+            first_run,
+            None,
+            &first_outcome,
+            "status-first",
+        );
+        let second_failure = AcquisitionOutcome::CarrierStartupFailed {
+            message: second_message.to_owned(),
+        };
+        let second_admission = seed_compiled_admission(
+            &mut engine.store,
+            profile,
+            &second_watcher.instance_id,
+            "status-second",
+        );
+        let second_run = test_run(
+            profile,
+            &second_watcher.instance_id,
+            "status-second",
+            second_admission,
+            second_failure,
+        );
+        let second_outcome = outcome(&second_watcher, &second_run.run_id, second_message);
+        commit_test_non_success(
+            &mut engine.store,
+            second_run,
+            None,
+            &second_outcome,
+            "status-second",
+        );
 
-        let assert_exact = |snapshot: &StatusSnapshotV1| {
-            let component = |id: &str| {
-                snapshot
-                    .components
-                    .iter()
-                    .find(|component| component.id == id)
-                    .unwrap_or_else(|| panic!("missing status component {id}"))
-            };
-            let first = component(&first_watcher.instance_id);
-            let second = component(&second_watcher.instance_id);
+        let assert_exact = |snapshot: &StatusSnapshotV2| {
+            let first = snapshot
+                .components
+                .iter()
+                .find(|component| component.id == first_watcher.instance_id)
+                .expect("first status");
+            let second = snapshot
+                .components
+                .iter()
+                .find(|component| component.id == second_watcher.instance_id)
+                .expect("second status");
             assert_eq!(first.code, "collection_failed");
             assert_eq!(second.code, "collection_failed");
-            assert_eq!(first.details["code"], "carrier_startup_failed");
-            assert_eq!(second.details["code"], "carrier_startup_failed");
-            assert_eq!(first.details["detail"], first_message);
-            assert_eq!(second.details["detail"], second_message);
-            assert_ne!(first.details, second.details);
+            let ComponentStatusDetailV2::Collection { result: first } = &first.detail else {
+                panic!("instance status must be typed")
+            };
+            let ComponentStatusDetailV2::Collection { result: second } = &second.detail else {
+                panic!("instance status must be typed")
+            };
+            let CollectionResult::AcquisitionFailed { failure: first } = &first.result else {
+                panic!("first acquisition failure")
+            };
+            let CollectionResult::AcquisitionFailed { failure: second } = &second.result else {
+                panic!("second acquisition failure")
+            };
+            assert_eq!(first.class, second.class);
+            assert_eq!(first.retry, RetryDisposition::Unspecified);
+            assert_eq!(second.retry, RetryDisposition::Unspecified);
+            assert_ne!(first.outcome, second.outcome);
+            assert!(matches!(
+                &first.outcome,
+                AcquisitionOutcome::CarrierStartupFailed { message } if message == first_message
+            ));
+            assert!(matches!(
+                &second.outcome,
+                AcquisitionOutcome::CarrierStartupFailed { message } if message == second_message
+            ));
         };
 
-        assert_exact(&status_snapshot(&engine.store).expect("live public status snapshot"));
+        assert_exact(&status_snapshot_v2(&engine.store).expect("live v2 status"));
         let backup = directory.path().join("nq-status-backup.db");
         let artifact = engine
             .store
             .backup_verified(&backup)
-            .expect("verified status backup");
-        assert_eq!(artifact.path, backup);
+            .expect("verified backup");
         drop(engine);
-
-        let reopened = Store::open(&artifact.path).expect("reopen verified backup");
-        assert_exact(&status_snapshot(&reopened).expect("archived public status snapshot"));
+        let reopened = Store::open(&artifact.path).expect("reopen backup");
+        assert_exact(&status_snapshot_v2(&reopened).expect("reopened v2 status"));
     }
 
-    /// Forcing case for refusal preservation: a refusal family whose members
-    /// share one coarse code but carry distinct dependent watchers must stay
-    /// distinguishable through EVERY operator-facing and archival surface, not
-    /// merely internally. `carrier_startup_failed` covers a refused socket mode,
-    /// a spawn failure, and a startup timeout alike, so any surface that exports
-    /// only the code laundering-collapses them.
-    ///
-    /// Regression: through 2026-07-19 the `nq watcher test` dry-collection path
-    /// exported only the code, so a helper-directory-missing failure (run
-    /// 0a2938c) and a 30s startup timeout (run a4faf06) were byte-identical
-    /// `carrier_startup_failed` to the operator. This proves the two now stay
-    /// distinct through the CLI error and the persisted status-event bytes,
-    /// while both retain the stable code.
     #[test]
-    fn carrier_startup_detail_survives_the_cli_and_archival_surfaces() {
+    fn status_v2_rejects_substituted_state_and_code_projection() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let mut store = Store::initialize(directory.path().join("status.db")).expect("store");
+        let outcome = CollectionOutcome::acquisition_failed(
+            "projection.primary".to_owned(),
+            "run-projection".to_owned(),
+            AcquisitionOutcome::Timeout,
+        )
+        .expect("typed timeout");
+        store
+            .record_status(&StatusEventInput {
+                status_event_id: "status-substituted".to_owned(),
+                component_kind: "instance".to_owned(),
+                component_id: "projection.primary".to_owned(),
+                state: "healthy".to_owned(),
+                code: "report_complete".to_owned(),
+                detail: canonical(&outcome).expect("canonical outcome"),
+                observed_at: timestamp(Utc::now()),
+            })
+            .expect("record substituted projection");
+        assert!(matches!(
+            status_snapshot_v2(&store),
+            Err(EngineError::Invariant(message)) if message.contains("typed result requires")
+        ));
+
+        let acquisition_refusal = GovernedRefusal::acquisition(
+            "refusal-acquisition".to_owned(),
+            AcquisitionRefusal {
+                responsible_instance_id: "projection.primary".to_owned(),
+                failure: AcquisitionFailure::from_outcome(AcquisitionOutcome::MalformedJson {
+                    message: "not an object".to_owned(),
+                })
+                .expect("acquisition refusal"),
+            },
+        );
+        let rejected = CollectionOutcome::rejected(
+            "projection.primary".to_owned(),
+            "run-rejected".to_owned(),
+            acquisition_refusal,
+        );
+        assert_eq!(
+            instance_status_projection(&rejected).expect("projection"),
+            InstanceStatusProjection {
+                state: "failed",
+                code: "collection_failed",
+            }
+        );
+    }
+
+    #[test]
+    fn run_profile_digest_and_semantic_substitution_fail_closed() {
+        let profile: &'static dyn ProfileModule = &nq_profiles::conformance::MODULE;
+        let descriptor = profile.descriptor();
+        let mut run = nq_store::WatcherRunOutcomeRow {
+            run_id: "run-profile-binding".to_owned(),
+            instance_id: "profile.binding".to_owned(),
+            admission_id: Some("admission-profile-binding".to_owned()),
+            profile_id: descriptor.profile.id.clone(),
+            profile_version: descriptor.profile.version.to_string(),
+            profile_digest: descriptor
+                .digest()
+                .expect("profile digest")
+                .as_str()
+                .to_owned(),
+            profile_semantic_id: Some(
+                profile_semantic_id(descriptor)
+                    .expect("profile semantic identity")
+                    .as_str()
+                    .to_owned(),
+            ),
+            acquisition_outcome: "response".to_owned(),
+            resource_outcome_json: test_run_resource(AcquisitionOutcome::Response)
+                .as_bytes()
+                .to_vec(),
+        };
+        validate_run_profile_identity(&run).expect("exact compiled profile binding");
+        run.profile_digest = nq_protocol::sha256_bytes(b"substituted descriptor").into_string();
+        assert!(matches!(
+            validate_run_profile_identity(&run),
+            Err(EngineError::Invariant(message))
+                if message.contains("profile digest or semantic identity was substituted")
+        ));
+        run.profile_digest = descriptor
+            .digest()
+            .expect("profile digest")
+            .as_str()
+            .to_owned();
+        run.profile_semantic_id =
+            Some(nq_protocol::sha256_bytes(b"substituted semantics").into_string());
+        assert!(matches!(
+            validate_run_profile_identity(&run),
+            Err(EngineError::Invariant(message))
+                if message.contains("profile digest or semantic identity was substituted")
+        ));
+    }
+
+    #[test]
+    fn status_history_validation_cannot_hide_legacy_event_behind_typed_current() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let mut store = Store::initialize(directory.path().join("history.db")).expect("store");
+        let observed_at = timestamp(Utc::now());
+        store
+            .record_status(&StatusEventInput {
+                status_event_id: "status-legacy".to_owned(),
+                component_kind: "instance".to_owned(),
+                component_id: "history.primary".to_owned(),
+                state: "failed".to_owned(),
+                code: "legacy_failure".to_owned(),
+                detail: canonical(&json!({"diagnostic": "untyped legacy result"}))
+                    .expect("legacy detail"),
+                observed_at: observed_at.clone(),
+            })
+            .expect("record legacy event");
+        let profile: &'static dyn ProfileModule = &nq_profiles::conformance::MODULE;
+        let admission =
+            seed_compiled_admission(&mut store, profile, "history.primary", "history-current");
+        let run = test_run(
+            profile,
+            "history.primary",
+            "history-current",
+            admission,
+            AcquisitionOutcome::Timeout,
+        );
+        let current = CollectionOutcome::acquisition_failed(
+            "history.primary".to_owned(),
+            run.run_id.clone(),
+            AcquisitionOutcome::Timeout,
+        )
+        .expect("typed current result");
+        commit_test_non_success(&mut store, run, None, &current, "history-current");
+
+        assert!(status_snapshot_v2(&store).is_ok());
+        assert!(matches!(
+            validate_status_history_v2(&store),
+            Err(EngineError::Invariant(message)) if message.contains("not a valid versioned collection result")
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn same_refusal_id_with_different_payload_is_rejected_on_status_reopen() {
+        const TIME: &str = "2026-07-20T12:00:00.000Z";
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let mut store = Store::initialize(directory.path().join("refusal.db")).expect("store");
+        let instance = InstanceId::new("refusal.primary").expect("instance");
+        let helper_refusal = |retriable: bool, errno: &str| nq_protocol::Refusal {
+            responsible_instance_id: instance.clone(),
+            boundary: nq_protocol::RefusalBoundary::Collection,
+            code: nq_protocol::RefusalCode::CollectionFailed,
+            message: "backend collection failed".to_owned(),
+            retriable,
+            details: json!({"errno": errno}),
+        };
+        let original =
+            GovernedRefusal::helper("refusal-stable".to_owned(), helper_refusal(true, "EAGAIN"));
+        let profile: &'static dyn ProfileModule = &nq_profiles::conformance::MODULE;
+        let admission =
+            seed_compiled_admission(&mut store, profile, instance.as_str(), "refusal-stable");
+        let run = test_run(
+            profile,
+            instance.as_str(),
+            "refusal-stable",
+            admission,
+            AcquisitionOutcome::Response,
+        );
+        let run_id = run.run_id.clone();
+        let valid =
+            CollectionOutcome::rejected(instance.to_string(), run_id.clone(), original.clone());
+        let submission = SubmissionInput {
+            submission_id: "submission-refusal-stable".to_owned(),
+            raw_bytes: b"helper refusal\n".to_vec(),
+            received_at: TIME.to_owned(),
+            protocol_outcome: "valid_refusal".to_owned(),
+            disposition: SubmissionDisposition::Rejected {
+                refusal: stored_governed_refusal(
+                    &original,
+                    DateTime::parse_from_rfc3339(TIME)
+                        .expect("time")
+                        .with_timezone(&Utc),
+                )
+                .expect("stored refusal"),
+            },
+        };
+        commit_test_non_success(&mut store, run, Some(submission), &valid, "refusal-stable");
+        assert_eq!(
+            validate_rejected_custody_history(&store).expect("validate complete custody"),
+            1
+        );
+
+        assert!(status_snapshot_v2(&store).is_ok());
+        assert_eq!(
+            validate_status_history_v2(&store).expect("valid status history"),
+            1
+        );
+
+        let substituted = CollectionOutcome::rejected(
+            instance.to_string(),
+            run_id,
+            GovernedRefusal::helper("refusal-stable".to_owned(), helper_refusal(false, "ENODEV")),
+        );
+        store
+            .record_status(&StatusEventInput {
+                status_event_id: "status-refusal-substituted".to_owned(),
+                component_kind: "instance".to_owned(),
+                component_id: instance.to_string(),
+                state: "degraded".to_owned(),
+                code: "helper_refused".to_owned(),
+                detail: canonical(&substituted).expect("substituted status detail"),
+                observed_at: TIME.to_owned(),
+            })
+            .expect("record hostile substituted status");
+        assert!(matches!(
+            status_snapshot_v2(&store),
+            Err(EngineError::Invariant(message)) if message.contains("disagrees with linked refusal")
+        ));
+        assert!(validate_status_history_v2(&store).is_err());
+    }
+
+    #[test]
+    fn carrier_startup_detail_survives_dry_and_canonical_surfaces() {
         let mode = AcquisitionOutcome::CarrierStartupFailed {
             message: "helper socket mode is 0o660; expected 0o600".to_owned(),
         };
         let timeout = AcquisitionOutcome::CarrierStartupFailed {
             message: "supervised helper did not become ready within 30s".to_owned(),
         };
-
-        // Same coarse code: the code alone cannot tell the two causes apart.
-        assert_eq!(acquisition_code(&mode), "carrier_startup_failed");
-        assert_eq!(acquisition_code(&timeout), "carrier_startup_failed");
-
-        // CLI surface (`nq watcher test` dry collection): the stable code is
-        // retained and the distinct detail is appended, so the two differ.
-        let cli_mode = dry_collection_error(&mode).to_string();
-        let cli_timeout = dry_collection_error(&timeout).to_string();
-        assert!(cli_mode.contains("carrier_startup_failed"), "{cli_mode}");
-        assert!(
-            cli_timeout.contains("carrier_startup_failed"),
-            "{cli_timeout}"
-        );
-        assert!(
-            cli_mode.contains("helper socket mode is 0o660"),
-            "{cli_mode}"
-        );
-        assert!(
-            cli_timeout.contains("did not become ready within 30s"),
-            "{cli_timeout}"
-        );
-        assert_ne!(cli_mode, cli_timeout);
-
-        // Archival surface: record_instance_status persists canonical(outcome)
-        // into status_events.detail, so the same two causes must stay distinct
-        // in the stored bytes, code included.
-        let persist = |o: &AcquisitionOutcome| -> String {
-            let outcome = CollectionOutcome::AcquisitionFailed {
-                instance_id: "conformance-local".to_owned(),
-                run_id: "00000000-0000-4000-8000-000000000000".to_owned(),
-                code: acquisition_code(o).to_owned(),
-                detail: acquisition_detail(o),
-            };
-            String::from_utf8(nq_protocol::canonical_json_bytes(&outcome).expect("canonical"))
-                .expect("utf8")
+        assert_eq!(acquisition_code(&mode), acquisition_code(&timeout));
+        let render = |outcome: &AcquisitionOutcome| {
+            EngineError::AcquisitionFailed(Box::new(
+                AcquisitionFailure::from_outcome(outcome.clone()).expect("failure"),
+            ))
+            .to_string()
         };
-        let stored_mode = persist(&mode);
-        let stored_timeout = persist(&timeout);
-        assert!(
-            stored_mode.contains("carrier_startup_failed"),
-            "{stored_mode}"
-        );
-        assert!(
-            stored_mode.contains("helper socket mode is 0o660"),
-            "{stored_mode}"
-        );
-        assert!(
-            stored_timeout.contains("did not become ready within 30s"),
-            "{stored_timeout}"
-        );
-        assert_ne!(stored_mode, stored_timeout);
-
-        // Regression guard: an outcome that genuinely carries no detail keeps
-        // the bare code, with no invented `: <detail>` suffix appended.
-        let bare = dry_collection_error(&AcquisitionOutcome::Timeout).to_string();
-        assert!(bare.ends_with("timeout"), "{bare}");
-        assert!(!bare.contains("carrier_startup_failed"), "{bare}");
+        assert!(render(&mode).contains("helper socket mode is 0o660"));
+        assert!(render(&timeout).contains("did not become ready within 30s"));
+        assert_ne!(render(&mode), render(&timeout));
     }
 
     /// Release forcing case: persistent-carrier timeout phase is dependent
@@ -4052,51 +7595,73 @@ mod tests {
     /// diagnostic and in the canonical `CollectionOutcome` persisted by
     /// `record_instance_status`.
     ///
-    /// This is ignored in the ordinary suite because it specifies the repair
-    /// required before release.  Running it explicitly must fail against a
-    /// candidate that still drops `ExchangeTimeout.phase`.
     #[test]
-    #[ignore = "release gate: ExchangeTimeout.phase must survive every testimonial boundary"]
     fn forcing_exchange_timeout_phase_survives_dry_and_status_surfaces() {
         let write = AcquisitionOutcome::ExchangeTimeout {
-            phase: "write_request".to_owned(),
+            phase: ExchangeTimeoutPhase::WriteRequest,
         };
         let read = AcquisitionOutcome::ExchangeTimeout {
-            phase: "read_response".to_owned(),
+            phase: ExchangeTimeoutPhase::ReadResponse,
         };
 
         assert_eq!(acquisition_code(&write), "timeout");
         assert_eq!(acquisition_code(&read), "timeout");
 
-        let write_detail = acquisition_detail(&write);
-        let read_detail = acquisition_detail(&read);
-        let dry_write = dry_collection_error(&write).to_string();
-        let dry_read = dry_collection_error(&read).to_string();
+        let dry = |outcome: &AcquisitionOutcome| {
+            EngineError::AcquisitionFailed(Box::new(
+                AcquisitionFailure::from_outcome(outcome.clone()).expect("failure"),
+            ))
+            .to_string()
+        };
+        let dry_write = dry(&write);
+        let dry_read = dry(&read);
         let status = |outcome: &AcquisitionOutcome| {
-            canonical(&CollectionOutcome::AcquisitionFailed {
-                instance_id: "conformance-local".to_owned(),
-                run_id: "00000000-0000-4000-8000-000000000000".to_owned(),
-                code: acquisition_code(outcome).to_owned(),
-                detail: acquisition_detail(outcome),
-            })
-            .expect("status outcome canonicalizes")
+            let carrier = CollectionOutcome::acquisition_failed(
+                "conformance-local".to_owned(),
+                "00000000-0000-4000-8000-000000000000".to_owned(),
+                outcome.clone(),
+            )
+            .expect("typed status outcome");
+            canonical(&carrier).expect("status outcome canonicalizes")
         };
         let stored_write = status(&write);
         let stored_read = status(&read);
 
-        assert!(
-            write_detail.as_deref() == Some("write_request")
-                && read_detail.as_deref() == Some("read_response")
-                && dry_write != dry_read
-                && dry_write.contains("write_request")
-                && dry_read.contains("read_response")
-                && stored_write.as_bytes() != stored_read.as_bytes(),
-            "timeout phase collapsed: write_detail={write_detail:?}, \
-             read_detail={read_detail:?}, dry_write={dry_write:?}, \
-             dry_read={dry_read:?}, stored_write={}, stored_read={}",
-            String::from_utf8_lossy(stored_write.as_bytes()),
-            String::from_utf8_lossy(stored_read.as_bytes())
-        );
+        assert_ne!(dry_write, dry_read);
+        assert!(dry_write.contains("write_request"));
+        assert!(dry_read.contains("read_response"));
+        assert_ne!(stored_write.as_bytes(), stored_read.as_bytes());
+        let reopened =
+            decode_collection_outcome(stored_write.as_bytes()).expect("reopen timeout result");
+        assert!(matches!(
+            reopened.result,
+            CollectionResult::AcquisitionFailed {
+                failure: AcquisitionFailure {
+                    class: AcquisitionFailureClass::Timeout,
+                    retry: RetryDisposition::Unspecified,
+                    outcome: AcquisitionOutcome::ExchangeTimeout { ref phase },
+                },
+            } if phase == &ExchangeTimeoutPhase::WriteRequest
+        ));
+    }
+
+    #[test]
+    fn exchange_timeout_phase_is_closed_and_required() {
+        let exact = serde_json::to_value(AcquisitionOutcome::ExchangeTimeout {
+            phase: ExchangeTimeoutPhase::WriteRequest,
+        })
+        .expect("timeout value");
+        for invalid_phase in [json!(""), json!("connect"), json!(null)] {
+            let mut invalid = exact.clone();
+            invalid["phase"] = invalid_phase;
+            assert!(serde_json::from_value::<AcquisitionOutcome>(invalid).is_err());
+        }
+        let mut omitted = exact;
+        omitted
+            .as_object_mut()
+            .expect("timeout object")
+            .remove("phase");
+        assert!(serde_json::from_value::<AcquisitionOutcome>(omitted).is_err());
     }
 
     /// Release forcing case: `retriable` and structured details are part of a
@@ -4104,7 +7669,6 @@ mod tests {
     /// in those fields must not become one status event merely because their
     /// operator-facing message is the same.
     #[test]
-    #[ignore = "release gate: protocol refusal dependent fields must survive CollectionOutcome"]
     fn forcing_protocol_refusal_dependent_fields_survive_collection_status() {
         let instance = InstanceId::new("conformance-local").expect("instance token");
         let transient = nq_protocol::Refusal {
@@ -4129,20 +7693,19 @@ mod tests {
             .expect("typed permanent refusal canonicalizes");
         assert_ne!(source_transient, source_permanent);
 
-        // Mirrors the current ResponseOutcome::Refusal -> CollectionOutcome
-        // conversion in `collect`; this is the object persisted in status.
-        let status = |refusal: &nq_protocol::Refusal| {
-            canonical(&CollectionOutcome::HelperRefused {
-                instance_id: refusal.responsible_instance_id.to_string(),
-                run_id: "00000000-0000-4000-8000-000000000000".to_owned(),
-                boundary: enum_token(&refusal.boundary).expect("boundary token"),
-                code: enum_token(&refusal.code).expect("code token"),
-                diagnostic: refusal.message.clone(),
-            })
-            .expect("status outcome canonicalizes")
+        let carrier = |refusal_id: &str, refusal: &nq_protocol::Refusal| {
+            CollectionOutcome::rejected(
+                refusal.responsible_instance_id.to_string(),
+                "00000000-0000-4000-8000-000000000000".to_owned(),
+                GovernedRefusal::helper(refusal_id.to_owned(), refusal.clone()),
+            )
         };
-        let stored_transient = status(&transient);
-        let stored_permanent = status(&permanent);
+        let transient_carrier = carrier("refusal-transient", &transient);
+        let permanent_carrier = carrier("refusal-permanent", &permanent);
+        let stored_transient =
+            canonical(&transient_carrier).expect("transient status canonicalizes");
+        let stored_permanent =
+            canonical(&permanent_carrier).expect("permanent status canonicalizes");
 
         assert_ne!(
             stored_transient.as_bytes(),
@@ -4150,6 +7713,37 @@ mod tests {
             "typed protocol refusals collapsed in status: {}",
             String::from_utf8_lossy(stored_transient.as_bytes())
         );
+        let reopened =
+            decode_collection_outcome(stored_transient.as_bytes()).expect("reopen helper refusal");
+        assert!(matches!(
+            reopened.result,
+            CollectionResult::Rejected {
+                refusal: GovernedRefusal {
+                    origin: GovernedRefusalOrigin::Helper(ref source),
+                    ..
+                },
+            } if source.retriable && source.details == json!({"errno": "EAGAIN", "attempt": 1})
+        ));
+
+        let transient_wire =
+            nq_protocol::encode_ndjson(&transient_carrier).expect("encode transient carrier");
+        let permanent_wire =
+            nq_protocol::encode_ndjson(&permanent_carrier).expect("encode permanent carrier");
+        assert_ne!(transient_wire, permanent_wire);
+        let transient_decoded: CollectionOutcome =
+            nq_protocol::decode_ndjson(&transient_wire, transient_wire.len())
+                .expect("decode transient carrier");
+        let permanent_decoded: CollectionOutcome =
+            nq_protocol::decode_ndjson(&permanent_wire, permanent_wire.len())
+                .expect("decode permanent carrier");
+        transient_decoded
+            .validate()
+            .expect("validate transient wire");
+        permanent_decoded
+            .validate()
+            .expect("validate permanent wire");
+        assert_eq!(transient_decoded, transient_carrier);
+        assert_eq!(permanent_decoded, permanent_carrier);
     }
 
     /// Release forcing case: profile identity, exact refusing boundary, and
@@ -4157,7 +7751,6 @@ mod tests {
     /// message coincide.  The status carrier must preserve those dependent
     /// fields instead of reducing both refusals to `plane = profile`.
     #[test]
-    #[ignore = "release gate: profile refusal identity must survive CollectionOutcome"]
     fn forcing_profile_refusal_identity_survives_collection_status() {
         let report = nq_profiles::ProfileRefusal {
             instance_id: "conformance-local".to_owned(),
@@ -4169,7 +7762,7 @@ mod tests {
         };
         let observation = nq_profiles::ProfileRefusal {
             instance_id: "conformance-local".to_owned(),
-            profile: nq_profiles::ProfileKey::new("nq.host", 7),
+            profile: nq_profiles::host::MODULE.descriptor().profile.clone(),
             boundary: nq_profiles::RefusalBoundary::Observation,
             code: nq_profiles::ProfileRefusalCode::InvalidPayload,
             message: "payload is invalid".to_owned(),
@@ -4181,26 +7774,74 @@ mod tests {
             .expect("typed observation refusal canonicalizes");
         assert_ne!(source_report, source_observation);
 
-        // Mirrors the current ProfileRefusal -> CollectionOutcome conversion
-        // in `collect`; neither profile nor exact boundary/details is carried.
-        let status = |refusal: &nq_profiles::ProfileRefusal| {
-            canonical(&CollectionOutcome::Rejected {
-                instance_id: refusal.instance_id.clone(),
-                run_id: "00000000-0000-4000-8000-000000000000".to_owned(),
-                plane: "profile".to_owned(),
-                code: enum_token(&refusal.code).expect("code token"),
-                diagnostic: refusal.message.clone(),
-            })
-            .expect("status outcome canonicalizes")
+        let status = |refusal_id: &str, refusal: &nq_profiles::ProfileRefusal| {
+            let compiled = nq_profiles::resolve_profile_key(&refusal.profile)
+                .expect("test profile is compiled");
+            let semantic_id =
+                profile_semantic_id(compiled.descriptor()).expect("test profile semantic identity");
+            let carrier = CollectionOutcome::rejected(
+                refusal.instance_id.clone(),
+                "00000000-0000-4000-8000-000000000000".to_owned(),
+                GovernedRefusal::profile(refusal_id.to_owned(), semantic_id, refusal.clone()),
+            );
+            canonical(&carrier).expect("status outcome canonicalizes")
         };
-        let stored_report = status(&report);
-        let stored_observation = status(&observation);
+        let stored_report = status("refusal-report", &report);
+        let stored_observation = status("refusal-observation", &observation);
 
         assert_ne!(
             stored_report.as_bytes(),
             stored_observation.as_bytes(),
             "typed profile refusals collapsed in status: {}",
             String::from_utf8_lossy(stored_report.as_bytes())
+        );
+        let reopened = decode_collection_outcome(stored_observation.as_bytes())
+            .expect("reopen profile refusal");
+        assert!(matches!(
+            reopened.result,
+            CollectionResult::Rejected {
+                refusal: GovernedRefusal {
+                    origin: GovernedRefusalOrigin::Profile(ref source),
+                    ..
+                },
+            } if source.refusal.profile == nq_profiles::host::MODULE.descriptor().profile
+                && source.refusal.boundary == nq_profiles::RefusalBoundary::Observation
+                && source.refusal.details.get("ordinal").map(String::as_str) == Some("4")
+        ));
+
+        let empty_details = CollectionOutcome::rejected(
+            "conformance-local".to_owned(),
+            "run-empty-profile-details".to_owned(),
+            GovernedRefusal::profile(
+                "refusal-empty-profile-details".to_owned(),
+                profile_semantic_id(nq_profiles::conformance::MODULE.descriptor())
+                    .expect("conformance semantic identity"),
+                nq_profiles::ProfileRefusal {
+                    instance_id: "conformance-local".to_owned(),
+                    profile: nq_profiles::ProfileKey::new("nq.conformance", 1),
+                    boundary: nq_profiles::RefusalBoundary::Report,
+                    code: nq_profiles::ProfileRefusalCode::InvalidPayload,
+                    message: "payload is invalid".to_owned(),
+                    details: BTreeMap::new(),
+                },
+            ),
+        );
+        let mut strict_value =
+            serde_json::to_value(&empty_details).expect("strict profile refusal value");
+        assert_eq!(
+            strict_value["result"]["refusal"]["origin"]["payload"]["refusal"]["details"],
+            json!({}),
+            "empty structured details remain an explicit governed field"
+        );
+        strict_value["result"]["refusal"]["origin"]["payload"]["refusal"]
+            .as_object_mut()
+            .expect("profile refusal payload")
+            .remove("details");
+        let omitted_details = nq_protocol::canonical_json_bytes(&strict_value)
+            .expect("canonical omitted-details fixture");
+        assert!(
+            decode_collection_outcome(&omitted_details).is_err(),
+            "profile refusal details must not default during historical reopen"
         );
     }
 }

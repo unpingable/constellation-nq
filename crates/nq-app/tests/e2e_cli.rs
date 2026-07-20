@@ -133,7 +133,7 @@ max_file_bytes = 67108864
     assert_eq!(findings, serde_json::json!([]));
 
     let status = success(run(nq, &config_path, &["status", "export"]));
-    assert_eq!(status["schema"], "nq.status_snapshot.v1");
+    assert_eq!(status["schema"], "nq.status_snapshot.v2");
     let instance = status["components"]
         .as_array()
         .and_then(|components| {
