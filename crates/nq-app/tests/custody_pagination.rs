@@ -97,7 +97,15 @@ fn append_admission(
             identity: AdmissionIdentity {
                 profile_semantic_id: Sha256Digest::parse(semantic_id.as_str())
                     .expect("semantic identity digest"),
-                detector_identity_digest: digest("detector"),
+                detector_identity_digest: nq_store::detector_suite_identity_digest(
+                    profile.detectors().iter().map(|detector| {
+                        detector
+                            .descriptor()
+                            .digest()
+                            .expect("compiled detector identity")
+                    }),
+                )
+                .expect("compiled detector suite identity"),
                 evaluator_source_digest: digest("source"),
                 evaluator_artifact_digest: digest("evaluator"),
                 helper_artifact_digest: digest("helper"),

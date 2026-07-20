@@ -1,14 +1,13 @@
 //! Hostile profile-validation and detector-lifecycle corpus.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{Duration, TimeZone as _, Utc};
 use nq_profiles::{
-    DetectorInput, DetectorReport, DetectorRuleParameters, DetectorState, EvidenceWatermark,
-    ProfileModule,
-    ProfileRefusalCode, ReportInput, ScopeGrant, SemanticCoverageState, SemanticReportStatus,
-    ValidatedReport, ValidationContext, VantageGrant, all_profiles, conformance, host,
-    resolve_profile,
+    DetectorInput, DetectorReport, DetectorResult, DetectorRuleParameters, DetectorState,
+    EvidenceWatermark, ProfileModule, ProfileRefusalCode, ReportInput, ScopeGrant,
+    SemanticCoverageState, SemanticReportStatus, ValidatedReport, ValidationContext, VantageGrant,
+    all_profiles, conformance, host, resolve_profile,
 };
 use serde_json::{Value, json};
 
@@ -68,7 +67,10 @@ fn detector_semantic_id_covers_the_load_pressure_threshold() {
     // Same parameters -> same detector semantic id.
     assert_eq!(
         baseline,
-        descriptor.clone().digest().expect("unchanged detector digest"),
+        descriptor
+            .clone()
+            .digest()
+            .expect("unchanged detector digest"),
     );
 
     // Changing only the executable threshold must rotate the detector semantic
@@ -527,6 +529,68 @@ fn detector_requires_newest_current_complete_coverage_to_resolve() {
     let result = detector.evaluate(&newer_failure_input);
     assert_eq!(result.state, DetectorState::CannotEvaluate);
     assert!(result.refusal.is_some());
+}
+
+#[test]
+fn host_detector_same_code_refusals_preserve_distinct_structured_details() {
+    let detector = host::MODULE.detectors()[0];
+    let empty = detector.evaluate(&DetectorInput {
+        instance_id: "instance:host",
+        evaluated_at: now(),
+        watermark: EvidenceWatermark(9),
+        reports: &[],
+    });
+    let current = detector_report(
+        "report:current",
+        10,
+        host::MODULE
+            .validate(&host_context(now()), &host_report(now(), 1.0))
+            .expect("complete host report"),
+    );
+    let stale = detector.evaluate(&DetectorInput {
+        instance_id: "instance:host",
+        evaluated_at: now() + Duration::seconds(301),
+        watermark: EvidenceWatermark(10),
+        reports: std::slice::from_ref(&current),
+    });
+
+    let empty_refusal = empty.refusal.as_ref().expect("typed missing refusal");
+    let stale_refusal = stale.refusal.as_ref().expect("typed stale refusal");
+    assert_eq!(empty.state, DetectorState::CannotEvaluate);
+    assert_eq!(stale.state, DetectorState::CannotEvaluate);
+    assert_eq!(empty_refusal.code, stale_refusal.code);
+    assert_eq!(empty_refusal.boundary, stale_refusal.boundary);
+    assert_eq!(
+        empty_refusal.details,
+        BTreeMap::from([("reason".to_owned(), "missing_testimony".to_owned())])
+    );
+    assert_eq!(
+        stale_refusal.details,
+        BTreeMap::from([
+            ("age_seconds".to_owned(), "301".to_owned()),
+            ("freshness_relation".to_owned(), "stale".to_owned()),
+            ("reason".to_owned(), "invalid_freshness".to_owned()),
+            ("reliance_seconds".to_owned(), "300".to_owned()),
+        ])
+    );
+    assert_ne!(empty_refusal.details, stale_refusal.details);
+
+    for result in [empty, stale] {
+        let encoded = serde_json::to_vec(&result).expect("detector result serializes");
+        let reopened: DetectorResult =
+            serde_json::from_slice(&encoded).expect("detector result reopens");
+        assert_eq!(reopened, result);
+
+        let mut omitted = serde_json::to_value(&result).expect("detector result value");
+        omitted["refusal"]
+            .as_object_mut()
+            .expect("typed profile refusal")
+            .remove("details");
+        assert!(
+            serde_json::from_value::<DetectorResult>(omitted).is_err(),
+            "structured refusal details must never be defaulted during reopen"
+        );
+    }
 }
 
 #[test]

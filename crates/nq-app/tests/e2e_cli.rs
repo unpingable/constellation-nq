@@ -125,15 +125,33 @@ max_file_bytes = 67108864
     assert_eq!(admitted["outcome"], "activated");
     assert!(admissions.join("conformance.primary.json").is_file());
 
-    let collected = success(run(nq, &config_path, &["collect", "conformance.primary"]));
-    assert_eq!(collected["outcome"], "admitted");
-    assert_eq!(collected["report_status"], "complete");
+    let collected_output = run(
+        nq,
+        &config_path,
+        &["--json", "collect", "conformance.primary"],
+    );
+    assert!(
+        collected_output.status.success(),
+        "structured collection failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&collected_output.stdout),
+        String::from_utf8_lossy(&collected_output.stderr)
+    );
+    let reopened = nq_core::decode_collection_outcome_ndjson(
+        &collected_output.stdout,
+        collected_output.stdout.len(),
+    )
+    .expect("shipped structured collection output must strictly reopen");
+    let collected = serde_json::to_value(reopened).expect("reopened collection serializes");
+    assert_eq!(collected["schema"], "nq.collection_outcome.v2");
+    assert_eq!(collected["result"]["outcome"], "admitted");
+    assert_eq!(collected["result"]["report_status"], "complete");
+    assert_eq!(collected["result"]["evaluations"], serde_json::json!([]));
 
     let findings = success(run(nq, &config_path, &["findings", "export"]));
     assert_eq!(findings, serde_json::json!([]));
 
     let status = success(run(nq, &config_path, &["status", "export"]));
-    assert_eq!(status["schema"], "nq.status_snapshot.v2");
+    assert_eq!(status["schema"], "nq.status_snapshot.v3");
     let instance = status["components"]
         .as_array()
         .and_then(|components| {
@@ -144,7 +162,7 @@ max_file_bytes = 67108864
         .expect("instance status component");
     assert_eq!(instance["state"], "healthy");
 
-    let queried = success(run(
+    let queried = run(
         nq,
         &config_path,
         &[
@@ -153,8 +171,12 @@ max_file_bytes = 67108864
             "--limit",
             "10",
         ],
-    ));
-    assert!(queried.as_array().is_some_and(|rows| rows.len() >= 4));
+    );
+    assert!(!queried.status.success());
+    assert!(
+        String::from_utf8_lossy(&queried.stderr)
+            .contains("nq.status_snapshot.v1 cannot emit governed collection results; use v3")
+    );
 
     let revoked = success(run(
         nq,
@@ -173,7 +195,8 @@ max_file_bytes = 67108864
     assert!(!refused.status.success());
     let refused_json: Value =
         serde_json::from_slice(&refused.stdout).expect("refused collection JSON");
-    assert_eq!(refused_json["outcome"], "admission_refused");
+    assert_eq!(refused_json["schema"], "nq.collection_outcome.v1");
+    assert_eq!(refused_json["result"]["outcome"], "admission_refused");
 
     let rolled_back = success(run(
         nq,
@@ -183,7 +206,8 @@ max_file_bytes = 67108864
     assert_eq!(rolled_back["outcome"], "rolled_back");
     assert!(admissions.join("conformance.primary.json").is_file());
     let recollected = success(run(nq, &config_path, &["collect", "conformance.primary"]));
-    assert_eq!(recollected["outcome"], "admitted");
+    assert_eq!(recollected["schema"], "nq.collection_outcome.v2");
+    assert_eq!(recollected["result"]["outcome"], "admitted");
 
     nq_store::Store::open(&database)
         .expect("open database through library for integrity assertion")

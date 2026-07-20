@@ -57,7 +57,7 @@ import os
 import sys
 
 request = json.loads(sys.stdin.readline())
-mode_path = os.path.join(os.path.dirname(__file__), "refusal-mode")
+mode_path = os.environ["NQ_REFUSAL_MODE_PATH"]
 mode = open(mode_path, encoding="utf-8").read().strip()
 transient = mode == "transient"
 echo_fields = (
@@ -108,7 +108,9 @@ vantage = {{ kind = "local", value = {{}} }}
 capability_ceiling = []
 
 [watchers.command]
-executable = "{}"
+executable = "/usr/bin/python3"
+args = ["{}"]
+env = {{ NQ_REFUSAL_MODE_PATH = "{}" }}
 execution_account = "{}"
 allow_same_identity_in_debug = true
 working_directory = "{}"
@@ -139,6 +141,7 @@ max_file_bytes = 67108864
             root.join("refusal-admissions").display(),
             root.join("refusal-helpers").display(),
             helper.display(),
+            root.join("refusal-mode").display(),
             nix::unistd::geteuid().as_raw(),
             root.display(),
         ),
@@ -318,7 +321,15 @@ fn append_admission(
             identity: AdmissionIdentity {
                 profile_semantic_id: Sha256Digest::parse(semantic_id.as_str())
                     .expect("semantic identity is a digest"),
-                detector_identity_digest: digest("detector"),
+                detector_identity_digest: nq_store::detector_suite_identity_digest(
+                    profile.detectors().iter().map(|detector| {
+                        detector
+                            .descriptor()
+                            .digest()
+                            .expect("compiled detector identity")
+                    }),
+                )
+                .expect("compiled detector suite identity"),
                 evaluator_source_digest: digest("source"),
                 evaluator_artifact_digest: digest("evaluator"),
                 helper_artifact_digest: digest("helper"),
@@ -629,7 +640,7 @@ fn cli_and_cold_archive_reopen_exact_same_code_refusal_payloads() {
     let outcomes = seed_transport_store(&database);
 
     let status = success(run(nq, &config, &["status", "export"]));
-    assert_eq!(status["schema"], "nq.status_snapshot.v2");
+    assert_eq!(status["schema"], "nq.status_snapshot.v3");
     let components = status["components"].as_array().expect("status components");
     let component = |id: &str| {
         components
@@ -775,6 +786,11 @@ fn cli_and_cold_archive_reopen_exact_same_code_refusal_payloads() {
     ));
     assert_eq!(verified["integrity_verified"], true);
     assert_eq!(verified["historical_database_verified"], true);
+    assert_eq!(
+        verified["historical_admitted_report_semantics_verified"],
+        true
+    );
+    assert_eq!(verified["historical_admitted_reports_verified"], 0);
     assert_eq!(verified["historical_status_semantics_verified"], true);
     assert_eq!(verified["historical_status_events_verified"], 6);
     assert_eq!(
@@ -834,14 +850,6 @@ fn structured_watcher_test_emits_the_canonical_typed_refusal() {
         !transient_output.status.success(),
         "helper refusal must exit non-zero"
     );
-    if String::from_utf8_lossy(&transient_output.stderr).contains("spawn_failed")
-        && fs::read_to_string("/proc/self/attr/current")
-            .is_ok_and(|profile| profile.contains("unpriv_bwrap"))
-    {
-        eprintln!("skipping helper execution: sandbox AppArmor denies executable memfds");
-        return;
-    }
-
     fs::write(directory.path().join("refusal-mode"), b"permanent\n").expect("switch refusal mode");
     let permanent_output = run(nq, &config, &["watcher", "test", "dry-refusal"]);
     assert!(
@@ -868,7 +876,10 @@ fn structured_watcher_test_emits_the_canonical_typed_refusal() {
         assert_eq!(envelope["schema"], "nq.watcher_action_error.v1");
         assert_eq!(envelope["instance_id"], "dry-refusal");
         assert_eq!(envelope["action"], "test");
-        assert_eq!(envelope["failure"]["kind"], "governed_refusal");
+        assert_eq!(
+            envelope["failure"]["kind"], "governed_refusal",
+            "unexpected watcher failure: {envelope}"
+        );
         assert_eq!(
             envelope["failure"]["payload"]["schema"],
             "nq.governed_refusal.v1"

@@ -10,9 +10,10 @@
 
 use nq_protocol::Sha256Digest;
 use nq_store::{
-    AdmissionIdentity, AdmissionInput, CanonicalDocument, CollectionInput, ProfileDescriptorInput,
-    RefusalInput, ReportInput, RunInput, RunResultStatusInput, StatusEventInput, Store,
-    SubmissionDisposition, SubmissionInput,
+    AdmissionIdentity, AdmissionInput, AdmittedCollectionCompletion, CanonicalDocument,
+    CollectionInput, ProfileDescriptorInput, RefusalInput, ReportInput, RunInput,
+    RunResultStatusInput, StatusEventInput, Store, StoreError, SubmissionDisposition,
+    SubmissionInput, detector_suite_identity_digest,
 };
 use serde_json::{Value, json};
 
@@ -50,7 +51,8 @@ fn seed_descriptor(store: &mut Store) -> String {
 fn identity() -> AdmissionIdentity {
     AdmissionIdentity {
         profile_semantic_id: digest("semantic"),
-        detector_identity_digest: digest("detector"),
+        detector_identity_digest: detector_suite_identity_digest(Vec::<String>::new())
+            .expect("empty contract detector suite identity"),
         evaluator_source_digest: digest("source"),
         evaluator_artifact_digest: digest("artifact"),
         helper_artifact_digest: digest("helper"),
@@ -117,6 +119,46 @@ fn run(suffix: &str, admission_id: Option<&str>, profile_digest: &str) -> RunInp
 }
 
 fn admitted_report(suffix: &str, profile_digest: &str) -> ReportInput {
+    let evidence = nq_protocol::EvidenceReport {
+        schema: nq_protocol::EVIDENCE_REPORT_SCHEMA.to_owned(),
+        profile: nq_protocol::ProfileBinding {
+            id: nq_protocol::ProfileId::new(PROFILE).expect("profile id"),
+            version: nq_protocol::ProfileVersion::new("1").expect("profile version"),
+            digest: Sha256Digest::parse(profile_digest.to_owned()).expect("profile digest"),
+        },
+        binding: nq_protocol::SubjectBinding {
+            subject: nq_protocol::SubjectId::new(format!("contract:{suffix}")).expect("subject"),
+            scope: nq_protocol::ScopeBinding {
+                kind: nq_protocol::ScopeKind::new("fixture").expect("scope kind"),
+                value: json!({"suffix": suffix}),
+            },
+            vantage: nq_protocol::VantageBinding {
+                kind: nq_protocol::VantageKind::new("local").expect("vantage kind"),
+                value: json!({}),
+            },
+        },
+        observed_at: chrono::DateTime::parse_from_rfc3339(TS)
+            .expect("observed time")
+            .with_timezone(&chrono::Utc),
+        status: nq_protocol::ReportStatus::Complete,
+        coverage: Vec::new(),
+        observations: Vec::new(),
+        errors: Vec::new(),
+        used_capabilities: Vec::new(),
+        backend: nq_protocol::BackendProvenance {
+            implementation: nq_protocol::BackendIdentity {
+                name: nq_protocol::ImplementationName::new("contract-fixture")
+                    .expect("implementation"),
+                version: Some("1".to_owned()),
+                digest: None,
+            },
+            tools: Vec::new(),
+        },
+        next_checkpoint: None,
+    };
+    nq_protocol::validate_report(&evidence).expect("valid evidence report");
+    let canonical_report =
+        CanonicalDocument::from_serializable(&evidence).expect("canonical evidence report");
     ReportInput {
         report_id: format!("report-{suffix}"),
         instance_id: INSTANCE.to_owned(),
@@ -126,14 +168,70 @@ fn admitted_report(suffix: &str, profile_digest: &str) -> ReportInput {
         observed_at: TS.to_owned(),
         received_at: TS.to_owned(),
         report_status: "complete".to_owned(),
-        canonical_report: doc(json!({ "report": suffix })),
-        validated_report: doc(json!({ "validated": suffix })),
+        validated_report: doc(json!({
+            "schema": "nq.store_contract.validated_report.v1",
+            "instance_id": INSTANCE,
+            "report_digest": canonical_report.digest(),
+            "profile": {"id": PROFILE, "version": 1},
+            "profile_digest": profile_digest,
+            "status": "complete",
+            "observed_at": TS,
+            "received_at": TS,
+        })),
+        canonical_report,
         next_checkpoint: None,
         admitted_at: TS.to_owned(),
         observations: Vec::new(),
         coverage: Vec::new(),
         errors: Vec::new(),
     }
+}
+
+fn commit_admitted_fixture(
+    store: &mut Store,
+    collection: &CollectionInput,
+) -> Result<(), StoreError> {
+    let run_id = collection.run.run_id.clone();
+    let instance_id = collection.run.instance_id.clone();
+    let (report_id, report_status) = match &collection
+        .submission
+        .as_ref()
+        .expect("admitted fixture submission")
+        .disposition
+    {
+        SubmissionDisposition::Admitted(report) => {
+            (report.report_id.clone(), report.report_status.clone())
+        }
+        SubmissionDisposition::Rejected { .. } => panic!("admitted fixture disposition"),
+    };
+    store
+        .commit_admitted_collection(collection, |_view, receipt| {
+            Ok::<_, StoreError>(AdmittedCollectionCompletion {
+                value: (),
+                evaluations: Vec::new(),
+                status: StatusEventInput {
+                    status_event_id: format!("status-{run_id}"),
+                    component_kind: "instance".to_owned(),
+                    component_id: instance_id.clone(),
+                    state: "healthy".to_owned(),
+                    code: "report_complete".to_owned(),
+                    detail: doc(json!({
+                        "schema": "nq.collection_outcome.v2",
+                        "instance_id": instance_id,
+                        "run_id": run_id,
+                        "result": {
+                            "outcome": "admitted",
+                            "report_id": report_id,
+                            "report_status": report_status,
+                            "semantic_digest": receipt.semantic_digest,
+                            "evaluations": [],
+                        },
+                    })),
+                    observed_at: TS.to_owned(),
+                },
+            })
+        })
+        .map(|_| ())
 }
 
 /// Seed one admitted report and return its identifiers.
@@ -144,8 +242,9 @@ fn seed_admitted(store: &mut Store, suffix: &str) -> (String, String, String) {
         .append_admission(&admission_input(&admission_id, &profile_digest))
         .expect("append admission");
     let submission_id = format!("submission-{suffix}");
-    store
-        .commit_collection(&CollectionInput {
+    commit_admitted_fixture(
+        store,
+        &CollectionInput {
             run: run(suffix, Some(&admission_id), &profile_digest),
             submission: Some(SubmissionInput {
                 submission_id: submission_id.clone(),
@@ -157,8 +256,9 @@ fn seed_admitted(store: &mut Store, suffix: &str) -> (String, String, String) {
                     &profile_digest,
                 )),
             }),
-        })
-        .expect("commit admitted collection");
+        },
+    )
+    .expect("commit admitted collection");
     (submission_id, format!("report-{suffix}"), admission_id)
 }
 
@@ -287,8 +387,9 @@ fn an_admission_identity_is_append_only() {
 fn an_admitted_report_requires_a_run_bound_to_an_admission() {
     let mut store = Store::initialize_in_memory().expect("initialize");
     let profile_digest = seed_descriptor(&mut store);
-    let error = store
-        .commit_collection(&CollectionInput {
+    let error = commit_admitted_fixture(
+        &mut store,
+        &CollectionInput {
             run: run("unbound", None, &profile_digest),
             submission: Some(SubmissionInput {
                 submission_id: "submission-unbound".to_owned(),
@@ -300,8 +401,9 @@ fn an_admitted_report_requires_a_run_bound_to_an_admission() {
                     &profile_digest,
                 )),
             }),
-        })
-        .expect_err("an admitted report requires an admission-bound run");
+        },
+    )
+    .expect_err("an admitted report requires an admission-bound run");
     let _ = error;
 }
 

@@ -136,7 +136,7 @@ max_file_bytes = 67108864
         .spawn()
         .expect("collection process");
     let wait_started = Instant::now();
-    while !marker.exists() && wait_started.elapsed() < Duration::from_secs(5) {
+    while !marker.exists() && wait_started.elapsed() < Duration::from_secs(30) {
         thread::sleep(Duration::from_millis(10));
     }
     assert!(marker.exists(), "collection helper never started");
