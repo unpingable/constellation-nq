@@ -1,6 +1,7 @@
 # Governed-result transport map
 
-Status: **repair implemented; clean-pinned audit pending** (2026-07-20).
+Status: **repair clean-pinned, audited, rebuilt, and freshly qualified**
+(2026-07-20).
 
 This map preserves the pre-repair failure record and describes the current
 canonical transport chain. It follows existing refusal-preservation policy;
@@ -325,22 +326,28 @@ evidence commands. Direct additional tests exercise:
   hostile resealed-history failures.
 
 `admissibility.toml` binds these actual entry points. Its `delete-detail`
-mutation is designed to compile while replacing phase-specific exchange timeouts with the
-coarse timeout variant; the timeout pair assertion must fail. Its
-`recompute-from-code` mutation is designed to compile while storing a code-derived status
-document instead of the canonical result; the status reopen assertion must
-fail. A new clean-pinned ledger must execute both. No outcome is inherited from
-the authoritative old r4 receipt or its earlier r3 attempt.
+mutation replaces phase-specific exchange timeouts with the coarse timeout
+variant; the mutation command turns red. Its
+`recompute-from-code` mutation stores a code-derived status document instead
+of the canonical result; that mutation command also turns red. The clean-pinned
+r5 ledger records both pristine checks green and both mutations biting.
+No outcome is inherited from the authoritative old r4 receipt or its earlier
+r3 attempt.
 
 ## Qualification boundary
 
-The current repair map is implementation evidence, not mint evidence. The old
-candidate SHA-256
+The old candidate SHA-256
 `44e7bd1af43ac4d6f9543d2dc286610be43d86426334ca24ff1a05a45d24e2e0`
 remains blocked. Its external run `run-2026-07-20-06aa918` remains
 cryptographically intact but insufficiently sealed because mandatory
 `guest-results/RESULT` was omitted from the manifest; it is not corrupt and is
-not mint-sufficient. Until the product source is committed and clean-pinned,
-all direct tests pass, both mutations bite, the release package is rebuilt to
-different bytes, and a fresh corrected VM qualification passes, the release
-verdict remains **BLOCKED** with no waiver and no inherited pass.
+not mint-sufficient.
+
+The repaired source is clean-pinned at
+`2c41b0a49f9dc0e4e1b6c4da7863353d28ea6a5d`. The r5 ledger passes every active
+control and both mutations; the reproducibly rebuilt deb is
+`24ca5e0b40d9fde5a51c7324d27c3d83d3386669a833c23db773f49840141e63`;
+and fresh corrected run `run-2026-07-20-2c41b0a` passes an exact 51-file seal
+including `guest-results/RESULT`. The release verdict is therefore
+**READY-FOR-MINT-RATIFICATION** for those exact objects, with no waiver and no
+inherited pass. Operator ratification remains outstanding.

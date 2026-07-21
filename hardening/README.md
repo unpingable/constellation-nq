@@ -46,13 +46,14 @@ The two-phase guest script requires exact Ubuntu 24.04 and exercises:
   exact-byte restoration and a successful start; and
 - final package, service, layout, journal, and byte-hash receipts.
 
-The top-level `dist/nq-ng_0.1.0_amd64.deb` is the preserved 2026-07-20 mint
-candidate. Its package lifecycle ran successfully, but the mint-gate audit in
-`docs/HARDENING_PROGRAM.md` found that the historical run's 50-file seal omitted
-mandatory `guest-results/RESULT` and that the package fails the release-required
-refusal-preservation gate. Do not inherit the historical pass or use those exact
-bytes for a new qualification. A future full run requires a rebuilt candidate
-that first passes the refusal-preservation preflight.
+The old `44e7bd1a…` candidate and `run-2026-07-20-06aa918` remain historical:
+the run's internally valid 50-file seal omitted mandatory
+`guest-results/RESULT`, and those package bytes fail the release-required
+refusal-preservation gate. Do not inherit that pass. The current
+`dist/nq-ng_0.1.0_amd64.deb` is the rebuilt `24ca5e0b…` candidate from clean
+source `2c41b0a`; its r5 refusal audit passes and fresh KVM run
+`run-2026-07-20-2c41b0a` passes with an exact 51-file seal containing the guest
+verdict. The candidate is ready for operator mint ratification, not minted.
 
 There is no cross-UID or AF_UNIX skip path. The host accepts the guest result
 only when all four mandatory pass markers are present. Package purge intentionally

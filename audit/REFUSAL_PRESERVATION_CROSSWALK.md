@@ -1,6 +1,7 @@
 # Refusal-preservation crosswalk
 
-Status: **repair implemented; clean-pinned audit pending** (2026-07-20).
+Status: **release-required closure passed at clean pin; fresh candidate
+qualified** (2026-07-20).
 
 This is the target-owned complement to `admissibility.toml`. It derives its
 scope from `docs/HARDENING_PROGRAM.md` section 8 and the existing invariant
@@ -8,15 +9,17 @@ that refusals retain the exact responsible instance and boundary. It does not
 add product doctrine. Matching codes remain non-testimonial indexes; exact
 typed payloads and associations are the testimony.
 
-This status is deliberately narrower than a release verdict. The repair is
-present in current source, but no new package identity, clean-pinned AC-R4
-ledger, or fresh VM qualification is claimed here.
+This status is deliberately narrower than an operator mint. The exact source,
+package, audit ledger, and fresh VM evidence are recorded in
+`audit/receipts/run-2026-07-20-qualification-repair-r5/RECEIPT.md`; mint
+ratification remains an operator act.
 
 ## Historical bound object and governing control
 
 The failed candidate-specific audit remains immutable:
 
-- old package: `dist/nq-ng_0.1.0_amd64.deb`;
+- old package identity: the former bytes at the mutable
+  `dist/nq-ng_0.1.0_amd64.deb` path;
 - old package SHA-256:
   `44e7bd1af43ac4d6f9543d2dc286610be43d86426334ca24ff1a05a45d24e2e0`;
 - packaged source commit: `06aa918b7b51cf165070d53215ee4e943192102e`;
@@ -37,8 +40,8 @@ The failed candidate-specific audit remains immutable:
   authoritative campaign verdict.
 
 The r4 receipt retains its own historical verifier and control identities
-without reinterpretation. The current external inputs measured for the pending
-r5 execution are:
+without reinterpretation. The external inputs bound by the passing r5
+execution are:
 
 - verifier: `/home/jbeck/git/audit/target/debug/admissibility-audit`, SHA-256
   `4cef41d898e4ad770196a5709d1bcbcc5bd6757a3c63938f53824363aa68ede9`;
@@ -58,8 +61,10 @@ law is specification evidence only; it does not prove this runtime mapping,
 serialization, persistence, or archive behavior.
 
 This dependency is explicitly **release-required**. It is neither a
-qualification-only check nor merely archival provenance, so a rebuilt package
-cannot proceed to mint ratification without a fresh passing closure receipt.
+qualification-only check nor merely archival provenance. It is closed for
+source `2c41b0a49f9dc0e4e1b6c4da7863353d28ea6a5d` and rebuilt package SHA-256
+`24ca5e0b40d9fde5a51c7324d27c3d83d3386669a833c23db773f49840141e63`
+by the passing r5 receipt; that closure does not transfer to other bytes.
 
 ## Canonical transport objects
 
@@ -115,7 +120,7 @@ cross-field projections after decode. The helper request/response wire remains
 | Helper refusal | `nq_protocol::Refusal` is embedded unchanged in `GovernedRefusalOrigin::Helper`, alongside an NQ-owned refusal ID. | `SubmissionDisposition::Rejected` requires the same refusal at commit. `refusals.detail_json` stores canonical `GovernedRefusal`; rejected-custody reopening checks ID, origin, run, instance, profile, boundary, code, and canonical bytes. | Normal collection, dry watcher, status V3, refusal export, API, CLI, daemon log, and archive expose `retriable` and structured `details` directly. | **Repaired in source.** Retriable EAGAIN and non-retriable ENODEV pairs remain distinct. |
 | Protocol response rejection | Framing, JSON category/location, validation variant, and canonicalization failure are mirrored by closed typed protocol-rejection variants inside `GovernedRefusal`. | The canonical refusal is linked to retained raw response custody. | The same governed refusal reaches status/API/CLI/archive; no generic `invalid_response` string is treated as the testimony. | **Repaired in source.** Coarse `invalid_response` remains an index only. |
 | Profile refusal | The complete `nq_profiles::ProfileRefusal` is embedded in `GovernedRefusalOrigin::Profile`; strict decoding requires profile identity, boundary, code, message, and structured details. The real host detector emits stable dependent facts for missing testimony, profile mismatch, coverage, projection, and freshness refusals. | Canonical refusal detail is linked to the exact run/submission/profile or evaluation envelope. Reopening compares the embedded value to every duplicated projection. | Status V3, refusal/evaluation export, API, CLI, daemon log, backup, and archive consume the canonical value. | **Repaired in source.** Same-code missing-testimony and stale host-detector refusals retain distinct structured details, as do different profile boundaries. |
-| Admission verification | `AdmissionError` is converted once to `AdmissionRefusal { responsible_instance_id, boundary, code, details }`. Nested upstream acquisition or governed refusals remain typed. | Admission refusal status stores the canonical `CollectionOutcome`; no run identity is fabricated for a pre-run refusal. | Status/API/CLI decode the same typed result. Local failures that have no richer committed source type retain a bounded diagnostic only inside a closed typed refusal variant. | **Repaired in source; clean-pinned evidence pending.** |
+| Admission verification | `AdmissionError` is converted once to `AdmissionRefusal { responsible_instance_id, boundary, code, details }`. Nested upstream acquisition or governed refusals remain typed. | Admission refusal status stores the canonical `CollectionOutcome`; no run identity is fabricated for a pre-run refusal. | Status/API/CLI decode the same typed result. Local failures that have no richer committed source type retain a bounded diagnostic only inside a closed typed refusal variant. | **Repaired and evidenced by the clean-pinned r5 audit.** |
 | Rejected custody | New writers must supply `SubmissionDisposition::Rejected { refusal: RefusalInput }`; the rejection code is derived from that refusal. | Validation requires exactly one linked refusal and rejects zero, duplicate, admitted-row, run/instance/profile/code, or noncanonical-detail mismatches. Bounded and paged readers expose stable refusal identity. | Status V3 reopening resolves the embedded refusal ID and demands exact equality with custody. Refusal export, API, CLI, backup, and archive do not reconstruct from adjacent rows or logs. | **Repaired in source.** A bare rejected-custody row is historical incompatible data, not a synthetic typed refusal. |
 | Detector/evaluation refusal | `DetectorState::CannotEvaluate` becomes `EvaluationResultV1` inside the exact `EvaluationEnvelopeV2`, with the same profile-origin `GovernedRefusal` used at the finding boundary when a finding already exists. Envelope validation closes the detector producer law: boundary `Detector`, code `CannotEvaluate`, refusal message equal to the result summary, and no affirmative evidence. | Schema-v3 evaluation rows persist and validate the complete envelope, append sequence, trigger-run membership, full context, detector/evaluator identity, profile identity, times, watermarks, and refusal. A collection-triggered sequence commits atomically with its report and exact V2 run result. Reopening compares the carrier directly with ascending durable `evaluation_sequence`, requires every completed run result, recomputes the trigger set's sorted detector-suite digest against the admission, rejects duplicate detector execution, and requires the admission's exact evaluator artifact. Thus coherent carrier-and-row omission, extension, reorder, or substitution fails closed. Finding copies must be byte-identical and cannot open/resolve/substitute a condition. | V3 status, `/v1/evaluations`, `nq evaluations export`, V3 findings when one lawfully exists, backup, and archive expose the exact envelope/refusal. `/v2/status` and `/v2/findings` explicitly require V3 when needed. | **Repaired in source.** First-ever `CannotEvaluate` creates no finding but remains visible in the authoritative evaluation component/history. Same-code, different-scope/refusal payloads remain distinct. |
 | Status code | `status_events.code` is paired with canonical detail. `status_component_v2` decodes collection rows, checks component identity, recomputes only the coarse state/code projection, and for rejected results verifies exact linked custody. | `status_events` remains append-only. `validate_status_history_v2` pages through every immutable event, while `status_snapshot_v3` freezes and exhaustively reopens evaluation history before selecting current evaluation components. | `/v3/status`, structured CLI status, console, and archive use V3. `/v2/status` returns 409 when evaluations exist; `/v1/status` does not reinterpret governed collection or evaluation results. | **Repaired in source.** Carrier testimony comes from stored detail, never from code. |
@@ -243,9 +248,15 @@ points. SQL columns, serde discriminants, and the boolean control-flow method
 are explicitly classified above because the framework's function-shaped
 census cannot discover them.
 
-The product repair is implemented, but this is not yet an AC-R4 pass receipt:
-the source must be committed and clean-pinned, every bound evidence command and
-mutation must be green/biting, the full hardening and admissibility batteries
-must pass, package bytes must be rebuilt to a new SHA-256, and the corrected VM
-qualification must run from a fresh directory. Until those records exist, the
-release remains **BLOCKED**. There is no waiver and no inherited pass.
+The authoritative r5 audit pins clean source
+`2c41b0a49f9dc0e4e1b6c4da7863353d28ea6a5d`: all three active controls pass,
+all evidence commands pass, both mutation commands bite, and the census has
+zero obstructions or missing entry points. The reproducibly rebuilt deb is
+`24ca5e0b40d9fde5a51c7324d27c3d83d3386669a833c23db773f49840141e63`.
+Fresh corrected VM run `run-2026-07-20-2c41b0a` passes with an exact 51-file
+seal containing mandatory `guest-results/RESULT`.
+
+The release-required crosswalk is therefore closed for those exact objects.
+The release verdict is **READY-FOR-MINT-RATIFICATION**, not minted. There is no
+waiver and no inherited pass; the old package and old insufficiently sealed
+run remain historical failures for mint purposes.

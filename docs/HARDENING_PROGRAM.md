@@ -792,3 +792,70 @@ fresh corrected qualification.** No tag, mint, publish, push, or remote
 configuration occurred. The earlier re-qualification text is preserved above
 as the decision recorded at that time; this dated audit entry supersedes its
 mint-readiness conclusion without rewriting its evidence.
+
+### Semantic transport repair and fresh mint qualification — 2026-07-20
+
+The preceding blocked decision remains the authoritative verdict for package
+SHA `44e7bd1af43ac4d6f9543d2dc286610be43d86426334ca24ff1a05a45d24e2e0`
+and external run `run-2026-07-20-06aa918`. That run remains cryptographically
+intact, insufficiently sealed, not corrupt, and not mint-sufficient. It was not
+edited or supplemented.
+
+The product repair closes the earliest lossy carriers rather than reconstructing
+fields at renderers. `CollectionOutcome`, `GovernedRefusal`, and
+`EvaluationEnvelopeV2` now retain timeout phase, helper retryability/details,
+profile identity/scope/boundary/details, and stable typed refusal linkage from
+engine/helper collection through schema-v3 storage, strict product-result wire,
+daemon/API/status/CLI, verified backup, and immutable cold archive. Every
+completed run requires one canonical result; admitted evaluation order,
+detector-suite identity, and evaluator artifact are bound to the originating
+admission. `CannotEvaluate` is producer-closed to its exact detector refusal.
+Old v1/v2 databases remain incompatible historical data and are not
+synthetically upgraded.
+
+Repair lineage:
+
+- `d65fb6d` — transport erasure map;
+- `7b3c719`, `62d2f7b`, `d72c9d7` — typed custody linkage and bounded reopening;
+- `fc7ae32` — governed semantic carriers and outward surfaces;
+- `66eade7` — same-code/different-payload shipped-surface pairs;
+- `d7ad6ce` — canonical result/admission chain closure;
+- `a0b9b68` — exact shipped payload regressions;
+- `2c41b0a49f9dc0e4e1b6c4da7863353d28ea6a5d` — clean audited source pin and
+  audit binding.
+
+The release-required refusal-preservation campaign r5 passes at that clean pin.
+Its immutable copied ledger is
+`audit/receipts/run-2026-07-20-qualification-repair-r5/refusal-audit/ledger.json`
+(SHA-256
+`3c1d7988422c164ffa3df0e4b7c16e65b725076a20f5a624c2d59832067e4509`):
+all three active controls pass; five projections are classified; all ten entry
+points exist; there are zero obstructions, waivers, serialization violations,
+or unclassified projections; and both semantic-erasure mutation commands turn
+red from pristine green. The adjacent `RECEIPT.md` binds the
+verifier, controls, commands, source digests, and residual scope.
+
+The epoch-zero release assembly is reproducible under the complete perturbation
+matrix and failure-atomic. The new package is
+`dist/nq-ng_0.1.0_amd64.deb`, SHA-256
+`24ca5e0b40d9fde5a51c7324d27c3d83d3386669a833c23db773f49840141e63`
+(old and new bytes differ). The matching tar SHA-256 is
+`25bd257a8322d5e3b2cf70103ee3f4962a0a9985972fffc08941b4830eb917da`.
+
+Fresh KVM qualification
+`/home/jbeck/nqlab/nq-ng-hardening/run-2026-07-20-2c41b0a` passes against the
+same Noble image `ffe6203d…`. Its `ARTIFACTS.sha256` is
+`8ab1dc1a39b348f7a6a34cab72d2d178f0451557c5caca6fa88f686e57a5f4a3`;
+all 51 entries recompute; mandatory `./guest-results/RESULT` is sealed; only the
+documented top-level write-last result/log/manifest objects are outside the
+inventory. Independent guest admission and seal reopening pass. All four
+required markers pass, package identity is `nq-ng 0.1.0 amd64`, distinct
+`nq-helper`/daemon UIDs are exercised, and admitted counts advance across
+service starts, restart, and reboot.
+
+**Current gate: READY-FOR-MINT-RATIFICATION.** This verdict binds only source
+`2c41b0a…`, deb `24ca5e0b…`, and fresh run `run-2026-07-20-2c41b0a`; it is not
+an inherited pass and uses no waiver. Remaining operator action is to ratify
+and, if ratified, create `v0.1.0` at the exact source pin before separately
+authorizing any publication or push. Nothing was tagged, minted, published,
+pushed, or remotely configured by this campaign.

@@ -33,15 +33,17 @@ The repository implements the stage-one operational spine:
   run-linked status become visible together. Every completed run requires one
   canonical result. Reopening also binds the exact evaluation set to the
   admission's detector-suite and evaluator-artifact identities, rejecting
-  omission, duplication, extension, or substitution even when stored rows and
-  the outward carrier were changed coherently;
+  omission, duplication, extension, reorder, or substitution even when stored
+  rows and the outward carrier were changed coherently;
 - versioned governed collection/evaluation/refusal carriers: non-admitted
   collection results remain V1, admitted results are V2 with their exact
   ordered `EvaluationEnvelopeV2` set, and the outer evaluation envelope wraps
   `EvaluationResultV1` without semantic erasure. They preserve
   exchange-timeout phase, retryability, structured details, profile semantic
   identity and boundary, and stable refusal linkage through storage, protocol,
-  daemon/API, CLI/status, backup, and immutable cold-archive reopening;
+  daemon/API, CLI/status, backup, and immutable cold-archive reopening. A
+  `CannotEvaluate` envelope is producer-closed to the detector boundary/code,
+  exact refusal message/summary, and absence of affirmative evidence;
 - consistent finding/status DTOs through CLI export, local Unix HTTP API,
   bounded public SQL, and an opt-in (off-by-default) loopback server-rendered
   console; current typed status is V3, governed findings are V3, and immutable
@@ -119,27 +121,33 @@ Its system-cut mutation, environment-perturbed release assembly, partial-write,
 and extracted-package checks passed locally. The Noble QEMU runs exercised the
 package lifecycle, real cross-UID AF_UNIX custody, parent-side helper
 socket-mode enforcement, and byte-tamper/helper-drift refusals. The 2026-07-20
-mint-gate audit subsequently found that the current candidate's historical run
-was insufficiently sealed: its internally valid 50-file manifest omitted
-mandatory `guest-results/RESULT`. The same audit closed the dependency's scope
-as release-required and found package-level refusal-preservation failures.
-Consequently neither historical run is a current mint qualification, and the
-exact `44e7bd1a…` candidate remains blocked and cannot inherit the current
-source repair. See [`HARDENING_PROGRAM.md`](HARDENING_PROGRAM.md) §8 and
+mint-gate audit found that the old candidate's historical run was
+insufficiently sealed: its internally valid 50-file manifest omitted mandatory
+`guest-results/RESULT`. The same audit closed the dependency's scope as
+release-required and found package-level refusal-preservation failures.
+Neither historical run is a current mint qualification, and the exact
+`44e7bd1a…` candidate remains blocked. See
+[`HARDENING_PROGRAM.md`](HARDENING_PROGRAM.md) §8 and
 [`../audit/REFUSAL_PRESERVATION_CROSSWALK.md`](../audit/REFUSAL_PRESERVATION_CROSSWALK.md)
 for the scope, and
 [`../audit/receipts/run-2026-07-20-qualification-repair-r4/RECEIPT.md`](../audit/receipts/run-2026-07-20-qualification-repair-r4/RECEIPT.md)
 for the authoritative clean-pin blocked verdict.
-The semantic transport repair is implemented in the current working source,
-including authoritative V3 evaluation status/history and real host-detector
-same-code refusals carried through the governed store/status/backup/reopen path,
-with cross-boundary finding contamination refused. Its new clean-pinned admissibility ledger,
-rebuilt package identity, and fresh VM qualification are still pending. This
-is not a ready or inherited release verdict.
-Some kernel boundaries remain **not** qualified and still require the documented
-unsandboxed Linux package/VM job — executable memfd policy and the full
-`SO_PEERCRED` wrong-PID/UID/GID matrix among them. A sandbox skip is never treated
-as release evidence for those boundaries.
+
+The semantic transport repair is clean-pinned at
+`2c41b0a49f9dc0e4e1b6c4da7863353d28ea6a5d`. Its r5 admissibility ledger passes
+all three active controls and records both mutation commands biting. Rebuilt
+package SHA-256
+`24ca5e0b40d9fde5a51c7324d27c3d83d3386669a833c23db773f49840141e63`
+is reproducible at epoch zero and passed fresh KVM qualification
+`run-2026-07-20-2c41b0a`; the exact 51-file seal includes mandatory
+`guest-results/RESULT`. The current verdict is
+**READY-FOR-MINT-RATIFICATION**, not minted. The authoritative receipt is
+[`../audit/receipts/run-2026-07-20-qualification-repair-r5/RECEIPT.md`](../audit/receipts/run-2026-07-20-qualification-repair-r5/RECEIPT.md).
+Some named kernel boundaries remain **outside this qualification** — executable
+memfd policy and the full `SO_PEERCRED` wrong-PID/UID/GID matrix among them.
+Any later claim over those boundaries requires its separately documented
+unsandboxed Linux package/VM job; no sandbox skip or current four-marker pass is
+treated as evidence for them.
 
 Delivery proceeds through the stages in `PLAN.md`. A later stage may add a
 profile module, helper, and registry entry, but may not silently move profile
