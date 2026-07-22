@@ -53,7 +53,16 @@ refusal-preservation gate. Do not inherit that pass. The current
 `dist/nq-ng_0.1.0_amd64.deb` is the rebuilt `24ca5e0b…` candidate from clean
 source `2c41b0a`; its r5 refusal audit passes and fresh KVM run
 `run-2026-07-20-2c41b0a` passes with an exact 51-file seal containing the guest
-verdict. The candidate is ready for operator mint ratification, not minted.
+verdict. Operator ratification created local lightweight tag `v0.1.0` at that
+exact qualified source; the release is minted and its package remains
+unchanged.
+
+The separate post-release provider-intake candidate is clean-pinned at
+`44e556709e629eb3c83d1d74bfbcf12cb4c9a549`. Its external rebuilt package SHA
+is `4f078257b2a23dd06f51ec3e2376b16973d247d0f0be9e6d14c6325f04d9408f`;
+fresh KVM run `run-2026-07-22-44e5567` passes all four mandatory markers and
+the independently reopened exact 51-file seal. This post-release qualification
+does not move or extend `v0.1.0`.
 
 There is no cross-UID or AF_UNIX skip path. The host accepts the guest result
 only when all four mandatory pass markers are present. Package purge intentionally

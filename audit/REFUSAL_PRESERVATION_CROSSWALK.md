@@ -321,7 +321,13 @@ mint purposes.
 The schema-v4 provider-intake work starts from record-only commit
 `e3c451f9722cb81dd22af25c52b264e6b888ed81` on
 `campaign/provider-intake-foundation`. It is candidate-side source, not part of
-the tag and not covered by the r5 package or VM receipt. Its clean source pin,
-rebuilt artifact identity, admissibility ledger, and any required fresh VM run
-remain separate record-only qualification facts to be added only after they
-exist.
+the tag and is not covered by the r5 package or VM receipt. Its independent
+clean source pin is `44e556709e629eb3c83d1d74bfbcf12cb4c9a549`, tree
+`9aee37f90b93f27296550d9664af5ec574e5bf27`. The new copied ledger at
+`audit/receipts/run-2026-07-22-provider-intake-foundation/refusal-audit/ledger.json`
+passes all three active controls with no obstruction or waiver and 2/2 biting
+mutations. Rebuilt package SHA-256 `4f078257…` passed fresh KVM run
+`run-2026-07-22-44e5567` with all four markers and the exact corrected 51-file
+seal. The separate post-release verdict is
+**READY-FOR-PROVIDER-INTAKE-RATIFICATION**; it neither moves nor expands
+`v0.1.0`.

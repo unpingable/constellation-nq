@@ -483,6 +483,12 @@ qualified commit and tree. There is no waiver and no inherited pass.
 The provider-intake extension begins from record-only commit
 `e3c451f9722cb81dd22af25c52b264e6b888ed81` on
 `campaign/provider-intake-foundation`. It is not contained in `v0.1.0`, and
-this map is not a qualification receipt for it. A clean candidate pin, rebuilt
-package identity, fresh admissibility ledger, and any policy-required VM run
-must be recorded separately before provider-intake ratification.
+this map is not itself its qualification receipt. The extension is now
+clean-pinned at `44e556709e629eb3c83d1d74bfbcf12cb4c9a549`, tree
+`9aee37f90b93f27296550d9664af5ec574e5bf27`; its independent admissibility gate
+passes with 2/2 mutations biting. Rebuilt package SHA-256 `4f078257…` passed
+fresh KVM run `run-2026-07-22-44e5567` and its exact 51-file seal. The complete
+post-release receipt is
+`audit/receipts/run-2026-07-22-provider-intake-foundation/RECEIPT.md`; the
+verdict is **READY-FOR-PROVIDER-INTAKE-RATIFICATION** and does not move or
+reinterpret `v0.1.0`.

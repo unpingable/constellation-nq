@@ -859,3 +859,79 @@ an inherited pass and uses no waiver. Remaining operator action is to ratify
 and, if ratified, create `v0.1.0` at the exact source pin before separately
 authorizing any publication or push. Nothing was tagged, minted, published,
 pushed, or remotely configured by this campaign.
+
+### Exact mint and provider-intake foundation — 2026-07-22
+
+The operator ratified the preceding exact release. Pre-mutation inspection
+matched every pin: clean `main` at record-only commit `e3c451f…`, qualified
+candidate `2c41b0a49f9dc0e4e1b6c4da7863353d28ea6a5d`, tree `f7f244d…`, and
+package SHA-256 `24ca5e0b40d9fde5a51c7324d27c3d83d3386669a833c23db773f49840141e63`;
+there were no tags or remotes. Local lightweight tag `v0.1.0` was created at
+that exact candidate, not at record-only HEAD. The package was not rebuilt,
+requalified, or changed. **Mint verdict: NQ-V0.1.0-MINTED.** No publication or
+push occurred.
+
+The separate provider-intake foundation began on
+`campaign/provider-intake-foundation` from exact record-only parent
+`e3c451f9722cb81dd22af25c52b264e6b888ed81`. One bounded technical commit was
+created:
+
+- candidate commit `44e556709e629eb3c83d1d74bfbcf12cb4c9a549`;
+- tree `9aee37f90b93f27296550d9664af5ec574e5bf27`;
+- subject `feat(provider): establish typed local intake custody`.
+
+The boundary is semantic rather than physical. The existing retained-descriptor
+local helper is the only live provider. `ProviderIdentityV1`, private
+`VerifiedProvider`, `ProviderAttempt`, `ProviderIntakeContextV1`,
+`ProviderResponseInterpretationV1`, and `ProviderIntakeRecordV1` bind the exact
+NQ request/provider/profile/evaluator context to the native acquisition outcome
+and raw bytes before protocol interpretation, report admission, detector
+evaluation, or status publication. A provider cannot deserialize live
+authority or inject admission, finding, health, entitlement, or action fields.
+
+Schema v4 adds a provider-intake parent, an exact local-watcher subtype, and a
+durable acknowledgment in the same immediate transaction as run, raw custody,
+admission or linked refusal, evaluations/findings, status, sequence, and
+watermark. Exact replay reopens the stored result without reevaluation or
+checkpoint movement; changed bytes/provider/context refuse, and current
+provider revocation blocks live reuse without erasing history. Exact schema-v3
+migration records every historical watcher run as
+`provider_intake_not_recorded`; it synthesizes no intake bytes, attempt, or
+acknowledgment.
+
+The independent clean-pinned audit ledger is copied at
+`audit/receipts/run-2026-07-22-provider-intake-foundation/refusal-audit/ledger.json`,
+SHA-256 `bb1a8fad28bde6b4d4d6a3f7f581be54c70c7ee7b2955da3703ade19e94c36e2`.
+All three active controls pass; there are zero census obstructions, waivers,
+serialization violations, unclassified projections, or missing entry points;
+and both semantic mutations turn red from pristine green.
+
+Locked debug/release builds, clippy, store and provider hostile tests,
+schema-v3 migration, real cross-process helper intake, protocol/catalog/system
+contract checks, release verifier tests, hardening negatives, reproducibility,
+and failure atomicity pass. The broad all-target/all-feature workspace run also
+reported eleven existing runner fixture/host failures. Exact base/current
+reproduction and identical source blobs show these predate the campaign: the
+inline `python3 -c` fixture hits the existing path-like-argument
+`ENAMETOOLONG` behavior, two fixtures contradict production cwd ancestry, and
+forking helpers encounter the host's per-UID `RLIMIT_NPROC` population. They
+were neither waived nor called provider passes; the campaign-owned gates ran
+independently and passed.
+
+The external epoch-zero package is `nq-ng 0.1.0 amd64`, SHA-256
+`4f078257b2a23dd06f51ec3e2376b16973d247d0f0be9e6d14c6325f04d9408f`.
+It differs from the minted package and was never copied over `dist`. Fresh KVM
+run `/home/jbeck/nqlab/nq-ng-hardening/run-2026-07-22-44e5567` passed against
+the same exact Noble image. Its manifest SHA-256 is
+`b8262fdd58c99ca0f0c21ac8dff6017214289d0edbf33ce1d685467a6ddae4f1`;
+all 51 sealed entries recompute, mandatory `guest-results/RESULT` is inside the
+seal, independent guest admission and seal reopening pass, and all four
+mandatory markers pass. The candidate package hash is identical before and
+after qualification.
+
+**Current post-release gate: READY-FOR-PROVIDER-INTAKE-RATIFICATION.** This
+verdict binds only candidate `44e5567…`, package `4f078257…`, and fresh run
+`run-2026-07-22-44e5567`. It creates no JCP or AG integration, remote provider,
+physical watcher split, eBPF provider, authority, or post-`v0.1.0` tag. The
+complete receipt is
+`audit/receipts/run-2026-07-22-provider-intake-foundation/RECEIPT.md`.

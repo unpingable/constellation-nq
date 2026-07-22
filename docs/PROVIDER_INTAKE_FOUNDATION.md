@@ -417,3 +417,23 @@ Physical monitoring separation may be considered only after the local helper
 proves this versioned boundary, exact replay law, atomic custody chain, durable
 acknowledgment, schema migration, restart, backup, archive, and hostile
 non-implication tests end to end.
+
+## Qualified campaign identity
+
+That bounded foundation is clean-pinned at candidate commit
+`44e556709e629eb3c83d1d74bfbcf12cb4c9a549`, tree
+`9aee37f90b93f27296550d9664af5ec574e5bf27`, with parent
+`e3c451f9722cb81dd22af25c52b264e6b888ed81`. The clean-pinned admissibility
+ledger passes all three active controls with zero obstructions or waivers and
+2/2 semantic mutations biting. Rebuilt package SHA-256
+`4f078257b2a23dd06f51ec3e2376b16973d247d0f0be9e6d14c6325f04d9408f`
+passed fresh KVM qualification
+`/home/jbeck/nqlab/nq-ng-hardening/run-2026-07-22-44e5567`; all four mandatory
+markers and the independently reopened exact 51-file evidence seal passed.
+
+The post-release verdict is **READY-FOR-PROVIDER-INTAKE-RATIFICATION**. The
+complete identity, test ledger, migration treatment, package digest, and VM
+receipt are recorded in
+[`../audit/receipts/run-2026-07-22-provider-intake-foundation/RECEIPT.md`](../audit/receipts/run-2026-07-22-provider-intake-foundation/RECEIPT.md).
+This qualification does not alter or extend local tag `v0.1.0`, which remains
+fixed at the earlier qualified release commit.
