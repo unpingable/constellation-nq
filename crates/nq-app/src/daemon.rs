@@ -46,6 +46,12 @@ pub async fn run(options: Nqd) -> Result<()> {
         "database is absent or has an incompatible schema; run `nq init` or `nq admin upgrade`",
     )?;
     store.validate()?;
+    // Refuse typed provider-history substitution before the daemon mutates
+    // status history or binds any listener. Store validation authenticates
+    // canonical bytes and relational links; this core pass additionally
+    // proves request/raw/native-outcome semantic correspondence.
+    nq_core::engine::validate_provider_intake_history(&store)
+        .context("provider-intake history failed typed startup verification")?;
     validate_catalog(&config)?;
     nq_core::engine::record_component_status(
         &mut store,

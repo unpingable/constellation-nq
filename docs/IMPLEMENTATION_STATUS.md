@@ -20,21 +20,19 @@ The repository implements the stage-one operational spine:
   and compiled detector evaluation;
 - explicit helper test/admission/rotation/rollback/revocation with immutable
   admission history and drift refusal;
-- a schema-v3 append-only SQLite evidence substrate, exact raw and semantic
-  identities, mandatory typed refusal linkage for rejected custody, exact
-  compiled-profile evaluation identity, store-wide evaluation sequence,
-  optional trigger-run linkage, full context and evaluator identity, evaluation
-  watermarks, finding events, public views, backup/restore, and an upgrade
-  receipt skeleton; old schema v1 and v2 data are preserved as incompatible
-  history and are never silently rewritten;
-- one atomic admitted-completion boundary: SQLite assigns the report sequence
-  inside the transaction, detectors build exact watermarks from that pending
-  report, and the run, custody, report, evaluations/refusals/findings, and V2
-  run-linked status become visible together. Every completed run requires one
-  canonical result. Reopening also binds the exact evaluation set to the
-  admission's detector-suite and evaluator-artifact identities, rejecting
-  omission, duplication, extension, reorder, or substitution even when stored
-  rows and the outward carrier were changed coherently;
+- a schema-v4 append-only SQLite evidence substrate. It retains schema v3's
+  exact raw/report/refusal/evaluation/finding/status custody and adds a
+  versioned provider-intake parent, a distinct NQ-derived local-provider
+  admission, an exact local-watcher-run subtype, and a durable acknowledgment
+  returned only after commit. The only live provider kind is the existing NQ-controlled
+  local helper; this is not a remote or provider-neutral intake service;
+- one atomic collection-completion boundary: the provider attempt, local
+  watcher run, exact native outcome and raw capture, raw submission when one
+  exists, admission or linked refusal, report, evaluations/findings, status,
+  sequence/watermark, and provider-intake acknowledgment become visible
+  together. The acknowledgment is returned only after commit and means durable
+  custody plus canonical processing, never admission, health, testimony, or
+  authority. SQLite assigns report and evaluation order inside that transaction;
 - versioned governed collection/evaluation/refusal carriers: non-admitted
   collection results remain V1, admitted results are V2 with their exact
   ordered `EvaluationEnvelopeV2` set, and the outer evaluation envelope wraps
@@ -69,7 +67,8 @@ The repository implements the stage-one operational spine:
   but never initializes, migrates, starts, overwrites, or purges state; and
 - hostile tests for protocol planes, profile overclaim, append-only custody,
   evidence lifecycle, executable/config races, cross-process binding mutation,
-  checkpoint isolation, schema integrity, and live-WAL backup/restore.
+  checkpoint isolation, provider identity and replay, schema integrity,
+  schema-v3 migration, live-WAL backup/restore, and cold-archive reopening.
 
 The preview treats the SQLite binding history as authoritative. Active
 admission files are crash-recoverable materializations, and every collection
@@ -87,6 +86,22 @@ rlimits and service-wide systemd resource ceilings. These are bounded preview
 controls, not per-instance cgroup or filesystem quotas; a shared execution
 account remains a shared sibling trust and resource domain.
 
+The post-release provider-intake factoring is a semantic boundary inside the
+existing vertical slice, not a process split. `ProviderIdentityV1` is derived
+from the active NQ admission, retained execution identity, protocol,
+configuration, profile, and evaluator facts; a helper response cannot mint it.
+`ProviderIntakeRecordV1` retains the complete NQ-owned request/context, native
+acquisition outcome, exact raw bytes and digest, and pre-admission response
+interpretation. Provider success or refusal is therefore still candidate input
+to NQ normalization and policy, not an NQ judgment. See
+[`PROVIDER_INTAKE_FOUNDATION.md`](PROVIDER_INTAKE_FOUNDATION.md).
+
+Schema v4 provides an exact v3-to-v4 migration only. It freezes and validates
+the released schema-v3 definition, takes a verified backup, and preserves each
+old watcher run with an explicit `provider_intake_not_recorded` gap. It derives
+a prospective local-provider admission from existing admission facts, but does
+not invent historical intake bytes, attempt identity, or acknowledgment.
+
 ## Deliberately not replacement-ready
 
 The following governing-plan stages are not claimed by this preview:
@@ -98,6 +113,9 @@ The following governing-plan stages are not claimed by this preview:
 - an operator-approved legacy cut manifest produced from an actual old NQ;
 - DNS/TLS/reachability/path observation profiles;
 - WLP custody transport, remote enrollment, or fleet administration;
+- an independently deployed provider, provider-neutral durable intake,
+  provider-owned sequence protocol, remote submission surface, plugin host, or
+  physical monitoring split;
 - claims, governed inquiry, remediation/action authorization, or authority of
   any kind;
 - daemon/SQLite/API/CLI publication or consumption of system cuts, NetBox
@@ -140,14 +158,23 @@ package SHA-256
 `24ca5e0b40d9fde5a51c7324d27c3d83d3386669a833c23db773f49840141e63`
 is reproducible at epoch zero and passed fresh KVM qualification
 `run-2026-07-20-2c41b0a`; the exact 51-file seal includes mandatory
-`guest-results/RESULT`. The current verdict is
-**READY-FOR-MINT-RATIFICATION**, not minted. The authoritative receipt is
+`guest-results/RESULT`. Operator ratification created the local lightweight tag
+`v0.1.0` at that exact candidate commit and tree; the package bytes were not
+changed. The release is **NQ-V0.1.0-MINTED**. The authoritative receipt is
 [`../audit/receipts/run-2026-07-20-qualification-repair-r5/RECEIPT.md`](../audit/receipts/run-2026-07-20-qualification-repair-r5/RECEIPT.md).
 Some named kernel boundaries remain **outside this qualification** — executable
 memfd policy and the full `SO_PEERCRED` wrong-PID/UID/GID matrix among them.
 Any later claim over those boundaries requires its separately documented
 unsandboxed Linux package/VM job; no sandbox skip or current four-marker pass is
 treated as evidence for them.
+
+The provider-intake foundation begins after the tag from record-only commit
+`e3c451f9722cb81dd22af25c52b264e6b888ed81`, tree
+`328c41c97f11e57500d9207824d35b086a889454`, on
+`campaign/provider-intake-foundation`. It is not part of `v0.1.0` and inherits
+neither that release's clean-pin audit nor its package/VM qualification. Its
+candidate pin, rebuilt bytes, audit ledger, and qualification verdict must be
+recorded separately after those checks run.
 
 Delivery proceeds through the stages in `PLAN.md`. A later stage may add a
 profile module, helper, and registry entry, but may not silently move profile

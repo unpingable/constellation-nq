@@ -1,25 +1,30 @@
 //! Black-box semantic-transport checks through the shipped operator binary.
 
-use std::collections::BTreeMap;
+mod support;
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use chrono::{Duration, Utc};
 use nq_core::engine::{
     CollectionOutcome, CollectionResult, GovernedRefusal, GovernedRefusalOrigin, RunHardLimits,
     RunResourceOutcomeSchema, RunResourceOutcomeV1,
 };
 use nq_core::runner::{AcquisitionOutcome, ExchangeTimeoutPhase};
 use nq_profiles::{
-    ProfileKey, ProfileRefusal, ProfileRefusalCode, RefusalBoundary as ProfileRefusalBoundary,
-    profile_semantic_id,
+    ProfileRefusalCode, RefusalBoundary as ProfileRefusalBoundary,
+    ReportInput as ProfileReportInput, ValidationContext, profile_semantic_id,
 };
-use nq_protocol::{InstanceId, Refusal, RefusalBoundary, RefusalCode, Sha256Digest};
+use nq_protocol::{
+    BackendIdentity, BackendProvenance, Capability, CoverageDeclaration, CoverageKind,
+    CoverageState, EvidenceReport, ImplementationName, InstanceId, Observation, ObservationKind,
+    Refusal, RefusalBoundary, RefusalCode, ReportStatus,
+};
 use nq_store::{
-    AdmissionIdentity, AdmissionInput, CanonicalDocument, CollectionInput, ProfileDescriptorInput,
-    RefusalInput, RunInput, RunResultStatusInput, StatusEventInput, Store, SubmissionDisposition,
-    SubmissionInput,
+    CanonicalDocument, ProfileDescriptorInput, RefusalInput, RunInput, RunResultStatusInput,
+    StatusEventInput, Store, SubmissionDisposition, SubmissionInput,
 };
 use serde_json::{Value, json};
 
@@ -226,35 +231,6 @@ fn helper_result(
     )
 }
 
-fn profile_result(
-    instance_id: &str,
-    run_id: &str,
-    refusal_id: &str,
-    profile_id: &str,
-    profile_version: u32,
-    boundary: ProfileRefusalBoundary,
-    details: BTreeMap<String, String>,
-) -> (CollectionOutcome, GovernedRefusal) {
-    let profile = nq_profiles::resolve_profile(profile_id, profile_version)
-        .expect("profile refusal fixture uses a compiled profile");
-    let refusal = GovernedRefusal::profile(
-        refusal_id.to_owned(),
-        profile_semantic_id(profile.descriptor()).expect("profile semantic identity"),
-        ProfileRefusal {
-            instance_id: instance_id.to_owned(),
-            profile: ProfileKey::new(profile_id, profile_version),
-            boundary,
-            code: ProfileRefusalCode::InvalidPayload,
-            message: "payload is invalid".to_owned(),
-            details,
-        },
-    );
-    (
-        CollectionOutcome::rejected(instance_id.to_owned(), run_id.to_owned(), refusal.clone()),
-        refusal,
-    )
-}
-
 fn append_fixture_descriptor(store: &mut Store, profile_id: &str, version: u32) -> String {
     let descriptor = nq_profiles::resolve_profile(profile_id, version).map_or_else(
         || {
@@ -308,52 +284,19 @@ fn append_admission(
     profile_version: u32,
     profile_digest: &str,
 ) -> String {
-    let profile = nq_profiles::resolve_profile(profile_id, profile_version)
-        .expect("run admission uses a compiled profile");
-    let semantic_id =
-        profile_semantic_id(profile.descriptor()).expect("compiled profile semantic identity");
-    let admission_id = format!("admission-{suffix}");
-    let digest = |label: &str| nq_protocol::sha256_bytes(label.as_bytes());
-    store
-        .append_admission(&AdmissionInput {
-            admission_id: admission_id.clone(),
-            instance_id: instance_id.to_owned(),
-            identity: AdmissionIdentity {
-                profile_semantic_id: Sha256Digest::parse(semantic_id.as_str())
-                    .expect("semantic identity is a digest"),
-                detector_identity_digest: nq_store::detector_suite_identity_digest(
-                    profile.detectors().iter().map(|detector| {
-                        detector
-                            .descriptor()
-                            .digest()
-                            .expect("compiled detector identity")
-                    }),
-                )
-                .expect("compiled detector suite identity"),
-                evaluator_source_digest: digest("source"),
-                evaluator_artifact_digest: digest("evaluator"),
-                helper_artifact_digest: digest("helper"),
-                config_digest: digest("config"),
-                protocol_version: nq_protocol::HELPER_PROTOCOL_VERSION.to_owned(),
-                target_triple: "fixture-target".to_owned(),
-                artifact_identity_method: "fixture".to_owned(),
-                platform_runtime_version: "fixture".to_owned(),
-            },
-            execution_chain: document(&json!({"fixture": true})),
-            profile_id: profile_id.to_owned(),
-            profile_version: profile_version.to_string(),
-            profile_digest: profile_digest.to_owned(),
-            capability_grant: document(&json!([])),
-            conformance: document(&json!({"fixture": true})),
-            lock: document(&json!({"fixture": true})),
-            admitted_at: TEST_TIME.to_owned(),
-            operator_identity: document(&json!({"fixture": true})),
-        })
-        .expect("append governing run admission");
-    admission_id
+    support::append_typed_admission(
+        store,
+        suffix,
+        instance_id,
+        profile_id,
+        profile_version,
+        profile_digest,
+        TEST_TIME,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 fn seed_result(
     store: &mut Store,
     profile_id: &str,
@@ -395,47 +338,56 @@ fn seed_result(
         profile_version,
         profile_digest,
     );
-    let collection = CollectionInput {
-        run: RunInput {
-            run_id: run_id.to_owned(),
-            request_id: format!("request-{suffix}"),
-            instance_id: instance_id.clone(),
-            admission_id: Some(admission_id),
-            binding_digest: nq_protocol::sha256_bytes(b"binding").into_string(),
-            checkpoint_contract_digest: nq_protocol::sha256_bytes(b"checkpoint").into_string(),
-            profile_id: profile_id.to_owned(),
-            profile_version: profile_version.to_string(),
-            profile_digest: profile_digest.to_owned(),
-            carrier: "stdio".to_owned(),
-            started_at: TEST_TIME.to_owned(),
-            deadline_at: TEST_TIME.to_owned(),
-            finished_at: TEST_TIME.to_owned(),
-            acquisition_outcome: "response".to_owned(),
-            execution_identity: document(&json!({"fixture": true})),
-            resource_outcome: resource_document(
-                AcquisitionOutcome::Response,
-                format!("rejected-{suffix}").len(),
-            ),
-        },
-        submission: Some(SubmissionInput {
-            submission_id: format!("submission-{suffix}"),
-            raw_bytes: format!("rejected-{suffix}").into_bytes(),
-            received_at: TEST_TIME.to_owned(),
-            protocol_outcome: protocol_outcome.to_owned(),
-            disposition: SubmissionDisposition::Rejected {
-                refusal: RefusalInput {
-                    refusal_id: refusal.refusal_id.clone(),
-                    source_kind: source_kind.to_owned(),
-                    responsible_instance_id: instance_id.clone(),
-                    boundary,
-                    code,
-                    profile_semantic_id,
-                    detail: document(refusal),
-                    created_at: TEST_TIME.to_owned(),
-                },
-            },
-        }),
+    let run = RunInput {
+        run_id: run_id.to_owned(),
+        request_id: format!("request-{suffix}"),
+        instance_id: instance_id.clone(),
+        admission_id: Some(admission_id),
+        binding_digest: nq_protocol::sha256_bytes(b"binding").into_string(),
+        checkpoint_contract_digest: nq_protocol::sha256_bytes(b"checkpoint").into_string(),
+        profile_id: profile_id.to_owned(),
+        profile_version: profile_version.to_string(),
+        profile_digest: profile_digest.to_owned(),
+        carrier: "stdio".to_owned(),
+        started_at: TEST_TIME.to_owned(),
+        deadline_at: TEST_TIME.to_owned(),
+        finished_at: TEST_TIME.to_owned(),
+        acquisition_outcome: "response".to_owned(),
+        execution_identity: document(&json!({"fixture": true})),
+        resource_outcome: resource_document(
+            AcquisitionOutcome::Response,
+            format!("rejected-{suffix}").len(),
+        ),
     };
+    let submission = SubmissionInput {
+        submission_id: format!("submission-{suffix}"),
+        raw_bytes: format!("rejected-{suffix}").into_bytes(),
+        received_at: TEST_TIME.to_owned(),
+        protocol_outcome: protocol_outcome.to_owned(),
+        disposition: SubmissionDisposition::Rejected {
+            refusal: RefusalInput {
+                refusal_id: refusal.refusal_id.clone(),
+                source_kind: source_kind.to_owned(),
+                responsible_instance_id: instance_id.clone(),
+                boundary,
+                code,
+                profile_semantic_id,
+                detail: document(refusal),
+                created_at: TEST_TIME.to_owned(),
+            },
+        },
+    };
+    assert_eq!(
+        protocol_outcome, "valid_refusal",
+        "profile candidates use the separate typed report fixture"
+    );
+    let collection = support::provider_collection(
+        store,
+        run,
+        Some(submission),
+        support::ProviderFixtureResponse::HelperRefusal,
+        TEST_TIME,
+    );
     store
         .commit_non_success_collection(
             &collection,
@@ -467,27 +419,31 @@ fn seed_acquisition_result(
         panic!("acquisition fixture must carry acquisition failure");
     };
     let admission_id = append_admission(store, suffix, &instance_id, PROFILE_ID, 1, profile_digest);
-    let collection = CollectionInput {
-        run: RunInput {
-            run_id: run_id.to_owned(),
-            request_id: format!("request-{suffix}"),
-            instance_id: instance_id.clone(),
-            admission_id: Some(admission_id),
-            binding_digest: nq_protocol::sha256_bytes(b"binding").into_string(),
-            checkpoint_contract_digest: nq_protocol::sha256_bytes(b"checkpoint").into_string(),
-            profile_id: PROFILE_ID.to_owned(),
-            profile_version: "1".to_owned(),
-            profile_digest: profile_digest.to_owned(),
-            carrier: "unix".to_owned(),
-            started_at: TEST_TIME.to_owned(),
-            deadline_at: TEST_TIME.to_owned(),
-            finished_at: TEST_TIME.to_owned(),
-            acquisition_outcome: "timeout".to_owned(),
-            execution_identity: document(&json!({"fixture": true})),
-            resource_outcome: resource_document(failure.outcome.clone(), 0),
-        },
-        submission: None,
+    let run = RunInput {
+        run_id: run_id.to_owned(),
+        request_id: format!("request-{suffix}"),
+        instance_id: instance_id.clone(),
+        admission_id: Some(admission_id),
+        binding_digest: nq_protocol::sha256_bytes(b"binding").into_string(),
+        checkpoint_contract_digest: nq_protocol::sha256_bytes(b"checkpoint").into_string(),
+        profile_id: PROFILE_ID.to_owned(),
+        profile_version: "1".to_owned(),
+        profile_digest: profile_digest.to_owned(),
+        carrier: "unix".to_owned(),
+        started_at: TEST_TIME.to_owned(),
+        deadline_at: TEST_TIME.to_owned(),
+        finished_at: TEST_TIME.to_owned(),
+        acquisition_outcome: "timeout".to_owned(),
+        execution_identity: document(&json!({"fixture": true})),
+        resource_outcome: resource_document(failure.outcome.clone(), 0),
     };
+    let collection = support::provider_collection(
+        store,
+        run,
+        None,
+        support::ProviderFixtureResponse::Unavailable,
+        TEST_TIME,
+    );
     store
         .commit_non_success_collection(
             &collection,
@@ -505,6 +461,222 @@ fn seed_acquisition_result(
             },
         )
         .expect("atomically commit acquisition failure and canonical status");
+}
+
+fn invalid_profile_candidate(request: &nq_protocol::HelperRequest) -> EvidenceReport {
+    let observed_at = chrono::DateTime::parse_from_rfc3339(TEST_TIME)
+        .expect("fixture observation time")
+        .with_timezone(&Utc);
+    let backend = BackendProvenance {
+        implementation: BackendIdentity {
+            name: ImplementationName::new("typed-surface-fixture").expect("backend identity"),
+            version: Some("1".to_owned()),
+            digest: None,
+        },
+        tools: Vec::new(),
+    };
+    let (coverage, observation_kind, payload, used_capabilities) = match request.profile.id.as_str()
+    {
+        nq_profiles::conformance::PROFILE_ID => (
+            vec![CoverageDeclaration {
+                kind: CoverageKind::new("echo").expect("echo coverage"),
+                subject: None,
+                state: CoverageState::Complete,
+                detail: None,
+            }],
+            ObservationKind::new("echo").expect("echo observation"),
+            json!({
+                "evidence_basis": {
+                    "scope": request.binding.scope,
+                    "vantage": request.binding.vantage,
+                    "access_path": "process",
+                    "basis": "request_echo",
+                    "regime": "conformance",
+                    "capabilities_used": [],
+                }
+                // Deliberately lacks the required nonce. The protocol
+                // accepts this opaque profile payload; the compiled
+                // profile produces the typed refusal below.
+            }),
+            Vec::new(),
+        ),
+        nq_profiles::host::PROFILE_ID => (
+            ["host_identity", "uptime", "load"]
+                .into_iter()
+                .map(|kind| CoverageDeclaration {
+                    kind: CoverageKind::new(kind).expect("host coverage"),
+                    subject: None,
+                    state: CoverageState::Complete,
+                    detail: None,
+                })
+                .collect(),
+            ObservationKind::new("host_snapshot").expect("host observation"),
+            json!({
+                "evidence_basis": {
+                    "scope": request.binding.scope,
+                    "vantage": request.binding.vantage,
+                    "access_path": "procfs",
+                    "basis": "kernel_snapshot",
+                    "regime": "normal",
+                    "capabilities_used": ["read_procfs"],
+                },
+                "hostname": "fixture",
+                "uptime_seconds": 1,
+                // Protocol-valid JSON, but explicitly invalid under the
+                // compiled host profile.
+                "cpu_count": 0,
+                "load_1m": 0.5,
+            }),
+            vec![Capability::new("read_procfs").expect("host capability")],
+        ),
+        other => panic!("unsupported profile refusal fixture {other}"),
+    };
+    let report = EvidenceReport {
+        schema: nq_protocol::EVIDENCE_REPORT_SCHEMA.to_owned(),
+        profile: request.profile.clone(),
+        binding: request.binding.clone(),
+        observed_at,
+        status: ReportStatus::Complete,
+        coverage,
+        observations: vec![Observation {
+            ordinal: 0,
+            kind: observation_kind,
+            subject: request.binding.subject.clone(),
+            observed_at,
+            payload,
+        }],
+        errors: Vec::new(),
+        used_capabilities,
+        backend,
+        next_checkpoint: None,
+    };
+    nq_protocol::validate_report(&report).expect("candidate is valid at the common protocol layer");
+    report
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn seed_profile_result(
+    store: &mut Store,
+    profile_id: &str,
+    profile_version: u32,
+    profile_digest: &str,
+    suffix: &str,
+) -> CollectionOutcome {
+    let instance_id = format!("profile-{suffix}");
+    let run_id = format!("run-profile-{suffix}");
+    let admission_id = append_admission(
+        store,
+        suffix,
+        &instance_id,
+        profile_id,
+        profile_version,
+        profile_digest,
+    );
+    let run = RunInput {
+        run_id: run_id.clone(),
+        request_id: format!("request-profile-{suffix}"),
+        instance_id: instance_id.clone(),
+        admission_id: Some(admission_id),
+        binding_digest: nq_protocol::sha256_bytes(b"replaced-by-typed-support").into_string(),
+        checkpoint_contract_digest: nq_protocol::sha256_bytes(
+            format!("checkpoint-profile-{suffix}").as_bytes(),
+        )
+        .into_string(),
+        profile_id: profile_id.to_owned(),
+        profile_version: profile_version.to_string(),
+        profile_digest: profile_digest.to_owned(),
+        carrier: "stdio".to_owned(),
+        started_at: TEST_TIME.to_owned(),
+        deadline_at: TEST_TIME.to_owned(),
+        finished_at: TEST_TIME.to_owned(),
+        acquisition_outcome: "response".to_owned(),
+        execution_identity: document(&json!({"replaced_by": "typed_support"})),
+        resource_outcome: resource_document(AcquisitionOutcome::Response, 0),
+    };
+    let request = support::provider_request(&run);
+    let report = invalid_profile_candidate(&request);
+    let profile = nq_profiles::resolve_profile(profile_id, profile_version)
+        .expect("profile refusal fixture uses a compiled profile");
+    let report_digest =
+        nq_protocol::semantic_digest(&report).expect("candidate report semantic digest");
+    let normalized = ProfileReportInput::from_protocol(&report, &report_digest)
+        .expect("candidate report normalizes");
+    let context =
+        ValidationContext::from_request(&request, timestamp(TEST_TIME), Duration::seconds(60));
+    let profile_refusal = profile
+        .validate(&context, &normalized)
+        .expect_err("candidate is refused by compiled profile semantics");
+    assert_eq!(
+        profile_refusal.boundary,
+        ProfileRefusalBoundary::Observation
+    );
+    assert_eq!(profile_refusal.code, ProfileRefusalCode::InvalidPayload);
+    let refusal = GovernedRefusal::profile(
+        format!("refusal-profile-{suffix}"),
+        profile_semantic_id(profile.descriptor()).expect("profile semantic identity"),
+        profile_refusal,
+    );
+    let outcome = CollectionOutcome::rejected(instance_id.clone(), run_id.clone(), refusal.clone());
+    let GovernedRefusalOrigin::Profile(governed_profile) = &refusal.origin else {
+        unreachable!("constructed a profile refusal")
+    };
+    let submission = SubmissionInput {
+        submission_id: format!("submission-profile-{suffix}"),
+        raw_bytes: Vec::new(),
+        received_at: TEST_TIME.to_owned(),
+        protocol_outcome: "valid_report".to_owned(),
+        disposition: SubmissionDisposition::Rejected {
+            refusal: RefusalInput {
+                refusal_id: refusal.refusal_id.clone(),
+                source_kind: "profile".to_owned(),
+                responsible_instance_id: instance_id.clone(),
+                boundary: serde_json::to_value(governed_profile.refusal.boundary)
+                    .expect("profile boundary serializes")
+                    .as_str()
+                    .expect("profile boundary token")
+                    .to_owned(),
+                code: serde_json::to_value(governed_profile.refusal.code)
+                    .expect("profile code serializes")
+                    .as_str()
+                    .expect("profile code token")
+                    .to_owned(),
+                profile_semantic_id: Some(governed_profile.profile_semantic_id.as_str().to_owned()),
+                detail: document(&refusal),
+                created_at: TEST_TIME.to_owned(),
+            },
+        },
+    };
+    let collection = support::provider_collection(
+        store,
+        run,
+        Some(submission),
+        support::ProviderFixtureResponse::CandidateReport(Box::new(report)),
+        TEST_TIME,
+    );
+    store
+        .commit_non_success_collection(
+            &collection,
+            &RunResultStatusInput {
+                run_id,
+                status: StatusEventInput {
+                    status_event_id: uuid::Uuid::new_v4().to_string(),
+                    component_kind: "instance".to_owned(),
+                    component_id: instance_id,
+                    state: "failed".to_owned(),
+                    code: "report_rejected".to_owned(),
+                    detail: document(&outcome),
+                    observed_at: TEST_TIME.to_owned(),
+                },
+            },
+        )
+        .expect("atomically commit typed profile refusal and raw candidate custody");
+    outcome
+}
+
+fn timestamp(value: &str) -> chrono::DateTime<Utc> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .expect("fixture timestamp")
+        .with_timezone(&Utc)
 }
 
 struct TransportOutcomes {
@@ -578,46 +750,15 @@ fn seed_transport_store(database: &Path) -> TransportOutcomes {
     seed_acquisition_result(&mut store, &profile_digest, "timeout-write", &timeout_write);
     seed_acquisition_result(&mut store, &profile_digest, "timeout-read", &timeout_read);
 
-    let (profile_report, report_refusal) = profile_result(
-        "profile-report",
-        "run-profile-report",
-        "refusal-profile-report",
-        "nq.conformance",
-        1,
-        ProfileRefusalBoundary::Report,
-        BTreeMap::from([("field".to_owned(), "status".to_owned())]),
-    );
-    let (profile_observation, observation_refusal) = profile_result(
-        "profile-observation",
-        "run-profile-observation",
-        "refusal-profile-observation",
-        "nq.host",
-        1,
-        ProfileRefusalBoundary::Observation,
-        BTreeMap::from([("ordinal".to_owned(), "4".to_owned())]),
-    );
-    seed_result(
+    let profile_report = seed_profile_result(
         &mut store,
         "nq.conformance",
         1,
         &conformance_digest,
-        "profile-report",
-        &profile_report,
-        &report_refusal,
-        "failed",
-        "report_rejected",
+        "report",
     );
-    seed_result(
-        &mut store,
-        "nq.host",
-        1,
-        &host_digest,
-        "profile-observation",
-        &profile_observation,
-        &observation_refusal,
-        "failed",
-        "report_rejected",
-    );
+    let profile_observation =
+        seed_profile_result(&mut store, "nq.host", 1, &host_digest, "observation");
     store.validate().expect("transport store validates");
     TransportOutcomes {
         helper_transient: transient,
@@ -708,7 +849,7 @@ fn cli_and_cold_archive_reopen_exact_same_code_refusal_payloads() {
     );
     assert_eq!(
         report_refusal["origin"]["payload"]["refusal"]["boundary"],
-        "report"
+        "observation"
     );
     assert_eq!(
         observation_refusal["origin"]["payload"]["refusal"]["profile"]["id"],
@@ -717,6 +858,15 @@ fn cli_and_cold_archive_reopen_exact_same_code_refusal_payloads() {
     assert_eq!(
         observation_refusal["origin"]["payload"]["refusal"]["boundary"],
         "observation"
+    );
+    assert_eq!(
+        report_refusal["origin"]["payload"]["refusal"]["code"],
+        "invalid_payload"
+    );
+    assert_eq!(
+        report_refusal["origin"]["payload"]["refusal"]["code"],
+        observation_refusal["origin"]["payload"]["refusal"]["code"],
+        "different compiled profiles retain distinct payloads under the same refusal code"
     );
     assert!(
         report_refusal["origin"]["payload"]["profile_semantic_id"]

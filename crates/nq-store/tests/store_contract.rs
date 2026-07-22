@@ -10,8 +10,9 @@
 
 use nq_protocol::Sha256Digest;
 use nq_store::{
-    AdmissionIdentity, AdmissionInput, AdmittedCollectionCompletion, CanonicalDocument,
-    CollectionInput, ProfileDescriptorInput, RefusalInput, ReportInput, RunInput,
+    AdmissionIdentity, AdmissionInput, AdmittedCollectionCompletion, BindingEventInput,
+    BindingMaterializationInput, CanonicalDocument, CollectionInput, ProfileDescriptorInput,
+    ProviderIntakeCommit, ProviderIntakeInput, RefusalInput, ReportInput, RunInput,
     RunResultStatusInput, StatusEventInput, Store, StoreError, SubmissionDisposition,
     SubmissionInput, detector_suite_identity_digest,
 };
@@ -187,6 +188,142 @@ fn admitted_report(suffix: &str, profile_digest: &str) -> ReportInput {
     }
 }
 
+#[allow(clippy::too_many_lines)]
+fn provider_collection(
+    store: &mut Store,
+    mut run: RunInput,
+    submission: Option<SubmissionInput>,
+) -> CollectionInput {
+    let source_admission_id = run.admission_id.clone().expect("bound fixture run");
+    let admission = store
+        .admission(&source_admission_id)
+        .expect("admission query")
+        .expect("admission exists");
+    CanonicalDocument::from_canonical_bytes(admission.lock_json.clone())
+        .expect("source lock canonical")
+        .digest()
+        .clone_into(&mut run.binding_digest);
+    let binding_event_id = uuid::Uuid::new_v4().to_string();
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    store
+        .begin_binding_transition(
+            &BindingEventInput {
+                binding_event_id: binding_event_id.clone(),
+                instance_id: run.instance_id.clone(),
+                event_kind: "activate".to_owned(),
+                admission_id: Some(source_admission_id.clone()),
+                binding_digest: run.binding_digest.clone(),
+                occurred_at: TS.to_owned(),
+                reason_code: Some("store_contract".to_owned()),
+                detail: doc(json!({})),
+            },
+            &BindingMaterializationInput {
+                materialization_event_id: uuid::Uuid::new_v4().to_string(),
+                operation_id: operation_id.clone(),
+                instance_id: run.instance_id.clone(),
+                binding_event_id: binding_event_id.clone(),
+                phase: "intent".to_owned(),
+                occurred_at: TS.to_owned(),
+                detail: doc(json!({})),
+            },
+        )
+        .expect("activate provider admission");
+    store
+        .complete_binding_materialization(&BindingMaterializationInput {
+            materialization_event_id: uuid::Uuid::new_v4().to_string(),
+            operation_id,
+            instance_id: run.instance_id.clone(),
+            binding_event_id,
+            phase: "completed".to_owned(),
+            occurred_at: TS.to_owned(),
+            detail: doc(json!({})),
+        })
+        .expect("complete provider binding");
+    let provider = store
+        .provider_admission_for_source(&source_admission_id)
+        .expect("provider admission query")
+        .expect("provider admission exists");
+    let raw_bytes = submission
+        .as_ref()
+        .map_or_else(Vec::new, |submission| submission.raw_bytes.clone());
+    let received_at = submission.as_ref().map_or_else(
+        || run.finished_at.clone(),
+        |submission| submission.received_at.clone(),
+    );
+    let (interpretation_kind, interpretation) = match submission.as_ref() {
+        Some(SubmissionInput {
+            disposition: SubmissionDisposition::Admitted(report),
+            ..
+        }) => (
+            "candidate_report".to_owned(),
+            report.canonical_report.clone(),
+        ),
+        Some(SubmissionInput {
+            disposition: SubmissionDisposition::Rejected { refusal },
+            ..
+        }) => ("protocol_rejected".to_owned(), refusal.detail.clone()),
+        None => ("unavailable".to_owned(), doc(Value::Null)),
+    };
+    let attempt_id = format!("attempt-{}", run.run_id);
+    let provider_admission_id = provider.provider_admission_id;
+    let idempotency_key = nq_store::provider_idempotency_key(&provider_admission_id, &attempt_id)
+        .expect("provider idempotency identity");
+    CollectionInput {
+        intake: ProviderIntakeInput {
+            intake_id: format!("intake-{}", run.run_id),
+            attempt_id,
+            idempotency_key,
+            request_id: run.request_id.clone(),
+            provider_admission_id,
+            source_admission_id,
+            provider_sequence: None,
+            origin_carrier: run.carrier.clone(),
+            deadline_at: run.deadline_at.clone(),
+            checkpoint_contract_digest: run.checkpoint_contract_digest.clone(),
+            execution_identity_digest: Sha256Digest::parse(
+                run.execution_identity.digest().to_owned(),
+            )
+            .expect("execution identity digest"),
+            admission_context_digest: Sha256Digest::parse(admission.admission_context_digest)
+                .expect("admission context digest"),
+            provider_semantic_id: Sha256Digest::parse(provider.provider_semantic_id)
+                .expect("provider semantic identity"),
+            provider_artifact_digest: Sha256Digest::parse(provider.provider_artifact_digest)
+                .expect("provider artifact identity"),
+            provider_protocol_identity: provider.provider_protocol_identity,
+            provider_config_digest: Sha256Digest::parse(provider.provider_config_digest)
+                .expect("provider configuration identity"),
+            binding_digest: run.binding_digest.clone(),
+            instance_id: run.instance_id.clone(),
+            profile_id: run.profile_id.clone(),
+            profile_version: run.profile_version.clone(),
+            profile_digest: run.profile_digest.clone(),
+            profile_semantic_id: Sha256Digest::parse(admission.profile_semantic_id)
+                .expect("profile semantic identity"),
+            evaluator_artifact_digest: Sha256Digest::parse(admission.evaluator_artifact_digest)
+                .expect("evaluator artifact identity"),
+            context: doc(json!({"schema": "nq.store_contract.provider_context.v1"})),
+            interpretation_kind,
+            interpretation,
+            native_outcome_kind: run.acquisition_outcome.clone(),
+            native_outcome: run.resource_outcome.clone(),
+            raw_bytes,
+            started_at: run.started_at.clone(),
+            finished_at: run.finished_at.clone(),
+            received_at,
+        },
+        run,
+        submission,
+    }
+}
+
+fn committed_receipt(commit: ProviderIntakeCommit<()>) -> nq_store::CollectionReceipt {
+    match commit {
+        ProviderIntakeCommit::Committed { receipt, .. } => receipt,
+        ProviderIntakeCommit::Replayed { .. } => panic!("fresh contract fixture replayed"),
+    }
+}
+
 fn commit_admitted_fixture(
     store: &mut Store,
     collection: &CollectionInput,
@@ -237,28 +374,23 @@ fn commit_admitted_fixture(
 /// Seed one admitted report and return its identifiers.
 fn seed_admitted(store: &mut Store, suffix: &str) -> (String, String, String) {
     let profile_digest = seed_descriptor(store);
-    let admission_id = format!("admission-{suffix}");
+    let admission_id = uuid::Uuid::new_v4().to_string();
     store
         .append_admission(&admission_input(&admission_id, &profile_digest))
         .expect("append admission");
     let submission_id = format!("submission-{suffix}");
-    commit_admitted_fixture(
+    let collection = provider_collection(
         store,
-        &CollectionInput {
-            run: run(suffix, Some(&admission_id), &profile_digest),
-            submission: Some(SubmissionInput {
-                submission_id: submission_id.clone(),
-                raw_bytes: format!("raw-{suffix}").into_bytes(),
-                received_at: TS.to_owned(),
-                protocol_outcome: "valid_exchange".to_owned(),
-                disposition: SubmissionDisposition::Admitted(admitted_report(
-                    suffix,
-                    &profile_digest,
-                )),
-            }),
-        },
-    )
-    .expect("commit admitted collection");
+        run(suffix, Some(&admission_id), &profile_digest),
+        Some(SubmissionInput {
+            submission_id: submission_id.clone(),
+            raw_bytes: format!("raw-{suffix}").into_bytes(),
+            received_at: TS.to_owned(),
+            protocol_outcome: "valid_report".to_owned(),
+            disposition: SubmissionDisposition::Admitted(admitted_report(suffix, &profile_digest)),
+        }),
+    );
+    commit_admitted_fixture(store, &collection).expect("commit admitted collection");
     (submission_id, format!("report-{suffix}"), admission_id)
 }
 
@@ -276,14 +408,19 @@ fn a_fresh_store_validates_and_holds_no_evidence() {
 fn rejected_custody_is_byte_exact_and_is_not_a_report() {
     let mut store = Store::initialize_in_memory().expect("initialize");
     let profile_digest = seed_descriptor(&mut store);
+    let admission_id = uuid::Uuid::new_v4().to_string();
+    store
+        .append_admission(&admission_input(&admission_id, &profile_digest))
+        .expect("append provider admission");
     let raw = b"exact rejected helper bytes".to_vec();
-    let collection = CollectionInput {
-        run: run("rej", None, &profile_digest),
-        submission: Some(SubmissionInput {
+    let collection = provider_collection(
+        &mut store,
+        run("rej", Some(&admission_id), &profile_digest),
+        Some(SubmissionInput {
             submission_id: "submission-rej".to_owned(),
             raw_bytes: raw.clone(),
             received_at: TS.to_owned(),
-            protocol_outcome: "protocol_error".to_owned(),
+            protocol_outcome: "rejected".to_owned(),
             disposition: SubmissionDisposition::Rejected {
                 refusal: RefusalInput {
                     refusal_id: "refusal-rej".to_owned(),
@@ -297,7 +434,7 @@ fn rejected_custody_is_byte_exact_and_is_not_a_report() {
                 },
             },
         }),
-    };
+    );
     let result = RunResultStatusInput {
         run_id: collection.run.run_id.clone(),
         status: StatusEventInput {
@@ -310,9 +447,11 @@ fn rejected_custody_is_byte_exact_and_is_not_a_report() {
             observed_at: TS.to_owned(),
         },
     };
-    let receipt = store
-        .commit_non_success_collection(&collection, &result)
-        .expect("commit rejected collection");
+    let receipt = committed_receipt(
+        store
+            .commit_non_success_collection(&collection, &result)
+            .expect("commit rejected collection"),
+    );
     assert_eq!(receipt.refusal_id.as_deref(), Some("refusal-rej"));
     assert_eq!(
         store.raw_submission_bytes("submission-rej").expect("query"),
@@ -387,23 +526,27 @@ fn an_admission_identity_is_append_only() {
 fn an_admitted_report_requires_a_run_bound_to_an_admission() {
     let mut store = Store::initialize_in_memory().expect("initialize");
     let profile_digest = seed_descriptor(&mut store);
-    let error = commit_admitted_fixture(
+    let admission_id = uuid::Uuid::new_v4().to_string();
+    store
+        .append_admission(&admission_input(&admission_id, &profile_digest))
+        .expect("append provider admission");
+    let mut collection = provider_collection(
         &mut store,
-        &CollectionInput {
-            run: run("unbound", None, &profile_digest),
-            submission: Some(SubmissionInput {
-                submission_id: "submission-unbound".to_owned(),
-                raw_bytes: b"raw".to_vec(),
-                received_at: TS.to_owned(),
-                protocol_outcome: "valid_exchange".to_owned(),
-                disposition: SubmissionDisposition::Admitted(admitted_report(
-                    "unbound",
-                    &profile_digest,
-                )),
-            }),
-        },
-    )
-    .expect_err("an admitted report requires an admission-bound run");
+        run("unbound", Some(&admission_id), &profile_digest),
+        Some(SubmissionInput {
+            submission_id: "submission-unbound".to_owned(),
+            raw_bytes: b"raw".to_vec(),
+            received_at: TS.to_owned(),
+            protocol_outcome: "valid_report".to_owned(),
+            disposition: SubmissionDisposition::Admitted(admitted_report(
+                "unbound",
+                &profile_digest,
+            )),
+        }),
+    );
+    collection.run.admission_id = None;
+    let error = commit_admitted_fixture(&mut store, &collection)
+        .expect_err("an admitted report requires an admission-bound run");
     let _ = error;
 }
 

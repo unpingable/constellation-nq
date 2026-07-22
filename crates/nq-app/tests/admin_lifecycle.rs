@@ -102,6 +102,55 @@ fn read_only_upgrade_receipt(database: &Path) -> UpgradeReceipt {
         .expect("read durable upgrade receipt")
 }
 
+fn write_exact_v3_database(path: &Path, include_historical_run: bool) {
+    let connection = Connection::open(path).expect("create exact v3 fixture");
+    connection
+        .execute_batch(include_str!("../../nq-store/src/schema_v3.sql"))
+        .expect("install qualified v3 schema");
+    connection
+        .execute(
+            "INSERT INTO schema_metadata (
+                singleton, product, schema_version, schema_artifact_digest, initialized_at
+             ) VALUES (1, 'nq-ng', 3, ?1, '2026-07-20T12:00:00.000Z')",
+            [nq_store::SCHEMA_V3_ARTIFACT_DIGEST],
+        )
+        .expect("record exact v3 schema identity");
+    if include_historical_run {
+        let digest_a = format!("sha256:{}", "a".repeat(64));
+        let digest_b = format!("sha256:{}", "b".repeat(64));
+        connection
+            .execute(
+                "INSERT INTO watcher_runs (
+                    run_id, request_id, instance_id, admission_id, binding_digest,
+                    checkpoint_contract_digest, profile_id, profile_version,
+                    profile_digest, carrier, started_at, deadline_at, finished_at,
+                    acquisition_outcome, execution_identity_json, resource_outcome_json
+                 ) VALUES (
+                    'v3-run', 'v3-request', 'v3-instance', NULL, ?1, ?2,
+                    'nq.conformance', '1', ?1, 'stdio',
+                    '2026-07-20T12:00:00.000Z', '2026-07-20T12:00:01.000Z',
+                    '2026-07-20T12:00:00.500Z', 'spawn_failed', X'7B7D', X'7B7D'
+                 )",
+                rusqlite::params![digest_a, digest_b],
+            )
+            .expect("insert historical v3 run");
+        connection
+            .execute_batch(
+                "INSERT INTO status_events (
+                    status_event_id, component_kind, component_id, run_id, state,
+                    code, detail_json, observed_at
+                 ) VALUES (
+                    'v3-status', 'instance', 'v3-instance', 'v3-run', 'degraded',
+                    'spawn_failed', X'7B7D', '2026-07-20T12:00:00.500Z'
+                 );
+                 INSERT INTO status_current (
+                    component_kind, component_id, latest_status_event_id
+                 ) VALUES ('instance', 'v3-instance', 'v3-status');",
+            )
+            .expect("insert historical v3 result");
+    }
+}
+
 #[test]
 #[allow(clippy::too_many_lines)]
 fn backup_restore_and_already_current_upgrade_are_verified_and_non_destructive() {
@@ -288,4 +337,135 @@ fn backup_restore_and_already_current_upgrade_are_verified_and_non_destructive()
         )
         .expect("query restored WAL state");
     assert_eq!(restored_wal_event, 1);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn exact_v3_upgrade_accepts_typed_empty_history_and_refuses_semantic_or_schema_drift() {
+    let nq = env!("CARGO_BIN_EXE_nq");
+    let directory = tempfile::tempdir().expect("temporary test directory");
+    let root = directory.path();
+    let database = root.join("qualified-v3.db");
+    write_exact_v3_database(&database, false);
+    let config = write_config(root, "qualified-v3", &database);
+    let backup_directory = root.join("v3-upgrade-backups");
+
+    let upgraded = success(run(
+        nq,
+        &config,
+        &[
+            "admin",
+            "upgrade",
+            "--backup-directory",
+            backup_directory.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(upgraded["result"], "migrated");
+    assert_eq!(upgraded["from_schema_version"], 3);
+    assert_eq!(upgraded["schema_version"], nq_store::SCHEMA_VERSION);
+    assert_eq!(upgraded["historical_provider_intake"], "explicit_gap_only");
+
+    let backup = PathBuf::from(upgraded["backup"].as_str().unwrap());
+    let backup_digest = upgraded["backup_digest"].as_str().unwrap();
+    assert_eq!(sha256_file(&backup), backup_digest);
+    assert_eq!(
+        nq_store::Store::database_schema_version(&backup).expect("inspect v3 backup"),
+        3
+    );
+    assert!(matches!(
+        nq_store::Store::open(&backup),
+        Err(nq_store::StoreError::SchemaVersionMismatch {
+            found: 3,
+            supported: nq_store::SCHEMA_VERSION,
+        })
+    ));
+
+    let store = nq_store::Store::open(&database).expect("open migrated v4 store");
+    store.validate().expect("validate migrated v4 store");
+    assert!(
+        store
+            .provider_intakes_bounded(10, None)
+            .expect("enumerate real intakes")
+            .is_empty(),
+        "migration must not invent provider intake"
+    );
+    let gaps = store
+        .legacy_provider_intake_gaps_bounded(10, None)
+        .expect("enumerate explicit v3 gaps");
+    assert!(gaps.is_empty());
+    drop(store);
+
+    let receipt = read_only_upgrade_receipt(&database);
+    assert_eq!(receipt.from_version, 3);
+    assert_eq!(receipt.to_version, nq_store::SCHEMA_VERSION);
+    assert_eq!(receipt.result, "migrated");
+    assert_eq!(receipt.backup_digest, backup_digest);
+    assert_eq!(receipt.backup_location, backup.display().to_string());
+    assert_eq!(
+        serde_json::from_str::<Value>(&receipt.migrations_json).unwrap(),
+        serde_json::json!(["schema_v3_to_v4_provider_intake"])
+    );
+    let verification: Value = serde_json::from_str(&receipt.verification_json).unwrap();
+    assert_eq!(verification["provider_intakes_synthesized"], false);
+    assert_eq!(verification["acknowledgments_synthesized"], false);
+
+    let semantic_invalid = root.join("semantic-invalid-v3.db");
+    write_exact_v3_database(&semantic_invalid, true);
+    let semantic_invalid_before = fs::read(&semantic_invalid).expect("snapshot invalid v3");
+    let semantic_invalid_config = write_config(root, "semantic-invalid-v3", &semantic_invalid);
+    let semantic_refused_directory = root.join("semantic-invalid-v3-backups");
+    let diagnostic = failure(run(
+        nq,
+        &semantic_invalid_config,
+        &[
+            "admin",
+            "upgrade",
+            "--backup-directory",
+            semantic_refused_directory.to_str().unwrap(),
+        ],
+    ));
+    assert!(
+        diagnostic.contains("watcher run v3-run")
+            && (diagnostic.contains("resource outcome") || diagnostic.contains("admission")),
+        "unexpected typed-v3 refusal: {diagnostic}"
+    );
+    assert_eq!(
+        fs::read(&semantic_invalid).unwrap(),
+        semantic_invalid_before,
+        "semantic refusal must not mutate the schema-v3 source"
+    );
+    assert_eq!(
+        nq_store::Store::database_schema_version(&semantic_invalid)
+            .expect("semantic-invalid schema remains inspectable"),
+        3
+    );
+    assert_eq!(
+        fs::read_dir(&semantic_refused_directory).unwrap().count(),
+        0,
+        "semantic source refusal occurs before backup creation"
+    );
+
+    let modified = root.join("modified-v3.db");
+    write_exact_v3_database(&modified, false);
+    let connection = Connection::open(&modified).expect("open modified v3 fixture");
+    connection
+        .execute_batch("DROP INDEX watcher_runs_by_instance;")
+        .expect("modify v3 schema shape");
+    drop(connection);
+    let modified_before = fs::read(&modified).expect("snapshot modified v3");
+    let modified_config = write_config(root, "modified-v3", &modified);
+    let refused_directory = root.join("modified-v3-backups");
+    let diagnostic = failure(run(
+        nq,
+        &modified_config,
+        &[
+            "admin",
+            "upgrade",
+            "--backup-directory",
+            refused_directory.to_str().unwrap(),
+        ],
+    ));
+    assert!(diagnostic.contains("schema-v3 definition fingerprint"));
+    assert_eq!(fs::read(&modified).unwrap(), modified_before);
+    assert_eq!(fs::read_dir(refused_directory).unwrap().count(), 0);
 }

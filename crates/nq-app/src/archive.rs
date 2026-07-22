@@ -97,6 +97,19 @@ pub struct VerifyReport {
     /// Exact number of immutable evaluation rows checked together with their
     /// finding/refusal linkage.
     pub historical_evaluation_records_verified: Option<usize>,
+    /// Whether every schema-v4 provider intake reopened through its exact
+    /// identity, raw-byte custody, local-run origin, and durable acknowledgment,
+    /// and every migrated schema-v3 run remained an explicit limitation rather
+    /// than synthetic intake evidence. `None` when history is un-openable.
+    pub historical_provider_intake_semantics_verified: Option<bool>,
+    /// Exact number of real schema-v4 provider-intake records reopened.
+    pub historical_provider_intake_records_verified: Option<usize>,
+    /// Exact number of durable provider-intake acknowledgments reopened and
+    /// matched to their canonical downstream result.
+    pub historical_provider_intake_acknowledgments_verified: Option<usize>,
+    /// Exact number of schema-v3 watcher runs reopened as explicit provider-
+    /// intake gaps. These are limitations, never synthesized evidence.
+    pub historical_legacy_provider_intake_gaps_verified: Option<usize>,
     /// Always false: verification confirms history, it grants nothing.
     pub grants_authority: bool,
 }
@@ -106,6 +119,9 @@ struct HistoricalSemanticCounts {
     status_events: usize,
     rejected_custody_records: usize,
     evaluations: usize,
+    provider_intakes: usize,
+    provider_intake_acknowledgments: usize,
+    legacy_provider_intake_gaps: usize,
 }
 
 fn validate_historical_semantics(store: &Store) -> Result<HistoricalSemanticCounts> {
@@ -147,11 +163,16 @@ fn validate_historical_semantics(store: &Store) -> Result<HistoricalSemanticCoun
             "public evaluation history reopened {public_evaluations} rows; typed verifier reopened {evaluations}"
         );
     }
+    let provider_history = nq_core::engine::validate_provider_intake_history(store)
+        .context("reopen provider-intake and legacy-gap semantics")?;
     Ok(HistoricalSemanticCounts {
         admitted_reports,
         status_events,
         rejected_custody_records,
         evaluations,
+        provider_intakes: provider_history.provider_intakes,
+        provider_intake_acknowledgments: provider_history.acknowledgments,
+        legacy_provider_intake_gaps: provider_history.legacy_gaps,
     })
 }
 
@@ -471,6 +492,10 @@ pub fn verify_archive(archive: &Path) -> Result<VerifyReport> {
         historical_rejected_custody_records_verified,
         historical_evaluation_refusal_semantics_verified,
         historical_evaluation_records_verified,
+        historical_provider_intake_semantics_verified,
+        historical_provider_intake_records_verified,
+        historical_provider_intake_acknowledgments_verified,
+        historical_legacy_provider_intake_gaps_verified,
     ) = match (
         metadata.source_openable,
         Store::open_immutable(archive.join("db/nq.db")),
@@ -487,6 +512,10 @@ pub fn verify_archive(archive: &Path) -> Result<VerifyReport> {
                 Some(counts.rejected_custody_records),
                 Some(true),
                 Some(counts.evaluations),
+                Some(true),
+                Some(counts.provider_intakes),
+                Some(counts.provider_intake_acknowledgments),
+                Some(counts.legacy_provider_intake_gaps),
             )
         }
         (true, Err(error)) => {
@@ -499,7 +528,9 @@ pub fn verify_archive(archive: &Path) -> Result<VerifyReport> {
                 "archive records source_openable=false but its preserved database opens as a valid current store"
             );
         }
-        (false, Err(_)) => (None, None, None, None, None, None, None, None, None),
+        (false, Err(_)) => (
+            None, None, None, None, None, None, None, None, None, None, None, None, None,
+        ),
     };
 
     Ok(VerifyReport {
@@ -515,6 +546,10 @@ pub fn verify_archive(archive: &Path) -> Result<VerifyReport> {
         historical_rejected_custody_records_verified,
         historical_evaluation_refusal_semantics_verified,
         historical_evaluation_records_verified,
+        historical_provider_intake_semantics_verified,
+        historical_provider_intake_records_verified,
+        historical_provider_intake_acknowledgments_verified,
+        historical_legacy_provider_intake_gaps_verified,
         grants_authority: false,
     })
 }
@@ -588,7 +623,10 @@ mod tests {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn append_mismatched_typed_custody(database: &Path) {
+    fn append_provider_intake_collection(
+        database: &Path,
+        mismatch_refusal_identity: bool,
+    ) -> nq_store::ProviderIntakeRow {
         let mut store = Store::open(database).expect("open archived store");
         let profile = nq_profiles::resolve_profile("nq.conformance", 1)
             .expect("compiled archive fixture profile");
@@ -604,57 +642,193 @@ mod tests {
             .expect("append profile descriptor");
 
         let instance_id = "archive-transport";
-        let admission_id = "admission-archive-transport";
+        let admission_id = "00000000-0000-4000-8000-000000000101";
         let semantic_id = nq_profiles::profile_semantic_id(profile.descriptor())
             .expect("compiled profile semantic identity");
         let digest = |label: &str| nq_protocol::sha256_bytes(label.as_bytes());
+        let conformance = nq_core::admission::ConformanceReceipt {
+            tool_version: "archive-fixture-v1".to_owned(),
+            protocol_passed: true,
+            protocol_corpus_digest: digest("archive-provider-corpus").into_string(),
+            protocol_fixtures_checked: 1,
+            dry_collection_passed: true,
+            dry_report_digest: Some(digest("archive-dry-report").into_string()),
+        };
+        let conformance_document = canonical(&conformance);
+        let admission_identity = nq_store::AdmissionIdentity {
+            profile_semantic_id: nq_protocol::Sha256Digest::parse(semantic_id.as_str())
+                .expect("semantic identity digest"),
+            detector_identity_digest: nq_store::detector_suite_identity_digest(
+                profile.detectors().iter().map(|detector| {
+                    detector
+                        .descriptor()
+                        .digest()
+                        .expect("compiled detector identity")
+                }),
+            )
+            .expect("compiled detector suite identity"),
+            evaluator_source_digest: digest("source"),
+            evaluator_artifact_digest: digest("evaluator"),
+            helper_artifact_digest: digest("helper"),
+            config_digest: digest("config"),
+            protocol_version: nq_protocol::HELPER_PROTOCOL_VERSION.to_owned(),
+            target_triple: "fixture-target".to_owned(),
+            artifact_identity_method: "fixture".to_owned(),
+            platform_runtime_version: "fixture".to_owned(),
+        };
+        let execution = nq_core::identity::ExecutionIdentity {
+            execution_account: Some(nq_helper_sandbox::ExecutionAccount {
+                configured: "991".to_owned(),
+                name: "archive-fixture".to_owned(),
+                uid: 991,
+                gid: 991,
+                debug_same_identity: false,
+            }),
+            configured_path: std::path::PathBuf::from("/fixture/archive-provider"),
+            resolved_path: std::path::PathBuf::from("/fixture/archive-provider"),
+            sha256: admission_identity
+                .helper_artifact_digest
+                .as_str()
+                .to_owned(),
+            size: 1,
+            device: 1,
+            inode: 1,
+            mode: 0o100_755,
+            modified_ns: "0".to_owned(),
+            fixed_argv: Vec::new(),
+            working_directory: None,
+            working_directory_identity: None,
+            execution_chain: Vec::new(),
+            startup_runtime: None,
+        };
+        let execution_identity = canonical(&execution);
+        let source_lock = canonical(&nq_core::admission::AdmissionLock {
+            schema: nq_core::admission::ADMISSION_SCHEMA.to_owned(),
+            admission_id: admission_id.to_owned(),
+            instance_id: instance_id.to_owned(),
+            config_digest: admission_identity.config_digest.as_str().to_owned(),
+            execution,
+            profile: nq_core::admission::AdmittedProfile {
+                id: "nq.conformance".to_owned(),
+                version: 1,
+                digest: profile_digest.clone(),
+            },
+            protocol_version: nq_protocol::HELPER_PROTOCOL_VERSION.to_owned(),
+            granted_capabilities: std::collections::BTreeSet::new(),
+            conformance: conformance.clone(),
+            admitted_at: chrono::DateTime::parse_from_rfc3339("2026-07-20T12:00:00Z")
+                .expect("fixture admission time")
+                .with_timezone(&chrono::Utc),
+            operator: nq_core::admission::OperatorIdentity {
+                uid: 991,
+                gid: 991,
+                login_hint: Some("archive-fixture".to_owned()),
+            },
+        });
         store
             .append_admission(&nq_store::AdmissionInput {
                 admission_id: admission_id.to_owned(),
                 instance_id: instance_id.to_owned(),
-                identity: nq_store::AdmissionIdentity {
-                    profile_semantic_id: nq_protocol::Sha256Digest::parse(semantic_id.as_str())
-                        .expect("semantic identity digest"),
-                    detector_identity_digest: nq_store::detector_suite_identity_digest(
-                        profile.detectors().iter().map(|detector| {
-                            detector
-                                .descriptor()
-                                .digest()
-                                .expect("compiled detector identity")
-                        }),
-                    )
-                    .expect("compiled detector suite identity"),
-                    evaluator_source_digest: digest("source"),
-                    evaluator_artifact_digest: digest("evaluator"),
-                    helper_artifact_digest: digest("helper"),
-                    config_digest: digest("config"),
-                    protocol_version: nq_protocol::HELPER_PROTOCOL_VERSION.to_owned(),
-                    target_triple: "fixture-target".to_owned(),
-                    artifact_identity_method: "fixture".to_owned(),
-                    platform_runtime_version: "fixture".to_owned(),
-                },
-                execution_chain: canonical(&serde_json::json!({"fixture": true})),
+                identity: admission_identity.clone(),
+                execution_chain: execution_identity.clone(),
                 profile_id: "nq.conformance".to_owned(),
                 profile_version: "1".to_owned(),
                 profile_digest: profile_digest.clone(),
                 capability_grant: canonical(&serde_json::json!([])),
-                conformance: canonical(&serde_json::json!({"fixture": true})),
-                lock: canonical(&serde_json::json!({"fixture": true})),
+                conformance: conformance_document.clone(),
+                lock: source_lock.clone(),
                 admitted_at: "2026-07-20T12:00:00Z".to_owned(),
-                operator_identity: canonical(&serde_json::json!({"fixture": true})),
+                operator_identity: canonical(&serde_json::json!({
+                    "uid": 991,
+                    "gid": 991,
+                    "login_hint": "archive-fixture",
+                })),
             })
             .expect("append archive fixture admission");
-        let refusal = nq_core::engine::GovernedRefusal::helper(
-            "refusal-inside-document".to_owned(),
-            nq_protocol::Refusal {
-                responsible_instance_id: nq_protocol::InstanceId::new(instance_id)
-                    .expect("instance token"),
-                boundary: nq_protocol::RefusalBoundary::Collection,
-                code: nq_protocol::RefusalCode::CollectionFailed,
-                message: "backend collection failed".to_owned(),
-                retriable: true,
-                details: serde_json::json!({"attempt": 1, "errno": "EAGAIN"}),
+
+        let binding_digest = nq_protocol::Sha256Digest::parse(source_lock.digest().to_owned())
+            .expect("source lock digest");
+        let binding_event_id = "00000000-0000-4000-8000-000000000102";
+        let operation_id = "00000000-0000-4000-8000-000000000103";
+        store
+            .begin_binding_transition(
+                &nq_store::BindingEventInput {
+                    binding_event_id: binding_event_id.to_owned(),
+                    instance_id: instance_id.to_owned(),
+                    event_kind: "activate".to_owned(),
+                    admission_id: Some(admission_id.to_owned()),
+                    binding_digest: binding_digest.as_str().to_owned(),
+                    occurred_at: "2026-07-20T12:00:00Z".to_owned(),
+                    reason_code: Some("archive_fixture".to_owned()),
+                    detail: canonical(&serde_json::json!({"fixture": true})),
+                },
+                &nq_store::BindingMaterializationInput {
+                    materialization_event_id: "00000000-0000-4000-8000-000000000104".to_owned(),
+                    operation_id: operation_id.to_owned(),
+                    instance_id: instance_id.to_owned(),
+                    binding_event_id: binding_event_id.to_owned(),
+                    phase: "intent".to_owned(),
+                    occurred_at: "2026-07-20T12:00:00Z".to_owned(),
+                    detail: canonical(&serde_json::json!({"desired": "active"})),
+                },
+            )
+            .expect("activate archive fixture provider admission");
+        store
+            .complete_binding_materialization(&nq_store::BindingMaterializationInput {
+                materialization_event_id: "00000000-0000-4000-8000-000000000105".to_owned(),
+                operation_id: operation_id.to_owned(),
+                instance_id: instance_id.to_owned(),
+                binding_event_id: binding_event_id.to_owned(),
+                phase: "completed".to_owned(),
+                occurred_at: "2026-07-20T12:00:00Z".to_owned(),
+                detail: canonical(&serde_json::json!({"durable": true})),
+            })
+            .expect("complete archive fixture provider binding");
+
+        let request_id = "request-archive-transport";
+        let request = nq_protocol::HelperRequest::builder(
+            nq_protocol::RequestId::new(request_id).expect("request identity"),
+            nq_protocol::InstanceId::new(instance_id).expect("instance identity"),
+            nq_protocol::ProfileBinding {
+                id: nq_protocol::ProfileId::new("nq.conformance").expect("profile identity"),
+                version: nq_protocol::ProfileVersion::new("1").expect("profile version"),
+                digest: nq_protocol::Sha256Digest::parse(profile_digest.clone())
+                    .expect("profile digest"),
             },
+            nq_protocol::SubjectBinding {
+                subject: nq_protocol::SubjectId::new("archive:provider-intake")
+                    .expect("subject identity"),
+                scope: nq_protocol::ScopeBinding {
+                    kind: nq_protocol::ScopeKind::new("archive").expect("scope kind"),
+                    value: serde_json::json!({"fixture": "provider-intake"}),
+                },
+                vantage: nq_protocol::VantageBinding {
+                    kind: nq_protocol::VantageKind::new("local").expect("vantage kind"),
+                    value: serde_json::json!({}),
+                },
+            },
+            nq_protocol::MonotonicDeadline {
+                clock: nq_protocol::MonotonicClock::LinuxBoottime,
+                expires_at_ns: 10_000,
+            },
+        )
+        .build()
+        .expect("archive fixture helper request");
+        let helper_refusal = nq_protocol::Refusal {
+            responsible_instance_id: nq_protocol::InstanceId::new(instance_id)
+                .expect("instance token"),
+            boundary: nq_protocol::RefusalBoundary::Collection,
+            code: nq_protocol::RefusalCode::CollectionFailed,
+            message: "backend collection failed".to_owned(),
+            retriable: true,
+            details: serde_json::json!({"attempt": 1, "errno": "EAGAIN"}),
+        };
+        let response = nq_protocol::HelperResponse::refusal(&request, helper_refusal.clone());
+        let raw_bytes = nq_protocol::encode_ndjson(&response).expect("encode provider response");
+        let governed_refusal_id = "refusal-inside-document";
+        let refusal = nq_core::engine::GovernedRefusal::helper(
+            governed_refusal_id.to_owned(),
+            helper_refusal,
         );
         let outcome = nq_core::engine::CollectionOutcome::rejected(
             instance_id.to_owned(),
@@ -673,19 +847,122 @@ mod tests {
                 file_bytes_per_regular_file: 1,
                 core_bytes: 0,
             },
-            stdout_bytes_retained: b"rejected response".len(),
+            stdout_bytes_retained: raw_bytes.len(),
             stderr_bytes_retained: 0,
             stderr_hex: String::new(),
             outcome: nq_core::runner::AcquisitionOutcome::Response,
         };
+        let admission = store
+            .admission(admission_id)
+            .expect("reopen fixture admission")
+            .expect("fixture admission exists");
+        let provider_admission = store
+            .provider_admission_for_source(admission_id)
+            .expect("reopen fixture provider admission")
+            .expect("fixture provider admission exists");
+        let provider_semantic_id = nq_store::local_provider_semantic_id(
+            nq_protocol::HELPER_PROTOCOL_VERSION,
+            &conformance_document,
+        )
+        .expect("derive provider semantic identity");
+        let execution_identity_digest =
+            nq_protocol::Sha256Digest::parse(execution_identity.digest().to_owned())
+                .expect("execution identity digest");
+        let provider_identity = nq_core::ProviderIdentityV1 {
+            schema: nq_core::ProviderIdentitySchema::V1,
+            kind: nq_core::ProviderKind::LocalHelper,
+            provider_semantic_id: provider_semantic_id.clone(),
+            provider_admission_id: nq_protocol::Sha256Digest::parse(
+                provider_admission.provider_admission_id.clone(),
+            )
+            .expect("provider admission digest"),
+            source_admission_id: admission_id.to_owned(),
+            binding_digest: binding_digest.clone(),
+            artifact_digest: admission_identity.helper_artifact_digest.clone(),
+            execution_identity_digest: execution_identity_digest.clone(),
+            configuration_digest: admission_identity.config_digest.clone(),
+            protocol_identity: nq_protocol::HELPER_PROTOCOL_VERSION.to_owned(),
+            conformance_corpus_digest: nq_protocol::Sha256Digest::parse(
+                conformance.protocol_corpus_digest.clone(),
+            )
+            .expect("corpus digest"),
+            conformance_tool_version: conformance.tool_version.clone(),
+            conformance: conformance.clone(),
+            profile_semantic_id: admission_identity.profile_semantic_id.clone(),
+            evaluator_artifact_digest: admission_identity.evaluator_artifact_digest.clone(),
+            admission_context_digest: nq_protocol::Sha256Digest::parse(
+                admission.admission_context_digest.clone(),
+            )
+            .expect("admission context digest"),
+        };
+        let checkpoint_contract_digest = digest("checkpoint");
+        let intake_id = "intake-archive-transport";
+        let attempt_id = "attempt-archive-transport";
+        let run_id = "run-archive-transport";
+        let context = nq_core::ProviderIntakeContextV1 {
+            schema: nq_core::ProviderIntakeContextSchema::V1,
+            intake_id: intake_id.to_owned(),
+            attempt_id: attempt_id.to_owned(),
+            run_id: run_id.to_owned(),
+            request: request.clone(),
+            provider: provider_identity,
+            origin_carrier: "stdio".to_owned(),
+            deadline_at: chrono::DateTime::parse_from_rfc3339("2026-07-20T12:00:01Z")
+                .expect("provider deadline")
+                .with_timezone(&chrono::Utc),
+            checkpoint_contract_digest: checkpoint_contract_digest.clone(),
+        };
+        let interpretation = nq_core::ProviderResponseInterpretationV1::Validated { response };
+        let idempotency_key = nq_store::provider_idempotency_key(
+            &provider_admission.provider_admission_id,
+            attempt_id,
+        )
+        .expect("derive provider idempotency identity");
         let collection = nq_store::CollectionInput {
+            intake: nq_store::ProviderIntakeInput {
+                intake_id: intake_id.to_owned(),
+                attempt_id: attempt_id.to_owned(),
+                idempotency_key,
+                request_id: request_id.to_owned(),
+                provider_admission_id: provider_admission.provider_admission_id,
+                source_admission_id: admission_id.to_owned(),
+                provider_sequence: None,
+                origin_carrier: "stdio".to_owned(),
+                deadline_at: "2026-07-20T12:00:01Z".to_owned(),
+                checkpoint_contract_digest: checkpoint_contract_digest.as_str().to_owned(),
+                execution_identity_digest,
+                admission_context_digest: nq_protocol::Sha256Digest::parse(
+                    admission.admission_context_digest,
+                )
+                .expect("admission context digest"),
+                provider_semantic_id,
+                provider_artifact_digest: admission_identity.helper_artifact_digest,
+                provider_protocol_identity: nq_protocol::HELPER_PROTOCOL_VERSION.to_owned(),
+                provider_config_digest: admission_identity.config_digest,
+                binding_digest: binding_digest.as_str().to_owned(),
+                instance_id: instance_id.to_owned(),
+                profile_id: "nq.conformance".to_owned(),
+                profile_version: "1".to_owned(),
+                profile_digest: profile_digest.clone(),
+                profile_semantic_id: admission_identity.profile_semantic_id,
+                evaluator_artifact_digest: admission_identity.evaluator_artifact_digest,
+                context: canonical(&context),
+                interpretation_kind: "provider_refusal".to_owned(),
+                interpretation: canonical(&interpretation),
+                native_outcome_kind: "response".to_owned(),
+                native_outcome: canonical(&resource_outcome),
+                raw_bytes: raw_bytes.clone(),
+                started_at: "2026-07-20T12:00:00Z".to_owned(),
+                finished_at: "2026-07-20T12:00:00Z".to_owned(),
+                received_at: "2026-07-20T12:00:00Z".to_owned(),
+            },
             run: nq_store::RunInput {
-                run_id: "run-archive-transport".to_owned(),
-                request_id: "request-archive-transport".to_owned(),
+                run_id: run_id.to_owned(),
+                request_id: request_id.to_owned(),
                 instance_id: instance_id.to_owned(),
                 admission_id: Some(admission_id.to_owned()),
-                binding_digest: nq_protocol::sha256_bytes(b"binding").into_string(),
-                checkpoint_contract_digest: nq_protocol::sha256_bytes(b"checkpoint").into_string(),
+                binding_digest: binding_digest.into_string(),
+                checkpoint_contract_digest: checkpoint_contract_digest.into_string(),
                 profile_id: "nq.conformance".to_owned(),
                 profile_version: "1".to_owned(),
                 profile_digest,
@@ -694,19 +971,23 @@ mod tests {
                 deadline_at: "2026-07-20T12:00:01Z".to_owned(),
                 finished_at: "2026-07-20T12:00:00Z".to_owned(),
                 acquisition_outcome: "response".to_owned(),
-                execution_identity: canonical(&serde_json::json!({"fixture": true})),
+                execution_identity,
                 resource_outcome: canonical(&resource_outcome),
             },
             submission: Some(nq_store::SubmissionInput {
                 submission_id: "submission-archive-transport".to_owned(),
-                raw_bytes: b"rejected response".to_vec(),
+                raw_bytes,
                 received_at: "2026-07-20T12:00:00Z".to_owned(),
                 protocol_outcome: "valid_refusal".to_owned(),
                 disposition: nq_store::SubmissionDisposition::Rejected {
                     refusal: nq_store::RefusalInput {
                         // SQL projections are self-consistent, but this ID
                         // deliberately disagrees with the canonical object.
-                        refusal_id: "refusal-in-sql-row".to_owned(),
+                        refusal_id: if mismatch_refusal_identity {
+                            "refusal-in-sql-row".to_owned()
+                        } else {
+                            governed_refusal_id.to_owned()
+                        },
                         source_kind: "protocol".to_owned(),
                         responsible_instance_id: instance_id.to_owned(),
                         boundary: "collection".to_owned(),
@@ -738,6 +1019,14 @@ mod tests {
         store
             .validate()
             .expect("generic store validation does not interpret refusal payload");
+        store
+            .provider_intake(intake_id)
+            .expect("query provider intake")
+            .expect("provider intake persists")
+    }
+
+    fn append_mismatched_typed_custody(database: &Path) {
+        let _ = append_provider_intake_collection(database, true);
     }
 
     fn write_config(root: &Path, database: &Path) -> PathBuf {
@@ -763,6 +1052,384 @@ mod tests {
         let config = write_config(root, &database);
         let archive = root.join("archive");
         create_archive(&config, &archive).expect("create archive");
+        archive
+    }
+
+    fn provider_archive(root: &Path) -> (PathBuf, nq_store::ProviderIntakeRow, Vec<u8>) {
+        let database = root.join("nq.db");
+        drop(Store::initialize(&database).expect("init store"));
+        let expected = append_provider_intake_collection(&database, false);
+        let raw_bytes = Store::open(&database)
+            .expect("reopen provider source")
+            .provider_intake_raw_bytes(&expected.intake_id)
+            .expect("query provider raw bytes")
+            .expect("provider raw bytes exist");
+        let config = write_config(root, &database);
+        let archive = root.join("archive");
+        create_archive(&config, &archive).expect("create provider archive");
+        (archive, expected, raw_bytes)
+    }
+
+    /// Replace typed provider documents while making every store-level digest
+    /// and the durable acknowledgment internally self-consistent. The exact raw
+    /// provider bytes remain untouched, so typed reconstruction—not the store's
+    /// self-consistency checks—must decide whether the documents correspond.
+    #[allow(clippy::too_many_lines)]
+    fn reseal_provider_documents(
+        archive: &Path,
+        expected: &nq_store::ProviderIntakeRow,
+        context: &nq_store::CanonicalDocument,
+        interpretation: &nq_store::CanonicalDocument,
+    ) {
+        let replay = canonical(&serde_json::json!({
+            "schema": "nq.provider_intake_replay.v1",
+            "idempotency_key": expected.idempotency_key,
+            "attempt_id": expected.attempt_id,
+            "request_id": expected.request_id,
+            "provider_admission_id": expected.provider_admission_id,
+            "source_admission_id": expected.source_admission_id,
+            "provider_sequence": expected.provider_sequence,
+            "origin_carrier": expected.origin_carrier,
+            "deadline_at": expected.deadline_at,
+            "checkpoint_contract_digest": expected.checkpoint_contract_digest,
+            "execution_identity_digest": expected.execution_identity_digest,
+            "admission_context_digest": expected.admission_context_digest,
+            "provider_semantic_id": expected.provider_semantic_id,
+            "provider_artifact_digest": expected.provider_artifact_digest,
+            "provider_protocol_identity": expected.provider_protocol_identity,
+            "provider_config_digest": expected.provider_config_digest,
+            "binding_digest": expected.binding_digest,
+            "instance_id": expected.instance_id,
+            "profile_id": expected.profile_id,
+            "profile_version": expected.profile_version,
+            "profile_digest": expected.profile_digest,
+            "profile_semantic_id": expected.profile_semantic_id,
+            "evaluator_artifact_digest": expected.evaluator_artifact_digest,
+            "context_digest": context.digest(),
+            "interpretation_kind": expected.interpretation_kind,
+            "interpretation_digest": interpretation.digest(),
+            "native_outcome_kind": expected.native_outcome_kind,
+            "native_outcome_digest": expected.native_outcome_digest,
+            "raw_sha256": expected.raw_sha256,
+            "started_at": expected.started_at,
+            "finished_at": expected.finished_at,
+        }));
+        let intake = canonical(&serde_json::json!({
+            "schema": nq_store::PROVIDER_INTAKE_SCHEMA,
+            "intake_id": expected.intake_id,
+            "replay_digest": replay.digest(),
+            "received_at": expected.received_at,
+        }));
+        let acknowledgment = &expected.acknowledgment;
+        let acknowledgment_detail = canonical(&serde_json::json!({
+            "schema": nq_store::PROVIDER_INTAKE_ACK_SCHEMA,
+            "acknowledgment_id": acknowledgment.acknowledgment_id,
+            "intake_id": acknowledgment.intake_id,
+            "attempt_id": acknowledgment.attempt_id,
+            "run_id": acknowledgment.run_id,
+            "provider_admission_id": acknowledgment.provider_admission_id,
+            "intake_digest": intake.digest(),
+            "raw_sha256": acknowledgment.raw_sha256,
+            "status_event_id": acknowledgment.status_event_id,
+            "canonical_result_digest": acknowledgment.canonical_result_digest,
+            "committed_at": acknowledgment.committed_at,
+            "establishes": "durable_custody_and_canonical_processing",
+            "does_not_establish": [
+                "report_admission",
+                "detector_result",
+                "health",
+                "testimonial_sufficiency",
+                "authority",
+                "external_obligation_discharge",
+            ],
+        }));
+
+        let database = archive.join("db/nq.db");
+        let connection = rusqlite::Connection::open(&database).expect("open archive database");
+        connection
+            .execute_batch(
+                "DROP TRIGGER immutable_provider_intake_attempts_update;
+                 DROP TRIGGER immutable_provider_intake_acknowledgments_update;",
+            )
+            .expect("open append-only rows for hostile substitution");
+        connection
+            .execute(
+                "UPDATE provider_intake_attempts
+                    SET context_json = ?1, context_digest = ?2,
+                        interpretation_json = ?3, interpretation_digest = ?4,
+                        replay_digest = ?5, intake_digest = ?6
+                  WHERE intake_id = ?7",
+                rusqlite::params![
+                    context.as_bytes(),
+                    context.digest(),
+                    interpretation.as_bytes(),
+                    interpretation.digest(),
+                    replay.digest(),
+                    intake.digest(),
+                    expected.intake_id,
+                ],
+            )
+            .expect("replace context and all store-level intake digests");
+        connection
+            .execute(
+                "UPDATE provider_intake_acknowledgments
+                    SET detail_json = ?1, acknowledgment_digest = ?2
+                  WHERE intake_id = ?3",
+                rusqlite::params![
+                    acknowledgment_detail.as_bytes(),
+                    acknowledgment_detail.digest(),
+                    expected.intake_id,
+                ],
+            )
+            .expect("replace acknowledgment with self-consistent intake digest");
+        connection
+            .execute_batch(
+                "CREATE TRIGGER immutable_provider_intake_attempts_update BEFORE UPDATE ON provider_intake_attempts BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
+                 CREATE TRIGGER immutable_provider_intake_acknowledgments_update BEFORE UPDATE ON provider_intake_acknowledgments BEGIN SELECT RAISE(ABORT, 'append-only table'); END;",
+            )
+            .expect("restore exact append-only schema");
+        drop(connection);
+        reseal_after_database_change(archive);
+    }
+
+    fn substitute_provider_context_and_reseal(
+        archive: &Path,
+        expected: &nq_store::ProviderIntakeRow,
+    ) {
+        let mut context: nq_core::ProviderIntakeContextV1 =
+            serde_json::from_slice(&expected.context_json).expect("decode provider context");
+        context.request.binding.subject =
+            nq_protocol::SubjectId::new("archive:substituted-provider-subject")
+                .expect("substituted subject identity");
+        let context = canonical(&context);
+        let interpretation =
+            nq_store::CanonicalDocument::from_canonical_bytes(expected.interpretation_json.clone())
+                .expect("reopen exact provider interpretation");
+        reseal_provider_documents(archive, expected, &context, &interpretation);
+    }
+
+    fn substitute_provider_interpretation_and_reseal(
+        archive: &Path,
+        expected: &nq_store::ProviderIntakeRow,
+    ) {
+        let context =
+            nq_store::CanonicalDocument::from_canonical_bytes(expected.context_json.clone())
+                .expect("reopen exact provider context");
+        let mut interpretation: nq_core::ProviderResponseInterpretationV1 =
+            serde_json::from_slice(&expected.interpretation_json)
+                .expect("decode provider interpretation");
+        let nq_core::ProviderResponseInterpretationV1::Validated { response } = &mut interpretation
+        else {
+            panic!("fixture interpretation is validated")
+        };
+        let nq_protocol::ResponseOutcome::Refusal { refusal } = &mut response.outcome else {
+            panic!("fixture interpretation contains a provider refusal")
+        };
+        refusal.retriable = !refusal.retriable;
+        let interpretation = canonical(&interpretation);
+        reseal_provider_documents(archive, expected, &context, &interpretation);
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn migrated_v3_archive(root: &Path) -> PathBuf {
+        let database = root.join("nq-v3.db");
+        let connection = rusqlite::Connection::open(&database).expect("create schema-v3 store");
+        connection
+            .execute_batch(include_str!("../../nq-store/src/schema_v3.sql"))
+            .expect("install exact frozen schema v3");
+        connection
+            .execute(
+                "INSERT INTO schema_metadata (
+                    singleton, product, schema_version, schema_artifact_digest, initialized_at
+                 ) VALUES (1, 'nq-ng', 3, ?1, ?2)",
+                rusqlite::params![nq_store::SCHEMA_V3_ARTIFACT_DIGEST, "2026-07-20T12:00:00Z"],
+            )
+            .expect("record exact schema-v3 identity");
+        let profile = nq_profiles::resolve_profile("nq.conformance", 1)
+            .expect("compiled legacy archive fixture profile");
+        let descriptor = canonical(profile.descriptor());
+        let profile_digest = descriptor.digest().to_owned();
+        let profile_semantic_id = nq_profiles::profile_semantic_id(profile.descriptor())
+            .expect("compiled legacy profile semantics");
+        let detector_identity =
+            nq_store::detector_suite_identity_digest(profile.detectors().iter().map(|detector| {
+                detector
+                    .descriptor()
+                    .digest()
+                    .expect("compiled legacy detector identity")
+            }))
+            .expect("compiled legacy detector suite");
+        connection
+            .execute(
+                "INSERT INTO profile_descriptor_snapshots (
+                    profile_id, profile_version, profile_digest, descriptor_json, recorded_at
+                 ) VALUES ('nq.conformance', '1', ?1, ?2, ?3)",
+                rusqlite::params![
+                    profile_digest,
+                    descriptor.as_bytes(),
+                    "2026-07-20T12:00:00Z"
+                ],
+            )
+            .expect("append exact schema-v3 profile descriptor");
+        let config_digest = nq_protocol::sha256_bytes(b"legacy-config");
+        let helper_artifact_digest = nq_protocol::sha256_bytes(b"legacy-helper");
+        let evaluator_source_digest = nq_protocol::sha256_bytes(b"legacy-evaluator-source");
+        let evaluator_artifact_digest = nq_protocol::sha256_bytes(b"legacy-evaluator");
+        let protocol_version = nq_protocol::HELPER_PROTOCOL_VERSION;
+        let admission_context_digest = nq_protocol::semantic_digest(&serde_json::json!({
+            "admission_context_schema": nq_store::ADMISSION_CONTEXT_SCHEMA,
+            "config_digest": config_digest,
+            "detector_identity_digest": detector_identity,
+            "evaluator_artifact_digest": evaluator_artifact_digest,
+            "evaluator_source_digest": evaluator_source_digest,
+            "helper_artifact_digest": helper_artifact_digest,
+            "profile_semantic_id": profile_semantic_id.as_str(),
+            "protocol_version": protocol_version,
+        }))
+        .expect("derive exact schema-v3 admission context")
+        .into_string();
+        let source_admission_id = "00000000-0000-4000-8000-000000000201";
+        connection
+            .execute(
+                "INSERT INTO admission_records (
+                    admission_id, instance_id, config_digest, helper_artifact_digest,
+                    profile_semantic_id, detector_identity_digest, evaluator_source_digest,
+                    evaluator_artifact_digest, admission_context_digest, execution_chain_json,
+                    profile_id, profile_version, profile_digest, protocol_version,
+                    target_triple, artifact_identity_method, platform_runtime_version,
+                    capability_grant_json, conformance_json, lock_json, admitted_at,
+                    operator_identity_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                           CAST(?10 AS BLOB), 'nq.conformance', '1', ?11, ?12,
+                           'fixture-target', 'fixture', 'fixture', CAST(?13 AS BLOB),
+                           CAST(?14 AS BLOB), CAST(?15 AS BLOB), ?16, CAST(?17 AS BLOB))",
+                rusqlite::params![
+                    source_admission_id,
+                    "legacy-archive-provider",
+                    config_digest.as_str(),
+                    helper_artifact_digest.as_str(),
+                    profile_semantic_id.as_str(),
+                    detector_identity.as_str(),
+                    evaluator_source_digest.as_str(),
+                    evaluator_artifact_digest.as_str(),
+                    admission_context_digest,
+                    br#"{"artifacts":[]}"#,
+                    profile_digest,
+                    protocol_version,
+                    br"[]",
+                    br#"{"fixture":true}"#,
+                    br#"{"fixture":true}"#,
+                    "2026-07-20T12:00:00Z",
+                    br#"{"uid":991}"#,
+                ],
+            )
+            .expect("append exact schema-v3 source admission");
+        let resource_outcome = nq_core::RunResourceOutcomeV1 {
+            schema: nq_core::RunResourceOutcomeSchema::V1,
+            duration_ms: 1,
+            exit_code: None,
+            hard_limits: nq_core::RunHardLimits {
+                address_space_bytes_per_process: 1,
+                cpu_seconds_per_process: 1,
+                processes_per_execution_uid: 1,
+                open_files_per_process: 1,
+                file_bytes_per_regular_file: 1,
+                core_bytes: 0,
+            },
+            stdout_bytes_retained: 0,
+            stderr_bytes_retained: 0,
+            stderr_hex: String::new(),
+            outcome: nq_core::runner::AcquisitionOutcome::ExchangeTimeout {
+                phase: nq_core::ExchangeTimeoutPhase::ReadResponse,
+            },
+        };
+        let outcome = nq_core::CollectionOutcome::acquisition_failed(
+            "legacy-archive-provider".to_owned(),
+            "run-legacy-provider-gap".to_owned(),
+            resource_outcome.outcome.clone(),
+        )
+        .expect("construct exact legacy run result");
+        let resource_outcome = canonical(&resource_outcome);
+        let outcome = canonical(&outcome);
+        connection
+            .execute(
+                "INSERT INTO watcher_runs (
+                    run_id, request_id, instance_id, admission_id, binding_digest,
+                    checkpoint_contract_digest, profile_id, profile_version, profile_digest,
+                    carrier, started_at, deadline_at, finished_at, acquisition_outcome,
+                    execution_identity_json, resource_outcome_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'nq.conformance', '1', ?7, 'stdio',
+                           ?8, ?9, ?10, 'timeout', CAST(?11 AS BLOB), ?12)",
+                rusqlite::params![
+                    "run-legacy-provider-gap",
+                    "request-legacy-provider-gap",
+                    "legacy-archive-provider",
+                    source_admission_id,
+                    nq_protocol::sha256_bytes(b"legacy-binding").into_string(),
+                    nq_protocol::sha256_bytes(b"legacy-checkpoint").into_string(),
+                    profile_digest,
+                    "2026-07-20T12:00:00Z",
+                    "2026-07-20T12:00:01Z",
+                    "2026-07-20T12:00:01Z",
+                    br#"{"fixture":true}"#,
+                    resource_outcome.as_bytes(),
+                ],
+            )
+            .expect("append schema-v3 watcher run");
+        connection
+            .execute(
+                "INSERT INTO status_events (
+                    status_event_id, component_kind, component_id, run_id,
+                    state, code, detail_json, observed_at
+                 ) VALUES (?1, 'instance', ?2, ?3, 'failed', 'collection_failed', ?4, ?5)",
+                rusqlite::params![
+                    "status-legacy-provider-gap",
+                    "legacy-archive-provider",
+                    "run-legacy-provider-gap",
+                    outcome.as_bytes(),
+                    "2026-07-20T12:00:01Z",
+                ],
+            )
+            .expect("append schema-v3 canonical run result");
+        connection
+            .execute(
+                "INSERT INTO status_current (
+                    component_kind, component_id, latest_status_event_id
+                 ) VALUES ('instance', ?1, ?2)",
+                rusqlite::params!["legacy-archive-provider", "status-legacy-provider-gap"],
+            )
+            .expect("materialize schema-v3 status projection");
+        drop(connection);
+
+        let backup = root.join("nq-v3.pre-upgrade.db");
+        let backup = Store::backup_v3_verified(&database, &backup)
+            .expect("create exact verified schema-v3 backup");
+        let receipt = nq_store::UpgradeReceiptInput {
+            receipt_id: "upgrade-archive-v3-v4".to_owned(),
+            from_schema_version: 3,
+            to_schema_version: 4,
+            migrations: canonical(&serde_json::json!(["schema_v3_to_v4_provider_intake"])),
+            binary_digest: nq_protocol::sha256_bytes(b"archive-upgrade-binary").into_string(),
+            backup_digest: backup.sha256,
+            backup_location: backup.path.to_string_lossy().into_owned(),
+            started_at: "2026-07-20T12:00:02Z".to_owned(),
+            finished_at: "2026-07-20T12:00:03Z".to_owned(),
+            result: "migrated".to_owned(),
+            operator_identity: canonical(&serde_json::json!({"uid": 991})),
+            verification: canonical(&serde_json::json!({
+                "integrity": "ok",
+                "source_schema_version": 3,
+                "source_schema_artifact_digest": nq_store::SCHEMA_V3_ARTIFACT_DIGEST,
+                "backup_reopened": true,
+                "historical_provider_intake": "explicit_gap_only",
+                "provider_intakes_synthesized": false,
+                "acknowledgments_synthesized": false,
+            })),
+        };
+        drop(Store::upgrade_v3_to_v4(&database, &receipt).expect("upgrade schema-v3 store"));
+        let config = write_config(root, &database);
+        let archive = root.join("archive");
+        create_archive(&config, &archive).expect("create migrated-v3 archive");
         archive
     }
 
@@ -820,7 +1487,211 @@ mod tests {
             Some(true)
         );
         assert_eq!(report.historical_evaluation_records_verified, Some(0));
+        assert_eq!(
+            report.historical_provider_intake_semantics_verified,
+            Some(true)
+        );
+        assert_eq!(report.historical_provider_intake_records_verified, Some(0));
+        assert_eq!(
+            report.historical_provider_intake_acknowledgments_verified,
+            Some(0)
+        );
+        assert_eq!(
+            report.historical_legacy_provider_intake_gaps_verified,
+            Some(0)
+        );
         assert!(!report.grants_authority);
+    }
+
+    #[test]
+    fn provider_intake_and_acknowledgment_survive_backup_and_archive_reopen_exactly() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (archive, expected, raw_bytes) = provider_archive(dir.path());
+
+        let report = verify_archive(&archive).expect("verify provider archive");
+        assert_eq!(
+            report.historical_provider_intake_semantics_verified,
+            Some(true)
+        );
+        assert_eq!(report.historical_provider_intake_records_verified, Some(1));
+        assert_eq!(
+            report.historical_provider_intake_acknowledgments_verified,
+            Some(1)
+        );
+        assert_eq!(
+            report.historical_legacy_provider_intake_gaps_verified,
+            Some(0)
+        );
+        assert!(!report.grants_authority);
+
+        let reopened = Store::open_immutable(archive.join("db/nq.db"))
+            .expect("independently reopen archived provider store");
+        assert_eq!(
+            reopened
+                .provider_intake(&expected.intake_id)
+                .expect("reopen intake by identity"),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            reopened
+                .provider_intake_raw_bytes(&expected.intake_id)
+                .expect("reopen exact raw bytes"),
+            Some(raw_bytes)
+        );
+        let (acknowledgment, canonical_result) = reopened
+            .provider_intake_acknowledgment(&expected.idempotency_key)
+            .expect("reopen acknowledgment")
+            .expect("acknowledgment exists");
+        assert_eq!(acknowledgment, expected.acknowledgment);
+        assert_eq!(
+            acknowledgment.canonical_result_digest,
+            canonical_result.digest()
+        );
+    }
+
+    #[test]
+    fn a_resealed_provider_acknowledgment_substitution_fails_closed() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (archive, expected, _) = provider_archive(dir.path());
+        let database = archive.join("db/nq.db");
+        let connection = rusqlite::Connection::open(&database).expect("open archive database");
+        connection
+            .execute_batch(
+                "DROP TRIGGER immutable_provider_intake_acknowledgments_update;
+                 UPDATE provider_intake_acknowledgments
+                    SET detail_json = CAST('{\"forged\":true}' AS BLOB)
+                  WHERE intake_id = 'intake-archive-transport';
+                 CREATE TRIGGER immutable_provider_intake_acknowledgments_update BEFORE UPDATE ON provider_intake_acknowledgments BEGIN SELECT RAISE(ABORT, 'append-only table'); END;",
+            )
+            .expect("substitute acknowledgment behind restored append-only schema");
+        drop(connection);
+        reseal_after_database_change(&archive);
+
+        let error = verify_archive(&archive)
+            .expect_err("substituted provider acknowledgment must fail closed");
+        let diagnostic = format!("{error:#}");
+        assert!(
+            diagnostic.contains(&expected.intake_id) && diagnostic.contains("acknowledgment"),
+            "unexpected refusal: {diagnostic}"
+        );
+    }
+
+    #[test]
+    fn a_resealed_typed_context_substitution_fails_against_exact_raw_bytes() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (archive, expected, _) = provider_archive(dir.path());
+        substitute_provider_context_and_reseal(&archive, &expected);
+
+        let error = verify_archive(&archive)
+            .expect_err("self-consistent store digests must not hide typed context substitution");
+        let diagnostic = format!("{error:#}");
+        assert!(
+            diagnostic.contains("provider intake")
+                && diagnostic.contains("raw custody")
+                && !diagnostic.contains("substituted canonical bytes or derived digests"),
+            "typed historical verification did not own the refusal: {diagnostic}"
+        );
+    }
+
+    #[test]
+    fn a_resealed_typed_interpretation_substitution_fails_against_exact_raw_bytes() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (archive, expected, _) = provider_archive(dir.path());
+        substitute_provider_interpretation_and_reseal(&archive, &expected);
+
+        let error = verify_archive(&archive).expect_err(
+            "self-consistent store digests must not hide typed interpretation substitution",
+        );
+        let diagnostic = format!("{error:#}");
+        assert!(
+            diagnostic.contains("provider intake")
+                && diagnostic.contains("raw custody")
+                && !diagnostic.contains("substituted canonical bytes or derived digests"),
+            "typed historical verification did not own the refusal: {diagnostic}"
+        );
+    }
+
+    #[test]
+    fn migrated_v3_history_reopens_as_an_explicit_gap_not_a_synthetic_intake() {
+        let dir = tempfile::tempdir().expect("dir");
+        let archive = migrated_v3_archive(dir.path());
+
+        let report = verify_archive(&archive).expect("verify migrated-v3 archive");
+        assert_eq!(
+            report.historical_provider_intake_semantics_verified,
+            Some(true)
+        );
+        assert_eq!(report.historical_provider_intake_records_verified, Some(0));
+        assert_eq!(
+            report.historical_provider_intake_acknowledgments_verified,
+            Some(0)
+        );
+        assert_eq!(
+            report.historical_legacy_provider_intake_gaps_verified,
+            Some(1)
+        );
+
+        let reopened = Store::open_immutable(archive.join("db/nq.db"))
+            .expect("reopen migrated archive database");
+        assert!(
+            reopened
+                .provider_intakes_bounded(nq_store::MAX_PUBLIC_QUERY_ROWS, None)
+                .expect("query real intakes")
+                .is_empty(),
+            "migration must not invent provider-intake evidence"
+        );
+        let gaps = reopened
+            .legacy_provider_intake_gaps_bounded(nq_store::MAX_PUBLIC_QUERY_ROWS, None)
+            .expect("query explicit migration gaps");
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0].run_id, "run-legacy-provider-gap");
+        assert_eq!(gaps[0].source_schema_version, 3);
+        assert_eq!(
+            gaps[0].source_schema_artifact_digest,
+            nq_store::SCHEMA_V3_ARTIFACT_DIGEST
+        );
+        assert_eq!(gaps[0].limitation_code, "provider_intake_not_recorded");
+    }
+
+    #[test]
+    fn a_resealed_legacy_gap_contradiction_fails_typed_archive_reopen() {
+        let dir = tempfile::tempdir().expect("dir");
+        let archive = migrated_v3_archive(dir.path());
+        let database = archive.join("db/nq.db");
+        let connection = rusqlite::Connection::open(&database).expect("open archived database");
+        let contradictory = canonical(&serde_json::json!({
+            "schema": "nq.legacy_provider_intake_gap.v1",
+            "source_schema_version": 4,
+            "source_schema_artifact_digest": nq_store::SCHEMA_V3_ARTIFACT_DIGEST,
+            "limitation": "schema v3 did not preserve a versioned provider intake or exact outer raw capture for every acquisition",
+            "provider_intake_synthesized": false,
+            "acknowledgment_synthesized": false,
+        }));
+        connection
+            .execute_batch("DROP TRIGGER immutable_legacy_v3_watcher_run_intake_gaps_update;")
+            .expect("drop append-only trigger for hostile mutation");
+        connection
+            .execute(
+                "UPDATE legacy_v3_watcher_run_intake_gaps SET detail_json = ?1",
+                [contradictory.as_bytes()],
+            )
+            .expect("install contradictory legacy gap");
+        connection
+            .execute_batch(
+                "CREATE TRIGGER immutable_legacy_v3_watcher_run_intake_gaps_update BEFORE UPDATE ON legacy_v3_watcher_run_intake_gaps BEGIN SELECT RAISE(ABORT, 'append-only table'); END;",
+            )
+            .expect("restore append-only trigger");
+        drop(connection);
+        reseal_after_database_change(&archive);
+
+        let error = verify_archive(&archive)
+            .expect_err("contradictory legacy-gap receipt must fail typed reopen");
+        let diagnostic = format!("{error:#}");
+        assert!(
+            diagnostic.contains("legacy provider-intake gap")
+                && diagnostic.contains("substitutes or invents"),
+            "unexpected legacy-gap diagnostic: {diagnostic}"
+        );
     }
 
     #[test]

@@ -769,8 +769,9 @@ mod tests {
     };
     use nq_protocol::{InstanceId, Refusal, RefusalBoundary, RefusalCode, Sha256Digest};
     use nq_store::{
-        AdmissionIdentity, AdmissionInput, CanonicalDocument, CollectionInput, EvaluationInput,
-        EvaluationProfileBinding, EvaluationWatermark, FindingEventInput, ProfileDescriptorInput,
+        AdmissionIdentity, AdmissionInput, BindingEventInput, BindingMaterializationInput,
+        CanonicalDocument, CollectionInput, EvaluationInput, EvaluationProfileBinding,
+        EvaluationWatermark, FindingEventInput, ProfileDescriptorInput, ProviderIntakeInput,
         RefusalInput, RunInput, RunResultStatusInput, StatusEventInput, SubmissionDisposition,
         SubmissionInput,
     };
@@ -919,7 +920,7 @@ mod tests {
 
     fn append_run_admission(
         store: &mut Store,
-        suffix: &str,
+        _suffix: &str,
         instance_id: &str,
         profile_id: &str,
         profile_version: u32,
@@ -929,7 +930,7 @@ mod tests {
             .expect("run admission uses a compiled profile");
         let semantic_id =
             profile_semantic_id(profile.descriptor()).expect("compiled profile semantic identity");
-        let admission_id = format!("admission-{suffix}");
+        let admission_id = uuid::Uuid::new_v4().to_string();
         let digest = |label: &str| nq_protocol::sha256_bytes(label.as_bytes());
         store
             .append_admission(&AdmissionInput {
@@ -968,6 +969,137 @@ mod tests {
             })
             .expect("append governing run admission");
         admission_id
+    }
+
+    /// Store-structural fixture for API projection tests. Its synthetic JSON
+    /// is intentionally not cited as typed provider-intake reopen evidence.
+    #[allow(clippy::too_many_lines)]
+    fn fixture_provider_collection(
+        store: &mut Store,
+        mut run: RunInput,
+        submission: Option<SubmissionInput>,
+        interpretation_kind: &str,
+        interpretation: CanonicalDocument,
+    ) -> CollectionInput {
+        let admission_id = run
+            .admission_id
+            .as_deref()
+            .expect("provider fixture run has an admission")
+            .to_owned();
+        let admission = store
+            .admission(&admission_id)
+            .expect("read fixture provider admission")
+            .expect("fixture provider admission exists");
+        run.binding_digest = CanonicalDocument::from_canonical_bytes(admission.lock_json.clone())
+            .expect("fixture source lock canonical")
+            .digest()
+            .to_owned();
+        let event_id = uuid::Uuid::new_v4().to_string();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        store
+            .begin_binding_transition(
+                &BindingEventInput {
+                    binding_event_id: event_id.clone(),
+                    instance_id: run.instance_id.clone(),
+                    event_kind: "activate".to_owned(),
+                    admission_id: Some(admission_id.clone()),
+                    binding_digest: run.binding_digest.clone(),
+                    occurred_at: TEST_TIME.to_owned(),
+                    reason_code: Some("provider_intake_fixture".to_owned()),
+                    detail: document(&json!({"fixture": true})),
+                },
+                &BindingMaterializationInput {
+                    materialization_event_id: uuid::Uuid::new_v4().to_string(),
+                    operation_id: operation_id.clone(),
+                    instance_id: run.instance_id.clone(),
+                    binding_event_id: event_id.clone(),
+                    phase: "intent".to_owned(),
+                    occurred_at: TEST_TIME.to_owned(),
+                    detail: document(&json!({"fixture": true})),
+                },
+            )
+            .expect("activate fixture provider admission");
+        store
+            .complete_binding_materialization(&BindingMaterializationInput {
+                materialization_event_id: uuid::Uuid::new_v4().to_string(),
+                operation_id,
+                instance_id: run.instance_id.clone(),
+                binding_event_id: event_id,
+                phase: "completed".to_owned(),
+                occurred_at: TEST_TIME.to_owned(),
+                detail: document(&json!({"fixture": true})),
+            })
+            .expect("complete fixture provider binding");
+
+        let provider = store
+            .provider_admission_for_source(&admission_id)
+            .expect("read derived provider admission")
+            .expect("derived provider admission exists");
+        let raw_bytes = submission
+            .as_ref()
+            .map_or_else(Vec::new, |submission| submission.raw_bytes.clone());
+        let received_at = submission.as_ref().map_or_else(
+            || run.finished_at.clone(),
+            |submission| submission.received_at.clone(),
+        );
+        let attempt_id = format!("attempt-{}", run.run_id);
+        let idempotency_key =
+            nq_store::provider_idempotency_key(&provider.provider_admission_id, &attempt_id)
+                .expect("provider idempotency identity");
+        let intake = ProviderIntakeInput {
+            intake_id: format!("intake-{}", run.run_id),
+            idempotency_key,
+            attempt_id,
+            request_id: run.request_id.clone(),
+            provider_admission_id: provider.provider_admission_id,
+            source_admission_id: admission_id,
+            provider_sequence: None,
+            origin_carrier: run.carrier.clone(),
+            deadline_at: run.deadline_at.clone(),
+            checkpoint_contract_digest: run.checkpoint_contract_digest.clone(),
+            execution_identity_digest: Sha256Digest::parse(
+                run.execution_identity.digest().to_owned(),
+            )
+            .expect("execution identity digest"),
+            admission_context_digest: Sha256Digest::parse(admission.admission_context_digest)
+                .expect("admission context digest"),
+            provider_semantic_id: Sha256Digest::parse(provider.provider_semantic_id)
+                .expect("provider semantic identity"),
+            provider_artifact_digest: Sha256Digest::parse(provider.provider_artifact_digest)
+                .expect("provider artifact digest"),
+            provider_protocol_identity: provider.provider_protocol_identity,
+            provider_config_digest: Sha256Digest::parse(provider.provider_config_digest)
+                .expect("provider config digest"),
+            binding_digest: run.binding_digest.clone(),
+            instance_id: run.instance_id.clone(),
+            profile_id: run.profile_id.clone(),
+            profile_version: run.profile_version.clone(),
+            profile_digest: run.profile_digest.clone(),
+            profile_semantic_id: Sha256Digest::parse(admission.profile_semantic_id)
+                .expect("profile semantic identity"),
+            evaluator_artifact_digest: Sha256Digest::parse(admission.evaluator_artifact_digest)
+                .expect("evaluator artifact digest"),
+            context: document(&json!({
+                "schema": "fixture.provider_intake_context.v1",
+                "subject": run.instance_id.clone(),
+                "scope": {"kind": "fixture"},
+                "vantage": {"kind": "local"},
+                "requested_capabilities": [],
+            })),
+            interpretation_kind: interpretation_kind.to_owned(),
+            interpretation,
+            native_outcome_kind: run.acquisition_outcome.clone(),
+            native_outcome: run.resource_outcome.clone(),
+            raw_bytes,
+            started_at: run.started_at.clone(),
+            finished_at: run.finished_at.clone(),
+            received_at,
+        };
+        CollectionInput {
+            intake,
+            run,
+            submission,
+        }
     }
 
     struct EvaluationSurfaceFixture {
@@ -1259,47 +1391,61 @@ mod tests {
             profile_version,
             profile_digest,
         );
-        let collection = CollectionInput {
-            run: RunInput {
-                run_id: run_id.to_owned(),
-                request_id: format!("request-{suffix}"),
-                instance_id: instance_id.clone(),
-                admission_id: Some(admission_id),
-                binding_digest: nq_protocol::sha256_bytes(b"binding").into_string(),
-                checkpoint_contract_digest: nq_protocol::sha256_bytes(b"checkpoint").into_string(),
-                profile_id: profile_id.to_owned(),
-                profile_version: profile_version.to_string(),
-                profile_digest: profile_digest.to_owned(),
-                carrier: "stdio".to_owned(),
-                started_at: TEST_TIME.to_owned(),
-                deadline_at: TEST_TIME.to_owned(),
-                finished_at: TEST_TIME.to_owned(),
-                acquisition_outcome: "response".to_owned(),
-                execution_identity: document(&json!({"fixture": true})),
-                resource_outcome: resource_document(
-                    AcquisitionOutcome::Response,
-                    format!("rejected-{suffix}").len(),
-                ),
-            },
-            submission: Some(SubmissionInput {
-                submission_id: format!("submission-{suffix}"),
-                raw_bytes: format!("rejected-{suffix}").into_bytes(),
-                received_at: TEST_TIME.to_owned(),
-                protocol_outcome: protocol_outcome.to_owned(),
-                disposition: SubmissionDisposition::Rejected {
-                    refusal: RefusalInput {
-                        refusal_id: refusal.refusal_id.clone(),
-                        source_kind: source_kind.to_owned(),
-                        responsible_instance_id: instance_id.clone(),
-                        boundary: boundary.as_str().expect("boundary is token").to_owned(),
-                        code: code.as_str().expect("code is token").to_owned(),
-                        profile_semantic_id,
-                        detail: document(refusal),
-                        created_at: TEST_TIME.to_owned(),
-                    },
-                },
-            }),
+        let run = RunInput {
+            run_id: run_id.to_owned(),
+            request_id: format!("request-{suffix}"),
+            instance_id: instance_id.clone(),
+            admission_id: Some(admission_id),
+            binding_digest: nq_protocol::sha256_bytes(b"binding").into_string(),
+            checkpoint_contract_digest: nq_protocol::sha256_bytes(b"checkpoint").into_string(),
+            profile_id: profile_id.to_owned(),
+            profile_version: profile_version.to_string(),
+            profile_digest: profile_digest.to_owned(),
+            carrier: "stdio".to_owned(),
+            started_at: TEST_TIME.to_owned(),
+            deadline_at: TEST_TIME.to_owned(),
+            finished_at: TEST_TIME.to_owned(),
+            acquisition_outcome: "response".to_owned(),
+            execution_identity: document(&json!({"fixture": true})),
+            resource_outcome: resource_document(
+                AcquisitionOutcome::Response,
+                format!("rejected-{suffix}").len(),
+            ),
         };
+        let submission = SubmissionInput {
+            submission_id: format!("submission-{suffix}"),
+            raw_bytes: format!("rejected-{suffix}").into_bytes(),
+            received_at: TEST_TIME.to_owned(),
+            protocol_outcome: protocol_outcome.to_owned(),
+            disposition: SubmissionDisposition::Rejected {
+                refusal: RefusalInput {
+                    refusal_id: refusal.refusal_id.clone(),
+                    source_kind: source_kind.to_owned(),
+                    responsible_instance_id: instance_id.clone(),
+                    boundary: boundary.as_str().expect("boundary is token").to_owned(),
+                    code: code.as_str().expect("code is token").to_owned(),
+                    profile_semantic_id,
+                    detail: document(refusal),
+                    created_at: TEST_TIME.to_owned(),
+                },
+            },
+        };
+        let interpretation_kind = if protocol_outcome == "valid_refusal" {
+            "provider_refusal"
+        } else {
+            "candidate_report"
+        };
+        let collection = fixture_provider_collection(
+            store,
+            run,
+            Some(submission),
+            interpretation_kind,
+            document(&json!({
+                "schema": "fixture.provider_interpretation.v1",
+                "native_outcome": protocol_outcome,
+                "governed_refusal": refusal,
+            })),
+        );
         store
             .commit_non_success_collection(
                 &collection,
@@ -1338,27 +1484,26 @@ mod tests {
             1,
             profile_digest,
         );
-        let collection = CollectionInput {
-            run: RunInput {
-                run_id: run_id.to_owned(),
-                request_id: format!("request-{suffix}"),
-                instance_id: instance_id.clone(),
-                admission_id: Some(admission_id),
-                binding_digest: nq_protocol::sha256_bytes(b"binding").into_string(),
-                checkpoint_contract_digest: nq_protocol::sha256_bytes(b"checkpoint").into_string(),
-                profile_id: "nq.conformance".to_owned(),
-                profile_version: "1".to_owned(),
-                profile_digest: profile_digest.to_owned(),
-                carrier: "unix".to_owned(),
-                started_at: TEST_TIME.to_owned(),
-                deadline_at: TEST_TIME.to_owned(),
-                finished_at: TEST_TIME.to_owned(),
-                acquisition_outcome: "timeout".to_owned(),
-                execution_identity: document(&json!({"fixture": true})),
-                resource_outcome: resource_document(failure.outcome.clone(), 0),
-            },
-            submission: None,
+        let run = RunInput {
+            run_id: run_id.to_owned(),
+            request_id: format!("request-{suffix}"),
+            instance_id: instance_id.clone(),
+            admission_id: Some(admission_id),
+            binding_digest: nq_protocol::sha256_bytes(b"binding").into_string(),
+            checkpoint_contract_digest: nq_protocol::sha256_bytes(b"checkpoint").into_string(),
+            profile_id: "nq.conformance".to_owned(),
+            profile_version: "1".to_owned(),
+            profile_digest: profile_digest.to_owned(),
+            carrier: "unix".to_owned(),
+            started_at: TEST_TIME.to_owned(),
+            deadline_at: TEST_TIME.to_owned(),
+            finished_at: TEST_TIME.to_owned(),
+            acquisition_outcome: "timeout".to_owned(),
+            execution_identity: document(&json!({"fixture": true})),
+            resource_outcome: resource_document(failure.outcome.clone(), 0),
         };
+        let collection =
+            fixture_provider_collection(store, run, None, "unavailable", document(&Value::Null));
         store
             .commit_non_success_collection(
                 &collection,

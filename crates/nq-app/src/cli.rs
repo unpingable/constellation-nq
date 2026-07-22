@@ -569,6 +569,7 @@ fn doctor(config_path: &Path, json_output: bool) -> Result<()> {
     validate_compiled_profiles(&config)?;
     let store = Store::open_read_only(&config.database_path)?;
     store.validate()?;
+    nq_core::engine::validate_provider_intake_history(&store)?;
     let mut diagnostics = Vec::new();
     for watcher in &config.watchers {
         let lock_path = config
@@ -667,6 +668,33 @@ fn restore(backup: &Path, destination: &Path, json_output: bool) -> Result<()> {
     )
 }
 
+fn finalize_upgrade_backup(
+    temporary_backup: &Path,
+    backup_directory: &Path,
+    backup_digest: &str,
+) -> Result<PathBuf> {
+    let backup = backup_directory.join(format!(
+        "nq-{}.db",
+        backup_digest
+            .strip_prefix("sha256:")
+            .context("qualified backup digest")?
+    ));
+    if backup.exists() {
+        if digest_file(&backup)? != backup_digest {
+            bail!(
+                "digest-addressed backup path contains different bytes: {}",
+                backup.display()
+            );
+        }
+        fs::remove_file(temporary_backup)?;
+    } else {
+        fs::rename(temporary_backup, &backup)?;
+        File::open(backup_directory)?.sync_all()?;
+    }
+    Ok(backup)
+}
+
+#[allow(clippy::too_many_lines)]
 fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -> Result<()> {
     match command {
         AdminCommand::Archive { destination } => {
@@ -682,68 +710,117 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
             let _ownership = crate::ownership::acquire(&config.database_path, "admin-upgrade")?;
             fs::create_dir_all(&backup_directory)?;
             let started_at = chrono::Utc::now();
-            let mut store = Store::open(&config.database_path)?;
-            store.validate()?;
-            let source_digest = digest_file(&config.database_path)?;
+            let source_version = Store::database_schema_version(&config.database_path)?;
             let temporary_backup =
                 backup_directory.join(format!(".nq-upgrade-{}.db", uuid::Uuid::new_v4()));
-            store_backup_if_supported(&store, &temporary_backup)?;
-            Store::open(&temporary_backup)?.validate()?;
-            let backup_digest = digest_file(&temporary_backup)?;
-            let backup = backup_directory.join(format!(
-                "nq-{}.db",
-                backup_digest
-                    .strip_prefix("sha256:")
-                    .context("qualified backup digest")?
-            ));
-            if backup.exists() {
-                if digest_file(&backup)? != backup_digest {
-                    bail!(
-                        "digest-addressed backup path contains different bytes: {}",
-                        backup.display()
-                    );
-                }
-                fs::remove_file(&temporary_backup)?;
-            } else {
-                fs::rename(&temporary_backup, &backup)?;
-                File::open(&backup_directory)?.sync_all()?;
-            }
-            Store::open(&backup)?.validate()?;
             let binary_digest = digest_file(&std::env::current_exe()?)?;
-            let finished_at = chrono::Utc::now();
-            store.append_upgrade_receipt(&UpgradeReceiptInput {
-                receipt_id: uuid::Uuid::new_v4().to_string(),
-                from_schema_version: u32::try_from(nq_store::SCHEMA_VERSION)?,
-                to_schema_version: u32::try_from(nq_store::SCHEMA_VERSION)?,
-                migrations: CanonicalDocument::from_serializable(&Vec::<String>::new())?,
-                binary_digest,
-                backup_digest: backup_digest.clone(),
-                backup_location: backup.display().to_string(),
-                started_at: started_at.to_rfc3339(),
-                finished_at: finished_at.to_rfc3339(),
-                result: "already_current".into(),
-                operator_identity: CanonicalDocument::from_serializable(&json!({
-                    "uid": nix::unistd::Uid::effective().as_raw(),
-                    "gid": nix::unistd::Gid::effective().as_raw(),
-                }))?,
-                verification: CanonicalDocument::from_serializable(&json!({
-                    "integrity": "ok",
-                    "schema_version": nq_store::SCHEMA_VERSION,
-                    "source_digest": source_digest,
-                }))?,
-            })?;
-            // Schema v3 has no in-product predecessor migration. Still perform
-            // all safety checks and return an explicit no-op receipt rather
-            // than silently starting.
-            print_value(
-                &json!({
-                    "result": "already_current",
-                    "schema_version": nq_store::SCHEMA_VERSION,
-                    "backup": backup,
-                    "backup_digest": backup_digest,
-                }),
-                json_output,
-            )
+            let operator_identity = CanonicalDocument::from_serializable(&json!({
+                "uid": nix::unistd::Uid::effective().as_raw(),
+                "gid": nix::unistd::Gid::effective().as_raw(),
+            }))?;
+
+            match source_version {
+                nq_store::SCHEMA_VERSION => {
+                    let mut store = Store::open(&config.database_path)?;
+                    store.validate()?;
+                    let source_digest = digest_file(&config.database_path)?;
+                    // An already-current upgrade still promises a verified
+                    // pre-operation backup. Route it through the complete
+                    // typed history verifier, including provider-intake
+                    // context/raw correspondence, before calling it verified.
+                    store_backup_if_supported(&store, &temporary_backup)?;
+                    let backup_digest = digest_file(&temporary_backup)?;
+                    let backup = finalize_upgrade_backup(
+                        &temporary_backup,
+                        &backup_directory,
+                        &backup_digest,
+                    )?;
+                    Store::open(&backup)?.validate()?;
+                    let finished_at = chrono::Utc::now();
+                    store.append_upgrade_receipt(&UpgradeReceiptInput {
+                        receipt_id: uuid::Uuid::new_v4().to_string(),
+                        from_schema_version: u32::try_from(nq_store::SCHEMA_VERSION)?,
+                        to_schema_version: u32::try_from(nq_store::SCHEMA_VERSION)?,
+                        migrations: CanonicalDocument::from_serializable(&Vec::<String>::new())?,
+                        binary_digest,
+                        backup_digest: backup_digest.clone(),
+                        backup_location: backup.display().to_string(),
+                        started_at: started_at.to_rfc3339(),
+                        finished_at: finished_at.to_rfc3339(),
+                        result: "already_current".into(),
+                        operator_identity,
+                        verification: CanonicalDocument::from_serializable(&json!({
+                            "integrity": "ok",
+                            "schema_version": nq_store::SCHEMA_VERSION,
+                            "source_digest": source_digest,
+                        }))?,
+                    })?;
+                    print_value(
+                        &json!({
+                            "result": "already_current",
+                            "schema_version": nq_store::SCHEMA_VERSION,
+                            "backup": backup,
+                            "backup_digest": backup_digest,
+                        }),
+                        json_output,
+                    )
+                }
+                3 => {
+                    validate_v3_upgrade_source_semantics(&config.database_path)?;
+                    let artifact =
+                        Store::backup_v3_verified(&config.database_path, &temporary_backup)?;
+                    let backup = finalize_upgrade_backup(
+                        &temporary_backup,
+                        &backup_directory,
+                        &artifact.sha256,
+                    )?;
+                    validate_v3_upgrade_source_semantics(&backup)?;
+                    let finished_at = chrono::Utc::now();
+                    let receipt = UpgradeReceiptInput {
+                        receipt_id: uuid::Uuid::new_v4().to_string(),
+                        from_schema_version: 3,
+                        to_schema_version: u32::try_from(nq_store::SCHEMA_VERSION)?,
+                        migrations: CanonicalDocument::from_serializable(&[
+                            "schema_v3_to_v4_provider_intake",
+                        ])?,
+                        binary_digest,
+                        backup_digest: artifact.sha256.clone(),
+                        backup_location: backup.display().to_string(),
+                        started_at: started_at.to_rfc3339(),
+                        finished_at: finished_at.to_rfc3339(),
+                        result: "migrated".into(),
+                        operator_identity,
+                        verification: CanonicalDocument::from_serializable(&json!({
+                            "integrity": "ok",
+                            "source_schema_version": 3,
+                            "source_schema_artifact_digest": nq_store::SCHEMA_V3_ARTIFACT_DIGEST,
+                            "backup_reopened": true,
+                            "historical_provider_intake": "explicit_gap_only",
+                            "provider_intakes_synthesized": false,
+                            "acknowledgments_synthesized": false,
+                        }))?,
+                    };
+                    let store = Store::upgrade_v3_to_v4(&config.database_path, &receipt)?;
+                    store.validate()?;
+                    print_value(
+                        &json!({
+                            "result": "migrated",
+                            "from_schema_version": 3,
+                            "schema_version": nq_store::SCHEMA_VERSION,
+                            "backup": backup,
+                            "backup_digest": artifact.sha256,
+                            "historical_provider_intake": "explicit_gap_only",
+                        }),
+                        json_output,
+                    )
+                }
+                _ => {
+                    // Reuse the store's exact fail-closed diagnostic. `open`
+                    // checks version and identity before any persistent PRAGMA.
+                    let _ = Store::open(&config.database_path)?;
+                    unreachable!("a non-current schema cannot pass exact Store::open")
+                }
+            }
         }
     }
 }
@@ -938,6 +1015,17 @@ fn append_genesis_if_supported(store: &mut Store, digest: Option<String>) -> Res
 
 fn store_backup_if_supported(store: &Store, destination: &Path) -> Result<()> {
     Ok(nq_core::engine::backup_store(store, destination)?)
+}
+
+fn validate_v3_upgrade_source_semantics(path: &Path) -> Result<()> {
+    let store = Store::open_v3_upgrade_source_read_only(path)?;
+    nq_core::engine::validate_admitted_report_history(&store)?;
+    nq_core::engine::validate_watcher_run_history(&store)?;
+    nq_core::engine::validate_status_history_v2(&store)?;
+    nq_core::engine::validate_rejected_custody_history(&store)?;
+    nq_core::engine::validate_evaluation_refusal_history(&store)?;
+    nq_core::engine::status_snapshot_v3(&store)?;
+    Ok(())
 }
 
 fn list_findings_if_supported(store: &Store) -> Result<Vec<nq_core::FindingSnapshotV3>> {

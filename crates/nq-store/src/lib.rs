@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -23,7 +24,30 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 const SCHEMA: &str = include_str!("schema.sql");
+const SCHEMA_V3: &str = include_str!("schema_v3.sql");
+const SCHEMA_V3_TO_V4_PROVIDER: &str = include_str!("schema_v3_to_v4_provider.sql");
 const APPLICATION_ID: i64 = 1_313_951_303;
+
+const SCHEMA_METADATA_V4: &str = r"CREATE TABLE schema_metadata (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    product TEXT NOT NULL CHECK (product = 'nq-ng'),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 4),
+    -- Digest of the exact schema.sql artifact compiled into the writing binary.
+    -- Rejects stale provisional-candidate databases at startup; it is NOT a
+    -- tamper attestation of the live SQLite schema (which the structural
+    -- fingerprint checks separately).
+    schema_artifact_digest TEXT NOT NULL CHECK (length(schema_artifact_digest) = 71 AND substr(schema_artifact_digest, 1, 7) = 'sha256:'),
+    initialized_at TEXT NOT NULL
+) STRICT;";
+
+const SCHEMA_METADATA_V4_TRIGGERS: &str = "CREATE TRIGGER immutable_schema_metadata_update BEFORE UPDATE ON schema_metadata BEGIN SELECT RAISE(ABORT, 'append-only table'); END;\n\
+     CREATE TRIGGER immutable_schema_metadata_delete BEFORE DELETE ON schema_metadata BEGIN SELECT RAISE(ABORT, 'append-only table'); END;";
+
+/// Exact schema-artifact digest of the qualified v0.1.0 store. It is retained
+/// only to validate an explicit v3-to-v4 upgrade source; normal opening never
+/// interprets v3 bytes as current storage.
+pub const SCHEMA_V3_ARTIFACT_DIGEST: &str =
+    "sha256:3ea4295c7574ed41cc9d4389a216c21103a5b3851509988e300e788292f657e2";
 
 /// Schema tag bound into every admission-context digest preimage. Bump only when
 /// the constituent set or its canonicalization changes.
@@ -33,6 +57,18 @@ pub const ADMISSION_CONTEXT_SCHEMA: &str = "nq-ng.admission_context.v1";
 /// `judgment_digest` and stored beside the judgment so 3B verification pins the
 /// exact format it is checking.
 pub const JUDGMENT_SCHEMA_VERSION: &str = "nq-ng.judgment.v1";
+
+/// First exact NQ provider-intake custody representation.
+pub const PROVIDER_INTAKE_SCHEMA: &str = "nq.provider_intake.v1";
+
+/// First exact durable-processing acknowledgment representation.
+pub const PROVIDER_INTAKE_ACK_SCHEMA: &str = "nq.provider_intake_ack.v1";
+
+/// Closed derivation law for the admitted local helper provider's semantics.
+pub const LOCAL_PROVIDER_SEMANTIC_SCHEMA: &str = "nq.local_provider_semantics.v1";
+
+/// NQ-derived, local-helper-only provider admission representation.
+pub const LOCAL_PROVIDER_ADMISSION_SCHEMA: &str = "nq.local_provider_admission.v1";
 static EXPECTED_SCHEMA_FINGERPRINT: LazyLock<Result<String, String>> = LazyLock::new(|| {
     let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
     connection
@@ -40,9 +76,16 @@ static EXPECTED_SCHEMA_FINGERPRINT: LazyLock<Result<String, String>> = LazyLock:
         .map_err(|error| error.to_string())?;
     schema_fingerprint(&connection).map_err(|error| error.to_string())
 });
+static EXPECTED_SCHEMA_V3_FINGERPRINT: LazyLock<Result<String, String>> = LazyLock::new(|| {
+    let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    connection
+        .execute_batch(SCHEMA_V3)
+        .map_err(|error| error.to_string())?;
+    schema_fingerprint(&connection).map_err(|error| error.to_string())
+});
 
 /// The only schema version understood by this crate.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Hard ceiling for one page returned through the public read model helpers.
 pub const MAX_PUBLIC_QUERY_ROWS: u32 = 1_000;
@@ -84,6 +127,10 @@ pub enum StoreError {
     /// A core storage invariant was violated before SQL was attempted.
     #[error("storage invariant violated: {0}")]
     Invariant(String),
+    /// A repeated provider attempt reused an identity for different evidence or
+    /// a different bound context.
+    #[error("provider intake replay conflict: {0}")]
+    ReplayConflict(String),
 }
 
 /// A canonical JSON document and its SHA-256 semantic digest.
@@ -206,6 +253,109 @@ struct JudgmentPreimage<'a> {
     validated_report_digest: &'a str,
 }
 
+#[derive(Serialize)]
+struct ProviderReplayPreimage<'a> {
+    schema: &'static str,
+    idempotency_key: &'a str,
+    attempt_id: &'a str,
+    request_id: &'a str,
+    provider_admission_id: &'a str,
+    source_admission_id: &'a str,
+    provider_sequence: &'a Option<String>,
+    origin_carrier: &'a str,
+    deadline_at: &'a str,
+    checkpoint_contract_digest: &'a str,
+    execution_identity_digest: &'a Sha256Digest,
+    admission_context_digest: &'a Sha256Digest,
+    provider_semantic_id: &'a Sha256Digest,
+    provider_artifact_digest: &'a Sha256Digest,
+    provider_protocol_identity: &'a str,
+    provider_config_digest: &'a Sha256Digest,
+    binding_digest: &'a str,
+    instance_id: &'a str,
+    profile_id: &'a str,
+    profile_version: &'a str,
+    profile_digest: &'a str,
+    profile_semantic_id: &'a Sha256Digest,
+    evaluator_artifact_digest: &'a Sha256Digest,
+    context_digest: &'a str,
+    interpretation_kind: &'a str,
+    interpretation_digest: &'a str,
+    native_outcome_kind: &'a str,
+    native_outcome_digest: &'a str,
+    raw_sha256: &'a str,
+    started_at: &'a str,
+    finished_at: &'a str,
+}
+
+#[derive(Serialize)]
+struct ProviderIdempotencyPreimage<'a> {
+    schema: &'static str,
+    provider_admission_id: &'a str,
+    attempt_id: &'a str,
+}
+
+#[derive(Serialize)]
+struct LocalProviderSemanticPreimage<'a> {
+    schema: &'static str,
+    protocol_identity: &'a str,
+    conformance: &'a Value,
+}
+
+#[derive(Serialize)]
+struct LocalProviderAdmissionContract<'a> {
+    schema: &'static str,
+    source_admission_id: &'a str,
+    instance_id: &'a str,
+    provider_semantic_id: &'a str,
+    provider_artifact_digest: &'a str,
+    provider_protocol_identity: &'a str,
+    provider_config_digest: &'a str,
+    admission_context_digest: &'a str,
+    profile_id: &'a str,
+    profile_version: &'a str,
+    profile_digest: &'a str,
+    profile_semantic_id: &'a str,
+    evaluator_artifact_digest: &'a str,
+    capability_grant_digest: &'a str,
+    conformance_digest: &'a str,
+    lock_digest: &'a str,
+}
+
+#[derive(Serialize)]
+struct ProviderIntakeDigestPreimage<'a> {
+    schema: &'static str,
+    intake_id: &'a str,
+    replay_digest: &'a str,
+    received_at: &'a str,
+}
+
+#[derive(Serialize)]
+struct ProviderAcknowledgmentDocument<'a> {
+    schema: &'static str,
+    acknowledgment_id: &'a str,
+    intake_id: &'a str,
+    attempt_id: &'a str,
+    run_id: &'a str,
+    provider_admission_id: &'a str,
+    intake_digest: &'a str,
+    raw_sha256: &'a str,
+    status_event_id: &'a str,
+    canonical_result_digest: &'a str,
+    committed_at: &'a str,
+    establishes: &'static str,
+    does_not_establish: [&'static str; 6],
+}
+
+struct ProviderIntakeDigests {
+    context_digest: String,
+    interpretation_digest: String,
+    native_outcome_digest: String,
+    raw_sha256: String,
+    replay_digest: String,
+    intake_digest: String,
+}
+
 impl AdmissionIdentity {
     /// Derive the algorithm-qualified `admission_context_digest` over exactly the
     /// seven identity-bearing constituents. This is the single implementation of
@@ -263,6 +413,286 @@ fn judgment_digest(
     Ok(sha256_digest(&bytes))
 }
 
+fn provider_intake_digests(
+    intake: &ProviderIntakeInput,
+) -> Result<ProviderIntakeDigests, StoreError> {
+    let context_digest = intake.context.digest().to_owned();
+    let interpretation_digest = intake.interpretation.digest().to_owned();
+    let native_outcome_digest = intake.native_outcome.digest().to_owned();
+    let raw_sha256 = sha256_digest(&intake.raw_bytes);
+    let replay = ProviderReplayPreimage {
+        schema: "nq.provider_intake_replay.v1",
+        idempotency_key: &intake.idempotency_key,
+        attempt_id: &intake.attempt_id,
+        request_id: &intake.request_id,
+        provider_admission_id: &intake.provider_admission_id,
+        source_admission_id: &intake.source_admission_id,
+        provider_sequence: &intake.provider_sequence,
+        origin_carrier: &intake.origin_carrier,
+        deadline_at: &intake.deadline_at,
+        checkpoint_contract_digest: &intake.checkpoint_contract_digest,
+        execution_identity_digest: &intake.execution_identity_digest,
+        admission_context_digest: &intake.admission_context_digest,
+        provider_semantic_id: &intake.provider_semantic_id,
+        provider_artifact_digest: &intake.provider_artifact_digest,
+        provider_protocol_identity: &intake.provider_protocol_identity,
+        provider_config_digest: &intake.provider_config_digest,
+        binding_digest: &intake.binding_digest,
+        instance_id: &intake.instance_id,
+        profile_id: &intake.profile_id,
+        profile_version: &intake.profile_version,
+        profile_digest: &intake.profile_digest,
+        profile_semantic_id: &intake.profile_semantic_id,
+        evaluator_artifact_digest: &intake.evaluator_artifact_digest,
+        context_digest: &context_digest,
+        interpretation_kind: &intake.interpretation_kind,
+        interpretation_digest: &interpretation_digest,
+        native_outcome_kind: &intake.native_outcome_kind,
+        native_outcome_digest: &native_outcome_digest,
+        raw_sha256: &raw_sha256,
+        started_at: &intake.started_at,
+        finished_at: &intake.finished_at,
+    };
+    let replay_bytes = nq_protocol::canonical_json_bytes(&replay)
+        .map_err(|error| StoreError::CanonicalJson(error.to_string()))?;
+    let replay_digest = sha256_digest(&replay_bytes);
+    let full = ProviderIntakeDigestPreimage {
+        schema: PROVIDER_INTAKE_SCHEMA,
+        intake_id: &intake.intake_id,
+        replay_digest: &replay_digest,
+        received_at: &intake.received_at,
+    };
+    let full_bytes = nq_protocol::canonical_json_bytes(&full)
+        .map_err(|error| StoreError::CanonicalJson(error.to_string()))?;
+    Ok(ProviderIntakeDigests {
+        context_digest,
+        interpretation_digest,
+        native_outcome_digest,
+        raw_sha256,
+        replay_digest,
+        intake_digest: sha256_digest(&full_bytes),
+    })
+}
+
+/// Derive the local provider's semantic identity from NQ-owned admission facts.
+///
+/// The executable artifact remains a separate identity. This digest binds the
+/// closed helper protocol and the exact canonical conformance receipt under
+/// which NQ admitted that implementation; a provider cannot mint the value by
+/// placing an identity-shaped field in its response.
+pub fn local_provider_semantic_id(
+    protocol_identity: &str,
+    conformance: &CanonicalDocument,
+) -> Result<Sha256Digest, StoreError> {
+    if protocol_identity.is_empty() || protocol_identity.len() > 128 {
+        return Err(StoreError::Invariant(
+            "provider protocol identity must be nonempty and bounded".into(),
+        ));
+    }
+    let conformance_value: Value = serde_json::from_slice(conformance.as_bytes())
+        .map_err(|error| StoreError::CanonicalJson(error.to_string()))?;
+    nq_protocol::semantic_digest(&LocalProviderSemanticPreimage {
+        schema: LOCAL_PROVIDER_SEMANTIC_SCHEMA,
+        protocol_identity,
+        conformance: &conformance_value,
+    })
+    .map_err(|error| StoreError::CanonicalJson(error.to_string()))
+}
+
+/// Derive the only accepted replay key for one admitted provider and attempt.
+pub fn provider_idempotency_key(
+    provider_admission_id: &str,
+    attempt_id: &str,
+) -> Result<String, StoreError> {
+    validate_digest("provider_admission_id", provider_admission_id)?;
+    if attempt_id.is_empty() || attempt_id.len() > 256 || attempt_id.chars().any(char::is_control) {
+        return Err(StoreError::Invariant(
+            "provider attempt identity must be nonempty, bounded, and printable".into(),
+        ));
+    }
+    nq_protocol::semantic_digest(&ProviderIdempotencyPreimage {
+        schema: PROVIDER_INTAKE_SCHEMA,
+        provider_admission_id,
+        attempt_id,
+    })
+    .map(Sha256Digest::into_string)
+    .map_err(|error| StoreError::CanonicalJson(error.to_string()))
+}
+
+fn local_provider_admission_contract(
+    admission: &AdmissionInput,
+    admission_context_digest: &str,
+) -> Result<(Sha256Digest, CanonicalDocument), StoreError> {
+    let provider_semantic_id =
+        local_provider_semantic_id(&admission.identity.protocol_version, &admission.conformance)?;
+    let contract = CanonicalDocument::from_serializable(&LocalProviderAdmissionContract {
+        schema: LOCAL_PROVIDER_ADMISSION_SCHEMA,
+        source_admission_id: &admission.admission_id,
+        instance_id: &admission.instance_id,
+        provider_semantic_id: provider_semantic_id.as_str(),
+        provider_artifact_digest: admission.identity.helper_artifact_digest.as_str(),
+        provider_protocol_identity: &admission.identity.protocol_version,
+        provider_config_digest: admission.identity.config_digest.as_str(),
+        admission_context_digest,
+        profile_id: &admission.profile_id,
+        profile_version: &admission.profile_version,
+        profile_digest: &admission.profile_digest,
+        profile_semantic_id: admission.identity.profile_semantic_id.as_str(),
+        evaluator_artifact_digest: admission.identity.evaluator_artifact_digest.as_str(),
+        capability_grant_digest: admission.capability_grant.digest(),
+        conformance_digest: admission.conformance.digest(),
+        lock_digest: admission.lock.digest(),
+    })?;
+    Ok((provider_semantic_id, contract))
+}
+
+fn insert_local_provider_admission(
+    transaction: &Transaction<'_>,
+    admission: &AdmissionInput,
+    admission_context_digest: &str,
+    derived_at: &str,
+    derivation_kind: &str,
+) -> Result<LocalProviderAdmissionRow, StoreError> {
+    if !matches!(derivation_kind, "admission_append" | "schema_v3_migration")
+        || chrono::DateTime::parse_from_rfc3339(derived_at).is_err()
+    {
+        return Err(StoreError::Invariant(
+            "local-provider admission derivation provenance is invalid".into(),
+        ));
+    }
+    let (provider_semantic_id, contract) =
+        local_provider_admission_contract(admission, admission_context_digest)?;
+    let provider_admission_id = contract.digest().to_owned();
+    transaction.execute(
+        "INSERT INTO local_provider_admissions (
+            provider_admission_id, schema_id, source_admission_id,
+            provider_semantic_id, provider_artifact_digest,
+            provider_protocol_identity, provider_config_digest,
+            contract_json, contract_digest, source_admitted_at, derived_at,
+            derivation_kind
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            provider_admission_id,
+            LOCAL_PROVIDER_ADMISSION_SCHEMA,
+            admission.admission_id,
+            provider_semantic_id.as_str(),
+            admission.identity.helper_artifact_digest.as_str(),
+            admission.identity.protocol_version,
+            admission.identity.config_digest.as_str(),
+            contract.as_bytes(),
+            contract.digest(),
+            admission.admitted_at,
+            derived_at,
+            derivation_kind,
+        ],
+    )?;
+    Ok(LocalProviderAdmissionRow {
+        provider_admission_id,
+        source_admission_id: admission.admission_id.clone(),
+        provider_semantic_id: provider_semantic_id.into_string(),
+        provider_artifact_digest: admission
+            .identity
+            .helper_artifact_digest
+            .as_str()
+            .to_owned(),
+        provider_protocol_identity: admission.identity.protocol_version.clone(),
+        provider_config_digest: admission.identity.config_digest.as_str().to_owned(),
+        contract_json: contract.as_bytes().to_vec(),
+        contract_digest: contract.digest().to_owned(),
+        source_admitted_at: admission.admitted_at.clone(),
+        derived_at: derived_at.to_owned(),
+        derivation_kind: derivation_kind.to_owned(),
+    })
+}
+
+fn migrate_local_provider_admissions(
+    transaction: &Transaction<'_>,
+    derived_at: &str,
+) -> Result<(), StoreError> {
+    let admissions = {
+        let mut statement = transaction.prepare(
+            "SELECT admission_id, instance_id, config_digest,
+                    helper_artifact_digest, profile_semantic_id,
+                    detector_identity_digest, evaluator_source_digest,
+                    evaluator_artifact_digest, execution_chain_json,
+                    profile_id, profile_version, profile_digest,
+                    protocol_version, target_triple, artifact_identity_method,
+                    platform_runtime_version, capability_grant_json,
+                    conformance_json, lock_json, admitted_at,
+                    operator_identity_json
+             FROM admission_records ORDER BY admission_id",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Vec<u8>>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, String>(11)?,
+                    row.get::<_, String>(12)?,
+                    row.get::<_, String>(13)?,
+                    row.get::<_, String>(14)?,
+                    row.get::<_, String>(15)?,
+                    row.get::<_, Vec<u8>>(16)?,
+                    row.get::<_, Vec<u8>>(17)?,
+                    row.get::<_, Vec<u8>>(18)?,
+                    row.get::<_, String>(19)?,
+                    row.get::<_, Vec<u8>>(20)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for row in admissions {
+        let parse_digest = |name: &str, value: String| {
+            Sha256Digest::parse(value).map_err(|error| {
+                StoreError::Integrity(format!("schema-v3 admission has invalid {name}: {error}"))
+            })
+        };
+        let admission = AdmissionInput {
+            admission_id: row.0,
+            instance_id: row.1,
+            identity: AdmissionIdentity {
+                config_digest: parse_digest("configuration digest", row.2)?,
+                helper_artifact_digest: parse_digest("helper artifact digest", row.3)?,
+                profile_semantic_id: parse_digest("profile semantic identity", row.4)?,
+                detector_identity_digest: parse_digest("detector identity digest", row.5)?,
+                evaluator_source_digest: parse_digest("evaluator source digest", row.6)?,
+                evaluator_artifact_digest: parse_digest("evaluator artifact digest", row.7)?,
+                protocol_version: row.12,
+                target_triple: row.13,
+                artifact_identity_method: row.14,
+                platform_runtime_version: row.15,
+            },
+            execution_chain: CanonicalDocument::from_canonical_bytes(row.8)?,
+            profile_id: row.9,
+            profile_version: row.10,
+            profile_digest: row.11,
+            capability_grant: CanonicalDocument::from_canonical_bytes(row.16)?,
+            conformance: CanonicalDocument::from_canonical_bytes(row.17)?,
+            lock: CanonicalDocument::from_canonical_bytes(row.18)?,
+            admitted_at: row.19,
+            operator_identity: CanonicalDocument::from_canonical_bytes(row.20)?,
+        };
+        let context_digest = admission.identity.context_digest()?;
+        insert_local_provider_admission(
+            transaction,
+            &admission,
+            &context_digest,
+            derived_at,
+            "schema_v3_migration",
+        )?;
+    }
+    Ok(())
+}
+
 /// An immutable transition in an instance's admission binding.
 #[derive(Clone, Debug)]
 pub struct BindingEventInput {
@@ -310,6 +740,49 @@ pub struct RunInput {
     pub acquisition_outcome: String,
     pub execution_identity: CanonicalDocument,
     pub resource_outcome: CanonicalDocument,
+}
+
+/// One NQ-constructed provider intake before report admission or evaluation.
+///
+/// Identity fields are checked against the referenced NQ-owned admission and
+/// active binding. They are never trusted merely because a provider supplied
+/// similarly named fields in its raw payload. `raw_bytes` is the exact outer
+/// capture, including empty or partial bytes for attempts that never become a
+/// protocol submission.
+#[derive(Clone, Debug)]
+pub struct ProviderIntakeInput {
+    pub intake_id: String,
+    pub attempt_id: String,
+    pub idempotency_key: String,
+    pub request_id: String,
+    pub provider_admission_id: String,
+    pub source_admission_id: String,
+    pub provider_sequence: Option<String>,
+    pub origin_carrier: String,
+    pub deadline_at: String,
+    pub checkpoint_contract_digest: String,
+    pub execution_identity_digest: Sha256Digest,
+    pub admission_context_digest: Sha256Digest,
+    pub provider_semantic_id: Sha256Digest,
+    pub provider_artifact_digest: Sha256Digest,
+    pub provider_protocol_identity: String,
+    pub provider_config_digest: Sha256Digest,
+    pub binding_digest: String,
+    pub instance_id: String,
+    pub profile_id: String,
+    pub profile_version: String,
+    pub profile_digest: String,
+    pub profile_semantic_id: Sha256Digest,
+    pub evaluator_artifact_digest: Sha256Digest,
+    pub context: CanonicalDocument,
+    pub interpretation_kind: String,
+    pub interpretation: CanonicalDocument,
+    pub native_outcome_kind: String,
+    pub native_outcome: CanonicalDocument,
+    pub raw_bytes: Vec<u8>,
+    pub started_at: String,
+    pub finished_at: String,
+    pub received_at: String,
 }
 
 /// A typed refusal retained at its exact boundary and responsible instance.
@@ -409,6 +882,8 @@ pub struct SubmissionInput {
 /// An atomic run/submission/report commit.
 #[derive(Clone, Debug)]
 pub struct CollectionInput {
+    /// Mandatory provider-intake custody for every schema-v4 write.
+    pub intake: ProviderIntakeInput,
     pub run: RunInput,
     pub submission: Option<SubmissionInput>,
 }
@@ -421,6 +896,136 @@ pub struct CollectionReceipt {
     pub report_sequence: Option<i64>,
     /// Stable identity of the typed refusal linked to rejected custody.
     pub refusal_id: Option<String>,
+}
+
+/// Exact acknowledgment returned only after the whole intake transaction is
+/// durable. Its meaning is limited to custody and canonical processing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DurableIntakeAcknowledgment {
+    pub acknowledgment_id: String,
+    pub intake_id: String,
+    pub attempt_id: String,
+    pub run_id: String,
+    pub provider_admission_id: String,
+    pub intake_digest: String,
+    pub raw_sha256: String,
+    pub status_event_id: String,
+    pub canonical_result_digest: String,
+    pub committed_at: String,
+    pub detail_json: Vec<u8>,
+}
+
+/// Read-only idempotency decision made before semantic processing.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProviderIntakePreflight {
+    /// No durable attempt owns this idempotency identity.
+    New,
+    /// The exact attempt was already durably processed. The canonical result is
+    /// returned from history and must not be re-evaluated under current state.
+    Existing {
+        acknowledgment: DurableIntakeAcknowledgment,
+        canonical_result: CanonicalDocument,
+    },
+}
+
+/// Atomic provider-intake completion, including the race-closing replay case.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProviderIntakeCommit<T> {
+    /// This call committed the intake and may return its freshly built value.
+    Committed {
+        receipt: CollectionReceipt,
+        acknowledgment: DurableIntakeAcknowledgment,
+        value: T,
+    },
+    /// A concurrent or retried call had already committed the exact attempt.
+    /// No completion builder ran and the stored canonical result is returned.
+    Replayed {
+        receipt: CollectionReceipt,
+        acknowledgment: DurableIntakeAcknowledgment,
+        canonical_result: CanonicalDocument,
+    },
+}
+
+/// One NQ-derived admission of the local helper as a candidate-evidence
+/// provider. `source_admission_id` names the existing AdmissionLock record;
+/// this identity never represents admission of an individual report.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalProviderAdmissionRow {
+    pub provider_admission_id: String,
+    pub source_admission_id: String,
+    pub provider_semantic_id: String,
+    pub provider_artifact_digest: String,
+    pub provider_protocol_identity: String,
+    pub provider_config_digest: String,
+    pub contract_json: Vec<u8>,
+    pub contract_digest: String,
+    pub source_admitted_at: String,
+    pub derived_at: String,
+    pub derivation_kind: String,
+}
+
+/// One exhaustively reopenable provider-intake identity and its local origin.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderIntakeRow {
+    pub intake_id: String,
+    pub attempt_id: String,
+    pub idempotency_key: String,
+    pub request_id: String,
+    pub provider_admission_id: String,
+    pub source_admission_id: String,
+    pub provider_sequence: Option<String>,
+    pub origin_carrier: String,
+    pub deadline_at: String,
+    pub checkpoint_contract_digest: String,
+    pub execution_identity_digest: String,
+    pub admission_context_digest: String,
+    pub provider_semantic_id: String,
+    pub provider_artifact_digest: String,
+    pub provider_protocol_identity: String,
+    pub provider_config_digest: String,
+    pub binding_digest: String,
+    pub instance_id: String,
+    pub profile_id: String,
+    pub profile_version: String,
+    pub profile_digest: String,
+    pub profile_semantic_id: String,
+    pub evaluator_artifact_digest: String,
+    pub context_json: Vec<u8>,
+    pub context_digest: String,
+    pub interpretation_kind: String,
+    pub interpretation_json: Vec<u8>,
+    pub interpretation_digest: String,
+    pub native_outcome_kind: String,
+    pub native_outcome_json: Vec<u8>,
+    pub native_outcome_digest: String,
+    pub raw_sha256: String,
+    pub started_at: String,
+    pub finished_at: String,
+    pub received_at: String,
+    pub replay_digest: String,
+    pub intake_digest: String,
+    pub run_id: String,
+    /// Exact capability grant from the source admission. Typed historical
+    /// reopening uses this independently stored NQ decision to prove that a
+    /// resealed request did not acquire provider capabilities retroactively.
+    pub source_capability_grant_json: Vec<u8>,
+    /// Exact source AdmissionLock bytes from which NQ derived the local
+    /// provider admission. Historical reopening authenticates the provider
+    /// context against this decision without reactivating it.
+    pub source_lock_json: Vec<u8>,
+    pub acknowledgment: DurableIntakeAcknowledgment,
+}
+
+/// Explicit limitation retained for one schema-v3 run during migration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LegacyProviderIntakeGapRow {
+    pub run_id: String,
+    pub source_schema_version: i64,
+    pub source_schema_artifact_digest: String,
+    pub limitation_code: String,
+    pub detail_json: Vec<u8>,
+    pub migrated_at: String,
 }
 
 /// One rejected custody artifact with its exact, mandatory typed refusal.
@@ -604,6 +1209,50 @@ struct StoredAdmittedReport {
     judgment_schema_version: String,
     judgment_digest: String,
     admission_context_digest: String,
+}
+
+struct StoredProviderIntake {
+    intake_id: String,
+    attempt_id: String,
+    idempotency_key: String,
+    request_id: String,
+    provider_admission_id: String,
+    source_admission_id: String,
+    provider_sequence: Option<String>,
+    origin_carrier: String,
+    deadline_at: String,
+    checkpoint_contract_digest: String,
+    execution_identity_digest: String,
+    admission_context_digest: String,
+    provider_semantic_id: String,
+    provider_artifact_digest: String,
+    provider_protocol_identity: String,
+    provider_config_digest: String,
+    binding_digest: String,
+    instance_id: String,
+    profile_id: String,
+    profile_version: String,
+    profile_digest: String,
+    profile_semantic_id: String,
+    evaluator_artifact_digest: String,
+    context_json: Vec<u8>,
+    context_digest: String,
+    interpretation_kind: String,
+    interpretation_json: Vec<u8>,
+    interpretation_digest: String,
+    native_outcome_kind: String,
+    native_outcome_json: Vec<u8>,
+    native_outcome_digest: String,
+    raw_bytes: Vec<u8>,
+    raw_sha256: String,
+    started_at: String,
+    finished_at: String,
+    received_at: String,
+    replay_digest: String,
+    intake_digest: String,
+    run_id: String,
+    source_capability_grant_json: Vec<u8>,
+    source_lock_json: Vec<u8>,
 }
 
 fn canonical_materialized<T: Serialize>(value: &T) -> Result<Vec<u8>, SnapshotVerificationError> {
@@ -865,7 +1514,21 @@ pub struct Store {
 }
 
 impl Store {
-    /// Explicitly create a v3 store. Existing schemas are never overwritten.
+    /// Read an nq-ng database's declared schema version without accepting or
+    /// mutating its contents.
+    pub fn database_schema_version(path: impl AsRef<Path>) -> Result<i64, StoreError> {
+        let path = path.as_ref();
+        if !path.is_file() || std::fs::metadata(path)?.len() == 0 {
+            return Err(StoreError::NotInitialized(path.to_path_buf()));
+        }
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        pragma_i64(&connection, "user_version")
+    }
+
+    /// Explicitly create a current schema-v4 store. Existing schemas are never overwritten.
     pub fn initialize(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref();
         let existed = path.exists();
@@ -897,7 +1560,7 @@ impl Store {
         Ok(store)
     }
 
-    /// Open only an already-initialized, exactly compatible v3 store.
+    /// Open only an already-initialized, exactly compatible schema-v4 store.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref();
         if !path.is_file() || std::fs::metadata(path)?.len() == 0 {
@@ -973,6 +1636,34 @@ impl Store {
         };
         store.validate()?;
         Ok(store)
+    }
+
+    /// Open the exact qualified v0.1.0 schema-v3 store read-only so the
+    /// application can run its typed semantic history verifiers before the
+    /// separately authorized v3-to-v4 migration. This is not a compatibility
+    /// opener: every v3 schema, identity, custody, and store invariant is
+    /// validated, and the returned handle cannot write.
+    pub fn open_v3_upgrade_source_read_only(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        if !path.is_file() || std::fs::metadata(path)?.len() == 0 {
+            return Err(StoreError::NotInitialized(path.to_path_buf()));
+        }
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        connection.pragma_update(None, "query_only", "ON")?;
+        let store = Self {
+            connection,
+            path: Some(path.to_path_buf()),
+        };
+        store.validate_v3_upgrade_source()?;
+        Ok(store)
+    }
+
+    fn validate_v3_upgrade_source(&self) -> Result<(), StoreError> {
+        validate_v3_upgrade_source_connection(&self.connection)
     }
 
     /// Checkpoint a writable backup copy and leave it in rollback-journal mode
@@ -1100,7 +1791,10 @@ impl Store {
             )));
         }
         validate_stored_digests(&self.connection)?;
+        validate_upgrade_receipts(&self.connection)?;
         validate_all_admission_context_digests(&self.connection)?;
+        validate_local_provider_admissions(&self.connection)?;
+        validate_provider_intake_invariants(&self.connection)?;
         validate_refusal_invariants(&self.connection)?;
         validate_run_results(&self.connection)?;
         validate_evaluation_refusal_invariants(&self.connection)?;
@@ -1164,6 +1858,7 @@ impl Store {
         validate_digest("profile_digest", &admission.profile_digest)?;
         let identity = &admission.identity;
         let context_digest = identity.context_digest()?;
+        let derived_at = now_utc();
         let transaction = self.immediate_transaction()?;
         transaction.execute(
             "INSERT INTO admission_records (
@@ -1203,8 +1898,50 @@ impl Store {
                 admission.operator_identity.as_bytes(),
             ],
         )?;
+        insert_local_provider_admission(
+            &transaction,
+            admission,
+            &context_digest,
+            &derived_at,
+            "admission_append",
+        )?;
         transaction.commit()?;
         Ok(())
+    }
+
+    /// Read the exact local-provider admission NQ derived from one existing
+    /// AdmissionLock record. This is provider admission, not report admission.
+    pub fn provider_admission_for_source(
+        &self,
+        source_admission_id: &str,
+    ) -> Result<Option<LocalProviderAdmissionRow>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT provider_admission_id, source_admission_id,
+                        provider_semantic_id, provider_artifact_digest,
+                        provider_protocol_identity, provider_config_digest,
+                        contract_json, contract_digest, source_admitted_at,
+                        derived_at, derivation_kind
+                 FROM local_provider_admissions WHERE source_admission_id = ?1",
+                [source_admission_id],
+                |row| {
+                    Ok(LocalProviderAdmissionRow {
+                        provider_admission_id: row.get(0)?,
+                        source_admission_id: row.get(1)?,
+                        provider_semantic_id: row.get(2)?,
+                        provider_artifact_digest: row.get(3)?,
+                        provider_protocol_identity: row.get(4)?,
+                        provider_config_digest: row.get(5)?,
+                        contract_json: row.get(6)?,
+                        contract_digest: row.get(7)?,
+                        source_admitted_at: row.get(8)?,
+                        derived_at: row.get(9)?,
+                        derivation_kind: row.get(10)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
     }
 
     /// Read one admission lock and its independently captured identities.
@@ -1673,7 +2410,7 @@ impl Store {
         &mut self,
         collection: &CollectionInput,
         build: F,
-    ) -> Result<(CollectionReceipt, T), E>
+    ) -> Result<ProviderIntakeCommit<T>, E>
     where
         E: From<StoreError>,
         F: FnOnce(
@@ -1688,6 +2425,20 @@ impl Store {
             )));
         }
         let transaction = self.immediate_transaction().map_err(E::from)?;
+        if let ProviderIntakePreflight::Existing {
+            acknowledgment,
+            canonical_result,
+        } = provider_intake_preflight_on_connection(&transaction, &collection.intake, true)
+            .map_err(E::from)?
+        {
+            let receipt = collection_receipt_for_run(&transaction, &acknowledgment.run_id)
+                .map_err(E::from)?;
+            return Ok(ProviderIntakeCommit::Replayed {
+                receipt,
+                acknowledgment,
+                canonical_result,
+            });
+        }
         let receipt = insert_collection(&transaction, collection).map_err(E::from)?;
         if receipt.report_sequence.is_none() || receipt.semantic_digest.is_none() {
             return Err(E::from(StoreError::Invariant(
@@ -1711,6 +2462,14 @@ impl Store {
             Some(&collection.run.run_id),
         )
         .map_err(E::from)?;
+        let acknowledgment = insert_provider_acknowledgment(
+            &transaction,
+            &collection.intake,
+            &collection.run.run_id,
+            &completion.status,
+        )
+        .map_err(E::from)?;
+        validate_provider_intake_invariants(&transaction).map_err(E::from)?;
         validate_refusal_invariants(&transaction).map_err(E::from)?;
         validate_run_results(&transaction).map_err(E::from)?;
         validate_evaluation_refusal_invariants(&transaction).map_err(E::from)?;
@@ -1718,7 +2477,11 @@ impl Store {
             .commit()
             .map_err(StoreError::from)
             .map_err(E::from)?;
-        Ok((receipt, completion.value))
+        Ok(ProviderIntakeCommit::Committed {
+            receipt,
+            acknowledgment,
+            value: completion.value,
+        })
     }
 
     /// Atomically append one run-bearing non-success collection and its exact
@@ -1728,16 +2491,243 @@ impl Store {
         &mut self,
         collection: &CollectionInput,
         result: &RunResultStatusInput,
-    ) -> Result<CollectionReceipt, StoreError> {
+    ) -> Result<ProviderIntakeCommit<()>, StoreError> {
         validate_collection(collection)?;
         validate_non_success_input(collection, result)?;
         let transaction = self.immediate_transaction()?;
+        if let ProviderIntakePreflight::Existing {
+            acknowledgment,
+            canonical_result,
+        } = provider_intake_preflight_on_connection(&transaction, &collection.intake, true)?
+        {
+            let receipt = collection_receipt_for_run(&transaction, &acknowledgment.run_id)?;
+            return Ok(ProviderIntakeCommit::Replayed {
+                receipt,
+                acknowledgment,
+                canonical_result,
+            });
+        }
         let receipt = insert_collection(&transaction, collection)?;
         validate_refusal_invariants(&transaction)?;
         insert_status_event(&transaction, &result.status, Some(&result.run_id))?;
+        let acknowledgment = insert_provider_acknowledgment(
+            &transaction,
+            &collection.intake,
+            &collection.run.run_id,
+            &result.status,
+        )?;
+        validate_provider_intake_invariants(&transaction)?;
         validate_run_results(&transaction)?;
         transaction.commit()?;
-        Ok(receipt)
+        Ok(ProviderIntakeCommit::Committed {
+            receipt,
+            acknowledgment,
+            value: (),
+        })
+    }
+
+    /// Check an exact provider retry before protocol/profile/evaluator work.
+    ///
+    /// Current provider admission is required even for a byte-identical retry;
+    /// historical acknowledgment reopening is available separately and never
+    /// changes a stored decision.
+    pub fn preflight_provider_intake(
+        &self,
+        intake: &ProviderIntakeInput,
+    ) -> Result<ProviderIntakePreflight, StoreError> {
+        provider_intake_preflight_on_connection(&self.connection, intake, true)
+    }
+
+    /// Reopen a durable provider acknowledgment without requiring that its
+    /// historical provider admission remains current.
+    pub fn provider_intake_acknowledgment(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<(DurableIntakeAcknowledgment, CanonicalDocument)>, StoreError> {
+        validate_digest("idempotency_key", idempotency_key)?;
+        let intake_id: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT intake_id FROM provider_intake_attempts WHERE idempotency_key = ?1",
+                [idempotency_key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        intake_id
+            .map(|intake_id| provider_acknowledgment_for_intake(&self.connection, &intake_id))
+            .transpose()
+            .map(Option::flatten)
+    }
+
+    /// Reopen one exact provider intake and its durable acknowledgment.
+    pub fn provider_intake(
+        &self,
+        intake_id: &str,
+    ) -> Result<Option<ProviderIntakeRow>, StoreError> {
+        validate_provider_intake_invariants(&self.connection)?;
+        let mut rows = self.provider_intake_rows(1, Some(intake_id), true)?;
+        Ok(rows.pop().filter(|row| row.intake_id == intake_id))
+    }
+
+    /// Prove the store-wide exact-one-origin, exact-one-acknowledgment, digest,
+    /// replay, native-outcome, raw-custody, and v3-gap laws once before an
+    /// exhaustive history traversal.
+    pub fn validate_provider_intake_history_invariants(&self) -> Result<(), StoreError> {
+        validate_provider_intake_invariants(&self.connection)
+    }
+
+    /// Page real v4 provider intakes in lexical identity order. Exhaustive
+    /// semantic consumers must first call
+    /// [`Self::validate_provider_intake_history_invariants`] once for the
+    /// traversal rather than rescanning all append-only history per page.
+    pub fn provider_intakes_bounded(
+        &self,
+        limit: u32,
+        after_intake_id: Option<&str>,
+    ) -> Result<Vec<ProviderIntakeRow>, StoreError> {
+        validate_public_limit(limit)?;
+        self.provider_intake_rows(limit, after_intake_id, false)
+    }
+
+    fn provider_intake_rows(
+        &self,
+        limit: u32,
+        cursor: Option<&str>,
+        inclusive: bool,
+    ) -> Result<Vec<ProviderIntakeRow>, StoreError> {
+        let comparison = if inclusive { ">=" } else { ">" };
+        let sql = format!(
+            "SELECT intake.intake_id, intake.attempt_id, intake.idempotency_key,
+                    intake.request_id, intake.provider_admission_id,
+                    intake.admission_context_digest, intake.provider_semantic_id,
+                    intake.provider_artifact_digest, intake.provider_protocol_identity,
+                    intake.provider_config_digest, intake.binding_digest,
+                    intake.instance_id, intake.profile_id, intake.profile_version,
+                    intake.profile_digest, intake.profile_semantic_id,
+                    intake.evaluator_artifact_digest, intake.context_json,
+                    intake.context_digest, intake.interpretation_kind,
+                    intake.interpretation_json, intake.interpretation_digest,
+                    intake.native_outcome_kind, intake.native_outcome_json,
+                    intake.native_outcome_digest, intake.raw_bytes, intake.raw_sha256,
+                    intake.started_at, intake.finished_at, intake.received_at,
+                    intake.replay_digest, intake.intake_digest,
+                    intake.source_admission_id, intake.provider_sequence,
+                    intake.origin_carrier, intake.deadline_at,
+                    intake.checkpoint_contract_digest,
+                    intake.execution_identity_digest, local.run_id,
+                    source.capability_grant_json, source.lock_json
+             FROM provider_intake_attempts AS intake
+             JOIN local_watcher_provider_intakes AS local ON local.intake_id = intake.intake_id
+             JOIN admission_records AS source
+               ON source.admission_id = intake.source_admission_id
+             WHERE ?1 IS NULL OR intake.intake_id {comparison} ?1
+             ORDER BY intake.intake_id LIMIT ?2"
+        );
+        let mut statement = self.connection.prepare(&sql)?;
+        let stored = statement
+            .query_map(params![cursor, limit], stored_provider_intake_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        stored
+            .into_iter()
+            .map(|stored| {
+                let (acknowledgment, _) =
+                    provider_acknowledgment_for_intake(&self.connection, &stored.intake_id)?
+                        .ok_or_else(|| {
+                            StoreError::Integrity(format!(
+                                "provider intake {} lacks its acknowledgment",
+                                stored.intake_id
+                            ))
+                        })?;
+                Ok(ProviderIntakeRow {
+                    intake_id: stored.intake_id,
+                    attempt_id: stored.attempt_id,
+                    idempotency_key: stored.idempotency_key,
+                    request_id: stored.request_id,
+                    provider_admission_id: stored.provider_admission_id,
+                    source_admission_id: stored.source_admission_id,
+                    provider_sequence: stored.provider_sequence,
+                    origin_carrier: stored.origin_carrier,
+                    deadline_at: stored.deadline_at,
+                    checkpoint_contract_digest: stored.checkpoint_contract_digest,
+                    execution_identity_digest: stored.execution_identity_digest,
+                    admission_context_digest: stored.admission_context_digest,
+                    provider_semantic_id: stored.provider_semantic_id,
+                    provider_artifact_digest: stored.provider_artifact_digest,
+                    provider_protocol_identity: stored.provider_protocol_identity,
+                    provider_config_digest: stored.provider_config_digest,
+                    binding_digest: stored.binding_digest,
+                    instance_id: stored.instance_id,
+                    profile_id: stored.profile_id,
+                    profile_version: stored.profile_version,
+                    profile_digest: stored.profile_digest,
+                    profile_semantic_id: stored.profile_semantic_id,
+                    evaluator_artifact_digest: stored.evaluator_artifact_digest,
+                    context_json: stored.context_json,
+                    context_digest: stored.context_digest,
+                    interpretation_kind: stored.interpretation_kind,
+                    interpretation_json: stored.interpretation_json,
+                    interpretation_digest: stored.interpretation_digest,
+                    native_outcome_kind: stored.native_outcome_kind,
+                    native_outcome_json: stored.native_outcome_json,
+                    native_outcome_digest: stored.native_outcome_digest,
+                    raw_sha256: stored.raw_sha256,
+                    started_at: stored.started_at,
+                    finished_at: stored.finished_at,
+                    received_at: stored.received_at,
+                    replay_digest: stored.replay_digest,
+                    intake_digest: stored.intake_digest,
+                    run_id: stored.run_id,
+                    source_capability_grant_json: stored.source_capability_grant_json,
+                    source_lock_json: stored.source_lock_json,
+                    acknowledgment,
+                })
+            })
+            .collect()
+    }
+
+    /// Fetch the byte-exact outer provider capture, including partial failures.
+    pub fn provider_intake_raw_bytes(
+        &self,
+        intake_id: &str,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT raw_bytes FROM provider_intake_attempts WHERE intake_id = ?1",
+                [intake_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    /// Page explicit schema-v3 provider-intake limitations without upgrading
+    /// them into evidence that was never recorded.
+    pub fn legacy_provider_intake_gaps_bounded(
+        &self,
+        limit: u32,
+        after_run_id: Option<&str>,
+    ) -> Result<Vec<LegacyProviderIntakeGapRow>, StoreError> {
+        validate_public_limit(limit)?;
+        let mut statement = self.connection.prepare(
+            "SELECT run_id, source_schema_version, source_schema_artifact_digest,
+                    limitation_code, detail_json, migrated_at
+             FROM legacy_v3_watcher_run_intake_gaps
+             WHERE ?1 IS NULL OR run_id > ?1
+             ORDER BY run_id LIMIT ?2",
+        )?;
+        statement
+            .query_map(params![after_run_id, limit], |row| {
+                Ok(LegacyProviderIntakeGapRow {
+                    run_id: row.get(0)?,
+                    source_schema_version: row.get(1)?,
+                    source_schema_artifact_digest: row.get(2)?,
+                    limitation_code: row.get(3)?,
+                    detail_json: row.get(4)?,
+                    migrated_at: row.get(5)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     /// Fetch exact raw bytes without a JSON or UTF-8 round trip.
@@ -1852,73 +2842,7 @@ impl Store {
     /// Prove exact one-to-one admitted submission/report association and its
     /// complete run/admission identity chain.
     pub fn validate_admitted_report_associations(&self) -> Result<(), StoreError> {
-        let invalid_sequence: Option<i64> = self
-            .connection
-            .query_row(
-                "SELECT report_sequence FROM admitted_reports
-                 WHERE report_sequence <= 0 ORDER BY report_sequence LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(sequence) = invalid_sequence {
-            return Err(StoreError::Integrity(format!(
-                "admitted report sequence must be positive; found {sequence}"
-            )));
-        }
-        let wrong_count: Option<(String, i64)> = self
-            .connection
-            .query_row(
-                "SELECT submission.submission_id, COUNT(report.report_id)
-                 FROM raw_submissions AS submission
-                 LEFT JOIN admitted_reports AS report
-                   ON report.submission_id = submission.submission_id
-                 WHERE submission.admission_outcome = 'admitted'
-                 GROUP BY submission.submission_id
-                 HAVING COUNT(report.report_id) <> 1
-                 ORDER BY submission.submission_id LIMIT 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        if let Some((submission_id, count)) = wrong_count {
-            return Err(StoreError::Integrity(format!(
-                "admitted submission {submission_id} requires exactly one report; found {count}"
-            )));
-        }
-        let broken: Option<String> = self
-            .connection
-            .query_row(
-                "SELECT report.report_id
-                 FROM admitted_reports AS report
-                 LEFT JOIN raw_submissions AS submission
-                   ON submission.submission_id = report.submission_id
-                 LEFT JOIN watcher_runs AS run ON run.run_id = submission.run_id
-                 LEFT JOIN admission_records AS admission
-                   ON admission.admission_id = run.admission_id
-                 WHERE submission.submission_id IS NULL
-                    OR submission.admission_outcome <> 'admitted'
-                    OR run.run_id IS NULL OR admission.admission_id IS NULL
-                    OR report.instance_id IS NOT run.instance_id
-                    OR report.instance_id IS NOT admission.instance_id
-                    OR report.profile_id IS NOT run.profile_id
-                    OR report.profile_version IS NOT run.profile_version
-                    OR report.profile_digest IS NOT run.profile_digest
-                    OR report.profile_id IS NOT admission.profile_id
-                    OR report.profile_version IS NOT admission.profile_version
-                    OR report.profile_digest IS NOT admission.profile_digest
-                    OR report.received_at IS NOT submission.received_at
-                 ORDER BY report.report_id LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(report_id) = broken {
-            return Err(StoreError::Integrity(format!(
-                "admitted report {report_id} has a broken submission/run/admission association"
-            )));
-        }
-        Ok(())
+        validate_admitted_report_associations_connection(&self.connection)
     }
 
     /// Reopen the authoritative acquisition testimony and admitted profile
@@ -2709,6 +3633,200 @@ impl Store {
         result
     }
 
+    /// Create and semantically verify the mandatory pre-upgrade backup of the
+    /// exact qualified schema-v3 store. This does not accept v1, v2, stale-v3,
+    /// or current-v4 bytes under the upgrade-source identity.
+    pub fn backup_v3_verified(
+        source: impl AsRef<Path>,
+        destination: impl AsRef<Path>,
+    ) -> Result<BackupArtifact, StoreError> {
+        let source_store = Self::open_v3_upgrade_source_read_only(source)?;
+        let destination = destination.as_ref();
+        if destination.exists() {
+            return Err(StoreError::Invariant(format!(
+                "backup destination already exists: {}",
+                destination.display()
+            )));
+        }
+        drop(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(destination)?,
+        );
+        let result = (|| {
+            let mut target =
+                Connection::open_with_flags(destination, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+            {
+                let backup = rusqlite::backup::Backup::new(&source_store.connection, &mut target)?;
+                backup.run_to_completion(64, std::time::Duration::from_millis(10), None)?;
+            }
+            drop(target);
+            drop(Self::open_v3_upgrade_source_read_only(destination)?);
+            Ok(BackupArtifact {
+                path: destination.to_path_buf(),
+                sha256: sha256_file(destination)?,
+                size_bytes: std::fs::metadata(destination)?.len(),
+            })
+        })();
+        if result.is_err() {
+            remove_database_artifact(destination);
+        }
+        result
+    }
+
+    /// Explicitly migrate the exact qualified v0.1.0 schema-v3 store to v4.
+    ///
+    /// The caller must first create the verified backup named in `receipt`.
+    /// Historical runs receive only an explicit limitation marker: the
+    /// migration never synthesizes provider intake or acknowledgment evidence.
+    #[allow(clippy::too_many_lines)]
+    pub fn upgrade_v3_to_v4(
+        path: impl AsRef<Path>,
+        receipt: &UpgradeReceiptInput,
+    ) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        validate_v3_to_v4_receipt(receipt)?;
+        let backup_path = Path::new(&receipt.backup_location);
+        if !backup_path.is_file() || sha256_file(backup_path)? != receipt.backup_digest {
+            return Err(StoreError::Invariant(
+                "v3-to-v4 migration requires the exact verified backup named by its receipt".into(),
+            ));
+        }
+        let source_metadata = std::fs::metadata(path)?;
+        let backup_metadata = std::fs::metadata(backup_path)?;
+        if std::fs::canonicalize(path)? == std::fs::canonicalize(backup_path)?
+            || (source_metadata.dev(), source_metadata.ino())
+                == (backup_metadata.dev(), backup_metadata.ino())
+        {
+            return Err(StoreError::Invariant(
+                "v3-to-v4 migration backup must be distinct from the source database".into(),
+            ));
+        }
+        let backup_store = Self::open_v3_upgrade_source_read_only(backup_path)?;
+        let backup_logical_digest = v3_logical_state_digest(&backup_store.connection)?;
+        let source_store = Self::open_v3_upgrade_source_read_only(path)?;
+        let source_logical_digest = v3_logical_state_digest(&source_store.connection)?;
+        if source_logical_digest != backup_logical_digest {
+            return Err(StoreError::Invariant(format!(
+                "v3-to-v4 migration backup logical state {backup_logical_digest} does not match source {source_logical_digest}"
+            )));
+        }
+        drop(source_store);
+        drop(backup_store);
+
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        configure_connection(&connection, false)?;
+        let mut store = Self {
+            connection,
+            path: Some(path.to_path_buf()),
+        };
+        store.validate_v3_upgrade_source()?;
+        {
+            let transaction = store.immediate_transaction()?;
+            // The read-only preflight above provides an early diagnostic. This
+            // second complete validation is authoritative: BEGIN IMMEDIATE now
+            // prevents a writer from changing the v3 source between validation
+            // and migration. Reopen and rehash the named backup here as well so
+            // the receipt is bound to this exact locked logical source state.
+            validate_v3_upgrade_source_connection(&transaction)?;
+            if sha256_file(backup_path)? != receipt.backup_digest {
+                return Err(StoreError::Invariant(
+                    "v3-to-v4 migration backup changed after preflight validation".into(),
+                ));
+            }
+            let locked_backup = Self::open_v3_upgrade_source_read_only(backup_path)?;
+            let locked_backup_digest = v3_logical_state_digest(&locked_backup.connection)?;
+            let locked_source_digest = v3_logical_state_digest(&transaction)?;
+            if locked_source_digest != locked_backup_digest {
+                return Err(StoreError::Invariant(format!(
+                    "v3-to-v4 migration backup logical state {locked_backup_digest} does not match locked source {locked_source_digest}"
+                )));
+            }
+            drop(locked_backup);
+            transaction.execute_batch(
+                "DROP TRIGGER immutable_schema_metadata_update;
+                 DROP TRIGGER immutable_schema_metadata_delete;
+                 ALTER TABLE schema_metadata RENAME TO schema_metadata_v3;",
+            )?;
+            transaction.execute_batch(SCHEMA_METADATA_V4)?;
+            transaction.execute(
+                "INSERT INTO schema_metadata (
+                    singleton, product, schema_version, schema_artifact_digest, initialized_at
+                 )
+                 SELECT singleton, product, 4, ?1, initialized_at
+                 FROM schema_metadata_v3",
+                [schema_artifact_digest()],
+            )?;
+            transaction.execute("DROP TABLE schema_metadata_v3", [])?;
+            transaction.execute_batch(SCHEMA_METADATA_V4_TRIGGERS)?;
+            transaction.execute_batch(SCHEMA_V3_TO_V4_PROVIDER)?;
+            let migrated_at = now_utc();
+            migrate_local_provider_admissions(&transaction, &migrated_at)?;
+
+            let run_ids = {
+                let mut statement =
+                    transaction.prepare("SELECT run_id FROM watcher_runs ORDER BY run_id")?;
+                statement
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            let limitation = CanonicalDocument::from_serializable(&serde_json::json!({
+                "schema": "nq.legacy_provider_intake_gap.v1",
+                "source_schema_version": 3,
+                "source_schema_artifact_digest": SCHEMA_V3_ARTIFACT_DIGEST,
+                "limitation": "schema v3 did not preserve a versioned provider intake or exact outer raw capture for every acquisition",
+                "provider_intake_synthesized": false,
+                "acknowledgment_synthesized": false,
+            }))?;
+            for run_id in run_ids {
+                transaction.execute(
+                    "INSERT INTO legacy_v3_watcher_run_intake_gaps (
+                        run_id, source_schema_version, source_schema_artifact_digest,
+                        limitation_code, detail_json, migrated_at
+                     ) VALUES (?1, 3, ?2, 'provider_intake_not_recorded', ?3, ?4)",
+                    params![
+                        run_id,
+                        SCHEMA_V3_ARTIFACT_DIGEST,
+                        limitation.as_bytes(),
+                        migrated_at,
+                    ],
+                )?;
+            }
+            insert_upgrade_receipt(&transaction, receipt)?;
+            transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+
+            let expected = EXPECTED_SCHEMA_FINGERPRINT.as_ref().map_err(|error| {
+                StoreError::Integrity(format!(
+                    "compiled schema cannot be fingerprinted after migration: {error}"
+                ))
+            })?;
+            let actual = schema_fingerprint(&transaction)?;
+            if &actual != expected {
+                return Err(StoreError::Integrity(format!(
+                    "migrated v4 schema fingerprint {actual} differs from fresh v4 {expected}"
+                )));
+            }
+            validate_stored_digests(&transaction)?;
+            validate_upgrade_receipts(&transaction)?;
+            validate_all_admission_context_digests(&transaction)?;
+            validate_local_provider_admissions(&transaction)?;
+            validate_provider_intake_invariants(&transaction)?;
+            validate_refusal_invariants(&transaction)?;
+            validate_run_results(&transaction)?;
+            validate_evaluation_refusal_invariants(&transaction)?;
+            validate_status_sequence_lower_bound(&transaction)?;
+            validate_projection_invariants(&transaction)?;
+            transaction.commit()?;
+        }
+        store.validate()?;
+        configure_connection(&store.connection, true)?;
+        Ok(store)
+    }
+
     /// Create a consistent, verified backup of a database file that `open`
     /// refuses (incompatible schema, stale candidate) — so an operator can
     /// preserve it before recreation. A backup must be possible *before* a
@@ -2790,8 +3908,10 @@ impl Store {
         Ok(snapshot)
     }
 
-    /// Return the newest committed non-null checkpoint for one instance.
-    /// Rejected submissions and uncommitted reports can never advance it.
+    /// Return the newest durably acknowledged non-null checkpoint for one
+    /// instance. Rejected submissions, uncommitted reports, and migrated v3
+    /// reports lacking a real provider-intake acknowledgment can never advance
+    /// the live cursor.
     pub fn latest_checkpoint(
         &self,
         instance_id: &str,
@@ -2805,6 +3925,11 @@ impl Store {
                  JOIN raw_submissions AS submission
                    ON submission.submission_id = report.submission_id
                  JOIN watcher_runs AS run ON run.run_id = submission.run_id
+                 JOIN local_watcher_provider_intakes AS local
+                   ON local.run_id = run.run_id
+                 JOIN provider_intake_acknowledgments AS acknowledgment
+                   ON acknowledgment.intake_id = local.intake_id
+                  AND acknowledgment.run_id = run.run_id
                  WHERE report.instance_id = ?1
                    AND report.next_checkpoint_json IS NOT NULL
                    AND run.checkpoint_contract_digest = ?2
@@ -3425,33 +4550,154 @@ impl Store {
         &mut self,
         receipt: &UpgradeReceiptInput,
     ) -> Result<(), StoreError> {
-        validate_digest("binary_digest", &receipt.binary_digest)?;
-        validate_digest("backup_digest", &receipt.backup_digest)?;
         let transaction = self.immediate_transaction()?;
-        transaction.execute(
-            "INSERT INTO upgrade_receipts (
-                receipt_id, from_schema_version, to_schema_version, migrations_json,
-                binary_digest, backup_digest, backup_location, started_at, finished_at,
-                result, operator_identity_json, verification_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![
-                receipt.receipt_id,
-                receipt.from_schema_version,
-                receipt.to_schema_version,
-                receipt.migrations.as_bytes(),
-                receipt.binary_digest,
-                receipt.backup_digest,
-                receipt.backup_location,
-                receipt.started_at,
-                receipt.finished_at,
-                receipt.result,
-                receipt.operator_identity.as_bytes(),
-                receipt.verification.as_bytes(),
-            ],
-        )?;
+        insert_upgrade_receipt(&transaction, receipt)?;
         transaction.commit()?;
         Ok(())
     }
+}
+
+fn insert_upgrade_receipt(
+    transaction: &Transaction<'_>,
+    receipt: &UpgradeReceiptInput,
+) -> Result<(), StoreError> {
+    validate_digest("binary_digest", &receipt.binary_digest)?;
+    validate_digest("backup_digest", &receipt.backup_digest)?;
+    validate_upgrade_receipt_times(receipt)?;
+    if receipt.from_schema_version == 3 && i64::from(receipt.to_schema_version) == SCHEMA_VERSION {
+        validate_v3_to_v4_receipt(receipt)?;
+    }
+    transaction.execute(
+        "INSERT INTO upgrade_receipts (
+            receipt_id, from_schema_version, to_schema_version, migrations_json,
+            binary_digest, backup_digest, backup_location, started_at, finished_at,
+            result, operator_identity_json, verification_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            receipt.receipt_id,
+            receipt.from_schema_version,
+            receipt.to_schema_version,
+            receipt.migrations.as_bytes(),
+            receipt.binary_digest,
+            receipt.backup_digest,
+            receipt.backup_location,
+            receipt.started_at,
+            receipt.finished_at,
+            receipt.result,
+            receipt.operator_identity.as_bytes(),
+            receipt.verification.as_bytes(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn validate_upgrade_receipt_times(receipt: &UpgradeReceiptInput) -> Result<(), StoreError> {
+    let started_at = chrono::DateTime::parse_from_rfc3339(&receipt.started_at)
+        .map_err(|_| StoreError::Invariant("upgrade receipt started_at is not RFC 3339".into()))?;
+    let finished_at = chrono::DateTime::parse_from_rfc3339(&receipt.finished_at)
+        .map_err(|_| StoreError::Invariant("upgrade receipt finished_at is not RFC 3339".into()))?;
+    if started_at > finished_at {
+        return Err(StoreError::Invariant(
+            "upgrade receipt finished_at precedes started_at".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_v3_to_v4_receipt(receipt: &UpgradeReceiptInput) -> Result<(), StoreError> {
+    if receipt.from_schema_version != 3 || i64::from(receipt.to_schema_version) != SCHEMA_VERSION {
+        return Err(StoreError::Invariant(
+            "v3-to-v4 migration receipt names the wrong version transition".into(),
+        ));
+    }
+    validate_digest("binary_digest", &receipt.binary_digest)?;
+    validate_digest("backup_digest", &receipt.backup_digest)?;
+    validate_upgrade_receipt_times(receipt)?;
+    let expected_migrations =
+        CanonicalDocument::from_serializable(&["schema_v3_to_v4_provider_intake"])?;
+    if receipt.migrations != expected_migrations {
+        return Err(StoreError::Invariant(
+            "v3-to-v4 migration receipt does not name the exact migration vocabulary".into(),
+        ));
+    }
+    if receipt.result != "migrated" {
+        return Err(StoreError::Invariant(
+            "v3-to-v4 migration receipt result must be exactly migrated".into(),
+        ));
+    }
+    let expected_verification = CanonicalDocument::from_serializable(&serde_json::json!({
+        "integrity": "ok",
+        "source_schema_version": 3,
+        "source_schema_artifact_digest": SCHEMA_V3_ARTIFACT_DIGEST,
+        "backup_reopened": true,
+        "historical_provider_intake": "explicit_gap_only",
+        "provider_intakes_synthesized": false,
+        "acknowledgments_synthesized": false,
+    }))?;
+    if receipt.verification != expected_verification {
+        return Err(StoreError::Invariant(
+            "v3-to-v4 migration receipt verification does not match the exact closed vocabulary"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_upgrade_receipts(connection: &Connection) -> Result<(), StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT receipt_id, from_schema_version, to_schema_version,
+                migrations_json, binary_digest, backup_digest, backup_location,
+                started_at, finished_at, result, operator_identity_json,
+                verification_json
+         FROM upgrade_receipts ORDER BY receipt_id",
+    )?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let receipt_id: String = row.get(0)?;
+        let from_schema_version: u32 = row.get(1)?;
+        let to_schema_version: u32 = row.get(2)?;
+        let receipt = UpgradeReceiptInput {
+            receipt_id: receipt_id.clone(),
+            from_schema_version,
+            to_schema_version,
+            migrations: CanonicalDocument::from_canonical_bytes(row.get(3)?).map_err(|error| {
+                StoreError::Integrity(format!(
+                    "upgrade receipt {receipt_id} migrations are not canonical: {error}"
+                ))
+            })?,
+            binary_digest: row.get(4)?,
+            backup_digest: row.get(5)?,
+            backup_location: row.get(6)?,
+            started_at: row.get(7)?,
+            finished_at: row.get(8)?,
+            result: row.get(9)?,
+            operator_identity: CanonicalDocument::from_canonical_bytes(row.get(10)?).map_err(
+                |error| {
+                    StoreError::Integrity(format!(
+                        "upgrade receipt {receipt_id} operator identity is not canonical: {error}"
+                    ))
+                },
+            )?,
+            verification: CanonicalDocument::from_canonical_bytes(row.get(11)?).map_err(
+                |error| {
+                    StoreError::Integrity(format!(
+                        "upgrade receipt {receipt_id} verification is not canonical: {error}"
+                    ))
+                },
+            )?,
+        };
+        validate_digest("upgrade receipt binary_digest", &receipt.binary_digest)
+            .map_err(|error| StoreError::Integrity(format!("{receipt_id}: {error}")))?;
+        validate_digest("upgrade receipt backup_digest", &receipt.backup_digest)
+            .map_err(|error| StoreError::Integrity(format!("{receipt_id}: {error}")))?;
+        validate_upgrade_receipt_times(&receipt)
+            .map_err(|error| StoreError::Integrity(format!("{receipt_id}: {error}")))?;
+        if from_schema_version == 3 && i64::from(to_schema_version) == SCHEMA_VERSION {
+            validate_v3_to_v4_receipt(&receipt)
+                .map_err(|error| StoreError::Integrity(format!("{receipt_id}: {error}")))?;
+        }
+    }
+    Ok(())
 }
 
 fn evidence_snapshot_from_connection(
@@ -3609,6 +4855,217 @@ fn now_utc() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
+fn validate_v3_upgrade_source_connection(connection: &Connection) -> Result<(), StoreError> {
+    let version = pragma_i64(connection, "user_version")?;
+    if version != 3 {
+        return Err(StoreError::SchemaVersionMismatch {
+            found: version,
+            supported: 3,
+        });
+    }
+    let application_id = pragma_i64(connection, "application_id")?;
+    if application_id != APPLICATION_ID {
+        return Err(StoreError::ApplicationIdMismatch {
+            found: application_id,
+            expected: APPLICATION_ID,
+        });
+    }
+    let metadata: (i64, String) = connection.query_row(
+        "SELECT schema_version, schema_artifact_digest
+         FROM schema_metadata WHERE singleton = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if metadata.0 != 3 || metadata.1 != SCHEMA_V3_ARTIFACT_DIGEST {
+        return Err(StoreError::Integrity(
+            "schema-v3 metadata does not identify the exact qualified v0.1.0 schema artifact"
+                .into(),
+        ));
+    }
+    if sha256_digest(SCHEMA_V3.as_bytes()) != SCHEMA_V3_ARTIFACT_DIGEST {
+        return Err(StoreError::Integrity(
+            "compiled schema_v3.sql does not match its pinned release digest".into(),
+        ));
+    }
+    let quick_check: String =
+        connection.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+    if quick_check != "ok" {
+        return Err(StoreError::Integrity(quick_check));
+    }
+    let foreign_key_failures: i64 =
+        connection.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })?;
+    if foreign_key_failures != 0 {
+        return Err(StoreError::Integrity(format!(
+            "{foreign_key_failures} schema-v3 foreign-key violations"
+        )));
+    }
+    let expected = EXPECTED_SCHEMA_V3_FINGERPRINT.as_ref().map_err(|error| {
+        StoreError::Integrity(format!(
+            "compiled v3 schema cannot be fingerprinted: {error}"
+        ))
+    })?;
+    let actual = schema_fingerprint(connection)?;
+    if &actual != expected {
+        return Err(StoreError::Integrity(format!(
+            "schema-v3 definition fingerprint {actual} differs from exact qualified v0.1.0 {expected}"
+        )));
+    }
+    validate_stored_digests(connection)?;
+    validate_all_admission_context_digests(connection)?;
+    validate_refusal_invariants(connection)?;
+    validate_run_results(connection)?;
+    validate_evaluation_refusal_invariants(connection)?;
+    validate_admitted_report_associations_connection(connection)?;
+    validate_status_sequence_lower_bound(connection)?;
+    validate_projection_invariants(connection)
+}
+
+fn validate_admitted_report_associations_connection(
+    connection: &Connection,
+) -> Result<(), StoreError> {
+    let invalid_sequence: Option<i64> = connection
+        .query_row(
+            "SELECT report_sequence FROM admitted_reports
+             WHERE report_sequence <= 0 ORDER BY report_sequence LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(sequence) = invalid_sequence {
+        return Err(StoreError::Integrity(format!(
+            "admitted report sequence must be positive; found {sequence}"
+        )));
+    }
+    let wrong_count: Option<(String, i64)> = connection
+        .query_row(
+            "SELECT submission.submission_id, COUNT(report.report_id)
+             FROM raw_submissions AS submission
+             LEFT JOIN admitted_reports AS report
+               ON report.submission_id = submission.submission_id
+             WHERE submission.admission_outcome = 'admitted'
+             GROUP BY submission.submission_id
+             HAVING COUNT(report.report_id) <> 1
+             ORDER BY submission.submission_id LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((submission_id, count)) = wrong_count {
+        return Err(StoreError::Integrity(format!(
+            "admitted submission {submission_id} requires exactly one report; found {count}"
+        )));
+    }
+    let broken: Option<String> = connection
+        .query_row(
+            "SELECT report.report_id
+             FROM admitted_reports AS report
+             LEFT JOIN raw_submissions AS submission
+               ON submission.submission_id = report.submission_id
+             LEFT JOIN watcher_runs AS run ON run.run_id = submission.run_id
+             LEFT JOIN admission_records AS admission
+               ON admission.admission_id = run.admission_id
+             WHERE submission.submission_id IS NULL
+                OR submission.admission_outcome <> 'admitted'
+                OR run.run_id IS NULL OR admission.admission_id IS NULL
+                OR report.instance_id IS NOT run.instance_id
+                OR report.instance_id IS NOT admission.instance_id
+                OR report.profile_id IS NOT run.profile_id
+                OR report.profile_version IS NOT run.profile_version
+                OR report.profile_digest IS NOT run.profile_digest
+                OR report.profile_id IS NOT admission.profile_id
+                OR report.profile_version IS NOT admission.profile_version
+                OR report.profile_digest IS NOT admission.profile_digest
+                OR report.received_at IS NOT submission.received_at
+             ORDER BY report.report_id LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(report_id) = broken {
+        return Err(StoreError::Integrity(format!(
+            "admitted report {report_id} has a broken submission/run/admission association"
+        )));
+    }
+    Ok(())
+}
+
+fn append_digest_field(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), StoreError> {
+    let length = u64::try_from(bytes.len())
+        .map_err(|_| StoreError::Invariant("logical-state field exceeds u64".into()))?;
+    hasher.update(length.to_be_bytes());
+    hasher.update(bytes);
+    Ok(())
+}
+
+/// Hash the typed contents of every schema-v3 table as an order-independent
+/// row multiset. This deliberately excludes SQLite page layout while retaining
+/// value types, duplicate rows, `sqlite_sequence`, and every durable byte.
+fn v3_logical_state_digest(connection: &Connection) -> Result<String, StoreError> {
+    let mut names =
+        connection.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name")?;
+    let table_names = names
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(names);
+
+    let mut state = Sha256::new();
+    state.update(b"nq.schema_v3.logical_state.v1\0");
+    state.update(pragma_i64(connection, "application_id")?.to_be_bytes());
+    state.update(pragma_i64(connection, "user_version")?.to_be_bytes());
+    for table_name in table_names {
+        append_digest_field(&mut state, table_name.as_bytes())?;
+        let quoted = table_name.replace('"', "\"\"");
+        let mut statement = connection.prepare(&format!("SELECT * FROM \"{quoted}\""))?;
+        let column_count = statement.column_count();
+        state.update(
+            u64::try_from(column_count)
+                .map_err(|_| StoreError::Invariant("v3 table has too many columns".into()))?
+                .to_be_bytes(),
+        );
+        let mut rows = statement.query([])?;
+        let mut row_digests = Vec::new();
+        while let Some(row) = rows.next()? {
+            let mut row_hasher = Sha256::new();
+            row_hasher.update(b"nq.schema_v3.logical_row.v1\0");
+            for index in 0..column_count {
+                use rusqlite::types::ValueRef;
+                match row.get_ref(index)? {
+                    ValueRef::Null => row_hasher.update([0]),
+                    ValueRef::Integer(value) => {
+                        row_hasher.update([1]);
+                        row_hasher.update(value.to_be_bytes());
+                    }
+                    ValueRef::Real(value) => {
+                        row_hasher.update([2]);
+                        row_hasher.update(value.to_bits().to_be_bytes());
+                    }
+                    ValueRef::Text(value) => {
+                        row_hasher.update([3]);
+                        append_digest_field(&mut row_hasher, value)?;
+                    }
+                    ValueRef::Blob(value) => {
+                        row_hasher.update([4]);
+                        append_digest_field(&mut row_hasher, value)?;
+                    }
+                }
+            }
+            row_digests.push(row_hasher.finalize());
+        }
+        row_digests.sort_unstable();
+        state.update(
+            u64::try_from(row_digests.len())
+                .map_err(|_| StoreError::Invariant("v3 table has too many rows".into()))?
+                .to_be_bytes(),
+        );
+        for row_digest in row_digests {
+            state.update(row_digest);
+        }
+    }
+    Ok(format!("sha256:{:x}", state.finalize()))
+}
+
 fn pragma_i64(connection: &Connection, pragma: &str) -> Result<i64, StoreError> {
     let sql = match pragma {
         "application_id" => "PRAGMA application_id",
@@ -3629,9 +5086,13 @@ fn validate_required_objects(connection: &Connection) -> Result<(), StoreError> 
         "schema_metadata",
         "profile_descriptor_snapshots",
         "admission_records",
+        "local_provider_admissions",
         "instance_binding_events",
         "binding_materialization_events",
         "watcher_runs",
+        "provider_intake_attempts",
+        "local_watcher_provider_intakes",
+        "legacy_v3_watcher_run_intake_gaps",
         "raw_submissions",
         "admitted_reports",
         "observations",
@@ -3651,6 +5112,7 @@ fn validate_required_objects(connection: &Connection) -> Result<(), StoreError> 
         "legacy_references",
         "upgrade_receipts",
         "status_events",
+        "provider_intake_acknowledgments",
         "status_current",
     ];
     const VIEWS: &[&str] = &[
@@ -3767,6 +5229,363 @@ fn validate_stored_digests(connection: &Connection) -> Result<(), StoreError> {
             return Err(StoreError::Integrity(format!(
                 "descriptor {profile_id}/{profile_version} bytes hash to {}, not stored {stored}",
                 document.digest()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn stored_provider_intake_row(
+    row: &rusqlite::Row<'_>,
+) -> Result<StoredProviderIntake, rusqlite::Error> {
+    Ok(StoredProviderIntake {
+        intake_id: row.get(0)?,
+        attempt_id: row.get(1)?,
+        idempotency_key: row.get(2)?,
+        request_id: row.get(3)?,
+        provider_admission_id: row.get(4)?,
+        admission_context_digest: row.get(5)?,
+        provider_semantic_id: row.get(6)?,
+        provider_artifact_digest: row.get(7)?,
+        provider_protocol_identity: row.get(8)?,
+        provider_config_digest: row.get(9)?,
+        binding_digest: row.get(10)?,
+        instance_id: row.get(11)?,
+        profile_id: row.get(12)?,
+        profile_version: row.get(13)?,
+        profile_digest: row.get(14)?,
+        profile_semantic_id: row.get(15)?,
+        evaluator_artifact_digest: row.get(16)?,
+        context_json: row.get(17)?,
+        context_digest: row.get(18)?,
+        interpretation_kind: row.get(19)?,
+        interpretation_json: row.get(20)?,
+        interpretation_digest: row.get(21)?,
+        native_outcome_kind: row.get(22)?,
+        native_outcome_json: row.get(23)?,
+        native_outcome_digest: row.get(24)?,
+        raw_bytes: row.get(25)?,
+        raw_sha256: row.get(26)?,
+        started_at: row.get(27)?,
+        finished_at: row.get(28)?,
+        received_at: row.get(29)?,
+        replay_digest: row.get(30)?,
+        intake_digest: row.get(31)?,
+        source_admission_id: row.get(32)?,
+        provider_sequence: row.get(33)?,
+        origin_carrier: row.get(34)?,
+        deadline_at: row.get(35)?,
+        checkpoint_contract_digest: row.get(36)?,
+        execution_identity_digest: row.get(37)?,
+        run_id: row.get(38)?,
+        source_capability_grant_json: row.get(39)?,
+        source_lock_json: row.get(40)?,
+    })
+}
+
+/// Prove that provider-intake custody is exact and every run is explicitly
+/// classified as either a real v4 intake or a non-upgraded v3 historical gap.
+#[allow(clippy::too_many_lines, clippy::type_complexity)]
+fn validate_provider_intake_invariants(connection: &Connection) -> Result<(), StoreError> {
+    let invalid_run: Option<(String, i64, i64)> = connection
+        .query_row(
+            "SELECT run.run_id,
+                    COUNT(DISTINCT local.intake_id),
+                    COUNT(DISTINCT legacy.run_id)
+             FROM watcher_runs AS run
+             LEFT JOIN local_watcher_provider_intakes AS local ON local.run_id = run.run_id
+             LEFT JOIN legacy_v3_watcher_run_intake_gaps AS legacy ON legacy.run_id = run.run_id
+             GROUP BY run.run_id
+             HAVING COUNT(DISTINCT local.intake_id) + COUNT(DISTINCT legacy.run_id) <> 1
+             ORDER BY run.run_id LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    if let Some((run_id, intakes, gaps)) = invalid_run {
+        return Err(StoreError::Integrity(format!(
+            "watcher run {run_id} must have exactly one real provider intake or explicit v3 gap; found {intakes} intake links and {gaps} gaps"
+        )));
+    }
+
+    let incomplete_intake: Option<(String, i64, i64)> = connection
+        .query_row(
+            "SELECT intake.intake_id,
+                    COUNT(DISTINCT local.run_id),
+                    COUNT(DISTINCT acknowledgment.acknowledgment_id)
+             FROM provider_intake_attempts AS intake
+             LEFT JOIN local_watcher_provider_intakes AS local
+               ON local.intake_id = intake.intake_id
+             LEFT JOIN provider_intake_acknowledgments AS acknowledgment
+               ON acknowledgment.intake_id = intake.intake_id
+              AND acknowledgment.provider_admission_id = intake.provider_admission_id
+             GROUP BY intake.intake_id
+             HAVING COUNT(DISTINCT local.run_id) <> 1
+                 OR COUNT(DISTINCT acknowledgment.acknowledgment_id) <> 1
+             ORDER BY intake.intake_id LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    if let Some((intake_id, origins, acknowledgments)) = incomplete_intake {
+        return Err(StoreError::Integrity(format!(
+            "provider intake {intake_id} requires one local origin and one durable acknowledgment; found {origins} origins and {acknowledgments} acknowledgments"
+        )));
+    }
+
+    let mut legacy = connection.prepare(
+        "SELECT run_id, source_schema_version, source_schema_artifact_digest,
+                limitation_code, detail_json
+         FROM legacy_v3_watcher_run_intake_gaps ORDER BY run_id",
+    )?;
+    let mut legacy_rows = legacy.query([])?;
+    while let Some(row) = legacy_rows.next()? {
+        let run_id: String = row.get(0)?;
+        let source_version: i64 = row.get(1)?;
+        let source_digest: String = row.get(2)?;
+        let limitation: String = row.get(3)?;
+        let detail: Vec<u8> = row.get(4)?;
+        if source_version != 3
+            || source_digest != SCHEMA_V3_ARTIFACT_DIGEST
+            || limitation != "provider_intake_not_recorded"
+        {
+            return Err(StoreError::Integrity(format!(
+                "legacy provider-intake gap {run_id} substitutes its source or limitation"
+            )));
+        }
+        CanonicalDocument::from_canonical_bytes(detail).map_err(|error| {
+            StoreError::Integrity(format!(
+                "legacy provider-intake gap {run_id} is not canonical: {error}"
+            ))
+        })?;
+    }
+
+    let mut statement = connection.prepare(
+        "SELECT intake.intake_id, intake.attempt_id, intake.idempotency_key,
+                intake.request_id, intake.provider_admission_id,
+                intake.admission_context_digest, intake.provider_semantic_id,
+                intake.provider_artifact_digest, intake.provider_protocol_identity,
+                intake.provider_config_digest, intake.binding_digest,
+                intake.instance_id, intake.profile_id, intake.profile_version,
+                intake.profile_digest, intake.profile_semantic_id,
+                intake.evaluator_artifact_digest, intake.context_json,
+                intake.context_digest, intake.interpretation_kind,
+                intake.interpretation_json, intake.interpretation_digest,
+                intake.native_outcome_kind, intake.native_outcome_json,
+                intake.native_outcome_digest, intake.raw_bytes, intake.raw_sha256,
+                intake.started_at, intake.finished_at, intake.received_at,
+                intake.replay_digest, intake.intake_digest,
+                intake.source_admission_id, intake.provider_sequence,
+                intake.origin_carrier, intake.deadline_at,
+                intake.checkpoint_contract_digest,
+                intake.execution_identity_digest, local.run_id,
+                source.capability_grant_json, source.lock_json
+         FROM provider_intake_attempts AS intake
+         JOIN local_watcher_provider_intakes AS local ON local.intake_id = intake.intake_id
+         JOIN admission_records AS source
+           ON source.admission_id = intake.source_admission_id
+         ORDER BY intake.intake_sequence",
+    )?;
+    let rows = statement.query_map([], stored_provider_intake_row)?;
+    for row in rows {
+        let stored = row?;
+        let parse_digest = |name: &str, value: String| {
+            Sha256Digest::parse(value).map_err(|error| {
+                StoreError::Integrity(format!(
+                    "provider intake {} has invalid {name}: {error}",
+                    stored.intake_id
+                ))
+            })
+        };
+        let context = CanonicalDocument::from_canonical_bytes(stored.context_json.clone())
+            .map_err(|error| {
+                StoreError::Integrity(format!(
+                    "provider intake {} context is not canonical: {error}",
+                    stored.intake_id
+                ))
+            })?;
+        let interpretation = CanonicalDocument::from_canonical_bytes(
+            stored.interpretation_json.clone(),
+        )
+        .map_err(|error| {
+            StoreError::Integrity(format!(
+                "provider intake {} interpretation is not canonical: {error}",
+                stored.intake_id
+            ))
+        })?;
+        let native_outcome = CanonicalDocument::from_canonical_bytes(
+            stored.native_outcome_json.clone(),
+        )
+        .map_err(|error| {
+            StoreError::Integrity(format!(
+                "provider intake {} native outcome is not canonical: {error}",
+                stored.intake_id
+            ))
+        })?;
+        let intake = ProviderIntakeInput {
+            intake_id: stored.intake_id.clone(),
+            attempt_id: stored.attempt_id.clone(),
+            idempotency_key: stored.idempotency_key.clone(),
+            request_id: stored.request_id.clone(),
+            provider_admission_id: stored.provider_admission_id.clone(),
+            source_admission_id: stored.source_admission_id.clone(),
+            provider_sequence: stored.provider_sequence.clone(),
+            origin_carrier: stored.origin_carrier.clone(),
+            deadline_at: stored.deadline_at.clone(),
+            checkpoint_contract_digest: stored.checkpoint_contract_digest.clone(),
+            execution_identity_digest: Sha256Digest::parse(
+                stored.execution_identity_digest.clone(),
+            )
+            .map_err(|error| {
+                StoreError::Integrity(format!(
+                    "provider intake {} has invalid execution identity digest: {error}",
+                    stored.intake_id
+                ))
+            })?,
+            admission_context_digest: parse_digest(
+                "admission context digest",
+                stored.admission_context_digest.clone(),
+            )?,
+            provider_semantic_id: parse_digest(
+                "provider semantic identity",
+                stored.provider_semantic_id.clone(),
+            )?,
+            provider_artifact_digest: parse_digest(
+                "provider artifact digest",
+                stored.provider_artifact_digest.clone(),
+            )?,
+            provider_protocol_identity: stored.provider_protocol_identity.clone(),
+            provider_config_digest: parse_digest(
+                "provider configuration digest",
+                stored.provider_config_digest.clone(),
+            )?,
+            binding_digest: stored.binding_digest.clone(),
+            instance_id: stored.instance_id.clone(),
+            profile_id: stored.profile_id.clone(),
+            profile_version: stored.profile_version.clone(),
+            profile_digest: stored.profile_digest.clone(),
+            profile_semantic_id: parse_digest(
+                "profile semantic identity",
+                stored.profile_semantic_id.clone(),
+            )?,
+            evaluator_artifact_digest: parse_digest(
+                "evaluator artifact digest",
+                stored.evaluator_artifact_digest.clone(),
+            )?,
+            context,
+            interpretation_kind: stored.interpretation_kind.clone(),
+            interpretation,
+            native_outcome_kind: stored.native_outcome_kind.clone(),
+            native_outcome,
+            raw_bytes: stored.raw_bytes.clone(),
+            started_at: stored.started_at.clone(),
+            finished_at: stored.finished_at.clone(),
+            received_at: stored.received_at.clone(),
+        };
+        validate_provider_admission(connection, &intake, false)?;
+        let digests = provider_intake_digests(&intake)?;
+        if digests.context_digest != stored.context_digest
+            || digests.interpretation_digest != stored.interpretation_digest
+            || digests.native_outcome_digest != stored.native_outcome_digest
+            || digests.raw_sha256 != stored.raw_sha256
+            || digests.replay_digest != stored.replay_digest
+            || digests.intake_digest != stored.intake_digest
+        {
+            return Err(StoreError::Integrity(format!(
+                "provider intake {} has substituted canonical bytes or derived digests",
+                stored.intake_id
+            )));
+        }
+        let run: (
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Vec<u8>,
+            String,
+            String,
+            String,
+            Vec<u8>,
+        ) = connection.query_row(
+            "SELECT request_id, admission_id, binding_digest, instance_id,
+                        profile_id, profile_version, profile_digest, started_at,
+                        finished_at, resource_outcome_json, carrier, deadline_at,
+                        checkpoint_contract_digest, execution_identity_json
+                 FROM watcher_runs WHERE run_id = ?1",
+            [&stored.run_id],
+            |run| {
+                Ok((
+                    run.get(0)?,
+                    run.get(1)?,
+                    run.get(2)?,
+                    run.get(3)?,
+                    run.get(4)?,
+                    run.get(5)?,
+                    run.get(6)?,
+                    run.get(7)?,
+                    run.get(8)?,
+                    run.get(9)?,
+                    run.get(10)?,
+                    run.get(11)?,
+                    run.get(12)?,
+                    run.get(13)?,
+                ))
+            },
+        )?;
+        let run_execution_identity =
+            CanonicalDocument::from_canonical_bytes(run.13).map_err(|error| {
+                StoreError::Integrity(format!(
+                    "watcher run {} execution identity is not canonical: {error}",
+                    stored.run_id
+                ))
+            })?;
+        if stored.request_id != run.0
+            || run.1.as_deref() != Some(stored.source_admission_id.as_str())
+            || stored.binding_digest != run.2
+            || stored.instance_id != run.3
+            || stored.profile_id != run.4
+            || stored.profile_version != run.5
+            || stored.profile_digest != run.6
+            || stored.started_at != run.7
+            || stored.finished_at != run.8
+            || stored.native_outcome_json != run.9
+            || stored.origin_carrier != run.10
+            || stored.deadline_at != run.11
+            || stored.checkpoint_contract_digest != run.12
+            || stored.execution_identity_digest != run_execution_identity.digest()
+        {
+            return Err(StoreError::Integrity(format!(
+                "provider intake {} does not match its local watcher run {}",
+                stored.intake_id, stored.run_id
+            )));
+        }
+        let submission: Option<(Vec<u8>, String, String)> = connection
+            .query_row(
+                "SELECT raw_bytes, raw_sha256, received_at
+                 FROM raw_submissions WHERE run_id = ?1",
+                [&stored.run_id],
+                |submission| Ok((submission.get(0)?, submission.get(1)?, submission.get(2)?)),
+            )
+            .optional()?;
+        if let Some((bytes, digest, received_at)) = submission
+            && (bytes != stored.raw_bytes
+                || digest != stored.raw_sha256
+                || received_at != stored.received_at)
+        {
+            return Err(StoreError::Integrity(format!(
+                "provider intake {} and protocol submission do not share exact raw custody",
+                stored.intake_id
+            )));
+        }
+        if provider_acknowledgment_for_intake(connection, &stored.intake_id)?.is_none() {
+            return Err(StoreError::Integrity(format!(
+                "provider intake {} lacks an exact durable acknowledgment",
+                stored.intake_id
             )));
         }
     }
@@ -4164,6 +5983,142 @@ fn validate_all_admission_context_digests(connection: &Connection) -> Result<(),
     Ok(())
 }
 
+#[allow(clippy::too_many_lines, clippy::type_complexity)]
+fn validate_local_provider_admissions(connection: &Connection) -> Result<(), StoreError> {
+    let rows = {
+        let mut statement = connection.prepare(
+            "SELECT provider.provider_admission_id, provider.source_admission_id,
+                    provider.provider_semantic_id, provider.provider_artifact_digest,
+                    provider.provider_protocol_identity,
+                    provider.provider_config_digest, provider.contract_json,
+                    provider.contract_digest, admission.instance_id,
+                    admission.admission_context_digest, admission.profile_id,
+                    admission.profile_version, admission.profile_digest,
+                    admission.profile_semantic_id,
+                    admission.evaluator_artifact_digest,
+                    admission.capability_grant_json, admission.conformance_json,
+                    admission.lock_json, admission.helper_artifact_digest,
+                    admission.protocol_version, admission.config_digest,
+                    provider.source_admitted_at, provider.derived_at,
+                    provider.derivation_kind, admission.admitted_at
+             FROM local_provider_admissions AS provider
+             JOIN admission_records AS admission
+               ON admission.admission_id = provider.source_admission_id
+             ORDER BY provider.provider_admission_id",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Vec<u8>>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, String>(11)?,
+                    row.get::<_, String>(12)?,
+                    row.get::<_, String>(13)?,
+                    row.get::<_, String>(14)?,
+                    row.get::<_, Vec<u8>>(15)?,
+                    row.get::<_, Vec<u8>>(16)?,
+                    row.get::<_, Vec<u8>>(17)?,
+                    row.get::<_, String>(18)?,
+                    row.get::<_, String>(19)?,
+                    row.get::<_, String>(20)?,
+                    row.get::<_, String>(21)?,
+                    row.get::<_, String>(22)?,
+                    row.get::<_, String>(23)?,
+                    row.get::<_, String>(24)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for row in rows {
+        let contract = CanonicalDocument::from_canonical_bytes(row.6).map_err(|error| {
+            StoreError::Integrity(format!(
+                "local provider admission {} contract is not canonical: {error}",
+                row.0
+            ))
+        })?;
+        let capability = CanonicalDocument::from_canonical_bytes(row.15)?;
+        let conformance = CanonicalDocument::from_canonical_bytes(row.16)?;
+        let lock = CanonicalDocument::from_canonical_bytes(row.17)?;
+        let expected_semantic = local_provider_semantic_id(&row.19, &conformance)?.into_string();
+        let expected_contract =
+            CanonicalDocument::from_serializable(&LocalProviderAdmissionContract {
+                schema: LOCAL_PROVIDER_ADMISSION_SCHEMA,
+                source_admission_id: &row.1,
+                instance_id: &row.8,
+                provider_semantic_id: &expected_semantic,
+                provider_artifact_digest: &row.18,
+                provider_protocol_identity: &row.19,
+                provider_config_digest: &row.20,
+                admission_context_digest: &row.9,
+                profile_id: &row.10,
+                profile_version: &row.11,
+                profile_digest: &row.12,
+                profile_semantic_id: &row.13,
+                evaluator_artifact_digest: &row.14,
+                capability_grant_digest: capability.digest(),
+                conformance_digest: conformance.digest(),
+                lock_digest: lock.digest(),
+            })?;
+        if row.2 != expected_semantic
+            || row.3 != row.18
+            || row.4 != row.19
+            || row.5 != row.20
+            || contract.as_bytes() != expected_contract.as_bytes()
+            || row.7 != expected_contract.digest()
+            || row.0 != expected_contract.digest()
+            || row.21 != row.24
+            || chrono::DateTime::parse_from_rfc3339(&row.21).is_err()
+            || chrono::DateTime::parse_from_rfc3339(&row.22).is_err()
+            || !matches!(row.23.as_str(), "admission_append" | "schema_v3_migration")
+        {
+            return Err(StoreError::Integrity(format!(
+                "local provider admission {} does not recompute from its NQ-owned source admission",
+                row.0
+            )));
+        }
+    }
+    let missing: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM admission_records AS admission
+         WHERE NOT EXISTS (
+             SELECT 1 FROM local_provider_admissions AS provider
+             WHERE provider.source_admission_id = admission.admission_id
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if missing != 0 {
+        return Err(StoreError::Integrity(format!(
+            "{missing} source admissions lack their derived local-provider admission"
+        )));
+    }
+    let orphaned_migration_derivations: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM local_provider_admissions AS provider
+         WHERE provider.derivation_kind = 'schema_v3_migration'
+           AND NOT EXISTS (
+               SELECT 1 FROM upgrade_receipts AS receipt
+               WHERE receipt.from_schema_version = 3
+                 AND receipt.to_schema_version = 4
+           )",
+        [],
+        |row| row.get(0),
+    )?;
+    if orphaned_migration_derivations != 0 {
+        return Err(StoreError::Integrity(format!(
+            "{orphaned_migration_derivations} local-provider admissions claim schema-v3 derivation without a transactional v3-to-v4 receipt"
+        )));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)]
 fn validate_evaluation_refusal_invariants(connection: &Connection) -> Result<(), StoreError> {
     validate_evaluation_revision_shape(connection)?;
@@ -4505,6 +6460,15 @@ fn sha256_file(path: &Path) -> Result<String, StoreError> {
     Ok(format!("sha256:{:x}", digest.finalize()))
 }
 
+fn remove_database_artifact(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = path.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        let _ = std::fs::remove_file(PathBuf::from(sidecar));
+    }
+}
+
 fn validate_digest(field: &str, digest: &str) -> Result<(), StoreError> {
     let Some(hex) = digest.strip_prefix("sha256:") else {
         return Err(StoreError::Invariant(format!(
@@ -4619,6 +6583,11 @@ fn validate_document_size(size: usize) -> Result<(), StoreError> {
 
 #[allow(clippy::too_many_lines)]
 fn validate_collection(collection: &CollectionInput) -> Result<(), StoreError> {
+    validate_provider_intake_shape(
+        &collection.intake,
+        &collection.run,
+        collection.submission.as_ref(),
+    )?;
     validate_digest("binding_digest", &collection.run.binding_digest)?;
     validate_digest(
         "checkpoint_contract_digest",
@@ -4744,6 +6713,193 @@ fn validate_collection(collection: &CollectionInput) -> Result<(), StoreError> {
                 )?;
             }
         }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn validate_provider_intake_shape(
+    intake: &ProviderIntakeInput,
+    run: &RunInput,
+    submission: Option<&SubmissionInput>,
+) -> Result<(), StoreError> {
+    for (name, value) in [
+        ("intake_id", intake.intake_id.as_str()),
+        ("attempt_id", intake.attempt_id.as_str()),
+        ("request_id", intake.request_id.as_str()),
+        (
+            "provider_admission_id",
+            intake.provider_admission_id.as_str(),
+        ),
+        ("source_admission_id", intake.source_admission_id.as_str()),
+        ("instance_id", intake.instance_id.as_str()),
+        ("profile_id", intake.profile_id.as_str()),
+        ("profile_version", intake.profile_version.as_str()),
+        (
+            "provider_protocol_identity",
+            intake.provider_protocol_identity.as_str(),
+        ),
+        ("origin_carrier", intake.origin_carrier.as_str()),
+    ] {
+        if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+            return Err(StoreError::Invariant(format!(
+                "provider intake {name} must be nonempty, bounded, and printable"
+            )));
+        }
+    }
+    validate_digest("idempotency_key", &intake.idempotency_key)?;
+    if intake.idempotency_key
+        != provider_idempotency_key(&intake.provider_admission_id, &intake.attempt_id)?
+    {
+        return Err(StoreError::Invariant(
+            "provider idempotency key does not match its admitted provider and attempt".into(),
+        ));
+    }
+    validate_digest("binding_digest", &intake.binding_digest)?;
+    validate_digest("profile_digest", &intake.profile_digest)?;
+    validate_digest(
+        "checkpoint_contract_digest",
+        &intake.checkpoint_contract_digest,
+    )?;
+    if intake.provider_sequence.as_ref().is_some_and(|sequence| {
+        sequence.is_empty() || sequence.len() > 256 || sequence.chars().any(char::is_control)
+    }) {
+        return Err(StoreError::Invariant(
+            "provider sequence must be absent or nonempty, bounded, and printable".into(),
+        ));
+    }
+    if intake.provider_sequence.is_some() {
+        return Err(StoreError::Invariant(
+            "the schema-v4 local-helper provider contract does not admit a provider sequence"
+                .into(),
+        ));
+    }
+    let raw_limit = nq_protocol::MAX_RESPONSE_FRAME_BYTES
+        + usize::from(intake.native_outcome_kind == "output_too_large");
+    if intake.raw_bytes.len() > raw_limit {
+        return Err(StoreError::Invariant(format!(
+            "provider intake raw capture is {} bytes; exact outcome limit is {raw_limit}",
+            intake.raw_bytes.len(),
+        )));
+    }
+    if intake.context.as_bytes().len() > 1_048_576
+        || intake.native_outcome.as_bytes().len() > 1_048_576
+    {
+        return Err(StoreError::Invariant(
+            "provider intake context or native outcome exceeds its 1 MiB bound".into(),
+        ));
+    }
+    if !matches!(
+        intake.interpretation_kind.as_str(),
+        "unavailable" | "protocol_rejected" | "provider_refusal" | "candidate_report"
+    ) {
+        return Err(StoreError::Invariant(
+            "provider intake has an unsupported interpretation kind".into(),
+        ));
+    }
+    if !matches!(
+        intake.native_outcome_kind.as_str(),
+        "response"
+            | "spawn_failed"
+            | "request_write_failed"
+            | "timeout"
+            | "output_too_large"
+            | "stderr_too_large"
+            | "eof"
+            | "malformed_framing"
+            | "malformed_json"
+            | "exit_nonzero"
+            | "helper_exited"
+            | "disconnect"
+            | "carrier_startup_failed"
+            | "not_running"
+            | "io_failed"
+    ) {
+        return Err(StoreError::Invariant(
+            "provider intake has an unsupported native outcome kind".into(),
+        ));
+    }
+    for (name, value) in [
+        ("started_at", intake.started_at.as_str()),
+        ("finished_at", intake.finished_at.as_str()),
+        ("received_at", intake.received_at.as_str()),
+        ("deadline_at", intake.deadline_at.as_str()),
+    ] {
+        if chrono::DateTime::parse_from_rfc3339(value).is_err() {
+            return Err(StoreError::Invariant(format!(
+                "provider intake {name} is not an RFC3339 timestamp"
+            )));
+        }
+    }
+    let started_at = chrono::DateTime::parse_from_rfc3339(&intake.started_at)
+        .expect("provider intake start was validated");
+    let finished_at = chrono::DateTime::parse_from_rfc3339(&intake.finished_at)
+        .expect("provider intake finish was validated");
+    let received_at = chrono::DateTime::parse_from_rfc3339(&intake.received_at)
+        .expect("provider intake receive time was validated");
+    if started_at > finished_at || finished_at > received_at {
+        return Err(StoreError::Invariant(
+            "provider intake timestamps must satisfy start <= finish <= receive".into(),
+        ));
+    }
+    if intake.request_id != run.request_id
+        || intake.source_admission_id != run.admission_id.as_deref().unwrap_or_default()
+        || intake.binding_digest != run.binding_digest
+        || intake.origin_carrier != run.carrier
+        || intake.deadline_at != run.deadline_at
+        || intake.checkpoint_contract_digest != run.checkpoint_contract_digest
+        || intake.execution_identity_digest.as_str() != run.execution_identity.digest()
+        || intake.instance_id != run.instance_id
+        || intake.profile_id != run.profile_id
+        || intake.profile_version != run.profile_version
+        || intake.profile_digest != run.profile_digest
+        || intake.started_at != run.started_at
+        || intake.finished_at != run.finished_at
+        || intake.native_outcome_kind != run.acquisition_outcome
+        || intake.native_outcome.as_bytes() != run.resource_outcome.as_bytes()
+    {
+        return Err(StoreError::Invariant(
+            "provider intake identity or native outcome does not match its local watcher run"
+                .into(),
+        ));
+    }
+    if run.acquisition_outcome == "response" && intake.interpretation_kind == "unavailable" {
+        return Err(StoreError::Invariant(
+            "a completed response requires an exact pre-admission interpretation".into(),
+        ));
+    }
+    if run.acquisition_outcome != "response" && intake.interpretation_kind != "unavailable" {
+        return Err(StoreError::Invariant(
+            "a non-response acquisition cannot claim a parsed provider interpretation".into(),
+        ));
+    }
+    if let Some(submission) = submission
+        && (submission.raw_bytes != intake.raw_bytes
+            || submission.received_at != intake.received_at)
+    {
+        return Err(StoreError::Invariant(
+            "protocol submission does not preserve the provider intake's exact raw bytes or receive time"
+                .into(),
+        ));
+    }
+    let interpretation_matches_protocol = match (intake.interpretation_kind.as_str(), submission) {
+        ("unavailable", None) => true,
+        ("unavailable", Some(submission)) => {
+            submission.protocol_outcome == "not_validated"
+                && matches!(
+                    &submission.disposition,
+                    SubmissionDisposition::Rejected { .. }
+                )
+        }
+        ("protocol_rejected", Some(submission)) => submission.protocol_outcome == "rejected",
+        ("provider_refusal", Some(submission)) => submission.protocol_outcome == "valid_refusal",
+        ("candidate_report", Some(submission)) => submission.protocol_outcome == "valid_report",
+        _ => false,
+    };
+    if !interpretation_matches_protocol {
+        return Err(StoreError::Invariant(
+            "provider interpretation does not match the raw submission protocol outcome".into(),
+        ));
     }
     Ok(())
 }
@@ -5036,11 +7192,506 @@ fn is_admitted_collection(collection: &CollectionInput) -> bool {
         })
 }
 
+#[allow(clippy::too_many_lines)]
+fn validate_provider_admission(
+    connection: &Connection,
+    intake: &ProviderIntakeInput,
+    require_current: bool,
+) -> Result<(), StoreError> {
+    let admission = connection
+        .query_row(
+            "SELECT admission.instance_id, admission.config_digest,
+                    admission.helper_artifact_digest, admission.profile_semantic_id,
+                    admission.evaluator_artifact_digest,
+                    admission.admission_context_digest, admission.profile_id,
+                    admission.profile_version, admission.profile_digest,
+                    admission.protocol_version, admission.conformance_json,
+                    provider.source_admission_id, provider.provider_semantic_id,
+                    provider.provider_artifact_digest,
+                    provider.provider_protocol_identity,
+                    provider.provider_config_digest, provider.contract_json,
+                    provider.contract_digest, admission.lock_json,
+                    admission.execution_chain_json
+             FROM local_provider_admissions AS provider
+             JOIN admission_records AS admission
+               ON admission.admission_id = provider.source_admission_id
+             WHERE provider.provider_admission_id = ?1",
+            [&intake.provider_admission_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, Vec<u8>>(10)?,
+                    row.get::<_, String>(11)?,
+                    row.get::<_, String>(12)?,
+                    row.get::<_, String>(13)?,
+                    row.get::<_, String>(14)?,
+                    row.get::<_, String>(15)?,
+                    row.get::<_, Vec<u8>>(16)?,
+                    row.get::<_, String>(17)?,
+                    row.get::<_, Vec<u8>>(18)?,
+                    row.get::<_, Vec<u8>>(19)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| {
+            StoreError::Invariant(format!(
+                "provider intake names missing admission {}",
+                intake.provider_admission_id
+            ))
+        })?;
+    let conformance = CanonicalDocument::from_canonical_bytes(admission.10).map_err(|error| {
+        StoreError::Integrity(format!(
+            "provider admission {} conformance is not canonical: {error}",
+            intake.provider_admission_id
+        ))
+    })?;
+    let expected_semantic = local_provider_semantic_id(&admission.9, &conformance)?.into_string();
+    let contract = CanonicalDocument::from_canonical_bytes(admission.16).map_err(|error| {
+        StoreError::Integrity(format!(
+            "provider admission {} contract is not canonical: {error}",
+            intake.provider_admission_id
+        ))
+    })?;
+    let source_lock = CanonicalDocument::from_canonical_bytes(admission.18).map_err(|error| {
+        StoreError::Integrity(format!(
+            "provider admission {} source lock is not canonical: {error}",
+            intake.provider_admission_id
+        ))
+    })?;
+    let source_execution =
+        CanonicalDocument::from_canonical_bytes(admission.19).map_err(|error| {
+            StoreError::Integrity(format!(
+                "provider admission {} source execution identity is not canonical: {error}",
+                intake.provider_admission_id
+            ))
+        })?;
+    if intake.instance_id != admission.0
+        || intake.source_admission_id != admission.11
+        || intake.provider_config_digest.as_str() != admission.1
+        || intake.provider_artifact_digest.as_str() != admission.2
+        || intake.profile_semantic_id.as_str() != admission.3
+        || intake.evaluator_artifact_digest.as_str() != admission.4
+        || intake.admission_context_digest.as_str() != admission.5
+        || intake.profile_id != admission.6
+        || intake.profile_version != admission.7
+        || intake.profile_digest != admission.8
+        || intake.provider_protocol_identity != admission.9
+        || intake.provider_semantic_id.as_str() != expected_semantic
+        || admission.12 != expected_semantic
+        || admission.13 != admission.2
+        || admission.14 != admission.9
+        || admission.15 != admission.1
+        || contract.digest() != admission.17
+        || contract.digest() != intake.provider_admission_id
+        || source_lock.digest() != intake.binding_digest
+        || source_execution.digest() != intake.execution_identity_digest.as_str()
+    {
+        return Err(StoreError::Invariant(
+            "provider intake identity does not match NQ-owned admission facts".into(),
+        ));
+    }
+    if require_current {
+        let current: Option<(String, Option<String>, String)> = connection
+            .query_row(
+                "SELECT event_kind, admission_id, binding_digest
+                 FROM instance_binding_events
+                 WHERE instance_id = ?1
+                 ORDER BY binding_sequence DESC LIMIT 1",
+                [&intake.instance_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let active = current.is_some_and(|(kind, admission_id, binding_digest)| {
+            matches!(kind.as_str(), "activate" | "rollback")
+                && admission_id.as_deref() == Some(intake.source_admission_id.as_str())
+                && binding_digest == intake.binding_digest
+        });
+        if !active {
+            return Err(StoreError::Invariant(format!(
+                "provider admission {} is not the current exact active binding for {}",
+                intake.provider_admission_id, intake.instance_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn provider_intake_preflight_on_connection(
+    connection: &Connection,
+    intake: &ProviderIntakeInput,
+    require_current: bool,
+) -> Result<ProviderIntakePreflight, StoreError> {
+    validate_provider_admission(connection, intake, require_current)?;
+    let digests = provider_intake_digests(intake)?;
+    let existing: Option<(String, String, String)> = connection
+        .query_row(
+            "SELECT intake_id, idempotency_key, replay_digest
+             FROM provider_intake_attempts
+             WHERE idempotency_key = ?1 OR attempt_id = ?2 OR request_id = ?3
+             ORDER BY intake_sequence LIMIT 1",
+            params![intake.idempotency_key, intake.attempt_id, intake.request_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((intake_id, idempotency_key, replay_digest)) = existing else {
+        return Ok(ProviderIntakePreflight::New);
+    };
+    if idempotency_key != intake.idempotency_key || replay_digest != digests.replay_digest {
+        return Err(StoreError::ReplayConflict(format!(
+            "attempt, request, or idempotency identity is already bound to intake {intake_id} with different exact evidence or context"
+        )));
+    }
+    let (acknowledgment, canonical_result) =
+        provider_acknowledgment_for_intake(connection, &intake_id)?.ok_or_else(|| {
+            StoreError::Integrity(format!(
+                "provider intake {intake_id} exists without a durable acknowledgment"
+            ))
+        })?;
+    Ok(ProviderIntakePreflight::Existing {
+        acknowledgment,
+        canonical_result,
+    })
+}
+
+fn insert_provider_intake(
+    transaction: &Transaction<'_>,
+    intake: &ProviderIntakeInput,
+) -> Result<(), StoreError> {
+    validate_provider_admission(transaction, intake, true)?;
+    let digests = provider_intake_digests(intake)?;
+    transaction.execute(
+        "INSERT INTO provider_intake_attempts (
+            intake_id, schema_id, idempotency_key, attempt_id, request_id,
+            provider_admission_id, admission_context_digest,
+            provider_semantic_id, provider_artifact_digest,
+            provider_protocol_identity, provider_config_digest, binding_digest,
+            instance_id, profile_id, profile_version, profile_digest,
+            profile_semantic_id, evaluator_artifact_digest,
+            context_json, context_digest, interpretation_kind,
+            interpretation_json, interpretation_digest, native_outcome_kind,
+            native_outcome_json, native_outcome_digest, raw_bytes, raw_sha256,
+            started_at, finished_at, received_at, replay_digest, intake_digest,
+            source_admission_id, provider_sequence, origin_carrier, deadline_at,
+            checkpoint_contract_digest, execution_identity_digest
+         ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+            ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26,
+            ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38,
+            ?39
+         )",
+        params![
+            intake.intake_id,
+            PROVIDER_INTAKE_SCHEMA,
+            intake.idempotency_key,
+            intake.attempt_id,
+            intake.request_id,
+            intake.provider_admission_id,
+            intake.admission_context_digest.as_str(),
+            intake.provider_semantic_id.as_str(),
+            intake.provider_artifact_digest.as_str(),
+            intake.provider_protocol_identity,
+            intake.provider_config_digest.as_str(),
+            intake.binding_digest,
+            intake.instance_id,
+            intake.profile_id,
+            intake.profile_version,
+            intake.profile_digest,
+            intake.profile_semantic_id.as_str(),
+            intake.evaluator_artifact_digest.as_str(),
+            intake.context.as_bytes(),
+            digests.context_digest,
+            intake.interpretation_kind,
+            intake.interpretation.as_bytes(),
+            digests.interpretation_digest,
+            intake.native_outcome_kind,
+            intake.native_outcome.as_bytes(),
+            digests.native_outcome_digest,
+            intake.raw_bytes,
+            digests.raw_sha256,
+            intake.started_at,
+            intake.finished_at,
+            intake.received_at,
+            digests.replay_digest,
+            digests.intake_digest,
+            intake.source_admission_id,
+            intake.provider_sequence,
+            intake.origin_carrier,
+            intake.deadline_at,
+            intake.checkpoint_contract_digest,
+            intake.execution_identity_digest.as_str(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_local_provider_intake_link(
+    transaction: &Transaction<'_>,
+    intake_id: &str,
+    run_id: &str,
+) -> Result<(), StoreError> {
+    transaction.execute(
+        "INSERT INTO local_watcher_provider_intakes (intake_id, run_id)
+         VALUES (?1, ?2)",
+        params![intake_id, run_id],
+    )?;
+    Ok(())
+}
+
+fn build_provider_acknowledgment(
+    intake: &ProviderIntakeInput,
+    run_id: &str,
+    status: &StatusEventInput,
+) -> Result<(DurableIntakeAcknowledgment, CanonicalDocument), StoreError> {
+    let digests = provider_intake_digests(intake)?;
+    let acknowledgment_id = uuid::Uuid::new_v4().to_string();
+    let committed_at = now_utc();
+    let canonical_result_digest = status.detail.digest().to_owned();
+    let detail = CanonicalDocument::from_serializable(&ProviderAcknowledgmentDocument {
+        schema: PROVIDER_INTAKE_ACK_SCHEMA,
+        acknowledgment_id: &acknowledgment_id,
+        intake_id: &intake.intake_id,
+        attempt_id: &intake.attempt_id,
+        run_id,
+        provider_admission_id: &intake.provider_admission_id,
+        intake_digest: &digests.intake_digest,
+        raw_sha256: &digests.raw_sha256,
+        status_event_id: &status.status_event_id,
+        canonical_result_digest: &canonical_result_digest,
+        committed_at: &committed_at,
+        establishes: "durable_custody_and_canonical_processing",
+        does_not_establish: [
+            "report_admission",
+            "detector_result",
+            "health",
+            "testimonial_sufficiency",
+            "authority",
+            "external_obligation_discharge",
+        ],
+    })?;
+    Ok((
+        DurableIntakeAcknowledgment {
+            acknowledgment_id,
+            intake_id: intake.intake_id.clone(),
+            attempt_id: intake.attempt_id.clone(),
+            run_id: run_id.to_owned(),
+            provider_admission_id: intake.provider_admission_id.clone(),
+            intake_digest: digests.intake_digest,
+            raw_sha256: digests.raw_sha256,
+            status_event_id: status.status_event_id.clone(),
+            canonical_result_digest,
+            committed_at,
+            detail_json: detail.as_bytes().to_vec(),
+        },
+        detail,
+    ))
+}
+
+fn insert_provider_acknowledgment(
+    transaction: &Transaction<'_>,
+    intake: &ProviderIntakeInput,
+    run_id: &str,
+    status: &StatusEventInput,
+) -> Result<DurableIntakeAcknowledgment, StoreError> {
+    let (acknowledgment, detail) = build_provider_acknowledgment(intake, run_id, status)?;
+    transaction.execute(
+        "INSERT INTO provider_intake_acknowledgments (
+            acknowledgment_id, intake_id, run_id, provider_admission_id,
+            status_event_id, schema_id, detail_json, acknowledgment_digest,
+            committed_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            acknowledgment.acknowledgment_id,
+            acknowledgment.intake_id,
+            acknowledgment.run_id,
+            acknowledgment.provider_admission_id,
+            acknowledgment.status_event_id,
+            PROVIDER_INTAKE_ACK_SCHEMA,
+            detail.as_bytes(),
+            detail.digest(),
+            acknowledgment.committed_at,
+        ],
+    )?;
+    Ok(acknowledgment)
+}
+
+#[allow(clippy::too_many_lines)]
+fn provider_acknowledgment_for_intake(
+    connection: &Connection,
+    intake_id: &str,
+) -> Result<Option<(DurableIntakeAcknowledgment, CanonicalDocument)>, StoreError> {
+    let row = connection
+        .query_row(
+            "SELECT acknowledgment.acknowledgment_id,
+                    acknowledgment.intake_id, intake.attempt_id,
+                    acknowledgment.run_id, acknowledgment.provider_admission_id,
+                    intake.intake_digest, intake.raw_sha256,
+                    acknowledgment.status_event_id,
+                    acknowledgment.acknowledgment_digest,
+                    acknowledgment.committed_at, acknowledgment.detail_json,
+                    status.detail_json
+             FROM provider_intake_acknowledgments AS acknowledgment
+             JOIN provider_intake_attempts AS intake
+               ON intake.intake_id = acknowledgment.intake_id
+              AND intake.provider_admission_id = acknowledgment.provider_admission_id
+             JOIN local_watcher_provider_intakes AS local
+               ON local.intake_id = intake.intake_id
+              AND local.run_id = acknowledgment.run_id
+             JOIN status_events AS status
+               ON status.status_event_id = acknowledgment.status_event_id
+              AND status.run_id = local.run_id
+             WHERE acknowledgment.intake_id = ?1",
+            [intake_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, Vec<u8>>(10)?,
+                    row.get::<_, Vec<u8>>(11)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let detail = CanonicalDocument::from_canonical_bytes(row.10).map_err(|error| {
+        StoreError::Integrity(format!(
+            "provider intake {} acknowledgment is not canonical: {error}",
+            row.1
+        ))
+    })?;
+    if detail.digest() != row.8 {
+        return Err(StoreError::Integrity(format!(
+            "provider intake {} acknowledgment digest does not match its exact bytes",
+            row.1
+        )));
+    }
+    let canonical_result = CanonicalDocument::from_canonical_bytes(row.11).map_err(|error| {
+        StoreError::Integrity(format!(
+            "provider intake {} canonical result is not exact: {error}",
+            row.1
+        ))
+    })?;
+    if chrono::DateTime::parse_from_rfc3339(&row.9).is_err() {
+        return Err(StoreError::Integrity(format!(
+            "provider intake {} acknowledgment has an invalid transaction timestamp",
+            row.1
+        )));
+    }
+    let expected = CanonicalDocument::from_serializable(&ProviderAcknowledgmentDocument {
+        schema: PROVIDER_INTAKE_ACK_SCHEMA,
+        acknowledgment_id: &row.0,
+        intake_id: &row.1,
+        attempt_id: &row.2,
+        run_id: &row.3,
+        provider_admission_id: &row.4,
+        intake_digest: &row.5,
+        raw_sha256: &row.6,
+        status_event_id: &row.7,
+        canonical_result_digest: canonical_result.digest(),
+        committed_at: &row.9,
+        establishes: "durable_custody_and_canonical_processing",
+        does_not_establish: [
+            "report_admission",
+            "detector_result",
+            "health",
+            "testimonial_sufficiency",
+            "authority",
+            "external_obligation_discharge",
+        ],
+    })?;
+    if expected.as_bytes() != detail.as_bytes() {
+        return Err(StoreError::Integrity(format!(
+            "provider intake {} acknowledgment substitutes its bound identities or canonical result",
+            row.1
+        )));
+    }
+    Ok(Some((
+        DurableIntakeAcknowledgment {
+            acknowledgment_id: row.0,
+            intake_id: row.1,
+            attempt_id: row.2,
+            run_id: row.3,
+            provider_admission_id: row.4,
+            intake_digest: row.5,
+            raw_sha256: row.6,
+            status_event_id: row.7,
+            canonical_result_digest: canonical_result.digest().to_owned(),
+            committed_at: row.9,
+            detail_json: detail.as_bytes().to_vec(),
+        },
+        canonical_result,
+    )))
+}
+
+fn collection_receipt_for_run(
+    connection: &Connection,
+    run_id: &str,
+) -> Result<CollectionReceipt, StoreError> {
+    let raw_sha256: Option<String> = connection
+        .query_row(
+            "SELECT raw_sha256 FROM raw_submissions WHERE run_id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let admitted: Option<(String, i64)> = connection
+        .query_row(
+            "SELECT report.semantic_digest, report.report_sequence
+             FROM raw_submissions AS submission
+             JOIN admitted_reports AS report ON report.submission_id = submission.submission_id
+             WHERE submission.run_id = ?1",
+            [run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let refusal_id: Option<String> = connection
+        .query_row(
+            "SELECT refusal.refusal_id
+             FROM raw_submissions AS submission
+             JOIN refusals AS refusal ON refusal.submission_id = submission.submission_id
+             WHERE submission.run_id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(CollectionReceipt {
+        raw_sha256,
+        semantic_digest: admitted.as_ref().map(|row| row.0.clone()),
+        report_sequence: admitted.map(|row| row.1),
+        refusal_id,
+    })
+}
+
 fn insert_collection(
     transaction: &Transaction<'_>,
     collection: &CollectionInput,
 ) -> Result<CollectionReceipt, StoreError> {
+    insert_provider_intake(transaction, &collection.intake)?;
     insert_run(transaction, &collection.run)?;
+    insert_local_provider_intake_link(
+        transaction,
+        &collection.intake.intake_id,
+        &collection.run.run_id,
+    )?;
     let mut receipt = CollectionReceipt {
         raw_sha256: None,
         semantic_digest: None,
@@ -5920,6 +8571,47 @@ mod tests {
         nq_protocol::sha256_bytes(label.as_bytes()).into_string()
     }
 
+    fn write_empty_exact_v3(path: &Path) {
+        let connection = Connection::open(path).expect("open exact schema-v3 fixture");
+        connection
+            .execute_batch(SCHEMA_V3)
+            .expect("install exact schema-v3 definition");
+        connection
+            .execute(
+                "INSERT INTO schema_metadata (
+                    singleton, product, schema_version,
+                    schema_artifact_digest, initialized_at
+                 ) VALUES (1, 'nq-ng', 3, ?1, ?2)",
+                params![SCHEMA_V3_ARTIFACT_DIGEST, TIME],
+            )
+            .expect("record exact schema-v3 identity");
+    }
+
+    fn exact_v3_to_v4_receipt(backup: &BackupArtifact) -> UpgradeReceiptInput {
+        UpgradeReceiptInput {
+            receipt_id: "upgrade-v3-v4-provider".to_owned(),
+            from_schema_version: 3,
+            to_schema_version: 4,
+            migrations: document(json!(["schema_v3_to_v4_provider_intake"])),
+            binary_digest: digest("migration-binary"),
+            backup_digest: backup.sha256.clone(),
+            backup_location: backup.path.to_string_lossy().into_owned(),
+            started_at: "2026-07-22T12:00:00Z".to_owned(),
+            finished_at: "2026-07-22T12:00:01Z".to_owned(),
+            result: "migrated".to_owned(),
+            operator_identity: document(json!({"uid": 991})),
+            verification: document(json!({
+                "integrity": "ok",
+                "source_schema_version": 3,
+                "source_schema_artifact_digest": SCHEMA_V3_ARTIFACT_DIGEST,
+                "backup_reopened": true,
+                "historical_provider_intake": "explicit_gap_only",
+                "provider_intakes_synthesized": false,
+                "acknowledgments_synthesized": false,
+            })),
+        }
+    }
+
     fn configured_store() -> (Store, String) {
         let mut store = Store::initialize_in_memory().expect("store initializes");
         let profile_digest = append_fixture_descriptor(&mut store);
@@ -6022,7 +8714,7 @@ mod tests {
             carrier: "stdio".to_owned(),
             started_at: TIME.to_owned(),
             deadline_at: "2026-07-16T12:00:10.000Z".to_owned(),
-            finished_at: "2026-07-16T12:00:01.000Z".to_owned(),
+            finished_at: TIME.to_owned(),
             acquisition_outcome: "response".to_owned(),
             execution_identity: document(json!({"uid": 991})),
             resource_outcome: document(json!({
@@ -6042,6 +8734,279 @@ mod tests {
                 "stderr_hex": "",
                 "outcome": {"outcome": "response"}
             })),
+        }
+    }
+
+    fn activate_fixture_provider(store: &mut Store, run: &RunInput, provider_admission_id: &str) {
+        let transaction = store
+            .immediate_transaction()
+            .expect("fixture binding writer");
+        let binding_event_id = uuid::Uuid::new_v4().to_string();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        insert_binding_event(
+            &transaction,
+            &BindingEventInput {
+                binding_event_id: binding_event_id.clone(),
+                instance_id: run.instance_id.clone(),
+                event_kind: "activate".to_owned(),
+                admission_id: Some(provider_admission_id.to_owned()),
+                binding_digest: run.binding_digest.clone(),
+                occurred_at: TIME.to_owned(),
+                reason_code: Some("provider_intake_fixture".to_owned()),
+                detail: document(json!({"fixture": true})),
+            },
+        )
+        .expect("fixture provider binding inserts");
+        for phase in ["intent", "completed"] {
+            insert_materialization_event(
+                &transaction,
+                &BindingMaterializationInput {
+                    materialization_event_id: uuid::Uuid::new_v4().to_string(),
+                    operation_id: operation_id.clone(),
+                    instance_id: run.instance_id.clone(),
+                    binding_event_id: binding_event_id.clone(),
+                    phase: phase.to_owned(),
+                    occurred_at: TIME.to_owned(),
+                    detail: document(json!({"fixture": true, "phase": phase})),
+                },
+            )
+            .expect("fixture provider materialization inserts");
+        }
+        transaction
+            .commit()
+            .expect("fixture provider binding commits");
+    }
+
+    fn fixture_collection(
+        store: &mut Store,
+        mut run: RunInput,
+        submission: Option<SubmissionInput>,
+    ) -> CollectionInput {
+        let source_admission_id = run
+            .admission_id
+            .as_deref()
+            .expect("live fixture run has provider admission")
+            .to_owned();
+        let admission = store
+            .admission(&source_admission_id)
+            .expect("fixture admission query")
+            .expect("fixture admission exists");
+        run.binding_digest = CanonicalDocument::from_canonical_bytes(admission.lock_json.clone())
+            .expect("fixture source lock canonical")
+            .digest()
+            .to_owned();
+        let execution_identity_bytes: Vec<u8> = store
+            .connection
+            .query_row(
+                "SELECT execution_chain_json FROM admission_records WHERE admission_id = ?1",
+                [&source_admission_id],
+                |row| row.get(0),
+            )
+            .expect("fixture source execution identity");
+        run.execution_identity = CanonicalDocument::from_canonical_bytes(execution_identity_bytes)
+            .expect("fixture execution identity canonical");
+        activate_fixture_provider(store, &run, &source_admission_id);
+        let provider_admission = store
+            .provider_admission_for_source(&source_admission_id)
+            .expect("fixture provider admission query")
+            .expect("fixture provider admission exists");
+        let conformance_bytes: Vec<u8> = store
+            .connection
+            .query_row(
+                "SELECT conformance_json FROM admission_records WHERE admission_id = ?1",
+                [&source_admission_id],
+                |row| row.get(0),
+            )
+            .expect("fixture conformance");
+        let conformance = CanonicalDocument::from_canonical_bytes(conformance_bytes)
+            .expect("fixture conformance canonical");
+        let raw_bytes = submission
+            .as_ref()
+            .map_or_else(Vec::new, |submission| submission.raw_bytes.clone());
+        let received_at = submission.as_ref().map_or_else(
+            || run.finished_at.clone(),
+            |submission| submission.received_at.clone(),
+        );
+        let (interpretation_kind, interpretation) = match submission.as_ref() {
+            Some(SubmissionInput {
+                protocol_outcome,
+                disposition: SubmissionDisposition::Admitted(report),
+                ..
+            }) if protocol_outcome == "valid_report" => (
+                "candidate_report".to_owned(),
+                report.canonical_report.clone(),
+            ),
+            Some(SubmissionInput {
+                raw_bytes,
+                protocol_outcome,
+                disposition: SubmissionDisposition::Rejected { .. },
+                ..
+            }) if protocol_outcome == "valid_report" => (
+                "candidate_report".to_owned(),
+                document(json!({
+                    "schema": "fixture.candidate_report.v1",
+                    "raw_sha256": sha256_digest(raw_bytes),
+                })),
+            ),
+            Some(SubmissionInput {
+                protocol_outcome,
+                disposition: SubmissionDisposition::Rejected { refusal },
+                ..
+            }) if protocol_outcome == "valid_refusal" => (
+                "provider_refusal".to_owned(),
+                document(json!({
+                    "schema": "fixture.provider_interpretation.v1",
+                    "refusal_id": refusal.refusal_id,
+                    "source_kind": refusal.source_kind,
+                    "code": refusal.code,
+                    "detail": serde_json::from_slice::<Value>(refusal.detail.as_bytes())
+                        .expect("fixture refusal detail JSON"),
+                })),
+            ),
+            Some(SubmissionInput {
+                protocol_outcome,
+                disposition: SubmissionDisposition::Rejected { refusal },
+                ..
+            }) if protocol_outcome == "rejected" => (
+                "protocol_rejected".to_owned(),
+                document(json!({
+                    "schema": "fixture.provider_interpretation.v1",
+                    "refusal_id": refusal.refusal_id,
+                    "source_kind": refusal.source_kind,
+                    "code": refusal.code,
+                    "detail": serde_json::from_slice::<Value>(refusal.detail.as_bytes())
+                        .expect("fixture refusal detail JSON"),
+                })),
+            ),
+            Some(SubmissionInput {
+                protocol_outcome,
+                disposition: SubmissionDisposition::Rejected { .. },
+                ..
+            }) if protocol_outcome == "not_validated" => {
+                ("unavailable".to_owned(), document(Value::Null))
+            }
+            None => ("unavailable".to_owned(), document(Value::Null)),
+            Some(submission) => panic!(
+                "fixture submission has unsupported protocol outcome {}",
+                submission.protocol_outcome
+            ),
+        };
+        let intake_id = format!("intake-{}", run.run_id);
+        let attempt_id = format!("attempt-{}", run.run_id);
+        let provider_admission_id = provider_admission.provider_admission_id;
+        let idempotency_key = provider_idempotency_key(&provider_admission_id, &attempt_id)
+            .expect("fixture provider idempotency identity");
+        let intake = ProviderIntakeInput {
+            intake_id,
+            attempt_id,
+            idempotency_key,
+            request_id: run.request_id.clone(),
+            provider_admission_id,
+            source_admission_id,
+            provider_sequence: None,
+            origin_carrier: run.carrier.clone(),
+            deadline_at: run.deadline_at.clone(),
+            checkpoint_contract_digest: run.checkpoint_contract_digest.clone(),
+            execution_identity_digest: Sha256Digest::parse(
+                run.execution_identity.digest().to_owned(),
+            )
+            .expect("fixture execution identity digest"),
+            admission_context_digest: Sha256Digest::parse(admission.admission_context_digest)
+                .expect("fixture admission context digest"),
+            provider_semantic_id: local_provider_semantic_id(
+                &admission.protocol_version,
+                &conformance,
+            )
+            .expect("fixture provider semantic identity"),
+            provider_artifact_digest: Sha256Digest::parse(admission.helper_artifact_digest)
+                .expect("fixture helper artifact digest"),
+            provider_protocol_identity: admission.protocol_version,
+            provider_config_digest: Sha256Digest::parse(admission.config_digest)
+                .expect("fixture config digest"),
+            binding_digest: run.binding_digest.clone(),
+            instance_id: run.instance_id.clone(),
+            profile_id: run.profile_id.clone(),
+            profile_version: run.profile_version.clone(),
+            profile_digest: run.profile_digest.clone(),
+            profile_semantic_id: Sha256Digest::parse(admission.profile_semantic_id)
+                .expect("fixture profile semantic identity"),
+            evaluator_artifact_digest: Sha256Digest::parse(admission.evaluator_artifact_digest)
+                .expect("fixture evaluator artifact digest"),
+            context: document(json!({
+                "schema": "fixture.provider_intake_context.v1",
+                "subject": format!("fixture:{}", run.instance_id),
+                "scope": {"kind": "fixture", "instance": run.instance_id},
+                "vantage": {"kind": "local"},
+                "requested_capabilities": [],
+                "declared_coverage": [],
+                "incomplete": false,
+            })),
+            interpretation_kind,
+            interpretation,
+            native_outcome_kind: run.acquisition_outcome.clone(),
+            native_outcome: run.resource_outcome.clone(),
+            raw_bytes,
+            started_at: run.started_at.clone(),
+            finished_at: run.finished_at.clone(),
+            received_at,
+        };
+        CollectionInput {
+            intake,
+            run,
+            submission,
+        }
+    }
+
+    fn bound_fixture_run(
+        store: &mut Store,
+        instance_id: &str,
+        suffix: &str,
+        profile_digest: &str,
+    ) -> RunInput {
+        let admission_id = format!("admission-provider-{suffix}");
+        append_fixture_admission(store, profile_digest, instance_id, &admission_id);
+        let mut run = run(instance_id, suffix, profile_digest);
+        run.admission_id = Some(admission_id);
+        run
+    }
+
+    fn rejected_fixture_collection(
+        store: &mut Store,
+        instance_id: &str,
+        suffix: &str,
+        profile_digest: &str,
+    ) -> CollectionInput {
+        let run = bound_fixture_run(store, instance_id, suffix, profile_digest);
+        fixture_collection(
+            store,
+            run,
+            Some(SubmissionInput {
+                submission_id: format!("submission-{suffix}"),
+                raw_bytes: format!("rejected-{suffix}\n").into_bytes(),
+                received_at: TIME.to_owned(),
+                protocol_outcome: "rejected".to_owned(),
+                disposition: SubmissionDisposition::Rejected {
+                    refusal: RefusalInput {
+                        refusal_id: format!("refusal-{suffix}"),
+                        source_kind: "protocol".to_owned(),
+                        responsible_instance_id: instance_id.to_owned(),
+                        boundary: "response".to_owned(),
+                        code: "invalid_response".to_owned(),
+                        profile_semantic_id: None,
+                        detail: document(json!({"fixture": suffix})),
+                        created_at: TIME.to_owned(),
+                    },
+                },
+            }),
+        )
+    }
+
+    fn committed_parts<T>(commit: ProviderIntakeCommit<T>) -> (CollectionReceipt, T) {
+        match commit {
+            ProviderIntakeCommit::Committed { receipt, value, .. } => (receipt, value),
+            ProviderIntakeCommit::Replayed { .. } => {
+                panic!("fresh fixture unexpectedly replayed provider intake")
+            }
         }
     }
 
@@ -6075,6 +9040,7 @@ mod tests {
     fn append_historical_run_with_result(store: &mut Store, run: &RunInput) {
         let transaction = store.immediate_transaction().expect("historical writer");
         insert_run(&transaction, run).expect("historical run insert");
+        insert_fixture_legacy_intake_gap(&transaction, &run.run_id);
         insert_status_event(
             &transaction,
             &StatusEventInput {
@@ -6090,6 +9056,27 @@ mod tests {
         )
         .expect("historical result insert");
         transaction.commit().expect("historical run commit");
+    }
+
+    fn insert_fixture_legacy_intake_gap(transaction: &Transaction<'_>, run_id: &str) {
+        transaction
+            .execute(
+                "INSERT INTO legacy_v3_watcher_run_intake_gaps (
+                    run_id, source_schema_version, source_schema_artifact_digest,
+                    limitation_code, detail_json, migrated_at
+                 ) VALUES (?1, 3, ?2, 'provider_intake_not_recorded', ?3, ?4)",
+                params![
+                    run_id,
+                    SCHEMA_V3_ARTIFACT_DIGEST,
+                    document(json!({
+                        "schema": "nq.legacy_provider_intake_gap.v1",
+                        "provider_intake_synthesized": false,
+                    }))
+                    .as_bytes(),
+                    TIME,
+                ],
+            )
+            .expect("fixture legacy provider-intake gap");
     }
 
     fn report(
@@ -6213,25 +9200,23 @@ mod tests {
         append_fixture_admission(store, profile_digest, instance_id, &admission_id);
         let mut bound_run = run(instance_id, suffix, profile_digest);
         bound_run.admission_id = Some(admission_id);
-        commit_admitted_fixture(
+        let collection = fixture_collection(
             store,
-            CollectionInput {
-                run: bound_run,
-                submission: Some(SubmissionInput {
-                    submission_id: format!("submission-{suffix}"),
-                    raw_bytes,
-                    received_at: TIME.to_owned(),
-                    protocol_outcome: "valid_exchange".to_owned(),
-                    disposition: SubmissionDisposition::Admitted(report(
-                        instance_id,
-                        suffix,
-                        profile_digest,
-                        canonical_report,
-                    )),
-                }),
-            },
-        )
-        .expect("collection commits")
+            bound_run,
+            Some(SubmissionInput {
+                submission_id: format!("submission-{suffix}"),
+                raw_bytes,
+                received_at: TIME.to_owned(),
+                protocol_outcome: "valid_report".to_owned(),
+                disposition: SubmissionDisposition::Admitted(report(
+                    instance_id,
+                    suffix,
+                    profile_digest,
+                    canonical_report,
+                )),
+            }),
+        );
+        commit_admitted_fixture(store, collection).expect("collection commits")
     }
 
     fn commit_admitted_fixture(
@@ -6251,32 +9236,35 @@ mod tests {
             }
             SubmissionDisposition::Rejected { .. } => panic!("admitted fixture disposition"),
         };
-        let (receipt, ()) = store.commit_admitted_collection(&collection, |_view, receipt| {
-            Ok::<_, StoreError>(AdmittedCollectionCompletion {
-                value: (),
-                evaluations: Vec::new(),
-                status: StatusEventInput {
-                    status_event_id: format!("status-{run_id}"),
-                    component_kind: "instance".to_owned(),
-                    component_id: instance_id.clone(),
-                    state: "healthy".to_owned(),
-                    code: "report_complete".to_owned(),
-                    detail: document(json!({
-                        "schema": "nq.collection_outcome.v2",
-                        "instance_id": instance_id,
-                        "run_id": run_id,
-                        "result": {
-                            "outcome": "admitted",
-                            "report_id": report_id,
-                            "report_status": report_status,
-                            "semantic_digest": receipt.semantic_digest,
-                            "evaluations": [],
-                        },
-                    })),
-                    observed_at: TIME.to_owned(),
-                },
-            })
-        })?;
+        let (receipt, ()) = committed_parts(store.commit_admitted_collection(
+            &collection,
+            |_view, receipt| {
+                Ok::<_, StoreError>(AdmittedCollectionCompletion {
+                    value: (),
+                    evaluations: Vec::new(),
+                    status: StatusEventInput {
+                        status_event_id: format!("status-{run_id}"),
+                        component_kind: "instance".to_owned(),
+                        component_id: instance_id.clone(),
+                        state: "healthy".to_owned(),
+                        code: "report_complete".to_owned(),
+                        detail: document(json!({
+                            "schema": "nq.collection_outcome.v2",
+                            "instance_id": instance_id,
+                            "run_id": run_id,
+                            "result": {
+                                "outcome": "admitted",
+                                "report_id": report_id,
+                                "report_status": report_status,
+                                "semantic_digest": receipt.semantic_digest,
+                                "evaluations": [],
+                            },
+                        })),
+                        observed_at: TIME.to_owned(),
+                    },
+                })
+            },
+        )?);
         Ok(receipt)
     }
 
@@ -6288,13 +9276,18 @@ mod tests {
         code: &str,
         detail: CanonicalDocument,
     ) -> CollectionReceipt {
-        let collection = CollectionInput {
-            run: run("fixture-a", suffix, profile_digest),
-            submission: Some(SubmissionInput {
+        let admission_id = format!("admission-{suffix}");
+        append_fixture_admission(store, profile_digest, "fixture-a", &admission_id);
+        let mut bound_run = run("fixture-a", suffix, profile_digest);
+        bound_run.admission_id = Some(admission_id);
+        let collection = fixture_collection(
+            store,
+            bound_run,
+            Some(SubmissionInput {
                 submission_id: format!("submission-{suffix}"),
                 raw_bytes: format!("raw-{suffix}\n").into_bytes(),
                 received_at: TIME.to_owned(),
-                protocol_outcome: "valid_refusal".to_owned(),
+                protocol_outcome: "rejected".to_owned(),
                 disposition: SubmissionDisposition::Rejected {
                     refusal: RefusalInput {
                         refusal_id: refusal_id.to_owned(),
@@ -6308,11 +9301,14 @@ mod tests {
                     },
                 },
             }),
-        };
+        );
         let result = non_success_status(&collection.run.run_id, "fixture-a", suffix);
-        store
-            .commit_non_success_collection(&collection, &result)
-            .expect("rejected collection commits")
+        committed_parts(
+            store
+                .commit_non_success_collection(&collection, &result)
+                .expect("rejected collection commits"),
+        )
+        .0
     }
 
     #[derive(Clone, Copy)]
@@ -6517,13 +9513,15 @@ mod tests {
     fn raw_submission_is_byte_exact_and_rejected_evidence_is_isolated() {
         let (mut store, profile_digest) = configured_store();
         let raw = vec![0, 0xff, b'\n', b'{', b'}', 0];
-        let collection = CollectionInput {
-            run: run("fixture-a", "rejected", &profile_digest),
-            submission: Some(SubmissionInput {
+        let bound_run = bound_fixture_run(&mut store, "fixture-a", "rejected", &profile_digest);
+        let collection = fixture_collection(
+            &mut store,
+            bound_run,
+            Some(SubmissionInput {
                 submission_id: "submission-rejected".to_owned(),
                 raw_bytes: raw.clone(),
                 received_at: TIME.to_owned(),
-                protocol_outcome: "malformed_framing".to_owned(),
+                protocol_outcome: "rejected".to_owned(),
                 disposition: SubmissionDisposition::Rejected {
                     refusal: RefusalInput {
                         refusal_id: "refusal-rejected".to_owned(),
@@ -6537,11 +9535,13 @@ mod tests {
                     },
                 },
             }),
-        };
+        );
         let result = non_success_status(&collection.run.run_id, "fixture-a", "rejected");
-        let receipt = store
-            .commit_non_success_collection(&collection, &result)
-            .expect("rejected custody commits");
+        let (receipt, ()) = committed_parts(
+            store
+                .commit_non_success_collection(&collection, &result)
+                .expect("rejected custody commits"),
+        );
         assert_eq!(
             receipt.raw_sha256,
             Some(nq_protocol::sha256_bytes(&raw).into_string())
@@ -6574,38 +9574,21 @@ mod tests {
     #[test]
     fn non_success_commit_is_atomic_and_ordinary_path_fails_closed() {
         let (mut store, profile_digest) = configured_store();
-        let incomplete = CollectionInput {
-            run: run("fixture-a", "incomplete-response", &profile_digest),
-            submission: None,
-        };
+        let incomplete_run = bound_fixture_run(
+            &mut store,
+            "fixture-a",
+            "incomplete-response",
+            &profile_digest,
+        );
+        let incomplete = fixture_collection(&mut store, incomplete_run, None);
         assert!(matches!(
             store.commit_collection(&incomplete),
             Err(StoreError::Invariant(message))
-                if message.contains("cannot prove a canonical completed-run result")
+                if message.contains("completed response requires an exact pre-admission interpretation")
         ));
-        let rejected = |suffix: &str| CollectionInput {
-            run: run("fixture-a", suffix, &profile_digest),
-            submission: Some(SubmissionInput {
-                submission_id: format!("submission-{suffix}"),
-                raw_bytes: format!("rejected-{suffix}\n").into_bytes(),
-                received_at: TIME.to_owned(),
-                protocol_outcome: "rejected".to_owned(),
-                disposition: SubmissionDisposition::Rejected {
-                    refusal: RefusalInput {
-                        refusal_id: format!("refusal-{suffix}"),
-                        source_kind: "protocol".to_owned(),
-                        responsible_instance_id: "fixture-a".to_owned(),
-                        boundary: "response".to_owned(),
-                        code: "invalid_response".to_owned(),
-                        profile_semantic_id: None,
-                        detail: document(json!({"fixture": suffix})),
-                        created_at: TIME.to_owned(),
-                    },
-                },
-            }),
-        };
 
-        let ordinary = rejected("ordinary");
+        let ordinary =
+            rejected_fixture_collection(&mut store, "fixture-a", "ordinary", &profile_digest);
         assert!(matches!(
             store.commit_collection(&ordinary),
             Err(StoreError::Invariant(message))
@@ -6623,7 +9606,8 @@ mod tests {
                 observed_at: TIME.to_owned(),
             })
             .expect("seed duplicate status identity");
-        let atomic = rejected("rollback");
+        let atomic =
+            rejected_fixture_collection(&mut store, "fixture-a", "rollback", &profile_digest);
         let mut result = non_success_status(&atomic.run.run_id, "fixture-a", "rollback");
         result.status.status_event_id = "status-duplicate".to_owned();
         assert!(
@@ -6634,6 +9618,12 @@ mod tests {
 
         for (table, column, identity) in [
             ("watcher_runs", "run_id", "run-rollback"),
+            (
+                "provider_intake_attempts",
+                "intake_id",
+                "intake-run-rollback",
+            ),
+            ("provider_intake_acknowledgments", "run_id", "run-rollback"),
             ("raw_submissions", "submission_id", "submission-rollback"),
             ("refusals", "refusal_id", "refusal-rollback"),
         ] {
@@ -6665,6 +9655,7 @@ mod tests {
         let historical = run("fixture-a", "historical-resultless", &profile_digest);
         let transaction = store.immediate_transaction().expect("historical writer");
         insert_run(&transaction, &historical).expect("insert resultless historical run");
+        insert_fixture_legacy_intake_gap(&transaction, &historical.run_id);
         transaction
             .commit()
             .expect("commit resultless historical run");
@@ -6727,13 +9718,14 @@ mod tests {
             admitted_run.admission_id = Some(admission_id);
             let run_id = admitted_run.run_id.clone();
             let report_id = format!("report-{suffix}");
-            let collection = CollectionInput {
-                run: admitted_run,
-                submission: Some(SubmissionInput {
+            let collection = fixture_collection(
+                &mut store,
+                admitted_run,
+                Some(SubmissionInput {
                     submission_id: format!("submission-{suffix}"),
                     raw_bytes: format!("suite {suffix}").into_bytes(),
                     received_at: TIME.to_owned(),
-                    protocol_outcome: "valid_exchange".to_owned(),
+                    protocol_outcome: "valid_report".to_owned(),
                     disposition: SubmissionDisposition::Admitted(report(
                         "fixture-a",
                         suffix,
@@ -6741,7 +9733,7 @@ mod tests {
                         document(json!({"suite": suffix})),
                     )),
                 }),
-            };
+            );
             let error = store
                 .commit_admitted_collection(&collection, |_view, receipt| {
                     let report_sequence = receipt.report_sequence.expect("pending report");
@@ -6860,13 +9852,14 @@ mod tests {
         let mut admitted_run = run("fixture-a", "atomic-admitted", &profile_digest);
         admitted_run.admission_id = Some("admission-atomic-admitted".to_owned());
         let run_id = admitted_run.run_id.clone();
-        let collection = CollectionInput {
-            run: admitted_run,
-            submission: Some(SubmissionInput {
+        let collection = fixture_collection(
+            &mut store,
+            admitted_run,
+            Some(SubmissionInput {
                 submission_id: "submission-atomic-admitted".to_owned(),
                 raw_bytes: b"atomic admitted".to_vec(),
                 received_at: TIME.to_owned(),
-                protocol_outcome: "valid_exchange".to_owned(),
+                protocol_outcome: "valid_report".to_owned(),
                 disposition: SubmissionDisposition::Admitted(report(
                     "fixture-a",
                     "atomic-admitted",
@@ -6874,7 +9867,7 @@ mod tests {
                     document(json!({"fixture": "atomic-admitted"})),
                 )),
             }),
-        };
+        );
         let error = store
             .commit_admitted_collection(&collection, |_view, receipt| {
                 let report_sequence = receipt.report_sequence.expect("pending report sequence");
@@ -6930,6 +9923,16 @@ mod tests {
         for (table, column, identity) in [
             ("watcher_runs", "run_id", "run-atomic-admitted"),
             (
+                "provider_intake_attempts",
+                "intake_id",
+                "intake-run-atomic-admitted",
+            ),
+            (
+                "provider_intake_acknowledgments",
+                "run_id",
+                "run-atomic-admitted",
+            ),
+            (
                 "raw_submissions",
                 "submission_id",
                 "submission-atomic-admitted",
@@ -6980,13 +9983,14 @@ mod tests {
         let mut admitted_run = run("fixture-a", "ordered-evaluations", &profile_digest);
         admitted_run.admission_id = Some("admission-ordered-evaluations".to_owned());
         let run_id = admitted_run.run_id.clone();
-        let collection = CollectionInput {
-            run: admitted_run,
-            submission: Some(SubmissionInput {
+        let collection = fixture_collection(
+            &mut store,
+            admitted_run,
+            Some(SubmissionInput {
                 submission_id: "submission-ordered-evaluations".to_owned(),
                 raw_bytes: b"ordered evaluations".to_vec(),
                 received_at: TIME.to_owned(),
-                protocol_outcome: "valid_exchange".to_owned(),
+                protocol_outcome: "valid_report".to_owned(),
                 disposition: SubmissionDisposition::Admitted(report(
                     "fixture-a",
                     "ordered-evaluations",
@@ -6994,7 +9998,7 @@ mod tests {
                     document(json!({"fixture": "ordered-evaluations"})),
                 )),
             }),
-        };
+        );
         let first_detail = json!({
             "code": "cannot_evaluate",
             "order": "first",
@@ -7144,13 +10148,14 @@ mod tests {
         );
         let mut admitted_run = run("fixture-a", "historical-admitted", &profile_digest);
         admitted_run.admission_id = Some("admission-historical-admitted".to_owned());
-        let collection = CollectionInput {
-            run: admitted_run,
-            submission: Some(SubmissionInput {
+        let collection = fixture_collection(
+            &mut store,
+            admitted_run,
+            Some(SubmissionInput {
                 submission_id: "submission-historical-admitted".to_owned(),
                 raw_bytes: b"historical admitted".to_vec(),
                 received_at: TIME.to_owned(),
-                protocol_outcome: "valid_exchange".to_owned(),
+                protocol_outcome: "valid_report".to_owned(),
                 disposition: SubmissionDisposition::Admitted(report(
                     "fixture-a",
                     "historical-admitted",
@@ -7158,7 +10163,7 @@ mod tests {
                     document(json!({"fixture": "historical-admitted"})),
                 )),
             }),
-        };
+        );
         let transaction = store.immediate_transaction().expect("historical writer");
         insert_collection(&transaction, &collection).expect("insert historical partial chain");
         transaction
@@ -7167,7 +10172,8 @@ mod tests {
         assert!(matches!(
             store.validate(),
             Err(StoreError::Integrity(message))
-                if message.contains("exactly one canonical run-linked result")
+                if message.contains("durable acknowledgment")
+                    || message.contains("exactly one canonical run-linked result")
         ));
     }
 
@@ -7192,13 +10198,14 @@ mod tests {
         let mut admitted_run = run("fixture-a", "historical-omitted-suite", &profile_digest);
         admitted_run.admission_id = Some("admission-historical-omitted-suite".to_owned());
         let run_id = admitted_run.run_id.clone();
-        let collection = CollectionInput {
-            run: admitted_run,
-            submission: Some(SubmissionInput {
+        let collection = fixture_collection(
+            &mut store,
+            admitted_run,
+            Some(SubmissionInput {
                 submission_id: "submission-historical-omitted-suite".to_owned(),
                 raw_bytes: b"historical omitted suite".to_vec(),
                 received_at: TIME.to_owned(),
-                protocol_outcome: "valid_exchange".to_owned(),
+                protocol_outcome: "valid_report".to_owned(),
                 disposition: SubmissionDisposition::Admitted(report(
                     "fixture-a",
                     "historical-omitted-suite",
@@ -7206,34 +10213,33 @@ mod tests {
                     document(json!({"historical": "omitted-suite"})),
                 )),
             }),
-        };
+        );
         let transaction = store.immediate_transaction().expect("historical writer");
         let receipt = insert_collection(&transaction, &collection).expect("historical collection");
-        insert_status_event(
-            &transaction,
-            &StatusEventInput {
-                status_event_id: "status-historical-omitted-suite".to_owned(),
-                component_kind: "instance".to_owned(),
-                component_id: "fixture-a".to_owned(),
-                state: "healthy".to_owned(),
-                code: "report_complete".to_owned(),
-                detail: document(json!({
-                    "schema": "nq.collection_outcome.v2",
-                    "instance_id": "fixture-a",
-                    "run_id": run_id,
-                    "result": {
-                        "outcome": "admitted",
-                        "report_id": "report-historical-omitted-suite",
-                        "report_status": "complete",
-                        "semantic_digest": receipt.semantic_digest,
-                        "evaluations": [],
-                    },
-                })),
-                observed_at: TIME.to_owned(),
-            },
-            Some(&run_id),
-        )
-        .expect("historical canonical result");
+        let status = StatusEventInput {
+            status_event_id: "status-historical-omitted-suite".to_owned(),
+            component_kind: "instance".to_owned(),
+            component_id: "fixture-a".to_owned(),
+            state: "healthy".to_owned(),
+            code: "report_complete".to_owned(),
+            detail: document(json!({
+                "schema": "nq.collection_outcome.v2",
+                "instance_id": "fixture-a",
+                "run_id": run_id,
+                "result": {
+                    "outcome": "admitted",
+                    "report_id": "report-historical-omitted-suite",
+                    "report_status": "complete",
+                    "semantic_digest": receipt.semantic_digest,
+                    "evaluations": [],
+                },
+            })),
+            observed_at: TIME.to_owned(),
+        };
+        insert_status_event(&transaction, &status, Some(&run_id))
+            .expect("historical canonical result");
+        insert_provider_acknowledgment(&transaction, &collection.intake, &run_id, &status)
+            .expect("historical provider acknowledgment");
         transaction.commit().expect("historical partial commit");
         drop(store);
 
@@ -7271,13 +10277,14 @@ mod tests {
         );
         admitted_run.admission_id = Some("admission-historical-substituted-evaluator".to_owned());
         let run_id = admitted_run.run_id.clone();
-        let collection = CollectionInput {
-            run: admitted_run,
-            submission: Some(SubmissionInput {
+        let collection = fixture_collection(
+            &mut store,
+            admitted_run,
+            Some(SubmissionInput {
                 submission_id: "submission-historical-substituted-evaluator".to_owned(),
                 raw_bytes: b"historical substituted evaluator".to_vec(),
                 received_at: TIME.to_owned(),
-                protocol_outcome: "valid_exchange".to_owned(),
+                protocol_outcome: "valid_report".to_owned(),
                 disposition: SubmissionDisposition::Admitted(report(
                     "fixture-a",
                     "historical-substituted-evaluator",
@@ -7285,7 +10292,7 @@ mod tests {
                     document(json!({"historical": "substituted-evaluator"})),
                 )),
             }),
-        };
+        );
         let evaluation_value = json!({"historical": "wrong-evaluator"});
         let evaluation_detail = document(evaluation_value.clone());
         let transaction = store.immediate_transaction().expect("historical writer");
@@ -7324,31 +10331,30 @@ mod tests {
                 params![report_sequence, TIME],
             )
             .expect("raw historical evaluation watermark");
-        insert_status_event(
-            &transaction,
-            &StatusEventInput {
-                status_event_id: "status-historical-substituted-evaluator".to_owned(),
-                component_kind: "instance".to_owned(),
-                component_id: "fixture-a".to_owned(),
-                state: "healthy".to_owned(),
-                code: "report_complete".to_owned(),
-                detail: document(json!({
-                    "schema": "nq.collection_outcome.v2",
-                    "instance_id": "fixture-a",
-                    "run_id": run_id,
-                    "result": {
-                        "outcome": "admitted",
-                        "report_id": "report-historical-substituted-evaluator",
-                        "report_status": "complete",
-                        "semantic_digest": receipt.semantic_digest,
-                        "evaluations": [evaluation_value],
-                    },
-                })),
-                observed_at: TIME.to_owned(),
-            },
-            Some(&run_id),
-        )
-        .expect("historical canonical result");
+        let status = StatusEventInput {
+            status_event_id: "status-historical-substituted-evaluator".to_owned(),
+            component_kind: "instance".to_owned(),
+            component_id: "fixture-a".to_owned(),
+            state: "healthy".to_owned(),
+            code: "report_complete".to_owned(),
+            detail: document(json!({
+                "schema": "nq.collection_outcome.v2",
+                "instance_id": "fixture-a",
+                "run_id": run_id,
+                "result": {
+                    "outcome": "admitted",
+                    "report_id": "report-historical-substituted-evaluator",
+                    "report_status": "complete",
+                    "semantic_digest": receipt.semantic_digest,
+                    "evaluations": [evaluation_value],
+                },
+            })),
+            observed_at: TIME.to_owned(),
+        };
+        insert_status_event(&transaction, &status, Some(&run_id))
+            .expect("historical canonical result");
+        insert_provider_acknowledgment(&transaction, &collection.intake, &run_id, &status)
+            .expect("historical provider acknowledgment");
         transaction.commit().expect("historical partial commit");
         drop(store);
 
@@ -7636,18 +10642,16 @@ mod tests {
 
     #[test]
     fn unknown_profile_submission_remains_queryable_quarantine() {
-        let mut store = Store::initialize_in_memory().expect("store initializes");
-        let unknown_digest = digest("unknown-profile");
-        let mut unknown_run = run("fixture-unknown", "unknown", &unknown_digest);
-        unknown_run.profile_id = "unknown.profile".to_owned();
-        unknown_run.profile_version = "99".to_owned();
-        let collection = CollectionInput {
-            run: unknown_run,
-            submission: Some(SubmissionInput {
+        let (mut store, profile_digest) = configured_store();
+        let bound_run = bound_fixture_run(&mut store, "fixture-a", "unknown", &profile_digest);
+        let collection = fixture_collection(
+            &mut store,
+            bound_run,
+            Some(SubmissionInput {
                 submission_id: "submission-unknown".to_owned(),
                 raw_bytes: b"{\"claimed_profile\":\"unknown.profile\"}\n".to_vec(),
                 received_at: TIME.to_owned(),
-                protocol_outcome: "valid_json".to_owned(),
+                protocol_outcome: "valid_report".to_owned(),
                 disposition: SubmissionDisposition::Rejected {
                     refusal: RefusalInput {
                         refusal_id: "refusal-unknown".to_owned(),
@@ -7655,7 +10659,7 @@ mod tests {
                         // semantic identity; retain it as upstream protocol
                         // quarantine rather than inventing profile meaning.
                         source_kind: "protocol".to_owned(),
-                        responsible_instance_id: "fixture-unknown".to_owned(),
+                        responsible_instance_id: "fixture-a".to_owned(),
                         boundary: "profile_registry".to_owned(),
                         code: "unknown_profile".to_owned(),
                         profile_semantic_id: None,
@@ -7664,11 +10668,13 @@ mod tests {
                     },
                 },
             }),
-        };
-        let result = non_success_status(&collection.run.run_id, "fixture-unknown", "unknown");
-        store
-            .commit_non_success_collection(&collection, &result)
-            .expect("unknown profile is retained as rejected custody");
+        );
+        let result = non_success_status(&collection.run.run_id, "fixture-a", "unknown");
+        committed_parts(
+            store
+                .commit_non_success_collection(&collection, &result)
+                .expect("unknown claimed profile is retained as rejected custody"),
+        );
         assert!(
             store
                 .raw_submission_bytes("submission-unknown")
@@ -8290,20 +11296,18 @@ mod tests {
                 document(json!({"report": suffix})),
             );
             admitted.next_checkpoint = Some(document(json!({"cursor": cursor})));
-            commit_admitted_fixture(
+            let collection = fixture_collection(
                 &mut store,
-                CollectionInput {
-                    run,
-                    submission: Some(SubmissionInput {
-                        submission_id: format!("submission-{suffix}"),
-                        raw_bytes: suffix.as_bytes().to_vec(),
-                        received_at: TIME.to_owned(),
-                        protocol_outcome: "valid_exchange".to_owned(),
-                        disposition: SubmissionDisposition::Admitted(admitted),
-                    }),
-                },
-            )
-            .expect("admitted checkpoint");
+                run,
+                Some(SubmissionInput {
+                    submission_id: format!("submission-{suffix}"),
+                    raw_bytes: suffix.as_bytes().to_vec(),
+                    received_at: TIME.to_owned(),
+                    protocol_outcome: "valid_report".to_owned(),
+                    disposition: SubmissionDisposition::Admitted(admitted),
+                }),
+            );
+            commit_admitted_fixture(&mut store, collection).expect("admitted checkpoint");
         }
 
         let cursor_a: Value = serde_json::from_slice(
@@ -8328,6 +11332,93 @@ mod tests {
                 .expect("unknown query")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn acknowledgment_insert_failure_rolls_back_checkpoint_and_complete_intake() {
+        let (mut store, profile_digest) = configured_store();
+        let admission_id = "admission-ack-checkpoint-rollback";
+        append_fixture_admission(&mut store, &profile_digest, "fixture-a", admission_id);
+        let mut run = run("fixture-a", "ack-checkpoint-rollback", &profile_digest);
+        run.admission_id = Some(admission_id.to_owned());
+        let checkpoint_contract = run.checkpoint_contract_digest.clone();
+        let mut admitted = report(
+            "fixture-a",
+            "ack-checkpoint-rollback",
+            &profile_digest,
+            document(json!({"report": "ack-checkpoint-rollback"})),
+        );
+        admitted.next_checkpoint = Some(document(json!({"cursor": "must-not-advance"})));
+        let collection = fixture_collection(
+            &mut store,
+            run,
+            Some(SubmissionInput {
+                submission_id: "submission-ack-checkpoint-rollback".to_owned(),
+                raw_bytes: b"ack-checkpoint-rollback".to_vec(),
+                received_at: TIME.to_owned(),
+                protocol_outcome: "valid_report".to_owned(),
+                disposition: SubmissionDisposition::Admitted(admitted),
+            }),
+        );
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER hostile_acknowledgment_insert_failure
+                 BEFORE INSERT ON provider_intake_acknowledgments
+                 BEGIN
+                   SELECT RAISE(ABORT, 'hostile acknowledgment insert failure');
+                 END;",
+            )
+            .expect("install hostile acknowledgment trigger");
+
+        let error = commit_admitted_fixture(&mut store, collection)
+            .expect_err("an acknowledgment failure must abort the admitted commit");
+        assert!(
+            error
+                .to_string()
+                .contains("hostile acknowledgment insert failure"),
+            "unexpected acknowledgment failure: {error}"
+        );
+        assert!(
+            store
+                .latest_checkpoint("fixture-a", &checkpoint_contract)
+                .expect("checkpoint lookup after rollback")
+                .is_none(),
+            "checkpoint became visible without a durable acknowledgment"
+        );
+        for (table, column, identity) in [
+            (
+                "provider_intake_attempts",
+                "intake_id",
+                "intake-run-ack-checkpoint-rollback",
+            ),
+            ("watcher_runs", "run_id", "run-ack-checkpoint-rollback"),
+            (
+                "raw_submissions",
+                "submission_id",
+                "submission-ack-checkpoint-rollback",
+            ),
+            (
+                "admitted_reports",
+                "report_id",
+                "report-ack-checkpoint-rollback",
+            ),
+            (
+                "provider_intake_acknowledgments",
+                "run_id",
+                "run-ack-checkpoint-rollback",
+            ),
+        ] {
+            let count: i64 = store
+                .connection
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?1"),
+                    [identity],
+                    |row| row.get(0),
+                )
+                .expect("count rolled-back acknowledged collection row");
+            assert_eq!(count, 0, "{table} survived acknowledgment failure");
+        }
     }
 
     #[test]
@@ -8432,29 +11523,29 @@ mod tests {
         let (mut store, profile_digest) = configured_store();
         // A run with no admission cannot carry an admitted report, and the
         // failed commit leaves neither the run nor the submission behind.
-        let unbound = run("fixture-a", "a", &profile_digest);
-        let error = commit_admitted_fixture(
+        let bound = bound_fixture_run(&mut store, "fixture-a", "a", &profile_digest);
+        let mut collection = fixture_collection(
             &mut store,
-            CollectionInput {
-                run: unbound,
-                submission: Some(SubmissionInput {
-                    submission_id: "submission-a".to_owned(),
-                    raw_bytes: b"raw".to_vec(),
-                    received_at: TIME.to_owned(),
-                    protocol_outcome: "valid_exchange".to_owned(),
-                    disposition: SubmissionDisposition::Admitted(report(
-                        "fixture-a",
-                        "a",
-                        &profile_digest,
-                        document(json!({"report": "a"})),
-                    )),
-                }),
-            },
-        )
-        .expect_err("an admitted report requires a run bound to an admission");
-        assert!(
-            matches!(error, StoreError::Invariant(message) if message.contains("bound to an admission"))
+            bound,
+            Some(SubmissionInput {
+                submission_id: "submission-a".to_owned(),
+                raw_bytes: b"raw".to_vec(),
+                received_at: TIME.to_owned(),
+                protocol_outcome: "valid_report".to_owned(),
+                disposition: SubmissionDisposition::Admitted(report(
+                    "fixture-a",
+                    "a",
+                    &profile_digest,
+                    document(json!({"report": "a"})),
+                )),
+            }),
         );
+        collection.run.admission_id = None;
+        let error = commit_admitted_fixture(&mut store, collection)
+            .expect_err("an admitted report requires a run bound to an admission");
+        assert!(matches!(error, StoreError::Invariant(message)
+                if message.contains("provider intake identity")
+                    || message.contains("bound to an admission")));
         let runs: i64 = store
             .connection
             .query_row("SELECT COUNT(*) FROM watcher_runs", [], |row| row.get(0))
@@ -8566,28 +11657,27 @@ mod tests {
         // refuse to bind the report to a context that does not govern its run.
         let mut foreign = run("instance-b", "b", &profile_digest);
         foreign.admission_id = Some("admission-a".to_owned());
-        let error = commit_admitted_fixture(
+        let collection = fixture_collection(
             &mut store,
-            CollectionInput {
-                run: foreign,
-                submission: Some(SubmissionInput {
-                    submission_id: "submission-b".to_owned(),
-                    raw_bytes: b"raw".to_vec(),
-                    received_at: TIME.to_owned(),
-                    protocol_outcome: "valid_exchange".to_owned(),
-                    disposition: SubmissionDisposition::Admitted(report(
-                        "instance-b",
-                        "b",
-                        &profile_digest,
-                        document(json!({"report": "b"})),
-                    )),
-                }),
-            },
-        )
-        .expect_err("a run cannot borrow another instance's admission");
-        assert!(
-            matches!(error, StoreError::Invariant(message) if message.contains("cannot bind admission"))
+            foreign,
+            Some(SubmissionInput {
+                submission_id: "submission-b".to_owned(),
+                raw_bytes: b"raw".to_vec(),
+                received_at: TIME.to_owned(),
+                protocol_outcome: "valid_report".to_owned(),
+                disposition: SubmissionDisposition::Admitted(report(
+                    "instance-b",
+                    "b",
+                    &profile_digest,
+                    document(json!({"report": "b"})),
+                )),
+            }),
         );
+        let error = commit_admitted_fixture(&mut store, collection)
+            .expect_err("a run cannot borrow another instance's admission");
+        assert!(matches!(error, StoreError::Invariant(message)
+                if message.contains("provider intake identity")
+                    || message.contains("cannot bind admission")));
 
         let mut substituted_profile = run("instance-a", "profile-substitution", &profile_digest);
         substituted_profile.admission_id = Some("admission-a".to_owned());
@@ -8857,5 +11947,685 @@ mod tests {
         assert_eq!(artifact.path, backup);
         assert!(artifact.sha256.starts_with("sha256:"));
         assert!(backup.is_file());
+    }
+
+    #[test]
+    fn provider_admission_is_derived_distinct_and_does_not_admit_a_report() {
+        let (mut store, profile_digest) = configured_store();
+        let source_admission_id = uuid::Uuid::new_v4().to_string();
+        append_fixture_admission(
+            &mut store,
+            &profile_digest,
+            "fixture-a",
+            &source_admission_id,
+        );
+        let provider = store
+            .provider_admission_for_source(&source_admission_id)
+            .expect("provider admission query")
+            .expect("derived provider admission");
+        assert_ne!(provider.provider_admission_id, source_admission_id);
+        assert_eq!(provider.provider_admission_id, provider.contract_digest);
+        assert_eq!(provider.source_admission_id, source_admission_id);
+        assert_eq!(provider.source_admitted_at, TIME);
+        assert_eq!(provider.derivation_kind, "admission_append");
+        chrono::DateTime::parse_from_rfc3339(&provider.derived_at)
+            .expect("provider derivation time is exact RFC 3339");
+        let contract: serde_json::Value =
+            serde_json::from_slice(&provider.contract_json).expect("provider contract JSON");
+        assert!(contract.get("source_admitted_at").is_none());
+        assert!(contract.get("derived_at").is_none());
+        assert!(contract.get("derivation_kind").is_none());
+        assert!(
+            store
+                .evidence_snapshot(&[])
+                .expect("empty evidence")
+                .reports
+                .is_empty()
+        );
+        store
+            .validate()
+            .expect("derived provider admission validates");
+    }
+
+    #[test]
+    fn provider_interpretation_cannot_disagree_with_raw_protocol_outcome() {
+        let (mut store, profile_digest) = configured_store();
+        let mut collection =
+            rejected_fixture_collection(&mut store, "fixture-a", "cross-plane", &profile_digest);
+        assert_eq!(collection.intake.interpretation_kind, "protocol_rejected");
+        collection
+            .submission
+            .as_mut()
+            .expect("rejected raw submission")
+            .protocol_outcome = "valid_refusal".to_owned();
+        let result = non_success_status(&collection.run.run_id, "fixture-a", "cross-plane");
+        assert!(matches!(
+            store.commit_non_success_collection(&collection, &result),
+            Err(StoreError::Invariant(message))
+                if message.contains("interpretation does not match")
+        ));
+        assert!(
+            store
+                .provider_intakes_bounded(10, None)
+                .expect("provider intake query")
+                .is_empty(),
+            "a cross-plane mismatch must fail before durable custody"
+        );
+    }
+
+    #[test]
+    fn provider_replay_is_exact_and_revocation_blocks_live_retry_not_history() {
+        let (mut store, profile_digest) = configured_store();
+        let collection =
+            rejected_fixture_collection(&mut store, "fixture-a", "replay", &profile_digest);
+        let result = non_success_status(&collection.run.run_id, "fixture-a", "replay");
+        let first = store
+            .commit_non_success_collection(&collection, &result)
+            .expect("initial provider intake commits");
+        let ProviderIntakeCommit::Committed {
+            acknowledgment: first_ack,
+            ..
+        } = first
+        else {
+            panic!("initial provider intake replayed");
+        };
+        let replay = store
+            .commit_non_success_collection(&collection, &result)
+            .expect("identical provider intake replays");
+        let ProviderIntakeCommit::Replayed {
+            acknowledgment: replay_ack,
+            ..
+        } = replay
+        else {
+            panic!("identical provider intake was re-evaluated");
+        };
+        assert_eq!(replay_ack, first_ack);
+
+        let mut changed_bytes = collection.clone();
+        changed_bytes.intake.raw_bytes.push(b'!');
+        changed_bytes
+            .submission
+            .as_mut()
+            .expect("rejected submission")
+            .raw_bytes
+            .push(b'!');
+        assert!(matches!(
+            store.commit_non_success_collection(&changed_bytes, &result),
+            Err(StoreError::ReplayConflict(_))
+        ));
+        for (field, value) in [
+            ("subject", json!({"subject": "substituted"})),
+            ("scope", json!({"scope": {"kind": "other"}})),
+            ("vantage", json!({"vantage": {"kind": "remote"}})),
+            (
+                "unsupported_capability",
+                json!({"granted_capabilities": ["external_actuation"]}),
+            ),
+        ] {
+            let mut changed_context = collection.clone();
+            changed_context.intake.context = document(json!({
+                "schema": "fixture.provider_intake_context.v1",
+                "mutated_field": field,
+                "request": value,
+            }));
+            assert!(matches!(
+                store.commit_non_success_collection(&changed_context, &result),
+                Err(StoreError::ReplayConflict(_))
+            ));
+        }
+        let mut changed_sequence = collection.clone();
+        changed_sequence.intake.provider_sequence = Some("provider-sequence-2".to_owned());
+        assert!(matches!(
+            store.commit_non_success_collection(&changed_sequence, &result),
+            Err(StoreError::Invariant(message)) if message.contains("provider sequence")
+        ));
+        let mut changed_profile = collection.clone();
+        changed_profile.intake.profile_semantic_id = typed_digest("substituted-profile");
+        assert!(matches!(
+            store.commit_non_success_collection(&changed_profile, &result),
+            Err(StoreError::Invariant(_))
+        ));
+        let mut changed_evaluator = collection.clone();
+        changed_evaluator.intake.evaluator_artifact_digest = typed_digest("substituted-evaluator");
+        assert!(matches!(
+            store.commit_non_success_collection(&changed_evaluator, &result),
+            Err(StoreError::Invariant(_))
+        ));
+
+        let replacement_source = uuid::Uuid::new_v4().to_string();
+        append_fixture_admission(
+            &mut store,
+            &profile_digest,
+            "fixture-a",
+            &replacement_source,
+        );
+        let mut replacement_run = collection.run.clone();
+        replacement_run.admission_id = Some(replacement_source);
+        let replacement =
+            fixture_collection(&mut store, replacement_run, collection.submission.clone());
+        assert_ne!(
+            replacement.intake.provider_admission_id,
+            collection.intake.provider_admission_id
+        );
+        assert!(matches!(
+            store.preflight_provider_intake(&collection.intake),
+            Err(StoreError::Invariant(message)) if message.contains("not the current")
+        ));
+        let historical_after_replacement = store
+            .provider_intake_acknowledgment(&collection.intake.idempotency_key)
+            .expect("historical acknowledgment after provider replacement")
+            .expect("replaced provider history remains reopenable");
+        assert_eq!(historical_after_replacement.0, first_ack);
+        assert!(matches!(
+            store.commit_non_success_collection(&replacement, &result),
+            Err(StoreError::ReplayConflict(_))
+        ));
+
+        let transaction = store.immediate_transaction().expect("revocation writer");
+        let binding_event_id = uuid::Uuid::new_v4().to_string();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        insert_binding_event(
+            &transaction,
+            &BindingEventInput {
+                binding_event_id: binding_event_id.clone(),
+                instance_id: collection.run.instance_id.clone(),
+                event_kind: "revoke".to_owned(),
+                admission_id: None,
+                binding_digest: collection.run.binding_digest.clone(),
+                occurred_at: TIME.to_owned(),
+                reason_code: Some("hostile_replay_test".to_owned()),
+                detail: document(json!({})),
+            },
+        )
+        .expect("revocation inserts");
+        for phase in ["intent", "completed"] {
+            insert_materialization_event(
+                &transaction,
+                &BindingMaterializationInput {
+                    materialization_event_id: uuid::Uuid::new_v4().to_string(),
+                    operation_id: operation_id.clone(),
+                    instance_id: collection.run.instance_id.clone(),
+                    binding_event_id: binding_event_id.clone(),
+                    phase: phase.to_owned(),
+                    occurred_at: TIME.to_owned(),
+                    detail: document(json!({"phase": phase})),
+                },
+            )
+            .expect("revocation materialization inserts");
+        }
+        transaction.commit().expect("revocation commits");
+        assert!(matches!(
+            store.preflight_provider_intake(&collection.intake),
+            Err(StoreError::Invariant(message)) if message.contains("not the current")
+        ));
+        let historical = store
+            .provider_intake_acknowledgment(&collection.intake.idempotency_key)
+            .expect("historical acknowledgment query")
+            .expect("historical acknowledgment remains");
+        assert_eq!(historical.0, first_ack);
+    }
+
+    #[test]
+    fn lossy_native_outcome_retains_partial_outer_bytes_without_report_admission() {
+        let (mut store, profile_digest) = configured_store();
+        let mut failed_run =
+            bound_fixture_run(&mut store, "fixture-a", "partial-loss", &profile_digest);
+        failed_run.acquisition_outcome = "output_too_large".to_owned();
+        failed_run.resource_outcome = document(json!({
+            "schema": "nq.run_resource_outcome.v1",
+            "duration_ms": 7,
+            "exit_code": null,
+            "hard_limits": {
+                "address_space_bytes_per_process": 1,
+                "cpu_seconds_per_process": 1,
+                "processes_per_execution_uid": 1,
+                "open_files_per_process": 1,
+                "file_bytes_per_regular_file": 1,
+                "core_bytes": 0
+            },
+            "stdout_bytes_retained": 4,
+            "stderr_bytes_retained": 2,
+            "stderr_hex": "6f6b",
+            "outcome": {"outcome": "output_too_large"},
+        }));
+        let mut collection = fixture_collection(&mut store, failed_run, None);
+        collection.intake.raw_bytes = b"part".to_vec();
+        let result = non_success_status(&collection.run.run_id, "fixture-a", "partial-loss");
+        committed_parts(
+            store
+                .commit_non_success_collection(&collection, &result)
+                .expect("lossy attempt commits exact intake"),
+        );
+        let row = store
+            .provider_intake(&collection.intake.intake_id)
+            .expect("provider intake query")
+            .expect("provider intake exists");
+        assert_eq!(row.native_outcome_kind, "output_too_large");
+        let native: serde_json::Value =
+            serde_json::from_slice(&row.native_outcome_json).expect("typed native outcome JSON");
+        assert_eq!(
+            native.pointer("/outcome/outcome").and_then(Value::as_str),
+            Some("output_too_large")
+        );
+        assert_eq!(
+            native.get("stdout_bytes_retained").and_then(Value::as_u64),
+            Some(4)
+        );
+        assert_eq!(
+            native.get("stderr_hex").and_then(Value::as_str),
+            Some("6f6b")
+        );
+        assert!(native.get("incomplete").is_none());
+        assert!(native.get("loss").is_none());
+        assert_eq!(row.interpretation_kind, "unavailable");
+        assert_eq!(
+            store
+                .provider_intake_raw_bytes(&collection.intake.intake_id)
+                .expect("raw provider bytes"),
+            Some(b"part".to_vec())
+        );
+        assert!(row.context_digest.starts_with("sha256:"));
+        assert!(
+            store
+                .evidence_snapshot(&[])
+                .expect("evidence query")
+                .reports
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn v3_upgrade_refuses_an_unrelated_valid_backup_with_a_different_logical_state() {
+        let directory = tempdir().expect("temporary directory");
+        let source_a = directory.path().join("schema-v3-a.db");
+        let source_b = directory.path().join("schema-v3-b.db");
+        let backup = directory.path().join("schema-v3-a.backup.db");
+        write_empty_exact_v3(&source_a);
+        write_empty_exact_v3(&source_b);
+
+        // A and B are independently valid exact-v3 stores. The extra durable
+        // fact makes their logical states different without corrupting B.
+        let connection = Connection::open(&source_b).expect("reopen v3 source B");
+        connection
+            .execute(
+                "INSERT INTO retention_tombstones (
+                    tombstone_id, target_kind, target_id, target_digest,
+                    reason_code, detail_json, created_at
+                 ) VALUES ('after-backup', 'fixture', 'new-state', NULL,
+                           'fixture_change', CAST('{}' AS BLOB), ?1)",
+                [TIME],
+            )
+            .expect("append a valid source-B fact");
+        drop(connection);
+        drop(
+            Store::open_v3_upgrade_source_read_only(&source_a).expect("source A is valid exact v3"),
+        );
+        drop(
+            Store::open_v3_upgrade_source_read_only(&source_b).expect("source B is valid exact v3"),
+        );
+        let backup =
+            Store::backup_v3_verified(&source_a, &backup).expect("verified backup of source A");
+
+        let error = Store::upgrade_v3_to_v4(&source_b, &exact_v3_to_v4_receipt(&backup))
+            .err()
+            .expect("source A's valid backup cannot authorize migration of source B");
+        assert!(matches!(
+            error,
+            StoreError::Invariant(message) if message.contains("logical state")
+        ));
+        assert_eq!(Store::database_schema_version(&source_a).unwrap(), 3);
+        assert_eq!(Store::database_schema_version(&source_b).unwrap(), 3);
+        assert_eq!(Store::database_schema_version(&backup.path).unwrap(), 3);
+    }
+
+    #[test]
+    fn v3_upgrade_receipt_has_closed_vocabulary_and_ordered_rfc3339_times() {
+        let directory = tempdir().expect("temporary directory");
+        let source = directory.path().join("schema-v3.db");
+        let backup_path = directory.path().join("schema-v3.backup.db");
+        write_empty_exact_v3(&source);
+        let backup = Store::backup_v3_verified(&source, &backup_path).expect("verified v3 backup");
+        let receipt = exact_v3_to_v4_receipt(&backup);
+
+        let aliased_backup_path = directory.path().join("schema-v3.alias.db");
+        std::fs::hard_link(&source, &aliased_backup_path).expect("hard-link source alias");
+        let mut aliased_backup = receipt.clone();
+        aliased_backup.backup_location = aliased_backup_path.to_string_lossy().into_owned();
+        aliased_backup.backup_digest = sha256_file(&aliased_backup_path).unwrap();
+        assert!(matches!(
+            Store::upgrade_v3_to_v4(&source, &aliased_backup),
+            Err(StoreError::Invariant(message)) if message.contains("distinct from the source")
+        ));
+        std::fs::remove_file(&aliased_backup_path).expect("remove hard-link fixture");
+
+        let mut wrong_migration = receipt.clone();
+        wrong_migration.migrations = document(json!(["schema_v3_to_v4_provider.sql"]));
+        assert!(matches!(
+            Store::upgrade_v3_to_v4(&source, &wrong_migration),
+            Err(StoreError::Invariant(message)) if message.contains("migration vocabulary")
+        ));
+
+        let mut wrong_result = receipt.clone();
+        wrong_result.result = "success".to_owned();
+        assert!(matches!(
+            Store::upgrade_v3_to_v4(&source, &wrong_result),
+            Err(StoreError::Invariant(message)) if message.contains("exactly migrated")
+        ));
+        let mut current = Store::initialize_in_memory().expect("current store");
+        assert!(matches!(
+            current.append_upgrade_receipt(&wrong_result),
+            Err(StoreError::Invariant(message)) if message.contains("exactly migrated")
+        ));
+        let forged_receipts: i64 = current
+            .connection
+            .query_row("SELECT COUNT(*) FROM upgrade_receipts", [], |row| {
+                row.get(0)
+            })
+            .expect("count rejected receipt writes");
+        assert_eq!(forged_receipts, 0);
+
+        let mut omitted_verification = receipt.clone();
+        omitted_verification.verification = document(json!({
+            "integrity": "ok",
+            "source_schema_version": 3,
+            "source_schema_artifact_digest": SCHEMA_V3_ARTIFACT_DIGEST,
+            "backup_reopened": true,
+            "historical_provider_intake": "explicit_gap_only",
+            "provider_intakes_synthesized": false,
+        }));
+        assert!(matches!(
+            Store::upgrade_v3_to_v4(&source, &omitted_verification),
+            Err(StoreError::Invariant(message)) if message.contains("closed vocabulary")
+        ));
+
+        let mut extended_verification = receipt.clone();
+        extended_verification.verification = document(json!({
+            "integrity": "ok",
+            "source_schema_version": 3,
+            "source_schema_artifact_digest": SCHEMA_V3_ARTIFACT_DIGEST,
+            "backup_reopened": true,
+            "historical_provider_intake": "explicit_gap_only",
+            "provider_intakes_synthesized": false,
+            "acknowledgments_synthesized": false,
+            "waived": true,
+        }));
+        assert!(matches!(
+            Store::upgrade_v3_to_v4(&source, &extended_verification),
+            Err(StoreError::Invariant(message)) if message.contains("closed vocabulary")
+        ));
+
+        let mut malformed_time = receipt.clone();
+        malformed_time.started_at = "not-a-time".to_owned();
+        assert!(matches!(
+            Store::upgrade_v3_to_v4(&source, &malformed_time),
+            Err(StoreError::Invariant(message)) if message.contains("RFC 3339")
+        ));
+
+        let mut reversed_time = receipt;
+        reversed_time.started_at = "2026-07-22T12:00:02Z".to_owned();
+        reversed_time.finished_at = "2026-07-22T12:00:01Z".to_owned();
+        assert!(matches!(
+            Store::upgrade_v3_to_v4(&source, &reversed_time),
+            Err(StoreError::Invariant(message)) if message.contains("precedes")
+        ));
+        assert_eq!(
+            Store::database_schema_version(&source).unwrap(),
+            3,
+            "hostile receipts cannot partially migrate the source"
+        );
+    }
+
+    #[test]
+    fn exact_v3_upgrade_derives_provider_authority_but_not_intake_evidence() {
+        let directory = tempdir().expect("temporary directory");
+        let source = directory.path().join("schema-v3.db");
+        let backup = directory.path().join("schema-v3.backup.db");
+        let source_admission_id = uuid::Uuid::new_v4().to_string();
+        let descriptor = document(json!({
+            "profile_id": "fixture.health",
+            "profile_version": "1",
+        }));
+        let profile_digest = descriptor.digest().to_owned();
+        let admission = AdmissionInput {
+            admission_id: source_admission_id.clone(),
+            instance_id: "fixture-a".to_owned(),
+            identity: fixture_identity(),
+            execution_chain: document(json!({"artifacts": []})),
+            profile_id: "fixture.health".to_owned(),
+            profile_version: "1".to_owned(),
+            profile_digest: profile_digest.clone(),
+            capability_grant: document(json!([])),
+            conformance: document(json!({"passed": true})),
+            lock: document(json!({"source": "qualified-v3"})),
+            admitted_at: TIME.to_owned(),
+            operator_identity: document(json!({"uid": 991})),
+        };
+        {
+            let mut connection = Connection::open(&source).expect("open v3 fixture");
+            configure_connection(&connection, true).expect("configure v3 fixture");
+            let transaction = connection.transaction().expect("v3 fixture transaction");
+            transaction
+                .execute_batch(SCHEMA_V3)
+                .expect("apply exact v3 schema");
+            transaction
+                .execute(
+                    "INSERT INTO schema_metadata (
+                        singleton, product, schema_version,
+                        schema_artifact_digest, initialized_at
+                     ) VALUES (1, 'nq-ng', 3, ?1, ?2)",
+                    params![SCHEMA_V3_ARTIFACT_DIGEST, TIME],
+                )
+                .expect("v3 metadata");
+            transaction
+                .execute(
+                    "INSERT INTO profile_descriptor_snapshots (
+                        profile_id, profile_version, profile_digest,
+                        descriptor_json, recorded_at
+                     ) VALUES ('fixture.health', '1', ?1, ?2, ?3)",
+                    params![profile_digest, descriptor.as_bytes(), TIME],
+                )
+                .expect("v3 descriptor");
+            let identity = &admission.identity;
+            transaction
+                .execute(
+                    "INSERT INTO admission_records (
+                        admission_id, instance_id, config_digest,
+                        helper_artifact_digest, profile_semantic_id,
+                        detector_identity_digest, evaluator_source_digest,
+                        evaluator_artifact_digest, admission_context_digest,
+                        execution_chain_json, profile_id, profile_version,
+                        profile_digest, protocol_version, target_triple,
+                        artifact_identity_method, platform_runtime_version,
+                        capability_grant_json, conformance_json, lock_json,
+                        admitted_at, operator_identity_json
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                               ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19,
+                               ?20, ?21, ?22)",
+                    params![
+                        admission.admission_id,
+                        admission.instance_id,
+                        identity.config_digest.as_str(),
+                        identity.helper_artifact_digest.as_str(),
+                        identity.profile_semantic_id.as_str(),
+                        identity.detector_identity_digest.as_str(),
+                        identity.evaluator_source_digest.as_str(),
+                        identity.evaluator_artifact_digest.as_str(),
+                        identity.context_digest().expect("v3 admission context"),
+                        admission.execution_chain.as_bytes(),
+                        admission.profile_id,
+                        admission.profile_version,
+                        admission.profile_digest,
+                        identity.protocol_version,
+                        identity.target_triple,
+                        identity.artifact_identity_method,
+                        identity.platform_runtime_version,
+                        admission.capability_grant.as_bytes(),
+                        admission.conformance.as_bytes(),
+                        admission.lock.as_bytes(),
+                        admission.admitted_at,
+                        admission.operator_identity.as_bytes(),
+                    ],
+                )
+                .expect("v3 admission");
+            let mut historical_run = run("fixture-a", "migrated-v3", &profile_digest);
+            historical_run.admission_id = Some(source_admission_id.clone());
+            insert_run(&transaction, &historical_run).expect("v3 watcher run");
+            let mut historical_report = report(
+                "fixture-a",
+                "migrated-v3",
+                &profile_digest,
+                document(json!({"source": "qualified-v3"})),
+            );
+            historical_report.next_checkpoint =
+                Some(document(json!({"cursor": "historical-v3-only"})));
+            let raw_bytes = historical_report.canonical_report.as_bytes().to_vec();
+            transaction
+                .execute(
+                    "INSERT INTO raw_submissions (
+                        submission_id, run_id, raw_bytes, raw_sha256, received_at,
+                        protocol_outcome, admission_outcome, rejection_code
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, 'valid_report', 'admitted', NULL)",
+                    params![
+                        "submission-migrated-v3",
+                        historical_run.run_id,
+                        raw_bytes,
+                        sha256_digest(historical_report.canonical_report.as_bytes()),
+                        TIME,
+                    ],
+                )
+                .expect("v3 raw admitted submission");
+            let admission_context_digest = admission
+                .identity
+                .context_digest()
+                .expect("v3 admission context");
+            insert_report(
+                &transaction,
+                "submission-migrated-v3",
+                &historical_report,
+                &admission_context_digest,
+            )
+            .expect("v3 admitted report with historical checkpoint");
+            insert_status_event(
+                &transaction,
+                &StatusEventInput {
+                    status_event_id: "status-migrated-v3".to_owned(),
+                    component_kind: "instance".to_owned(),
+                    component_id: "fixture-a".to_owned(),
+                    state: "healthy".to_owned(),
+                    code: "report_complete".to_owned(),
+                    detail: document(json!({
+                        "schema": "nq.collection_outcome.v2",
+                        "instance_id": "fixture-a",
+                        "run_id": historical_run.run_id,
+                        "result": {
+                            "outcome": "admitted",
+                            "report_id": historical_report.report_id,
+                            "report_status": historical_report.report_status,
+                            "semantic_digest": historical_report.canonical_report.digest(),
+                            "evaluations": [],
+                        },
+                    })),
+                    observed_at: TIME.to_owned(),
+                },
+                Some(&historical_run.run_id),
+            )
+            .expect("v3 run result");
+            transaction.commit().expect("commit exact v3 fixture");
+        }
+        assert_eq!(
+            Store::database_schema_version(&source).expect("v3 version"),
+            3
+        );
+        let backup_artifact =
+            Store::backup_v3_verified(&source, &backup).expect("verified v3 backup");
+        let receipt = UpgradeReceiptInput {
+            receipt_id: "upgrade-v3-v4-provider".to_owned(),
+            from_schema_version: 3,
+            to_schema_version: 4,
+            migrations: document(json!(["schema_v3_to_v4_provider_intake"])),
+            binary_digest: digest("migration-binary"),
+            backup_digest: backup_artifact.sha256.clone(),
+            backup_location: backup.to_string_lossy().into_owned(),
+            started_at: TIME.to_owned(),
+            finished_at: TIME.to_owned(),
+            result: "migrated".to_owned(),
+            operator_identity: document(json!({"uid": 991})),
+            verification: document(json!({
+                "integrity": "ok",
+                "source_schema_version": 3,
+                "source_schema_artifact_digest": SCHEMA_V3_ARTIFACT_DIGEST,
+                "backup_reopened": true,
+                "historical_provider_intake": "explicit_gap_only",
+                "provider_intakes_synthesized": false,
+                "acknowledgments_synthesized": false,
+            })),
+        };
+        let migrated = Store::upgrade_v3_to_v4(&source, &receipt).expect("exact v3 upgrades to v4");
+        assert_eq!(
+            Store::database_schema_version(&source).expect("v4 version"),
+            4
+        );
+        assert_eq!(
+            Store::database_schema_version(&backup).expect("backup version"),
+            3
+        );
+        let provider = migrated
+            .provider_admission_for_source(&source_admission_id)
+            .expect("migrated provider query")
+            .expect("migrated provider admission derived");
+        assert_ne!(provider.provider_admission_id, source_admission_id);
+        assert_eq!(provider.provider_admission_id, provider.contract_digest);
+        assert_eq!(provider.source_admitted_at, TIME);
+        assert_eq!(provider.derivation_kind, "schema_v3_migration");
+        chrono::DateTime::parse_from_rfc3339(&provider.derived_at)
+            .expect("migration derivation time is exact RFC 3339");
+        let contract: serde_json::Value =
+            serde_json::from_slice(&provider.contract_json).expect("provider contract JSON");
+        assert!(contract.get("source_admitted_at").is_none());
+        assert!(contract.get("derived_at").is_none());
+        assert!(contract.get("derivation_kind").is_none());
+        assert!(
+            migrated
+                .provider_intakes_bounded(10, None)
+                .expect("intakes")
+                .is_empty()
+        );
+        let gaps = migrated
+            .legacy_provider_intake_gaps_bounded(10, None)
+            .expect("legacy gaps");
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0].run_id, "run-migrated-v3");
+        assert_eq!(provider.derived_at, gaps[0].migrated_at);
+        let acknowledgment_count: i64 = migrated
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM provider_intake_acknowledgments",
+                [],
+                |row| row.get(0),
+            )
+            .expect("acknowledgment count");
+        assert_eq!(acknowledgment_count, 0);
+        let historical_checkpoint: Vec<u8> = migrated
+            .connection
+            .query_row(
+                "SELECT next_checkpoint_json FROM admitted_reports
+                 WHERE report_id = 'report-migrated-v3'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("historical v3 checkpoint remains preserved");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&historical_checkpoint)
+                .expect("decode preserved historical checkpoint"),
+            json!({"cursor": "historical-v3-only"})
+        );
+        assert!(
+            migrated
+                .latest_checkpoint("fixture-a", &digest("checkpoint-fixture-a"))
+                .expect("query migrated v3 checkpoint eligibility")
+                .is_none(),
+            "a migrated checkpoint without a real provider acknowledgment cannot advance live intake"
+        );
+        migrated.validate().expect("migrated v4 validates");
     }
 }

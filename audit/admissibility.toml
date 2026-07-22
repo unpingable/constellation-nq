@@ -33,6 +33,26 @@ file = "crates/nq-core/src/engine.rs"
 
 [[bindings]]
 role = "rich_packet"
+symbol = "nq_core::provider_intake::ProviderIdentityV1"
+file = "crates/nq-core/src/provider_intake.rs"
+
+[[bindings]]
+role = "rich_packet"
+symbol = "nq_core::provider_intake::ProviderResponseInterpretationV1"
+file = "crates/nq-core/src/provider_intake.rs"
+
+[[bindings]]
+role = "rich_packet"
+symbol = "nq_core::provider_intake::ProviderIntakeRecordV1"
+file = "crates/nq-core/src/provider_intake.rs"
+
+[[bindings]]
+role = "rich_packet"
+symbol = "nq_store::DurableIntakeAcknowledgment"
+file = "crates/nq-store/src/lib.rs"
+
+[[bindings]]
+role = "rich_packet"
 symbol = "nq_core::engine::AdmissionRefusal"
 file = "crates/nq-core/src/engine.rs"
 
@@ -183,6 +203,16 @@ file = "crates/nq-core/src/engine.rs"
 
 [[bindings]]
 role = "stored_detail_renderer"
+symbol = "nq_core::provider_intake::ProviderIntakeRecordV1::reopen_store_row"
+file = "crates/nq-core/src/provider_intake.rs"
+
+[[bindings]]
+role = "stored_detail_renderer"
+symbol = "nq_core::engine::validate_provider_intake_history"
+file = "crates/nq-core/src/engine.rs"
+
+[[bindings]]
+role = "stored_detail_renderer"
 symbol = "nq_core::engine::finding_from_row"
 file = "crates/nq-core/src/engine.rs"
 
@@ -268,6 +298,20 @@ forbidden_uses = [
   "operator diagnosis",
   "qualification predicate",
   "archive testimony without the exact AcquisitionFailure.outcome",
+]
+
+[[projections]]
+file = "crates/nq-core/src/provider_intake.rs"
+owner_type = "ProviderResponseInterpretationV1"
+function = "kind"
+runtime_type = "nq_core::provider_intake::ProviderResponseInterpretationV1"
+classification = "non_testimonial"
+allowed_uses = ["stable storage comparison", "bounded indexing"]
+forbidden_uses = [
+  "provider diagnosis without the exact typed interpretation",
+  "report admission",
+  "qualification predicate",
+  "testimonial output without the exact typed interpretation",
 ]
 
 [[projections]]
@@ -588,6 +632,78 @@ id = "public-evaluation-history-crosses-maximum-page"
 kind = "surface_forcing"
 surface = "status-read-model"
 command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::public_evaluation_history_crosses_the_maximum_page_without_silent_truncation", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "provider-intake-preserves-exact-raw-refusal-and-context"
+kind = "surface_forcing"
+surface = "sqlite-history"
+command = ["cargo", "test", "--offline", "-p", "nq-core", "provider_intake::tests::exact_raw_refusal_and_context_are_one_validated_intake", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "provider-intake-preserves-partial-timeout-bytes"
+kind = "surface_forcing"
+surface = "sqlite-history"
+command = ["cargo", "test", "--offline", "-p", "nq-core", "provider_intake::tests::partial_timeout_bytes_remain_native_and_uninterpreted", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "provider-intake-replay-is-exact-and-revocation-closed"
+kind = "surface_forcing"
+surface = "sqlite-history"
+command = ["cargo", "test", "--offline", "-p", "nq-store", "tests::provider_replay_is_exact_and_revocation_blocks_live_retry_not_history", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "provider-intake-replay-binds-typed-request-boundary"
+kind = "surface_forcing"
+surface = "sqlite-history"
+command = ["cargo", "test", "--offline", "-p", "nq-core", "engine::tests::admitted_provider_replay_reopens_stored_decision_without_evaluator_or_checkpoint_rerun", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "provider-acknowledgment-failure-rolls-back-checkpoint"
+kind = "surface_forcing"
+surface = "sqlite-history"
+command = ["cargo", "test", "--offline", "-p", "nq-store", "tests::acknowledgment_insert_failure_rolls_back_checkpoint_and_complete_intake", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "provider-intake-loss-retains-outer-bytes"
+kind = "surface_forcing"
+surface = "sqlite-history"
+command = ["cargo", "test", "--offline", "-p", "nq-store", "tests::lossy_native_outcome_retains_partial_outer_bytes_without_report_admission", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "provider-intake-survives-backup-and-archive-reopen"
+kind = "surface_forcing"
+surface = "cold-archive"
+command = ["cargo", "test", "--offline", "-p", "nq-app", "archive::tests::provider_intake_and_acknowledgment_survive_backup_and_archive_reopen_exactly", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "provider-intake-acknowledgment-substitution-fails-closed"
+kind = "surface_forcing"
+surface = "cold-archive"
+command = ["cargo", "test", "--offline", "-p", "nq-app", "archive::tests::a_resealed_provider_acknowledgment_substitution_fails_closed", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "provider-intake-context-substitution-fails-against-raw"
+kind = "surface_forcing"
+surface = "cold-archive"
+command = ["cargo", "test", "--offline", "-p", "nq-app", "archive::tests::a_resealed_typed_context_substitution_fails_against_exact_raw_bytes", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "provider-intake-v3-migration-retains-explicit-gap"
+kind = "surface_forcing"
+surface = "cold-archive"
+command = ["cargo", "test", "--offline", "-p", "nq-app", "archive::tests::migrated_v3_history_reopens_as_an_explicit_gap_not_a_synthetic_intake", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "provider-intake-v3-upgrade-refuses-modified-source"
+kind = "surface_forcing"
+surface = "sqlite-history"
+command = ["cargo", "test", "--offline", "-p", "nq-app", "--test", "admin_lifecycle", "exact_v3_upgrade_accepts_typed_empty_history_and_refuses_semantic_or_schema_drift", "--", "--exact"]
+
+[[controls.AC-R4-001.evidence_commands]]
+id = "local-helper-intake-survives-distinct-nq-and-nqd-frontends"
+kind = "surface_forcing"
+surface = "daemon-log"
+command = ["cargo", "test", "--offline", "-p", "nq-app", "--test", "mutation_serialization", "daemon_collection_and_cli_revocation_are_serialized_across_processes", "--", "--exact"]
 
 [[controls.AC-R4-001.mutations]]
 id = "erase-exchange-timeout-phase"

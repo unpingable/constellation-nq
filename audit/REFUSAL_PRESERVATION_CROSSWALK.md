@@ -1,7 +1,7 @@
 # Refusal-preservation crosswalk
 
-Status: **release-required closure passed at clean pin; fresh candidate
-qualified** (2026-07-20).
+Status: **v0.1.0 release-required closure passed, qualified, and minted;
+post-release provider-intake extension not yet qualified** (2026-07-22).
 
 This is the target-owned complement to `admissibility.toml`. It derives its
 scope from `docs/HARDENING_PROGRAM.md` section 8 and the existing invariant
@@ -9,10 +9,15 @@ that refusals retain the exact responsible instance and boundary. It does not
 add product doctrine. Matching codes remain non-testimonial indexes; exact
 typed payloads and associations are the testimony.
 
-This status is deliberately narrower than an operator mint. The exact source,
-package, audit ledger, and fresh VM evidence are recorded in
-`audit/receipts/run-2026-07-20-qualification-repair-r5/RECEIPT.md`; mint
-ratification remains an operator act.
+The exact source, package, audit ledger, and fresh VM evidence for the release
+are recorded in
+`audit/receipts/run-2026-07-20-qualification-repair-r5/RECEIPT.md`. Operator
+ratification has since created local tag `v0.1.0` at the exact qualified commit
+`2c41b0a49f9dc0e4e1b6c4da7863353d28ea6a5d`; the qualified package bytes remain
+`24ca5e0b40d9fde5a51c7324d27c3d83d3386669a833c23db773f49840141e63`.
+This file also maps the post-release provider-intake extension, but does not
+transfer the release's audit or qualification verdict to those new source
+changes.
 
 ## Historical bound object and governing control
 
@@ -84,6 +89,20 @@ reconstruction:
   Helper and profile variants embed their authoritative source objects.
 - `engine::AdmissionRefusal` retains a typed boundary, code, responsible
   instance, and a closed dependent-detail variant before a run exists.
+- `provider_intake::ProviderIdentityV1` binds the local helper to the
+  NQ-derived provider-admission, retained executable/execution identity,
+  protocol, configuration, profile, evaluator, and active binding facts.
+  Deserializing that identity never grants live admission.
+- `nq.provider_intake.v1` / `ProviderIntakeRecordV1` retains the complete
+  NQ-owned request/context, exact native `RunResourceOutcomeV1`, raw bytes and
+  digest, times, and the pre-report-admission `ProviderResponseInterpretationV1`.
+  A parsed report or provider-native refusal never replaces raw custody or
+  becomes an NQ admission/refusal by its own assertion.
+- `nq.provider_intake_ack.v1` / `DurableIntakeAcknowledgment` binds an exact
+  intake, local watcher run, provider admission, status event, intake/raw/result
+  digests, and a transaction-recorded timestamp. It is returned only after
+  atomic commit and has no
+  success, health, admission, entitlement, or authority field.
 - `nq.status_snapshot.v3` embeds the canonical collection result for each
   instance and the latest exact evaluation in every complete semantic lineage.
   State and code remain checked projections, not substitutes. V2 refuses when
@@ -111,49 +130,63 @@ All new nested result and refusal representations deny unknown fields, require
 mandatory dependent fields, use explicit tagged variants, and validate
 cross-field projections after decode. The helper request/response wire remains
 `nq.helper.response.v1`; it was already lossless and is not silently revised.
+The provider-intake types are NQ-specific and local-helper-only; they are not a
+JCP object, remote intake API, or universal provider contract.
 
 ## Family and surface matrix
 
 | Family | Stable source and canonical carrier | Persistence and historical reopening | Outward surfaces | Repair status |
 |---|---|---|---|---|
 | Exchange/acquisition failure | `runner::AcquisitionOutcome` becomes `AcquisitionFailure { class, retry, outcome }`; `ExchangeTimeout { phase }` remains inside `outcome`. | The complete run resource document and canonical `CollectionOutcome` are stored. `watcher_runs.acquisition_outcome` is only an index. Status backup/reopen decodes the exact carrier and revalidates class/retry. | Dry watcher errors, status V3, API, CLI, daemon canonical log, backup, and archive consume the same typed value. | **Repaired in source.** `write_request` and `read_response` remain different despite the same outward code. |
+| Provider intake and native outcome | `ProviderAttempt` binds an NQ-verified `ProviderIdentityV1`, exact request/context, carrier, deadline, and checkpoint contract before invocation. `ProviderIntakeV1::from_capture` combines that attempt with the complete `RunCapture`; `ProviderResponseInterpretationV1` keeps unavailable bytes, typed protocol rejection, provider-native refusal, and candidate report distinct before NQ report admission. | Schema v4 stores the complete canonical context, native outcome, interpretation, exact bounded raw bytes and digest in `provider_intake_attempts`, with one required `local_watcher_provider_intakes` link. Typed restart, backup, and archive reopening reparse the exact bytes and check all duplicated projections. | No public or remote submission surface is added. The existing local-helper collection path consumes the intake internally before profile admission/evaluation; archive verification reports exact intake, acknowledgment, and legacy-gap counts. | **Post-release foundation.** Provider success/refusal remains candidate input; neither can self-assert an NQ report admission, NQ refusal, detector result, finding, health, entitlement, or authority. |
 | Helper refusal | `nq_protocol::Refusal` is embedded unchanged in `GovernedRefusalOrigin::Helper`, alongside an NQ-owned refusal ID. | `SubmissionDisposition::Rejected` requires the same refusal at commit. `refusals.detail_json` stores canonical `GovernedRefusal`; rejected-custody reopening checks ID, origin, run, instance, profile, boundary, code, and canonical bytes. | Normal collection, dry watcher, status V3, refusal export, API, CLI, daemon log, and archive expose `retriable` and structured `details` directly. | **Repaired in source.** Retriable EAGAIN and non-retriable ENODEV pairs remain distinct. |
 | Protocol response rejection | Framing, JSON category/location, validation variant, and canonicalization failure are mirrored by closed typed protocol-rejection variants inside `GovernedRefusal`. | The canonical refusal is linked to retained raw response custody. | The same governed refusal reaches status/API/CLI/archive; no generic `invalid_response` string is treated as the testimony. | **Repaired in source.** Coarse `invalid_response` remains an index only. |
 | Profile refusal | The complete `nq_profiles::ProfileRefusal` is embedded in `GovernedRefusalOrigin::Profile`; strict decoding requires profile identity, boundary, code, message, and structured details. The real host detector emits stable dependent facts for missing testimony, profile mismatch, coverage, projection, and freshness refusals. | Canonical refusal detail is linked to the exact run/submission/profile or evaluation envelope. Reopening compares the embedded value to every duplicated projection. | Status V3, refusal/evaluation export, API, CLI, daemon log, backup, and archive consume the canonical value. | **Repaired in source.** Same-code missing-testimony and stale host-detector refusals retain distinct structured details, as do different profile boundaries. |
 | Admission verification | `AdmissionError` is converted once to `AdmissionRefusal { responsible_instance_id, boundary, code, details }`. Nested upstream acquisition or governed refusals remain typed. | Admission refusal status stores the canonical `CollectionOutcome`; no run identity is fabricated for a pre-run refusal. | Status/API/CLI decode the same typed result. Local failures that have no richer committed source type retain a bounded diagnostic only inside a closed typed refusal variant. | **Repaired and evidenced by the clean-pinned r5 audit.** |
 | Rejected custody | New writers must supply `SubmissionDisposition::Rejected { refusal: RefusalInput }`; the rejection code is derived from that refusal. | Validation requires exactly one linked refusal and rejects zero, duplicate, admitted-row, run/instance/profile/code, or noncanonical-detail mismatches. Bounded and paged readers expose stable refusal identity. | Status V3 reopening resolves the embedded refusal ID and demands exact equality with custody. Refusal export, API, CLI, backup, and archive do not reconstruct from adjacent rows or logs. | **Repaired in source.** A bare rejected-custody row is historical incompatible data, not a synthetic typed refusal. |
-| Detector/evaluation refusal | `DetectorState::CannotEvaluate` becomes `EvaluationResultV1` inside the exact `EvaluationEnvelopeV2`, with the same profile-origin `GovernedRefusal` used at the finding boundary when a finding already exists. Envelope validation closes the detector producer law: boundary `Detector`, code `CannotEvaluate`, refusal message equal to the result summary, and no affirmative evidence. | Schema-v3 evaluation rows persist and validate the complete envelope, append sequence, trigger-run membership, full context, detector/evaluator identity, profile identity, times, watermarks, and refusal. A collection-triggered sequence commits atomically with its report and exact V2 run result. Reopening compares the carrier directly with ascending durable `evaluation_sequence`, requires every completed run result, recomputes the trigger set's sorted detector-suite digest against the admission, rejects duplicate detector execution, and requires the admission's exact evaluator artifact. Thus coherent carrier-and-row omission, extension, reorder, or substitution fails closed. Finding copies must be byte-identical and cannot open/resolve/substitute a condition. | V3 status, `/v1/evaluations`, `nq evaluations export`, V3 findings when one lawfully exists, backup, and archive expose the exact envelope/refusal. `/v2/status` and `/v2/findings` explicitly require V3 when needed. | **Repaired in source.** First-ever `CannotEvaluate` creates no finding but remains visible in the authoritative evaluation component/history. Same-code, different-scope/refusal payloads remain distinct. |
+| Detector/evaluation refusal | `DetectorState::CannotEvaluate` becomes `EvaluationResultV1` inside the exact `EvaluationEnvelopeV2`, with the same profile-origin `GovernedRefusal` used at the finding boundary when a finding already exists. Envelope validation closes the detector producer law: boundary `Detector`, code `CannotEvaluate`, refusal message equal to the result summary, and no affirmative evidence. | Schema v4 retains the schema-v3 evaluation rows and validates the complete envelope, append sequence, trigger-run membership, full context, detector/evaluator identity, profile identity, times, watermarks, and refusal. A collection-triggered sequence commits atomically with its provider intake, report, and exact V2 run result. Reopening compares the carrier directly with ascending durable `evaluation_sequence`, requires every completed run result, recomputes the trigger set's sorted detector-suite digest against the admission, rejects duplicate detector execution, and requires the admission's exact evaluator artifact. Thus coherent carrier-and-row omission, extension, reorder, or substitution fails closed. Finding copies must be byte-identical and cannot open/resolve/substitute a condition. | V3 status, `/v1/evaluations`, `nq evaluations export`, V3 findings when one lawfully exists, backup, and archive expose the exact envelope/refusal. `/v2/status` and `/v2/findings` explicitly require V3 when needed. | **Repaired in source.** First-ever `CannotEvaluate` creates no finding but remains visible in the authoritative evaluation component/history. Same-code, different-scope/refusal payloads remain distinct. |
 | Status code | `status_events.code` is paired with canonical detail. `status_component_v2` decodes collection rows, checks component identity, recomputes only the coarse state/code projection, and for rejected results verifies exact linked custody. | `status_events` remains append-only. `validate_status_history_v2` pages through every immutable event, while `status_snapshot_v3` freezes and exhaustively reopens evaluation history before selecting current evaluation components. | `/v3/status`, structured CLI status, console, and archive use V3. `/v2/status` returns 409 when evaluations exist; `/v1/status` does not reinterpret governed collection or evaluation results. | **Repaired in source.** Carrier testimony comes from stored detail, never from code. |
-| Cold archive | The archive seals a checkpointed database copy, exact verifier binary, interpretation config, and a canonical exact-coverage content manifest. | Verification uses SQLite immutable mode, exhaustively pages admitted-report, watcher, status, custody, and evaluation history, invokes V3 status and every frozen public evaluation page, and leaves the complete sealed inventory byte-identical. Metadata schema/tool projections and archived binary digest must match the executing preserved verifier; symlinked, omitted, substituted, duplicate, or extra content refuses. | The preserved executable uses read-only status, evaluation, finding, and refusal exports from the preserved database with no live store or archive mutation. | **Repaired in source.** Integrity alone does not imply authority; incompatible history fails closed and a hostile reseal cannot substitute verifier identity or suppress mandatory content. |
+| Cold archive | The archive seals a checkpointed database copy, exact verifier binary, interpretation config, and a canonical exact-coverage content manifest. | Verification uses SQLite immutable mode, exhaustively pages admitted-report, watcher, provider-intake/acknowledgment/gap, status, custody, and evaluation history; reparses typed provider context/interpretation against exact raw bytes; invokes V3 status and every frozen public evaluation page; and leaves the complete sealed inventory byte-identical. Metadata schema/tool projections and archived binary digest must match the executing preserved verifier; symlinked, omitted, substituted, duplicate, or extra content refuses. | The preserved executable uses read-only status, evaluation, finding, refusal, and provider-history reopening from the preserved database with no live store or archive mutation. | **Repaired release cone plus post-release provider verification.** Integrity alone does not imply authority; incompatible history fails closed and a hostile reseal cannot substitute verifier identity, intake context/interpretation, acknowledgment, or mandatory content. |
+| Provider replay and acknowledgment | `provider_idempotency_key` derives the replay key from the provider admission and NQ attempt identity. Preflight compares the complete replay digest before profile admission or evaluation. | An exact replay returns the stored canonical outcome and `DurableIntakeAcknowledgment`; it allocates no new report/evaluation/finding/status/sequence. Changed bytes, native outcome, provider, request, subject, scope, vantage, profile, evaluator, capability, or checkpoint context refuse. Live retry requires current provider admission; read-only historical reopening does not reactivate it. The acknowledgment is inserted last in the same transaction and returned only after commit. | The current local helper does not receive the acknowledgment. Backup/archive readers may reopen it as durable history, not as success, report admission, health, testimony, or authority. | **Post-release foundation.** Replay preserves the stored decision rather than evaluating under current context; revocation blocks a live retry without erasing history. |
 | Success/control-flow projection | `CollectionOutcome::is_success()` reads the complete typed result. | The boolean is not persisted as testimony. | Scheduler cadence and exit selection may use it only after the full result is retained/rendered. | Classified non-testimonial. |
+| Coarse health projection | `health_from_evaluation` maps both `DetectorState::Present` and `DetectorState::ExplicitlyAbsent` to presentation state `HealthState::Healthy`, while retaining distinct codes and complete `EvaluationEnvelopeV2` values. | The exact evaluation envelope remains authoritative; coarse state/code are checked projections only. | Allowed for bounded operator presentation. Forbidden as an input to provider intake/admission, report admission, checkpoint advancement, testimonial sufficiency, or authority. | Classified non-testimonial. `coarse_healthy_projection_cannot_substitute_for_exact_detector_judgment` proves equal coarse state does not make the exact judgments interchangeable. |
 | Coarse SQL and serde projections | `watcher_runs.acquisition_outcome`, `refusals.source_kind`, `raw_submissions.rejection_code`, `status_events.code`, binding kind/reason fields, and tagged-union discriminants remain linked to canonical payloads. | Exact detail and associations are mandatory where the projection is testimonial context. | Allowed for bounded indexing, stable comparison, grouping, or tagged-union selection only. | Classified non-testimonial/internal; forbidden as standalone diagnosis or qualification evidence. |
 | Historical verification refusal | Typed verification errors remain read-only and never rewrite stored decisions. | Historical bytes are preserved; unsupported or unprovable meaning refuses current semantic reopening. | No candidate-facing CLI/API authority upgrade is introduced. | Existing implementation boundary retained. |
 | System-cut coherence refusal | `nq-system-contract::CutCoherenceRefusal` remains typed in its separate crate. | Its own tests cover that workspace object. | `nq-app`/`nq-core` do not silently project it into this runtime cone. | Crate separation preserved; not reopened here. |
 
 ## Schema and historical-data treatment
 
-The physical SQLite schema is explicitly version 3. Earlier columns could
-retain some canonical JSON, but they could not prove every required relation.
-Version 3 binds admissions and admitted judgments to their recomputable
-contexts, persists exact admitted-report materialization, and adds the
-store-wide evaluation sequence, optional triggering run, detector/evaluator
-identity, full canonical `EvaluationEnvelopeV2`, watermarks, exclusive
-custody-versus-evaluation refusal association, and
-`public_finding_snapshot_v3`. New writes atomically commit every completed
-run-bearing result. An admitted completion assigns the report sequence and
-then commits custody, report, exact evaluation/refusal/finding set, and its V2
-run-linked status in one transaction; non-success custody/result remains one
-transaction as well. Cannot-evaluate commits its typed refusal and optional
-finding copy with its evaluation.
+The post-release physical SQLite schema is explicitly version 4. It retains
+version 3's admission, raw submission, report, evaluation, refusal, finding,
+status, sequence, and watermark relations unchanged, then adds five
+append-only relations: `local_provider_admissions`,
+`provider_intake_attempts`, the one-to-one
+`local_watcher_provider_intakes` subtype,
+`provider_intake_acknowledgments`, and explicit
+`legacy_v3_watcher_run_intake_gaps`. New v4 collection writes require one real
+provider intake and acknowledgment for every watcher run. They commit the
+provider attempt, exact native outcome/raw capture, watcher run, optional raw
+submission, admission or linked refusal, evaluation/finding/status closure,
+and acknowledgment in the same immediate transaction.
+
+Schema v4 is intentionally local-helper-only. Provider admission is derived
+by NQ from an exact source admission and active binding. Every current intake
+references that local admission and exactly one local watcher run; the allowed
+carrier vocabulary remains `stdio` or `unix`, and the reserved provider-local
+sequence must be absent. A later independent provider requires a new explicit
+subtype and admission law rather than a nullable foreign key or an assertion
+inside candidate evidence.
 
 There is deliberately no evidence-inventing upgrade. Version-1 and version-2
-databases are refused before any persistent PRAGMA; a file-backed test hashes
-the old v2 bytes before and after failed open. They may be copied as
-incompatible historical data, but no bare custody row, unversioned result,
-missing context, or missing semantic identity is upgraded from a code, log,
-adjacent row, or later status. Within version 3, any omitted,
-ambiguous, noncanonical, or projection-inconsistent relation prevents semantic
-reopening even when a newer current projection is valid.
+databases remain incompatible. The exact released version-3 schema is frozen
+and fingerprint-validated before a verified backup and additive v3-to-v4
+migration. Existing admission facts may derive a prospective local-provider
+admission, with source-admission time and derivation provenance kept separate,
+but every historical watcher run receives only an explicit
+`provider_intake_not_recorded` gap. No raw capture, attempt/idempotency identity,
+provider intake, or acknowledgment is synthesized. Any omitted, ambiguous,
+noncanonical, or projection-inconsistent current relation prevents semantic
+reopening even when a newer projection is otherwise valid.
 
 The JSON/read-model schemas are independently versioned from SQLite and from
 the helper protocol. Strict decoding rejects omitted, duplicate, unknown, or
@@ -190,6 +223,16 @@ cargo test --offline -p nq-core engine::tests::real_host_detector_same_code_refu
 cargo test --offline -p nq-core engine::tests::finding_transport_uses_only_the_exact_evaluation_context_rows -- --exact
 cargo test --offline -p nq-profiles --test profile_validation host_detector_same_code_refusals_preserve_distinct_structured_details -- --exact
 
+# post-release local-provider intake boundary
+cargo test --offline -p nq-core provider_intake::tests::exact_raw_refusal_and_context_are_one_validated_intake -- --exact
+cargo test --offline -p nq-core provider_intake::tests::provider_cannot_inject_nq_judgment_or_authority_fields -- --exact
+cargo test --offline -p nq-core provider_intake::tests::declared_backend_identity_stays_candidate_data_and_success_is_not_admission -- --exact
+cargo test --offline -p nq-core provider_intake::tests::first_submission_capability_escape_keeps_raw_bytes_and_typed_rejection -- --exact
+cargo test --offline -p nq-core provider_intake::tests::partial_timeout_bytes_remain_native_and_uninterpreted -- --exact
+cargo test --offline -p nq-core provider_intake::tests::provider_finish_may_precede_nq_receive_without_reintroducing_process_locality -- --exact
+cargo test --offline -p nq-core engine::tests::admitted_provider_replay_reopens_stored_decision_without_evaluator_or_checkpoint_rerun -- --exact
+cargo test --offline -p nq-core engine::tests::coarse_healthy_projection_cannot_substitute_for_exact_detector_judgment -- --exact
+
 # storage and backup/reopen
 cargo test --offline -p nq-store tests::forcing_rejected_submission_requires_typed_refusal -- --exact
 cargo test --offline -p nq-store tests::same_code_refusal_payloads_and_links_survive_backup_and_reopen -- --exact
@@ -204,6 +247,12 @@ cargo test --offline -p nq-store tests::historical_reopen_rejects_omitted_admiss
 cargo test --offline -p nq-store tests::historical_reopen_rejects_substituted_admission_evaluator_artifact -- --exact
 cargo test --offline -p nq-store tests::historical_reopen_rejects_reordered_admitted_evaluation_sequence -- --exact
 cargo test --offline -p nq-store tests::immutable_open_preserves_prepared_archive_bytes_and_file_inventory -- --exact
+cargo test --offline -p nq-store tests::provider_admission_is_derived_distinct_and_does_not_admit_a_report -- --exact
+cargo test --offline -p nq-store tests::provider_interpretation_cannot_disagree_with_raw_protocol_outcome -- --exact
+cargo test --offline -p nq-store tests::provider_replay_is_exact_and_revocation_blocks_live_retry_not_history -- --exact
+cargo test --offline -p nq-store tests::lossy_native_outcome_retains_partial_outer_bytes_without_report_admission -- --exact
+cargo test --offline -p nq-store tests::acknowledgment_insert_failure_rolls_back_checkpoint_and_complete_intake -- --exact
+cargo test --offline -p nq-store tests::exact_v3_upgrade_derives_provider_authority_but_not_intake_evidence -- --exact
 
 # detector producer closure
 cargo test --offline -p nq-core engine::tests::evaluation_envelope_rejects_substituted_cannot_evaluate_boundary -- --exact
@@ -228,6 +277,12 @@ cargo test --offline -p nq-app --test custody_pagination cli_pages_same_code_ref
 cargo test --offline -p nq-app --test evaluation_refusal_surfaces same_code_evaluation_refusals_survive_backup_cli_and_cold_archive -- --exact
 cargo test --offline -p nq-app archive::tests::a_resealed_unversioned_instance_status_fails_typed_history_verification -- --exact
 cargo test --offline -p nq-app archive::tests::a_resealed_mismatched_refusal_document_fails_typed_history_verification -- --exact
+cargo test --offline -p nq-app archive::tests::provider_intake_and_acknowledgment_survive_backup_and_archive_reopen_exactly -- --exact
+cargo test --offline -p nq-app archive::tests::a_resealed_provider_acknowledgment_substitution_fails_closed -- --exact
+cargo test --offline -p nq-app archive::tests::a_resealed_typed_context_substitution_fails_against_exact_raw_bytes -- --exact
+cargo test --offline -p nq-app archive::tests::a_resealed_typed_interpretation_substitution_fails_against_exact_raw_bytes -- --exact
+cargo test --offline -p nq-app archive::tests::migrated_v3_history_reopens_as_an_explicit_gap_not_a_synthetic_intake -- --exact
+cargo test --offline -p nq-app --test admin_lifecycle exact_v3_upgrade_accepts_typed_empty_history_and_refuses_semantic_or_schema_drift -- --exact
 ```
 
 The four original release-forcing tests are retained under their original
@@ -237,8 +292,9 @@ one is designed to collapse exchange-timeout phase while still compiling, and
 one is designed to replace stored canonical status detail with a code-derived
 document while still compiling. Their paired assertions must turn red. A fresh
 clean-pinned audit must execute and record compilation and both mutation
-outcomes; this file does not inherit the old r4 mutation ledger (or its earlier
-r3 attempt).
+outcomes. The r5 receipt records that execution for the released pin. The
+post-release provider-intake candidate must run and record its own clean-pinned
+audit; it does not inherit r5, the old r4 ledger, or its earlier r3 attempt.
 
 ## Current boundary and verdict
 
@@ -256,7 +312,16 @@ zero obstructions or missing entry points. The reproducibly rebuilt deb is
 Fresh corrected VM run `run-2026-07-20-2c41b0a` passes with an exact 51-file
 seal containing mandatory `guest-results/RESULT`.
 
-The release-required crosswalk is therefore closed for those exact objects.
-The release verdict is **READY-FOR-MINT-RATIFICATION**, not minted. There is no
-waiver and no inherited pass; the old package and old insufficiently sealed
-run remain historical failures for mint purposes.
+The release-required crosswalk is therefore closed for those exact objects,
+and local tag `v0.1.0` now resolves to that qualified source and tree. The
+release is **NQ-V0.1.0-MINTED**. There is no waiver and no inherited pass; the
+old package and old insufficiently sealed run remain historical failures for
+mint purposes.
+
+The schema-v4 provider-intake work starts from record-only commit
+`e3c451f9722cb81dd22af25c52b264e6b888ed81` on
+`campaign/provider-intake-foundation`. It is candidate-side source, not part of
+the tag and not covered by the r5 package or VM receipt. Its clean source pin,
+rebuilt artifact identity, admissibility ledger, and any required fresh VM run
+remain separate record-only qualification facts to be added only after they
+exist.

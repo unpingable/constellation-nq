@@ -9,10 +9,11 @@ The walkthrough below uses the one-shot `stdio` conformance specimen; the same
 protocol exchange is also supported by a supervised persistent `unix` helper
 carrier with private sockets and peer-credential checks. The preview includes
 compiled profiles, admission locks, explicit collection, a resident scheduler,
-SQLite schema v3, verified SQLite backup/restore, read-only exports, the Unix
-API, and an opt-in loopback console. A real historical
-migration chain, notifications, retention automation, privileged hardware
-helpers, and package-driven upgrades are not implemented yet.
+SQLite schema v4, verified SQLite backup/restore, an exact qualified-v3-to-v4
+migration, read-only exports, the Unix API, and an opt-in loopback console.
+Broader historical migration chains, notifications, retention automation,
+privileged hardware helpers, and package-driven upgrades are not implemented
+yet.
 
 Two distinct local surfaces, deliberately separated:
 
@@ -151,14 +152,22 @@ With the sample watcher configured, `doctor` is expected to report a missing
 admission until the next section is complete. That is a useful failed state,
 not a reason to create a lock by hand.
 
-The current binary accepts only SQLite schema v3. It does not migrate schema-v1
-or schema-v2 history or infer admission context, evaluation identity, typed
-refusal linkage, or profile semantic identity that was never stored. `init`,
-normal open, backup/restore, and daemon startup therefore refuse either old
-schema without rewriting it. A file-backed regression proves even a
-provisional v2 database remains byte-identical after refusal. Preserve
-incompatible bytes first with a cold archive; such an archive records
-`source_openable=false` and makes no semantic-reopen claim.
+The current binary normally opens only SQLite schema v4. It has one explicit
+migration source: the exact schema-v3 artifact shipped in the qualified
+`v0.1.0` release. `admin upgrade` first validates that complete v3 schema and
+its stored semantics, creates and reopens a digest-addressed backup, and then
+performs one transactional v3-to-v4 migration. Historical v3 watcher runs are
+retained with explicit `provider_intake_not_recorded` gaps; the migration does
+not manufacture provider identities, raw captures, or durable acknowledgments
+that v3 never stored. Any historical v3 checkpoint bytes remain preserved for
+reopening, but are not eligible to advance the live v4 cursor because no exact
+provider-intake acknowledgment exists for them.
+
+Schema v1, schema v2, stale or modified v3 databases, and every other
+incompatible representation remain fail-closed and byte-preserved. `init`,
+normal open, backup/restore, and daemon startup refuse them without rewriting
+their meaning. Preserve incompatible bytes with a cold archive; such an archive
+records `source_openable=false` and makes no semantic-reopen claim.
 
 At a hard successor cut, provide the already-created immutable legacy manifest
 digest; this records a reference and imports no legacy finding state:
@@ -529,14 +538,21 @@ nq_helper_command --config /etc/nq/nq.toml doctor
 sudo systemctl start nqd.service
 ```
 
-Schema v3 is the current schema. The preview's `admin upgrade` creates and
-semantically verifies a digest-addressed backup and returns `already_current`
-only for an already-compatible v3 store. It contains no v1-to-v3 or v2-to-v3
-migration; `nqd` and the command reject either old or otherwise incompatible
-schema before any rewrite. Validation compares the compiled definitions of
-tables, indexes, triggers, and views as well as the application and schema
-version, so a same-named object with changed SQL is refused. Do not force
-startup, edit SQLite metadata, or relabel old rows as typed testimony.
+Schema v4 is the current schema. The preview's `admin upgrade` creates and
+semantically verifies a digest-addressed backup for both supported cases. It
+returns `already_current` only for an exactly compatible v4 store. For the
+exact qualified v3 schema, it records a v3-to-v4 receipt, adds the provider
+intake custody structures, and marks each historical watcher run with an
+explicit non-upgraded intake gap. The backup is complete before the first
+source write, and migration failure leaves the v3 source transactionally
+unchanged.
+
+There is no v1-to-v4, v2-to-v4, or arbitrary-v3 migration. `nqd` and the
+command reject those representations before any rewrite. Validation compares
+the compiled definitions of tables, indexes, triggers, and views as well as the
+application and schema version, so a same-named object with changed SQL is
+refused. Do not force startup, edit SQLite metadata, or relabel old rows as
+provider intake, acknowledgment, or typed testimony.
 
 Rollback means reinstalling the matching previous binaries and using `nq
 restore` with their verified pre-upgrade backup. Reverse migration is not

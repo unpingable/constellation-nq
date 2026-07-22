@@ -1,5 +1,7 @@
 //! Black-box pagination checks through the shipped rejected-custody CLI.
 
+mod support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -9,12 +11,10 @@ use nq_core::engine::{
     RunResourceOutcomeV1,
 };
 use nq_core::runner::AcquisitionOutcome;
-use nq_profiles::profile_semantic_id;
-use nq_protocol::{InstanceId, Refusal, RefusalBoundary, RefusalCode, Sha256Digest};
+use nq_protocol::{InstanceId, Refusal, RefusalBoundary, RefusalCode};
 use nq_store::{
-    AdmissionIdentity, AdmissionInput, CanonicalDocument, CollectionInput, ProfileDescriptorInput,
-    RefusalInput, RunInput, RunResultStatusInput, StatusEventInput, Store, SubmissionDisposition,
-    SubmissionInput,
+    CanonicalDocument, ProfileDescriptorInput, RefusalInput, RunInput, RunResultStatusInput,
+    StatusEventInput, Store, SubmissionDisposition, SubmissionInput,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -85,48 +85,15 @@ fn append_admission(
     instance_id: &str,
     profile_digest: &str,
 ) -> String {
-    let profile = nq_profiles::resolve_profile(PROFILE_ID, 1).expect("compiled fixture profile");
-    let semantic_id =
-        profile_semantic_id(profile.descriptor()).expect("compiled profile semantic identity");
-    let digest = |label: &str| nq_protocol::sha256_bytes(label.as_bytes());
-    let admission_id = format!("admission-{suffix}");
-    store
-        .append_admission(&AdmissionInput {
-            admission_id: admission_id.clone(),
-            instance_id: instance_id.to_owned(),
-            identity: AdmissionIdentity {
-                profile_semantic_id: Sha256Digest::parse(semantic_id.as_str())
-                    .expect("semantic identity digest"),
-                detector_identity_digest: nq_store::detector_suite_identity_digest(
-                    profile.detectors().iter().map(|detector| {
-                        detector
-                            .descriptor()
-                            .digest()
-                            .expect("compiled detector identity")
-                    }),
-                )
-                .expect("compiled detector suite identity"),
-                evaluator_source_digest: digest("source"),
-                evaluator_artifact_digest: digest("evaluator"),
-                helper_artifact_digest: digest("helper"),
-                config_digest: digest("config"),
-                protocol_version: nq_protocol::HELPER_PROTOCOL_VERSION.to_owned(),
-                target_triple: "fixture-target".to_owned(),
-                artifact_identity_method: "fixture".to_owned(),
-                platform_runtime_version: "fixture".to_owned(),
-            },
-            execution_chain: document(&json!({"fixture": true})),
-            profile_id: PROFILE_ID.to_owned(),
-            profile_version: "1".to_owned(),
-            profile_digest: profile_digest.to_owned(),
-            capability_grant: document(&json!([])),
-            conformance: document(&json!({"fixture": true})),
-            lock: document(&json!({"fixture": true})),
-            admitted_at: TEST_TIME.to_owned(),
-            operator_identity: document(&json!({"fixture": true})),
-        })
-        .expect("append governing admission");
-    admission_id
+    support::append_typed_admission(
+        store,
+        suffix,
+        instance_id,
+        PROFILE_ID,
+        1,
+        profile_digest,
+        TEST_TIME,
+    )
 }
 
 fn seed_helper_refusal(
@@ -151,60 +118,65 @@ fn seed_helper_refusal(
     );
     let admission_id = append_admission(store, suffix, &instance_id, profile_digest);
     let outcome = CollectionOutcome::rejected(instance_id.clone(), run_id.clone(), refusal.clone());
-    let collection = CollectionInput {
-        run: RunInput {
-            run_id: run_id.clone(),
-            request_id: format!("request-{suffix}"),
-            instance_id: instance_id.clone(),
-            admission_id: Some(admission_id),
-            binding_digest: nq_protocol::sha256_bytes(b"binding").into_string(),
-            checkpoint_contract_digest: nq_protocol::sha256_bytes(b"checkpoint").into_string(),
-            profile_id: PROFILE_ID.to_owned(),
-            profile_version: "1".to_owned(),
-            profile_digest: profile_digest.to_owned(),
-            carrier: "stdio".to_owned(),
-            started_at: TEST_TIME.to_owned(),
-            deadline_at: TEST_TIME.to_owned(),
-            finished_at: TEST_TIME.to_owned(),
-            acquisition_outcome: "response".to_owned(),
-            execution_identity: document(&json!({"fixture": true})),
-            resource_outcome: document(&RunResourceOutcomeV1 {
-                schema: RunResourceOutcomeSchema::V1,
-                duration_ms: 1,
-                exit_code: Some(0),
-                hard_limits: RunHardLimits {
-                    address_space_bytes_per_process: 1,
-                    cpu_seconds_per_process: 1,
-                    processes_per_execution_uid: 1,
-                    open_files_per_process: 1,
-                    file_bytes_per_regular_file: 1,
-                    core_bytes: 0,
-                },
-                stdout_bytes_retained: format!("rejected-{suffix}").len(),
-                stderr_bytes_retained: 0,
-                stderr_hex: String::new(),
-                outcome: AcquisitionOutcome::Response,
-            }),
-        },
-        submission: Some(SubmissionInput {
-            submission_id: format!("submission-{suffix}"),
-            raw_bytes: format!("rejected-{suffix}").into_bytes(),
-            received_at: TEST_TIME.to_owned(),
-            protocol_outcome: "valid_refusal".to_owned(),
-            disposition: SubmissionDisposition::Rejected {
-                refusal: RefusalInput {
-                    refusal_id: refusal.refusal_id.clone(),
-                    source_kind: "protocol".to_owned(),
-                    responsible_instance_id: instance_id.clone(),
-                    boundary: "collection".to_owned(),
-                    code: "collection_failed".to_owned(),
-                    profile_semantic_id: None,
-                    detail: document(&refusal),
-                    created_at: TEST_TIME.to_owned(),
-                },
+    let run = RunInput {
+        run_id: run_id.clone(),
+        request_id: format!("request-{suffix}"),
+        instance_id: instance_id.clone(),
+        admission_id: Some(admission_id),
+        binding_digest: nq_protocol::sha256_bytes(b"binding").into_string(),
+        checkpoint_contract_digest: nq_protocol::sha256_bytes(b"checkpoint").into_string(),
+        profile_id: PROFILE_ID.to_owned(),
+        profile_version: "1".to_owned(),
+        profile_digest: profile_digest.to_owned(),
+        carrier: "stdio".to_owned(),
+        started_at: TEST_TIME.to_owned(),
+        deadline_at: TEST_TIME.to_owned(),
+        finished_at: TEST_TIME.to_owned(),
+        acquisition_outcome: "response".to_owned(),
+        execution_identity: document(&json!({"fixture": true})),
+        resource_outcome: document(&RunResourceOutcomeV1 {
+            schema: RunResourceOutcomeSchema::V1,
+            duration_ms: 1,
+            exit_code: Some(0),
+            hard_limits: RunHardLimits {
+                address_space_bytes_per_process: 1,
+                cpu_seconds_per_process: 1,
+                processes_per_execution_uid: 1,
+                open_files_per_process: 1,
+                file_bytes_per_regular_file: 1,
+                core_bytes: 0,
             },
+            stdout_bytes_retained: format!("rejected-{suffix}").len(),
+            stderr_bytes_retained: 0,
+            stderr_hex: String::new(),
+            outcome: AcquisitionOutcome::Response,
         }),
     };
+    let submission = SubmissionInput {
+        submission_id: format!("submission-{suffix}"),
+        raw_bytes: format!("rejected-{suffix}").into_bytes(),
+        received_at: TEST_TIME.to_owned(),
+        protocol_outcome: "valid_refusal".to_owned(),
+        disposition: SubmissionDisposition::Rejected {
+            refusal: RefusalInput {
+                refusal_id: refusal.refusal_id.clone(),
+                source_kind: "protocol".to_owned(),
+                responsible_instance_id: instance_id.clone(),
+                boundary: "collection".to_owned(),
+                code: "collection_failed".to_owned(),
+                profile_semantic_id: None,
+                detail: document(&refusal),
+                created_at: TEST_TIME.to_owned(),
+            },
+        },
+    };
+    let collection = support::provider_collection(
+        store,
+        run,
+        Some(submission),
+        support::ProviderFixtureResponse::HelperRefusal,
+        TEST_TIME,
+    );
     store
         .commit_non_success_collection(
             &collection,
