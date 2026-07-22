@@ -179,9 +179,16 @@ foundation is independently clean-pinned at
 all three controls and 2/2 biting mutations; rebuilt package SHA-256
 `4f078257b2a23dd06f51ec3e2376b16973d247d0f0be9e6d14c6325f04d9408f`
 passed fresh KVM run `run-2026-07-22-44e5567` with the exact corrected 51-file
-seal. The current post-release verdict is
-**READY-FOR-PROVIDER-INTAKE-RATIFICATION**. The exact receipt is
-[`../audit/receipts/run-2026-07-22-provider-intake-foundation/RECEIPT.md`](../audit/receipts/run-2026-07-22-provider-intake-foundation/RECEIPT.md).
+seal. Its immutable qualification verdict is
+**READY-FOR-PROVIDER-INTAKE-RATIFICATION**; the operator subsequently issued
+**RATIFY-PROVIDER-INTAKE**, producing the bounded decision verdict
+**PROVIDER-INTAKE-RATIFIED** for those exact objects. The qualification receipt
+is
+[`../audit/receipts/run-2026-07-22-provider-intake-foundation/RECEIPT.md`](../audit/receipts/run-2026-07-22-provider-intake-foundation/RECEIPT.md),
+and the separate ratification record is
+[`../audit/receipts/run-2026-07-22-provider-intake-ratification/RECEIPT.md`](../audit/receipts/run-2026-07-22-provider-intake-ratification/RECEIPT.md).
+Ratification creates no post-`v0.1.0` tag or publication and does not alter the
+tagged release.
 
 Delivery proceeds through the stages in `PLAN.md`. A later stage may add a
 profile module, helper, and registry entry, but may not silently move profile

@@ -64,6 +64,13 @@ fresh KVM run `run-2026-07-22-44e5567` passes all four mandatory markers and
 the independently reopened exact 51-file seal. This post-release qualification
 does not move or extend `v0.1.0`.
 
+The operator subsequently issued `RATIFY-PROVIDER-INTAKE` for those exact
+objects. The bounded decision verdict is **PROVIDER-INTAKE-RATIFIED**; its
+immutable record is
+`audit/receipts/run-2026-07-22-provider-intake-ratification/RECEIPT.md`. No
+post-`v0.1.0` tag, push, publication, remote provider, or physical watcher split
+is implied.
+
 There is no cross-UID or AF_UNIX skip path. The host accepts the guest result
 only when all four mandatory pass markers are present. Package purge intentionally
 tests Debian's non-destructive behavior; it is not the separate manual evidence

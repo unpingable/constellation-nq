@@ -929,9 +929,31 @@ seal, independent guest admission and seal reopening pass, and all four
 mandatory markers pass. The candidate package hash is identical before and
 after qualification.
 
-**Current post-release gate: READY-FOR-PROVIDER-INTAKE-RATIFICATION.** This
-verdict binds only candidate `44e5567…`, package `4f078257…`, and fresh run
+**Qualification-stop gate before operator ratification:
+READY-FOR-PROVIDER-INTAKE-RATIFICATION.** This verdict binds only candidate
+`44e5567…`, package `4f078257…`, and fresh run
 `run-2026-07-22-44e5567`. It creates no JCP or AG integration, remote provider,
 physical watcher split, eBPF provider, authority, or post-`v0.1.0` tag. The
 complete receipt is
 `audit/receipts/run-2026-07-22-provider-intake-foundation/RECEIPT.md`.
+
+### Provider-intake foundation — RATIFIED 2026-07-22 (operator)
+
+The operator act **RATIFY-PROVIDER-INTAKE** accepted the preceding qualification
+without altering it. The qualification receipt remains an immutable
+**READY-FOR-PROVIDER-INTAKE-RATIFICATION** record; the separate decision verdict
+is **PROVIDER-INTAKE-RATIFIED**.
+
+Ratification binds exact technical candidate
+`44e556709e629eb3c83d1d74bfbcf12cb4c9a549`, tree
+`9aee37f90b93f27296550d9664af5ec574e5bf27`, external package SHA-256
+`4f078257b2a23dd06f51ec3e2376b16973d247d0f0be9e6d14c6325f04d9408f`,
+clean-pinned ledger, and fresh KVM run `run-2026-07-22-44e5567` with manifest
+SHA-256 `b8262fdd58c99ca0f0c21ac8dff6017214289d0edbf33ce1d685467a6ddae4f1`.
+The provider-intake operator gate is closed for those exact objects.
+
+This act creates no release or post-`v0.1.0` tag, moves no existing tag, and
+authorizes no push or publication. It does not add JCP, AG integration, a
+physical watcher split, a remote or eBPF provider, or provider-neutral claims.
+The immutable operator-decision record is
+`audit/receipts/run-2026-07-22-provider-intake-ratification/RECEIPT.md`.

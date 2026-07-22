@@ -1,7 +1,8 @@
 # Refusal-preservation crosswalk
 
 Status: **v0.1.0 release-required closure passed, qualified, and minted;
-post-release provider-intake extension not yet qualified** (2026-07-22).
+post-release provider-intake extension independently qualified and operator
+ratified** (2026-07-22).
 
 This is the target-owned complement to `admissibility.toml`. It derives its
 scope from `docs/HARDENING_PROGRAM.md` section 8 and the existing invariant
@@ -329,5 +330,8 @@ passes all three active controls with no obstruction or waiver and 2/2 biting
 mutations. Rebuilt package SHA-256 `4f078257…` passed fresh KVM run
 `run-2026-07-22-44e5567` with all four markers and the exact corrected 51-file
 seal. The separate post-release verdict is
-**READY-FOR-PROVIDER-INTAKE-RATIFICATION**; it neither moves nor expands
-`v0.1.0`.
+**READY-FOR-PROVIDER-INTAKE-RATIFICATION** in the immutable qualification
+receipt. The operator subsequently issued **RATIFY-PROVIDER-INTAKE**; the
+separate decision verdict is **PROVIDER-INTAKE-RATIFIED**. It neither moves nor
+expands `v0.1.0`. The decision record is
+`audit/receipts/run-2026-07-22-provider-intake-ratification/RECEIPT.md`.

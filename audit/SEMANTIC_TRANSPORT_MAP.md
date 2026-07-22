@@ -1,7 +1,8 @@
 # Governed-result transport map
 
 Status: **v0.1.0 repair clean-pinned, audited, rebuilt, qualified, and minted;
-post-release provider-intake extension not yet qualified** (2026-07-22).
+post-release provider-intake extension independently qualified and operator
+ratified** (2026-07-22).
 
 This map preserves the pre-repair failure record and describes the current
 canonical transport chain. It follows existing refusal-preservation policy;
@@ -490,5 +491,9 @@ passes with 2/2 mutations biting. Rebuilt package SHA-256 `4f078257…` passed
 fresh KVM run `run-2026-07-22-44e5567` and its exact 51-file seal. The complete
 post-release receipt is
 `audit/receipts/run-2026-07-22-provider-intake-foundation/RECEIPT.md`; the
-verdict is **READY-FOR-PROVIDER-INTAKE-RATIFICATION** and does not move or
-reinterpret `v0.1.0`.
+immutable qualification verdict is
+**READY-FOR-PROVIDER-INTAKE-RATIFICATION**. The operator subsequently issued
+**RATIFY-PROVIDER-INTAKE**; the separate decision verdict is
+**PROVIDER-INTAKE-RATIFIED**, recorded in
+`audit/receipts/run-2026-07-22-provider-intake-ratification/RECEIPT.md`. Neither
+act moves or reinterprets `v0.1.0`.

@@ -1,6 +1,6 @@
 # Provider-intake foundation
 
-Status: post-`v0.1.0` architecture record for the bounded
+Status: operator-ratified post-`v0.1.0` architecture record for the bounded
 `campaign/provider-intake-foundation` campaign.
 
 ## Release separation
@@ -431,9 +431,13 @@ passed fresh KVM qualification
 `/home/jbeck/nqlab/nq-ng-hardening/run-2026-07-22-44e5567`; all four mandatory
 markers and the independently reopened exact 51-file evidence seal passed.
 
-The post-release verdict is **READY-FOR-PROVIDER-INTAKE-RATIFICATION**. The
-complete identity, test ledger, migration treatment, package digest, and VM
-receipt are recorded in
+The immutable qualification verdict is
+**READY-FOR-PROVIDER-INTAKE-RATIFICATION**. Its complete identity, test ledger,
+migration treatment, package digest, and VM receipt are recorded in
 [`../audit/receipts/run-2026-07-22-provider-intake-foundation/RECEIPT.md`](../audit/receipts/run-2026-07-22-provider-intake-foundation/RECEIPT.md).
-This qualification does not alter or extend local tag `v0.1.0`, which remains
-fixed at the earlier qualified release commit.
+The operator subsequently issued **RATIFY-PROVIDER-INTAKE** for those exact
+objects. The resulting verdict is **PROVIDER-INTAKE-RATIFIED**, recorded
+separately in
+[`../audit/receipts/run-2026-07-22-provider-intake-ratification/RECEIPT.md`](../audit/receipts/run-2026-07-22-provider-intake-ratification/RECEIPT.md).
+Neither qualification nor ratification alters or extends local tag `v0.1.0`,
+which remains fixed at the earlier qualified release commit.
