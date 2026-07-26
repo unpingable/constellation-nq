@@ -2,6 +2,18 @@
 
 **Status: RATIFIED / FROZEN — 2026-07-17.**
 
+> **Supersession note (2026-07-26, operator canonicalization direction):**
+> §6 "Integration and cutover" — freezing classic nq, fetching this repo's
+> history into canonical `nq` as the beta lineage, promoting to default, and
+> demoting classic to a legacy branch — **no longer stands as authorization.**
+> Canonical live NQ remains `~/git/nq-root/nq`; nq-ng is an experimental
+> mechanism branch. Any future canonicalization of nq-ng requires a new,
+> separately ratified re-earning campaign with its own forcing case and
+> acceptance criteria. The §0 pin ("uncommitted working tree; no revision to
+> pin yet") is likewise stale: this repository now has its own history and
+> tag `v0.1.0`. The plan text below is preserved unrewritten as the ratified
+> record it was.
+
 Reviewed by two independent adversarial passes (Fable and codex) against the
 provisional at plan hash `c51511db…50db`, then reconciled by Opus. The frozen plan
 hash is in `docs/HARDENING_PROGRAM.sha256`. Implement from the workstreams as amended

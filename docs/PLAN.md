@@ -1,5 +1,14 @@
 # NQ-ng: Professional, Local-First NQ Successor
 
+> **Supersession note (2026-07-26):** this plan's successor framing — the
+> Stage 4 "replacement-ready cut", the "At cutover" retirement of old
+> services, and the Nightshift consumer-migration step — is **superseded by
+> operator direction 2026-07-26**. Canonical live NQ remains
+> `~/git/nq-root/nq`; this repository is an experimental mechanism branch
+> (see the README status banner). The plan is preserved unrewritten as the
+> historical intent and structural audit it records; its per-mechanism
+> content remains the donor inventory.
+
 ## Summary
 
 The audit confirms that NQ’s extensibility problem is structural: adding GPU currently fans through roughly 25 files, fixed collector enums and batches, profile-specific SQL, repeated `collector_runs` constraint rebuilds, and duplicated execution/persistence logic. The in-progress GPU migration also breaks the existing upgrade test. The successor should therefore be greenfield, not an incremental refactor.
