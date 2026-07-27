@@ -1,0 +1,222 @@
+{
+  "schema": "nq.audit.classic_transfer_manifest.v1",
+  "created_at": "2026-07-27",
+  "classic": {
+    "repository": "/home/jbeck/git/nq-root/nq",
+    "head": "2e956d27616bcb7e49016b4d7867c9455c4129a7",
+    "tree": "428be9d34a5cf36d4c97532578d4bb4a99d22e80",
+    "license": "Apache-2.0",
+    "license_sha256": "f8c96bf1a1e2b2e6f57d8ae035d6207de5fa64ba92428c1e822569e11a071405"
+  },
+  "nq_ng": {
+    "repository": "/home/jbeck/git/skunkworks/nq-ng",
+    "survey_base_head": "f1e37563de0b59b0abb38f04ace0c3170a954c51",
+    "survey_base_tree": "0c515678258e5902d469b8aa4df77af3dbbd830b"
+  },
+  "implementation_gate": {
+    "result": "survey_only",
+    "reason": "The deployed capability, notification, reliance, and retention requirements are unresolved locally, so no implementation candidate is uniquely justified.",
+    "actual_transfers": []
+  },
+  "candidates": [
+    {
+      "classification": "D",
+      "source_commit": "7f9056e7e01aa3d3b7333637d0483839ed2c3378",
+      "source_path": "crates/nq-check-pack-host/src/lib.rs",
+      "source_sha256": "636341675b6475592fa930c40705671ecf577dc4e1a3dc0aa66a387133b90c77",
+      "semantic_purpose": "Conservative-host descriptor intent",
+      "status": "deferred_pending_G0",
+      "required_adaptation": "Do not copy the pack registry. Express each required observation as a versioned NQ-NG profile/helper/configuration.",
+      "destination_path": null,
+      "destination_sha256": null,
+      "byte_preservation": "none"
+    },
+    {
+      "classification": "D",
+      "source_commit": "7f9056e7e01aa3d3b7333637d0483839ed2c3378",
+      "source_path": "crates/nq-check-pack-host/src/host.rs",
+      "source_sha256": "38ba7b2ae1756b9defb1816134a7fa903729cc42b0ed662ed7750d183850986f",
+      "semantic_purpose": "Bounded Linux memory and root-filesystem acquisition behavior",
+      "status": "deferred_pending_G0",
+      "required_adaptation": "Remove Classic DTOs, status and unsafe libc. Use NQ-NG profile-owned fields, explicit coverage, safe system calls, admission and provider intake.",
+      "destination_path": null,
+      "destination_sha256": null,
+      "byte_preservation": "behavior_only_if_selected"
+    },
+    {
+      "classification": "D",
+      "source_commit": "7f9056e7e01aa3d3b7333637d0483839ed2c3378",
+      "source_path": "crates/nq-check-pack-host/src/host_bsd.rs",
+      "source_sha256": "6603a133adf1dca412f0c4f240f33242999561184e661aef6c073ec5b9df6bad",
+      "semantic_purpose": "Field-level incapacity rather than fabricated BSD values",
+      "status": "reference_only",
+      "required_adaptation": "No BSD implementation is selected; future work requires independent NQ-NG platform qualification.",
+      "destination_path": null,
+      "destination_sha256": null,
+      "byte_preservation": "none"
+    },
+    {
+      "classification": "D",
+      "source_commit": "7f9056e7e01aa3d3b7333637d0483839ed2c3378",
+      "source_path": "crates/nq-check-pack-storage/src/lib.rs",
+      "source_sha256": "0bf6970dc8f86f0ea0baf72ea5910a3bf747c7c164a4f6405e1786845fd5d33e",
+      "semantic_purpose": "Explicit-only storage configuration requirements",
+      "status": "deferred_pending_G0",
+      "required_adaptation": "Do not copy pack selection or the closed envelope; split required devices into NQ-NG profiles/helpers.",
+      "destination_path": null,
+      "destination_sha256": null,
+      "byte_preservation": "none"
+    },
+    {
+      "classification": "D",
+      "source_commit": "7f9056e7e01aa3d3b7333637d0483839ed2c3378",
+      "source_path": "crates/nq-check-pack-storage/src/zfs.rs",
+      "source_sha256": "6eb3ad920b4c4cde766a7f499f2fb6e964cc482278c04ca1f7bedc6d2a28fdf9",
+      "semantic_purpose": "ZFS acquisition algorithm",
+      "status": "deferred_pending_G0",
+      "required_adaptation": "Replace Classic witness-v0 and status assumptions with an exact NQ-NG helper/profile/provider contract.",
+      "destination_path": null,
+      "destination_sha256": null,
+      "byte_preservation": "behavior_only_if_selected"
+    },
+    {
+      "classification": "D",
+      "source_commit": "7f9056e7e01aa3d3b7333637d0483839ed2c3378",
+      "source_path": "crates/nq-check-pack-storage/src/smart.rs",
+      "source_sha256": "d0e06e3e91a91e5e3fb4fc4713f60ad37d35f88c25316de277b6b480be6e5821",
+      "semantic_purpose": "SMART acquisition algorithm",
+      "status": "deferred_pending_G0",
+      "required_adaptation": "Replace Classic witness-v0 and status assumptions with exact device identity, privilege, helper and NQ-NG profile contracts.",
+      "destination_path": null,
+      "destination_sha256": null,
+      "byte_preservation": "behavior_only_if_selected"
+    },
+    {
+      "classification": "D",
+      "source_commit": "7f9056e7e01aa3d3b7333637d0483839ed2c3378",
+      "source_path": "crates/nq-check-pack-storage/src/gpu.rs",
+      "source_sha256": "331d868e98561eeeb318d9fe781a5309986b66a318cd34c0433e826c0232ad77",
+      "semantic_purpose": "NVIDIA acquisition algorithm",
+      "status": "deferred_architecture_gate",
+      "required_adaptation": "Resolve NQ-NG's explicit late driver/plugin loading limitation before admitting a GPU provider.",
+      "destination_path": null,
+      "destination_sha256": null,
+      "byte_preservation": "none"
+    },
+    {
+      "classification": "D",
+      "source_commit": "f853180cfa6b3368f1a0335d257ddf1be7b50be3",
+      "source_path": "scripts/install-first-run-campaign.py",
+      "source_sha256": "9e6d020ae1b9880e0121152e5f46cbe1a48922efbab4dcf7adb6354b3beabb14",
+      "semantic_purpose": "Clean-room methodology and failure-matrix capture",
+      "status": "methodology_only",
+      "required_adaptation": "Write an NQ-NG package-native harness without Classic binaries, ports, suite, source-workspace or sibling assumptions.",
+      "destination_path": null,
+      "destination_sha256": null,
+      "byte_preservation": "none"
+    },
+    {
+      "classification": "E",
+      "source_commit": "ff610bbb3d930100e5a42731521aec09dd8bbd77",
+      "source_path": "crates/nq-witness/tests/fixtures/zab2nq-external-projection.json",
+      "source_sha256": "ace5000fa8533403fa6f58005d5521c2338f54298e4ef28f775c02208f521968",
+      "semantic_purpose": "Static external-projection compatibility vector",
+      "status": "reference_only",
+      "required_adaptation": "Future correspondence must preserve static/historical status and refuse promotion to current provider observation.",
+      "destination_path": null,
+      "destination_sha256": null,
+      "byte_preservation": "exact_if_later_copied"
+    },
+    {
+      "classification": "E",
+      "source_commit": "ff610bbb3d930100e5a42731521aec09dd8bbd77",
+      "source_path": "crates/nq-witness/tests/fixtures/projection_receipt/continuity-imported.json",
+      "source_sha256": "d7511108e1bebc6ad2ec60aa8c19d3163e71da15565100c078f6ad931041f4db",
+      "semantic_purpose": "Imported projection custody/refusal correspondence",
+      "status": "reference_only",
+      "required_adaptation": "No direct admission; future importer needs an explicit external artifact schema and semantic-loss record.",
+      "destination_path": null,
+      "destination_sha256": null,
+      "byte_preservation": "exact_if_later_copied"
+    },
+    {
+      "classification": "E",
+      "source_commit": "ff610bbb3d930100e5a42731521aec09dd8bbd77",
+      "source_path": "crates/nq-witness/tests/fixtures/projection_receipt/docket-substitution-refused.json",
+      "source_sha256": "47d8873e145ad4cbb003cc0d7037bc51ee6af65a2f048d1e3a393e051893ea8e",
+      "semantic_purpose": "Source-substitution refusal correspondence",
+      "status": "reference_only",
+      "required_adaptation": "Translate the hostile condition to any future NQ-NG external-artifact boundary.",
+      "destination_path": null,
+      "destination_sha256": null,
+      "byte_preservation": "exact_if_later_copied"
+    },
+    {
+      "classification": "E",
+      "source_commit": "c09f748935a4a04f5cbff399b566908b744d3f26",
+      "source_path": "crates/nq/tests/fixtures/reliance-profiles.json",
+      "source_sha256": "dc35bfc749fd41689c00d40a64c4258981e8a5e78bbd138e5f841709315d9e2b",
+      "semantic_purpose": "Consumer-purpose reliance correspondence",
+      "status": "reference_only",
+      "required_adaptation": "Use only after a named NQ-NG consumer contract exists; never equate reliance with provider/report admission.",
+      "destination_path": null,
+      "destination_sha256": null,
+      "byte_preservation": "exact_if_later_copied"
+    },
+    {
+      "classification": "E",
+      "source_commit": "f853180cfa6b3368f1a0335d257ddf1be7b50be3",
+      "source_path": "docs/install/campaign/installation-operator-scenarios.v1.json",
+      "source_sha256": "5dd5b70d36cfb1fc5c9fb5ce26cd7713f314fc09d5956bb24bd3b894f6d4e7ff",
+      "semantic_purpose": "Literal-documentation and recovery scenarios",
+      "status": "reference_only",
+      "required_adaptation": "Replace Classic command/package expectations with the NQ-NG Debian/tar lifecycle and first operational result.",
+      "destination_path": null,
+      "destination_sha256": null,
+      "byte_preservation": "exact_if_later_copied"
+    },
+    {
+      "classification": "E",
+      "source_commit": "02081fa7e8d69f4fa6ed06d511547430f52539d0",
+      "source_path": "docs/install/campaign/clean-room-f853180-results.json",
+      "source_sha256": "596b73a967f2d73d9f483f1f139446021bbeb6607cc32d3729b2b528a9fc5c2e",
+      "semantic_purpose": "Adverse Classic installation baseline",
+      "status": "reference_only",
+      "required_adaptation": "Comparison evidence only; it is not an NQ-NG result.",
+      "destination_path": null,
+      "destination_sha256": null,
+      "byte_preservation": "exact_if_later_copied"
+    },
+    {
+      "classification": "E",
+      "source_commit": "02081fa7e8d69f4fa6ed06d511547430f52539d0",
+      "source_path": "docs/install/campaign/synthetic-20260727-results.json",
+      "source_sha256": "ceba71f7b847a123822dadde80af65f646ddc19c9ce6b89d674139d595db9cc8",
+      "semantic_purpose": "Synthetic operator baseline",
+      "status": "reference_only",
+      "required_adaptation": "Evidence only; never convert it into human usability or NQ-NG product qualification.",
+      "destination_path": null,
+      "destination_sha256": null,
+      "byte_preservation": "exact_if_later_copied"
+    }
+  ],
+  "excluded_classes": {
+    "F": [
+      "Classic nq-core compatibility facades",
+      "Classic nq-db and all 64 migrations",
+      "raw SQLite/private-table crossings",
+      "nq-monitor-agent all-collectors runtime",
+      "closed collector/witness packet envelope",
+      "planning-only nq-suite",
+      "detector-specific dashboard and notification branches",
+      "Classic binary-name and source-workspace installation compatibility"
+    ],
+    "G": [
+      "full dashboard",
+      "notification product",
+      "Labelwatch and Driftwatch before deployed requirements are recovered",
+      "general external-provider intake",
+      "public release and deployment"
+    ]
+  }
+}
