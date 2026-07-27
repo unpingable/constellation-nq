@@ -1,0 +1,890 @@
+{
+  "authority": {
+    "bounded_closure_unit": "authorized",
+    "classic_replacement": "not_authorized",
+    "cutover": "not_authorized",
+    "general_stage2_implementation": "not_authorized",
+    "parallel_qualification": "not_authorized",
+    "retirement_execution": "not_authorized",
+    "specification": "operator_ratified",
+    "subject_completeness": "not_earned"
+  },
+  "classification_counts": {
+    "conditionally_required": 4,
+    "deployment_required": 7,
+    "mandatory_core": 15,
+    "operator_loop_required": 12,
+    "optional_supported": 1,
+    "retirement_approved": 5,
+    "total": 44
+  },
+  "classification_taxonomy": {
+    "allowed": [
+      "mandatory_core",
+      "deployment_required",
+      "operator_loop_required",
+      "conditionally_required",
+      "optional_supported",
+      "retirement_approved"
+    ],
+    "definitions": {
+      "conditionally_required": "A mandatory requirement when the versioned closed inventory activates its declared substrate or source predicate.",
+      "deployment_required": "A requirement activated by this subject's retained deployed workload or role.",
+      "mandatory_core": "A universal Host Operational Portrait v1 requirement for the declared host role.",
+      "operator_loop_required": "A required clean-install, recurrence, inspection, posture, notification, retention, backup, or product self-standing gate that is not necessarily a host fact.",
+      "optional_supported": "A supported mechanism that is not itself a completeness obligation and cannot replace an underlying required question without explicit selection and qualification.",
+      "retirement_approved": "An operator-approved successor disposition subject to stated prerequisites; it grants no execution, removal, cutover, or mutation authority."
+    }
+  },
+  "decision_date": "2026-07-27",
+  "decision_id": "nq.host_operational_portrait.v1.ratification.2026-07-27",
+  "implementation_authority_values": {
+    "bounded_closure_unit_only": "Records, design, evidence, and narrowly necessary implementation may address only identified blocker closure; no general implementation authority follows.",
+    "none_in_this_decision": "This ratification grants no implementation work for this row."
+  },
+  "manifest_id": "nq.host_operational_portrait.v1.capability_manifest",
+  "manifest_version": 1,
+  "open_blockers": [
+    {
+      "blocker_id": "B1.closed_subject_inventories",
+      "description": "Exact versioned per-subject inventories, bounded membership rules, authoritative sources, exclusions, and expected diagnostic capabilities are not closed."
+    },
+    {
+      "blocker_id": "B2.application_semantic_contracts",
+      "description": "Labelwatch and Driftwatch observation, profile, phase, field, denominator, freshness, threshold, hysteresis, recovery, and consumer contracts are not frozen."
+    },
+    {
+      "blocker_id": "B3.production_namespace",
+      "description": "The non-colliding package, executable, service, configuration, state, socket, and documentation namespace is not selected."
+    },
+    {
+      "blocker_id": "B4.sushi_k_platform_binding",
+      "description": "Sushi-k's exact OS, architecture, runtime floor, and relevant platform capabilities are not bound."
+    },
+    {
+      "blocker_id": "B5.external_vantage_identities",
+      "description": "Required endpoint/dependency roles, logical vantage identities, generations, request contexts, topology evidence, and qualification bases are not closed."
+    }
+  ],
+  "ratification_rules": [
+    "Specification ratification does not establish subject completeness.",
+    "Every mandatory, deployment-required, operator-loop-required, and activated conditional row must pass its exact acceptance relation before subject completeness can be earned.",
+    "Optional provider absence does not excuse an underlying required diagnostic question.",
+    "Retirement approval grants no execution, deletion, purge, cutover, or authority-switch permission.",
+    "Missing, stale, refused, unsupported, partial, contradictory, or not-configured testimony cannot become healthy.",
+    "No row may infer authority, reliance, or independent corroboration from packaging, endpoint appearance, provider count, or producer assertion.",
+    "A focused conformance review may update row and subject verdicts without repeating R1-R11 unless it proposes a material specification change."
+  ],
+  "retirement_authority_values": {
+    "conditional_disposition_only": "The item may leave the successor obligation only after R10/R11 prerequisites; actual mutation requires separate authorization.",
+    "none": "No retirement disposition applies."
+  },
+  "schema": "nq.audit.host_operational_portrait.ratified_capability_manifest.v1",
+  "source_commit": "6a336884ec9a4c4aeaa4dfe1ca78f7e893518341",
+  "source_manifest": {
+    "path": "audit/stage1-truth-and-qualification/DEPLOYED_CAPABILITY_MANIFEST.json",
+    "sha256": "ce1784ce42bcb53cea84a2a64564b39b7f1af74a161be521375afe1ffd3b9864"
+  },
+  "source_tree": "4ea26ea7562475a86281e6689b6ba644033ba231",
+  "subjects": [
+    {
+      "capabilities": [
+        {
+          "affected_subject_or_role": "labelwatch-host/driftwatch-overlay",
+          "capability_id": "application.driftwatch",
+          "completeness_consequence": "Missing or unfrozen application testimony leaves the overlay and dependent portrait partial or missing.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B2.application_semantic_contracts"
+          ],
+          "operator_rationale": "Driftwatch native progression, loss, queue, gate, storage, retention, export, and consumer testimony is required for the retained workload.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "ratified_classification": "deployment_required",
+          "retirement_authority": "none",
+          "row_conformance": "not_assessed_against_ratified_contract"
+        },
+        {
+          "affected_subject_or_role": "labelwatch-host/labelwatch-overlay",
+          "capability_id": "application.labelwatch",
+          "completeness_consequence": "Generic lifecycle or HTTP evidence cannot satisfy the application overlay.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B2.application_semantic_contracts"
+          ],
+          "operator_rationale": "Labelwatch native progression, publication, coverage, bridge, and consumer testimony is required for the retained workload.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "ratified_classification": "deployment_required",
+          "retirement_authority": "none",
+          "row_conformance": "not_assessed_against_ratified_contract"
+        },
+        {
+          "affected_subject_or_role": "labelwatch-host/retained-deployed-workloads",
+          "capability_id": "application.other_declared_services",
+          "completeness_consequence": "An undeclared or unobserved retained workload leaves deployment coverage incomplete.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B1.closed_subject_inventories"
+          ],
+          "operator_rationale": "Retained AG Classic, PostgreSQL, Caddy, PDS, and other declared workloads require lifecycle and dependency coverage; bespoke overlays require a separately named operator decision.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "ratified_classification": "deployment_required",
+          "retirement_authority": "none",
+          "row_conformance": "not_assessed_against_ratified_contract"
+        },
+        {
+          "affected_subject_or_role": "labelwatch-host/host-role",
+          "capability_id": "coverage.expected_inventory",
+          "completeness_consequence": "Until inventory closure, missing, not-configured, and intentionally-excluded states cannot be decided mechanically and subject completeness is not earned.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B1.closed_subject_inventories"
+          ],
+          "operator_rationale": "Every mandatory, conditional, optional, excluded, and retired obligation requires a closed versioned membership basis.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "ratified_classification": "mandatory_core",
+          "retirement_authority": "none",
+          "row_conformance": "not_earned"
+        },
+        {
+          "affected_subject_or_role": "labelwatch-host/production-installation",
+          "capability_id": "deployment.clean_install",
+          "completeness_consequence": "Current deployment evidence cannot substitute for the non-colliding clean-install contract.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B3.production_namespace"
+          ],
+          "operator_rationale": "A supported host role must install from documented artifacts without source-checkout or workstation assumptions.",
+          "prior_candidate_classification": [
+            "observed",
+            "required"
+          ],
+          "ratified_classification": "operator_loop_required",
+          "retirement_authority": "none",
+          "row_conformance": "not_earned"
+        },
+        {
+          "affected_subject_or_role": "labelwatch-host/host-role",
+          "capability_id": "host.cpu_load_pressure",
+          "completeness_consequence": "Missing required dimensions or policy produces a non-complete coverage or evaluation outcome.",
+          "implementation_authority": "none_in_this_decision",
+          "open_blocker_ids": [],
+          "operator_rationale": "CPU identity, load, utilization or pressure, time basis, and identified policy are universal host-role facts.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "ratified_classification": "mandatory_core",
+          "retirement_authority": "none",
+          "row_conformance": "not_assessed_against_ratified_contract"
+        },
+        {
+          "affected_subject_or_role": "labelwatch-host/host-role",
+          "capability_id": "host.identity_boot_kernel_time",
+          "completeness_consequence": "Locator identity or missing time/epoch binding cannot establish host-state applicability.",
+          "implementation_authority": "none_in_this_decision",
+          "open_blocker_ids": [],
+          "operator_rationale": "Logical identity, boot epoch, kernel, uptime, and relevant clock basis anchor all state applicability.",
+          "prior_candidate_classification": [
+            "observed",
+            "required"
+          ],
+          "ratified_classification": "mandatory_core",
+          "retirement_authority": "none",
+          "row_conformance": "not_assessed_against_ratified_contract"
+        },
+        {
+          "affected_subject_or_role": "labelwatch-host/host-role",
+          "capability_id": "host.memory_swap_pressure",
+          "completeness_consequence": "Missing swap or pressure testimony remains partial or missing, never healthy.",
+          "implementation_authority": "none_in_this_decision",
+          "open_blocker_ids": [],
+          "operator_rationale": "Memory, swap, and pressure are universal host-role facts with explicit missing-dimension behavior.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "ratified_classification": "mandatory_core",
+          "retirement_authority": "none",
+          "row_conformance": "not_assessed_against_ratified_contract"
+        },
+        {
+          "affected_subject_or_role": "labelwatch-host/classic-runtime",
+          "capability_id": "legacy.classic_runtime",
+          "completeness_consequence": "Classic remains authoritative now; this row neither helps nor blocks NQ-NG completeness until the separately authorized transition.",
+          "implementation_authority": "none_in_this_decision",
+          "open_blocker_ids": [],
+          "operator_rationale": "Classic has no successor compatibility constituency and becomes eligible only after switch, rollback-window disposition, and archive prerequisites.",
+          "prior_candidate_classification": [
+            "observed",
+            "retire"
+          ],
+          "ratified_classification": "retirement_approved",
+          "retirement_authority": "conditional_disposition_only",
+          "row_conformance": "retirement_disposition_ratified_execution_not_authorized"
+        },
+        {
+          "affected_subject_or_role": "labelwatch-host/host-and-external-vantages",
+          "capability_id": "network.interfaces_routes_listeners_reachability",
+          "completeness_consequence": "Unbound vantages or dependencies leave network/external coverage partial or missing.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B1.closed_subject_inventories",
+            "B5.external_vantage_identities"
+          ],
+          "operator_rationale": "Typed local network state, inbound endpoint roles, outbound dependencies, and exact vantages are required and remain distinct questions.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "ratified_classification": "mandatory_core",
+          "retirement_authority": "none",
+          "row_conformance": "not_earned"
+        },
+        {
+          "affected_subject_or_role": "labelwatch-host/operator-loop",
+          "capability_id": "notification.delivery",
+          "completeness_consequence": "One unavailable or unqualified required route yields partial notification coverage without changing the diagnostic.",
+          "implementation_authority": "none_in_this_decision",
+          "open_blocker_ids": [],
+          "operator_rationale": "Slack and Discord logical route roles remain independently required until retired, with exact Nightshift intent and per-route delivery custody.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "ratified_classification": "operator_loop_required",
+          "retirement_authority": "none",
+          "row_conformance": "not_assessed_against_ratified_contract"
+        },
+        {
+          "affected_subject_or_role": "labelwatch-host/nightshift-loop",
+          "capability_id": "observation.currency",
+          "completeness_consequence": "Missed, late, blocked, or expired recurrence changes current posture without changing old artifacts.",
+          "implementation_authority": "none_in_this_decision",
+          "open_blocker_ids": [],
+          "operator_rationale": "Immutable run slots, stable jitter, recurrence, expiry, and exact acquisition time prevent last-green from becoming currently green.",
+          "prior_candidate_classification": [
+            "observed",
+            "required"
+          ],
+          "ratified_classification": "operator_loop_required",
+          "retirement_authority": "none",
+          "row_conformance": "not_assessed_against_ratified_contract"
+        },
+        {
+          "affected_subject_or_role": "labelwatch-host/operator-surface",
+          "capability_id": "operator_surface.typed_contracts",
+          "completeness_consequence": "Private-table or flattened status access cannot satisfy operator usability or authority preservation.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B3.production_namespace"
+          ],
+          "operator_rationale": "NQ inspection and Nightshift posture must use stable canonical contracts with generated operations-EDA views and exact drill-down.",
+          "prior_candidate_classification": [
+            "observed",
+            "required"
+          ],
+          "ratified_classification": "operator_loop_required",
+          "retirement_authority": "none",
+          "row_conformance": "not_assessed_against_ratified_contract"
+        },
+        {
+          "affected_subject_or_role": "labelwatch-host/operator-loop",
+          "capability_id": "retention.backup_restore",
+          "completeness_consequence": "Either subfacet may be non-complete independently; no combined healthy result is permitted.",
+          "implementation_authority": "none_in_this_decision",
+          "open_blocker_ids": [],
+          "operator_rationale": "Evidence/archive retention and operational backup/restore are separately mandatory product-standing facets.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "ratified_classification": "operator_loop_required",
+          "retirement_authority": "none",
+          "row_conformance": "not_assessed_against_ratified_contract",
+          "subfacets": [
+            {
+              "evaluation": "independent_required",
+              "subfacet_id": "retention.evidence_archive"
+            },
+            {
+              "evaluation": "independent_required",
+              "subfacet_id": "backup_restore.operational_state"
+            }
+          ]
+        },
+        {
+          "affected_subject_or_role": "labelwatch-host/diagnostic-fabric",
+          "capability_id": "self_diagnosis.nq",
+          "completeness_consequence": "A responding facade cannot substitute for missing custody, recurrence, provider, or external testimony.",
+          "implementation_authority": "none_in_this_decision",
+          "open_blocker_ids": [],
+          "operator_rationale": "NQ, provider, admission, custody, store, API, catalog, Nightshift, and delivery self-standing remain separate typed questions.",
+          "prior_candidate_classification": [
+            "observed",
+            "required"
+          ],
+          "ratified_classification": "operator_loop_required",
+          "retirement_authority": "none",
+          "row_conformance": "not_assessed_against_ratified_contract"
+        },
+        {
+          "affected_subject_or_role": "labelwatch-host/host-role",
+          "capability_id": "service.lifecycle",
+          "completeness_consequence": "The observed configured service set cannot prove inventory closure.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B1.closed_subject_inventories"
+          ],
+          "operator_rationale": "All declared workload forms and generation/restart state require lifecycle coverage under the closed inventory.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "ratified_classification": "mandatory_core",
+          "retirement_authority": "none",
+          "row_conformance": "not_earned"
+        },
+        {
+          "affected_subject_or_role": "labelwatch-host/storage-overlay",
+          "capability_id": "storage.device_and_shared_failure_domain",
+          "completeness_consequence": "Unbound devices or access paths leave storage topology and corroboration limits incomplete.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B1.closed_subject_inventories"
+          ],
+          "operator_rationale": "The retained root and shared-storage paths require device/mount relationship and shared-failure-domain testimony without inferring device health.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "ratified_classification": "deployment_required",
+          "retirement_authority": "none",
+          "row_conformance": "not_assessed_against_ratified_contract"
+        },
+        {
+          "affected_subject_or_role": "labelwatch-host/host-role",
+          "capability_id": "storage.filesystems_mounts_capacity_inodes",
+          "completeness_consequence": "An open mount inventory or missing dimension is non-complete.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B1.closed_subject_inventories"
+          ],
+          "operator_rationale": "Every in-scope filesystem and mount requires bytes, inodes, read-only state, and backing identity.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "ratified_classification": "mandatory_core",
+          "retirement_authority": "none",
+          "row_conformance": "not_assessed_against_ratified_contract"
+        },
+        {
+          "affected_subject_or_role": "labelwatch-host/application-storage",
+          "capability_id": "storage.sqlite_metadata",
+          "completeness_consequence": "Configured-but-unobserved paths remain missing until explicitly excluded under the closed inventory.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B1.closed_subject_inventories",
+            "B2.application_semantic_contracts"
+          ],
+          "operator_rationale": "Retained Labelwatch/Driftwatch workloads require a closed exact database-path inventory with file testimony separated from application correctness.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "ratified_classification": "deployment_required",
+          "retirement_authority": "none",
+          "row_conformance": "not_earned"
+        },
+        {
+          "affected_subject_or_role": "labelwatch-host/application-storage",
+          "capability_id": "storage.sqlite_wal",
+          "completeness_consequence": "Missing target closure or semantic thresholds yields missing/unknown rather than healthy.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B1.closed_subject_inventories",
+            "B2.application_semantic_contracts"
+          ],
+          "operator_rationale": "Each retained database target requires WAL testimony and application-owned incorporation semantics.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "ratified_classification": "deployment_required",
+          "retirement_authority": "none",
+          "row_conformance": "not_assessed_against_ratified_contract"
+        },
+        {
+          "affected_subject_or_role": "labelwatch-host/log-overlay",
+          "capability_id": "telemetry.logs",
+          "completeness_consequence": "The four observed sources are a minimum, not proof of closed required coverage.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B1.closed_subject_inventories"
+          ],
+          "operator_rationale": "Important Labelwatch-host workload logs require a closed bounded source inventory and typed quiet/missing/denied/parse/stale/condition outcomes.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "ratified_classification": "deployment_required",
+          "retirement_authority": "none",
+          "row_conformance": "not_assessed_against_ratified_contract"
+        },
+        {
+          "affected_subject_or_role": "labelwatch-host/optional-provider",
+          "capability_id": "telemetry.prometheus_blackbox",
+          "completeness_consequence": "Omitting Prometheus is allowed only when required host/external questions are satisfied by other qualified providers; selecting it requires timestamp, lineage, projection, warning, partial-result, and coverage qualification.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B5.external_vantage_identities"
+          ],
+          "operator_rationale": "Prometheus is an admitted provider mechanism, not the evidence constitution or a mandatory implementation choice.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "ratified_classification": "optional_supported",
+          "retirement_authority": "none",
+          "row_conformance": "optional_mechanism_not_assessed"
+        }
+      ],
+      "completeness_status": "not_earned",
+      "open_blocker_ids": [
+        "B1.closed_subject_inventories",
+        "B2.application_semantic_contracts",
+        "B3.production_namespace",
+        "B5.external_vantage_identities"
+      ],
+      "role": "host_with_labelwatch_and_driftwatch_application_overlays",
+      "specification_status": "ratified",
+      "subject_id": "labelwatch-host"
+    },
+    {
+      "capabilities": [
+        {
+          "affected_subject_or_role": "sushi-k/legacy-application-workload",
+          "capability_id": "application.governor_code_adapter",
+          "completeness_consequence": "Its explicit approved inventory removal is not absence or recovery and creates no AG-NG compatibility obligation.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B1.closed_subject_inventories"
+          ],
+          "operator_rationale": "The down adapter is AG Classic residue with no retained Portrait v1 workflow and no AG-NG product-native contract.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision",
+            "retire"
+          ],
+          "ratified_classification": "retirement_approved",
+          "retirement_authority": "conditional_disposition_only",
+          "row_conformance": "retirement_disposition_ratified_execution_not_authorized"
+        },
+        {
+          "affected_subject_or_role": "sushi-k/host-role",
+          "capability_id": "coverage.expected_inventory",
+          "completeness_consequence": "Until closure, zero configured targets and discovered absence cannot be interpreted as completeness or health.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B1.closed_subject_inventories"
+          ],
+          "operator_rationale": "Every sushi-k obligation and exclusion requires a closed versioned membership basis.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "ratified_classification": "mandatory_core",
+          "retirement_authority": "none",
+          "row_conformance": "not_earned"
+        },
+        {
+          "affected_subject_or_role": "sushi-k/production-installation",
+          "capability_id": "deployment.clean_install",
+          "completeness_consequence": "The current user-local deployment cannot satisfy production clean-install or platform qualification.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B3.production_namespace",
+            "B4.sushi_k_platform_binding"
+          ],
+          "operator_rationale": "The retired developer-checkout shape must be replaced by a non-colliding supported installation on the exact bound platform.",
+          "prior_candidate_classification": [
+            "observed",
+            "required"
+          ],
+          "ratified_classification": "operator_loop_required",
+          "retirement_authority": "none",
+          "row_conformance": "not_earned"
+        },
+        {
+          "affected_subject_or_role": "sushi-k/host-role",
+          "capability_id": "host.cpu_load_pressure",
+          "completeness_consequence": "Point load without complete dimensions and policy does not satisfy the row.",
+          "implementation_authority": "none_in_this_decision",
+          "open_blocker_ids": [],
+          "operator_rationale": "CPU identity, load, utilization or pressure, time basis, and identified policy are universal host-role facts.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "ratified_classification": "mandatory_core",
+          "retirement_authority": "none",
+          "row_conformance": "not_assessed_against_ratified_contract"
+        },
+        {
+          "affected_subject_or_role": "sushi-k/host-role",
+          "capability_id": "host.identity_boot_kernel_time",
+          "completeness_consequence": "Missing exact platform or state binding prevents qualification by distribution similarity.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B4.sushi_k_platform_binding"
+          ],
+          "operator_rationale": "Logical identity, boot epoch, kernel, uptime, clock basis, and exact platform binding anchor applicability.",
+          "prior_candidate_classification": [
+            "observed",
+            "required"
+          ],
+          "ratified_classification": "mandatory_core",
+          "retirement_authority": "none",
+          "row_conformance": "not_earned"
+        },
+        {
+          "affected_subject_or_role": "sushi-k/host-role",
+          "capability_id": "host.memory_swap_pressure",
+          "completeness_consequence": "Missing swap or pressure testimony remains partial or missing.",
+          "implementation_authority": "none_in_this_decision",
+          "open_blocker_ids": [],
+          "operator_rationale": "Memory, swap, and pressure are universal host-role facts.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "ratified_classification": "mandatory_core",
+          "retirement_authority": "none",
+          "row_conformance": "not_assessed_against_ratified_contract"
+        },
+        {
+          "affected_subject_or_role": "sushi-k/classic-runtime",
+          "capability_id": "legacy.classic_runtime",
+          "completeness_consequence": "Classic remains authoritative now; this disposition does not execute retirement.",
+          "implementation_authority": "none_in_this_decision",
+          "open_blocker_ids": [],
+          "operator_rationale": "Classic has no successor compatibility obligation and becomes retirement-eligible only after switch, rollback-window disposition, and archive prerequisites.",
+          "prior_candidate_classification": [
+            "observed",
+            "retire"
+          ],
+          "ratified_classification": "retirement_approved",
+          "retirement_authority": "conditional_disposition_only",
+          "row_conformance": "retirement_disposition_ratified_execution_not_authorized"
+        },
+        {
+          "affected_subject_or_role": "sushi-k/developer-deployment",
+          "capability_id": "legacy.user_local_deployment_shape",
+          "completeness_consequence": "Successor clean install cannot depend on the retired paths or workstation state.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B3.production_namespace",
+            "B4.sushi_k_platform_binding"
+          ],
+          "operator_rationale": "Mutable checkout binaries, home-local configuration, and user services are historical deployment facts, not supported successor surfaces.",
+          "prior_candidate_classification": [
+            "observed",
+            "retire"
+          ],
+          "ratified_classification": "retirement_approved",
+          "retirement_authority": "conditional_disposition_only",
+          "row_conformance": "retirement_disposition_ratified_execution_not_authorized"
+        },
+        {
+          "affected_subject_or_role": "sushi-k/host-and-external-vantages",
+          "capability_id": "network.interfaces_routes_listeners_reachability",
+          "completeness_consequence": "The local Classic self-probe cannot satisfy local network, LAN, external, or dependency coverage.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B1.closed_subject_inventories",
+            "B5.external_vantage_identities"
+          ],
+          "operator_rationale": "Typed local network state, declared consumer endpoints, and required outbound dependencies are mandatory and retain exact vantage.",
+          "prior_candidate_classification": [
+            "owner_decision",
+            "required"
+          ],
+          "ratified_classification": "mandatory_core",
+          "retirement_authority": "none",
+          "row_conformance": "not_earned"
+        },
+        {
+          "affected_subject_or_role": "sushi-k/operator-loop",
+          "capability_id": "notification.delivery",
+          "completeness_consequence": "Zero configured routes is incomplete notification coverage, not an optional success.",
+          "implementation_authority": "none_in_this_decision",
+          "open_blocker_ids": [],
+          "operator_rationale": "Sushi-k requires at least one qualified operator-owned route with exact intent, attempt, and receipt semantics.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "ratified_classification": "operator_loop_required",
+          "retirement_authority": "none",
+          "row_conformance": "not_earned"
+        },
+        {
+          "affected_subject_or_role": "sushi-k/nightshift-loop",
+          "capability_id": "observation.currency",
+          "completeness_consequence": "Missed, late, blocked, or expired standing remains explicit.",
+          "implementation_authority": "none_in_this_decision",
+          "open_blocker_ids": [],
+          "operator_rationale": "Immutable slots, stable jitter, recurrence, expiry, and exact acquisition time prevent stale standing from appearing current.",
+          "prior_candidate_classification": [
+            "observed",
+            "required"
+          ],
+          "ratified_classification": "operator_loop_required",
+          "retirement_authority": "none",
+          "row_conformance": "not_assessed_against_ratified_contract"
+        },
+        {
+          "affected_subject_or_role": "sushi-k/operator-surface",
+          "capability_id": "operator_surface.typed_contracts",
+          "completeness_consequence": "Current CLI drift, private-table access, or flattened status cannot satisfy the row.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B3.production_namespace"
+          ],
+          "operator_rationale": "NQ inspection and Nightshift posture require canonical typed contracts and generated operator views.",
+          "prior_candidate_classification": [
+            "observed",
+            "required"
+          ],
+          "ratified_classification": "operator_loop_required",
+          "retirement_authority": "none",
+          "row_conformance": "not_assessed_against_ratified_contract"
+        },
+        {
+          "affected_subject_or_role": "sushi-k/operator-loop",
+          "capability_id": "retention.backup_restore",
+          "completeness_consequence": "Configured retention or budget declarations do not establish either subfacet.",
+          "implementation_authority": "none_in_this_decision",
+          "open_blocker_ids": [],
+          "operator_rationale": "Evidence/archive retention and operational backup/restore are independently mandatory product-standing facets.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "ratified_classification": "operator_loop_required",
+          "retirement_authority": "none",
+          "row_conformance": "not_assessed_against_ratified_contract",
+          "subfacets": [
+            {
+              "evaluation": "independent_required",
+              "subfacet_id": "retention.evidence_archive"
+            },
+            {
+              "evaluation": "independent_required",
+              "subfacet_id": "backup_restore.operational_state"
+            }
+          ]
+        },
+        {
+          "affected_subject_or_role": "sushi-k/diagnostic-fabric",
+          "capability_id": "self_diagnosis.nq",
+          "completeness_consequence": "A local HTTP response or loop completion proves none of the other required facets.",
+          "implementation_authority": "none_in_this_decision",
+          "open_blocker_ids": [],
+          "operator_rationale": "Separate NQ, provider, custody, catalog, API, store, Nightshift, and delivery self-standing is required.",
+          "prior_candidate_classification": [
+            "observed",
+            "required"
+          ],
+          "ratified_classification": "operator_loop_required",
+          "retirement_authority": "none",
+          "row_conformance": "not_assessed_against_ratified_contract"
+        },
+        {
+          "affected_subject_or_role": "sushi-k/host-role",
+          "capability_id": "service.lifecycle",
+          "completeness_consequence": "The six observed Classic targets are a minimum, not a closed role inventory.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B1.closed_subject_inventories"
+          ],
+          "operator_rationale": "All declared service, container, timer, job, and generation forms require lifecycle coverage.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "ratified_classification": "mandatory_core",
+          "retirement_authority": "none",
+          "row_conformance": "not_earned"
+        },
+        {
+          "affected_subject_or_role": "sushi-k/host-role",
+          "capability_id": "storage.filesystems_mounts_capacity_inodes",
+          "completeness_consequence": "Root-byte testimony alone cannot close the filesystem/mount inventory.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B1.closed_subject_inventories"
+          ],
+          "operator_rationale": "Every in-scope filesystem and mount requires bytes, inodes, read-only state, and backing identity.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "ratified_classification": "mandatory_core",
+          "retirement_authority": "none",
+          "row_conformance": "not_earned"
+        },
+        {
+          "affected_subject_or_role": "sushi-k/physical-device-overlay",
+          "capability_id": "storage.smart",
+          "completeness_consequence": "Until inventory closure determines applicability, absent tooling or testimony is non-complete; invocation success is not device health.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B1.closed_subject_inventories"
+          ],
+          "operator_rationale": "SMART or equivalent device-native health is required for each applicable declared physical device and supported access path.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision",
+            "retire"
+          ],
+          "ratified_classification": "conditionally_required",
+          "retirement_authority": "none",
+          "row_conformance": "condition_not_instantiated"
+        },
+        {
+          "affected_subject_or_role": "sushi-k/application-storage",
+          "capability_id": "storage.sqlite_metadata",
+          "completeness_consequence": "Zero configured targets remains not-configured until inventory closure; activation requires an exact path contract.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B1.closed_subject_inventories"
+          ],
+          "operator_rationale": "SQLite file testimony is required only when the closed sushi-k application inventory activates it.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision"
+          ],
+          "ratified_classification": "conditionally_required",
+          "retirement_authority": "none",
+          "row_conformance": "condition_not_instantiated"
+        },
+        {
+          "affected_subject_or_role": "sushi-k/application-storage",
+          "capability_id": "storage.sqlite_wal",
+          "completeness_consequence": "Zero configured targets is not a healthy result; activation requires target and application semantics.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B1.closed_subject_inventories"
+          ],
+          "operator_rationale": "WAL testimony and incorporation semantics are required only for SQLite targets activated by the closed inventory.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision"
+          ],
+          "ratified_classification": "conditionally_required",
+          "retirement_authority": "none",
+          "row_conformance": "condition_not_instantiated"
+        },
+        {
+          "affected_subject_or_role": "sushi-k/conditional-substrate-overlays",
+          "capability_id": "storage.zfs_gpu",
+          "completeness_consequence": "Absent current configuration is not an exclusion; applicability must be explicitly closed.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B1.closed_subject_inventories"
+          ],
+          "operator_rationale": "ZFS or GPU testimony is mandatory only when the closed role inventory declares the substrate in scope.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision"
+          ],
+          "ratified_classification": "conditionally_required",
+          "retirement_authority": "none",
+          "row_conformance": "condition_not_instantiated"
+        },
+        {
+          "affected_subject_or_role": "sushi-k/log-overlay",
+          "capability_id": "telemetry.logs",
+          "completeness_consequence": "Zero configured sources remains not-configured until the important-source inventory is closed.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B1.closed_subject_inventories"
+          ],
+          "operator_rationale": "Important bounded log and event testimony is a mandatory host category; the closed inventory defines its exact sources.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "ratified_classification": "mandatory_core",
+          "retirement_authority": "none",
+          "row_conformance": "not_earned"
+        },
+        {
+          "affected_subject_or_role": "sushi-k/legacy-local-probe",
+          "capability_id": "telemetry.prometheus_blackbox",
+          "completeness_consequence": "Required typed self-diagnostics and R7 vantages remain separate mandatory obligations.",
+          "implementation_authority": "bounded_closure_unit_only",
+          "open_blocker_ids": [
+            "B5.external_vantage_identities"
+          ],
+          "operator_rationale": "The local Classic Monitor facade probe is retired because it is neither independent nor equivalent to NQ, Nightshift, host, or external self-diagnosis.",
+          "prior_candidate_classification": [
+            "observed",
+            "owner_decision",
+            "retire"
+          ],
+          "ratified_classification": "retirement_approved",
+          "retirement_authority": "conditional_disposition_only",
+          "row_conformance": "retirement_disposition_ratified_execution_not_authorized"
+        }
+      ],
+      "completeness_status": "not_earned",
+      "open_blocker_ids": [
+        "B1.closed_subject_inventories",
+        "B3.production_namespace",
+        "B4.sushi_k_platform_binding",
+        "B5.external_vantage_identities"
+      ],
+      "role": "host",
+      "specification_status": "ratified",
+      "subject_id": "sushi-k"
+    }
+  ]
+}

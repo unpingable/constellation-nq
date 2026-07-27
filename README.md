@@ -5,9 +5,14 @@
 > live authority until NQ-NG earns functional equivalence, isolated parallel
 > qualification, and an explicit authority switch. The ratified direction is
 > [`docs/NORTH_STAR.md`](docs/NORTH_STAR.md); the cumulative campaign gates are
-> [`docs/SEQUENCING.md`](docs/SEQUENCING.md). The minted `v0.1.0` release and
-> post-release provider-intake receipts remain frozen evidence. Current main
-> is unpublished, untagged after `v0.1.0`, and not deployed.
+> [`docs/SEQUENCING.md`](docs/SEQUENCING.md). Host Operational Portrait v1 is
+> now a
+> [ratified specification](audit/host-operational-portrait-v1-ratification/RATIFICATION_DECISION.md),
+> but neither `sushi-k` nor `labelwatch-host` has earned completeness. Classic
+> replacement, parallel qualification, and cutover remain unauthorized. The
+> minted `v0.1.0` release and post-release provider-intake receipts remain
+> frozen evidence. Current main is unpublished, untagged after `v0.1.0`, and
+> not deployed.
 
 The target NQ-ng product is a local-first deterministic diagnostic engine and
 recursive evidence fabric. For one exact profile, subject, scope, and vantage,
@@ -43,6 +48,9 @@ contract is not yet wired into daemon storage, NQ evaluation, Porter, NetBox,
 or AG. See
 [docs/NORTH_STAR.md](docs/NORTH_STAR.md) for the governing product direction,
 [docs/SEQUENCING.md](docs/SEQUENCING.md) for the live implementation order,
+[the Portrait v1 packet](audit/host-operational-portrait-v1-ratification/HOST_OPERATIONAL_PORTRAIT_V1.md)
+for the ratified replacement-completeness contract and current subject
+verdicts,
 [docs/PORTER_NETBOX_ADDENDUM.md](docs/PORTER_NETBOX_ADDENDUM.md) for the
 Porter/QEMU/NetBox system-cut contract and later integration specimens,
 [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) for the exact

@@ -50,7 +50,8 @@ Two independent lanes may proceed in parallel.
 
 ### Lane B: deployed-capability declaration
 
-Inventory the actual `sushi-k` and Linode installations:
+Inventory the actual logical `sushi-k` and logical `labelwatch-host`
+(currently Linode-hosted) installations:
 
 - exact Classic binary/schema/config identities;
 - enabled collectors and concrete targets;
@@ -74,7 +75,34 @@ coverage, operator tasks, notification obligations, and the exact meaning of
 functional equivalence. Later implementation may add coverage but may not
 silently delete a required row.
 
+**Current gate decision (2026-07-27):** the
+[Portrait v1 specification](../audit/host-operational-portrait-v1-ratification/HOST_OPERATIONAL_PORTRAIT_V1.md)
+and [44-row manifest](../audit/host-operational-portrait-v1-ratification/RATIFIED_CAPABILITY_MANIFEST.json)
+are operator-ratified. `sushi-k` and `labelwatch-host` completeness are both
+not earned. Classic replacement, parallel qualification, and cutover remain
+unauthorized.
+
+The only authorized follow-on is the bounded
+`HOST-OPERATIONAL-PORTRAIT-V1-BLOCKER-CLOSURE` unit. It may perform records,
+design, evidence gathering, and narrowly necessary implementation to close:
+
+1. exact versioned per-subject inventories and exclusions;
+2. Labelwatch/Driftwatch native observation and profile-semantic contracts;
+3. the non-colliding production namespace;
+4. sushi-k's exact platform binding; and
+5. required external-vantage identities and qualification inputs.
+
+It may not deploy, mutate services, begin parallel qualification, switch
+authority, execute retirement, publish, tag, release, or claim subject
+completeness. When those blockers close, a focused conformance review updates
+each subject verdict against the already-ratified specification. It repeats
+the full policy ratification only if the contract materially changes.
+
 ## Stage 2 — witness, packaging, and cohort seam
+
+General Stage 2 implementation is not authorized by the current decision.
+Only work strictly necessary for the bounded blocker-closure unit above may
+touch Stage 2 implementation seams.
 
 - Reconcile useful `nq.witness.v0` concepts into the existing NQ helper and
   `EvidenceReport` path; do not promote producer-declared standing.
@@ -138,9 +166,10 @@ Use Classic, `nq-witness`, `nq-security-witness`, `nq-blackbox`, and
 missing diagnostic families and adversarial cases.
 
 The first Prometheus provider must prove exact raw-response replay, structural
-dimension survival, independent coverage, timestamp separation, warning and
-partial-result retention, recording-rule/federation lineage refusal, and
-missing-series nonclaim. It may not accept arbitrary PromQL as NQ fact.
+dimension survival, separately established coverage, timestamp separation,
+warning and partial-result retention, recording-rule/federation lineage
+refusal, and missing-series nonclaim. It may not accept arbitrary PromQL as NQ
+fact.
 
 ## Stage 5 — application cohorts and recursive testimony
 
@@ -152,15 +181,16 @@ missing-series nonclaim. It may not accept arbitrary PromQL as NQ fact.
   cohort; promote only semantics that have proved generally reusable.
 - Implement the standard child-testimony boundary needed for the private domain
   node to report outward.
-- Preserve claim surface, evidence availability, state frontier, projection
-  limits, contradictions, coverage gaps, and consumer-owned reliance at the
-  receiving NQ boundary.
+- Preserve claim surface, evidence availability, per-claim evidence
+  dependencies and state bindings, projection limits, contradictions,
+  coverage gaps, and consumer-owned reliance at the receiving NQ boundary.
 - Admit child testimony only as evidence for the same exact diagnostic
   question named by the receiving profile; shared subject or similar wording
   is not sufficient.
 - Prove adversarially that a receiving diagnostic cannot reconstruct
-  distinctions erased by child testimony or count a child as independent
-  corroboration without a claim-relative independence warrant.
+  distinctions erased by child testimony or count a child as independently
+  corroborating without a consumer-evaluated, claim-relative supported
+  separation assessment.
 - Prove that host, generic service, application-internal, bridge, and remote
   perspectives remain distinct and that shared failure domains do not create
   false corroboration.
@@ -174,9 +204,10 @@ cross-diagnostic operational synthesis.
 ## Stage 6 — diagnostic-to-operational-posture loop
 
 - Stabilize NQ's machine-facing read and export contract for individual
-  diagnostic executions: exact profile, subject, scope, vantage, evidence and
-  state frontiers, coverage, admissibility, disposition or refusal, and
-  limitations.
+  diagnostic executions: exact profile, subject, scope, vantage, complete
+  expected/received/admitted/refused/failed/excluded/selected input accounting,
+  per-claim evidence and state bindings, coverage, admissibility, disposition
+  or refusal, and limitations.
 - Retain `nq-monitor`, if that product name remains, as a semantics-free
   execution inspector or disposition explorer. It is not the estate
   operations dashboard.
@@ -195,7 +226,8 @@ cross-diagnostic operational synthesis.
   rather than a stronger NQ disposition.
 - Qualify Maude or another frontend over those typed contracts. The primary
   operations view is a Nightshift enterprise console showing diagnostic
-  profiles and their last-known and current-reliance states.
+  profiles and their last-known and current-reliance states under an identified
+  Nightshift consumer policy.
 - Keep acquired evidence, scoped diagnostic result, and operational posture
   visibly separate in every presentation.
 - Add durable notification delivery with visible
@@ -227,7 +259,8 @@ Nothing in this stage grants actuation authority.
 
 ## Stage 7 — estate qualification and replacement
 
-1. Install isolated NQ-NG candidates for `sushi-k` and the Linode with
+1. Install isolated NQ-NG candidates for logical `sushi-k` and logical
+   `labelwatch-host` with
    distinct configuration, database, admission, socket, service, console, and
    archive identities.
 2. Observe the same declared targets while Classic remains alert and

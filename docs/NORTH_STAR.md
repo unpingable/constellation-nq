@@ -53,8 +53,9 @@ by the evidence actually available. A parent NQ may compose child testimony
 when that testimony is evidence for the same exact diagnostic question.
 NQ-to-NQ recursion does not turn a higher NQ node into an open-ended
 operational composer. A receiving node must retain the child's claim surface,
-evidence dependencies, state frontier, omissions, contradictions, and
-unresolved uncertainty.
+per-claim evidence dependencies and state bindings, omissions, contradictions,
+and unresolved uncertainty. One unstructured state-frontier bag cannot imply
+that unrelated states co-occurred.
 
 The constellation-level objective is not merely to prove one narrow detector.
 The first complete operational role must answer:
@@ -231,10 +232,15 @@ excuse to make the normal host installation operationally empty.
 ## Host Operational Portrait
 
 The first role-complete constellation milestone is **Host Operational Portrait
-v1** for both `sushi-k` and the Linode. It is not an NQ-alone product claim. Its
-exact required-capability manifest is ratified only after the
-deployed-capability census in `SEQUENCING.md`; repository fixtures alone cannot
-establish the live requirements.
+v1** for both logical `sushi-k` and logical `labelwatch-host`. It is not an
+NQ-alone product claim. Its
+normative specification and 44-row capability classification are now
+operator-ratified in the
+[`host-operational-portrait-v1-ratification`](../audit/host-operational-portrait-v1-ratification/RATIFICATION_DECISION.md)
+packet following the deployed-capability census in `SEQUENCING.md`.
+Specification ratification does not establish subject conformance:
+`sushi-k` and `labelwatch-host` are both `not_earned`, Classic remains
+authoritative, and no parallel qualification or cutover is authorized.
 
 The portrait must cover at least:
 
@@ -259,6 +265,15 @@ Current, partial, stale, refused, missing, unsupported, intentionally excluded,
 not configured, condition-present, and explicitly absent outcomes must remain
 distinguishable. An empty configuration, absent series, or silent witness does
 not establish health.
+
+The only authorized next unit is the bounded Portrait v1 blocker-closure unit.
+It may close the exact subject inventories, Labelwatch/Driftwatch semantic
+contracts, production namespace, sushi-k platform binding, and external-vantage
+identities through records, design, evidence gathering, and narrowly necessary
+implementation. It may not deploy, start parallel qualification, switch
+authority, execute retirement, or claim subject completeness without focused
+conformance evidence. A full R1–R11 re-ratification is required only if that
+work materially changes the ratified specification.
 
 ## Witness ecosystem
 
@@ -302,11 +317,16 @@ identified private NQ build or node. Every cohort must seal:
 
 Private targets, credentials, and operational locators remain outside profile
 identity and product defaults. A threshold, phase map, or other input that
-changes verdict meaning must be bound into the detector semantic identity and
-private cohort; it cannot remain mutable unbound configuration. Private cohort
-nodes emit standard bounded NQ testimony outward; the receiving diagnostic
-applies its own reliance policy and may derive only the conclusion authorized
-by its exact profile.
+changes verdict meaning must be an exact identified semantic dependency; it
+cannot remain mutable unbound configuration. It may be compiled into the
+detector/cohort, or it may remain an external typed, versioned, immutable,
+custody-bound policy when the compiled profile explicitly permits that policy
+surface and binds it into the resulting disposition identity. A policy change
+always creates a new threshold-policy or profile-semantic identity; it creates
+a new cohort/build identity when the compiled catalog, evaluator, or another
+cohort-sealed artifact changes. Private cohort nodes emit standard bounded NQ
+testimony outward; the receiving diagnostic applies its own reliance policy
+and may derive only the conclusion authorized by its exact profile.
 
 Profiles that prove generally reusable may be promoted into the upstream
 registry through an explicit campaign. A runtime plugin ABI is not authorized.
@@ -330,10 +350,11 @@ NQ-native witness -> rich NQ evidence -> optional metric projection -> Prometheu
 An initial Prometheus provider is deliberately narrow: fixed endpoint
 identity, compiled query templates, typed bounded parameters, exact API
 response custody, explicit evaluation and sample times, retained warnings and
-partial-result state, structurally checked dimensions, and independent
-coverage inventory. Arbitrary PromQL and unadmitted recording-rule lineage do
-not become NQ facts. Missing series means not observed unless an independent
-closed-world coverage basis supports a stronger conclusion.
+partial-result state, structurally checked dimensions, and a separately
+established coverage inventory. Arbitrary PromQL and unadmitted recording-rule
+lineage do not become NQ facts. Missing series means not observed unless a
+separately established closed-world coverage basis supports a stronger
+conclusion.
 
 Prometheus crosses the same canonical boundary as every other acquisition
 path:
@@ -357,18 +378,19 @@ the dimensions required by the intended conclusion.
 ## Diagnostic, operational, and presentation surfaces
 
 The required NQ surface is an instrument-grade view of one execution. It must
-show the declared profile, subject, scope, and vantage; the evidence and state
-frontiers; coverage and admissibility; the diagnostic disposition or refusal;
-and the limitations of that result. A thin NQ inspector may render this
-contract, but NQ does not own the unified operations dashboard.
+show the declared profile, subject, scope, and vantage; complete input
+accounting and per-claim evidence/state bindings; coverage and admissibility;
+the diagnostic disposition or refusal; and the limitations of that result. A
+thin NQ inspector may render this contract, but NQ does not own the unified
+operations dashboard.
 
 The required Nightshift enterprise-console surface is the estate-level
 operational read model. It must answer which diagnostic profiles exist, which
 subjects and vantages they cover, when and why they run, their campaign or
 recurrence state, and the last known diagnostic result. A last result must
 retain its evaluation time, state applicability, coverage, and
-current-reliance status; it must not masquerade as present truth merely because
-it is the most recent row.
+current-reliance status under an identified Nightshift consumer policy; it
+must not masquerade as present truth merely because it is the most recent row.
 
 Nightshift may run diagnostics recurrently. This is governed temporal
 orchestration rather than plain cron: a recurrence can depend on declared
