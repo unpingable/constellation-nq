@@ -155,6 +155,9 @@ missing-series nonclaim. It may not accept arbitrary PromQL as NQ fact.
 - Preserve claim surface, evidence availability, state frontier, projection
   limits, contradictions, coverage gaps, and consumer-owned reliance at the
   receiving NQ boundary.
+- Admit child testimony only as evidence for the same exact diagnostic
+  question named by the receiving profile; shared subject or similar wording
+  is not sufficient.
 - Prove adversarially that a receiving diagnostic cannot reconstruct
   distinctions erased by child testimony or count a child as independent
   corroboration without a claim-relative independence warrant.
@@ -168,7 +171,7 @@ follow from their admitted testimony within one exact diagnostic profile. The
 NQ-to-NQ boundary preserves and qualifies testimony; it does not own
 cross-diagnostic operational synthesis.
 
-## Stage 6 — full diagnostic-to-operations loop
+## Stage 6 — diagnostic-to-operational-posture loop
 
 - Stabilize NQ's machine-facing read and export contract for individual
   diagnostic executions: exact profile, subject, scope, vantage, evidence and
@@ -187,8 +190,9 @@ cross-diagnostic operational synthesis.
   remain inspectable.
 - Prove cross-diagnostic composition in Nightshift without laundering the NQ
   boundary: multiple profiles, times, and vantages remain distinguishable;
-  agent or human interpretation is cited and replayable; and the result is a
-  read-only operational posture rather than a stronger NQ disposition.
+  agent derivations are cited and replayable; human assertions are attributed
+  and durably recorded; and the result is a read-only operational posture
+  rather than a stronger NQ disposition.
 - Qualify Maude or another frontend over those typed contracts. The primary
   operations view is a Nightshift enterprise console showing diagnostic
   profiles and their last-known and current-reliance states.
@@ -203,6 +207,11 @@ cross-diagnostic operational synthesis.
   missing check-ins, provider failure, storage failure, campaign failure, and
   notification failure remain operationally distinguishable and
   self-diagnosing.
+- Expire a previously usable diagnostic result solely through the declared
+  recurrence and time basis. Nightshift's current posture must change to the
+  exact overdue, narrowed, or unknown result required by its contract while
+  the original NQ disposition or refusal remains byte-identical with the same
+  identity.
 - Qualify task-oriented operator questions: what is established, what is
   unknown, why a prior result is or is not currently usable, which fault
   boundary is supported, and which bounded next diagnostic would reduce the
@@ -239,6 +248,25 @@ Nothing in this stage grants actuation authority.
 
 Public-repository transition follows functional equivalence and stable
 operation. It is not how equivalence is created.
+
+## Stage 8 — governed operation handoff
+
+- Define one exact, non-authoritative Nightshift operational-proposal carrier
+  that binds every informing NQ disposition/refusal and Nightshift composition
+  artifact without reconstructing either from a rendered endpoint.
+- Pass that proposal through explicit human or AG authorization and into
+  Docket's existing governed execution boundary.
+- Preserve proposal, authorization, refusal, dispatch, execution, observation,
+  and reconciliation identities as different objects.
+- Prove that a raw NQ result, a Nightshift posture, an agent interpretation, or
+  a notification receipt cannot independently authorize execution.
+- Qualify refusal and no-op paths before any separately authorized bounded live
+  specimen.
+
+This stage is not required to pretend that diagnosis itself grants actuation.
+It sequences the exact handoff by which separately authorized operations may
+consume diagnostic decision support. No Stage-1 record authorizes Docket
+changes or a live mutation.
 
 ## Cross-stage acceptance corpus
 

@@ -73,6 +73,14 @@ The repository implements the stage-one operational spine:
   checkpoint isolation, provider identity and replay, schema integrity,
   schema-v3 migration, live-WAL backup/restore, and cold-archive reopening.
 
+The resident `nqd` scheduler is an implemented preview mechanism, not a claim
+that NQ owns the target product's recurrent monitoring posture. Under the
+current north star, NQ runs bounded diagnostics while Nightshift owns
+recurrence, expiry, campaigns, transition detection, and the estate-level
+operational view. Any migration or narrowing of the existing scheduler
+requires its own implementation campaign; this status record does not pretend
+that work has already occurred.
+
 The preview treats the SQLite binding history as authoritative. Active
 admission files are crash-recoverable materializations, and every collection
 or binding mutation is serialized per database/instance across `nq` and

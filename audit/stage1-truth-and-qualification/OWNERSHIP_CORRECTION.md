@@ -85,7 +85,8 @@ Nightshift supplies time, coordination, and operational composition. It owns:
 - expiry and overdue classification without rewriting the prior disposition;
 - diagnostic state-transition detection;
 - composition across profiles, subjects, vantages, and time;
-- replayable human or agent interpretation that cites deterministic inputs;
+- custody and orchestration of cited, replayable agent derivations and
+  attributed, durable human assertions;
 - the read-only operational posture and useful next diagnostic; and
 - exact notification intent, audience, suppression, and escalation policy.
 

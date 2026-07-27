@@ -108,14 +108,33 @@ contradictory, insufficient-projection, or refused results instead of
 fabricating conformance. Those outcomes are the operational equivalents of an
 unconstrained, indeterminate, unroutable, or failed verification result.
 
-Nightshift may state whether the evidence required for an operational proposal
-is established and may propose a next diagnostic or action. It cannot authorize
-that action. Human or AG authorization and Docket execution remain separate
-even when the operator interface presents the whole chain.
+The constellation is therefore an engineering analysis environment for live
+operational systems, not one universal health solver. Different diagnostic
+questions may require different bounded calculi for attribution, grounding,
+admissibility, reliance, realizability, or projection sufficiency. Like
+distinct EDA analysis engines, each compiled diagnostic profile has its own
+required premises, derivation, refusal conditions, and claim surface.
+
+The shared NQ substrate supplies exact custody, identity, admission,
+deterministic execution, evidence history, and typed results across those
+profiles. It does not flatten their logics into a generic score or allow one
+profile's conclusion to answer another profile's question.
+
+Prior formal-calculus work is architectural lineage, not an operator or runtime
+dependency. A reader need not inspect an external proof repository to
+understand a profile's installed contract. No executable profile is described
+as formally verified unless correspondence between the formal object and the
+shipped implementation has separately been established.
+
+Nightshift may report whether exact NQ dispositions and refusals satisfy the
+declared prerequisites for an operational proposal, and it may propose a next
+diagnostic or action. It does not re-evaluate the underlying evidence and
+cannot authorize that action. Human or AG authorization and Docket execution
+remain separate even when the operator interface presents the whole chain.
 
 ## Agent boundary
 
-The architecture makes operational reasoning deterministic before a
+NQ completes its scoped deterministic diagnostic derivation before a
 probabilistic model enters the path. An agent consumes exact NQ dispositions
 and refusals plus Nightshift's declared campaign context; it is not the
 diagnostic engine over raw metrics, dashboards, Kubernetes state, or shell
@@ -161,7 +180,8 @@ NQ-NG owns:
   coverage, state applicability, contradiction, and coherence;
 - recursive testimony admission, projection-limit preservation, and typed
   refusal;
-- consumer-owned reliance at each NQ evidence boundary; and
+- application of the consuming jurisdiction's exact declared reliance policy
+  at each NQ evidence boundary, without producer-minted reliance; and
 - a stable machine-facing read and export contract for individual diagnostic
   executions.
 
@@ -171,10 +191,12 @@ authority. A provider identity or ordinary-looking endpoint does not bypass NQ
 admission.
 
 Nightshift owns recurrence and campaign policy for diagnostics, composition
-across diagnostic profiles, subjects, vantages, and time, probabilistic or
-human interpretation, and read-only operational posture. It may choose or
-propose the next declared diagnostic. It does not rewrite NQ evidence, mint an
-NQ disposition, or authorize repair.
+across diagnostic profiles, subjects, vantages, and time, custody and
+attribution of agent or human interpretation artifacts, and read-only
+operational posture. Humans and agents remain the authors of their
+interpretations; Nightshift does not make those interpretations true. It may
+choose or propose the next declared diagnostic. It does not rewrite NQ
+evidence, mint an NQ disposition, or authorize repair.
 
 Operational acknowledgment, escalation, suppression, notification intent, and
 remediation decisions do not belong to the NQ diagnostic finding lifecycle.
@@ -190,8 +212,7 @@ producer-declared `authoritative_for` standing is not promoted.
 
 NQ core does not assume that the node serves a conventional host diagnostic
 role. A parent fabric node, a Kubernetes-oriented node, and an ordinary Linux
-host have
-different jurisdictions and coverage obligations.
+host have different jurisdictions and coverage obligations.
 
 Deployment therefore uses explicit role bundles:
 
@@ -335,18 +356,19 @@ the dimensions required by the intended conclusion.
 
 ## Diagnostic, operational, and presentation surfaces
 
-NQ exposes an instrument-grade diagnostic surface for one execution. It must
+The required NQ surface is an instrument-grade view of one execution. It must
 show the declared profile, subject, scope, and vantage; the evidence and state
 frontiers; coverage and admissibility; the diagnostic disposition or refusal;
 and the limitations of that result. A thin NQ inspector may render this
 contract, but NQ does not own the unified operations dashboard.
 
-Nightshift owns the estate-level operational read model. Its enterprise-console
-surface answers which diagnostic profiles exist, which subjects and vantages
-they cover, when and why they run, their campaign or recurrence state, and the
-last known diagnostic result. A last result must retain its evaluation time,
-state applicability, coverage, and current-reliance status; it must not
-masquerade as present truth merely because it is the most recent row.
+The required Nightshift enterprise-console surface is the estate-level
+operational read model. It must answer which diagnostic profiles exist, which
+subjects and vantages they cover, when and why they run, their campaign or
+recurrence state, and the last known diagnostic result. A last result must
+retain its evaluation time, state applicability, coverage, and
+current-reliance status; it must not masquerade as present truth merely because
+it is the most recent row.
 
 Nightshift may run diagnostics recurrently. This is governed temporal
 orchestration rather than plain cron: a recurrence can depend on declared

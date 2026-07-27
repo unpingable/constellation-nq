@@ -9,11 +9,20 @@
 > post-release provider-intake receipts remain frozen evidence. Current main
 > is unpublished, untagged after `v0.1.0`, and not deployed.
 
-NQ-ng is a local-first operational evidence service. It runs independently
-scheduled witness helpers, validates their output against compiled and
-versioned profiles, retains both accepted evidence and rejected custody
-artifacts, and evaluates compiled detectors without granting helpers any
-authority over findings or actions.
+The target NQ-ng product is a local-first deterministic diagnostic engine and
+recursive evidence fabric. For one exact profile, subject, scope, and vantage,
+it takes custody of bounded witness or child-NQ testimony, retains accepted
+evidence and rejected custody artifacts, and emits only the diagnostic
+disposition or typed refusal mechanically supported by that evidence. Helpers
+and child nodes receive no authority over NQ conclusions or actions. The
+implemented subset is stated separately below.
+
+The product framing is:
+
+> Diagnostics are what monitoring is built on.
+
+Nightshift owns recurrent diagnostic operations and the whole-estate operator
+portrait. NQ remains the scoped analysis engine underneath that surface.
 
 The governing rule is:
 
