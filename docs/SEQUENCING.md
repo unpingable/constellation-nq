@@ -105,21 +105,23 @@ cumulatively:
   transitions;
 - interfaces, routes, basic listener inventory, and bounded local network
   state; and
-- NQ provider, helper, store, scheduler, and expected-coverage self-diagnosis.
+- NQ provider, helper, store, bounded diagnostic-runner, and expected-coverage
+  self-diagnosis.
 
 Each bounded family must have an explicit compiled-profile path, bounded
 helper/provider path, hostile fixtures, live bounded specimen, and generic
-read projection. The current `nq.host/v1` identity is not silently expanded;
-new semantics require an explicit new profile or version under the registry
-rules. One request invokes one exact profile; do not recreate Classic's
-all-collectors envelope.
+diagnostic read projection. The current `nq.host/v1` identity is not silently
+expanded; new semantics require an explicit new profile or version under the
+registry rules. One request invokes one exact profile; do not recreate
+Classic's all-collectors envelope.
 
 Stage 3 earns only the default acquisition foundation. It cannot earn Host
 Operational Portrait v1. That verdict additionally requires every Stage-1
-required overlay and application cohort plus the Stage-6 Monitor, scheduling,
-notification, and clean-operator loop. The Stage-3 gate requires every default
-row to have an explicit outcome and the clean host-role package to install
-from documented artifacts without repository-relative knowledge.
+required overlay and application cohort plus the Stage-6 NQ inspection,
+Nightshift recurrence and enterprise-console, notification, and clean-operator
+loop. The Stage-3 gate requires every default row to have an explicit outcome
+and the clean host-role package to install from documented artifacts without
+repository-relative knowledge.
 
 ## Stage 4 — required common overlays and external vantages
 
@@ -140,7 +142,7 @@ dimension survival, independent coverage, timestamp separation, warning and
 partial-result retention, recording-rule/federation lineage refusal, and
 missing-series nonclaim. It may not accept arbitrary PromQL as NQ fact.
 
-## Stage 5 — application cohorts and recursive composition
+## Stage 5 — application cohorts and recursive testimony
 
 - Build Labelwatch acquisition and its private witness package in the
   Labelwatch repository.
@@ -148,38 +150,71 @@ missing-series nonclaim. It may not accept arbitrary PromQL as NQ fact.
   Driftwatch repository.
 - Compile truly domain-specific profiles into an explicitly identified private
   cohort; promote only semantics that have proved generally reusable.
-- Implement the standard child-disposition boundary needed for the private
-  domain node to report outward.
+- Implement the standard child-testimony boundary needed for the private domain
+  node to report outward.
 - Preserve claim surface, evidence availability, state frontier, projection
   limits, contradictions, coverage gaps, and consumer-owned reliance at the
-  parent.
-- Prove adversarially that a parent cannot reconstruct distinctions erased by
-  a child summary or count a child as independent corroboration without a
-  claim-relative independence warrant.
+  receiving NQ boundary.
+- Prove adversarially that a receiving diagnostic cannot reconstruct
+  distinctions erased by child testimony or count a child as independent
+  corroboration without a claim-relative independence warrant.
 - Prove that host, generic service, application-internal, bridge, and remote
   perspectives remain distinct and that shared failure domains do not create
   false corroboration.
 
 Application repositories own phase maps and native facts. They do not import
 NQ's evaluator, database, or authority surfaces. NQ owns what conclusions
-follow from their admitted testimony.
+follow from their admitted testimony within one exact diagnostic profile. The
+NQ-to-NQ boundary preserves and qualifies testimony; it does not own
+cross-diagnostic operational synthesis.
 
-## Stage 6 — full operator loop
+## Stage 6 — full diagnostic-to-operations loop
 
-- Stabilize a generic read model for the complete host/application portrait.
-- Build `nq-monitor` as a semantics-free client showing subject, vantage,
-  evidence frontier, state frontier, conditions, contradictions, coverage,
-  limitations, and safe next checks.
-- Add durable notification delivery with visible queued/attempted/delivered/
-  failed state and new/escalated/resolved suppression.
-- Prove local scheduling, missing check-ins, provider failure, storage failure,
-  and notification failure are self-diagnosing.
+- Stabilize NQ's machine-facing read and export contract for individual
+  diagnostic executions: exact profile, subject, scope, vantage, evidence and
+  state frontiers, coverage, admissibility, disposition or refusal, and
+  limitations.
+- Retain `nq-monitor`, if that product name remains, as a semantics-free
+  execution inspector or disposition explorer. It is not the estate
+  operations dashboard.
+- Build Nightshift's operational model for declared diagnostic profiles,
+  subjects and vantages, recurrence and campaign state, last known result with
+  evaluation time and current applicability, unresolved gaps, and proposed
+  next diagnostic.
+- Prove Nightshift recurrence is governed diagnostic orchestration rather than
+  an unrecorded cron loop: declared purpose, expected check-ins, jitter,
+  backoff, escalation, campaign completion, and prior-result dependencies
+  remain inspectable.
+- Prove cross-diagnostic composition in Nightshift without laundering the NQ
+  boundary: multiple profiles, times, and vantages remain distinguishable;
+  agent or human interpretation is cited and replayable; and the result is a
+  read-only operational posture rather than a stronger NQ disposition.
+- Qualify Maude or another frontend over those typed contracts. The primary
+  operations view is a Nightshift enterprise console showing diagnostic
+  profiles and their last-known and current-reliance states.
+- Keep acquired evidence, scoped diagnostic result, and operational posture
+  visibly separate in every presentation.
+- Add durable notification delivery with visible
+  queued/attempted/delivered/failed state. Notification intent, audience,
+  suppression, and escalation are owned by Nightshift or explicit operator
+  policy; a delivery facet records transport attempts and cannot infer page
+  authority from a raw NQ finding.
+- Prove provider acquisition cadence, Nightshift diagnostic recurrence,
+  missing check-ins, provider failure, storage failure, campaign failure, and
+  notification failure remain operationally distinguishable and
+  self-diagnosing.
+- Qualify task-oriented operator questions: what is established, what is
+  unknown, why a prior result is or is not currently usable, which fault
+  boundary is supported, and which bounded next diagnostic would reduce the
+  decision-relevant uncertainty.
 - Run task-based clean-room qualification using only installed documentation
   and public command help.
 
 A critical supported condition must not coexist with a no-action headline.
 Unknown, stale, missing, refused, and unsupported evidence must not render as
-healthy or as subject failure.
+healthy or as subject failure. A last-known result must not render as current
+without separately established freshness, state applicability, and coverage.
+Nothing in this stage grants actuation authority.
 
 ## Stage 7 — estate qualification and replacement
 
@@ -215,17 +250,22 @@ Every stage extends one cumulative corpus covering:
   contradictory, and unsupported cases;
 - recursive projection collisions in which erased child distinctions remain
   unavailable until exact stronger evidence is retrieved;
+- agent replays in which deterministic diagnostic inputs remain byte-identical,
+  every interpretation cites its inputs and derivation identity, and model
+  output cannot overwrite evidence, disposition, refusal, or authority;
 - restart, checkpoint, replay, upgrade, rollback, and retirement;
 - clean package installation from empty mutable state;
 - no private targets, paths, credentials, or thresholds in public defaults;
-- Monitor and notification behavior; and
+- NQ diagnostic inspection, Nightshift enterprise-console, and notification
+  behavior; and
 - correspondence against Classic on required deployed facts.
 
 No verdict is earned solely from source inspection when execution is possible.
 
-## Immediate next campaign
+## Immediate gate
 
-After this record-only stage, the next authorized implementation work is
-Stage 1: restore the NQ-NG qualification baseline and produce the deployed
-capability manifest. Provider expansion, Prometheus integration, witness
-porting, application cohorts, and Monitor implementation wait for those gates.
+Stage 1 must finish with a green qualification record and a deployed-capability
+manifest. Host Operational Portrait v1 remains a candidate until the operator
+ratifies its exact requirements. Provider expansion, Prometheus integration,
+witness porting, application cohorts, and operator-surface implementation wait
+for that gate.

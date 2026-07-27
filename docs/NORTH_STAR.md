@@ -16,23 +16,108 @@ publicly available. Current implementation boundaries remain recorded in
 
 ## Product objective
 
-NQ is a recursive, vantage-indexed diagnostic composition system.
+NQ is a scoped, bounded, recursive diagnostic fabric.
+
+The stable product stack is:
+
+```text
+witnesses and providers
+  acquire bounded observations
+        ↓
+one NQ diagnostic
+  selects the evidence required by one bounded profile and subject
+  checks custody, admission, coverage, and state applicability
+  returns a diagnostic disposition or typed refusal
+        ↓
+Nightshift diagnostic operations
+  owns recurrence, expiry, campaigns, and multi-diagnostic posture
+        ↓
+monitoring · alerting · operator portraits · reporting · proposed automation
+        ↓
+human or AG authorization
+        ↓
+Docket execution
+```
+
+Diagnostics are what monitoring is built on. Monitoring is the continuing
+operational view over recurrent diagnostic obligations and results, not the
+semantic substrate from which a diagnostic must be reconstructed.
+
+Maude and other frontends render the typed NQ and Nightshift surfaces; they do
+not acquire evidence or create diagnostic or operational law.
 
 An NQ node takes custody of bounded observations and child dispositions,
-validates them against exact compiled profiles, preserves their provenance and
-state boundaries, and derives only conclusions supported by the evidence
-actually available. A higher node may consume a lower node's disposition, but
-the higher node must retain the child's claim surface, evidence dependencies,
-state frontier, omissions, contradictions, and unresolved uncertainty.
+validates them against one exact compiled profile, preserves their provenance
+and state boundaries, and derives only the profile-local conclusion supported
+by the evidence actually available. A parent NQ may compose child testimony
+when that testimony is evidence for the same exact diagnostic question.
+NQ-to-NQ recursion does not turn a higher NQ node into an open-ended
+operational composer. A receiving node must retain the child's claim surface,
+evidence dependencies, state frontier, omissions, contradictions, and
+unresolved uncertainty.
 
-The operator-facing objective is not merely to prove one narrow detector. The
-first complete operational role must answer:
+The constellation-level objective is not merely to prove one narrow detector.
+The first complete operational role must answer:
 
 > What is going on with this host, from this declared vantage, and what can the
 > system not currently establish?
 
 Bounded implementation campaigns are delivery units. They do not redefine a
 passing slice as a complete operational product.
+
+## Operational product claim
+
+The product is computer-assisted operations through deterministic diagnostics.
+It is not primarily an SRE telemetry, dashboard, alert-expression, or query
+product.
+
+The primary operator question is:
+
+> Something is wrong. What is actually established, what remains unknown, and
+> which bounded observation would change the decision?
+
+An operator portrait is for the person doing operations. It must support
+situation assessment, uncertainty, decision prerequisites, and the next useful
+diagnostic. A consumer status page, trend dashboard, or telemetry query surface
+may be useful downstream, but none is the canonical operational view.
+
+The underlying mix of native witnesses, Prometheus, remote providers, and child
+NQ nodes must remain inspectable for provenance and failure analysis. It is not
+the primary interface. The ordinary operator journey should begin from a
+subject and operational question, invoke declared diagnostics, and receive a
+Nightshift portrait whose conclusions factor through exact NQ dispositions and
+refusals.
+
+Nightshift may state whether the evidence required for an operational proposal
+is established and may propose a next diagnostic or action. It cannot authorize
+that action. Human or AG authorization and Docket execution remain separate
+even when the operator interface presents the whole chain.
+
+## Agent boundary
+
+The architecture makes operational reasoning deterministic before a
+probabilistic model enters the path. An agent consumes exact NQ dispositions
+and refusals plus Nightshift's declared campaign context; it is not the
+diagnostic engine over raw metrics, dashboards, Kubernetes state, or shell
+output.
+
+Agent output must retain:
+
+- the exact diagnostic inputs it cites;
+- model, prompt or policy, and derivation identity;
+- its scope, time, and stated uncertainty;
+- separation from direct observation and deterministic derivation; and
+- replayability against the same immutable diagnostic corpus.
+
+An agent may summarize, rank hypotheses, explain disagreement, or propose a
+deeper declared diagnostic. It may be wrong about operator intent or what
+should happen next. Its prose cannot fill a missing evidence slot, erase a
+refusal, overwrite an NQ result, become child NQ testimony, or authorize an
+action.
+
+The enforceable goal is not that an AI can never state something false. It is
+that an agent interpretation cannot silently become diagnostic fact or
+operational authority.
 
 ## Stable ownership boundaries
 
@@ -50,14 +135,31 @@ NQ-NG owns:
 - request, provider-attempt, and provider identity;
 - exact raw custody and durable intake acknowledgment;
 - protocol and compiled-profile admission or typed refusal;
-- semantic projection, detector evaluation, and finding lifecycle;
-- evidence history, coverage and coherence;
-- recursive disposition and consumer-owned reliance; and
-- the generic read model used by operator surfaces.
+- semantic projection and deterministic evaluation for one exact diagnostic
+  profile, subject, scope, and vantage;
+- diagnostic evidence and disposition history, including profile-local
+  coverage, state applicability, contradiction, and coherence;
+- recursive testimony admission, projection-limit preservation, and typed
+  refusal;
+- consumer-owned reliance at each NQ evidence boundary; and
+- a stable machine-facing read and export contract for individual diagnostic
+  executions.
 
 A witness owns bounded acquisition and native facts. It does not own NQ
-standing, reliance, disposition, or action authority. A provider identity or
-ordinary-looking endpoint does not bypass NQ admission.
+standing, reliance, diagnostic disposition, operational posture, or action
+authority. A provider identity or ordinary-looking endpoint does not bypass NQ
+admission.
+
+Nightshift owns recurrence and campaign policy for diagnostics, composition
+across diagnostic profiles, subjects, vantages, and time, probabilistic or
+human interpretation, and read-only operational posture. It may choose or
+propose the next declared diagnostic. It does not rewrite NQ evidence, mint an
+NQ disposition, or authorize repair.
+
+Operational acknowledgment, escalation, suppression, notification intent, and
+remediation decisions do not belong to the NQ diagnostic finding lifecycle.
+Delivery software may transport an exact intent and record attempts, but it
+does not infer operational meaning from an ordinary-looking NQ result.
 
 The existing `nq.witness.v0` specification is a donor, not a second canonical
 wire. Useful observation, error, coverage, and privilege concepts must be
@@ -66,8 +168,9 @@ producer-declared `authoritative_for` standing is not promoted.
 
 ## Role-oriented deployment
 
-NQ core does not assume that the node is a conventional host monitor. A parent
-fabric node, a Kubernetes-oriented node, and an ordinary Linux host have
+NQ core does not assume that the node serves a conventional host diagnostic
+role. A parent fabric node, a Kubernetes-oriented node, and an ordinary Linux
+host have
 different jurisdictions and coverage obligations.
 
 Deployment therefore uses explicit role bundles:
@@ -86,10 +189,11 @@ excuse to make the normal host installation operationally empty.
 
 ## Host Operational Portrait
 
-The first role-complete milestone is **Host Operational Portrait v1** for both
-`sushi-k` and the Linode. Its exact required-capability manifest is ratified
-only after the deployed-capability census in `SEQUENCING.md`; repository
-fixtures alone cannot establish the live requirements.
+The first role-complete constellation milestone is **Host Operational Portrait
+v1** for both `sushi-k` and the Linode. It is not an NQ-alone product claim. Its
+exact required-capability manifest is ratified only after the
+deployed-capability census in `SEQUENCING.md`; repository fixtures alone cannot
+establish the live requirements.
 
 The portrait must cover at least:
 
@@ -105,7 +209,8 @@ The portrait must cover at least:
 - configured application progression and application-owned state testimony;
 - contradictions, shared failure domains, missing evidence, and useful safe
   next checks; and
-- scheduling, a usable Monitor view, and notification delivery state.
+- governed recurrence and campaign state, an operational console view, and
+  notification delivery state.
 
 Completeness does not mean omniscience or a green score. Every required domain
 must be present with separate acquisition/coverage and domain-condition state.
@@ -158,8 +263,9 @@ Private targets, credentials, and operational locators remain outside profile
 identity and product defaults. A threshold, phase map, or other input that
 changes verdict meaning must be bound into the detector semantic identity and
 private cohort; it cannot remain mutable unbound configuration. Private cohort
-nodes emit the standard recursive NQ disposition outward; the consuming node
-applies its own reliance policy.
+nodes emit standard bounded NQ testimony outward; the receiving diagnostic
+applies its own reliance policy and may derive only the conclusion authorized
+by its exact profile.
 
 Profiles that prove generally reusable may be promoted into the upstream
 registry through an explicit campaign. A runtime plugin ABI is not authorized.
@@ -207,22 +313,47 @@ Prometheus may supply collection, discovery, storage, dashboards, and ordinary
 trend queries. NQ remains responsible for whether a query projection retains
 the dimensions required by the intended conclusion.
 
-## Operator and coordination surfaces
+## Diagnostic, operational, and presentation surfaces
 
-`nq-monitor` is a presentation client over NQ's generic read model. It owns no
-detector law. It must display the declared subject and vantage, evidence and
-state frontiers, established conditions, contradictions, missing or stale
-coverage, limitations, and safe next checks. A critical supported condition
-must not coexist with a no-action headline, while unknown must not be promoted
-to failure or health.
+NQ exposes an instrument-grade diagnostic surface for one execution. It must
+show the declared profile, subject, scope, and vantage; the evidence and state
+frontiers; coverage and admissibility; the diagnostic disposition or refusal;
+and the limitations of that result. A thin NQ inspector may render this
+contract, but NQ does not own the unified operations dashboard.
 
-Routine local cadence remains within NQ's resident scheduler. Nightshift may
-later coordinate deeper, remote, or multi-node diagnostic campaigns. It does
-not own NQ disposition or turn diagnostic depth into repair authority.
+Nightshift owns the estate-level operational read model. Its enterprise-console
+surface answers which diagnostic profiles exist, which subjects and vantages
+they cover, when and why they run, their campaign or recurrence state, and the
+last known diagnostic result. A last result must retain its evaluation time,
+state applicability, coverage, and current-reliance status; it must not
+masquerade as present truth merely because it is the most recent row.
 
-Probabilistic interpretation may summarize or propose further declared
-diagnostics, but it is never a source of direct observation and cannot mutate
-the evidence it cites.
+Nightshift may run diagnostics recurrently. This is governed temporal
+orchestration rather than plain cron: a recurrence can depend on declared
+profiles, expected check-ins, prior results, backoff, escalation, campaign
+completion, and operator or agent intent. Acquisition products may maintain
+their own signal-gathering cadence, but neither that cadence nor a missed run
+creates an NQ conclusion.
+
+Nightshift may compose multiple diagnostic dispositions and refusals into a
+read-only operational posture, preserve disagreement across vantages, and
+choose or propose the next declared diagnostic. Probabilistic interpretation
+may summarize or propose further diagnostics, but it is never a source of
+direct observation and cannot mutate the evidence it cites. Diagnostic depth,
+operational posture, notification, authorization, and repair remain separate.
+
+Maude or another frontend may present both the NQ execution-detail contract
+and Nightshift's enterprise-console contract. Presentation must keep three
+layers visible rather than flattening them:
+
+1. acquired signals and their coverage;
+2. the scoped NQ diagnostic disposition or refusal; and
+3. Nightshift's operational posture, recurrence, and proposed next step.
+
+A supported critical diagnostic condition must not coexist with a misleading
+no-action presentation, while unknown must not be promoted to failure or
+health. Frontend convenience never grants permission to reconstruct a stronger
+claim than the underlying contract exported.
 
 ## Classic and cutover
 
@@ -254,6 +385,10 @@ This direction does not authorize:
 - a Classic database adapter or permanent compatibility service;
 - one universal host model for Kubernetes, fabric, and application nodes;
 - collapsing direct observation, derived projection, child disposition,
-  agent assessment, and operator assertion; or
+  agent assessment, and operator assertion;
+- open-ended cross-diagnostic operational composition inside NQ;
+- a unified operations dashboard or notification-policy engine inside NQ;
+- treating Nightshift scheduling, posture, or agent interpretation as NQ
+  testimony; or
 - release, deployment, public promotion, or authority switch without their
   separately earned gates.
