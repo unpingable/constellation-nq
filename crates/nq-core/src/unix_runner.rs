@@ -1556,15 +1556,61 @@ while True:
     connection.sendall(json.dumps(response, separators=(",", ":")).encode() + b'\n')
 "#;
 
-    fn command(script: &str) -> CommandConfig {
-        CommandConfig {
+    struct PythonFixture {
+        _source_directory: tempfile::TempDir,
+        command: CommandConfig,
+        script_argument: String,
+    }
+
+    fn python_fixture(script: &str) -> PythonFixture {
+        python_fixture_for_identity(
+            script,
+            nix::unistd::geteuid().as_raw().to_string(),
+            true,
+            None,
+        )
+    }
+
+    fn python_fixture_for_identity(
+        script: &str,
+        execution_account: String,
+        allow_same_identity_in_debug: bool,
+        working_directory: Option<PathBuf>,
+    ) -> PythonFixture {
+        let source_directory = tempfile::tempdir().expect("Python fixture directory");
+        let script_path = source_directory.path().join("helper.py");
+        fs::write(&script_path, script).expect("write Python fixture");
+        let script_argument = script_path.to_string_lossy().into_owned();
+        let command = CommandConfig {
             executable: PathBuf::from("/usr/bin/python3"),
-            args: vec!["-c".into(), script.into()],
+            args: vec![script_argument.clone()],
             env: BTreeMap::new(),
-            execution_account: nix::unistd::geteuid().as_raw().to_string(),
-            allow_same_identity_in_debug: true,
-            working_directory: PathBuf::from("/tmp"),
+            execution_account,
+            allow_same_identity_in_debug,
+            working_directory: working_directory
+                .unwrap_or_else(|| source_directory.path().to_path_buf()),
+        };
+        PythonFixture {
+            _source_directory: source_directory,
+            command,
+            script_argument,
         }
+    }
+
+    fn assert_fixed_argument_retained(launch: &VerifiedLaunch, argument: &str) {
+        assert!(
+            launch.identity().execution_chain.iter().any(|artifact| {
+                artifact.role == crate::identity::ArtifactRole::FixedArgument
+                    && artifact.fixed_argument.as_deref() == Some(argument)
+            }),
+            "Python fixture must be retained as an exact fixed-argument artifact"
+        );
+    }
+
+    fn retained_python_launch(fixture: &PythonFixture) -> VerifiedLaunch {
+        let launch = VerifiedLaunch::open(&fixture.command).expect("qualify Python fixture");
+        assert_fixed_argument_retained(&launch, &fixture.script_argument);
+        launch
     }
 
     fn command_that_must_not_spawn() -> CommandConfig {
@@ -1585,7 +1631,10 @@ while True:
         root
     }
 
-    fn launch_with(script: &str, max_stderr_bytes: usize) -> (tempfile::TempDir, UnixRunner) {
+    fn launch_with(
+        script: &str,
+        max_stderr_bytes: usize,
+    ) -> (tempfile::TempDir, PythonFixture, UnixRunner) {
         let root = runtime_root();
         let options = UnixRunnerOptions::inherited_identity(
             root.path(),
@@ -1593,9 +1642,10 @@ while True:
             Duration::from_secs(2),
             max_stderr_bytes,
         );
-        let command = command(script);
-        let runner = UnixRunner::launch(&command, options).expect("launch helper");
-        (root, runner)
+        let fixture = python_fixture(script);
+        let launch = retained_python_launch(&fixture);
+        let runner = UnixRunner::launch_verified(launch, options).expect("launch helper");
+        (root, fixture, runner)
     }
 
     fn unix_socket_tests_available() -> bool {
@@ -1671,7 +1721,7 @@ while True:
         if !unix_socket_tests_available() {
             return;
         }
-        let (_root, mut runner) = launch_with(PYTHON_HELPER, 1024);
+        let (_root, _fixture, mut runner) = launch_with(PYTHON_HELPER, 1024);
         let pid = runner.child_pid().expect("child PID");
         assert_eq!(
             fs::metadata(runner.socket_directory())
@@ -1726,7 +1776,10 @@ while True:
             Duration::from_secs(2),
             1024,
         );
-        let mut runner = UnixRunner::launch(&command, options).expect("launch qualified helper");
+        let launch = VerifiedLaunch::open(&command).expect("qualify persistent helper");
+        assert_fixed_argument_retained(&launch, &script.to_string_lossy());
+        let mut runner =
+            UnixRunner::launch_verified(launch, options).expect("launch qualified helper");
         let first = runner.exchange(br#"{"sequence":1}"#, Duration::from_secs(1), 1024);
         assert_eq!(first.outcome, UnixAcquisitionOutcome::Response);
         runner.shutdown();
@@ -1749,7 +1802,7 @@ while True:
         if !unix_socket_tests_available() {
             return;
         }
-        let (_root, mut runner) = launch_with(PYTHON_HELPER, 1024);
+        let (_root, _fixture, mut runner) = launch_with(PYTHON_HELPER, 1024);
         let eof = runner.exchange(
             br#"{"mode":"eof","sequence":1}"#,
             Duration::from_secs(1),
@@ -1786,7 +1839,7 @@ while True:
         if !unix_socket_tests_available() {
             return;
         }
-        let (_root, mut runner) = launch_with(PYTHON_HELPER, 1024);
+        let (_root, _fixture, mut runner) = launch_with(PYTHON_HELPER, 1024);
         let timeout = runner.exchange(
             br#"{"mode":"timeout","sequence":1}"#,
             Duration::from_millis(25),
@@ -1818,7 +1871,7 @@ while True:
         if !unix_socket_tests_available() {
             return;
         }
-        let (_root, mut runner) = launch_with(PYTHON_HELPER, 32);
+        let (_root, _fixture, mut runner) = launch_with(PYTHON_HELPER, 32);
         let capture = runner.exchange(
             br#"{"mode":"stderr","sequence":1}"#,
             Duration::from_secs(1),
@@ -1846,8 +1899,10 @@ while True:
         } else {
             options.expected_uid + 1
         };
-        let command = command(PYTHON_HELPER);
-        let error = UnixRunner::launch(&command, options).expect_err("UID mismatch must fail");
+        let fixture = python_fixture(PYTHON_HELPER);
+        let launch = retained_python_launch(&fixture);
+        let error =
+            UnixRunner::launch_verified(launch, options).expect_err("UID mismatch must fail");
         assert!(matches!(
             error.failure,
             UnixLaunchFailure::InvalidConfiguration { .. }
@@ -1864,12 +1919,13 @@ while True:
         let options = UnixRunnerOptions::inherited_identity(
             root.path(),
             "wrong.mode",
-            Duration::from_millis(50),
+            Duration::from_secs(2),
             1024,
         );
-        let command = command(&script);
-        let error =
-            UnixRunner::launch(&command, options).expect_err("socket mode mismatch must fail");
+        let fixture = python_fixture(&script);
+        let launch = retained_python_launch(&fixture);
+        let error = UnixRunner::launch_verified(launch, options)
+            .expect_err("socket mode mismatch must fail");
         assert_eq!(
             error.failure,
             UnixLaunchFailure::SocketPermissions { actual: 0o660 }
@@ -1889,13 +1945,25 @@ while True:
             return;
         };
         let root = runtime_root();
-        let command = CommandConfig {
-            executable: PathBuf::from("/usr/bin/python3"),
-            args: vec!["-c".into(), PYTHON_HELPER.into()],
-            env: BTreeMap::new(),
-            execution_account: account.configured.clone(),
-            allow_same_identity_in_debug: false,
-            working_directory: PathBuf::from("/tmp"),
+        let fixture = python_fixture_for_identity(
+            PYTHON_HELPER,
+            account.configured.clone(),
+            false,
+            Some(PathBuf::from("/")),
+        );
+        let launch = match VerifiedLaunch::open(&fixture.command) {
+            Ok(launch) => {
+                assert_fixed_argument_retained(&launch, &fixture.script_argument);
+                launch
+            }
+            Err(error)
+                if error.to_string().contains("Operation not permitted")
+                    || error.to_string().contains("Permission denied") =>
+            {
+                eprintln!("skipping distinct-UID Unix launch: parent lacks required capabilities");
+                return;
+            }
+            Err(error) => panic!("distinct-UID Unix qualification failed: {error}"),
         };
         let options = UnixRunnerOptions::for_account(
             root.path(),
@@ -1904,7 +1972,7 @@ while True:
             1024,
             &account,
         );
-        let mut runner = match UnixRunner::launch(&command, options) {
+        let mut runner = match UnixRunner::launch_verified(launch, options) {
             Ok(runner) => runner,
             Err(error)
                 if error.to_string().contains("Operation not permitted")

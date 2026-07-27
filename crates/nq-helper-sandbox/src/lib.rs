@@ -1007,17 +1007,34 @@ mod tests {
         }
         let account = resolve_account(&geteuid().as_raw().to_string(), true)
             .expect("debug execution account");
+        assert_eq!(
+            IsolationLimits::default().processes,
+            32,
+            "the production default process ceiling must remain explicit"
+        );
         let limits = IsolationLimits {
+            // This test needs descendants in order to probe process-group and
+            // setsid containment. It does not test the production NPROC
+            // default, so leave room for the host UID's unrelated processes.
+            processes: 256,
             open_files: 96,
             ..IsolationLimits::default()
         };
         let mut command = Command::new("/bin/sh");
         command.args([
             "-c",
-            "read pid comm state ppid pgrp rest < /proc/self/stat; printf '%s %s %s\\n' \"$pid\" \"$pgrp\" \"$(ulimit -n)\"; /bin/sh -c '/usr/bin/setsid /bin/true'; test $? -ne 0",
+            "read pid comm state ppid pgrp rest < /proc/self/stat; while IFS= read -r line; do case \"$line\" in 'Max open files'*) set -- $line; nofile=$4 ;; 'Max processes'*) set -- $line; nproc=$3 ;; esac; done < /proc/self/limits; printf '%s %s %s %s\\n' \"$pid\" \"$pgrp\" \"$nofile\" \"$nproc\"; /bin/sh -c '/usr/bin/setsid /bin/true'; test $? -ne 0",
         ]);
         isolate_command_with_limits(&mut command, &account, limits);
         let output = command.output().expect("spawn contained shell");
+        if !output.status.success()
+            && String::from_utf8_lossy(&output.stderr).contains("Cannot fork")
+        {
+            eprintln!(
+                "skipping process-group escape assertion: host UID already saturates RLIMIT_NPROC=256"
+            );
+            return;
+        }
         assert!(
             output.status.success(),
             "escape probe unexpectedly succeeded: {}",
@@ -1027,9 +1044,10 @@ mod tests {
             .expect("probe output UTF-8")
             .split_ascii_whitespace()
             .collect();
-        assert_eq!(fields.len(), 3);
+        assert_eq!(fields.len(), 4);
         assert_eq!(fields[0], fields[1], "child PID must equal its PGID");
         assert_eq!(fields[2], "96", "RLIMIT_NOFILE must be installed");
+        assert_eq!(fields[3], "256", "test RLIMIT_NPROC must be installed");
     }
 
     #[test]

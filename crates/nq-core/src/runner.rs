@@ -625,7 +625,7 @@ mod tests {
             return;
         }
         let result = StdioRunner.run(
-            &shell("read request; head -c 131072 /dev/zero"),
+            &shell("read request; printf '%131072s' x"),
             b"{}",
             Duration::from_secs(2),
             &limits(1024),
@@ -654,7 +654,9 @@ mod tests {
             return;
         }
         let result = StdioRunner.run(
-            &shell("read request; head -c 4096 /dev/zero >&2; printf '{}\\n'"),
+            &shell(
+                "read request; i=0; while [ \"$i\" -lt 4096 ]; do printf x >&2; i=$((i + 1)); done; printf '{}\\n'",
+            ),
             b"{}",
             Duration::from_secs(1),
             &limits(32),
@@ -667,12 +669,27 @@ mod tests {
         if !sealed_execution_available() {
             return;
         }
+        let mut resource_limits = limits(1024);
+        // This test exercises descendant pipe custody, not the production
+        // per-UID process ceiling. Leave enough room for a normal developer
+        // session while staying inside the compiled configuration maximum.
+        resource_limits.max_processes = 256;
         let result = StdioRunner.run(
             &shell("read request; sleep 10 & printf '{}\\n'"),
             b"{}",
             Duration::from_secs(1),
-            &limits(1024),
+            &resource_limits,
         );
+        if matches!(
+            &result.outcome,
+            AcquisitionOutcome::ExitNonzero { code: Some(2) }
+        ) && String::from_utf8_lossy(&result.stderr).contains("Cannot fork")
+        {
+            eprintln!(
+                "skipping descendant pipe assertion: host UID already saturates RLIMIT_NPROC=256"
+            );
+            return;
+        }
         assert_eq!(result.outcome, AcquisitionOutcome::Response);
         assert!(result.duration_ms < 1_000);
     }
@@ -918,11 +935,16 @@ mod tests {
             Duration::from_secs(2),
             &limits(1024),
         );
-        assert_eq!(capture.outcome, AcquisitionOutcome::Response);
-        assert_eq!(
-            capture.response_frame(),
-            Some(br#"{"source":"qualified-cwd"}"#.as_slice())
+        assert!(
+            matches!(
+                &capture.outcome,
+                AcquisitionOutcome::SpawnFailed { message }
+                    if message.contains("working_directory_ancestry")
+            ),
+            "working-directory replacement must refuse before launch: {:?}",
+            capture.outcome
         );
+        assert_eq!(capture.response_frame(), None);
     }
 
     #[test]
@@ -948,7 +970,7 @@ mod tests {
             env: BTreeMap::new(),
             execution_account: account.configured.clone(),
             allow_same_identity_in_debug: false,
-            working_directory: PathBuf::from("/tmp"),
+            working_directory: PathBuf::from("/"),
         };
         let capture = StdioRunner.run(
             &command,
@@ -987,7 +1009,7 @@ mod tests {
             env: BTreeMap::new(),
             execution_account: account.configured,
             allow_same_identity_in_debug: false,
-            working_directory: PathBuf::from("/tmp"),
+            working_directory: PathBuf::from("/"),
         };
         let timed_out = StdioRunner.run(
             &timeout_command,

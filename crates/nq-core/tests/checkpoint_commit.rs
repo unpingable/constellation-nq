@@ -1,6 +1,7 @@
 //! Checkpoints advance only through a committed admitted report.
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use nq_core::config::NqConfig;
@@ -106,7 +107,9 @@ sys.stdout.write("\n")
 "#;
 
 fn checkpoint_config(root: &Path) -> NqConfig {
-    let database = root.join("nq.db");
+    let state_root = root.join("state");
+    let runtime_root = root.join("run");
+    let database = state_root.join("nq.db");
     let helper = root.join("checkpoint_helper.py");
     let state = root.join("helper.state");
     let log = root.join("requests.ndjson");
@@ -154,9 +157,9 @@ max_open_files = 128
 max_file_bytes = 67108864
 "#,
         database.display(),
-        root.join("nqd.sock").display(),
-        root.join("admissions").display(),
-        root.join("helpers").display(),
+        runtime_root.join("nqd.sock").display(),
+        state_root.join("admissions").display(),
+        runtime_root.join("helpers").display(),
         helper.display(),
         state.display(),
         log.display(),
@@ -204,13 +207,32 @@ fn assert_checkpoint_sequence(log: &Path) {
 fn only_committed_admitted_reports_advance_the_next_request_checkpoint() {
     let directory = tempfile::tempdir().expect("temporary test directory");
     let root = directory.path();
-    let database = root.join("nq.db");
+    let database = root.join("state").join("nq.db");
     let helper = root.join("checkpoint_helper.py");
     let log = root.join("requests.ndjson");
     fs::write(&helper, CHECKPOINT_HELPER).expect("write checkpoint helper");
 
     let config = checkpoint_config(root);
     validate_compiled_config(&config).expect("compiled profile accepts binding");
+    let state_root = database.parent().expect("database parent");
+    fs::create_dir(state_root).expect("create state root");
+    fs::set_permissions(state_root, fs::Permissions::from_mode(0o700)).expect("state root mode");
+    fs::create_dir(&config.admissions_dir).expect("create admissions root");
+    fs::set_permissions(&config.admissions_dir, fs::Permissions::from_mode(0o700))
+        .expect("admissions root mode");
+    let runtime_root = config
+        .helper_runtime_dir
+        .parent()
+        .expect("helper runtime parent");
+    fs::create_dir(runtime_root).expect("create runtime root");
+    fs::set_permissions(runtime_root, fs::Permissions::from_mode(0o751))
+        .expect("runtime root mode");
+    fs::create_dir(&config.helper_runtime_dir).expect("create helper runtime root");
+    fs::set_permissions(
+        &config.helper_runtime_dir,
+        fs::Permissions::from_mode(0o711),
+    )
+    .expect("helper runtime root mode");
 
     let profile = resolve_profile("nq.conformance", 1).expect("compiled conformance profile");
     let mut store = Store::initialize(&database).expect("initialize test store");
