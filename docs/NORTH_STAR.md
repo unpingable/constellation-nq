@@ -88,6 +88,19 @@ subject and operational question, invoke declared diagnostics, and receive a
 Nightshift portrait whose conclusions factor through exact NQ dispositions and
 refusals.
 
+The useful product-category analogy is **electronic design automation for
+operations**. EDA does not replace the engineer or grant a simulator fabrication
+authority. It gives the engineer deterministic analyses, rule checks,
+counterexamples, provenance, and inspectable intermediate artifacts before a
+consequential action. Here, witnesses acquire, NQ performs the deterministic
+diagnostic checks, Nightshift is the diagnostic-operations workbench, and
+Docket performs separately authorized execution.
+
+The analogy has a deliberate limit: a live operational system is not a closed
+netlist. Evidence may be partial, stale, contradictory, inaccessible, or
+vantage-bound. NQ coverage and refusal are therefore primary results rather
+than exceptional tool failures.
+
 Nightshift may state whether the evidence required for an operational proposal
 is established and may propose a next diagnostic or action. It cannot authorize
 that action. Human or AG authorization and Docket execution remain separate
