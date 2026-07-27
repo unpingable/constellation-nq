@@ -24,6 +24,46 @@ individual profile, provider, or detector earns a role-complete product claim.
    publish, release, deploy, or change remote state until the operator lifts
    that constraint explicitly.
 
+## Implementation posture — greenfield parity, VM first
+
+Do not begin replacement work by wholesale-porting or backporting Classic into
+NQ-NG. Continue building the greenfield successor cumulatively until it meets
+the exact operator questions and acceptance relations in the ratified Portrait
+v1 manifest.
+
+Classic has two roles in that work:
+
+- **capability donor:** recover bounded algorithms, fixtures, edge cases, and
+  still-required operator workflows; and
+- **qualification comparator:** later compare the same subject, bounded
+  question, state/interval, coverage, conclusion, and notification behavior.
+
+Classic is not the source architecture. Its collectors, pack framework,
+database, APIs, dashboard, executable names, configuration layout, and quirks
+are not implementation parity targets.
+
+Prefer a small disposable VM over `sushi-k` as the initial implementation and
+qualification substrate. The VM should exercise installed artifacts from
+empty state, explicit role and synthetic subject identity, clean state
+directories, witness/provider admission, hostile evidence cases, package
+lifecycle, upgrade/rollback, backup/restore, and repeatability without a
+developer checkout inside the guest.
+
+VM results may earn generic platform, installation, profile, witness, and
+operator-journey evidence. They cannot earn `sushi-k` or `labelwatch-host`
+Portrait completeness, because those verdicts require the subjects' closed
+inventories, application contracts, real vantages, and later isolated
+qualification.
+
+Only after NQ-NG meets the relevant ratified manifest rows does it meet Classic
+at the live comparison gate. Work on the real subjects should then be
+configuration and isolated qualification of a developed product, not
+unfinished product development.
+
+This posture records campaign direction only. It does not broaden the bounded
+blocker-closure authority below, authorize general Stage 2 implementation, or
+permit deployment, parallel qualification, authority switch, or cutover.
+
 ## Stage 0 — direction ratification
 
 Record the selected-successor status, the operational north-star, and this
