@@ -89,17 +89,24 @@ Nightshift portrait whose conclusions factor through exact NQ dispositions and
 refusals.
 
 The useful product-category analogy is **electronic design automation for
-operations**. EDA does not replace the engineer or grant a simulator fabrication
-authority. It gives the engineer deterministic analyses, rule checks,
-counterexamples, provenance, and inspectable intermediate artifacts before a
-consequential action. Here, witnesses acquire, NQ performs the deterministic
-diagnostic checks, Nightshift is the diagnostic-operations workbench, and
-Docket performs separately authorized execution.
+operations**. EDA does not replace the engineer or grant a simulator
+fabrication authority. It gives the engineer deterministic analyses, rule
+checks, counterexamples, provenance, and inspectable intermediate artifacts
+before a consequential action.
 
-The analogy has a deliberate limit: a live operational system is not a closed
-netlist. Evidence may be partial, stale, contradictory, inaccessible, or
-vantage-bound. NQ coverage and refusal are therefore primary results rather
-than exceptional tool failures.
+The diagnostic profile and declared operational model are the engineered
+artifacts; the live system is the changing, partially observable subject on
+the bench. Witnesses and providers are instruments and test fixtures. NQ is
+the deterministic verification and analysis engine. Nightshift is the flow
+orchestrator and operations workbench. Dispositions, refusals, contradictions,
+and coverage records are inspectable check results. Docket performs separately
+authorized execution.
+
+The live subject's open-world character is not where the analogy fails. It is
+why the tooling must return coverage-narrowed, state-incompatible,
+contradictory, insufficient-projection, or refused results instead of
+fabricating conformance. Those outcomes are the operational equivalents of an
+unconstrained, indeterminate, unroutable, or failed verification result.
 
 Nightshift may state whether the evidence required for an operational proposal
 is established and may propose a next diagnostic or action. It cannot authorize
