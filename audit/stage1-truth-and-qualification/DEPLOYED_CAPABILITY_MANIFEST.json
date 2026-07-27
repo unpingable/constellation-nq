@@ -1,0 +1,1423 @@
+{
+  "audit_date": "2026-07-27",
+  "authority": "none",
+  "classification_taxonomy": {
+    "allowed_order": [
+      "observed",
+      "owner_decision",
+      "required",
+      "retire"
+    ],
+    "definitions": {
+      "observed": "Present, absent, partial, broken, or otherwise directly evidenced by a named census. Observation does not establish intended completeness.",
+      "owner_decision": "The census cannot choose the inventory, threshold, policy, obligation, or retirement disposition. Operator ratification is required.",
+      "required": "Candidate requirement for Host Operational Portrait v1. Because this manifest has authority none, required does not become binding until operator ratification.",
+      "retire": "Candidate permission to retire a deployed capability or implementation shape only after an explicit operator decision and its stated retirement condition. This classification authorizes no removal."
+    },
+    "rules": [
+      "A capability may carry more than one classification because current observation and candidate cutover disposition are independent axes.",
+      "An observed configured set is not a complete required inventory unless an operator ratifies that closure.",
+      "No owner_decision row may be silently converted to required or retire.",
+      "No retire row authorizes a service stop, file removal, data deletion, or authority switch.",
+      "The manifest status and authority apply to every required and retire classification."
+    ]
+  },
+  "clean_install_obligations": [
+    "A clean supported host can identify and verify every installation artifact without a sibling checkout or developer target directory.",
+    "The operator selects an explicit host or application role and reviews its target inventory before collection begins.",
+    "Configuration and compatibility are validated before mutable state is initialized or upgraded.",
+    "Provider or helper qualification, admission, and self-diagnosis fail visibly before service enablement when evidence identity or privilege is incomplete.",
+    "The first supported host-role result is a useful bounded operational portrait rather than only a protocol conformance specimen.",
+    "Install, enablement, first start, upgrade, rollback, removal, and retained-state behavior are explicit and independently testable.",
+    "Parallel qualification uses isolated configuration, state, runtime, service, listener, and backup identities and does not mutate Classic.",
+    "These are outcome obligations and do not select a package manager, repository layout, process count, or installer implementation."
+  ],
+  "coverage_outcome_taxonomy": {
+    "acquisition_coverage_states": {
+      "current": "Required evidence arrived within its bound and was admitted for the exact subject, scope, and vantage.",
+      "intentionally_excluded": "An operator-ratified scope declaration excludes the subject or dimension. Silence alone cannot create this state.",
+      "missing": "Evidence was expected under an explicit inventory but did not arrive.",
+      "not_configured": "No target or provider was declared. This is not evidence of healthy absence.",
+      "partial": "Some required subjects, dimensions, fields, or vantages are current while others are unavailable or unaccounted for.",
+      "refused": "Acquisition, admission, projection, or evaluation explicitly refused the evidence and retained the refusal boundary.",
+      "stale": "Previously accepted evidence exists but is older than its bound.",
+      "unsupported": "The qualified provider or profile explicitly cannot testify about this substrate or dimension."
+    },
+    "condition_states": {
+      "condition_present": "Current sufficient evidence supports the bounded condition.",
+      "explicitly_absent": "Current sufficient evidence under closed declared coverage supports bounded absence.",
+      "unknown": "Coverage or evidence is insufficient, inapplicable, contradictory, or not evaluated; no condition conclusion is available."
+    },
+    "evidence_relation_states": {
+      "agree": "Distinct observations are compatible within their declared scopes.",
+      "contradictory": "Observations disagree within the bounded diagnostic; the relation must remain explicit for later Nightshift/operator composition.",
+      "independence_unknown": "Different surfaces exist, but failure-domain or vantage independence is not established.",
+      "not_compared": "No governed comparison was performed.",
+      "shared_failure_domain": "Observations share a host, disk, network, proxy, clock, provider, or other declared failure domain."
+    },
+    "rules": [
+      "Acquisition coverage and domain condition are separate axes.",
+      "Collector success with an empty payload establishes neither inventory completeness nor explicitly absent condition.",
+      "Service or container liveness does not substitute for application progression.",
+      "HTTP 2xx does not substitute for a semantic application verdict.",
+      "Classic NQ Monitor loop liveness does not mean the diagnosed subject is healthy.",
+      "Missing series or an unconfigured collector remains unknown unless independent closed-world coverage supports a stronger conclusion."
+    ]
+  },
+  "diagnostic_product_frame": {
+    "bounded_implementation_slice": "A witness/provider acquisition path, profile, detector, diagnostic read/export path, Nightshift recurrence/campaign, derived monitor or alert, or frontend view can contribute to the operator journey but is not the whole ownership stack.",
+    "continuous_operation": "The primary NQ object is one scoped and bounded diagnostic. Repeating diagnostics under Nightshift recurrence and expiry is what monitoring is built on.",
+    "host_operational_portrait_v1": "Host Operational Portrait v1 is the candidate minimum complete operational-posture contract over each ratified subject, scope, vantage, operator task, diagnostic profile, application overlay, self-diagnosis, typed read/export, recurrence, expiry, alerting, retention, backup, and clean-install obligation. Nightshift composes the portrait from bounded NQ results; NQ does not produce the whole portrait.",
+    "nq_recursive_fabric": "NQ-to-NQ recursion carries exact bounded dispositions or refusals as testimony for the same exact parent diagnostic question without laundering subject, evidence frontier, or limitations. It is not open-ended operational composition.",
+    "operator_analogy": "The operator compares this distinction to MRI only as an analogy for acquisition feeding one scoped diagnostic. The analogy introduces no medical terminology, medical claim, or medical semantics into NQ.",
+    "roles": {
+      "authority_and_execution": "Humans or AG own separately governed authorization; Docket owns execution through that separately governed operation boundary.",
+      "frontend": "Maude or another frontend renders stable typed NQ diagnostic exports and Nightshift operational output without minting diagnostic or operational authority.",
+      "monitoring_alerting_portraits_reporting": "Monitoring, alerting, portraits, reporting, and proposed automation are built from repeated exact diagnostics and Nightshift current posture; they are not upstream semantic inputs to NQ.",
+      "nightshift_and_operators": "Nightshift owns recurrence, expiry, campaigns, multi-diagnostic current posture, and operational proposals without rewriting NQ testimony; humans or agents provide separately identified interpretation or proposals without gaining NQ or action authority.",
+      "notification": "Nightshift or explicit operator policy creates exact alert intent for an identified diagnostic or operational state transition; candidate nq-notify owns only delivery attempts and attempt/result receipts and selects no implementation, schema, transport, or delivery law.",
+      "nq": "NQ selects exact required evidence, checks custody, admissibility, and coverage, evaluates one scoped and bounded subject/question, and returns an exact typed diagnostic disposition or refusal without granting remediation authority.",
+      "nq_monitor": "nq-monitor, if retained, inspects one diagnostic's evidence, custody, coverage, evaluation, disposition, and refusal; it is not the whole-estate console.",
+      "profiles": "Profiles are compiled, identified diagnostic protocols that state the question, evidence projection, coverage, bounds, limitations, and evaluator semantics.",
+      "witnesses_and_providers": "Witnesses and providers are admitted acquisition modalities with exact subject, scope, vantage, identity, capability, and custody boundaries."
+    },
+    "routine_monitoring_and_surveillance": "Routine monitoring is a downstream use of repeated bounded diagnostics under Nightshift recurrence, applicability, and expiry. Witnesses/providers perform acquisition; monitoring is not an upstream semantic substrate for NQ.",
+    "semantic_core": "NQ's semantic core is an evidence-bound diagnostic answering one declared, scoped, bounded question about one diagnosed subject while retaining what cannot be concluded."
+  },
+  "diagnostic_read_export_and_operational_presentation_obligations": [
+    "NQ provides a stable typed machine-facing diagnostic read/export contract rather than owning successor dashboard UX.",
+    "The NQ export exposes observation currency and expected-versus-observed coverage separately from domain condition.",
+    "The NQ export preserves current, partial, stale, refused, missing, unsupported, intentionally excluded, and not configured without flattening them into green or red.",
+    "The NQ export preserves condition present, explicitly absent, and unknown as a separate axis.",
+    "The NQ export carries exact disposition or refusal identity, subject, scope, vantage, source or provider, profile, evaluator, evidence time, freshness, limitations, and safe next checks.",
+    "nq-monitor, if retained, is an inspector/disposition explorer for one diagnostic and not the whole-estate console.",
+    "Nightshift binds the exact NQ diagnostic inputs it composes, applies identified recurrence and expiry, coordinates campaigns, and emits stable typed current-posture output without rewriting NQ testimony.",
+    "The Nightshift enterprise surface exposes configured profiles and each profile's last-result time, applicability, coverage, expiry state, and contribution to current posture.",
+    "Maude or another frontend consumes the typed NQ and Nightshift contracts, leads with supported urgent facts, and does not create diagnostic truth, operational authority, or delivery custody.",
+    "The contracts support core operator tasks without private-table SQL and remain read-only with respect to collection and remediation.",
+    "The observed Classic NQ Monitor remains a functional-equivalence input but does not select an NQ-owned successor dashboard.",
+    "This candidate does not select Maude, another web or terminal frontend, transport, port, authentication mechanism, or deployment topology."
+  ],
+  "evidence_files": [
+    {
+      "path": "audit/stage1-truth-and-qualification/FRESH_OPERATOR_AUDIT.md",
+      "role": "supporting_install_and_notification_boundary_audit",
+      "sha256": "0aeb43ddcb3c9974d2054d7bf55d6ddbb03f79df86d6b808ac64264645da9921",
+      "subject_ids": [
+        "labelwatch-host",
+        "sushi-k"
+      ]
+    },
+    {
+      "path": "audit/stage1-truth-and-qualification/LINODE_CENSUS.md",
+      "role": "primary_live_census",
+      "sha256": "0a79b82c39d76ff2c86a6021de4d0e1da82c1aa1098b1f1e1cdb747ff31852dc",
+      "subject_ids": [
+        "labelwatch-host"
+      ]
+    },
+    {
+      "path": "audit/stage1-truth-and-qualification/NOTIFICATION_FACET_CANDIDATE.md",
+      "role": "supporting_unratified_notification_boundary_and_falsification_record",
+      "sha256": "32c0c32dde151b112bc5b5cd2966f0b7694de589f174639d298d4dda24f1cad8",
+      "subject_ids": [
+        "labelwatch-host",
+        "sushi-k"
+      ]
+    },
+    {
+      "path": "audit/stage1-truth-and-qualification/SUSHI_K_CENSUS.md",
+      "role": "primary_live_census",
+      "sha256": "147d5c89e93488b182afbd521c6b1191b99efb9241f4ba72388559e71ef394cb",
+      "subject_ids": [
+        "sushi-k"
+      ]
+    }
+  ],
+  "human_portrait_path": "audit/stage1-truth-and-qualification/HOST_OPERATIONAL_PORTRAIT_V1.md",
+  "manifest_id": "nq.stage1.deployed_capability_manifest",
+  "manifest_version": 1,
+  "notification_delivery_candidate": {
+    "candidate_boundary": [
+      "Consume an exact alert intent created by Nightshift or explicit operator policy for an identified diagnostic or operational state transition, with every informing NQ disposition or refusal identity bound.",
+      "Preserve diagnostic-output, previous/current state, transition, Nightshift campaign/posture, alert-intent, and policy identity through a delivery attempt.",
+      "Record inspectable delivery receipts or explicit failed, refused, or unknown attempt outcomes.",
+      "Remain unable to create alert intent, change an underlying NQ disposition or refusal, or grant action authority."
+    ],
+    "candidate_name": "nq-notify",
+    "classification": [
+      "owner_decision",
+      "required"
+    ],
+    "delivery_law_status": "not_selected",
+    "implementation_shape_status": "not_selected",
+    "must_not_infer": [
+      "A raw NQ finding, evaluation, disposition, or refusal automatically creates alert intent or pages.",
+      "A configured transport proves delivery.",
+      "A transport acceptance proves human attention.",
+      "Notification failure changes the underlying NQ condition or disposition.",
+      "The candidate name selects a repository, crate, binary, service, package, queue, or in-process worker."
+    ],
+    "nq_ng_notification_tables_status": "implemented_unratified_scaffolding",
+    "owner_decisions": [
+      "Which diagnostic or operational state transitions create alert intent",
+      "Nightshift recurrence, expiry, campaign, current-posture, policy identity, and routing rules",
+      "Recipients and transports",
+      "Attempt, acceptance, delivery, refusal, and unknown meanings",
+      "Retry, replay, deduplication, ordering, escalation, and retention behavior",
+      "Backup, restore, and operator visibility obligations"
+    ],
+    "policy_semantics_status": "nightshift_operator_alert_intent_owned_not_selected",
+    "schema_status": "not_selected",
+    "status": "candidate_seam_only",
+    "supporting_record_path": "audit/stage1-truth-and-qualification/NOTIFICATION_FACET_CANDIDATE.md",
+    "transport_set_status": "owner_decision_required"
+  },
+  "operator_tasks": [
+    {
+      "acceptance_result": "For Labelwatch and Driftwatch, distinguish process liveness from phase, cursor, lag, queue, coverage, publication, export, and semantic-gate progression.",
+      "task_id": "application_progression"
+    },
+    {
+      "acceptance_result": "See the retention obligation, current runway or budget state, latest verified backup, restore qualification, and legacy archive boundary without inferring that a configured budget is enforced.",
+      "task_id": "backup_restore_and_retention"
+    },
+    {
+      "acceptance_result": "Determine what evidence is expected, current, partial, stale, refused, missing, unsupported, intentionally excluded, or not configured for each required domain.",
+      "task_id": "coverage_and_currency"
+    },
+    {
+      "acceptance_result": "Inspect CPU/load/pressure, memory/swap/pressure, filesystems, mounts, byte and inode capacity, and read-only state without treating a point sample as a health verdict.",
+      "task_id": "host_pressure_and_capacity"
+    },
+    {
+      "acceptance_result": "Distinguish local interface, route, listener, DNS, TLS, proxy, local reachability, and external-vantage evidence and expose unknown independence.",
+      "task_id": "network_and_reachability"
+    },
+    {
+      "acceptance_result": "Determine the exact diagnostic or operational state transition and whether Nightshift/operator policy created alert intent, then whether delivery was not attempted, attempted, accepted, delivered, failed, refused, or unknown only after those meanings are ratified.",
+      "task_id": "notification_delivery"
+    },
+    {
+      "acceptance_result": "Let Nightshift own recurrence, expiry, campaigns, and multi-diagnostic current posture while keeping each NQ subject, question, disposition/refusal, evidence boundary, and limitation intact.",
+      "task_id": "operational_composition"
+    },
+    {
+      "acceptance_result": "Let nq-monitor inspect one diagnostic; let the Nightshift enterprise surface expose profiles, last-result time/applicability/coverage/expiry, and current posture; let Maude or another frontend render without reconstructing authority.",
+      "task_id": "presentation"
+    },
+    {
+      "acceptance_result": "See the exact declared service, container, or process inventory, current lifecycle, recent changes, and inventory-closure status.",
+      "task_id": "service_lifecycle"
+    },
+    {
+      "acceptance_result": "Determine NQ build/cohort and typed-export state; Nightshift recurrence/expiry/campaign/profile/posture state; provider/helper, admission, store, and alert-delivery coverage.",
+      "task_id": "self_diagnosis"
+    },
+    {
+      "acceptance_result": "Inspect each declared database and WAL, configured-but-unobserved paths, growth or pressure, and the boundary between file testimony and application correctness.",
+      "task_id": "storage_and_database"
+    },
+    {
+      "acceptance_result": "Identify the supported condition, contradictions, shared failure domains, limitations, and useful safe next checks without receiving an action authorization.",
+      "task_id": "triage_and_safe_next_checks"
+    }
+  ],
+  "ratification": {
+    "operator_ratification_required": true,
+    "record": null,
+    "self_ratification_forbidden": true
+  },
+  "retention_backup_obligations": [
+    "Operator ratification selects evidence, evaluation, disposition, refusal, delivery-receipt, and application-overlay retention periods; this candidate does not choose durations.",
+    "Configured disk budgets are either enforced under an explicit contract or exposed as unenforced declarations with current size and runway.",
+    "SQLite main, WAL, checkpoint, and backup state remain separately visible.",
+    "Backup creates an identified artifact and restore qualification proves semantic reopening before the artifact is relied upon.",
+    "Classic history is frozen and retained under an explicit archive/access policy and is not imported as current NQ-NG state.",
+    "Removal or package purge does not silently destroy evidence, admissions, backups, or receipts.",
+    "Parallel qualification and rollback preserve an explicit split observation interval rather than merging histories."
+  ],
+  "schema": "nq.audit.deployed_capability_manifest.v1",
+  "self_diagnosis_obligations": [
+    "Exact NQ core build, static profile cohort, evaluator, detector suite, protocol, and store identities are inspectable.",
+    "Nightshift recurrence/campaign state exposes last requested diagnostic, last admitted completion, next expected run, applicability, expiry, lateness, overlap, and refusal.",
+    "The declared expected provider, helper, profile, subject, scope, and vantage inventory is compared with actual current evidence.",
+    "Helper absence, privilege denial, admission drift, executable drift, malformed output, timeout, and stale evidence remain distinct.",
+    "Store schema, integrity-opening result, WAL state, disk use, retention activity, backup state, and write refusal are visible.",
+    "Typed NQ diagnostic read/export and inspector availability, Nightshift operational-output compatibility, and alert-intent/delivery coverage are visible without being folded into the diagnosed subject's condition.",
+    "NQ liveness cannot produce an all-clear when active findings or missing required evidence exist."
+  ],
+  "status": "candidate_for_operator_ratification",
+  "subjects": [
+    {
+      "capabilities": [
+        {
+          "candidate_requirement": "Admit an application-owned Driftwatch overlay that separates simple liveness from ingest cursor and lag, coverage, reconnect and drop behavior, queue state, gate or preflight state, storage and retention, and facts-export freshness and consumer usability.",
+          "capability_id": "application.driftwatch",
+          "classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "evidence_refs": [
+            "LINODE_CENSUS.md#driftwatch-topology",
+            "FRESH_OPERATOR_AUDIT.md#driftwatch"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "partial",
+          "owner_decisions": [
+            "Exact overlay fields and phase model",
+            "Bound detector thresholds and baseline ownership",
+            "Which feature-enable states are required",
+            "Facts-export consumer contract"
+          ],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Admit an application-owned Labelwatch overlay that exposes main, discovery, API, ingest, scan, derive, report, publication, database, coverage, and Driftwatch-facts dependency progression without treating HTTP 2xx or systemd up as semantic health.",
+          "capability_id": "application.labelwatch",
+          "classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "evidence_refs": [
+            "LINODE_CENSUS.md#labelwatch-topology",
+            "FRESH_OPERATOR_AUDIT.md#labelwatch"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "partial",
+          "owner_decisions": [
+            "Exact overlay fields and phase model",
+            "Coverage denominators and freshness bounds",
+            "Bound detector thresholds and baseline ownership",
+            "Publication and API consumer-success contract"
+          ],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Keep generic lifecycle observation for the other declared services while the operator decides which require application-owned overlays or are dependencies only.",
+          "capability_id": "application.other_declared_services",
+          "classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "evidence_refs": [
+            "LINODE_CENSUS.md#service-subjects"
+          ],
+          "observed_condition": "explicitly_absent",
+          "observed_coverage": "current",
+          "owner_decisions": [
+            "Required overlay inventory for governor, gov-webui, governor-bridge, receipts-feed, PostgreSQL, Caddy, PDS, and NQ services",
+            "Dependency and consumer relationships"
+          ],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Declare the complete expected host, service, storage, network, telemetry, application, and notification coverage inventory and show closure state each cycle.",
+          "capability_id": "coverage.expected_inventory",
+          "classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "evidence_refs": [
+            "LINODE_CENSUS.md#host-operational-portrait-capability-matrix"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "missing",
+          "owner_decisions": [
+            "Complete required subject inventory",
+            "Explicit exclusions",
+            "Freshness bounds and vantages"
+          ],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Meet the common clean-install obligations and produce a useful labelwatch-host portrait without remote source compilation.",
+          "capability_id": "deployment.clean_install",
+          "classification": [
+            "observed",
+            "required"
+          ],
+          "evidence_refs": [
+            "LINODE_CENSUS.md#classic-nq",
+            "FRESH_OPERATOR_AUDIT.md#nq-ng"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "missing",
+          "owner_decisions": [],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Observe CPU identity, utilization or pressure, bounded load, and the time basis needed to interpret them; exact thresholds remain bound operator decisions.",
+          "capability_id": "host.cpu_load_pressure",
+          "classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "evidence_refs": [
+            "LINODE_CENSUS.md#point-in-time-host-values"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "partial",
+          "owner_decisions": [
+            "Required CPU utilization and pressure dimensions",
+            "Thresholds and baseline ownership"
+          ],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Preserve explicit logical host identity separately from static hostname and expose boot epoch, kernel, uptime, and relevant clock basis.",
+          "capability_id": "host.identity_boot_kernel_time",
+          "classification": [
+            "observed",
+            "required"
+          ],
+          "evidence_refs": [
+            "LINODE_CENSUS.md#host",
+            "LINODE_CENSUS.md#point-in-time-host-values"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "partial",
+          "owner_decisions": [],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Observe total and available memory, swap, and bounded pressure while keeping missing swap or PSI testimony explicit.",
+          "capability_id": "host.memory_swap_pressure",
+          "classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "evidence_refs": [
+            "LINODE_CENSUS.md#point-in-time-host-values"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "partial",
+          "owner_decisions": [
+            "Required swap and PSI dimensions",
+            "Thresholds and baseline ownership"
+          ],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": null,
+          "capability_id": "legacy.classic_runtime",
+          "classification": [
+            "observed",
+            "retire"
+          ],
+          "evidence_refs": [
+            "LINODE_CENSUS.md#classic-nq",
+            "LINODE_CENSUS.md#deployed-binarysource-separation"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "current",
+          "owner_decisions": [],
+          "retirement_condition": "Only after every ratified required row has independent NQ-NG evidence, typed diagnostic export/inspection, Nightshift recurrence/expiry/campaign/current-posture, frontend consumption, and alert-delivery obligations are qualified, an explicit authority switch occurs, and Classic rollback and archive access are preserved."
+        },
+        {
+          "candidate_requirement": "Provide stable typed NQ diagnostic read/export and single-diagnostic inspection for logical labelwatch-host, plus a Nightshift profile/last-result/applicability/coverage/expiry/current-posture contract consumable by Maude or another frontend without private SQL.",
+          "capability_id": "operator_surface.typed_contracts",
+          "classification": [
+            "observed",
+            "required"
+          ],
+          "evidence_refs": [
+            "LINODE_CENSUS.md#classic-nq",
+            "LINODE_CENSUS.md#operator-surface"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "partial",
+          "owner_decisions": [],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Observe declared interfaces, routes, listeners, local and proxy paths, DNS and TLS where required, and explicitly bounded reachability from named vantages.",
+          "capability_id": "network.interfaces_routes_listeners_reachability",
+          "classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "evidence_refs": [
+            "LINODE_CENSUS.md#scoped-storage-and-network-dependencies"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "partial",
+          "owner_decisions": [
+            "Complete interface, route, listener, endpoint, DNS, TLS, and proxy inventory",
+            "Required external vantages and independence claims"
+          ],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Expose exact diagnostic/operational state-transition and Nightshift/operator alert-intent identity, informing NQ disposition/refusal identities, policy identity, attempt, and receipt coverage through the unratified nq-notify candidate seam.",
+          "capability_id": "notification.delivery",
+          "classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "evidence_refs": [
+            "LINODE_CENSUS.md#detector-and-notification-categories",
+            "FRESH_OPERATOR_AUDIT.md#candidate-finding-independent-notification-delivery-facet"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "partial",
+          "owner_decisions": [
+            "Slack and Discord continued requirement",
+            "Nightshift recurrence, expiry, campaign/posture, state-transition and alert-intent policy, recipients, routing, retry expectation, and delivery meaning",
+            "Receipt and retention obligations"
+          ],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Preserve a scheduled 60-second observation loop, expected-source identity, source outcome, freshness, and missed or refused cycle evidence.",
+          "capability_id": "observation.currency",
+          "classification": [
+            "observed",
+            "required"
+          ],
+          "evidence_refs": [
+            "LINODE_CENSUS.md#host-operational-portrait-capability-matrix"
+          ],
+          "observed_condition": "explicitly_absent",
+          "observed_coverage": "current",
+          "owner_decisions": [],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Meet the common retention and backup obligations, expose the current database-versus-budget discrepancy, and avoid claiming that the 100 MB declaration is enforced.",
+          "capability_id": "retention.backup_restore",
+          "classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "evidence_refs": [
+            "LINODE_CENSUS.md#classic-nq",
+            "LINODE_CENSUS.md#point-in-time-host-values"
+          ],
+          "observed_condition": "condition_present",
+          "observed_coverage": "partial",
+          "owner_decisions": [
+            "Required retention and archive periods",
+            "Backup frequency, destination, restore proof, and acceptable data loss",
+            "Enforced budget or warning-only policy"
+          ],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Meet the common NQ/Nightshift self-diagnosis obligations and make source or build uncertainty, store pressure, collector gaps, typed diagnostic export/inspection, recurrence/expiry/campaign/posture, and alert-intent/delivery coverage visible.",
+          "capability_id": "self_diagnosis.nq",
+          "classification": [
+            "observed",
+            "required"
+          ],
+          "evidence_refs": [
+            "LINODE_CENSUS.md#deployed-binarysource-separation",
+            "LINODE_CENSUS.md#host-operational-portrait-capability-matrix"
+          ],
+          "observed_condition": "condition_present",
+          "observed_coverage": "partial",
+          "owner_decisions": [],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Preserve lifecycle and recent-change testimony for a ratified exact systemd, Docker, and process inventory; make undeclared-inventory uncertainty visible.",
+          "capability_id": "service.lifecycle",
+          "classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "evidence_refs": [
+            "LINODE_CENSUS.md#service-subjects"
+          ],
+          "observed_condition": "explicitly_absent",
+          "observed_coverage": "current",
+          "owner_decisions": [
+            "Whether the 14 configured subjects close the required inventory",
+            "Required recent-change window and process-presence semantics"
+          ],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Observe the declared /dev/sdc and root-device availability and their mount relationships without inferring device health; decide separately whether SMART testimony is required.",
+          "capability_id": "storage.device_and_shared_failure_domain",
+          "classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "evidence_refs": [
+            "LINODE_CENSUS.md#scoped-storage-and-network-dependencies"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "partial",
+          "owner_decisions": [
+            "SMART or other device-health requirement",
+            "Device identity and replacement semantics"
+          ],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Inventory every in-scope filesystem and mount with byte and inode capacity, read-only state, backing-device identity, and explicit exclusions.",
+          "capability_id": "storage.filesystems_mounts_capacity_inodes",
+          "classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "evidence_refs": [
+            "LINODE_CENSUS.md#scoped-storage-and-network-dependencies",
+            "LINODE_CENSUS.md#point-in-time-host-values"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "partial",
+          "owner_decisions": [
+            "Complete mount inventory and exclusions",
+            "Capacity and inode thresholds",
+            "Runway and read-only-state policy"
+          ],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Preserve exact declared SQLite-path metadata and expose configured-but-unobserved paths as missing or intentionally excluded only after inventory ratification.",
+          "capability_id": "storage.sqlite_metadata",
+          "classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "evidence_refs": [
+            "LINODE_CENSUS.md#sqlite-paths"
+          ],
+          "observed_condition": "condition_present",
+          "observed_coverage": "partial",
+          "owner_decisions": [
+            "Whether facts_work.sqlite is required, ephemeral, or retireable",
+            "Complete application database inventory",
+            "Application-correctness checks outside file metadata"
+          ],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Preserve WAL testimony for each ratified database target and bind thresholds, stalled-incorporation semantics, and application ownership explicitly.",
+          "capability_id": "storage.sqlite_wal",
+          "classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "evidence_refs": [
+            "LINODE_CENSUS.md#sqlite-paths"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "current",
+          "owner_decisions": [
+            "Complete WAL target inventory",
+            "Thresholds and application-specific incorporation semantics"
+          ],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Preserve bounded log testimony for a ratified source inventory and distinguish quiet, missing, access denied, parse error, stale, and condition-bearing events.",
+          "capability_id": "telemetry.logs",
+          "classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "evidence_refs": [
+            "LINODE_CENSUS.md#logs-and-prometheus"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "current",
+          "owner_decisions": [
+            "Complete important-log inventory",
+            "Windows, classification semantics, and raw-custody requirement"
+          ],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Qualify exact node and external-HTTP provider paths with source identity, sample and evaluation time, warnings, partial results, dimension checks, and independent coverage inventory.",
+          "capability_id": "telemetry.prometheus_blackbox",
+          "classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "evidence_refs": [
+            "LINODE_CENSUS.md#logs-and-prometheus"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "current",
+          "owner_decisions": [
+            "Required metric and probe families",
+            "External-vantage independence",
+            "Which observations graduate to NQ-native providers"
+          ],
+          "retirement_condition": null
+        }
+      ],
+      "network_locator": "labelwatch.neutral.zone",
+      "observed_deployment": {
+        "census_generation": 183895,
+        "classic_monitor_sha256": "e1136b5c4fac4d34b28b4433c967186d95c90ef72741c9d14c15c51aa61ed559",
+        "classic_publisher_sha256": "20663dd7d9c114ddaa3c6721ad3bde06c98ff3e31572397340d41bec5b617c2b",
+        "database_schema": 64,
+        "logical_source": "labelwatch-host",
+        "monitor_bind": "0.0.0.0:9848",
+        "operating_system": "Ubuntu 22.04.5 LTS",
+        "publisher_bind": "127.0.0.1:9847",
+        "source_interval_seconds": 60,
+        "static_hostname": "localhost"
+      },
+      "observed_inventory": {
+        "collectors": [
+          {
+            "collector_id": "gpu_witness",
+            "coverage": "not_configured",
+            "raw_outcome": "skipped"
+          },
+          {
+            "collector_id": "host",
+            "coverage": "current",
+            "raw_outcome": "ok"
+          },
+          {
+            "collector_id": "logs",
+            "coverage": "current",
+            "raw_outcome": "ok"
+          },
+          {
+            "collector_id": "nq_binary",
+            "coverage": "current",
+            "raw_outcome": "ok"
+          },
+          {
+            "collector_id": "prometheus",
+            "coverage": "current",
+            "raw_outcome": "ok"
+          },
+          {
+            "collector_id": "services",
+            "coverage": "current",
+            "raw_outcome": "ok"
+          },
+          {
+            "collector_id": "smart_witness",
+            "coverage": "not_configured",
+            "raw_outcome": "skipped"
+          },
+          {
+            "collector_id": "sqlite_health",
+            "coverage": "partial",
+            "raw_outcome": "ok"
+          },
+          {
+            "collector_id": "sqlite_wal_probe",
+            "coverage": "current",
+            "raw_outcome": "ok"
+          },
+          {
+            "collector_id": "zfs_witness",
+            "coverage": "not_configured",
+            "raw_outcome": "skipped"
+          }
+        ],
+        "database_targets": [
+          {
+            "coverage": "current",
+            "path": "/opt/driftwatch/deploy/data/facts.sqlite"
+          },
+          {
+            "coverage": "missing",
+            "path": "/opt/driftwatch/deploy/data/facts_work.sqlite"
+          },
+          {
+            "coverage": "current",
+            "path": "/opt/driftwatch/deploy/data/labeler.sqlite"
+          },
+          {
+            "coverage": "current",
+            "path": "/opt/receipts-feed/data/receipts.sqlite"
+          }
+        ],
+        "log_targets": [
+          "governor",
+          "labelwatch",
+          "nq-publish",
+          "nq-serve"
+        ],
+        "prometheus_target_names": [
+          "external_http_nq_neutralzone",
+          "node"
+        ],
+        "service_targets": [
+          {
+            "adapter": "docker",
+            "observed_condition": "explicitly_absent",
+            "target": "caddy"
+          },
+          {
+            "adapter": "docker",
+            "observed_condition": "explicitly_absent",
+            "target": "driftwatch"
+          },
+          {
+            "adapter": "systemd",
+            "observed_condition": "explicitly_absent",
+            "target": "gov-webui"
+          },
+          {
+            "adapter": "systemd",
+            "observed_condition": "explicitly_absent",
+            "target": "governor"
+          },
+          {
+            "adapter": "systemd",
+            "observed_condition": "explicitly_absent",
+            "target": "governor-bridge"
+          },
+          {
+            "adapter": "systemd",
+            "observed_condition": "explicitly_absent",
+            "target": "labelwatch"
+          },
+          {
+            "adapter": "systemd",
+            "observed_condition": "explicitly_absent",
+            "target": "labelwatch-api"
+          },
+          {
+            "adapter": "systemd",
+            "observed_condition": "explicitly_absent",
+            "target": "labelwatch-discovery"
+          },
+          {
+            "adapter": "systemd",
+            "observed_condition": "explicitly_absent",
+            "target": "labelwatch-lock-watcher"
+          },
+          {
+            "adapter": "systemd",
+            "observed_condition": "explicitly_absent",
+            "target": "nq-publish"
+          },
+          {
+            "adapter": "docker",
+            "observed_condition": "explicitly_absent",
+            "target": "pds"
+          },
+          {
+            "adapter": "systemd",
+            "observed_condition": "explicitly_absent",
+            "target": "postgresql@15-main"
+          },
+          {
+            "adapter": "systemd",
+            "observed_condition": "explicitly_absent",
+            "target": "postgresql@17-main"
+          },
+          {
+            "adapter": "systemd",
+            "observed_condition": "explicitly_absent",
+            "target": "receipts-feed"
+          }
+        ],
+        "wal_targets": [
+          "/opt/driftwatch/deploy/data/labeler.sqlite",
+          "/opt/notquery/nq.db",
+          "/var/lib/labelwatch/labelwatch.db"
+        ]
+      },
+      "observed_policy": {
+        "database_budget_mb": 100,
+        "database_budget_runtime_enforcement": "unknown",
+        "database_budget_warn_percent": 80,
+        "historic_detector_categories": [
+          "check_failed",
+          "error_shift",
+          "log_silence",
+          "resource_drift",
+          "service_status",
+          "signal_dropout",
+          "wal_bloat"
+        ],
+        "notification_min_severity": "warning",
+        "notification_transports": [
+          "discord",
+          "slack"
+        ],
+        "numeric_detector_thresholds": "unknown",
+        "prune_every_cycles": 60,
+        "retention_generations": 2880
+      },
+      "subject_id": "labelwatch-host",
+      "subject_kind": "host",
+      "subject_locator_kind": "dns"
+    },
+    {
+      "capabilities": [
+        {
+          "candidate_requirement": "The operator decides whether governor-code-adapter remains required; if retained, preserve generic lifecycle and define any required application-owned progression overlay.",
+          "capability_id": "application.governor_code_adapter",
+          "classification": [
+            "observed",
+            "owner_decision",
+            "retire"
+          ],
+          "evidence_refs": [
+            "SUSHI_K_CENSUS.md#observed-current-service-and-finding-state"
+          ],
+          "observed_condition": "condition_present",
+          "observed_coverage": "current",
+          "owner_decisions": [
+            "Retain and repair, or retire the target",
+            "Required application semantics if retained"
+          ],
+          "retirement_condition": "Only an explicit operator decision that the service is obsolete or out of portrait scope permits retirement."
+        },
+        {
+          "candidate_requirement": "Declare the complete expected host, service, storage, network, telemetry, application, and notification coverage inventory and show closure state each cycle.",
+          "capability_id": "coverage.expected_inventory",
+          "classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "evidence_refs": [
+            "SUSHI_K_CENSUS.md#observed-current-service-and-finding-state"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "missing",
+          "owner_decisions": [
+            "Complete required subject inventory",
+            "Explicit exclusions",
+            "Freshness bounds and vantages"
+          ],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Meet the common clean-install obligations and produce a useful sushi-k portrait without a mutable source checkout or home-local binary path.",
+          "capability_id": "deployment.clean_install",
+          "classification": [
+            "observed",
+            "required"
+          ],
+          "evidence_refs": [
+            "SUSHI_K_CENSUS.md#active-user-services",
+            "FRESH_OPERATOR_AUDIT.md#nq-classic"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "missing",
+          "owner_decisions": [],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Observe CPU identity, utilization or pressure, bounded load, and the time basis needed to interpret them; exact thresholds remain bound operator decisions.",
+          "capability_id": "host.cpu_load_pressure",
+          "classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "evidence_refs": [
+            "SUSHI_K_CENSUS.md#capability-comparison"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "partial",
+          "owner_decisions": [
+            "Required CPU utilization and pressure dimensions",
+            "Thresholds and baseline ownership"
+          ],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Preserve host identity, boot epoch, kernel, uptime, and relevant clock basis.",
+          "capability_id": "host.identity_boot_kernel_time",
+          "classification": [
+            "observed",
+            "required"
+          ],
+          "evidence_refs": [
+            "SUSHI_K_CENSUS.md#observed-collector-results"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "partial",
+          "owner_decisions": [],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Preserve total and available memory and bounded pressure, add explicit swap and pressure coverage, and keep missing dimensions visible.",
+          "capability_id": "host.memory_swap_pressure",
+          "classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "evidence_refs": [
+            "SUSHI_K_CENSUS.md#capability-comparison"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "partial",
+          "owner_decisions": [
+            "Required swap and PSI dimensions",
+            "Thresholds and baseline ownership"
+          ],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": null,
+          "capability_id": "legacy.classic_runtime",
+          "classification": [
+            "observed",
+            "retire"
+          ],
+          "evidence_refs": [
+            "SUSHI_K_CENSUS.md#active-user-services",
+            "SUSHI_K_CENSUS.md#files-and-build-identity"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "current",
+          "owner_decisions": [],
+          "retirement_condition": "Only after every ratified required row has independent NQ-NG evidence, typed diagnostic export/inspection, Nightshift recurrence/expiry/campaign/current-posture, frontend consumption, and alert-delivery obligations are qualified, an explicit authority switch occurs, and Classic rollback and archive access are preserved."
+        },
+        {
+          "candidate_requirement": null,
+          "capability_id": "legacy.user_local_deployment_shape",
+          "classification": [
+            "observed",
+            "retire"
+          ],
+          "evidence_refs": [
+            "SUSHI_K_CENSUS.md#active-user-services"
+          ],
+          "observed_condition": "condition_present",
+          "observed_coverage": "current",
+          "owner_decisions": [],
+          "retirement_condition": "A clean supported installation reproduces the required portrait without target/release, mutable checkout, or home-local configuration dependencies."
+        },
+        {
+          "candidate_requirement": "Provide stable typed NQ diagnostic read/export and single-diagnostic inspection for sushi-k, plus a Nightshift profile/last-result/applicability/coverage/expiry/current-posture contract consumable by Maude or another frontend, preserving current service and missing-SMART facts without false reassurance.",
+          "capability_id": "operator_surface.typed_contracts",
+          "classification": [
+            "observed",
+            "required"
+          ],
+          "evidence_refs": [
+            "SUSHI_K_CENSUS.md#observed-current-service-and-finding-state"
+          ],
+          "observed_condition": "condition_present",
+          "observed_coverage": "partial",
+          "owner_decisions": [],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Observe declared interfaces, routes, listeners, local and external paths, DNS and TLS where required, and explicitly bounded reachability from named vantages.",
+          "capability_id": "network.interfaces_routes_listeners_reachability",
+          "classification": [
+            "owner_decision",
+            "required"
+          ],
+          "evidence_refs": [
+            "SUSHI_K_CENSUS.md#capability-comparison"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "missing",
+          "owner_decisions": [
+            "Complete interface, route, listener, endpoint, DNS, TLS, and proxy inventory",
+            "Required external vantages and independence claims"
+          ],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Expose exact diagnostic/operational state-transition and Nightshift/operator alert-intent identity, informing NQ disposition/refusal identities, policy identity, attempt, and receipt coverage through the unratified nq-notify candidate seam.",
+          "capability_id": "notification.delivery",
+          "classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "evidence_refs": [
+            "SUSHI_K_CENSUS.md#monitor",
+            "FRESH_OPERATOR_AUDIT.md#candidate-finding-independent-notification-delivery-facet"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "not_configured",
+          "owner_decisions": [
+            "Whether sushi-k requires notification delivery",
+            "Nightshift recurrence, expiry, campaign/posture, state-transition and alert-intent policy, recipients, transports, routing, retry expectation, and delivery meaning",
+            "Receipt and retention obligations"
+          ],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Preserve a scheduled 60-second observation loop, expected-source identity, source outcome, freshness, and missed or refused cycle evidence.",
+          "capability_id": "observation.currency",
+          "classification": [
+            "observed",
+            "required"
+          ],
+          "evidence_refs": [
+            "SUSHI_K_CENSUS.md#monitor"
+          ],
+          "observed_condition": "explicitly_absent",
+          "observed_coverage": "current",
+          "owner_decisions": [],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Meet the common retention and backup obligations and expose that the 200 MiB budget fields are declarative rather than enforced.",
+          "capability_id": "retention.backup_restore",
+          "classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "evidence_refs": [
+            "SUSHI_K_CENSUS.md#monitor"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "partial",
+          "owner_decisions": [
+            "Required retention and archive periods",
+            "Backup frequency, destination, restore proof, and acceptable data loss",
+            "Enforced budget or warning-only policy"
+          ],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Meet the common NQ/Nightshift self-diagnosis obligations and make deployed-versus-documented CLI drift, collector failures, active findings, store state, typed diagnostic export/inspection, recurrence/expiry/campaign/posture, and alert-intent/delivery coverage visible.",
+          "capability_id": "self_diagnosis.nq",
+          "classification": [
+            "observed",
+            "required"
+          ],
+          "evidence_refs": [
+            "SUSHI_K_CENSUS.md#files-and-build-identity",
+            "SUSHI_K_CENSUS.md#observed-collector-results"
+          ],
+          "observed_condition": "condition_present",
+          "observed_coverage": "partial",
+          "owner_decisions": [],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Preserve lifecycle and recent-change testimony for a ratified exact systemd, Docker, and process inventory; make undeclared-inventory uncertainty visible.",
+          "capability_id": "service.lifecycle",
+          "classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "evidence_refs": [
+            "SUSHI_K_CENSUS.md#publisher-targets",
+            "SUSHI_K_CENSUS.md#observed-current-service-and-finding-state"
+          ],
+          "observed_condition": "condition_present",
+          "observed_coverage": "current",
+          "owner_decisions": [
+            "Whether the six configured subjects close the required inventory",
+            "Required recent-change window and process-presence semantics"
+          ],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "The operator decides whether SMART is required; if retained, install and qualify an exact privilege-bounded helper and preserve device coverage and silence semantics.",
+          "capability_id": "storage.smart",
+          "classification": [
+            "observed",
+            "owner_decision",
+            "retire"
+          ],
+          "evidence_refs": [
+            "SUSHI_K_CENSUS.md#publisher-targets",
+            "SUSHI_K_CENSUS.md#observed-collector-results"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "refused",
+          "owner_decisions": [
+            "Repair and require SMART, or retire its configured obligation",
+            "Required device inventory, privilege, thresholds, and freshness"
+          ],
+          "retirement_condition": "Only an explicit operator decision that SMART is outside the sushi-k portrait permits removal of the broken configuration and its expected-coverage obligation."
+        },
+        {
+          "candidate_requirement": "Inventory every in-scope filesystem and mount with byte and inode capacity, read-only state, backing-device identity, and explicit exclusions.",
+          "capability_id": "storage.filesystems_mounts_capacity_inodes",
+          "classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "evidence_refs": [
+            "SUSHI_K_CENSUS.md#capability-comparison"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "partial",
+          "owner_decisions": [
+            "Complete mount inventory and exclusions",
+            "Capacity and inode thresholds",
+            "Runway and read-only-state policy"
+          ],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "The operator declares whether ZFS or GPU substrate exists and is required; absent configuration remains not configured rather than healthy.",
+          "capability_id": "storage.zfs_gpu",
+          "classification": [
+            "observed",
+            "owner_decision"
+          ],
+          "evidence_refs": [
+            "SUSHI_K_CENSUS.md#observed-collector-results"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "not_configured",
+          "owner_decisions": [
+            "Whether ZFS exists and is in scope",
+            "Whether GPU substrate exists and is in scope"
+          ],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "The operator declares required application databases and file-level metadata testimony; zero configured targets must remain not configured.",
+          "capability_id": "storage.sqlite_metadata",
+          "classification": [
+            "observed",
+            "owner_decision"
+          ],
+          "evidence_refs": [
+            "SUSHI_K_CENSUS.md#publisher-targets",
+            "SUSHI_K_CENSUS.md#observed-collector-results"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "not_configured",
+          "owner_decisions": [
+            "Required application database inventory"
+          ],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "The operator declares required WAL targets and application-specific incorporation semantics; zero configured targets must remain not configured.",
+          "capability_id": "storage.sqlite_wal",
+          "classification": [
+            "observed",
+            "owner_decision"
+          ],
+          "evidence_refs": [
+            "SUSHI_K_CENSUS.md#publisher-targets",
+            "SUSHI_K_CENSUS.md#observed-collector-results"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "not_configured",
+          "owner_decisions": [
+            "Required WAL target inventory",
+            "Thresholds and incorporation semantics"
+          ],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "The operator declares the important log-source inventory; absent configuration must remain not configured rather than quiet or healthy.",
+          "capability_id": "telemetry.logs",
+          "classification": [
+            "observed",
+            "owner_decision",
+            "required"
+          ],
+          "evidence_refs": [
+            "SUSHI_K_CENSUS.md#publisher-targets",
+            "SUSHI_K_CENSUS.md#observed-collector-results"
+          ],
+          "observed_condition": "unknown",
+          "observed_coverage": "not_configured",
+          "owner_decisions": [
+            "Complete important-log inventory",
+            "Windows, classification semantics, and raw-custody requirement"
+          ],
+          "retirement_condition": null
+        },
+        {
+          "candidate_requirement": "Preserve or explicitly retire the local NQ self-probe; if retained, qualify target identity and keep HTTP 2xx separate from NQ semantic condition.",
+          "capability_id": "telemetry.prometheus_blackbox",
+          "classification": [
+            "observed",
+            "owner_decision",
+            "retire"
+          ],
+          "evidence_refs": [
+            "SUSHI_K_CENSUS.md#publisher-targets",
+            "SUSHI_K_CENSUS.md#observed-collector-results"
+          ],
+          "observed_condition": "explicitly_absent",
+          "observed_coverage": "current",
+          "owner_decisions": [
+            "Retain as an independent facade vantage or replace with NQ self-diagnosis",
+            "Required external-vantage acquisition"
+          ],
+          "retirement_condition": "Only after an operator decides the local self-probe adds no required independent testimony and its replacement or explicit exclusion is recorded."
+        }
+      ],
+      "network_locator": "sushi-k",
+      "observed_deployment": {
+        "census_generation": 135666,
+        "classic_build_commit": "361c5cdfa491",
+        "database_schema": 64,
+        "deployment_mode": "user_services_with_home_local_state",
+        "logical_source": "sushi-k",
+        "monitor_bind": "127.0.0.1:9848",
+        "publisher_bind": "127.0.0.1:9847",
+        "source_interval_seconds": 60,
+        "static_hostname": "sushi-k"
+      },
+      "observed_inventory": {
+        "collectors": [
+          {
+            "collector_id": "gpu_witness",
+            "coverage": "not_configured",
+            "raw_outcome": "skipped"
+          },
+          {
+            "collector_id": "host",
+            "coverage": "current",
+            "raw_outcome": "ok"
+          },
+          {
+            "collector_id": "logs",
+            "coverage": "not_configured",
+            "raw_outcome": "skipped"
+          },
+          {
+            "collector_id": "nq_binary",
+            "coverage": "current",
+            "raw_outcome": "ok"
+          },
+          {
+            "collector_id": "prometheus",
+            "coverage": "current",
+            "raw_outcome": "ok"
+          },
+          {
+            "collector_id": "services",
+            "coverage": "current",
+            "raw_outcome": "ok"
+          },
+          {
+            "collector_id": "smart_witness",
+            "coverage": "refused",
+            "raw_outcome": "error"
+          },
+          {
+            "collector_id": "sqlite_health",
+            "coverage": "not_configured",
+            "raw_outcome": "ok_empty"
+          },
+          {
+            "collector_id": "sqlite_wal_probe",
+            "coverage": "not_configured",
+            "raw_outcome": "ok_empty"
+          },
+          {
+            "collector_id": "zfs_witness",
+            "coverage": "not_configured",
+            "raw_outcome": "skipped"
+          }
+        ],
+        "database_targets": [],
+        "log_targets": [],
+        "prometheus_target_names": [
+          "nq_aggregator_http_localhost"
+        ],
+        "service_targets": [
+          {
+            "adapter": "systemd",
+            "observed_condition": "explicitly_absent",
+            "target": "cron"
+          },
+          {
+            "adapter": "systemd",
+            "observed_condition": "explicitly_absent",
+            "target": "gnome-remote-desktop"
+          },
+          {
+            "adapter": "docker",
+            "observed_condition": "condition_present",
+            "target": "governor-code-adapter"
+          },
+          {
+            "adapter": "systemd",
+            "observed_condition": "explicitly_absent",
+            "target": "rsyslog"
+          },
+          {
+            "adapter": "systemd",
+            "observed_condition": "explicitly_absent",
+            "target": "smartmontools"
+          },
+          {
+            "adapter": "systemd",
+            "observed_condition": "explicitly_absent",
+            "target": "ttyd"
+          }
+        ],
+        "wal_targets": []
+      },
+      "observed_policy": {
+        "database_budget_mb": 200,
+        "database_budget_runtime_enforcement": "declarative_only",
+        "database_budget_warn_percent": 80,
+        "detector_thresholds": {
+          "ata_temperature_celsius": 50,
+          "freelist_absolute_floor_mb": 1024,
+          "freelist_percent": 20,
+          "memory_pressure_percent": 85,
+          "nvme_available_spare_floor_percent": 10,
+          "nvme_temperature_celsius": 70,
+          "nvme_wear_percent": 80,
+          "pinned_wal_floor_mb": 256,
+          "pinned_wal_stall_seconds": 21600,
+          "root_disk_immediate_risk_percent": 95,
+          "root_disk_pressure_percent": 90,
+          "scsi_temperature_celsius": 55,
+          "smart_silence_seconds": 300,
+          "stale_generations": 2,
+          "wal_absolute_floor_mb": 256,
+          "wal_percent": 5,
+          "wal_small_database_mb": 5120
+        },
+        "escalation_generations": {
+          "critical": 180,
+          "warning": 30
+        },
+        "notification_min_severity": "warning",
+        "notification_transports": [],
+        "prune_every_cycles": 60,
+        "retention_generations": 2880
+      },
+      "subject_id": "sushi-k",
+      "subject_kind": "host",
+      "subject_locator_kind": "hostname"
+    }
+  ],
+  "unresolved_cross_subject_owner_decisions": [
+    "Ratified complete service, container, process, filesystem, mount, device, interface, route, listener, endpoint, log, database, WAL, metric, and external-dependency inventory for each subject",
+    "Numeric thresholds, phase maps, baseline ownership, freshness, and recovery semantics that change verdict meaning",
+    "Required Labelwatch, Driftwatch, governor, Docket, Continuity, Nightshift, reliance, and other consumer workflows",
+    "Nightshift recurrence, expiry, campaign, current-posture, state-transition, and alert-intent policy; recipients, transports, delivery meanings, retry expectations, and receipt retention",
+    "Evidence, finding, refusal, evaluation, disposition, application-overlay, and legacy archive retention periods",
+    "Backup frequency, destination, verification, restore objectives, and acceptable data loss",
+    "Required external vantages and acceptable independence or shared-failure-domain claims",
+    "Clean-install surface and supported host platforms",
+    "Stable typed NQ diagnostic read/export and single-diagnostic inspector contract; Nightshift profile/last-result/applicability/coverage/expiry/current-posture contract; frontend acceptance tasks; and access boundaries",
+    "Parallel-run duration, functional-equivalence evidence window, authority-switch conditions, and rollback window",
+    "Explicit approval or rejection of every retire candidate"
+  ]
+}
