@@ -1,7 +1,10 @@
 # NQ-ng implementation status
 
-The governing product plan is preserved verbatim in [`PLAN.md`](PLAN.md).
-This file records delivery status; it does not replace or narrow that plan.
+The governing product direction is [`NORTH_STAR.md`](NORTH_STAR.md), and the
+current implementation order is [`SEQUENCING.md`](SEQUENCING.md). The older
+[`PLAN.md`](PLAN.md) is preserved as historical design material; it does not
+override those records. This file reports executable delivery status and does
+not turn selected direction into implemented capability.
 The separately labeled [`PORTER_NETBOX_ADDENDUM.md`](PORTER_NETBOX_ADDENDUM.md)
 records the future disposable-package specimen, persistent-deployment
 specimen, and shared system-cut contract. The bounded contract compiler is
@@ -102,10 +105,15 @@ old watcher run with an explicit `provider_intake_not_recorded` gap. It derives
 a prospective local-provider admission from existing admission facts, but does
 not invent historical intake bytes, attempt identity, or acknowledgment.
 
-## Deliberately not replacement-ready
+## Selected successor, deliberately not replacement-ready
 
 The following governing-plan stages are not claimed by this preview:
 
+- a role-complete Host Operational Portrait for `sushi-k` and the Linode;
+- role-oriented core/host/application packaging or an independently installed
+  witness authoring and conformance surface;
+- static private profile-cohort assembly, cohort lifecycle, or recursive child
+  disposition intake;
 - ZFS, SMART, GPU, log-activity, and Prometheus sample-lane parity;
 - notification delivery workers and retention automation;
 - a historical multi-version migration chain and full install/upgrade matrix;
@@ -190,6 +198,7 @@ and the separate ratification record is
 Ratification creates no post-`v0.1.0` tag or publication and does not alter the
 tagged release.
 
-Delivery proceeds through the stages in `PLAN.md`. A later stage may add a
-profile module, helper, and registry entry, but may not silently move profile
-semantics into configuration, SQL, or helper-owned verdicts.
+Delivery proceeds through [`SEQUENCING.md`](SEQUENCING.md). A later stage may
+add a profile module, helper, and registry entry, but may not silently move
+profile semantics into configuration, SQL, helper-owned verdicts, or a runtime
+plugin surface.
