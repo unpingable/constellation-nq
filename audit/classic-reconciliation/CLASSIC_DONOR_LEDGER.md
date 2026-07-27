@@ -46,10 +46,10 @@ one material capability to exactly one A-G class.
 | 9a | `aca9dcdc25dccaeb2536e5a931892d897b04fdf9` | Explicit absent/uninitialized/current/upgrade/newer/malformed/unrecognized database preflight semantics | `nq-db::schema_compatibility`, CLI/tests | B |
 | 9b | same | Preflight scenario corpus | `database_compatibility.rs` | E |
 | 9c | same | Classic schema-64/raw SQLite implementation | `nq-db` | F |
-| 10a | `21950152fd86758790dd7b85c753bc67e0b87cce` | Operator requirements for structured evidence, sample/baseline/time/source/conflict/missing coverage, without producer-ID rendering branches | dashboard DTO/renderer behavior | C |
-| 10b | same | Fictional unrelated-producer generic-render tests | `dashboard_generic_rendering.rs` | E |
-| 10c | same | Classic HTML, detector-specific SQL loaders, and database-coupled finding DTO | `nq-db::dashboard`, `operator_dashboard.rs` | F |
-| 10d | same | Full task-first dashboard product | whole dashboard beyond a minimal replacement surface | G |
+| 10a | `21950152fd86758790dd7b85c753bc67e0b87cce` | Semantic requirements for freshness, evidence basis, unknown and conflict, without producer-ID rendering branches | requirements only | C |
+| 10b | same | Incomplete generic-render tests; useful as failure evidence but they guard overclaim and miss the deployed under-claim regression | `dashboard_generic_rendering.rs`, `render_claim_boundaries.rs` | E |
+| 10c | same | Rejected dashboard redesign: HTML, information hierarchy, interaction model, detector-specific SQL loaders and database-coupled finding DTO | `nq-db::dashboard`, `operator_dashboard.rs` | F |
+| 10d | same | A future operator surface designed and tested independently of the failed Classic redesign | not implemented | G |
 | 11a | `2e1122437c8d32614cdbe4754ddb5d3e3ec86b93` | Standalone structural validation/adoption seam, where NQ-NG's profile/admission/custody model is stronger | `nq-witness-tool` and library seam | B |
 | 11b | same | `zab2nq` corpus validation result and immutable external-projection specimen | witness fixture and result | E |
 | 12a | `7f9056e7e01aa3d3b7333637d0483839ed2c3378` | Classic pack/check registry abstraction | `nq-monitor-check` traits/registry | F |
@@ -138,3 +138,37 @@ The following is a negative transfer list:
 
 Classic's report explicitly says these prevent independent releases and full
 deployment reconstruction. Moving them would reproduce the problem.
+
+## Rejected dashboard UX and missing regression
+
+The operator's short production trial changes how commit 10 is interpreted.
+The dashboard redesign is not a partially successful implementation donor; its
+UX is rejected.
+
+During the `2e956d2` trial, a critical observed finding could coexist with a
+no-action headline. After rollback, the old dashboard again made
+`Service 'driftwatch' is down.` direct and restored the maintenance-coverage
+badge. Persistence remained schema-64-compatible and the regression was
+isolated to `operator_dashboard.rs`.
+
+`crates/nq-monitor/tests/render_claim_boundaries.rs` has multiple tests against
+overclaim but no inverse invariant such as:
+
+```text
+a critical + observed finding must never coexist with a no-action headline
+```
+
+The lesson is retained as an E failure specimen and a C semantic requirement.
+The Classic presentation code and design remain F.
+
+## Unowned Classic CI race
+
+`crates/nq-monitor-check/src/pack.rs` uses shared test statics `RUNS` and
+`SUBSTITUTION_RUNS`. Multiple tests reset and assert those counters, so parallel
+execution can interfere under load. This is Classic test-infrastructure debt
+and will continue to flake until the tests use per-test counters or explicit
+serialization.
+
+It is not detector behavior, not a parity feature, and not an NQ-NG donor.
+Classic remains read-only in this campaign, so the race is recorded rather
+than fixed.

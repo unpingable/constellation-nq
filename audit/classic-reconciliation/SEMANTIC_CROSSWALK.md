@@ -172,6 +172,13 @@ admitted/evaluated artifacts and preserve “no authority.”
 No Classic SQLite table, migration, raw connection, or runtime adapter should
 enter NQ-NG. NQ-NG must never be pointed at a Classic database.
 
+The operator's temporary `2e956d2` deployment and rollback provide useful
+negative and positive evidence: both candidate and rollback binary used schema
+64, no migration ran, and the approximately fifteen-minute candidate write
+interval remained readable after returning to `361c5cd`. That establishes
+bounded Classic-to-Classic compatibility for this exact trial. It does not
+establish any Classic-to-NQ-NG schema correspondence.
+
 The path collision is operationally important: a parallel qualification must
 use a separate VM/host or explicit NQ-NG-only config, database, admissions,
 socket, helper-runtime directory, service identity and console address. Shared
@@ -207,13 +214,22 @@ NQ-NG still has material packaging gaps:
 
 ## Operator/read-model behavior
 
-Classic's portable contribution is a set of semantic requirements:
+The `2e956d2` dashboard redesign is rejected from a UX perspective. It is not a
+surface to extract, clean up, or use as a functional-equivalence target. Its
+temporary fleet trial allowed a critical observed finding to coexist with a
+no-action headline and made a down service and maintenance coverage less
+legible than the restored old dashboard.
+
+Classic's portable contribution is therefore limited to failure evidence and
+a set of semantic requirements:
 
 - say whether evidence is current, stale, missing, or conflicting;
 - distinguish NQ component health from monitored-system state;
 - expose observation basis, sample/coverage and exact evidence;
 - preserve unknown and contradiction;
 - provide limitations and safe next inspections;
+- forbid both overclaim and material under-claim—for example, a critical
+  observed finding must not coexist with a no-action headline; and
 - never branch generic presentation on producer/check IDs.
 
 NQ-NG's `FindingSnapshotV3` and `StatusSnapshotV3` already carry much of the
@@ -221,10 +237,13 @@ semantic substrate: condition, visibility, freshness, basis, typed refusal,
 summary, evidence references, limitations, safe next checks, times and origin.
 Status and monitored findings are separate.
 
-The current console is only escaped JSON in `<pre>` elements. It does not
-provide Classic's task-first dashboard. Full Classic HTML/SQL loaders are
-compatibility debt. A minimum cutover can use the CLI/API if operator
-qualification proves the result understandable; a rich dashboard is deferred.
+The current console is only escaped JSON in `<pre>` elements. It is not the
+replacement dashboard either. Full Classic HTML/SQL loaders, the redesigned
+information architecture, and the associated interaction model are
+compatibility debt. A minimum cutover can use the CLI/API only if fresh
+operator qualification proves the required conclusions remain discoverable;
+any future dashboard must be designed from the operator tasks and NQ-NG's
+generic read model rather than transplanted from Classic.
 
 ## Capability disposition summary
 

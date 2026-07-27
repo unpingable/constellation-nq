@@ -208,6 +208,7 @@
       "nq-monitor-agent all-collectors runtime",
       "closed collector/witness packet envelope",
       "planning-only nq-suite",
+      "rejected operator_dashboard.rs UX and information architecture",
       "detector-specific dashboard and notification branches",
       "Classic binary-name and source-workspace installation compatibility"
     ],

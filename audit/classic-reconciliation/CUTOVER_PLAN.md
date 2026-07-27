@@ -70,7 +70,8 @@ cutover bridge.
 
 Before more parity implementation, recover and approve a bounded inventory of:
 
-- exact deployed Classic binary/commit and schema;
+- per-host confirmation of the operator-reported
+  `361c5cdfa49163c96b550e8a0f38165b49305994` / schema-64 identity;
 - enabled collectors/checks and actual targets;
 - thresholds and baseline ownership;
 - notification transports and recipients;
@@ -159,7 +160,9 @@ Observe bounded identical targets independently. For every required capability:
 - verify that disabled profiles do not execute;
 - verify no private Classic value enters product defaults;
 - measure operator identification of subject, change, freshness, evidence,
-  unknowns and safe next step; and
+  unknowns and safe next step;
+- require a critical observed finding to prevent any no-action headline while
+  retaining the existing anti-overclaim boundaries; and
 - verify notification delivery or the explicit manual substitute.
 
 Classic remains alert and operational authority during this window. NQ-NG is
@@ -192,6 +195,33 @@ which archive was named, not that Classic findings were admitted into NQ-NG.
 8. record the authority-switch time and the historical boundary.
 
 No NQ-NG “empty findings” state may be described as universal health.
+
+### Upgrade lifecycle ownership
+
+NQ-NG, not an external deployment folklore document, must own the supported
+binary/schema upgrade sequence.
+
+The Classic trial supplied a concrete failure mode: direct `cp` over a running
+binary has now produced `ETXTBSY` on three occasions. It failed without
+swapping bytes, and staging a sibling followed by rename succeeded. NQ-NG's
+Debian path already embodies the safer contract:
+
+- `prerm upgrade` stops `nqd.service`;
+- it verifies the service is inactive before allowing package replacement;
+- `dpkg` replaces package files instead of overwriting the running inode;
+- `postinst` does not initialize, migrate or restart;
+- `nq admin upgrade` performs the explicit backup-first schema step; and
+- the operator explicitly verifies and starts the daemon.
+
+Direct in-place copying to an installed executable is unsupported. A manual
+artifact path, if one is retained, must stage a complete verified sibling tree
+and activate it only after the service is inactive.
+
+The remaining evidence gap is a true different-version package
+upgrade/rollback in the VM, including version identity, pre-upgrade backup,
+schema refusal/migration, helper admission drift/rotation, manifest validation,
+explicit restart and rollback. Reinstalling identical `0.1.0` bytes is not
+that test.
 
 ### G7 — rollback and retirement
 
@@ -269,6 +299,13 @@ manifest verifier—but neither is yet the uniquely justified cutover blocker:
   NQ-NG denies unsafe code outside its sandbox boundary;
 - a freeze manifest needs an approved retained-asset contract; and
 - current NQ-NG package identity/versioning is itself a promotion gate.
+
+The later `ETXTBSY` evidence does not justify inventing another installer:
+NQ-NG's Debian hooks already stop and verify inactivity before package
+replacement, and the release-verifier suite exercises those refusal paths. The
+missing proof requires two honestly distinct package versions and a VM
+upgrade/rollback run. Fabricating that with two packages both called `0.1.0`
+would weaken, not strengthen, the evidence.
 
 Inventing a slice now would optimize against an assumed deployment. The
 authorized outcome is therefore the committed survey only. After G0, select

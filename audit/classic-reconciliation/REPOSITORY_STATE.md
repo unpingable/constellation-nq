@@ -147,11 +147,44 @@ commands write `target/`.
 | Index/worktree | clean; no untracked files |
 | Relevant tag | `track-b-mvp` at `4ab0406140980c7b45b77071df9b0253a12cb43c` |
 
-Classic remained strictly read-only throughout the gate. Its twenty local
-commits are undeployed local donor work. Local repository evidence does not
-establish the exact commit or configuration currently running in production;
-the deployed Classic system, the undeployed twenty-commit Classic rewrite, and
-the undeployed NQ-NG candidate are therefore kept distinct in every matrix.
+Classic remained strictly read-only throughout the gate. The starting prompt's
+“not deployed” description is accurate for current fleet state but incomplete
+as deployment history: the operator subsequently reported that `2e956d2` had
+been deployed for about fifteen minutes and then rolled back. The deployed
+Classic system, the rolled-back twenty-commit Classic candidate, and the
+undeployed NQ-NG candidate are kept distinct in every matrix.
+
+### Operator-supplied deployment correction
+
+This information was supplied during the local survey and was not obtained by
+contacting the fleet:
+
+- the four-host fleet currently runs Classic
+  `361c5cdfa49163c96b550e8a0f38165b49305994`, tree
+  `793f240abdd39db7fa65fdefc7601ac15667e25f`, schema 64;
+- all four services were reported active after rollback, all dashboards
+  returned HTTP 200, public `nq.neutral.zone` returned 200, three boundary
+  checks passed, and leak checks returned zero;
+- `2e956d2` ran for roughly fifteen minutes before rollback;
+- no migration ran in either direction: both binaries use schema 64 and
+  `6e05456` only adds refusal of a newer schema, so records written during the
+  trial remained backward-compatible;
+- the rollback was triggered by UX regressions in
+  `crates/nq-monitor/src/http/operator_dashboard.rs`, not by a deeper
+  persistence, collector, or detector incompatibility;
+- the restored old dashboard directly reports that `driftwatch` is down and
+  renders the maintenance-coverage badge; the redesigned page failed to keep
+  those facts salient;
+- the VM's corrected `publisher.json` is valid for both binaries and its WAL
+  probe continued observing after rollback;
+- candidate binaries were retained at the operator-reported NAS/crow, VM and
+  local paths for a later test; and
+- nothing was pushed.
+
+The local Classic checkout itself stayed at `2e956d2` and clean. A future
+deployment audit must still recover exact per-host config and enabled
+capabilities; the successful rollback report is not a substitute for that
+inventory.
 
 ### Classic package reality
 

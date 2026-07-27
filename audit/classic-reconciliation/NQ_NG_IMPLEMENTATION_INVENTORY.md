@@ -51,7 +51,7 @@ the NQ-controlled local helper, its only operational profile is
 | HTTP/API and console | `crates/nq-app::api` | Versioned read-only local endpoints; compatibility routes fail explicitly when representation would lose semantics; loopback-only optional console | Uses Store public DTOs, not arbitrary write APIs | API compatibility, paging, escaping, socket and mutation tests | Console is escaped JSON in `<pre>`, not a decision dashboard; no HTTP mutation |
 | Notification | `nq-store` outbox/attempt rows only | Immutable outbox/attempt storage and public status view | Store can retain notification state | Store validation tests | No delivery worker or transport; not functional parity |
 | Backup, restore, archive | `nq-app::cli`, `nq-app::archive`, `nq-store` | Explicit verified backup/restore; sealed cold archive with its own verifier; no current authority from historical custody | SQLite online backup captures WAL state; restore requires absent destination; archive records when source cannot be semantically reopened | Admin lifecycle and hostile archive substitution tests | Reverse migration is restore of prior verified backup plus prior binary; no automatic rollback |
-| Packaging | `scripts/`, `packaging/`, `hardening/` | Prebuilt no-Cargo/no-network tar and Debian artifacts containing `nq`, `nqd`, `nq-host-helper`; explicit manifest/modes/digests | Package creates accounts/layout only; never initializes, migrates, starts, overwrites config, or purges durable state | Reproducibility/failure-atomicity scripts; AMD64 Noble QEMU package lifecycle evidence | No configured remote; no public download/install source; VM evidence is AMD64 Noble, not every supported script target |
+| Packaging | `scripts/`, `packaging/`, `hardening/` | Prebuilt no-Cargo/no-network tar and Debian artifacts containing `nq`, `nqd`, `nq-host-helper`; explicit manifest/modes/digests; upgrade hook stops and proves `nqd` inactive before package replacement | Package creates accounts/layout only; never initializes, migrates, starts, overwrites config, or purges durable state; post-upgrade verification/schema action/start remain explicit | Reproducibility/failure-atomicity scripts; maintainer-script active/stop-failure tests; AMD64 Noble QEMU install/reinstall lifecycle evidence | No configured remote or public artifact source; no true different-version VM upgrade/rollback; VM evidence is AMD64 Noble, not every supported script target |
 | Installation/removal | `docs/OPERATIONS.md`, Debian maintainer scripts | Explicit init/config/admission/start workflow; `remove` stops/removes package; `purge` preserves config/state/evidence/accounts | Authoritative state locations documented; destructive erasure deliberately manual | Hostile install/reinstall/remove/purge/reinstall lifecycle receipt | Safe but not a short non-author first run; package-name conflict with Debian's unrelated `/usr/bin/nq`; no published artifact |
 
 ## Supported operational set
@@ -84,6 +84,8 @@ artifacts, not live observations.
 - positive multi-witness composition and general temporal/epoch semantics;
 - daemon use of system cuts and any live constellation integration;
 - a complete historical upgrade matrix; and
+- a distinct-version package upgrade/rollback run proving that running
+  executables are never overwritten in place; and
 - production deployment, publication, remote configuration, and cutover.
 
 These are not “planned implementation” and are not counted as current

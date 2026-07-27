@@ -4,12 +4,13 @@
 
 | State | Identity known locally | Deployment status |
 |---|---|---|
-| Currently deployed Classic system | Classic product family is the stated live line; exact deployed commit, configuration, enabled collectors, notification paths and durable-state obligations are unknown without contacting production | Deployed, exact identity unresolved by local-only policy |
-| Undeployed Classic rewrite | `main` at `2e956d27616bcb7e49016b4d7867c9455c4129a7`, exactly 20 commits ahead of `origin/main` | Explicitly not deployed |
+| Currently deployed Classic system | Operator reports `361c5cdfa49163c96b550e8a0f38165b49305994`, schema 64, on four hosts; exact per-host configuration, enabled collectors, notification paths and durable-state obligations remain unresolved locally | Deployed after rollback; four services/dashboard endpoints reported active |
+| Rolled-back Classic rewrite | `main` at `2e956d27616bcb7e49016b4d7867c9455c4129a7`, exactly 20 commits ahead of `origin/main` | Temporarily deployed for about fifteen minutes, then rolled back for dashboard UX regressions; candidate binaries retained |
 | Undeployed NQ-NG candidate | `campaign/provider-intake-foundation` at `f1e37563de0b59b0abb38f04ace0c3170a954c51`; implementation pin `44e5567…` | Experimental, qualified/ratified locally, untagged after `v0.1.0`, unpublished and not deployed |
 
-The twenty Classic commits do not describe deployed history merely because
-they are on local `main`.
+The twenty Classic commits are not current deployed state merely because they
+are on local `main`. Their brief trial is preserved as deployment evidence and
+must not be misreported as either “never deployed” or “still deployed.”
 
 ## Replacement matrix
 
@@ -36,18 +37,19 @@ development.
 | Consumer reliance/standing | Unknown deployed use | Purpose-bound reliance request/outcome/receipt; twenty-commit isolation is undeployed | Absent by explicit design | Implement only for a named real consumer and purpose; preserve no-action-authority | Archive old receipts; no automatic adoption | “Admitted,” “healthy,” or “acknowledged” must not become authorized reliance | Purpose/consumer/substitution/stale/contradiction/idempotence corpus | Yes if any live workflow depends on it |
 | Persistence | Classic SQLite presumed; exact schema and WAL state unknown | Shared/private SQLite and 64 migrations | Exact append-only schema v4, atomic provider/evaluation publication, verified backup/archive | Fresh NQ-NG initialization; no Classic adapter | Archive Classic DB; clean NQ-NG store | Parsing/migrating Classic rows could invent provider/profile/evaluator context | Fresh init, schema fingerprint, archive/restore and no-Classic-table gate | No if clean replacement accepted |
 | Historical durable state | Exact retention obligation unknown | Long Classic history | Optional legacy manifest digest only; no importer | Define retained archive manifest and operator access policy | Retain, do not import as current | Absence of imported finding does not establish health; archive digest is not semantic admission | Freeze/backup/WAL/archive manifest verification and explicit UI/docs distinction | Qualification gate |
-| Dashboard/operator surface | Unknown deployed use | Rich HTML/SQL UI; generic evidence DTO/render tests in local rewrite | Versioned CLI/API DTOs and escaped-JSON read-only console | Minimum operator result and clean-room qualification; full dashboard later if required | No import | Coarse component status or empty findings could be misread as universal health | Literal-docs operators identify issue/freshness/evidence/refusal without SQL | Conditional |
+| Dashboard/operator surface | Old Classic dashboard restored; operator reports direct down-service wording and maintenance badge | The `2e956d2` redesign is a rejected UX; its tests guard overclaim but missed a critical-observed/no-action under-claim | Versioned CLI/API DTOs and escaped-JSON read-only console, not a replacement dashboard | Design from operator tasks and NQ-NG read DTOs; add symmetric under-claim/overclaim invariants and clean-room qualification; do not port Classic UX | No import | A semantically cautious page can still hide urgent supported facts; coarse status or empty findings can become false reassurance | Critical observed finding cannot coexist with no-action headline; literal-docs operators identify issue/freshness/evidence/refusal without SQL | Yes if dashboard is required; CLI-only cut remains conditional |
 | Notifications | Actual configured transport unknown | Delivery/runtime present in Classic | Outbox/attempt storage only; no worker | Replacement transport or an explicit temporary manual operating procedure | Do not import delivery state | Silent absence of alert delivery is a serious cutover hazard | End-to-end delivery/failure/retry/dedup test or signed manual coverage plan | Yes if alert delivery is required |
 | Installation | Exact deployed install unknown | Static/source paths; local rewrite adds adverse clean-room harness | Strong reproducible tar/Deb packaging and hostile lifecycle evidence | Build and qualify a distinct post-provider candidate; publish only in later authorized campaign; add literal-docs first useful result | N/A | Current code is not in tagged `v0.1.0`; same `0.1.0` version has different bytes/schema in local evidence | Clean artifact install, exact version identity, no sibling path/network, useful host result | Yes |
-| Upgrade | Unknown | Classic migration lineage | Exact NQ-NG v3 -> v4 only | Document Classic -> NQ-NG as replacement; execute native package-to-package upgrade/rollback for candidate | No Classic DB conversion | Calling replacement an upgrade implies semantic correspondence that does not exist | VM package upgrade and restore of verified prior backup | Native gate; not a Classic import blocker |
+| Upgrade | Direct `cp` over a running Classic binary has produced `ETXTBSY` on three occasions; staged sibling plus rename worked; exact fleet playbook still external | Current Classic trial/rollback stayed on schema 64; no migration ran; `DEPLOY_CONTRACT.md` verify strings are stale for the redesign | Debian `prerm` stops and proves `nqd` inactive before package replacement; package leaves it stopped; explicit `admin upgrade`; same-package reinstall tested | Make package lifecycle the supported path; forbid in-place copy; run a true different-version package upgrade/rollback matrix; update verification strings only for an accepted future surface | No Classic DB conversion | Partial binary swaps, running old inode vs new path, stale admission, and ambiguous restart can split evidence identity | Inject `ETXTBSY`/active-service conditions, prove stop/inactivity, atomic package replacement, manifest/config/schema/admission checks, explicit restart and rollback | Yes as release/operations gate |
 | Recovery/rollback | Unknown | Classic database/service recovery patterns | Verified NQ-NG backup/restore/cold archive; no reverse migration | Preserve a complete Classic freeze artifact and rehearse rollback separately | Classic restored as Classic; NQ-NG data cannot be backported | Split observation interval and alert ownership | Offline rollback drill and disclosure of unmergeable interval | Gate |
 | Deployment | Classic live family; exact identity intentionally not contacted | Local rewrite undeployed | NQ-NG undeployed | Isolated parallel qualification followed by explicit authority switch | Fresh store | Default path/service names collide; shared paths could corrupt or confuse evidence | Separate host/VM or all paths/unit identities isolated; hash checks | Yes |
 
 ## Local facts still required before a cut
 
-The local-only campaign cannot resolve:
+The local-only campaign cannot independently verify or fully resolve:
 
-- exact deployed Classic commit and schema;
+- per-host running/on-disk binary digests behind the operator-reported
+  `361c5cd`/schema-64 fleet identity;
 - enabled collectors/checks and thresholds;
 - notification transports and recipients;
 - operational dependence on Labelwatch, Driftwatch, storage, Docket,
