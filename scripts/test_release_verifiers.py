@@ -14,12 +14,17 @@ import tempfile
 import unittest
 from pathlib import Path
 
+# This suite dynamically imports verifiers from public asset directories whose
+# inventories deliberately reject runtime caches.  Prevent the test harness
+# from manufacturing a forbidden file before it verifies those inventories.
+sys.dont_write_bytecode = True
+
 SCRIPT_DIRECTORY = Path(__file__).resolve().parent
 if str(SCRIPT_DIRECTORY) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIRECTORY))
 
-import verify_protocol_assets as protocol
-import verify_release_payload as payload
+import verify_protocol_assets as protocol  # noqa: E402
+import verify_release_payload as payload  # noqa: E402
 
 
 ROOT = SCRIPT_DIRECTORY.parent
@@ -67,7 +72,9 @@ diagnostic_contract = load_diagnostic_contract_module()
 class CatalogVerifierTest(unittest.TestCase):
     def copy_catalog(self, root: Path) -> Path:
         destination = root / "profiles"
-        shutil.copytree(ROOT / "profiles", destination, ignore=shutil.ignore_patterns("*.py"))
+        shutil.copytree(
+            ROOT / "profiles", destination, ignore=shutil.ignore_patterns("*.py")
+        )
         return destination
 
     def test_checked_catalog_is_strict_and_exact(self) -> None:
@@ -105,7 +112,9 @@ class CatalogVerifierTest(unittest.TestCase):
             value = json.loads(manifest_path.read_text(encoding="utf-8"))
             value["profiles"].append(value["profiles"][0])
             manifest_path.write_text(json.dumps(value), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "duplicate catalog profile identity"):
+            with self.assertRaisesRegex(
+                ValueError, "duplicate catalog profile identity"
+            ):
                 catalog.load_manifest(destination)
 
 
@@ -125,7 +134,9 @@ class ProtocolVerifierTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="nq-protocol-test-") as directory:
             destination = Path(directory) / "protocol"
             shutil.copytree(ROOT / "protocol", destination)
-            (destination / "fixtures/unlisted.ndjson").write_text("{}\n", encoding="utf-8")
+            (destination / "fixtures/unlisted.ndjson").write_text(
+                "{}\n", encoding="utf-8"
+            )
             with self.assertRaisesRegex(ValueError, "inventory differs"):
                 protocol.exact_file_inventory(
                     destination / "fixtures", set(protocol.FIXTURE_FILES)
@@ -166,19 +177,13 @@ class SystemContractPackagingTest(unittest.TestCase):
         }
         self.assertEqual(set(payload.SYSTEM_CONTRACT_FILES), actual)
         release_files = payload.expected_files(["fixture.v1.json"])
-        self.assertIn(
-            "share/doc/nq-ng/docs/PORTER_NETBOX_ADDENDUM.md", release_files
-        )
+        self.assertIn("share/doc/nq-ng/docs/PORTER_NETBOX_ADDENDUM.md", release_files)
         for relative in actual:
             self.assertIn(f"share/nq/system-contract/{relative}", release_files)
 
     def test_contract_profile_fixture_binds_to_packaged_catalog(self) -> None:
-        profile = system_contract.read_json("manifest.json")[
-            "compiled_profile_fixture"
-        ]
-        system_contract.verify_profile_catalog(
-            profile, ROOT / "profiles/manifest.json"
-        )
+        profile = system_contract.read_json("manifest.json")["compiled_profile_fixture"]
+        system_contract.verify_profile_catalog(profile, ROOT / "profiles/manifest.json")
 
         with tempfile.TemporaryDirectory(prefix="nq-contract-catalog-") as directory:
             catalog_path = Path(directory) / "manifest.json"
@@ -234,9 +239,7 @@ class DiagnosticContractPackagingTest(unittest.TestCase):
 
     def test_frozen_corpus_and_projection_collision_pass(self) -> None:
         contract_root = ROOT / "diagnostic-contract"
-        source_vectors = (
-            ROOT / "audit/nq-nightshift-stage6-foundation/vectors"
-        )
+        source_vectors = ROOT / "audit/nq-nightshift-stage6-foundation/vectors"
         manifest_digest = diagnostic_contract.verify(contract_root, source_vectors)
         self.assertEqual(
             manifest_digest,
