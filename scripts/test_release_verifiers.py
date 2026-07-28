@@ -69,6 +69,21 @@ def load_diagnostic_contract_module():
 diagnostic_contract = load_diagnostic_contract_module()
 
 
+def load_diagnostic_contract_v2_module():
+    path = ROOT / "diagnostic-contract-v2/verify_assets.py"
+    spec = importlib.util.spec_from_file_location(
+        "nq_verify_diagnostic_contract_v2", path
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load diagnostic-contract-v2 verifier")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+diagnostic_contract_v2 = load_diagnostic_contract_v2_module()
+
+
 class CatalogVerifierTest(unittest.TestCase):
     def copy_catalog(self, root: Path) -> Path:
         destination = root / "profiles"
@@ -299,6 +314,80 @@ class DiagnosticContractPackagingTest(unittest.TestCase):
                     sys.executable,
                     "-B",
                     str(ROOT / "diagnostic-contract/verify_assets.py"),
+                    "--asset-root",
+                    str(staged),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("schema file digest differs", result.stderr)
+
+
+class DiagnosticContractV2PackagingTest(unittest.TestCase):
+    def test_public_inventory_is_exactly_allowlisted(self) -> None:
+        contract_root = ROOT / "diagnostic-contract-v2"
+        actual = {
+            path.relative_to(contract_root).as_posix()
+            for path in contract_root.rglob("*")
+            if path.is_file() and path.name != "verify_assets.py"
+        }
+        self.assertEqual(set(payload.DIAGNOSTIC_CONTRACT_V2_FILES), actual)
+        release_files = payload.expected_files(["fixture.v1.json"])
+        for relative in actual:
+            self.assertIn(f"share/nq/diagnostic-contract-v2/{relative}", release_files)
+
+    def test_checked_v2_corpus_and_hostile_distinctions_pass(self) -> None:
+        manifest_digest = diagnostic_contract_v2.verify(ROOT / "diagnostic-contract-v2")
+        self.assertEqual(
+            manifest_digest,
+            "sha256:706aab7a5a71472a5dda6f1514f1748b460c06d606df6af7620a66b6574053e8",
+        )
+
+    def test_extra_asset_and_duplicate_manifest_key_are_refused(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="nq-diagnostic-contract-v2-"
+        ) as directory_name:
+            staged = Path(directory_name) / "diagnostic-contract-v2"
+            shutil.copytree(ROOT / "diagnostic-contract-v2", staged)
+
+            extra = staged / "fixtures/valid/unlisted.json"
+            extra.write_text("{}\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "inventory differs"):
+                diagnostic_contract_v2.verify(staged)
+            extra.unlink()
+
+            manifest = staged / "manifest.json"
+            original_manifest = manifest.read_text(encoding="utf-8")
+            manifest.write_text(
+                original_manifest.replace(
+                    '"schema": "nq.diagnostic_contract_assets.v2",',
+                    '"schema": "nq.diagnostic_contract_assets.v2",\n'
+                    '  "schema": "nq.diagnostic_contract_assets.v2",',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "duplicate JSON key"):
+                diagnostic_contract_v2.verify(staged)
+
+    def test_staged_partial_schema_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="nq-diagnostic-contract-v2-stage-"
+        ) as directory_name:
+            staged = Path(directory_name) / "diagnostic-contract-v2"
+            shutil.copytree(ROOT / "diagnostic-contract-v2", staged)
+            schema = staged / "schemas/nq.diagnostic_execution.v2.schema.json"
+            with schema.open("r+b") as output:
+                output.truncate(37)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-B",
+                    str(ROOT / "diagnostic-contract-v2/verify_assets.py"),
                     "--asset-root",
                     str(staged),
                 ],

@@ -1,0 +1,2004 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.diagnostic_execution.v2.schema.json",
+  "title": "nq.diagnostic_execution.v2",
+  "description": "Closed structural schema for one immutable bounded NQ diagnostic execution v2. Cross-field semantic invariants remain enforced by the NQ implementation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "artifact_id",
+    "canonicalization",
+    "producer",
+    "request_id",
+    "run_id",
+    "question",
+    "subject",
+    "profile",
+    "profile_semantic_id",
+    "vantage",
+    "state_model",
+    "evaluator",
+    "threshold_policy",
+    "projection",
+    "execution_clock",
+    "started_at",
+    "completed_at",
+    "attempt_interval",
+    "inputs",
+    "state_bindings",
+    "claims",
+    "outcome",
+    "limitations",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.diagnostic_execution.v2"
+    },
+    "artifact_id": {
+      "$ref": "#/$defs/digest"
+    },
+    "canonicalization": {
+      "const": {
+        "id": "rfc8785-jcs",
+        "version": "1",
+        "digest": "sha256:e49d92d4e86052e66ed2a481b9386d3b214ce3d2df5fd109a6491ccb9ffb24f3"
+      }
+    },
+    "producer": {
+      "$ref": "#/$defs/producer"
+    },
+    "request_id": {
+      "$ref": "#/$defs/nonEmpty"
+    },
+    "run_id": {
+      "$ref": "#/$defs/nonEmpty"
+    },
+    "question": {
+      "$ref": "#/$defs/semanticIdentity"
+    },
+    "subject": {
+      "$ref": "#/$defs/subject"
+    },
+    "profile": {
+      "$ref": "#/$defs/semanticIdentity"
+    },
+    "profile_semantic_id": {
+      "$ref": "#/$defs/digest"
+    },
+    "vantage": {
+      "$ref": "#/$defs/semanticIdentity"
+    },
+    "state_model": {
+      "$ref": "#/$defs/semanticIdentity"
+    },
+    "evaluator": {
+      "$ref": "#/$defs/semanticIdentity"
+    },
+    "threshold_policy": {
+      "$ref": "#/$defs/semanticIdentity"
+    },
+    "projection": {
+      "$ref": "#/$defs/projection"
+    },
+    "execution_clock": {
+      "$ref": "#/$defs/semanticIdentity"
+    },
+    "started_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "completed_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "attempt_interval": {
+      "$ref": "#/$defs/acquisitionInterval"
+    },
+    "inputs": {
+      "$ref": "#/$defs/inputAccounting"
+    },
+    "state_bindings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/stateBinding"
+      }
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/claim"
+      }
+    },
+    "primary_claim_id": {
+      "$ref": "#/$defs/nonEmpty"
+    },
+    "outcome": {
+      "$ref": "#/$defs/outcome"
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/limitation"
+      }
+    },
+    "nonclaims": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/nonEmpty"
+      }
+    }
+  },
+  "$defs": {
+    "nonEmpty": {
+      "type": "string",
+      "pattern": "\\S"
+    },
+    "token": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[A-Za-z0-9._:/@+-]+$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "ijsonUnsigned": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "semanticIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "digest"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "version": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_id",
+        "build",
+        "cohort"
+      ],
+      "properties": {
+        "node_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "build": {
+          "$ref": "#/$defs/semanticIdentity"
+        },
+        "cohort": {
+          "$ref": "#/$defs/semanticIdentity"
+        }
+      }
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "scope"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "scope": {
+          "$ref": "#/$defs/semanticIdentity"
+        }
+      }
+    },
+    "clockQualification": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "maximum_error_ms",
+            "basis"
+          ],
+          "properties": {
+            "state": {
+              "const": "bounded"
+            },
+            "maximum_error_ms": {
+              "$ref": "#/$defs/ijsonUnsigned"
+            },
+            "basis": {
+              "$ref": "#/$defs/semanticIdentity"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "code",
+            "detail"
+          ],
+          "properties": {
+            "state": {
+              "const": "unqualified"
+            },
+            "code": {
+              "$ref": "#/$defs/nonEmpty"
+            },
+            "detail": {
+              "$ref": "#/$defs/nonEmpty"
+            }
+          }
+        }
+      ]
+    },
+    "acquisitionInterval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "started_at",
+        "ended_at",
+        "clock",
+        "qualification"
+      ],
+      "properties": {
+        "started_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "ended_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "clock": {
+          "$ref": "#/$defs/semanticIdentity"
+        },
+        "qualification": {
+          "$ref": "#/$defs/clockQualification"
+        }
+      }
+    },
+    "expectedInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expectation_id",
+        "role",
+        "required"
+      ],
+      "properties": {
+        "expectation_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "role": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "required": {
+          "type": "boolean"
+        }
+      }
+    },
+    "receivedInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_id",
+        "expectation_id",
+        "provider_intake_id",
+        "raw_artifact_id",
+        "capture_mode",
+        "capture_policy",
+        "availability_at_derivation",
+        "acquisition",
+        "received_at"
+      ],
+      "properties": {
+        "input_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "expectation_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "provider_intake_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "raw_artifact_id": {
+          "$ref": "#/$defs/digest"
+        },
+        "capture_mode": {
+          "enum": [
+            "exact_source",
+            "earliest_boundary_redacted"
+          ]
+        },
+        "capture_policy": {
+          "$ref": "#/$defs/semanticIdentity"
+        },
+        "availability_at_derivation": {
+          "enum": [
+            "online",
+            "archived_retrievable",
+            "committed_unavailable"
+          ]
+        },
+        "acquisition": {
+          "$ref": "#/$defs/acquisitionInterval"
+        },
+        "received_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
+    },
+    "admittedInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_id",
+        "admission_rule",
+        "normalized_artifact_id",
+        "normalization_rule",
+        "projected_artifact_id",
+        "projection_rule"
+      ],
+      "properties": {
+        "input_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "admission_rule": {
+          "$ref": "#/$defs/semanticIdentity"
+        },
+        "normalized_artifact_id": {
+          "$ref": "#/$defs/digest"
+        },
+        "normalization_rule": {
+          "$ref": "#/$defs/semanticIdentity"
+        },
+        "projected_artifact_id": {
+          "$ref": "#/$defs/digest"
+        },
+        "projection_rule": {
+          "$ref": "#/$defs/semanticIdentity"
+        }
+      }
+    },
+    "profileRefusalBinding": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "scope"
+          ],
+          "properties": {
+            "scope": {
+              "const": "artifact_profile"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "scope",
+            "role"
+          ],
+          "properties": {
+            "scope": {
+              "const": "foreign_input_role"
+            },
+            "role": {
+              "$ref": "#/$defs/nonEmpty"
+            }
+          }
+        }
+      ]
+    },
+    "refusedInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_id",
+        "refusal"
+      ],
+      "properties": {
+        "input_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "refusal": {
+          "$ref": "#/$defs/governedRefusal"
+        },
+        "profile_binding": {
+          "$ref": "#/$defs/profileRefusalBinding"
+        }
+      }
+    },
+    "unsupportedOrigin": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "scope"
+          ],
+          "properties": {
+            "scope": {
+              "const": "diagnostic_profile"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "scope",
+            "failure_id"
+          ],
+          "properties": {
+            "scope": {
+              "const": "expected_input"
+            },
+            "failure_id": {
+              "$ref": "#/$defs/nonEmpty"
+            }
+          }
+        }
+      ]
+    },
+    "unsupportedCause": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unsupported_id",
+        "origin",
+        "code",
+        "capability",
+        "detail"
+      ],
+      "properties": {
+        "unsupported_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "origin": {
+          "$ref": "#/$defs/unsupportedOrigin"
+        },
+        "code": {
+          "enum": [
+            "question_unsupported",
+            "provider_capability_unavailable",
+            "platform_capability_unavailable",
+            "contract_version_unsupported"
+          ]
+        },
+        "capability": {
+          "$ref": "#/$defs/semanticIdentity"
+        },
+        "detail": {
+          "$ref": "#/$defs/nonEmpty"
+        }
+      }
+    },
+    "failedInputCause": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "reason"
+          ],
+          "properties": {
+            "kind": {
+              "const": "missing"
+            },
+            "reason": {
+              "$ref": "#/$defs/nonEmpty"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "provider_intake_id",
+            "attempt",
+            "raw_custody",
+            "failure"
+          ],
+          "properties": {
+            "kind": {
+              "const": "provider_no_response"
+            },
+            "provider_intake_id": {
+              "$ref": "#/$defs/nonEmpty"
+            },
+            "attempt": {
+              "$ref": "#/$defs/acquisitionInterval"
+            },
+            "raw_custody": {
+              "const": "no_bytes_retained"
+            },
+            "failure": {
+              "$ref": "#/$defs/acquisitionFailure"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "provider_intake_id",
+            "attempt",
+            "raw_custody",
+            "failure"
+          ],
+          "properties": {
+            "kind": {
+              "const": "acquisition_failed"
+            },
+            "provider_intake_id": {
+              "$ref": "#/$defs/nonEmpty"
+            },
+            "attempt": {
+              "$ref": "#/$defs/acquisitionInterval"
+            },
+            "raw_custody": {
+              "const": "no_bytes_retained"
+            },
+            "failure": {
+              "$ref": "#/$defs/acquisitionFailure"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "unsupported"
+          ],
+          "properties": {
+            "kind": {
+              "const": "unsupported"
+            },
+            "unsupported": {
+              "$ref": "#/$defs/unsupportedCause"
+            }
+          }
+        }
+      ]
+    },
+    "failedInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expectation_id",
+        "failure_id",
+        "cause"
+      ],
+      "properties": {
+        "expectation_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "failure_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "cause": {
+          "$ref": "#/$defs/failedInputCause"
+        }
+      }
+    },
+    "excludedInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_id",
+        "projected_artifact_id",
+        "code",
+        "reason"
+      ],
+      "properties": {
+        "input_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "projected_artifact_id": {
+          "$ref": "#/$defs/digest"
+        },
+        "code": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "reason": {
+          "$ref": "#/$defs/nonEmpty"
+        }
+      }
+    },
+    "selectedInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_id",
+        "projected_artifact_id",
+        "role"
+      ],
+      "properties": {
+        "input_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "projected_artifact_id": {
+          "$ref": "#/$defs/digest"
+        },
+        "role": {
+          "$ref": "#/$defs/nonEmpty"
+        }
+      }
+    },
+    "inputAccounting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selection_rule",
+        "expected",
+        "received",
+        "admitted",
+        "refused",
+        "failed",
+        "excluded",
+        "selected"
+      ],
+      "properties": {
+        "selection_rule": {
+          "$ref": "#/$defs/semanticIdentity"
+        },
+        "expected": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/expectedInput"
+          }
+        },
+        "received": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/receivedInput"
+          }
+        },
+        "admitted": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/admittedInput"
+          }
+        },
+        "refused": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/refusedInput"
+          }
+        },
+        "failed": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/failedInput"
+          }
+        },
+        "excluded": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/excludedInput"
+          }
+        },
+        "selected": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/selectedInput"
+          }
+        }
+      }
+    },
+    "stateBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "binding_id",
+        "kind",
+        "value",
+        "supporting_input_ids"
+      ],
+      "properties": {
+        "binding_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "kind": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "value": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "supporting_input_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/nonEmpty"
+          }
+        }
+      }
+    },
+    "condition": {
+      "enum": [
+        "present",
+        "clean",
+        "explicitly_absent",
+        "unresolved",
+        "not_applicable"
+      ]
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "claim_id",
+        "proposition",
+        "status",
+        "dependency_input_ids",
+        "dependency_refusal_ids",
+        "dependency_failure_ids",
+        "state_binding_ids",
+        "required_distinctions",
+        "limitations",
+        "nonclaims"
+      ],
+      "properties": {
+        "claim_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "proposition": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "status": {
+          "enum": [
+            "established",
+            "refuted",
+            "unknown",
+            "contradictory"
+          ]
+        },
+        "condition_effect": {
+          "$ref": "#/$defs/condition"
+        },
+        "dependency_input_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/nonEmpty"
+          }
+        },
+        "dependency_refusal_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/nonEmpty"
+          }
+        },
+        "dependency_failure_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/nonEmpty"
+          }
+        },
+        "state_binding_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/nonEmpty"
+          }
+        },
+        "required_distinctions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/nonEmpty"
+          }
+        },
+        "limitations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/nonEmpty"
+          }
+        },
+        "nonclaims": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/nonEmpty"
+          }
+        }
+      }
+    },
+    "unsupportedFrontier": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/unsupportedCause"
+      }
+    },
+    "refusalFrontier": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/governedRefusal"
+      }
+    },
+    "outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "derivation",
+        "condition",
+        "coherence",
+        "coverage",
+        "summary",
+        "refusals",
+        "unsupported"
+      ],
+      "properties": {
+        "derivation": {
+          "enum": [
+            "completed",
+            "partial",
+            "refused",
+            "unsupported"
+          ]
+        },
+        "condition": {
+          "$ref": "#/$defs/condition"
+        },
+        "coherence": {
+          "enum": [
+            "jointly_established",
+            "pairwise_only",
+            "contradictory",
+            "state_incompatible",
+            "insufficient",
+            "not_evaluated"
+          ]
+        },
+        "coverage": {
+          "enum": [
+            "complete",
+            "partial",
+            "missing"
+          ]
+        },
+        "summary": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "refusals": {
+          "$ref": "#/$defs/refusalFrontier"
+        },
+        "unsupported": {
+          "$ref": "#/$defs/unsupportedFrontier"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "derivation": {
+                "const": "refused"
+              }
+            },
+            "required": [
+              "derivation"
+            ]
+          },
+          "then": {
+            "properties": {
+              "condition": {
+                "const": "unresolved"
+              },
+              "refusals": {
+                "minItems": 1
+              },
+              "unsupported": {
+                "maxItems": 0
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "refusals": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "derivation": {
+                "const": "unsupported"
+              }
+            },
+            "required": [
+              "derivation"
+            ]
+          },
+          "then": {
+            "properties": {
+              "condition": {
+                "const": "unresolved"
+              },
+              "unsupported": {
+                "minItems": 1
+              },
+              "refusals": {
+                "maxItems": 0
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "unsupported": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "condition": {
+                "enum": [
+                  "clean",
+                  "explicitly_absent"
+                ]
+              }
+            },
+            "required": [
+              "condition"
+            ]
+          },
+          "then": {
+            "properties": {
+              "derivation": {
+                "const": "completed"
+              },
+              "coherence": {
+                "const": "jointly_established"
+              },
+              "coverage": {
+                "const": "complete"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "coherence": {
+                "enum": [
+                  "contradictory",
+                  "state_incompatible"
+                ]
+              }
+            },
+            "required": [
+              "coherence"
+            ]
+          },
+          "then": {
+            "properties": {
+              "condition": {
+                "const": "unresolved"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "limitation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "code",
+        "detail"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "projection_loss",
+            "missing_evidence",
+            "stale_evidence",
+            "state_mismatch",
+            "contradiction",
+            "coverage_gap",
+            "unverified_separation",
+            "unavailable_evidence",
+            "other"
+          ]
+        },
+        "code": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "detail": {
+          "$ref": "#/$defs/nonEmpty"
+        }
+      }
+    },
+    "omittedDistinction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "detail"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "detail": {
+          "$ref": "#/$defs/nonEmpty"
+        }
+      }
+    },
+    "projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity",
+        "omitted_distinctions"
+      ],
+      "properties": {
+        "identity": {
+          "$ref": "#/$defs/semanticIdentity"
+        },
+        "omitted_distinctions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/omittedDistinction"
+          }
+        }
+      }
+    },
+    "governedRefusal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "refusal_id",
+        "origin"
+      ],
+      "properties": {
+        "schema": {
+          "const": "nq.governed_refusal.v1"
+        },
+        "refusal_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "origin": {
+          "$ref": "#/$defs/governedRefusalOrigin"
+        }
+      }
+    },
+    "governedRefusalOrigin": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "acquisition"
+            },
+            "payload": {
+              "$ref": "#/$defs/acquisitionRefusal"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "protocol"
+            },
+            "payload": {
+              "$ref": "#/$defs/protocolRejection"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "helper"
+            },
+            "payload": {
+              "$ref": "#/$defs/helperRefusal"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "const": "profile"
+            },
+            "payload": {
+              "$ref": "#/$defs/governedProfileRefusal"
+            }
+          }
+        }
+      ]
+    },
+    "acquisitionRefusal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "responsible_instance_id",
+        "failure"
+      ],
+      "properties": {
+        "responsible_instance_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "failure": {
+          "$ref": "#/$defs/acquisitionFailure"
+        }
+      }
+    },
+    "acquisitionFailure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "class",
+        "retry",
+        "outcome"
+      ],
+      "properties": {
+        "class": {
+          "enum": [
+            "spawn_failed",
+            "request_write_failed",
+            "timeout",
+            "output_too_large",
+            "stderr_too_large",
+            "eof",
+            "malformed_framing",
+            "malformed_json",
+            "exit_nonzero",
+            "helper_exited",
+            "disconnect",
+            "carrier_startup_failed",
+            "not_running",
+            "io_failed"
+          ]
+        },
+        "retry": {
+          "enum": [
+            "retriable",
+            "non_retriable",
+            "unspecified"
+          ]
+        },
+        "outcome": {
+          "$ref": "#/$defs/acquisitionOutcome"
+        }
+      }
+    },
+    "acquisitionOutcome": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/acquisitionOutcomeResponse"
+        },
+        {
+          "$ref": "#/$defs/acquisitionOutcomeMessage"
+        },
+        {
+          "$ref": "#/$defs/acquisitionOutcomeRequestWrite"
+        },
+        {
+          "$ref": "#/$defs/acquisitionOutcomeTimeout"
+        },
+        {
+          "$ref": "#/$defs/acquisitionOutcomeExchangeTimeout"
+        },
+        {
+          "$ref": "#/$defs/acquisitionOutcomeOutputTooLarge"
+        },
+        {
+          "$ref": "#/$defs/acquisitionOutcomeStderrTooLarge"
+        },
+        {
+          "$ref": "#/$defs/acquisitionOutcomeEof"
+        },
+        {
+          "$ref": "#/$defs/acquisitionOutcomeMalformedFraming"
+        },
+        {
+          "$ref": "#/$defs/acquisitionOutcomeMalformedJson"
+        },
+        {
+          "$ref": "#/$defs/acquisitionOutcomeExitNonzero"
+        },
+        {
+          "$ref": "#/$defs/acquisitionOutcomeHelperExited"
+        },
+        {
+          "$ref": "#/$defs/acquisitionOutcomeDisconnect"
+        },
+        {
+          "$ref": "#/$defs/acquisitionOutcomeCarrierStartup"
+        },
+        {
+          "$ref": "#/$defs/acquisitionOutcomeNotRunning"
+        },
+        {
+          "$ref": "#/$defs/acquisitionOutcomeIoFailed"
+        }
+      ]
+    },
+    "acquisitionOutcomeResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome"
+      ],
+      "properties": {
+        "outcome": {
+          "const": "response"
+        }
+      }
+    },
+    "acquisitionOutcomeMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome",
+        "message"
+      ],
+      "properties": {
+        "outcome": {
+          "const": "spawn_failed"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "acquisitionOutcomeRequestWrite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome",
+        "message"
+      ],
+      "properties": {
+        "outcome": {
+          "const": "request_write_failed"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "acquisitionOutcomeTimeout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome"
+      ],
+      "properties": {
+        "outcome": {
+          "const": "timeout"
+        }
+      }
+    },
+    "acquisitionOutcomeExchangeTimeout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome",
+        "phase"
+      ],
+      "properties": {
+        "outcome": {
+          "const": "exchange_timeout"
+        },
+        "phase": {
+          "enum": [
+            "write_request",
+            "read_response"
+          ]
+        }
+      }
+    },
+    "acquisitionOutcomeOutputTooLarge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome"
+      ],
+      "properties": {
+        "outcome": {
+          "const": "output_too_large"
+        }
+      }
+    },
+    "acquisitionOutcomeStderrTooLarge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome"
+      ],
+      "properties": {
+        "outcome": {
+          "const": "stderr_too_large"
+        }
+      }
+    },
+    "acquisitionOutcomeEof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome"
+      ],
+      "properties": {
+        "outcome": {
+          "const": "eof"
+        }
+      }
+    },
+    "acquisitionOutcomeMalformedFraming": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome",
+        "message"
+      ],
+      "properties": {
+        "outcome": {
+          "const": "malformed_framing"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "acquisitionOutcomeMalformedJson": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome",
+        "message"
+      ],
+      "properties": {
+        "outcome": {
+          "const": "malformed_json"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "acquisitionOutcomeExitNonzero": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome",
+        "code"
+      ],
+      "properties": {
+        "outcome": {
+          "const": "exit_nonzero"
+        },
+        "code": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
+      }
+    },
+    "acquisitionOutcomeHelperExited": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome",
+        "code"
+      ],
+      "properties": {
+        "outcome": {
+          "const": "helper_exited"
+        },
+        "code": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        }
+      }
+    },
+    "acquisitionOutcomeDisconnect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome",
+        "message"
+      ],
+      "properties": {
+        "outcome": {
+          "const": "disconnect"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "acquisitionOutcomeCarrierStartup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome",
+        "message"
+      ],
+      "properties": {
+        "outcome": {
+          "const": "carrier_startup_failed"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "acquisitionOutcomeNotRunning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome"
+      ],
+      "properties": {
+        "outcome": {
+          "const": "not_running"
+        }
+      }
+    },
+    "acquisitionOutcomeIoFailed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome",
+        "message"
+      ],
+      "properties": {
+        "outcome": {
+          "const": "io_failed"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "helperRefusal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "responsible_instance_id",
+        "boundary",
+        "code",
+        "message",
+        "retriable",
+        "details"
+      ],
+      "properties": {
+        "responsible_instance_id": {
+          "$ref": "#/$defs/token"
+        },
+        "boundary": {
+          "enum": [
+            "protocol",
+            "profile",
+            "scope",
+            "vantage",
+            "capability",
+            "deadline",
+            "checkpoint",
+            "collection",
+            "resource",
+            "internal"
+          ]
+        },
+        "code": {
+          "enum": [
+            "unsupported_protocol",
+            "unknown_profile",
+            "profile_digest_mismatch",
+            "unsupported_scope",
+            "unsupported_vantage",
+            "capability_denied",
+            "deadline_expired",
+            "bounds_unsupported",
+            "checkpoint_invalid",
+            "collection_failed",
+            "resource_exhausted",
+            "internal_error"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "retriable": {
+          "type": "boolean"
+        },
+        "details": true
+      }
+    },
+    "governedProfileRefusal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile_semantic_id",
+        "refusal"
+      ],
+      "properties": {
+        "profile_semantic_id": {
+          "$ref": "#/$defs/digest"
+        },
+        "refusal": {
+          "$ref": "#/$defs/profileRefusal"
+        }
+      }
+    },
+    "profileRefusal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "instance_id",
+        "profile",
+        "boundary",
+        "code",
+        "message",
+        "details"
+      ],
+      "properties": {
+        "instance_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "profile": {
+          "$ref": "#/$defs/profileKey"
+        },
+        "boundary": {
+          "enum": [
+            "profile",
+            "report",
+            "coverage",
+            "observation",
+            "detector"
+          ]
+        },
+        "code": {
+          "enum": [
+            "unknown_profile",
+            "unknown_observation_kind",
+            "unknown_coverage",
+            "duplicate_coverage",
+            "missing_coverage",
+            "coverage_status_mismatch",
+            "report_status_overclaim",
+            "observation_limit_exceeded",
+            "payload_limit_exceeded",
+            "invalid_ordinal",
+            "subject_escape",
+            "scope_escape",
+            "vantage_escape",
+            "capability_escape",
+            "unknown_access_path",
+            "unknown_basis",
+            "unknown_regime",
+            "future_observation",
+            "invalid_payload",
+            "inconsistent_report",
+            "forbidden_helper_assertion",
+            "cannot_evaluate"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "profileKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        }
+      }
+    },
+    "protocolRejection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "responsible_instance_id",
+        "boundary",
+        "code",
+        "failure"
+      ],
+      "properties": {
+        "responsible_instance_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "boundary": {
+          "const": "response"
+        },
+        "code": {
+          "const": "invalid_response"
+        },
+        "failure": {
+          "$ref": "#/$defs/protocolRejectionFailure"
+        }
+      }
+    },
+    "protocolRejectionFailure": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "limit",
+            "actual"
+          ],
+          "properties": {
+            "kind": {
+              "const": "frame_too_large"
+            },
+            "limit": {
+              "$ref": "#/$defs/ijsonUnsigned"
+            },
+            "actual": {
+              "$ref": "#/$defs/ijsonUnsigned"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "invalid_framing"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "error"
+          ],
+          "properties": {
+            "kind": {
+              "const": "invalid_json"
+            },
+            "error": {
+              "$ref": "#/$defs/structuredJsonError"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "error"
+          ],
+          "properties": {
+            "kind": {
+              "const": "validation"
+            },
+            "error": {
+              "$ref": "#/$defs/protocolValidationFailure"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "error"
+          ],
+          "properties": {
+            "kind": {
+              "const": "canonicalization"
+            },
+            "error": {
+              "$ref": "#/$defs/protocolCanonicalizationFailure"
+            }
+          }
+        }
+      ]
+    },
+    "structuredJsonError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "category",
+        "line",
+        "column",
+        "diagnostic"
+      ],
+      "properties": {
+        "category": {
+          "enum": [
+            "io",
+            "syntax",
+            "data",
+            "eof"
+          ]
+        },
+        "line": {
+          "$ref": "#/$defs/ijsonUnsigned"
+        },
+        "column": {
+          "$ref": "#/$defs/ijsonUnsigned"
+        },
+        "diagnostic": {
+          "type": "string"
+        }
+      }
+    },
+    "protocolCanonicalizationFailure": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "error"
+          ],
+          "properties": {
+            "kind": {
+              "const": "serialization"
+            },
+            "error": {
+              "$ref": "#/$defs/structuredJsonError"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ],
+          "properties": {
+            "kind": {
+              "const": "unsafe_integer"
+            },
+            "value": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "protocolValidationFailure": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "document",
+            "expected",
+            "actual"
+          ],
+          "properties": {
+            "kind": {
+              "const": "invalid_schema"
+            },
+            "document": {
+              "type": "string"
+            },
+            "expected": {
+              "type": "string"
+            },
+            "actual": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "expected",
+            "actual"
+          ],
+          "properties": {
+            "kind": {
+              "const": "invalid_protocol_version"
+            },
+            "expected": {
+              "type": "string"
+            },
+            "actual": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "field",
+            "reason"
+          ],
+          "properties": {
+            "kind": {
+              "const": "invalid_field"
+            },
+            "field": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "field",
+            "limit",
+            "actual"
+          ],
+          "properties": {
+            "kind": {
+              "const": "bound_exceeded"
+            },
+            "field": {
+              "type": "string"
+            },
+            "limit": {
+              "$ref": "#/$defs/ijsonUnsigned"
+            },
+            "actual": {
+              "$ref": "#/$defs/ijsonUnsigned"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "field",
+            "value"
+          ],
+          "properties": {
+            "kind": {
+              "const": "duplicate"
+            },
+            "field": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "field"
+          ],
+          "properties": {
+            "kind": {
+              "const": "echo_mismatch"
+            },
+            "field": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "capability"
+          ],
+          "properties": {
+            "kind": {
+              "const": "capability_escape"
+            },
+            "capability": {
+              "$ref": "#/$defs/token"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "field",
+            "source"
+          ],
+          "properties": {
+            "kind": {
+              "const": "canonicalization"
+            },
+            "field": {
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/$defs/protocolCanonicalizationFailure"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

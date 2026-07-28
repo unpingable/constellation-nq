@@ -1,7 +1,7 @@
 //! Complete operator command surface.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -12,7 +12,12 @@ use nq_core::config::{LoadedConfig, NqConfig};
 use nq_helper_sandbox::{open_runtime_root, require_no_posix_acl};
 use nq_profiles::all_profiles;
 use nq_protocol::semantic_digest;
-use nq_store::{CanonicalDocument, MAX_PUBLIC_QUERY_ROWS, Store, UpgradeReceiptInput};
+use nq_store::{
+    CanonicalDocument, DiagnosticArtifactByteState, DiagnosticArtifactImportDisposition,
+    DiagnosticArtifactImportInput, DiagnosticArtifactLookup, DiagnosticArtifactOrigin,
+    DiagnosticArtifactSchemaSupport, MAX_PUBLIC_QUERY_ROWS, MAX_STORED_JSON_BYTES, Store,
+    UpgradeReceiptInput,
+};
 use serde::Serialize;
 use serde_json::json;
 use tempfile::NamedTempFile;
@@ -193,8 +198,26 @@ pub struct InstanceArg {
 /// Bounded diagnostic-execution operations.
 #[derive(Debug, Subcommand)]
 pub enum DiagnosticsCommand {
-    /// Collect, evaluate, and emit exact `nq.diagnostic_execution.v1` bytes.
+    /// Collect, evaluate, and emit one exact supported diagnostic artifact.
     Execute(InstanceArg),
+    /// Inspect one immutable artifact commitment without changing it.
+    Inspect {
+        /// Exact contract-owned artifact identity.
+        artifact_id: String,
+    },
+    /// Export the exact verified canonical bytes with no framing or newline.
+    Export {
+        /// Exact contract-owned artifact identity.
+        artifact_id: String,
+    },
+    /// Import exact canonical artifact bytes into custody without granting reliance.
+    Import {
+        /// Physical regular file containing one canonical artifact.
+        artifact: PathBuf,
+        /// Stable caller-owned operation identity for crash-safe retry.
+        #[arg(long)]
+        import_id: Option<String>,
+    },
 }
 
 /// Backup workflow.
@@ -346,7 +369,9 @@ pub async fn run(options: Nq) -> Result<()> {
         Command::Collect(instance) => {
             collect_command(&options.config, &instance.instance_id, options.json).await
         }
-        Command::Diagnostics { command } => diagnostics_command(&options.config, command).await,
+        Command::Diagnostics { command } => {
+            diagnostics_command(&options.config, command, options.json).await
+        }
         Command::Doctor => doctor(&options.config, options.json),
         Command::Backup(arguments) => backup(&options.config, &arguments.destination, options.json),
         Command::Restore(arguments) => {
@@ -559,24 +584,349 @@ async fn collect_command(config_path: &Path, instance_id: &str, json_output: boo
     }
 }
 
-async fn diagnostics_command(config_path: &Path, command: DiagnosticsCommand) -> Result<()> {
+async fn diagnostics_command(
+    config_path: &Path,
+    command: DiagnosticsCommand,
+    json_output: bool,
+) -> Result<()> {
     match command {
         DiagnosticsCommand::Execute(instance) => {
-            let config = NqConfig::load(config_path)?;
-            let watcher = config
-                .watcher(&instance.instance_id)
-                .with_context(|| format!("unknown instance {}", instance.instance_id))?
-                .clone();
-            let artifact = tokio::task::spawn_blocking(move || {
-                let mut engine = nq_core::CollectionEngine::open(&config)?;
-                engine.diagnostic_execute(&watcher)
-            })
-            .await??;
-            let bytes = artifact.canonical_bytes()?;
-            std::io::stdout().lock().write_all(&bytes)?;
+            diagnostic_execute(config_path, &instance.instance_id).await
+        }
+        DiagnosticsCommand::Inspect { artifact_id } => {
+            diagnostic_inspect(config_path, &artifact_id, json_output)
+        }
+        DiagnosticsCommand::Export { artifact_id } => diagnostic_export(config_path, &artifact_id),
+        DiagnosticsCommand::Import {
+            artifact,
+            import_id,
+        } => diagnostic_import(config_path, &artifact, import_id.as_deref(), json_output),
+    }
+}
+
+async fn diagnostic_execute(config_path: &Path, instance_id: &str) -> Result<()> {
+    let config = NqConfig::load(config_path)?;
+    let watcher = config
+        .watcher(instance_id)
+        .with_context(|| format!("unknown instance {instance_id}"))?
+        .clone();
+    let artifact = tokio::task::spawn_blocking(move || {
+        let mut engine = nq_core::CollectionEngine::open(&config)?;
+        engine.diagnostic_execute(&watcher)
+    })
+    .await??;
+    std::io::stdout()
+        .lock()
+        .write_all(&artifact.canonical_bytes()?)?;
+    Ok(())
+}
+
+fn diagnostic_inspect(config_path: &Path, artifact_id: &str, json_output: bool) -> Result<()> {
+    let config = NqConfig::load(config_path)?;
+    let artifact_id = nq_protocol::Sha256Digest::parse(artifact_id.to_owned())?;
+    let store = Store::open_read_only(&config.database_path)?;
+    if matches!(
+        store.diagnostic_artifact(
+            &artifact_id,
+            nq_core::SUPPORTED_DIAGNOSTIC_EXECUTION_SCHEMAS
+        )?,
+        DiagnosticArtifactLookup::Found(nq_store::DiagnosticArtifactAccess {
+            commitment: nq_store::DiagnosticArtifactCommitment {
+                origin: DiagnosticArtifactOrigin::Local { .. },
+                ..
+            },
+            ..
+        })
+    ) {
+        nq_core::engine::validate_semantic_history(&store)?;
+    }
+    print_value(
+        &diagnostic_artifact_access_value(&store, &artifact_id)?,
+        json_output,
+    )
+}
+
+fn diagnostic_export(config_path: &Path, artifact_id: &str) -> Result<()> {
+    let config = NqConfig::load(config_path)?;
+    let artifact_id = nq_protocol::Sha256Digest::parse(artifact_id.to_owned())?;
+    let store = Store::open_read_only(&config.database_path)?;
+    let DiagnosticArtifactLookup::Found(access) = store.diagnostic_artifact(
+        &artifact_id,
+        nq_core::SUPPORTED_DIAGNOSTIC_EXECUTION_SCHEMAS,
+    )?
+    else {
+        bail!("diagnostic artifact {artifact_id} is not committed");
+    };
+    if matches!(
+        access.commitment.origin,
+        DiagnosticArtifactOrigin::Local { .. }
+    ) {
+        nq_core::engine::validate_semantic_history(&store)?;
+    }
+    match access.byte_state {
+        DiagnosticArtifactByteState::VerifiedAvailable { canonical_bytes } => {
+            if matches!(
+                access.schema_support,
+                DiagnosticArtifactSchemaSupport::Supported
+            ) {
+                let diagnostic = nq_core::SupportedDiagnosticExecution::decode_canonical(
+                    canonical_bytes.as_bytes(),
+                )
+                .with_context(|| {
+                    format!("diagnostic artifact {artifact_id} failed strict contract reopening")
+                })?;
+                if diagnostic.artifact_id().as_digest() != &artifact_id {
+                    bail!(
+                        "diagnostic artifact {artifact_id} strictly reopened with a different self-identity"
+                    );
+                }
+            }
+            std::io::stdout()
+                .lock()
+                .write_all(canonical_bytes.as_bytes())?;
             Ok(())
         }
+        DiagnosticArtifactByteState::CommittedUnavailable => {
+            bail!(
+                "diagnostic artifact {artifact_id} is committed but its exact bytes are unavailable"
+            )
+        }
+        DiagnosticArtifactByteState::Corrupt { reason } => {
+            bail!("diagnostic artifact {artifact_id} failed byte verification: {reason}")
+        }
     }
+}
+
+fn diagnostic_import(
+    config_path: &Path,
+    artifact: &Path,
+    import_id: Option<&str>,
+    json_output: bool,
+) -> Result<()> {
+    let config = NqConfig::load(config_path)?;
+    let document = CanonicalDocument::from_canonical_bytes(read_bounded_artifact_file(artifact)?)?;
+    let value: serde_json::Value = serde_json::from_slice(document.as_bytes())?;
+    let object = value
+        .as_object()
+        .context("diagnostic artifact must be one canonical JSON object")?;
+    let contract_schema = object
+        .get("schema")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .context("diagnostic artifact has no nonempty top-level schema")?
+        .to_owned();
+    let artifact_id = nq_protocol::Sha256Digest::parse(
+        object
+            .get("artifact_id")
+            .and_then(serde_json::Value::as_str)
+            .context("diagnostic artifact has no typed top-level artifact_id")?
+            .to_owned(),
+    )?;
+    let schema_supported =
+        nq_core::SUPPORTED_DIAGNOSTIC_EXECUTION_SCHEMAS.contains(&contract_schema.as_str());
+    if schema_supported {
+        let reopened =
+            nq_core::SupportedDiagnosticExecution::decode_canonical(document.as_bytes())?;
+        if reopened.artifact_id().as_digest() != &artifact_id {
+            bail!("diagnostic artifact payload self-identity differs from imported identity");
+        }
+    }
+    let imported_at = chrono::Utc::now().to_rfc3339();
+    let import_id = import_id.map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_owned);
+    let mut store = Store::open(&config.database_path)?;
+    let receipt = store.import_diagnostic_artifact(&DiagnosticArtifactImportInput {
+        import_id,
+        artifact_id,
+        contract_schema: contract_schema.clone(),
+        canonical_bytes: document,
+        imported_at,
+    })?;
+    let disposition = match receipt.disposition {
+        DiagnosticArtifactImportDisposition::Committed => "committed",
+        DiagnosticArtifactImportDisposition::CommittedUnavailable => "committed_unavailable",
+        DiagnosticArtifactImportDisposition::Existing => "existing",
+        DiagnosticArtifactImportDisposition::Rematerialized => "rematerialized",
+    };
+    print_value(
+        &json!({
+            "schema": "nq.diagnostic_artifact_import_receipt.v1",
+            "import_id": receipt.import_id,
+            "artifact_id": receipt.artifact_id,
+            "contract_schema": receipt.contract_schema,
+            "canonical_bytes_sha256": receipt.canonical_bytes_sha256,
+            "canonical_bytes_length": receipt.canonical_bytes_length,
+            "schema_support": if schema_supported { "supported" } else { "unsupported" },
+            "disposition": disposition,
+            "imported_at": receipt.imported_at,
+            "producer_authenticated": false,
+            "relied_upon": false,
+            "grants_authority": false,
+        }),
+        json_output,
+    )
+}
+
+fn read_bounded_artifact_file(path: &Path) -> Result<Vec<u8>> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        // Opening a FIFO read-only can otherwise block before metadata proves
+        // that the input is not the bounded physical regular file required by
+        // this interface.
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(path)
+        .with_context(|| format!("open diagnostic artifact {}", path.display()))?;
+    let before = file.metadata()?;
+    if !before.is_file() {
+        bail!(
+            "diagnostic artifact {} is not a physical regular file",
+            path.display()
+        );
+    }
+    let limit = u64::try_from(MAX_STORED_JSON_BYTES)?
+        .checked_add(1)
+        .context("diagnostic artifact read limit overflowed")?;
+    let mut bytes = Vec::new();
+    std::io::Read::by_ref(&mut file)
+        .take(limit)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_STORED_JSON_BYTES {
+        bail!(
+            "diagnostic artifact is {} bytes; limit is {MAX_STORED_JSON_BYTES}",
+            bytes.len()
+        );
+    }
+    let after = file.metadata()?;
+    let before_identity = (
+        before.dev(),
+        before.ino(),
+        before.len(),
+        before.mtime(),
+        before.mtime_nsec(),
+    );
+    let after_identity = (
+        after.dev(),
+        after.ino(),
+        after.len(),
+        after.mtime(),
+        after.mtime_nsec(),
+    );
+    if before_identity != after_identity || after.len() != u64::try_from(bytes.len())? {
+        bail!(
+            "diagnostic artifact {} changed during bounded read",
+            path.display()
+        );
+    }
+    Ok(bytes)
+}
+
+#[allow(clippy::too_many_lines)] // Keep every artifact access and byte-state projection visibly closed.
+fn diagnostic_artifact_access_value(
+    store: &Store,
+    artifact_id: &nq_protocol::Sha256Digest,
+) -> Result<serde_json::Value> {
+    let lookup =
+        store.diagnostic_artifact(artifact_id, nq_core::SUPPORTED_DIAGNOSTIC_EXECUTION_SCHEMAS)?;
+    let DiagnosticArtifactLookup::Found(access) = lookup else {
+        return Ok(json!({
+            "schema": "nq.diagnostic_artifact_access.v1",
+            "artifact_id": artifact_id,
+            "lookup_state": "record_missing",
+            "nonclaims": [
+                "a missing commitment is not a committed artifact whose bytes are unavailable",
+                "this read grants no reliance, authorization, or action"
+            ],
+        }));
+    };
+    let origin = match access.commitment.origin {
+        DiagnosticArtifactOrigin::Local {
+            run_id,
+            evaluation_id,
+            completed_at,
+        } => json!({
+            "kind": "local_execution",
+            "run_id": run_id,
+            "evaluation_id": evaluation_id,
+            "completed_at": completed_at,
+        }),
+        DiagnosticArtifactOrigin::Imported {
+            import_id,
+            imported_at,
+        } => json!({
+            "kind": "imported_custody",
+            "import_id": import_id,
+            "imported_at": imported_at,
+        }),
+    };
+    let schema_supported = matches!(
+        access.schema_support,
+        DiagnosticArtifactSchemaSupport::Supported
+    );
+    let schema_support = match access.schema_support {
+        DiagnosticArtifactSchemaSupport::Supported => json!({"state": "supported"}),
+        DiagnosticArtifactSchemaSupport::Unsupported { contract_schema } => json!({
+            "state": "unsupported",
+            "contract_schema": contract_schema,
+        }),
+    };
+    let (byte_state, diagnostic) = match access.byte_state {
+        DiagnosticArtifactByteState::VerifiedAvailable { canonical_bytes } if schema_supported => {
+            match nq_core::SupportedDiagnosticExecution::decode_canonical(
+                canonical_bytes.as_bytes(),
+            ) {
+                Ok(diagnostic) if diagnostic.artifact_id().as_digest() == artifact_id => (
+                    json!({"state": "verified_available"}),
+                    Some(serde_json::from_slice::<serde_json::Value>(
+                        canonical_bytes.as_bytes(),
+                    )?),
+                ),
+                Ok(_) => (
+                    json!({
+                        "state": "corrupt",
+                        "reason": "strictly reopened self-identity differs from lookup identity",
+                    }),
+                    None,
+                ),
+                Err(error) => (
+                    json!({
+                        "state": "corrupt",
+                        "reason": format!("strict contract reopening failed: {error}"),
+                    }),
+                    None,
+                ),
+            }
+        }
+        DiagnosticArtifactByteState::VerifiedAvailable { .. } => {
+            (json!({"state": "verified_available"}), None)
+        }
+        DiagnosticArtifactByteState::CommittedUnavailable => {
+            (json!({"state": "committed_unavailable"}), None)
+        }
+        DiagnosticArtifactByteState::Corrupt { reason } => {
+            (json!({"state": "corrupt", "reason": reason}), None)
+        }
+    };
+    Ok(json!({
+        "schema": "nq.diagnostic_artifact_access.v1",
+        "artifact_id": artifact_id,
+        "lookup_state": "found",
+        "commitment": {
+            "artifact_sequence": access.commitment.artifact_sequence,
+            "artifact_id": access.commitment.artifact_id,
+            "contract_schema": access.commitment.contract_schema,
+            "canonical_bytes_sha256": access.commitment.canonical_bytes_sha256,
+            "canonical_bytes_length": access.commitment.canonical_bytes_length,
+            "committed_at": access.commitment.committed_at,
+            "origin": origin,
+        },
+        "schema_support": schema_support,
+        "byte_state": byte_state,
+        "diagnostic": diagnostic,
+        "nonclaims": [
+            "query lookup does not redefine the immutable artifact",
+            "import custody does not authenticate the producer",
+            "this read grants no reliance, authorization, or action"
+        ],
+    }))
 }
 
 fn collection_outcome_output(
@@ -604,6 +954,18 @@ fn doctor(config_path: &Path, json_output: bool) -> Result<()> {
     let store = Store::open_read_only(&config.database_path)?;
     store.validate()?;
     nq_core::engine::validate_provider_intake_history(&store)?;
+    let mut diagnostic_artifacts = diagnostic_artifact_custody_summary(&store)?;
+    let semantic_artifact_error = if diagnostic_artifacts.first_corruption.is_none() {
+        match nq_core::engine::validate_diagnostic_artifact_history(&store) {
+            Ok(verified) => {
+                diagnostic_artifacts = DiagnosticArtifactCustodySummary::from(verified);
+                None
+            }
+            Err(error) => Some(error),
+        }
+    } else {
+        None
+    };
     let mut diagnostics = Vec::new();
     for watcher in &config.watchers {
         let lock_path = config
@@ -633,11 +995,39 @@ fn doctor(config_path: &Path, json_output: bool) -> Result<()> {
             }),
         });
     }
-    let healthy = diagnostics.iter().all(|value| value["state"] == "healthy");
+    let instances_healthy = diagnostics.iter().all(|value| value["state"] == "healthy");
+    let unsupported_artifacts = diagnostic_artifacts
+        .unsupported_available
+        .checked_add(diagnostic_artifacts.unsupported_committed_unavailable)
+        .context("diagnostic artifact count overflow")?;
+    let artifact_state =
+        if diagnostic_artifacts.first_corruption.is_some() || semantic_artifact_error.is_some() {
+            "corrupt"
+        } else if diagnostic_artifacts.commitments == 0 {
+            "empty"
+        } else if unsupported_artifacts > 0 {
+            "unsupported"
+        } else if diagnostic_artifacts.supported_committed_unavailable > 0 {
+            "committed_unavailable"
+        } else {
+            "available_supported"
+        };
+    let artifact_custody_complete = matches!(artifact_state, "empty" | "available_supported");
+    let healthy = instances_healthy && artifact_custody_complete;
     print_value(
         &json!({
             "healthy": healthy,
             "database": "healthy",
+            "diagnostic_artifacts": {
+                "state": artifact_state,
+                "commitments": diagnostic_artifacts.commitments,
+                "supported_available": diagnostic_artifacts.supported_available,
+                "supported_committed_unavailable":
+                    diagnostic_artifacts.supported_committed_unavailable,
+                "unsupported_available": diagnostic_artifacts.unsupported_available,
+                "unsupported_committed_unavailable":
+                    diagnostic_artifacts.unsupported_committed_unavailable,
+            },
             "profiles": all_profiles().len(),
             "instances": diagnostics,
         }),
@@ -645,8 +1035,12 @@ fn doctor(config_path: &Path, json_output: bool) -> Result<()> {
     )?;
     if healthy {
         Ok(())
+    } else if let Some(error) = semantic_artifact_error {
+        Err(error.into())
+    } else if let Some(error) = diagnostic_artifacts.first_corruption {
+        bail!("{error}")
     } else {
-        bail!("doctor found one or more failed instances")
+        bail!("doctor found one or more failed or incomplete diagnostic surfaces")
     }
 }
 
@@ -654,6 +1048,7 @@ fn backup(config_path: &Path, destination: &Path, json_output: bool) -> Result<(
     let config = NqConfig::load(config_path)?;
     let store = Store::open(&config.database_path)?;
     store.validate()?;
+    let source_artifacts = nq_core::engine::validate_diagnostic_artifact_history(&store)?;
     if destination.exists() {
         bail!(
             "backup destination already exists: {}",
@@ -668,9 +1063,18 @@ fn backup(config_path: &Path, destination: &Path, json_output: bool) -> Result<(
     store_backup_if_supported(&store, destination)?;
     let backup_store = Store::open(destination)?;
     backup_store.validate()?;
+    let backup_artifacts = nq_core::engine::validate_diagnostic_artifact_history(&backup_store)?;
+    if backup_artifacts != source_artifacts {
+        bail!("backup did not preserve the exact diagnostic artifact custody counts");
+    }
     let digest = digest_file(destination)?;
     print_value(
-        &json!({"backup": destination, "sha256": digest, "verified": true}),
+        &json!({
+            "backup": destination,
+            "sha256": digest,
+            "verified": true,
+            "diagnostic_artifacts": diagnostic_artifact_preservation_value(&backup_artifacts),
+        }),
         json_output,
     )
 }
@@ -682,24 +1086,158 @@ fn restore(backup: &Path, destination: &Path, json_output: bool) -> Result<()> {
             destination.display()
         );
     }
-    let source = Store::open(backup)?;
+    let source = Store::open_read_only(backup)?;
     source.validate()?;
+    let source_artifacts = nq_core::engine::validate_diagnostic_artifact_history(&source)?;
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)?;
     }
-    // Restore through SQLite's backup API so a verified source with live WAL
-    // pages is copied as one consistent logical database without loading the
-    // artifact into memory or copying a stale main file alone.
-    store_backup_if_supported(&source, destination)?;
-    Store::open(destination)?.validate()?;
+    // Restore into an absent sibling first. Only an exact, fully validated
+    // logical copy is linked into the requested destination, and hard-link
+    // creation refuses to replace a path that appears concurrently.
+    let temporary = destination.with_file_name(format!(
+        ".{}.restore-{}",
+        destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("nq"),
+        uuid::Uuid::new_v4()
+    ));
+    let restore_result = (|| {
+        store_backup_if_supported(&source, &temporary)?;
+        let restored = Store::open_read_only(&temporary)?;
+        restored.validate()?;
+        let restored_artifacts = nq_core::engine::validate_diagnostic_artifact_history(&restored)?;
+        if restored_artifacts != source_artifacts {
+            bail!("restore did not preserve the exact diagnostic artifact custody counts");
+        }
+        fs::hard_link(&temporary, destination).with_context(|| {
+            format!(
+                "publish validated restore {} without replacing another path",
+                destination.display()
+            )
+        })?;
+        Ok::<_, anyhow::Error>(restored_artifacts)
+    })();
+    let _ = fs::remove_file(&temporary);
+    let restored_artifacts = restore_result?;
     print_value(
         &json!({
             "restored": true,
             "destination": destination,
             "sha256": digest_file(destination)?,
+            "diagnostic_artifacts":
+                diagnostic_artifact_preservation_value(&restored_artifacts),
         }),
         json_output,
     )
+}
+
+fn diagnostic_artifact_preservation_value(
+    verification: &nq_core::DiagnosticArtifactHistoryVerification,
+) -> serde_json::Value {
+    let all_required_bytes_available = verification.supported_committed_unavailable == 0
+        && verification.unsupported_committed_unavailable == 0;
+    json!({
+        "commitments": verification.commitments,
+        "supported_available": verification.supported_available,
+        "supported_committed_unavailable":
+            verification.supported_committed_unavailable,
+        "unsupported_available": verification.unsupported_available,
+        "unsupported_committed_unavailable":
+            verification.unsupported_committed_unavailable,
+        "structurally_preserved": true,
+        "all_required_bytes_available": all_required_bytes_available,
+        "full_replay_available": all_required_bytes_available,
+    })
+}
+
+#[derive(Debug, Default)]
+struct DiagnosticArtifactCustodySummary {
+    commitments: usize,
+    supported_available: usize,
+    supported_committed_unavailable: usize,
+    unsupported_available: usize,
+    unsupported_committed_unavailable: usize,
+    first_corruption: Option<String>,
+}
+
+impl From<nq_core::DiagnosticArtifactHistoryVerification> for DiagnosticArtifactCustodySummary {
+    fn from(value: nq_core::DiagnosticArtifactHistoryVerification) -> Self {
+        Self {
+            commitments: value.commitments,
+            supported_available: value.supported_available,
+            supported_committed_unavailable: value.supported_committed_unavailable,
+            unsupported_available: value.unsupported_available,
+            unsupported_committed_unavailable: value.unsupported_committed_unavailable,
+            first_corruption: None,
+        }
+    }
+}
+
+fn diagnostic_artifact_custody_summary(store: &Store) -> Result<DiagnosticArtifactCustodySummary> {
+    let mut summary = DiagnosticArtifactCustodySummary::default();
+    let mut after = None;
+    loop {
+        let commitments =
+            store.diagnostic_artifact_commitments_bounded(MAX_PUBLIC_QUERY_ROWS, after)?;
+        if commitments.is_empty() {
+            return Ok(summary);
+        }
+        let page_len = commitments.len();
+        for commitment in commitments {
+            after = Some(commitment.artifact_sequence);
+            summary.commitments = summary
+                .commitments
+                .checked_add(1)
+                .context("diagnostic artifact count overflow")?;
+            let DiagnosticArtifactLookup::Found(access) = store.diagnostic_artifact(
+                &commitment.artifact_id,
+                nq_core::SUPPORTED_DIAGNOSTIC_EXECUTION_SCHEMAS,
+            )?
+            else {
+                bail!(
+                    "diagnostic artifact index lost commitment {}",
+                    commitment.artifact_id
+                );
+            };
+            let counter = match (access.schema_support, access.byte_state) {
+                (
+                    DiagnosticArtifactSchemaSupport::Supported,
+                    DiagnosticArtifactByteState::VerifiedAvailable { .. },
+                ) => Some(&mut summary.supported_available),
+                (
+                    DiagnosticArtifactSchemaSupport::Supported,
+                    DiagnosticArtifactByteState::CommittedUnavailable,
+                ) => Some(&mut summary.supported_committed_unavailable),
+                (
+                    DiagnosticArtifactSchemaSupport::Unsupported { .. },
+                    DiagnosticArtifactByteState::VerifiedAvailable { .. },
+                ) => Some(&mut summary.unsupported_available),
+                (
+                    DiagnosticArtifactSchemaSupport::Unsupported { .. },
+                    DiagnosticArtifactByteState::CommittedUnavailable,
+                ) => Some(&mut summary.unsupported_committed_unavailable),
+                (_, DiagnosticArtifactByteState::Corrupt { reason }) => {
+                    summary.first_corruption.get_or_insert_with(|| {
+                        format!(
+                            "diagnostic artifact {} failed byte verification: {reason}",
+                            commitment.artifact_id
+                        )
+                    });
+                    None
+                }
+            };
+            if let Some(counter) = counter {
+                *counter = counter
+                    .checked_add(1)
+                    .context("diagnostic artifact count overflow")?;
+            }
+        }
+        if page_len < MAX_PUBLIC_QUERY_ROWS as usize {
+            return Ok(summary);
+        }
+    }
 }
 
 fn finalize_upgrade_backup(
@@ -801,29 +1339,31 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                 }
                 3 => {
                     validate_v3_upgrade_source_semantics(&config.database_path)?;
-                    let artifact =
+                    let v3_artifact =
                         Store::backup_v3_verified(&config.database_path, &temporary_backup)?;
-                    let backup = finalize_upgrade_backup(
+                    let v3_backup = finalize_upgrade_backup(
                         &temporary_backup,
                         &backup_directory,
-                        &artifact.sha256,
+                        &v3_artifact.sha256,
                     )?;
-                    validate_v3_upgrade_source_semantics(&backup)?;
-                    let finished_at = chrono::Utc::now();
-                    let receipt = UpgradeReceiptInput {
+                    validate_v3_upgrade_source_semantics(&v3_backup)?;
+                    let v3_receipt = UpgradeReceiptInput {
                         receipt_id: uuid::Uuid::new_v4().to_string(),
                         from_schema_version: 3,
-                        to_schema_version: u32::try_from(nq_store::SCHEMA_VERSION)?,
+                        to_schema_version: 4,
                         migrations: CanonicalDocument::from_serializable(&[
                             "schema_v3_to_v4_provider_intake",
                         ])?,
-                        binary_digest,
-                        backup_digest: artifact.sha256.clone(),
-                        backup_location: backup.display().to_string(),
+                        binary_digest: binary_digest.clone(),
+                        backup_digest: v3_artifact.sha256.clone(),
+                        backup_location: v3_backup.display().to_string(),
                         started_at: started_at.to_rfc3339(),
-                        finished_at: finished_at.to_rfc3339(),
+                        // The store replaces this preflight value with a
+                        // terminal timestamp after migration validation and
+                        // immediately before committing the receipt.
+                        finished_at: started_at.to_rfc3339(),
                         result: "migrated".into(),
-                        operator_identity,
+                        operator_identity: operator_identity.clone(),
                         verification: CanonicalDocument::from_serializable(&json!({
                             "integrity": "ok",
                             "source_schema_version": 3,
@@ -834,16 +1374,101 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                             "acknowledgments_synthesized": false,
                         }))?,
                     };
-                    let store = Store::upgrade_v3_to_v4(&config.database_path, &receipt)?;
+                    Store::upgrade_v3_to_v4(&config.database_path, &v3_receipt)?;
+
+                    let v4_started_at = chrono::Utc::now();
+                    let v4_temporary_backup =
+                        backup_directory.join(format!(".nq-upgrade-{}.db", uuid::Uuid::new_v4()));
+                    let v4_artifact =
+                        Store::backup_v4_verified(&config.database_path, &v4_temporary_backup)?;
+                    let v4_backup = finalize_upgrade_backup(
+                        &v4_temporary_backup,
+                        &backup_directory,
+                        &v4_artifact.sha256,
+                    )?;
+                    let v4_receipt = UpgradeReceiptInput {
+                        receipt_id: uuid::Uuid::new_v4().to_string(),
+                        from_schema_version: 4,
+                        to_schema_version: u32::try_from(nq_store::SCHEMA_VERSION)?,
+                        migrations: CanonicalDocument::from_serializable(&[
+                            "schema_v4_to_v5_diagnostic_artifacts",
+                        ])?,
+                        binary_digest,
+                        backup_digest: v4_artifact.sha256.clone(),
+                        backup_location: v4_backup.display().to_string(),
+                        started_at: v4_started_at.to_rfc3339(),
+                        // The store owns the durable terminal timestamp.
+                        finished_at: v4_started_at.to_rfc3339(),
+                        result: "migrated".into(),
+                        operator_identity,
+                        verification: CanonicalDocument::from_serializable(&json!({
+                            "integrity": "ok",
+                            "source_schema_version": 4,
+                            "source_schema_artifact_digest": nq_store::SCHEMA_V4_ARTIFACT_DIGEST,
+                            "backup_reopened": true,
+                            "historical_diagnostic_artifacts": "no_durable_commitments",
+                            "diagnostic_artifacts_synthesized": false,
+                        }))?,
+                    };
+                    let store = Store::upgrade_v4_to_v5(&config.database_path, &v4_receipt)?;
                     store.validate()?;
                     print_value(
                         &json!({
                             "result": "migrated",
                             "from_schema_version": 3,
                             "schema_version": nq_store::SCHEMA_VERSION,
+                            "v3_backup": v3_backup,
+                            "v3_backup_digest": v3_artifact.sha256,
+                            "v4_backup": v4_backup,
+                            "v4_backup_digest": v4_artifact.sha256,
+                            "historical_provider_intake": "explicit_gap_only",
+                            "historical_diagnostic_artifacts": "no_durable_commitments",
+                        }),
+                        json_output,
+                    )
+                }
+                4 => {
+                    let artifact =
+                        Store::backup_v4_verified(&config.database_path, &temporary_backup)?;
+                    let backup = finalize_upgrade_backup(
+                        &temporary_backup,
+                        &backup_directory,
+                        &artifact.sha256,
+                    )?;
+                    let receipt = UpgradeReceiptInput {
+                        receipt_id: uuid::Uuid::new_v4().to_string(),
+                        from_schema_version: 4,
+                        to_schema_version: u32::try_from(nq_store::SCHEMA_VERSION)?,
+                        migrations: CanonicalDocument::from_serializable(&[
+                            "schema_v4_to_v5_diagnostic_artifacts",
+                        ])?,
+                        binary_digest,
+                        backup_digest: artifact.sha256.clone(),
+                        backup_location: backup.display().to_string(),
+                        started_at: started_at.to_rfc3339(),
+                        // The store owns the durable terminal timestamp.
+                        finished_at: started_at.to_rfc3339(),
+                        result: "migrated".into(),
+                        operator_identity,
+                        verification: CanonicalDocument::from_serializable(&json!({
+                            "integrity": "ok",
+                            "source_schema_version": 4,
+                            "source_schema_artifact_digest": nq_store::SCHEMA_V4_ARTIFACT_DIGEST,
+                            "backup_reopened": true,
+                            "historical_diagnostic_artifacts": "no_durable_commitments",
+                            "diagnostic_artifacts_synthesized": false,
+                        }))?,
+                    };
+                    let store = Store::upgrade_v4_to_v5(&config.database_path, &receipt)?;
+                    store.validate()?;
+                    print_value(
+                        &json!({
+                            "result": "migrated",
+                            "from_schema_version": 4,
+                            "schema_version": nq_store::SCHEMA_VERSION,
                             "backup": backup,
                             "backup_digest": artifact.sha256,
-                            "historical_provider_intake": "explicit_gap_only",
+                            "historical_diagnostic_artifacts": "no_durable_commitments",
                         }),
                         json_output,
                     )
@@ -1273,6 +1898,123 @@ helper_runtime_dir = "/run/nq/helpers"
         assert!(
             Nq::try_parse_from(["nq", "diagnostics", "execute", "host-a", "host-b"]).is_err(),
             "one invocation cannot silently broaden to multiple subjects"
+        );
+    }
+
+    #[test]
+    fn diagnostic_artifact_commands_have_explicit_single_targets() {
+        let artifact_id = format!("sha256:{}", "a".repeat(64));
+        let inspect = Nq::try_parse_from([
+            "nq",
+            "--json",
+            "diagnostics",
+            "inspect",
+            artifact_id.as_str(),
+        ])
+        .expect("artifact inspection parses");
+        assert!(inspect.json);
+        assert!(matches!(
+            inspect.command,
+            Command::Diagnostics {
+                command: DiagnosticsCommand::Inspect { .. }
+            }
+        ));
+
+        let export = Nq::try_parse_from(["nq", "diagnostics", "export", artifact_id.as_str()])
+            .expect("artifact export parses");
+        assert!(matches!(
+            export.command,
+            Command::Diagnostics {
+                command: DiagnosticsCommand::Export { .. }
+            }
+        ));
+
+        let import = Nq::try_parse_from([
+            "nq",
+            "diagnostics",
+            "import",
+            "/tmp/artifact.json",
+            "--import-id",
+            "import:retryable-operation",
+        ])
+        .expect("artifact import parses");
+        let Command::Diagnostics {
+            command:
+                DiagnosticsCommand::Import {
+                    import_id: Some(import_id),
+                    ..
+                },
+        } = import.command
+        else {
+            panic!("diagnostic import preserves caller operation identity");
+        };
+        assert_eq!(import_id, "import:retryable-operation");
+    }
+
+    #[test]
+    fn bounded_artifact_read_refuses_fifo_without_waiting_for_a_writer() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let fifo = directory.path().join("artifact.fifo");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRUSR)
+            .expect("create diagnostic import FIFO");
+
+        let error =
+            read_bounded_artifact_file(&fifo).expect_err("a FIFO is not an importable artifact");
+        assert!(
+            error.to_string().contains("is not a physical regular file"),
+            "unexpected FIFO refusal: {error:#}"
+        );
+    }
+
+    #[test]
+    fn diagnostic_export_refuses_semantically_corrupt_supported_artifact() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database = directory.path().join("nq.db");
+        let artifact_id = nq_protocol::sha256_bytes(b"semantic-corruption-fixture");
+        let malformed = CanonicalDocument::from_serializable(&json!({
+            "schema": nq_core::diagnostic_execution::DIAGNOSTIC_EXECUTION_SCHEMA,
+            "artifact_id": artifact_id.as_str(),
+            "outcome": "not-a-diagnostic-outcome",
+        }))
+        .expect("canonical malformed fixture");
+        let mut store = Store::initialize(&database).expect("initialize store");
+        store
+            .import_diagnostic_artifact(&DiagnosticArtifactImportInput {
+                import_id: "import:semantic-corruption".to_owned(),
+                artifact_id: artifact_id.clone(),
+                contract_schema: nq_core::diagnostic_execution::DIAGNOSTIC_EXECUTION_SCHEMA
+                    .to_owned(),
+                canonical_bytes: malformed,
+                imported_at: "2026-07-28T12:00:00Z".to_owned(),
+            })
+            .expect("opaque storage accepts the structurally bounded artifact");
+        drop(store);
+
+        let config = directory.path().join("nq.toml");
+        fs::write(
+            &config,
+            format!(
+                r#"schema = "nq.config.v1"
+database_path = "{}"
+socket_path = "{}"
+admissions_dir = "{}"
+helper_runtime_dir = "{}"
+"#,
+                database.display(),
+                directory.path().join("nqd.sock").display(),
+                directory.path().join("admissions").display(),
+                directory.path().join("helpers").display(),
+            ),
+        )
+        .expect("write test configuration");
+
+        let error = diagnostic_export(&config, artifact_id.as_str())
+            .expect_err("supported semantic corruption must not be exported");
+        assert!(
+            error
+                .to_string()
+                .contains("failed strict contract reopening"),
+            "unexpected export refusal: {error:#}"
         );
     }
 

@@ -9,8 +9,9 @@ The walkthrough below uses the one-shot `stdio` conformance specimen; the same
 protocol exchange is also supported by a supervised persistent `unix` helper
 carrier with private sockets and peer-credential checks. The preview includes
 compiled profiles, admission locks, explicit collection, a resident scheduler,
-SQLite schema v4, verified SQLite backup/restore, an exact qualified-v3-to-v4
-migration, read-only exports, the Unix API, and an opt-in loopback console.
+SQLite schema v5, verified SQLite backup/restore, exact qualified
+v3-to-v4-to-v5 migration, immutable diagnostic-artifact custody and
+export/import, read-only exports, the Unix API, and an opt-in loopback console.
 Broader historical migration chains, notifications, retention automation,
 privileged hardware helpers, and package-driven upgrades are not implemented
 yet.
@@ -152,18 +153,19 @@ With the sample watcher configured, `doctor` is expected to report a missing
 admission until the next section is complete. That is a useful failed state,
 not a reason to create a lock by hand.
 
-The current binary normally opens only SQLite schema v4. It has one explicit
-migration source: the exact schema-v3 artifact shipped in the qualified
-`v0.1.0` release. `admin upgrade` first validates that complete v3 schema and
-its stored semantics, creates and reopens a digest-addressed backup, and then
-performs one transactional v3-to-v4 migration. Historical v3 watcher runs are
-retained with explicit `provider_intake_not_recorded` gaps; the migration does
-not manufacture provider identities, raw captures, or durable acknowledgments
-that v3 never stored. Any historical v3 checkpoint bytes remain preserved for
-reopening, but are not eligible to advance the live v4 cursor because no exact
-provider-intake acknowledgment exists for them.
+The current binary normally opens only SQLite schema v5. It has two exact
+migration sources: schema v4, and the exact schema-v3 artifact shipped in the
+qualified `v0.1.0` release. `admin upgrade` validates the complete source
+schema and stored semantics, creates and reopens a digest-addressed backup for
+each transition, and applies v3-to-v4 and then v4-to-v5 transactionally.
+Historical v3 watcher runs retain explicit `provider_intake_not_recorded`
+gaps; the migration manufactures neither provider identities, raw captures,
+durable acknowledgments, nor diagnostic artifacts that the source never
+stored. Any historical v3 checkpoint bytes remain preserved for reopening,
+but cannot advance the live cursor because no exact provider-intake
+acknowledgment exists for them.
 
-Schema v1, schema v2, stale or modified v3 databases, and every other
+Schema v1, schema v2, stale or modified v3/v4 databases, and every other
 incompatible representation remain fail-closed and byte-preserved. `init`,
 normal open, backup/restore, and daemon startup refuse them without rewriting
 their meaning. Preserve incompatible bytes with a cold archive; such an archive
@@ -425,6 +427,56 @@ immutable record in `nq.evaluation_history.v1`. A later refused evaluation for
 an existing condition may retain that finding with refused visibility, but the
 finding is not the source from which the evaluation is reconstructed.
 
+## Execute, inspect, export, and import a diagnostic artifact
+
+The bounded diagnostic command runs the configured instance, commits its
+ordinary run/evaluation history and `nq.diagnostic_execution.v2` artifact in
+one transaction, reopens the committed artifact, and writes the exact
+canonical bytes with no trailing newline:
+
+```sh
+sudo -u nq nq --config /etc/nq/nq.toml diagnostics execute host-local \
+  > diagnostic.json
+```
+
+The current producer is intentionally narrow: the existing
+`nq.host.load_pressure/v1` diagnostic may emit a determinate result, a
+governed received-input or detector refusal, or a typed no-byte provider
+no-response/acquisition failure. An admission refusal creates no execution
+artifact. Other profiles and historical runs do not receive reconstructed
+artifacts. The frozen v1 contract remains a supported compatibility boundary,
+not the current live-emission format.
+
+After process restart, use the contract-owned artifact ID from the document:
+
+```sh
+sudo -u nq nq --config /etc/nq/nq.toml --json \
+  diagnostics inspect sha256:LOWERCASE_64_HEX_DIGEST
+sudo -u nq nq --config /etc/nq/nq.toml \
+  diagnostics export sha256:LOWERCASE_64_HEX_DIGEST > exported.json
+```
+
+`inspect` reports commitment, origin, schema support, exact byte state, and
+the decoded diagnostic when supported. `export` returns only verified
+canonical bytes; committed-unavailable and corrupt states fail explicitly.
+The query index locates an artifact but never redefines its identity.
+
+Import is a bounded custody operation over one physical regular file:
+
+```sh
+sudo -u nq nq --config /etc/nq/nq.toml --json \
+  diagnostics import exported.json
+```
+
+The import receipt records committed, existing, or rematerialized custody.
+Import does not authenticate the producer, qualify a profile, establish
+reliance, make the artifact current, or grant authorization. Supported v1 and
+v2 documents receive strict semantic and self-identity validation. Canonical
+unknown schemas may be retained only as explicitly unsupported custody and
+cannot enter diagnostic evaluation. Locally emitted artifacts are additionally
+checked against their retained semantic history before inspection or export;
+that local correspondence is not inferred for imported bytes.
+
 ## Apply configuration safely
 
 There is no daemon reload in this preview. Validate a root-owned candidate,
@@ -538,16 +590,18 @@ nq_helper_command --config /etc/nq/nq.toml doctor
 sudo systemctl start nqd.service
 ```
 
-Schema v4 is the current schema. The preview's `admin upgrade` creates and
-semantically verifies a digest-addressed backup for both supported cases. It
-returns `already_current` only for an exactly compatible v4 store. For the
-exact qualified v3 schema, it records a v3-to-v4 receipt, adds the provider
-intake custody structures, and marks each historical watcher run with an
-explicit non-upgraded intake gap. The backup is complete before the first
-source write, and migration failure leaves the v3 source transactionally
-unchanged.
+Schema v5 is the current schema. The preview's `admin upgrade` creates and
+semantically verifies a digest-addressed backup before each supported
+transition. It returns `already_current` only for an exactly compatible v5
+store. Exact v4 receives the additive diagnostic-artifact custody transition.
+Exact qualified v3 first records the established v3-to-v4 receipt and explicit
+historical provider-intake gaps, then receives a separately backed-up
+v4-to-v5 transition. The v5 receipt states that historical diagnostic
+artifacts were absent and synthesized none. Every backup is complete before
+the corresponding source write; failure leaves that transition's source
+transactionally unchanged.
 
-There is no v1-to-v4, v2-to-v4, or arbitrary-v3 migration. `nqd` and the
+There is no v1-to-v5, v2-to-v5, or arbitrary-v3/v4 migration. `nqd` and the
 command reject those representations before any rewrite. Validation compares
 the compiled definitions of tables, indexes, triggers, and views as well as the
 application and schema version, so a same-named object with changed SQL is
@@ -555,8 +609,9 @@ refused. Do not force startup, edit SQLite metadata, or relabel old rows as
 provider intake, acknowledgment, or typed testimony.
 
 Rollback means reinstalling the matching previous binaries and using `nq
-restore` with their verified pre-upgrade backup. Reverse migration is not
-assumed.
+restore` with the verified backup for that exact transition. A chained
+v3-to-v5 upgrade therefore has distinct v3 and v4 recovery points. Reverse
+migration is not assumed.
 
 ## Uninstall versus explicit data purge
 

@@ -11,10 +11,12 @@
 use nq_protocol::Sha256Digest;
 use nq_store::{
     AdmissionIdentity, AdmissionInput, AdmittedCollectionCompletion, BindingEventInput,
-    BindingMaterializationInput, CanonicalDocument, CollectionInput, ProfileDescriptorInput,
+    BindingMaterializationInput, CanonicalDocument, CollectionInput, DiagnosticArtifactByteState,
+    DiagnosticArtifactImportDisposition, DiagnosticArtifactImportInput, DiagnosticArtifactLookup,
+    DiagnosticArtifactOrigin, DiagnosticArtifactSchemaSupport, ProfileDescriptorInput,
     ProviderIntakeCommit, ProviderIntakeInput, RefusalInput, ReportInput, RunInput,
     RunResultStatusInput, StatusEventInput, Store, StoreError, SubmissionDisposition,
-    SubmissionInput, detector_suite_identity_digest,
+    SubmissionInput, UnavailableDiagnosticArtifactImportInput, detector_suite_identity_digest,
 };
 use serde_json::{Value, json};
 
@@ -346,6 +348,7 @@ fn commit_admitted_fixture(
             Ok::<_, StoreError>(AdmittedCollectionCompletion {
                 value: (),
                 evaluations: Vec::new(),
+                diagnostic_artifact: None,
                 status: StatusEventInput {
                     status_event_id: format!("status-{run_id}"),
                     component_kind: "instance".to_owned(),
@@ -570,4 +573,87 @@ fn a_verified_backup_round_trips_the_evidence() {
         .expect("snapshot");
     assert_eq!(snapshot.reports.len(), 1);
     assert_eq!(snapshot.reports[0].report_id, report_id);
+}
+
+#[test]
+fn diagnostic_artifact_custody_round_trips_without_collapsing_identity_or_availability() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let database = directory.path().join("artifact.db");
+    let artifact_id = digest("contract-artifact-identity");
+    let artifact = doc(json!({
+        "schema": "nq.diagnostic_execution.v1",
+        "artifact_id": artifact_id.as_str(),
+        "result": "fixture",
+    }));
+    assert_ne!(artifact_id.as_str(), artifact.digest());
+    {
+        let mut store = Store::initialize(&database).expect("initialize artifact store");
+        let receipt = store
+            .import_diagnostic_artifact(&DiagnosticArtifactImportInput {
+                import_id: "contract-import".to_owned(),
+                artifact_id: artifact_id.clone(),
+                contract_schema: "nq.diagnostic_execution.v1".to_owned(),
+                canonical_bytes: artifact.clone(),
+                imported_at: TS.to_owned(),
+            })
+            .expect("import exact artifact");
+        assert_eq!(
+            receipt.disposition,
+            DiagnosticArtifactImportDisposition::Committed
+        );
+    }
+    let mut reopened = Store::open(&database).expect("reopen artifact store");
+    let DiagnosticArtifactLookup::Found(access) = reopened
+        .diagnostic_artifact(&artifact_id, &["nq.diagnostic_execution.v1"])
+        .expect("lookup exact artifact")
+    else {
+        panic!("artifact commitment missing after restart");
+    };
+    assert_eq!(
+        access.schema_support,
+        DiagnosticArtifactSchemaSupport::Supported
+    );
+    assert!(matches!(
+        access.commitment.origin,
+        DiagnosticArtifactOrigin::Imported { import_id, .. }
+            if import_id == "contract-import"
+    ));
+    assert!(matches!(
+        access.byte_state,
+        DiagnosticArtifactByteState::VerifiedAvailable { canonical_bytes }
+            if canonical_bytes == artifact
+    ));
+
+    let unavailable_id = digest("contract-unavailable-artifact");
+    let unavailable_bytes = doc(json!({
+        "schema": "nq.future_diagnostic_execution.v2",
+        "artifact_id": unavailable_id.as_str(),
+    }));
+    reopened
+        .import_unavailable_diagnostic_artifact(&UnavailableDiagnosticArtifactImportInput {
+            import_id: "contract-unavailable-import".to_owned(),
+            artifact_id: unavailable_id.clone(),
+            contract_schema: "nq.future_diagnostic_execution.v2".to_owned(),
+            canonical_bytes_sha256: Sha256Digest::parse(unavailable_bytes.digest().to_owned())
+                .expect("typed full-byte digest"),
+            canonical_bytes_length: u64::try_from(unavailable_bytes.as_bytes().len())
+                .expect("fixture length"),
+            imported_at: TS.to_owned(),
+        })
+        .expect("commit unavailable artifact");
+    let DiagnosticArtifactLookup::Found(unavailable) = reopened
+        .diagnostic_artifact(&unavailable_id, &["nq.diagnostic_execution.v1"])
+        .expect("lookup unavailable artifact")
+    else {
+        panic!("unavailable commitment missing");
+    };
+    assert!(matches!(
+        unavailable.schema_support,
+        DiagnosticArtifactSchemaSupport::Unsupported { contract_schema }
+            if contract_schema == "nq.future_diagnostic_execution.v2"
+    ));
+    assert_eq!(
+        unavailable.byte_state,
+        DiagnosticArtifactByteState::CommittedUnavailable
+    );
 }

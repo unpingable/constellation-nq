@@ -8,6 +8,8 @@ pub mod admission;
 pub mod config;
 pub mod coordination;
 pub mod diagnostic_execution;
+pub mod diagnostic_execution_supported;
+pub mod diagnostic_execution_v2;
 pub mod engine;
 pub mod evaluator_identity;
 pub mod identity;
@@ -33,25 +35,37 @@ pub use diagnostic_execution::{
     RawCaptureModeV1, ReceivedInputV1, RefusedInputV1, SelectedInputV1, SemanticIdentityV1,
     diagnostic_canonicalization_identity,
 };
+pub use diagnostic_execution_supported::{
+    SUPPORTED_DIAGNOSTIC_EXECUTION_SCHEMAS, SupportedDiagnosticExecution,
+};
+pub use diagnostic_execution_v2::{
+    AcquisitionIntervalV2, ClockQualificationV2, DIAGNOSTIC_EXECUTION_V2_SCHEMA, DiagnosticClaimV2,
+    DiagnosticExecutionSchemaV2, DiagnosticExecutionV2, DiagnosticInputAccountingV2,
+    DiagnosticOutcomeV2, FailedAcquisitionCustodyV2, FailedInputCauseV2, FailedInputV2,
+    ProfileRefusalBindingV2, ReceivedInputV2, RefusedInputV2, UnsupportedCauseV2,
+    UnsupportedCodeV2, UnsupportedOriginV2,
+};
 pub use engine::{
     AcquisitionFailure, AcquisitionFailureClass, AcquisitionRefusal, AdmissionRefusal,
     AdmissionRefusalBoundary, AdmissionRefusalCode, AdmissionRefusalDetails,
     AdmittedReportVerification, BindingActionOutcome, COLLECTION_OUTCOME_SCHEMA,
     COLLECTION_OUTCOME_V1_SCHEMA, COLLECTION_OUTCOME_V2_SCHEMA, CollectionEngine,
-    CollectionOutcome, CollectionOutcomeSchema, CollectionResult, EVALUATION_ENVELOPE_SCHEMA,
-    EVALUATION_RESULT_SCHEMA, EvaluationContextV1, EvaluationDetectorIdentity,
-    EvaluationEnvelopeSchema, EvaluationEnvelopeV2, EvaluationProfileIdentity,
-    EvaluationResultSchema, EvaluationResultV1, EvaluationWatermarkV2, GOVERNED_REFUSAL_SCHEMA,
-    GovernedProfileRefusal, GovernedRefusal, GovernedRefusalOrigin, GovernedRefusalSchema,
-    JsonErrorCategory, PlatformObservation, ProtocolCanonicalizationFailure, ProtocolRejection,
-    ProtocolRejectionBoundary, ProtocolRejectionCode, ProtocolRejectionFailure,
-    ProtocolValidationFailure, ProviderIntakeHistoryVerification, RUN_RESOURCE_OUTCOME_SCHEMA,
-    RetryDisposition, RunHardLimits, RunResourceOutcomeSchema, RunResourceOutcomeV1,
-    StructuredJsonError, VerificationRefusal, decode_collection_outcome,
-    decode_collection_outcome_ndjson, evaluation_history_bounded, rejected_custody_snapshot,
-    rejected_custody_snapshot_bounded, status_snapshot_v2, status_snapshot_v3,
-    validate_evaluation_refusal_history, validate_provider_intake_history,
-    validate_rejected_custody_history, validate_status_history_v2, validate_watcher_run_history,
+    CollectionOutcome, CollectionOutcomeSchema, CollectionResult,
+    DiagnosticArtifactHistoryVerification, EVALUATION_ENVELOPE_SCHEMA, EVALUATION_RESULT_SCHEMA,
+    EvaluationContextV1, EvaluationDetectorIdentity, EvaluationEnvelopeSchema,
+    EvaluationEnvelopeV2, EvaluationProfileIdentity, EvaluationResultSchema, EvaluationResultV1,
+    EvaluationWatermarkV2, GOVERNED_REFUSAL_SCHEMA, GovernedProfileRefusal, GovernedRefusal,
+    GovernedRefusalOrigin, GovernedRefusalSchema, JsonErrorCategory, PlatformObservation,
+    ProtocolCanonicalizationFailure, ProtocolRejection, ProtocolRejectionBoundary,
+    ProtocolRejectionCode, ProtocolRejectionFailure, ProtocolValidationFailure,
+    ProviderIntakeHistoryVerification, RUN_RESOURCE_OUTCOME_SCHEMA, RetryDisposition,
+    RunHardLimits, RunResourceOutcomeSchema, RunResourceOutcomeV1, StructuredJsonError,
+    VerificationRefusal, decode_collection_outcome, decode_collection_outcome_ndjson,
+    evaluation_history_bounded, rejected_custody_snapshot, rejected_custody_snapshot_bounded,
+    reopen_diagnostic_artifact, status_snapshot_v2, status_snapshot_v3,
+    validate_diagnostic_artifact_history, validate_evaluation_refusal_history,
+    validate_provider_intake_history, validate_rejected_custody_history,
+    validate_status_history_v2, validate_watcher_run_history,
 };
 pub use evaluator_identity::{EvaluatorIdentityError, EvaluatorRuntimeIdentity};
 pub use identity::{

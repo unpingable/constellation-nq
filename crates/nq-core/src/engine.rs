@@ -12,8 +12,7 @@ use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use nq_profiles::{
     DetectorInput, DetectorReport, DetectorState, EVALUATOR_SOURCE_DIGEST, EvidenceWatermark,
     ProfileModule, ProfileSemanticId, ReportInput as ProfileReportInput, ScopeGrant,
-    SemanticReportStatus, ValidatedReport, ValidationContext, VantageGrant, all_profiles,
-    profile_semantic_id,
+    SemanticReportStatus, ValidatedReport, ValidationContext, VantageGrant, profile_semantic_id,
 };
 use nq_protocol::{
     Capability, Checkpoint, CollectionBounds, HelperRequest, InstanceId, MonotonicClock,
@@ -23,6 +22,8 @@ use nq_protocol::{
 use nq_store::{
     AdmissionIdentity, AdmissionInput, AdmittedCollectionCompletion, BindingEventInput,
     BindingMaterializationInput, CanonicalDocument, CollectionInput, CoverageInput,
+    DiagnosticArtifactByteState, DiagnosticArtifactCommitInput, DiagnosticArtifactLocalOriginInput,
+    DiagnosticArtifactLookup, DiagnosticArtifactOrigin, DiagnosticArtifactSchemaSupport,
     EvaluationCommitInput, EvaluationInput, EvaluationProfileBinding, EvidenceSnapshot,
     FindingEventInput, FindingEvidenceInput, FindingSnapshotRow, GenesisInput, ObservationInput,
     ProfileDescriptorInput, ProviderIntakeCommit, ProviderIntakeInput, ProviderIntakePreflight,
@@ -42,14 +43,22 @@ use crate::config::{
 };
 use crate::coordination::{CoordinationError, InstanceGuard};
 use crate::diagnostic_execution::{
-    AcquisitionIntervalV1, AdmittedInputV1, DiagnosticArtifactId, DiagnosticClaimStatusV1,
-    DiagnosticClaimV1, DiagnosticCoherenceV1, DiagnosticConditionV1, DiagnosticCoverageV1,
-    DiagnosticDerivationV1, DiagnosticExecutionSchema, DiagnosticExecutionV1,
-    DiagnosticInputAccountingV1, DiagnosticLimitationKindV1, DiagnosticLimitationV1,
-    DiagnosticOutcomeV1, DiagnosticProducerV1, DiagnosticProjectionV1, DiagnosticRequestId,
-    DiagnosticRunId, DiagnosticStateBindingV1, DiagnosticSubjectV1, EvidenceAvailabilityV1,
-    ExpectedInputV1, NormalizedArtifactId, ProjectedArtifactId, RawArtifactId, RawCaptureModeV1,
-    ReceivedInputV1, SelectedInputV1, SemanticIdentityV1, diagnostic_canonicalization_identity,
+    AdmittedInputV1, DiagnosticArtifactId, DiagnosticClaimStatusV1, DiagnosticCoherenceV1,
+    DiagnosticConditionV1, DiagnosticCoverageV1, DiagnosticDerivationV1,
+    DiagnosticLimitationKindV1, DiagnosticLimitationV1, DiagnosticProducerV1,
+    DiagnosticProjectionV1, DiagnosticRequestId, DiagnosticRunId, DiagnosticStateBindingV1,
+    DiagnosticSubjectV1, EvidenceAvailabilityV1, ExpectedInputV1, NormalizedArtifactId,
+    ProjectedArtifactId, RawArtifactId, RawCaptureModeV1, SelectedInputV1, SemanticIdentityV1,
+    diagnostic_canonicalization_identity,
+};
+use crate::diagnostic_execution_supported::{
+    SUPPORTED_DIAGNOSTIC_EXECUTION_SCHEMAS, SupportedDiagnosticExecution,
+};
+use crate::diagnostic_execution_v2::{
+    AcquisitionIntervalV2, ClockQualificationV2, DIAGNOSTIC_EXECUTION_V2_SCHEMA, DiagnosticClaimV2,
+    DiagnosticExecutionSchemaV2, DiagnosticExecutionV2, DiagnosticInputAccountingV2,
+    DiagnosticOutcomeV2, FailedAcquisitionCustodyV2, FailedInputCauseV2, FailedInputV2,
+    ProfileRefusalBindingV2, ReceivedInputV2, RefusedInputV2,
 };
 use crate::evaluator_identity::EvaluatorRuntimeIdentity;
 use crate::identity::{ExecutionIdentity, VerifiedLaunch};
@@ -1284,13 +1293,19 @@ impl GovernedRefusal {
         }
     }
 
-    /// Validate stable identity and origin-specific dependent invariants.
+    /// Validate the versioned transport without consulting the current
+    /// compiled profile catalog.
+    ///
+    /// This is the historical reopening boundary. It preserves the exact
+    /// typed refusal and its internal dependent-field invariants even after a
+    /// profile generation leaves a later binary. It does not establish that
+    /// the profile is currently compiled or admissible for new work.
     ///
     /// # Errors
     ///
-    /// Returns when a refusal lacks a stable identity or an acquisition-origin
-    /// refusal contains projections that disagree with its exact outcome.
-    pub fn validate(&self) -> Result<(), EngineError> {
+    /// Returns when a refusal lacks a stable identity, an acquisition carrier
+    /// is internally inconsistent, or a typed origin is structurally invalid.
+    pub fn validate_transport(&self) -> Result<(), EngineError> {
         if self.refusal_id.is_empty() {
             return Err(EngineError::Invariant(
                 "governed refusal identity cannot be empty".into(),
@@ -1303,7 +1318,13 @@ impl GovernedRefusal {
         }
         match &self.origin {
             GovernedRefusalOrigin::Acquisition(refusal) => refusal.failure.validate()?,
-            GovernedRefusalOrigin::Protocol(_) => {}
+            GovernedRefusalOrigin::Protocol(refusal) => {
+                if refusal.responsible_instance_id.is_empty() {
+                    return Err(EngineError::Invariant(
+                        "protocol refusal responsible instance cannot be empty".into(),
+                    ));
+                }
+            }
             GovernedRefusalOrigin::Helper(refusal) => {
                 let expected = match refusal.code {
                     nq_protocol::RefusalCode::UnsupportedProtocol => {
@@ -1352,21 +1373,35 @@ impl GovernedRefusal {
                         "profile refusal identity or message is empty".into(),
                     ));
                 }
-                let compiled =
-                    nq_profiles::resolve_profile_key(&refusal.profile).ok_or_else(|| {
-                        EngineError::Invariant(format!(
-                            "profile refusal names uncompiled profile {}/{}",
-                            refusal.profile.id, refusal.profile.version
-                        ))
-                    })?;
-                let expected = profile_semantic_id(compiled.descriptor())
-                    .map_err(|error| EngineError::Canonical(error.to_string()))?;
-                if profile.profile_semantic_id != expected {
-                    return Err(EngineError::Invariant(format!(
-                        "profile refusal semantic identity disagrees with compiled profile {}/{}",
-                        refusal.profile.id, refusal.profile.version
-                    )));
-                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate stable identity and origin-specific dependent invariants for
+    /// current live use.
+    ///
+    /// # Errors
+    ///
+    /// Returns when a refusal lacks a stable identity or an acquisition-origin
+    /// refusal contains projections that disagree with its exact outcome.
+    pub fn validate(&self) -> Result<(), EngineError> {
+        self.validate_transport()?;
+        if let GovernedRefusalOrigin::Profile(profile) = &self.origin {
+            let refusal = &profile.refusal;
+            let compiled = nq_profiles::resolve_profile_key(&refusal.profile).ok_or_else(|| {
+                EngineError::Invariant(format!(
+                    "profile refusal names uncompiled profile {}/{}",
+                    refusal.profile.id, refusal.profile.version
+                ))
+            })?;
+            let expected = profile_semantic_id(compiled.descriptor())
+                .map_err(|error| EngineError::Canonical(error.to_string()))?;
+            if profile.profile_semantic_id != expected {
+                return Err(EngineError::Invariant(format!(
+                    "profile refusal semantic identity disagrees with compiled profile {}/{}",
+                    refusal.profile.id, refusal.profile.version
+                )));
             }
         }
         Ok(())
@@ -1699,10 +1734,11 @@ pub struct CollectionEngine {
     evaluator_identity: Result<EvaluatorRuntimeIdentity, String>,
 }
 
+#[derive(Debug)]
 struct CollectionExecution {
     outcome: CollectionOutcome,
-    diagnostic: Option<DiagnosticExecutionV1>,
-    diagnostic_reports: Option<Vec<DetectorReport>>,
+    diagnostic: Option<SupportedDiagnosticExecution>,
+    diagnostic_artifact_id: Option<Sha256Digest>,
 }
 
 impl CollectionExecution {
@@ -1710,7 +1746,7 @@ impl CollectionExecution {
         Self {
             outcome,
             diagnostic: None,
-            diagnostic_reports: None,
+            diagnostic_artifact_id: None,
         }
     }
 }
@@ -1723,13 +1759,14 @@ const INITIAL_DIAGNOSTIC_DETECTOR_DIGEST: &str =
     "sha256:7de797da3d9d3a6ae8e21e5d77b95095453336cd38f606ffb3eb29ff6a32e2cf";
 
 #[derive(Clone)]
-struct DiagnosticEmissionContext {
+struct DiagnosticEmissionBase {
     producer: DiagnosticProducerV1,
     request_id: DiagnosticRequestId,
     run_id: DiagnosticRunId,
     question: SemanticIdentityV1,
     subject: DiagnosticSubjectV1,
     profile: SemanticIdentityV1,
+    profile_semantic_id: Sha256Digest,
     vantage: SemanticIdentityV1,
     state_model: SemanticIdentityV1,
     evaluator: SemanticIdentityV1,
@@ -1737,8 +1774,92 @@ struct DiagnosticEmissionContext {
     projection: DiagnosticProjectionV1,
     execution_clock: SemanticIdentityV1,
     started_at: DateTime<Utc>,
-    attempt_interval: AcquisitionIntervalV1,
-    inputs: DiagnosticInputAccountingV1,
+    attempt_interval: AcquisitionIntervalV2,
+    capture_policy: SemanticIdentityV1,
+    admission_rule: SemanticIdentityV1,
+    normalization_rule: SemanticIdentityV1,
+    selection_rule: SemanticIdentityV1,
+    limitations: Vec<DiagnosticLimitationV1>,
+    nonclaims: Vec<String>,
+    expected_evaluator_artifact_digest: Sha256Digest,
+    expected_profile_semantic_id: ProfileSemanticId,
+    expected_instance_id: String,
+    expected_scope: ScopeConfig,
+    expected_vantage: VantageConfig,
+}
+
+impl DiagnosticEmissionBase {
+    fn seal(
+        self,
+        inputs: DiagnosticInputAccountingV2,
+        state_bindings: Vec<DiagnosticStateBindingV1>,
+        claims: Vec<DiagnosticClaimV2>,
+        primary_claim_id: Option<String>,
+        outcome: DiagnosticOutcomeV2,
+    ) -> Result<DiagnosticExecutionV2, EngineError> {
+        // A run-only diagnostic completes at the independently retained
+        // terminal acquisition boundary. Do not add a second unpersisted wall
+        // clock sample that historical reopening could not reconstruct.
+        let completed_at = self.attempt_interval.ended_at;
+        let mut artifact = DiagnosticExecutionV2 {
+            schema: DiagnosticExecutionSchemaV2::V2,
+            artifact_id: DiagnosticArtifactId(nq_protocol::sha256_bytes(
+                b"diagnostic-execution-artifact-placeholder",
+            )),
+            canonicalization: diagnostic_canonicalization_identity()
+                .map_err(|error| EngineError::Canonical(error.to_string()))?,
+            producer: self.producer,
+            request_id: self.request_id,
+            run_id: self.run_id,
+            question: self.question,
+            subject: self.subject,
+            profile: self.profile,
+            profile_semantic_id: self.profile_semantic_id,
+            vantage: self.vantage,
+            state_model: self.state_model,
+            evaluator: self.evaluator,
+            threshold_policy: self.threshold_policy,
+            projection: self.projection,
+            execution_clock: self.execution_clock,
+            started_at: self.started_at,
+            completed_at,
+            attempt_interval: self.attempt_interval,
+            inputs,
+            state_bindings,
+            claims,
+            primary_claim_id,
+            outcome,
+            limitations: self.limitations,
+            nonclaims: self.nonclaims,
+        };
+        artifact.artifact_id = artifact
+            .computed_artifact_id()
+            .map_err(|error| EngineError::Canonical(error.to_string()))?;
+        artifact
+            .canonical_bytes()
+            .map_err(|error| EngineError::Invariant(error.to_string()))?;
+        Ok(artifact)
+    }
+}
+
+#[derive(Clone)]
+struct DiagnosticEmissionContext {
+    producer: DiagnosticProducerV1,
+    request_id: DiagnosticRequestId,
+    run_id: DiagnosticRunId,
+    question: SemanticIdentityV1,
+    subject: DiagnosticSubjectV1,
+    profile: SemanticIdentityV1,
+    profile_semantic_id: Sha256Digest,
+    vantage: SemanticIdentityV1,
+    state_model: SemanticIdentityV1,
+    evaluator: SemanticIdentityV1,
+    threshold_policy: SemanticIdentityV1,
+    projection: DiagnosticProjectionV1,
+    execution_clock: SemanticIdentityV1,
+    started_at: DateTime<Utc>,
+    attempt_interval: AcquisitionIntervalV2,
+    inputs: DiagnosticInputAccountingV2,
     state_bindings: Vec<DiagnosticStateBindingV1>,
     limitations: Vec<DiagnosticLimitationV1>,
     nonclaims: Vec<String>,
@@ -1757,7 +1878,7 @@ impl DiagnosticEmissionContext {
         &self,
         evaluation: &EvaluationEnvelopeV2,
         detector_reports: &[DetectorReport],
-    ) -> Result<DiagnosticExecutionV1, EngineError> {
+    ) -> Result<DiagnosticExecutionV2, EngineError> {
         if evaluation.detector.id != self.question.id
             || evaluation.detector.version != self.question.version
             || evaluation.detector.digest != self.question.digest.as_str()
@@ -1838,120 +1959,51 @@ impl DiagnosticEmissionContext {
         };
         selected.projected_artifact_id = projected_artifact_id;
 
-        let (claims, primary_claim_id, outcome) = match evaluation.result.state {
-            DetectorState::Present | DetectorState::ExplicitlyAbsent => {
-                if !self.report_complete {
-                    return Err(EngineError::Invariant(
-                        "determinate diagnostic result came from incomplete report coverage".into(),
-                    ));
-                }
-                if evaluation.result.evidence.is_empty()
-                    || evaluation.result.evidence.iter().any(|evidence| {
-                        evidence.report_id != self.report_id
-                            || evidence.report_sequence != report_sequence
-                            || evidence.report_digest != detector_report.report.report_digest
-                            || match evidence.observation_ordinal {
-                                Some(ordinal) => {
-                                    !detector_report
-                                        .report
-                                        .observations
-                                        .iter()
-                                        .any(|observation| {
-                                            observation.ordinal == ordinal
-                                                && timestamp(observation.observed_at)
-                                                    == timestamp(evidence.observed_at)
-                                        })
-                                }
-                                None => {
-                                    timestamp(detector_report.report.observed_at)
-                                        != timestamp(evidence.observed_at)
-                                }
-                            }
-                    })
-                {
-                    return Err(EngineError::Invariant(
-                        "determinate diagnostic evidence differs from the exact detector input"
-                            .into(),
-                    ));
-                }
-                let condition = match evaluation.result.state {
-                    DetectorState::Present => DiagnosticConditionV1::Present,
-                    DetectorState::ExplicitlyAbsent => DiagnosticConditionV1::ExplicitlyAbsent,
-                    DetectorState::CannotEvaluate => unreachable!(),
-                };
-                let claim_id = format!("claim:{}", evaluation.result.condition);
-                let mut claim_limitations = evaluation.result.limitations.clone();
-                claim_limitations.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-                claim_limitations.dedup();
-                let mut claim_nonclaims = vec![
-                    "the causal source of the bounded condition is not established".to_owned(),
-                    "the host boot or deployment generation is not established".to_owned(),
-                ];
-                claim_nonclaims.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-                let claim = DiagnosticClaimV1 {
-                    claim_id: claim_id.clone(),
-                    proposition: match condition {
-                        DiagnosticConditionV1::Present => {
-                            format!(
-                                "bounded condition {} is present",
-                                evaluation.result.condition
-                            )
+        if matches!(
+            evaluation.result.state,
+            DetectorState::Present | DetectorState::ExplicitlyAbsent
+        ) && (evaluation.result.evidence.is_empty()
+            || evaluation.result.evidence.iter().any(|evidence| {
+                evidence.report_id != self.report_id
+                    || evidence.report_sequence != report_sequence
+                    || evidence.report_digest != detector_report.report.report_digest
+                    || match evidence.observation_ordinal {
+                        Some(ordinal) => {
+                            !detector_report
+                                .report
+                                .observations
+                                .iter()
+                                .any(|observation| {
+                                    observation.ordinal == ordinal
+                                        && timestamp(observation.observed_at)
+                                            == timestamp(evidence.observed_at)
+                                })
                         }
-                        DiagnosticConditionV1::ExplicitlyAbsent => format!(
-                            "bounded condition {} is explicitly absent",
-                            evaluation.result.condition
-                        ),
-                        _ => unreachable!(),
-                    },
-                    status: DiagnosticClaimStatusV1::Established,
-                    condition_effect: Some(condition),
-                    dependency_input_ids: inputs
-                        .selected
-                        .iter()
-                        .map(|input| input.input_id.clone())
-                        .collect(),
-                    state_binding_ids: self
-                        .state_bindings
-                        .iter()
-                        .map(|binding| binding.binding_id.clone())
-                        .collect(),
-                    required_distinctions: vec!["subject_identity".to_owned()],
-                    limitations: claim_limitations,
-                    nonclaims: claim_nonclaims,
-                };
-                (
-                    vec![claim],
-                    Some(claim_id),
-                    DiagnosticOutcomeV1 {
-                        derivation: DiagnosticDerivationV1::Completed,
-                        condition,
-                        coherence: DiagnosticCoherenceV1::JointlyEstablished,
-                        coverage: DiagnosticCoverageV1::Complete,
-                        summary: evaluation.result.summary.clone(),
-                        refusal: None,
-                    },
-                )
-            }
-            DetectorState::CannotEvaluate => {
-                return Err(EngineError::DiagnosticUnsupported(format!(
-                    "the initial live producer does not emit detector refusals; retained refusal: {}",
-                    evaluation.result.summary
-                )));
-            }
-        };
-
-        // Sample completion after every fallible semantic derivation above and
-        // immediately before sealing the immutable artifact. Canonical
-        // serialization and self-digesting are the mechanical seal, not a
-        // second diagnostic evaluation.
-        let completed_at = parse_timestamp(&timestamp(Utc::now()))?;
-        if completed_at < evaluation.evaluated_at {
+                        None => {
+                            timestamp(detector_report.report.observed_at)
+                                != timestamp(evidence.observed_at)
+                        }
+                    }
+            }))
+        {
             return Err(EngineError::Invariant(
-                "diagnostic completion precedes detector evaluation".into(),
+                "determinate diagnostic evidence differs from the exact detector input".into(),
             ));
         }
-        let mut artifact = DiagnosticExecutionV1 {
-            schema: DiagnosticExecutionSchema::V1,
+        let (claims, primary_claim_id, outcome) = diagnostic_result_from_evaluation(
+            evaluation,
+            &inputs,
+            &self.state_bindings,
+            self.report_complete,
+        )?;
+
+        // The detector evaluation is the bounded semantic completion event.
+        // Its exact time is already independently retained with the evaluation;
+        // a later sealing-clock sample would be producer-self-asserted and
+        // impossible to reconstruct on historical reopening.
+        let completed_at = evaluation.evaluated_at;
+        let mut artifact = DiagnosticExecutionV2 {
+            schema: DiagnosticExecutionSchemaV2::V2,
             artifact_id: DiagnosticArtifactId(nq_protocol::sha256_bytes(
                 b"diagnostic-execution-artifact-placeholder",
             )),
@@ -1963,6 +2015,7 @@ impl DiagnosticEmissionContext {
             question: self.question.clone(),
             subject: self.subject.clone(),
             profile: self.profile.clone(),
+            profile_semantic_id: self.profile_semantic_id.clone(),
             vantage: self.vantage.clone(),
             state_model: self.state_model.clone(),
             evaluator: self.evaluator.clone(),
@@ -1987,6 +2040,107 @@ impl DiagnosticEmissionContext {
             .canonical_bytes()
             .map_err(|error| EngineError::Invariant(error.to_string()))?;
         Ok(artifact)
+    }
+}
+
+fn diagnostic_result_from_evaluation(
+    evaluation: &EvaluationEnvelopeV2,
+    inputs: &DiagnosticInputAccountingV2,
+    state_bindings: &[DiagnosticStateBindingV1],
+    report_complete: bool,
+) -> Result<(Vec<DiagnosticClaimV2>, Option<String>, DiagnosticOutcomeV2), EngineError> {
+    match evaluation.result.state {
+        DetectorState::Present | DetectorState::ExplicitlyAbsent => {
+            if !report_complete {
+                return Err(EngineError::Invariant(
+                    "determinate diagnostic result came from incomplete report coverage".into(),
+                ));
+            }
+            let condition = match evaluation.result.state {
+                DetectorState::Present => DiagnosticConditionV1::Present,
+                DetectorState::ExplicitlyAbsent => DiagnosticConditionV1::ExplicitlyAbsent,
+                DetectorState::CannotEvaluate => unreachable!(),
+            };
+            let claim_id = format!("claim:{}", evaluation.result.condition);
+            let mut claim_limitations = evaluation.result.limitations.clone();
+            claim_limitations.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+            claim_limitations.dedup();
+            let mut claim_nonclaims = vec![
+                "the causal source of the bounded condition is not established".to_owned(),
+                "the host boot or deployment generation is not established".to_owned(),
+            ];
+            claim_nonclaims.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+            let claim = DiagnosticClaimV2 {
+                claim_id: claim_id.clone(),
+                proposition: match condition {
+                    DiagnosticConditionV1::Present => {
+                        format!(
+                            "bounded condition {} is present",
+                            evaluation.result.condition
+                        )
+                    }
+                    DiagnosticConditionV1::ExplicitlyAbsent => format!(
+                        "bounded condition {} is explicitly absent",
+                        evaluation.result.condition
+                    ),
+                    _ => unreachable!(),
+                },
+                status: DiagnosticClaimStatusV1::Established,
+                condition_effect: Some(condition),
+                dependency_input_ids: inputs
+                    .selected
+                    .iter()
+                    .map(|input| input.input_id.clone())
+                    .collect(),
+                dependency_refusal_ids: Vec::new(),
+                dependency_failure_ids: Vec::new(),
+                state_binding_ids: state_bindings
+                    .iter()
+                    .map(|binding| binding.binding_id.clone())
+                    .collect(),
+                required_distinctions: vec!["subject_identity".to_owned()],
+                limitations: claim_limitations,
+                nonclaims: claim_nonclaims,
+            };
+            Ok((
+                vec![claim],
+                Some(claim_id),
+                DiagnosticOutcomeV2 {
+                    derivation: DiagnosticDerivationV1::Completed,
+                    condition,
+                    coherence: DiagnosticCoherenceV1::JointlyEstablished,
+                    coverage: DiagnosticCoverageV1::Complete,
+                    summary: evaluation.result.summary.clone(),
+                    refusals: Vec::new(),
+                    unsupported: Vec::new(),
+                },
+            ))
+        }
+        DetectorState::CannotEvaluate => {
+            let refusal = evaluation.result.refusal.as_ref().ok_or_else(|| {
+                EngineError::Invariant(
+                    "cannot_evaluate diagnostic has no governed detector refusal".into(),
+                )
+            })?;
+            let GovernedRefusalOrigin::Profile(_) = &refusal.origin else {
+                return Err(EngineError::Invariant(
+                    "cannot_evaluate diagnostic refusal is not profile-origin".into(),
+                ));
+            };
+            Ok((
+                Vec::new(),
+                None,
+                DiagnosticOutcomeV2 {
+                    derivation: DiagnosticDerivationV1::Refused,
+                    condition: DiagnosticConditionV1::Unresolved,
+                    coherence: DiagnosticCoherenceV1::NotEvaluated,
+                    coverage: DiagnosticCoverageV1::Partial,
+                    summary: evaluation.result.summary.clone(),
+                    refusals: vec![refusal.clone()],
+                    unsupported: Vec::new(),
+                },
+            ))
+        }
     }
 }
 
@@ -2077,6 +2231,7 @@ impl CollectionEngine {
     pub fn open(config: &NqConfig) -> Result<Self, EngineError> {
         let store = Store::open(&config.database_path)?;
         validate_provider_intake_history(&store)?;
+        validate_diagnostic_artifact_history(&store)?;
         Ok(Self {
             config: config.clone(),
             store,
@@ -2097,6 +2252,7 @@ impl CollectionEngine {
     ) -> Result<Self, EngineError> {
         let store = Store::open(&config.database_path)?;
         validate_provider_intake_history(&store)?;
+        validate_diagnostic_artifact_history(&store)?;
         Ok(Self {
             config: config.clone(),
             store,
@@ -2404,29 +2560,25 @@ impl CollectionEngine {
     /// Execute one admitted collection and emit its exact bounded diagnostic.
     ///
     /// This is a deliberately narrow first live producer for
-    /// `nq.diagnostic_execution.v1`. It is sealed to the exact current
+    /// `nq.diagnostic_execution.v2`. It is sealed to the exact current
     /// `nq.host/v1` load-pressure profile/detector identities and a fresh
     /// evaluation context containing exactly the newly admitted report. The
-    /// fresh-history restriction keeps v1's complete input accounting truthful
-    /// until history-aware input manifests are implemented. Only determinate
-    /// detector results are emitted. It
-    /// returns only after the ordinary collection, custody, evaluation, and
-    /// status transaction commits. The returned artifact is not stored or
-    /// re-exportable by NQ, so this is a bounded executable integration surface,
-    /// not a durable live producer. Expected non-success collection outcomes
-    /// remain durably available through the existing collection/history
-    /// surfaces; they are not reconstructed into a diagnostic artifact after
-    /// information loss.
+    /// fresh-history restriction keeps complete input accounting truthful until
+    /// history-aware manifests exist. Admitted determinate results, detector
+    /// refusals, received-input refusals, and no-byte acquisition failures are
+    /// committed as immutable artifacts in the same transaction as their
+    /// originating collection. Admission refusals create no run and therefore
+    /// cannot be recast as execution artifacts.
     ///
     /// # Errors
     ///
     /// Returns when the profile does not have exactly one compiled detector,
-    /// collection fails locally, or the completed collection cannot emit the
-    /// complete v1 input accounting.
+    /// collection fails locally, admission creates no run, or the completed
+    /// collection cannot emit exact v2 input accounting.
     pub fn diagnostic_execute(
         &mut self,
         watcher: &WatcherConfig,
-    ) -> Result<DiagnosticExecutionV1, EngineError> {
+    ) -> Result<SupportedDiagnosticExecution, EngineError> {
         let execution = self.collect_internal(watcher, true)?;
         execution.diagnostic.ok_or_else(|| {
             EngineError::DiagnosticUnsupported(format!(
@@ -2587,10 +2739,26 @@ impl CollectionEngine {
         match self.store.preflight_provider_intake(&intake_input)? {
             ProviderIntakePreflight::New => {}
             ProviderIntakePreflight::Existing {
-                canonical_result, ..
+                acknowledgment,
+                canonical_result,
             } => {
                 let outcome = decode_collection_outcome(canonical_result.as_bytes())?;
-                return Ok(CollectionExecution::without_diagnostic(outcome));
+                let diagnostic_artifact_id = emit_diagnostic
+                    .then(|| {
+                        self.store
+                            .diagnostic_artifact_id_for_run(&acknowledgment.run_id)
+                    })
+                    .transpose()?
+                    .flatten();
+                let diagnostic = diagnostic_artifact_id
+                    .as_ref()
+                    .map(|artifact_id| reopen_diagnostic_artifact(&self.store, artifact_id))
+                    .transpose()?;
+                return Ok(CollectionExecution {
+                    outcome,
+                    diagnostic,
+                    diagnostic_artifact_id,
+                });
             }
         }
 
@@ -2598,16 +2766,42 @@ impl CollectionEngine {
             let (submission, custody_refusal) =
                 rejected_transport_submission(&run_id, watcher, &capture)?;
             let outcome = if let Some(refusal) = custody_refusal {
-                CollectionOutcome::rejected(watcher.instance_id.clone(), run_id, refusal)
+                CollectionOutcome::rejected(watcher.instance_id.clone(), run_id.clone(), refusal)
             } else {
                 CollectionOutcome::acquisition_failed(
                     watcher.instance_id.clone(),
-                    run_id,
+                    run_id.clone(),
                     capture.outcome.clone(),
                 )?
             };
-            self.commit_non_success_collection(watcher, intake_input, run, submission, &outcome)?;
-            return Ok(CollectionExecution::without_diagnostic(outcome));
+            let diagnostic = diagnostic_node_id
+                .as_deref()
+                .map(|node_id| {
+                    prepare_non_success_diagnostic(
+                        node_id,
+                        watcher,
+                        profile,
+                        &provider_identity,
+                        &request,
+                        &run_id,
+                        &intake_input.intake_id,
+                        submission
+                            .as_ref()
+                            .map(|submission| submission.raw_bytes.as_slice()),
+                        &capture,
+                        self.require_evaluator_identity()?,
+                        &outcome,
+                    )
+                })
+                .transpose()?;
+            return self.commit_non_success_collection(
+                watcher,
+                intake_input,
+                run,
+                submission,
+                outcome,
+                diagnostic.as_ref(),
+            );
         }
 
         let raw = intake.raw_bytes().to_vec();
@@ -2629,16 +2823,37 @@ impl CollectionEngine {
                         refusal: stored_refusal,
                     },
                 };
-                let outcome =
-                    CollectionOutcome::rejected(watcher.instance_id.clone(), run_id, refusal);
-                self.commit_non_success_collection(
+                let outcome = CollectionOutcome::rejected(
+                    watcher.instance_id.clone(),
+                    run_id.clone(),
+                    refusal,
+                );
+                let diagnostic = diagnostic_node_id
+                    .as_deref()
+                    .map(|node_id| {
+                        prepare_non_success_diagnostic(
+                            node_id,
+                            watcher,
+                            profile,
+                            &provider_identity,
+                            &request,
+                            &run_id,
+                            &intake_input.intake_id,
+                            Some(submission.raw_bytes.as_slice()),
+                            &capture,
+                            self.require_evaluator_identity()?,
+                            &outcome,
+                        )
+                    })
+                    .transpose()?;
+                return self.commit_non_success_collection(
                     watcher,
                     intake_input,
                     run,
                     Some(submission),
-                    &outcome,
-                )?;
-                return Ok(CollectionExecution::without_diagnostic(outcome));
+                    outcome,
+                    diagnostic.as_ref(),
+                );
             }
             ProviderResponseInterpretationV1::Validated { response } => response,
         };
@@ -2656,16 +2871,37 @@ impl CollectionEngine {
                         refusal: stored_refusal,
                     },
                 };
-                let outcome =
-                    CollectionOutcome::rejected(watcher.instance_id.clone(), run_id, refusal);
+                let outcome = CollectionOutcome::rejected(
+                    watcher.instance_id.clone(),
+                    run_id.clone(),
+                    refusal,
+                );
+                let diagnostic = diagnostic_node_id
+                    .as_deref()
+                    .map(|node_id| {
+                        prepare_non_success_diagnostic(
+                            node_id,
+                            watcher,
+                            profile,
+                            &provider_identity,
+                            &request,
+                            &run_id,
+                            &intake_input.intake_id,
+                            Some(submission.raw_bytes.as_slice()),
+                            &capture,
+                            self.require_evaluator_identity()?,
+                            &outcome,
+                        )
+                    })
+                    .transpose()?;
                 self.commit_non_success_collection(
                     watcher,
                     intake_input,
                     run,
                     Some(submission),
-                    &outcome,
-                )?;
-                Ok(CollectionExecution::without_diagnostic(outcome))
+                    outcome,
+                    diagnostic.as_ref(),
+                )
             }
             ResponseOutcome::Report { report } => {
                 let report_digest = nq_protocol::semantic_digest(&report)
@@ -2691,22 +2927,45 @@ impl CollectionEngine {
                         };
                         let outcome = CollectionOutcome::rejected(
                             watcher.instance_id.clone(),
-                            run_id,
+                            run_id.clone(),
                             refusal,
                         );
-                        self.commit_non_success_collection(
+                        let diagnostic = diagnostic_node_id
+                            .as_deref()
+                            .map(|node_id| {
+                                prepare_non_success_diagnostic(
+                                    node_id,
+                                    watcher,
+                                    profile,
+                                    &provider_identity,
+                                    &request,
+                                    &run_id,
+                                    &intake_input.intake_id,
+                                    Some(submission.raw_bytes.as_slice()),
+                                    &capture,
+                                    self.require_evaluator_identity()?,
+                                    &outcome,
+                                )
+                            })
+                            .transpose()?;
+                        return self.commit_non_success_collection(
                             watcher,
                             intake_input,
                             run,
                             Some(submission),
-                            &outcome,
-                        )?;
-                        return Ok(CollectionExecution::without_diagnostic(outcome));
+                            outcome,
+                            diagnostic.as_ref(),
+                        );
                     }
                 };
+                // Profile validation is part of the durable semantic record.
+                // Bind it to the exact millisecond-precision custody time that
+                // the store can reopen, rather than transient sub-millisecond
+                // process-clock precision that would be discarded at commit.
+                let durable_received_at = parse_timestamp(&timestamp(capture.finished_at))?;
                 let context = ValidationContext::from_request(
                     &request,
-                    capture.finished_at,
+                    durable_received_at,
                     Duration::seconds(60),
                 );
                 match profile.validate(&context, &normalized) {
@@ -2726,17 +2985,35 @@ impl CollectionEngine {
                         };
                         let outcome = CollectionOutcome::rejected(
                             watcher.instance_id.clone(),
-                            run_id,
+                            run_id.clone(),
                             refusal,
                         );
+                        let diagnostic = diagnostic_node_id
+                            .as_deref()
+                            .map(|node_id| {
+                                prepare_non_success_diagnostic(
+                                    node_id,
+                                    watcher,
+                                    profile,
+                                    &provider_identity,
+                                    &request,
+                                    &run_id,
+                                    &intake_input.intake_id,
+                                    Some(submission.raw_bytes.as_slice()),
+                                    &capture,
+                                    self.require_evaluator_identity()?,
+                                    &outcome,
+                                )
+                            })
+                            .transpose()?;
                         self.commit_non_success_collection(
                             watcher,
                             intake_input,
                             run,
                             Some(submission),
-                            &outcome,
-                        )?;
-                        Ok(CollectionExecution::without_diagnostic(outcome))
+                            outcome,
+                            diagnostic.as_ref(),
+                        )
                     }
                     Ok(validated) => {
                         let report_id = Uuid::new_v4().to_string();
@@ -2750,6 +3027,26 @@ impl CollectionEngine {
                             &validated,
                             capture.finished_at,
                         )?;
+                        let diagnostic_context = diagnostic_node_id
+                            .as_deref()
+                            .map(|node_id| {
+                                prepare_diagnostic_emission(
+                                    node_id,
+                                    watcher,
+                                    profile,
+                                    &provider_identity,
+                                    &request,
+                                    &run_id,
+                                    &report_id,
+                                    &intake_input.intake_id,
+                                    &raw,
+                                    &normalized,
+                                    &validated,
+                                    &capture,
+                                    self.require_evaluator_identity()?,
+                                )
+                            })
+                            .transpose()?;
                         let submission = SubmissionInput {
                             submission_id,
                             raw_bytes: raw,
@@ -2791,17 +3088,50 @@ impl CollectionEngine {
                                     &current_findings,
                                     &evaluator_artifact_digest,
                                 )?;
-                                let diagnostic_reports = if emit_diagnostic {
-                                    let [evaluation] = prepared.as_slice() else {
-                                        return Err(EngineError::Invariant(
-                                            "diagnostic execution requires exactly one prepared evaluation"
-                                                .into(),
-                                        ));
+                                let (diagnostic_artifact_id, diagnostic_artifact) =
+                                    if let Some(context) = diagnostic_context.as_ref() {
+                                        let [evaluation] = prepared.as_slice() else {
+                                            return Err(EngineError::Invariant(
+                                                "diagnostic execution requires exactly one prepared evaluation"
+                                                    .into(),
+                                            ));
+                                        };
+                                        let artifact = context.finish(
+                                            &evaluation.envelope,
+                                            &evaluation.detector_reports,
+                                        )?;
+                                        let artifact_id = artifact.artifact_id.0.clone();
+                                        let canonical_bytes =
+                                            CanonicalDocument::from_canonical_bytes(
+                                                artifact.canonical_bytes().map_err(|error| {
+                                                    EngineError::Canonical(error.to_string())
+                                                })?,
+                                            )?;
+                                        (
+                                            Some(artifact_id.clone()),
+                                            Some(DiagnosticArtifactCommitInput {
+                                                artifact_id,
+                                                contract_schema:
+                                                    DIAGNOSTIC_EXECUTION_V2_SCHEMA.to_owned(),
+                                                canonical_bytes,
+                                                local_origin:
+                                                    DiagnosticArtifactLocalOriginInput {
+                                                        run_id: run_id.clone(),
+                                                        evaluation_id: Some(
+                                                            evaluation
+                                                                .envelope
+                                                                .evaluation_id
+                                                                .clone(),
+                                                        ),
+                                                        completed_at: timestamp(
+                                                            artifact.completed_at,
+                                                        ),
+                                                    },
+                                            }),
+                                        )
+                                    } else {
+                                        (None, None)
                                     };
-                                    Some(evaluation.detector_reports.clone())
-                                } else {
-                                    None
-                                };
                                 let evaluations = prepared
                                     .iter()
                                     .map(|prepared| prepared.envelope.clone())
@@ -2829,69 +3159,49 @@ impl CollectionEngine {
                                         .into_iter()
                                         .map(|prepared| prepared.commit)
                                         .collect(),
+                                    diagnostic_artifact,
                                     value: CollectionExecution {
                                         outcome,
                                         diagnostic: None,
-                                        diagnostic_reports,
+                                        diagnostic_artifact_id,
                                     },
                                 })
                             },
                         )?;
                         match committed {
                             ProviderIntakeCommit::Committed { mut value, .. } => {
-                                if let Some(node_id) = diagnostic_node_id.as_deref() {
-                                    let CollectionResult::Admitted { evaluations, .. } =
-                                        &value.outcome.result
-                                    else {
-                                        return Err(EngineError::Invariant(
-                                            "committed diagnostic execution is not an admitted collection"
-                                                .into(),
-                                        ));
-                                    };
-                                    let [evaluation] = evaluations.as_slice() else {
-                                        return Err(EngineError::Invariant(
-                                            "diagnostic execution requires exactly one committed evaluation"
-                                                .into(),
-                                        ));
-                                    };
-                                    let detector_reports =
-                                        value.diagnostic_reports.take().ok_or_else(|| {
-                                            EngineError::Invariant(
-                                                "committed diagnostic execution lost its exact detector input"
-                                                    .into(),
-                                            )
-                                        })?;
-                                    let submission =
-                                        collection.submission.as_ref().ok_or_else(|| {
-                                            EngineError::Invariant(
-                                                "committed diagnostic execution lost its admitted submission"
-                                                    .into(),
-                                            )
-                                        })?;
-                                    let context = prepare_diagnostic_emission(
-                                        node_id,
-                                        watcher,
-                                        profile,
-                                        &provider_identity,
-                                        &request,
-                                        &run_id,
-                                        &report_id,
-                                        &collection.intake.intake_id,
-                                        &submission.raw_bytes,
-                                        &normalized,
-                                        &validated,
-                                        &capture,
-                                        self.require_evaluator_identity()?,
-                                    )?;
+                                if let Some(artifact_id) = value.diagnostic_artifact_id.as_ref() {
                                     value.diagnostic =
-                                        Some(context.finish(evaluation, &detector_reports)?);
+                                        Some(reopen_diagnostic_artifact(&self.store, artifact_id)?);
                                 }
                                 Ok(value)
                             }
                             ProviderIntakeCommit::Replayed {
-                                canonical_result, ..
-                            } => decode_collection_outcome(canonical_result.as_bytes())
-                                .map(CollectionExecution::without_diagnostic),
+                                acknowledgment,
+                                canonical_result,
+                                ..
+                            } => {
+                                let outcome =
+                                    decode_collection_outcome(canonical_result.as_bytes())?;
+                                let diagnostic_artifact_id = emit_diagnostic
+                                    .then(|| {
+                                        self.store
+                                            .diagnostic_artifact_id_for_run(&acknowledgment.run_id)
+                                    })
+                                    .transpose()?
+                                    .flatten();
+                                let diagnostic = diagnostic_artifact_id
+                                    .as_ref()
+                                    .map(|artifact_id| {
+                                        reopen_diagnostic_artifact(&self.store, artifact_id)
+                                    })
+                                    .transpose()?;
+                                Ok(CollectionExecution {
+                                    outcome,
+                                    diagnostic,
+                                    diagnostic_artifact_id,
+                                })
+                            }
                         }
                     }
                 }
@@ -3462,8 +3772,9 @@ impl CollectionEngine {
         intake: ProviderIntakeInput,
         run: RunInput,
         submission: Option<SubmissionInput>,
-        outcome: &CollectionOutcome,
-    ) -> Result<(), EngineError> {
+        outcome: CollectionOutcome,
+        diagnostic: Option<&DiagnosticExecutionV2>,
+    ) -> Result<CollectionExecution, EngineError> {
         let run_id = outcome.run_id.as_deref().ok_or_else(|| {
             EngineError::Invariant("non-success collection outcome has no run identity".into())
         })?;
@@ -3473,31 +3784,69 @@ impl CollectionEngine {
                 run.run_id
             )));
         }
-        validate_provider_input_downstream_correspondence(&intake, outcome)?;
+        validate_provider_input_downstream_correspondence(&intake, &outcome)?;
         let result = RunResultStatusInput {
             run_id: run_id.to_owned(),
-            status: instance_status_event(watcher, outcome)?,
+            status: instance_status_event(watcher, &outcome)?,
         };
-        let committed = self.store.commit_non_success_collection(
+        let artifact_commit = diagnostic
+            .map(|artifact| {
+                let canonical_bytes = CanonicalDocument::from_canonical_bytes(
+                    artifact
+                        .canonical_bytes()
+                        .map_err(|error| EngineError::Canonical(error.to_string()))?,
+                )?;
+                Ok::<_, EngineError>(DiagnosticArtifactCommitInput {
+                    artifact_id: artifact.artifact_id.0.clone(),
+                    contract_schema: DIAGNOSTIC_EXECUTION_V2_SCHEMA.to_owned(),
+                    canonical_bytes,
+                    local_origin: DiagnosticArtifactLocalOriginInput {
+                        run_id: run_id.to_owned(),
+                        evaluation_id: None,
+                        completed_at: timestamp(artifact.completed_at),
+                    },
+                })
+            })
+            .transpose()?;
+        let completion = self.store.commit_non_success_collection_with_artifact(
             &CollectionInput {
                 intake,
                 run,
                 submission,
             },
             &result,
+            artifact_commit.as_ref(),
         )?;
-        if let ProviderIntakeCommit::Replayed {
-            canonical_result, ..
-        } = committed
-        {
-            let reopened = decode_collection_outcome(canonical_result.as_bytes())?;
-            if &reopened != outcome {
-                return Err(EngineError::Invariant(
-                    "idempotent provider replay resolved to a different canonical outcome".into(),
-                ));
+        let stored_outcome = match &completion.intake {
+            ProviderIntakeCommit::Committed { .. } => outcome,
+            ProviderIntakeCommit::Replayed {
+                canonical_result, ..
+            } => {
+                let reopened = decode_collection_outcome(canonical_result.as_bytes())?;
+                if reopened != outcome {
+                    return Err(EngineError::Invariant(
+                        "idempotent provider replay resolved to a different canonical outcome"
+                            .into(),
+                    ));
+                }
+                reopened
             }
+        };
+        let reopened_diagnostic = completion
+            .diagnostic_artifact_id
+            .as_ref()
+            .map(|artifact_id| reopen_diagnostic_artifact(&self.store, artifact_id))
+            .transpose()?;
+        if reopened_diagnostic.is_some() != completion.diagnostic_artifact_id.is_some() {
+            return Err(EngineError::Invariant(
+                "non-success diagnostic reopening lost its committed artifact identity".into(),
+            ));
         }
-        Ok(())
+        Ok(CollectionExecution {
+            outcome: stored_outcome,
+            diagnostic: reopened_diagnostic,
+            diagnostic_artifact_id: completion.diagnostic_artifact_id,
+        })
     }
 
     #[allow(clippy::too_many_lines)]
@@ -3535,6 +3884,1135 @@ impl CollectionEngine {
         }
         Ok(evaluations)
     }
+}
+
+/// Reopen one exact current diagnostic artifact through durable store custody.
+///
+/// Query indexes only locate the immutable artifact commitment. This reader
+/// separately requires current-schema support, verified byte availability,
+/// strict canonical decoding, and agreement with the requested self-identity.
+///
+/// # Errors
+///
+/// Returns a typed engine failure when the commitment is missing, its schema is
+/// unsupported, its bytes are unavailable or corrupt, or strict contract
+/// reopening fails.
+pub fn reopen_diagnostic_artifact(
+    store: &Store,
+    artifact_id: &Sha256Digest,
+) -> Result<SupportedDiagnosticExecution, EngineError> {
+    let DiagnosticArtifactLookup::Found(access) =
+        store.diagnostic_artifact(artifact_id, SUPPORTED_DIAGNOSTIC_EXECUTION_SCHEMAS)?
+    else {
+        return Err(EngineError::DiagnosticUnsupported(format!(
+            "diagnostic artifact {artifact_id} is not committed"
+        )));
+    };
+    if let DiagnosticArtifactSchemaSupport::Unsupported { contract_schema } = access.schema_support
+    {
+        return Err(EngineError::DiagnosticUnsupported(format!(
+            "diagnostic artifact {artifact_id} uses unsupported contract schema {contract_schema}"
+        )));
+    }
+    let document = match access.byte_state {
+        DiagnosticArtifactByteState::VerifiedAvailable { canonical_bytes } => canonical_bytes,
+        DiagnosticArtifactByteState::CommittedUnavailable => {
+            return Err(EngineError::DiagnosticUnsupported(format!(
+                "diagnostic artifact {artifact_id} is committed but its exact bytes are unavailable"
+            )));
+        }
+        DiagnosticArtifactByteState::Corrupt { reason } => {
+            return Err(EngineError::Invariant(format!(
+                "diagnostic artifact {artifact_id} failed byte verification: {reason}"
+            )));
+        }
+    };
+    let artifact = SupportedDiagnosticExecution::decode_canonical(document.as_bytes())
+        .map_err(|error| EngineError::Invariant(error.to_string()))?;
+    if artifact.artifact_id().as_digest() != artifact_id {
+        return Err(EngineError::Invariant(format!(
+            "diagnostic artifact lookup identity {artifact_id} differs from reopened {}",
+            artifact.artifact_id().as_digest()
+        )));
+    }
+    Ok(artifact)
+}
+
+/// Exact historical diagnostic-artifact reopening counts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiagnosticArtifactHistoryVerification {
+    /// Total immutable commitments visited.
+    pub commitments: usize,
+    /// Current-schema artifacts whose exact bytes reopened strictly.
+    pub supported_available: usize,
+    /// Current-schema commitments whose bytes are explicitly unavailable.
+    pub supported_committed_unavailable: usize,
+    /// Available canonical bytes under an unsupported contract schema.
+    pub unsupported_available: usize,
+    /// Unsupported-schema commitments whose bytes are explicitly unavailable.
+    pub unsupported_committed_unavailable: usize,
+}
+
+/// Exhaustively verify diagnostic-artifact commitments without fabricating
+/// unavailable bytes or interpreting unknown contract schemas.
+///
+/// # Errors
+///
+/// Returns on corrupt committed bytes, an invalid current contract, cursor
+/// inconsistency, or count overflow.
+#[allow(clippy::too_many_lines)] // Keep one exhaustive fail-closed audit over every byte-state branch.
+pub fn validate_diagnostic_artifact_history(
+    store: &Store,
+) -> Result<DiagnosticArtifactHistoryVerification, EngineError> {
+    let mut verification = DiagnosticArtifactHistoryVerification {
+        commitments: 0,
+        supported_available: 0,
+        supported_committed_unavailable: 0,
+        unsupported_available: 0,
+        unsupported_committed_unavailable: 0,
+    };
+    let mut after = None;
+    loop {
+        let commitments = store
+            .diagnostic_artifact_commitments_bounded(nq_store::MAX_PUBLIC_QUERY_ROWS, after)?;
+        if commitments.is_empty() {
+            return Ok(verification);
+        }
+        let page_len = commitments.len();
+        for commitment in commitments {
+            after = Some(commitment.artifact_sequence);
+            let DiagnosticArtifactLookup::Found(access) = store.diagnostic_artifact(
+                &commitment.artifact_id,
+                SUPPORTED_DIAGNOSTIC_EXECUTION_SCHEMAS,
+            )?
+            else {
+                return Err(EngineError::Invariant(format!(
+                    "diagnostic artifact index lost commitment {}",
+                    commitment.artifact_id
+                )));
+            };
+            match (access.schema_support, access.byte_state) {
+                (
+                    DiagnosticArtifactSchemaSupport::Supported,
+                    DiagnosticArtifactByteState::VerifiedAvailable { .. },
+                ) => {
+                    let artifact = reopen_diagnostic_artifact(store, &commitment.artifact_id)?;
+                    if let DiagnosticArtifactOrigin::Local {
+                        run_id,
+                        evaluation_id,
+                        completed_at,
+                    } = &commitment.origin
+                    {
+                        let SupportedDiagnosticExecution::V2(local_v2_artifact) = &artifact else {
+                            return Err(EngineError::DiagnosticUnsupported(format!(
+                                "local diagnostic artifact {} uses frozen v1, whose local semantic correspondence was never retained",
+                                commitment.artifact_id
+                            )));
+                        };
+                        if artifact.run_id().as_str() != run_id {
+                            return Err(EngineError::Invariant(format!(
+                                "local diagnostic artifact {} claims run {} but its durable origin names {run_id}",
+                                commitment.artifact_id,
+                                artifact.run_id().as_str()
+                            )));
+                        }
+                        if timestamp(local_v2_artifact.completed_at) != *completed_at {
+                            return Err(EngineError::Invariant(format!(
+                                "local diagnostic artifact {} substitutes its exact completion time",
+                                commitment.artifact_id
+                            )));
+                        }
+                        let run = store.watcher_run_outcome(run_id)?.ok_or_else(|| {
+                            EngineError::Invariant(format!(
+                                "local diagnostic artifact {} origin run {run_id} is missing",
+                                commitment.artifact_id
+                            ))
+                        })?;
+                        if artifact.request_id().as_str() != run.request_id
+                            || artifact.profile().id != run.profile_id
+                            || artifact.profile().version != run.profile_version
+                            || artifact.profile().digest.as_str() != run.profile_digest
+                        {
+                            return Err(EngineError::Invariant(format!(
+                                "local diagnostic artifact {} substitutes its request or profile origin",
+                                commitment.artifact_id
+                            )));
+                        }
+                        let local_v2_context =
+                            validate_local_v2_provider_correspondence(store, &artifact, &run)?;
+                        if let Some(evaluation_id) = evaluation_id {
+                            let admitted =
+                                store.admitted_collection_for_run(run_id)?.ok_or_else(|| {
+                                    EngineError::Invariant(format!(
+                                        "local diagnostic artifact {} origin run {run_id} is not one admitted collection",
+                                        commitment.artifact_id
+                                    ))
+                                })?;
+                            if admitted.evaluations != 1 {
+                                return Err(EngineError::Invariant(format!(
+                                    "local diagnostic artifact {} requires exactly one origin evaluation; durable run {run_id} has {}",
+                                    commitment.artifact_id, admitted.evaluations
+                                )));
+                            }
+                            let evaluation =
+                                store.evaluation_origin(evaluation_id)?.ok_or_else(|| {
+                                    EngineError::Invariant(format!(
+                                        "local diagnostic artifact {} origin evaluation {evaluation_id} is missing",
+                                        commitment.artifact_id
+                                    ))
+                                })?;
+                            if evaluation.trigger_run_id.as_deref() != Some(run_id.as_str()) {
+                                return Err(EngineError::Invariant(format!(
+                                    "local diagnostic artifact {} origin evaluation {evaluation_id} does not belong to run {run_id}",
+                                    commitment.artifact_id
+                                )));
+                            }
+                            let envelope = reopen_exact_evaluation(store, &evaluation)?;
+                            validate_evaluated_diagnostic_correspondence(
+                                store,
+                                &artifact,
+                                &run,
+                                &local_v2_context,
+                                &envelope,
+                            )?;
+                        } else {
+                            validate_run_only_diagnostic_correspondence(
+                                store,
+                                &artifact,
+                                run_id,
+                                &local_v2_context,
+                            )?;
+                        }
+                    }
+                    verification.supported_available = verification
+                        .supported_available
+                        .checked_add(1)
+                        .ok_or_else(|| {
+                            EngineError::Invariant(
+                                "diagnostic artifact verification count overflowed".into(),
+                            )
+                        })?;
+                }
+                (
+                    DiagnosticArtifactSchemaSupport::Supported,
+                    DiagnosticArtifactByteState::CommittedUnavailable,
+                ) => {
+                    verification.supported_committed_unavailable = verification
+                        .supported_committed_unavailable
+                        .checked_add(1)
+                        .ok_or_else(|| {
+                            EngineError::Invariant(
+                                "diagnostic artifact verification count overflowed".into(),
+                            )
+                        })?;
+                }
+                (
+                    DiagnosticArtifactSchemaSupport::Unsupported { .. },
+                    DiagnosticArtifactByteState::VerifiedAvailable { .. },
+                ) => {
+                    verification.unsupported_available = verification
+                        .unsupported_available
+                        .checked_add(1)
+                        .ok_or_else(|| {
+                            EngineError::Invariant(
+                                "diagnostic artifact verification count overflowed".into(),
+                            )
+                        })?;
+                }
+                (
+                    DiagnosticArtifactSchemaSupport::Unsupported { .. },
+                    DiagnosticArtifactByteState::CommittedUnavailable,
+                ) => {
+                    verification.unsupported_committed_unavailable = verification
+                        .unsupported_committed_unavailable
+                        .checked_add(1)
+                        .ok_or_else(|| {
+                            EngineError::Invariant(
+                                "diagnostic artifact verification count overflowed".into(),
+                            )
+                        })?;
+                }
+                (_, DiagnosticArtifactByteState::Corrupt { reason }) => {
+                    return Err(EngineError::Invariant(format!(
+                        "diagnostic artifact {} failed byte verification: {reason}",
+                        commitment.artifact_id
+                    )));
+                }
+            }
+            verification.commitments =
+                verification.commitments.checked_add(1).ok_or_else(|| {
+                    EngineError::Invariant(
+                        "diagnostic artifact verification count overflowed".into(),
+                    )
+                })?;
+        }
+        if page_len < nq_store::MAX_PUBLIC_QUERY_ROWS as usize {
+            return Ok(verification);
+        }
+    }
+}
+
+struct LocalV2HistoryContext {
+    provider_intake: ProviderIntakeRecordV1,
+    capture_policy: SemanticIdentityV1,
+    admission_rule: SemanticIdentityV1,
+    normalization_rule: SemanticIdentityV1,
+    question: SemanticIdentityV1,
+}
+
+#[allow(clippy::too_many_lines)]
+fn validate_local_v2_provider_correspondence(
+    store: &Store,
+    artifact: &SupportedDiagnosticExecution,
+    run: &nq_store::WatcherRunOutcomeRow,
+) -> Result<LocalV2HistoryContext, EngineError> {
+    let SupportedDiagnosticExecution::V2(artifact) = artifact else {
+        return Err(EngineError::DiagnosticUnsupported(
+            "local semantic correspondence requires the v2 execution contract".into(),
+        ));
+    };
+    let run_id = run.run_id.as_str();
+    let mut provider_intake_ids = BTreeSet::new();
+    for input in &artifact.inputs.received {
+        provider_intake_ids.insert(input.provider_intake_id.as_str());
+    }
+    for input in &artifact.inputs.failed {
+        match &input.cause {
+            FailedInputCauseV2::ProviderNoResponse {
+                provider_intake_id, ..
+            }
+            | FailedInputCauseV2::AcquisitionFailed {
+                provider_intake_id, ..
+            } => {
+                provider_intake_ids.insert(provider_intake_id.as_str());
+            }
+            FailedInputCauseV2::Missing { .. } | FailedInputCauseV2::Unsupported { .. } => {}
+        }
+    }
+    let [provider_intake_id] = provider_intake_ids.iter().copied().collect::<Vec<_>>()[..] else {
+        return Err(EngineError::Invariant(format!(
+            "local v2 diagnostic artifact {} does not identify exactly one provider intake",
+            artifact.artifact_id.0
+        )));
+    };
+    let intake = store.provider_intake(provider_intake_id)?.ok_or_else(|| {
+        EngineError::Invariant(format!(
+            "local v2 diagnostic artifact {} references missing provider intake {provider_intake_id}",
+            artifact.artifact_id.0
+        ))
+    })?;
+    if intake.run_id != run_id
+        || intake.request_id != artifact.request_id.as_str()
+        || intake.profile_id != artifact.profile.id
+        || intake.profile_version != artifact.profile.version
+        || intake.profile_digest != artifact.profile.digest.as_str()
+        || intake.profile_semantic_id != artifact.profile_semantic_id.as_str()
+    {
+        return Err(EngineError::Invariant(format!(
+            "local v2 diagnostic artifact {} substitutes provider-intake origin identity",
+            artifact.artifact_id.0
+        )));
+    }
+    let raw = store
+        .provider_intake_raw_bytes(provider_intake_id)?
+        .ok_or_else(|| {
+            EngineError::Invariant(format!(
+                "provider intake {provider_intake_id} lost its raw-custody record"
+            ))
+        })?;
+    let provider_intake = ProviderIntakeRecordV1::reopen_store_row(&intake, &raw)?;
+    let request = &provider_intake.request;
+    let request_subject = request.binding.subject.to_string();
+    let scope = ScopeConfig {
+        kind: request.binding.scope.kind.to_string(),
+        value: request.binding.scope.value.clone(),
+    };
+    let vantage = VantageConfig {
+        kind: request.binding.vantage.kind.to_string(),
+        value: request.binding.vantage.value.clone(),
+    };
+    if request.instance_id.as_str() != run.instance_id
+        || request_subject != artifact.subject.id
+        || request.profile.id.as_str() != artifact.profile.id
+        || request.profile.version.as_str() != artifact.profile.version
+        || request.profile.digest != artifact.profile.digest
+    {
+        return Err(EngineError::Invariant(format!(
+            "local v2 diagnostic artifact {} substitutes its exact provider request binding",
+            artifact.artifact_id.0
+        )));
+    }
+    let admission_id = run.admission_id.as_deref().ok_or_else(|| {
+        EngineError::Invariant(format!(
+            "local v2 diagnostic artifact {} has no source admission",
+            artifact.artifact_id.0
+        ))
+    })?;
+    let admission = store.admission(admission_id)?.ok_or_else(|| {
+        EngineError::Invariant(format!(
+            "local v2 diagnostic artifact {} source admission {admission_id} is missing",
+            artifact.artifact_id.0
+        ))
+    })?;
+    if provider_intake.provider.source_admission_id != admission_id
+        || provider_intake.provider.evaluator_artifact_digest.as_str()
+            != admission.evaluator_artifact_digest
+        || provider_intake.provider.profile_semantic_id.as_str() != admission.profile_semantic_id
+        || artifact.profile_semantic_id.as_str() != admission.profile_semantic_id
+    {
+        return Err(EngineError::Invariant(format!(
+            "local v2 diagnostic artifact {} substitutes its admitted judging context",
+            artifact.artifact_id.0
+        )));
+    }
+
+    let node_id = format!("nq-store-genesis:{}", store.sole_genesis_id()?);
+    let profile_identity = SemanticIdentityV1 {
+        id: request.profile.id.to_string(),
+        version: request.profile.version.to_string(),
+        digest: request.profile.digest.clone(),
+    };
+    let expected_question = initial_local_v2_question(&admission.detector_identity_digest)?;
+    let historical_surface = local_v2_historical_surface(
+        &profile_identity,
+        &expected_question,
+        &admission.evaluator_artifact_digest,
+        &admission.evaluator_source_digest,
+        &admission.artifact_identity_method,
+        &admission.target_triple,
+        &admission.platform_runtime_version,
+        &admission.protocol_version,
+    )?;
+    let expected_scope = semantic_identity(
+        format!("nq.scope.{}", scope.kind),
+        profile_identity.version.clone(),
+        &json!({
+            "schema": "nq.diagnostic_scope.v1",
+            "subject": request_subject,
+            "scope": scope,
+            "profile": profile_identity,
+        }),
+    )?;
+    let expected_vantage = semantic_identity(
+        format!(
+            "nq.vantage.{}.{}.{}",
+            vantage.kind, node_id, run.instance_id
+        ),
+        provider_intake.provider.source_admission_id.clone(),
+        &json!({
+            "schema": "nq.diagnostic_vantage.v1",
+            "node_id": node_id,
+            "instance_id": run.instance_id,
+            "declared_vantage": vantage,
+            "provider": provider_intake.provider,
+        }),
+    )?;
+    let expected_state_model = semantic_identity(
+        format!("{}.subject_binding_state", profile_identity.id),
+        "1",
+        &json!({
+            "schema": "nq.subject_binding_state_model.v1",
+            "binding_kind": "subject_identity",
+            "profile": profile_identity,
+        }),
+    )?;
+    let expected_evaluator = semantic_identity(
+        "nq.detector_evaluator",
+        "1",
+        &json!({
+            "schema": "nq.detector_evaluator.v1",
+            "artifact_digest": provider_intake.provider.evaluator_artifact_digest,
+            "evaluator_source_digest": admission.evaluator_source_digest,
+            "detector_digest": expected_question.digest,
+        }),
+    )?;
+    let question_version: u32 = expected_question.version.parse().map_err(|error| {
+        EngineError::Invariant(format!(
+            "local v2 diagnostic artifact {} has invalid question version: {error}",
+            artifact.artifact_id.0
+        ))
+    })?;
+    let expected_threshold_policy = semantic_identity(
+        format!("{}.threshold_policy", expected_question.id),
+        expected_question.version.clone(),
+        &json!({
+            "schema": "nq.detector_threshold_policy.v2",
+            "detector_id": expected_question.id,
+            "detector_version": question_version,
+            "detector_digest": expected_question.digest,
+        }),
+    )?;
+    let expected_projection = DiagnosticProjectionV1 {
+        identity: semantic_identity(
+            "nq.detector_input_projection",
+            "1",
+            &json!({
+                "schema": "nq.detector_input_projection.v1",
+                "profile_semantic_id": artifact.profile_semantic_id,
+                "detector_id": expected_question.id,
+                "detector_version": question_version,
+                "detector_digest": expected_question.digest,
+                "fields": [
+                    "instance_id",
+                    "evaluated_at",
+                    "watermark",
+                    "reports[].report_id",
+                    "reports[].report_sequence",
+                    "reports[].report",
+                ],
+            }),
+        )?,
+        omitted_distinctions: Vec::new(),
+    };
+    let expected_clock = semantic_identity(
+        "nq.local_linux_realtime",
+        "1",
+        &json!({
+            "schema": "nq.local_linux_realtime.v1",
+            "source": "CLOCK_REALTIME through chrono::Utc",
+            "relationship": "NQ bounds the local helper invocation; admitted source times must fall inside that interval",
+        }),
+    )?;
+    let capture_policy = semantic_identity(
+        "nq.capture.exact_provider_response",
+        "1",
+        &json!({
+            "schema": "nq.capture_policy.v1",
+            "mode": "exact_source",
+            "boundary": "provider_intake",
+        }),
+    )?;
+    let admission_rule = semantic_identity(
+        "nq.local_provider_admission",
+        "1",
+        &json!({
+            "schema": "nq.diagnostic_admission_rule.v1",
+            "provider_admission_id": provider_intake.provider.provider_admission_id,
+            "profile_semantic_id": provider_intake.provider.profile_semantic_id,
+        }),
+    )?;
+    let expected_selection_rule = semantic_identity(
+        "nq.fresh_single_admitted_report",
+        "1",
+        &json!({
+            "schema": "nq.diagnostic_selection_rule.v1",
+            "question": expected_question,
+            "cardinality": "exactly_one_newly_admitted_report_with_no_prior_matching_history",
+        }),
+    )?;
+    let mut substitutions = Vec::new();
+    if artifact.producer.node_id != node_id {
+        substitutions.push("producer.node_id");
+    }
+    if artifact.producer.build != historical_surface.build {
+        substitutions.push("producer.build");
+    }
+    if artifact.producer.cohort != historical_surface.cohort {
+        substitutions.push("producer.cohort");
+    }
+    if artifact.question != expected_question {
+        substitutions.push("question");
+    }
+    if artifact.subject.scope != expected_scope {
+        substitutions.push("subject.scope");
+    }
+    if artifact.vantage != expected_vantage {
+        substitutions.push("vantage");
+    }
+    if artifact.state_model != expected_state_model {
+        substitutions.push("state_model");
+    }
+    if artifact.evaluator != expected_evaluator {
+        substitutions.push("evaluator");
+    }
+    if artifact.threshold_policy != expected_threshold_policy {
+        substitutions.push("threshold_policy");
+    }
+    if artifact.projection != expected_projection {
+        substitutions.push("projection");
+    }
+    if artifact.execution_clock != expected_clock {
+        substitutions.push("execution_clock");
+    }
+    if artifact.attempt_interval.qualification != historical_surface.clock_qualification {
+        substitutions.push("attempt_interval.qualification");
+    }
+    if artifact.limitations != historical_surface.limitations {
+        substitutions.push("limitations");
+    }
+    if artifact.nonclaims != historical_surface.nonclaims {
+        substitutions.push("nonclaims");
+    }
+    if artifact.inputs.selection_rule != expected_selection_rule {
+        substitutions.push("selection_rule");
+    }
+    if artifact
+        .inputs
+        .received
+        .iter()
+        .any(|input| input.capture_policy != capture_policy)
+    {
+        substitutions.push("capture_policy");
+    }
+    if artifact.inputs.admitted.iter().any(|input| {
+        input.admission_rule != admission_rule
+            || input.normalization_rule != historical_surface.normalization_rule
+            || input.projection_rule != artifact.projection.identity
+    }) {
+        substitutions.push("admission_normalization_or_projection_rule");
+    }
+    if !substitutions.is_empty() {
+        return Err(EngineError::Invariant(format!(
+            "local v2 diagnostic artifact {} substitutes its exact diagnostic semantic surface: {}",
+            artifact.artifact_id.0,
+            substitutions.join(", ")
+        )));
+    }
+    let intake_started_at = parse_timestamp(&intake.started_at)?;
+    let intake_finished_at = parse_timestamp(&intake.finished_at)?;
+    let intake_received_at = parse_timestamp(&intake.received_at)?;
+    if artifact.started_at != intake_started_at
+        || artifact.attempt_interval.started_at != intake_started_at
+        || artifact.attempt_interval.ended_at != intake_finished_at
+    {
+        return Err(EngineError::Invariant(format!(
+            "local v2 diagnostic artifact {} substitutes provider attempt timing",
+            artifact.artifact_id.0
+        )));
+    }
+    for input in &artifact.inputs.received {
+        if input.provider_intake_id == provider_intake_id
+            && (input.raw_artifact_id.0.as_str() != intake.raw_sha256
+                || input.acquisition != artifact.attempt_interval
+                || input.received_at != intake_received_at)
+        {
+            return Err(EngineError::Invariant(format!(
+                "local v2 diagnostic artifact {} substitutes provider raw custody or timing",
+                artifact.artifact_id.0
+            )));
+        }
+    }
+    for input in &artifact.inputs.failed {
+        let (attempt, failure) = match &input.cause {
+            FailedInputCauseV2::ProviderNoResponse {
+                provider_intake_id: input_provider,
+                attempt,
+                failure,
+                ..
+            }
+            | FailedInputCauseV2::AcquisitionFailed {
+                provider_intake_id: input_provider,
+                attempt,
+                failure,
+                ..
+            } if input_provider == provider_intake_id => (attempt, failure),
+            _ => continue,
+        };
+        if attempt != &artifact.attempt_interval {
+            return Err(EngineError::Invariant(format!(
+                "local v2 diagnostic artifact {} substitutes failed-attempt timing",
+                artifact.artifact_id.0
+            )));
+        }
+        if !raw.is_empty() {
+            return Err(EngineError::Invariant(format!(
+                "local v2 diagnostic artifact {} claims no failed-input bytes but custody retained {}",
+                artifact.artifact_id.0,
+                raw.len()
+            )));
+        }
+        let native_outcome: RunResourceOutcomeV1 =
+            serde_json::from_slice(&intake.native_outcome_json).map_err(|error| {
+                EngineError::Invariant(format!(
+                    "provider intake {provider_intake_id} native outcome cannot decode: {error}"
+                ))
+            })?;
+        let native_failure = AcquisitionFailure::from_outcome(native_outcome.outcome)
+        .ok_or_else(|| {
+            EngineError::Invariant(format!(
+                "provider intake {provider_intake_id} claims response for failed diagnostic input"
+            ))
+        })?;
+        if failure != &native_failure {
+            return Err(EngineError::Invariant(format!(
+                "local v2 diagnostic artifact {} substitutes its exact acquisition failure",
+                artifact.artifact_id.0
+            )));
+        }
+    }
+    Ok(LocalV2HistoryContext {
+        provider_intake,
+        capture_policy,
+        admission_rule,
+        normalization_rule: historical_surface.normalization_rule,
+        question: expected_question,
+    })
+}
+
+fn reopen_exact_evaluation(
+    store: &Store,
+    origin: &nq_store::EvaluationOriginRow,
+) -> Result<EvaluationEnvelopeV2, EngineError> {
+    if origin.evaluation_sequence <= 0 {
+        return Err(EngineError::Invariant(format!(
+            "evaluation {} has invalid sequence {}",
+            origin.evaluation_id, origin.evaluation_sequence
+        )));
+    }
+    let mut rows = store.evaluation_refusal_history_bounded(
+        1,
+        Some(origin.evaluation_sequence - 1),
+        origin.evaluation_sequence,
+    )?;
+    let [row] = rows.as_mut_slice() else {
+        return Err(EngineError::Invariant(format!(
+            "evaluation {} cannot be reopened at sequence {}",
+            origin.evaluation_id, origin.evaluation_sequence
+        )));
+    };
+    if row.evaluation_id != origin.evaluation_id
+        || row.evaluation_sequence != origin.evaluation_sequence
+        || row.trigger_run_id != origin.trigger_run_id
+    {
+        return Err(EngineError::Invariant(format!(
+            "evaluation {} exact sequence was substituted",
+            origin.evaluation_id
+        )));
+    }
+    validate_evaluation_refusal_row(store, row, false)
+}
+
+#[allow(clippy::too_many_lines)]
+fn validate_evaluated_diagnostic_correspondence(
+    store: &Store,
+    artifact: &SupportedDiagnosticExecution,
+    run: &nq_store::WatcherRunOutcomeRow,
+    context: &LocalV2HistoryContext,
+    evaluation: &EvaluationEnvelopeV2,
+) -> Result<(), EngineError> {
+    let SupportedDiagnosticExecution::V2(artifact) = artifact else {
+        return Err(EngineError::Invariant(
+            "evaluated diagnostic correspondence requires the v2 contract".into(),
+        ));
+    };
+    let request = &context.provider_intake.request;
+    let expected_scope = ScopeConfig {
+        kind: request.binding.scope.kind.to_string(),
+        value: request.binding.scope.value.clone(),
+    };
+    let expected_vantage = VantageConfig {
+        kind: request.binding.vantage.kind.to_string(),
+        value: request.binding.vantage.value.clone(),
+    };
+    if artifact.completed_at != evaluation.evaluated_at {
+        return Err(EngineError::Invariant(format!(
+            "local v2 diagnostic artifact {} substitutes its exact evaluation completion time",
+            artifact.artifact_id.0
+        )));
+    }
+    if evaluation.trigger_run_id.as_deref() != Some(run.run_id.as_str())
+        || evaluation.context.instance_id != run.instance_id
+        || evaluation.context.subject != request.binding.subject.as_str()
+        || evaluation.context.scope != expected_scope
+        || evaluation.context.vantage != expected_vantage
+        || evaluation.profile.profile.id != artifact.profile.id
+        || evaluation.profile.profile.version.to_string() != artifact.profile.version
+        || evaluation.profile.profile_digest.as_str() != artifact.profile.digest.as_str()
+        || evaluation.profile.profile_semantic_id.as_str() != artifact.profile_semantic_id.as_str()
+        || evaluation.detector.id != artifact.question.id
+        || evaluation.detector.version != artifact.question.version
+        || evaluation.detector.digest != artifact.question.digest.as_str()
+        || evaluation.evaluator_artifact_digest
+            != context.provider_intake.provider.evaluator_artifact_digest
+    {
+        return Err(EngineError::Invariant(format!(
+            "local v2 diagnostic artifact {} substitutes its exact evaluation context",
+            artifact.artifact_id.0
+        )));
+    }
+
+    let admitted = store
+        .admitted_collection_for_run(&run.run_id)?
+        .ok_or_else(|| {
+            EngineError::Invariant(format!(
+                "evaluated diagnostic artifact {} has no admitted source report",
+                artifact.artifact_id.0
+            ))
+        })?;
+    if admitted.evaluations != 1
+        || evaluation.watermark.instance_id != run.instance_id
+        || evaluation.watermark.max_report_sequence
+            != u64::try_from(admitted.report_sequence).unwrap_or(u64::MAX)
+        || evaluation.result.watermark.0 != evaluation.watermark.max_report_sequence
+    {
+        return Err(EngineError::Invariant(format!(
+            "local v2 diagnostic artifact {} substitutes its exact evaluation watermark",
+            artifact.artifact_id.0
+        )));
+    }
+    let report_document = CanonicalDocument::from_canonical_bytes(admitted.canonical_json.clone())?;
+    let report: nq_protocol::EvidenceReport = serde_json::from_slice(report_document.as_bytes())
+        .map_err(|error| {
+            EngineError::Invariant(format!(
+                "diagnostic source report {} cannot decode: {error}",
+                admitted.report_id
+            ))
+        })?;
+    nq_protocol::validate_report(&report).map_err(|error| {
+        EngineError::Invariant(format!("invalid diagnostic source report: {error}"))
+    })?;
+    let report_digest = Sha256Digest::parse(admitted.semantic_digest.clone())
+        .map_err(|error| EngineError::Invariant(error.to_string()))?;
+    let normalized = ProfileReportInput::from_protocol(&report, &report_digest)
+        .map_err(|error| EngineError::Invariant(error.to_string()))?;
+    let normalized_document = canonical(&normalized)?;
+    let admitted_snapshot = store
+        .verify_admitted_snapshot(&admitted.report_id)
+        .map_err(|error| {
+            EngineError::Invariant(format!(
+                "diagnostic source report {} failed historical reopening: {error}",
+                admitted.report_id
+            ))
+        })?;
+    let validated: ValidatedReport =
+        serde_json::from_slice(&admitted_snapshot.validated_report_json).map_err(|error| {
+            EngineError::Invariant(format!(
+                "diagnostic source report {} has an invalid persisted validated judgment: {error}",
+                admitted.report_id
+            ))
+        })?;
+    if canonical(&validated)?.as_bytes() != admitted_snapshot.validated_report_json {
+        return Err(EngineError::Invariant(format!(
+            "diagnostic source report {} validated judgment is not exact canonical typed bytes",
+            admitted.report_id
+        )));
+    }
+    let projection_document = canonical(&json!({
+        "schema": "nq.detector_input_projection.v1",
+        "instance_id": evaluation.context.instance_id,
+        "evaluated_at": evaluation.evaluated_at,
+        "watermark": evaluation.watermark.max_report_sequence,
+        "reports": [{
+            "report_id": admitted.report_id,
+            "report_sequence": admitted.report_sequence,
+            "report": validated,
+        }],
+    }))?;
+    let projected_artifact_id =
+        ProjectedArtifactId(nq_protocol::sha256_bytes(projection_document.as_bytes()));
+    let input_id = context.provider_intake.intake_id.clone();
+    let expected_inputs = DiagnosticInputAccountingV2 {
+        selection_rule: artifact.inputs.selection_rule.clone(),
+        expected: vec![ExpectedInputV1 {
+            expectation_id: "expected:current_provider_report".to_owned(),
+            role: "profile_report".to_owned(),
+            required: true,
+        }],
+        received: vec![ReceivedInputV2 {
+            input_id: input_id.clone(),
+            expectation_id: "expected:current_provider_report".to_owned(),
+            provider_intake_id: input_id.clone(),
+            raw_artifact_id: RawArtifactId(context.provider_intake.raw_sha256.clone()),
+            capture_mode: RawCaptureModeV1::ExactSource,
+            capture_policy: context.capture_policy.clone(),
+            availability_at_derivation: EvidenceAvailabilityV1::CommittedUnavailable,
+            acquisition: artifact.attempt_interval.clone(),
+            received_at: context.provider_intake.received_at,
+        }],
+        admitted: vec![AdmittedInputV1 {
+            input_id: input_id.clone(),
+            admission_rule: context.admission_rule.clone(),
+            normalized_artifact_id: NormalizedArtifactId(nq_protocol::sha256_bytes(
+                normalized_document.as_bytes(),
+            )),
+            normalization_rule: context.normalization_rule.clone(),
+            projected_artifact_id: projected_artifact_id.clone(),
+            projection_rule: artifact.projection.identity.clone(),
+        }],
+        refused: Vec::new(),
+        failed: Vec::new(),
+        excluded: Vec::new(),
+        selected: vec![SelectedInputV1 {
+            input_id: input_id.clone(),
+            projected_artifact_id,
+            role: "profile_report".to_owned(),
+        }],
+    };
+    let expected_state_bindings = vec![DiagnosticStateBindingV1 {
+        binding_id: "state:subject_identity".to_owned(),
+        kind: "subject_identity".to_owned(),
+        value: request.binding.subject.to_string(),
+        supporting_input_ids: vec![input_id],
+    }];
+    let (expected_claims, expected_primary_claim_id, expected_outcome) =
+        diagnostic_result_from_evaluation(
+            evaluation,
+            &expected_inputs,
+            &expected_state_bindings,
+            admitted.report_status == "complete",
+        )?;
+    if let (Some(actual), Some(expected)) = (
+        artifact.inputs.admitted.first(),
+        expected_inputs.admitted.first(),
+    ) && actual.projected_artifact_id != expected.projected_artifact_id
+    {
+        return Err(EngineError::Invariant(format!(
+            "local v2 diagnostic artifact {} substitutes its exact detector input projection: persisted {}, reconstructed {}",
+            artifact.artifact_id.0,
+            actual.projected_artifact_id.0,
+            expected.projected_artifact_id.0
+        )));
+    }
+    let mut substitutions = Vec::new();
+    if artifact.inputs != expected_inputs {
+        if artifact.inputs.selection_rule != expected_inputs.selection_rule {
+            substitutions.push("inputs.selection_rule");
+        }
+        if artifact.inputs.expected != expected_inputs.expected {
+            substitutions.push("inputs.expected");
+        }
+        if artifact.inputs.received != expected_inputs.received {
+            substitutions.push("inputs.received");
+        }
+        if artifact.inputs.admitted != expected_inputs.admitted {
+            substitutions.push("inputs.admitted");
+        }
+        if artifact.inputs.refused != expected_inputs.refused {
+            substitutions.push("inputs.refused");
+        }
+        if artifact.inputs.failed != expected_inputs.failed {
+            substitutions.push("inputs.failed");
+        }
+        if artifact.inputs.excluded != expected_inputs.excluded {
+            substitutions.push("inputs.excluded");
+        }
+        if artifact.inputs.selected != expected_inputs.selected {
+            substitutions.push("inputs.selected");
+        }
+    }
+    if artifact.state_bindings != expected_state_bindings {
+        substitutions.push("state_bindings");
+    }
+    if artifact.claims != expected_claims {
+        substitutions.push("claims");
+    }
+    if artifact.primary_claim_id != expected_primary_claim_id {
+        substitutions.push("primary_claim_id");
+    }
+    if artifact.outcome != expected_outcome {
+        substitutions.push("outcome");
+    }
+    if !substitutions.is_empty() {
+        return Err(EngineError::Invariant(format!(
+            "local v2 diagnostic artifact {} substitutes the exact persisted evaluation result or dependency frontier: {}",
+            artifact.artifact_id.0,
+            substitutions.join(", ")
+        )));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)] // Keep the closed non-success reconstruction matrix auditable in one place.
+fn validate_run_only_diagnostic_correspondence(
+    store: &Store,
+    artifact: &SupportedDiagnosticExecution,
+    run_id: &str,
+    context: &LocalV2HistoryContext,
+) -> Result<(), EngineError> {
+    let SupportedDiagnosticExecution::V2(artifact) = artifact else {
+        return Err(EngineError::Invariant(format!(
+            "run-only diagnostic artifact {} uses a contract that cannot preserve exact non-success",
+            artifact.artifact_id().0
+        )));
+    };
+    if artifact.completed_at != context.provider_intake.finished_at {
+        return Err(EngineError::Invariant(format!(
+            "run-only diagnostic artifact {} substitutes its exact terminal acquisition time",
+            artifact.artifact_id.0
+        )));
+    }
+    if run_id != context.provider_intake.run_id
+        || context.provider_intake.request.profile.id.as_str() != artifact.profile.id
+        || context.provider_intake.request.profile.version.as_str() != artifact.profile.version
+        || context.provider_intake.request.profile.digest != artifact.profile.digest
+        || artifact.question != context.question
+    {
+        return Err(EngineError::Invariant(format!(
+            "run-only diagnostic artifact {} substitutes its admitted question",
+            artifact.artifact_id.0
+        )));
+    }
+    let result = store.collection_result_for_run(run_id)?.ok_or_else(|| {
+        EngineError::Invariant(format!(
+            "run-only diagnostic artifact {} has no canonical collection result",
+            artifact.artifact_id.0
+        ))
+    })?;
+    let collection = decode_collection_outcome(result.as_bytes())?;
+    let input_id = context.provider_intake.intake_id.clone();
+    let expected = vec![ExpectedInputV1 {
+        expectation_id: "expected:current_provider_report".to_owned(),
+        role: "profile_report".to_owned(),
+        required: true,
+    }];
+    let (expected_inputs, expected_claims, expected_primary_claim_id, expected_outcome) =
+        match &collection.result {
+            CollectionResult::Rejected { refusal } => {
+                if context.provider_intake.raw_length == 0 {
+                    return Err(EngineError::Invariant(format!(
+                        "run-only diagnostic artifact {} claims refusal without retained bytes",
+                        artifact.artifact_id.0
+                    )));
+                }
+                let profile_binding = match &refusal.origin {
+                    GovernedRefusalOrigin::Profile(_) => {
+                        Some(ProfileRefusalBindingV2::ArtifactProfile)
+                    }
+                    _ => None,
+                };
+                (
+                    DiagnosticInputAccountingV2 {
+                        selection_rule: artifact.inputs.selection_rule.clone(),
+                        expected,
+                        received: vec![ReceivedInputV2 {
+                            input_id: input_id.clone(),
+                            expectation_id: "expected:current_provider_report".to_owned(),
+                            provider_intake_id: input_id.clone(),
+                            raw_artifact_id: RawArtifactId(
+                                context.provider_intake.raw_sha256.clone(),
+                            ),
+                            capture_mode: RawCaptureModeV1::ExactSource,
+                            capture_policy: context.capture_policy.clone(),
+                            availability_at_derivation:
+                                EvidenceAvailabilityV1::CommittedUnavailable,
+                            acquisition: artifact.attempt_interval.clone(),
+                            received_at: context.provider_intake.received_at,
+                        }],
+                        admitted: Vec::new(),
+                        refused: vec![RefusedInputV2 {
+                            input_id,
+                            refusal: refusal.clone(),
+                            profile_binding,
+                        }],
+                        failed: Vec::new(),
+                        excluded: Vec::new(),
+                        selected: Vec::new(),
+                    },
+                    Vec::new(),
+                    None,
+                    DiagnosticOutcomeV2 {
+                        derivation: DiagnosticDerivationV1::Refused,
+                        condition: DiagnosticConditionV1::Unresolved,
+                        coherence: DiagnosticCoherenceV1::NotEvaluated,
+                        coverage: DiagnosticCoverageV1::Missing,
+                        summary: "the required provider input was refused".to_owned(),
+                        refusals: vec![refusal.clone()],
+                        unsupported: Vec::new(),
+                    },
+                )
+            }
+            CollectionResult::AcquisitionFailed { failure } => {
+                if context.provider_intake.raw_length != 0 {
+                    return Err(EngineError::Invariant(format!(
+                        "run-only diagnostic artifact {} claims failed input despite retained bytes",
+                        artifact.artifact_id.0
+                    )));
+                }
+                let failure_id = format!("failure:{}", context.provider_intake.intake_id);
+                let cause = if matches!(
+                    failure.class,
+                    AcquisitionFailureClass::Timeout
+                        | AcquisitionFailureClass::Eof
+                        | AcquisitionFailureClass::HelperExited
+                        | AcquisitionFailureClass::Disconnect
+                ) {
+                    FailedInputCauseV2::ProviderNoResponse {
+                        provider_intake_id: context.provider_intake.intake_id.clone(),
+                        attempt: artifact.attempt_interval.clone(),
+                        raw_custody: FailedAcquisitionCustodyV2::NoBytesRetained,
+                        failure: failure.clone(),
+                    }
+                } else {
+                    FailedInputCauseV2::AcquisitionFailed {
+                        provider_intake_id: context.provider_intake.intake_id.clone(),
+                        attempt: artifact.attempt_interval.clone(),
+                        raw_custody: FailedAcquisitionCustodyV2::NoBytesRetained,
+                        failure: failure.clone(),
+                    }
+                };
+                let claim_id = "claim:required_provider_input_available".to_owned();
+                (
+                    DiagnosticInputAccountingV2 {
+                        selection_rule: artifact.inputs.selection_rule.clone(),
+                        expected,
+                        received: Vec::new(),
+                        admitted: Vec::new(),
+                        refused: Vec::new(),
+                        failed: vec![FailedInputV2 {
+                            expectation_id: "expected:current_provider_report".to_owned(),
+                            failure_id: failure_id.clone(),
+                            cause,
+                        }],
+                        excluded: Vec::new(),
+                        selected: Vec::new(),
+                    },
+                    vec![DiagnosticClaimV2 {
+                        claim_id: claim_id.clone(),
+                        proposition:
+                            "the required provider input is available for diagnostic evaluation"
+                                .to_owned(),
+                        status: DiagnosticClaimStatusV1::Unknown,
+                        condition_effect: Some(DiagnosticConditionV1::Unresolved),
+                        dependency_input_ids: Vec::new(),
+                        dependency_refusal_ids: Vec::new(),
+                        dependency_failure_ids: vec![failure_id],
+                        state_binding_ids: Vec::new(),
+                        required_distinctions: Vec::new(),
+                        limitations: vec![
+                            "the bounded subject condition was not evaluated".to_owned(),
+                        ],
+                        nonclaims: vec![
+                            "provider acquisition failure does not establish subject failure"
+                                .to_owned(),
+                        ],
+                    }],
+                    Some(claim_id),
+                    DiagnosticOutcomeV2 {
+                        derivation: DiagnosticDerivationV1::Partial,
+                        condition: DiagnosticConditionV1::Unresolved,
+                        coherence: DiagnosticCoherenceV1::NotEvaluated,
+                        coverage: DiagnosticCoverageV1::Missing,
+                        summary: "the required provider input was not acquired".to_owned(),
+                        refusals: Vec::new(),
+                        unsupported: Vec::new(),
+                    },
+                )
+            }
+            CollectionResult::AdmissionRefused { .. } => {
+                return Err(EngineError::Invariant(format!(
+                    "run-only diagnostic artifact {} claims a collection that created no run",
+                    artifact.artifact_id.0
+                )));
+            }
+            CollectionResult::Admitted { .. } => {
+                return Err(EngineError::Invariant(format!(
+                    "run-only diagnostic artifact {} is bound to admitted collection without an evaluation",
+                    artifact.artifact_id.0
+                )));
+            }
+        };
+    if artifact.inputs != expected_inputs
+        || !artifact.state_bindings.is_empty()
+        || artifact.claims != expected_claims
+        || artifact.primary_claim_id != expected_primary_claim_id
+        || artifact.outcome != expected_outcome
+    {
+        return Err(EngineError::Invariant(format!(
+            "run-only diagnostic artifact {} substitutes its exact non-success result or dependency frontier",
+            artifact.artifact_id.0
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4303,73 +5781,135 @@ fn semantic_identity(
     })
 }
 
-fn compiled_cohort_identity() -> Result<SemanticIdentityV1, EngineError> {
-    let mut profiles = all_profiles()
-        .iter()
-        .map(|profile| {
-            let descriptor = profile.descriptor();
-            let mut detectors = profile
-                .detectors()
-                .iter()
-                .map(|detector| {
-                    let descriptor = detector.descriptor();
-                    Ok(json!({
-                        "id": descriptor.id,
-                        "version": descriptor.version,
-                        "digest": descriptor.digest().map_err(EngineError::Canonical)?,
-                    }))
-                })
-                .collect::<Result<Vec<_>, EngineError>>()?;
-            detectors.sort_by(|left, right| {
-                left["id"]
-                    .as_str()
-                    .cmp(&right["id"].as_str())
-                    .then_with(|| left["version"].as_u64().cmp(&right["version"].as_u64()))
-            });
-            Ok(json!({
-                "id": descriptor.profile.id,
-                "version": descriptor.profile.version,
-                "digest": descriptor
-                    .digest()
-                    .map_err(|error| EngineError::Canonical(error.to_string()))?
-                    .as_str(),
-                "detectors": detectors,
-            }))
-        })
-        .collect::<Result<Vec<_>, EngineError>>()?;
-    profiles.sort_by(|left, right| {
-        left["id"]
-            .as_str()
-            .cmp(&right["id"].as_str())
-            .then_with(|| left["version"].as_u64().cmp(&right["version"].as_u64()))
-    });
-    semantic_identity(
-        "nq.compiled_cohort",
+#[derive(Clone)]
+struct LocalV2HistoricalSurface {
+    build: SemanticIdentityV1,
+    cohort: SemanticIdentityV1,
+    normalization_rule: SemanticIdentityV1,
+    clock_qualification: ClockQualificationV2,
+    limitations: Vec<DiagnosticLimitationV1>,
+    nonclaims: Vec<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn local_v2_historical_surface(
+    profile: &SemanticIdentityV1,
+    question: &SemanticIdentityV1,
+    evaluator_artifact_digest: &str,
+    evaluator_source_digest: &str,
+    artifact_identity_method: &str,
+    target_triple: &str,
+    platform_runtime_version: &str,
+    protocol_version: &str,
+) -> Result<LocalV2HistoricalSurface, EngineError> {
+    let build = semantic_identity(
+        "nq.evaluator_build",
+        "2",
+        &json!({
+            "schema": "nq.evaluator_build.v2",
+            "artifact_digest": evaluator_artifact_digest,
+            "artifact_identity_method": artifact_identity_method,
+            "target_triple": target_triple,
+            "platform_runtime_version": platform_runtime_version,
+            "evaluator_source_digest": evaluator_source_digest,
+        }),
+    )?;
+    let cohort = semantic_identity(
+        "nq.compiled_diagnostic_cohort",
         "1",
         &json!({
-            "schema": "nq.compiled_cohort.v1",
-            "evaluator_source_digest": EVALUATOR_SOURCE_DIGEST,
-            "profiles": profiles,
+            "schema": "nq.compiled_diagnostic_cohort.v1",
+            "evaluator_source_digest": evaluator_source_digest,
+            "profile": profile,
+            "question": question,
         }),
-    )
+    )?;
+    let normalization_rule = semantic_identity(
+        "nq.protocol_report_normalization",
+        "1",
+        &json!({
+            "schema": "nq.diagnostic_normalization_rule.v1",
+            "protocol": protocol_version,
+            "profile": profile,
+        }),
+    )?;
+    let clock_qualification = ClockQualificationV2::Unqualified {
+        code: "absolute_clock_quality_unqualified".to_owned(),
+        detail: "the local Linux wall clock has no qualified finite UTC-error bound".to_owned(),
+    };
+    let limitations = vec![
+        DiagnosticLimitationV1 {
+            kind: DiagnosticLimitationKindV1::Other,
+            code: "absolute_clock_quality_unqualified".to_owned(),
+            detail:
+                "timestamps share the local Linux wall clock; absolute UTC accuracy is not qualified"
+                    .to_owned(),
+        },
+        DiagnosticLimitationV1 {
+            kind: DiagnosticLimitationKindV1::Other,
+            code: "boot_or_deployment_state_unbound".to_owned(),
+            detail:
+                "the current host profile does not export boot or deployment generation identity"
+                    .to_owned(),
+        },
+        DiagnosticLimitationV1 {
+            kind: DiagnosticLimitationKindV1::UnverifiedSeparation,
+            code: "failure_domain_separation_unverified".to_owned(),
+            detail: "this local execution carries no cross-vantage independence warrant"
+                .to_owned(),
+        },
+        DiagnosticLimitationV1 {
+            kind: DiagnosticLimitationKindV1::UnavailableEvidence,
+            code: "raw_evidence_not_publicly_retrievable".to_owned(),
+            detail: "exact raw provider bytes are committed in NQ custody but no supported raw-evidence retrieval surface exists"
+                .to_owned(),
+        },
+    ];
+    let nonclaims = vec![
+        "agreement with another artifact does not establish independent corroboration".to_owned(),
+        "this artifact grants no reliance, authorization, or action".to_owned(),
+        "this bounded diagnostic does not establish whole-subject health".to_owned(),
+    ];
+    Ok(LocalV2HistoricalSurface {
+        build,
+        cohort,
+        normalization_rule,
+        clock_qualification,
+        limitations,
+        nonclaims,
+    })
+}
+
+fn initial_local_v2_question(
+    detector_identity_digest: &str,
+) -> Result<SemanticIdentityV1, EngineError> {
+    let digest = Sha256Digest::parse(INITIAL_DIAGNOSTIC_DETECTOR_DIGEST.to_owned())
+        .map_err(|error| EngineError::Invariant(error.to_string()))?;
+    let expected_suite =
+        nq_store::detector_suite_identity_digest(vec![digest.as_str().to_owned()])?;
+    if detector_identity_digest != expected_suite.as_str() {
+        return Err(EngineError::DiagnosticUnsupported(format!(
+            "no frozen v2 detector descriptor maps admitted suite {detector_identity_digest}"
+        )));
+    }
+    Ok(SemanticIdentityV1 {
+        id: INITIAL_DIAGNOSTIC_DETECTOR_ID.to_owned(),
+        version: INITIAL_DIAGNOSTIC_DETECTOR_VERSION.to_string(),
+        digest,
+    })
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn prepare_diagnostic_emission(
+fn prepare_diagnostic_emission_base(
     node_id: &str,
     watcher: &WatcherConfig,
     profile: &'static dyn ProfileModule,
     provider: &crate::provider_intake::ProviderIdentityV1,
     request: &HelperRequest,
     run_id: &str,
-    report_id: &str,
-    input_id: &str,
-    raw: &[u8],
-    normalized: &ProfileReportInput,
-    validated: &ValidatedReport,
     capture: &RunCapture,
     evaluator: &EvaluatorRuntimeIdentity,
-) -> Result<DiagnosticEmissionContext, EngineError> {
+) -> Result<DiagnosticEmissionBase, EngineError> {
     let detector = profile.detectors().first().ok_or_else(|| {
         EngineError::Invariant("diagnostic execution profile has no detector".into())
     })?;
@@ -4383,24 +5923,7 @@ fn prepare_diagnostic_emission(
         .map_err(|error| EngineError::Canonical(error.to_string()))?;
     let profile_semantic = profile_semantic_id(profile_descriptor)
         .map_err(|error| EngineError::Canonical(error.to_string()))?;
-    let normalized_document = canonical(normalized)?;
-    let projected_artifact_placeholder = ProjectedArtifactId(nq_protocol::sha256_bytes(
-        b"pending exact detector input projection",
-    ));
 
-    let build = semantic_identity(
-        "nq.evaluator_build",
-        env!("CARGO_PKG_VERSION"),
-        &json!({
-            "schema": "nq.evaluator_build.v1",
-            "artifact_digest": evaluator.artifact_digest(),
-            "artifact_identity_method": evaluator.artifact_identity_method(),
-            "target_triple": evaluator.target_triple(),
-            "platform_runtime_version": evaluator.platform_runtime_version(),
-            "crate_version": env!("CARGO_PKG_VERSION"),
-        }),
-    )?;
-    let cohort = compiled_cohort_identity()?;
     let question = SemanticIdentityV1 {
         id: detector_descriptor.id.clone(),
         version: detector_descriptor.version.to_string(),
@@ -4413,6 +5936,25 @@ fn prepare_diagnostic_emission(
         digest: Sha256Digest::parse(profile_digest.as_str().to_owned())
             .map_err(|error| EngineError::Invariant(error.to_string()))?,
     };
+    let detector_suite =
+        nq_store::detector_suite_identity_digest(vec![question.digest.as_str().to_owned()])?;
+    let frozen_question = initial_local_v2_question(detector_suite.as_str())?;
+    if question != frozen_question {
+        return Err(EngineError::DiagnosticUnsupported(
+            "the live detector descriptor has no frozen v2 historical correspondence mapping"
+                .into(),
+        ));
+    }
+    let historical_surface = local_v2_historical_surface(
+        &profile_identity,
+        &question,
+        evaluator.artifact_digest().as_str(),
+        EVALUATOR_SOURCE_DIGEST,
+        evaluator.artifact_identity_method(),
+        evaluator.target_triple(),
+        evaluator.platform_runtime_version(),
+        &provider.protocol_identity,
+    )?;
     let scope = semantic_identity(
         format!("nq.scope.{}", watcher.scope.kind),
         profile_descriptor.profile.version.to_string(),
@@ -4460,10 +6002,10 @@ fn prepare_diagnostic_emission(
         format!("{}.threshold_policy", detector_descriptor.id),
         detector_descriptor.version.to_string(),
         &json!({
-            "schema": "nq.detector_threshold_policy.v1",
+            "schema": "nq.detector_threshold_policy.v2",
             "detector_id": detector_descriptor.id,
             "detector_version": detector_descriptor.version,
-            "parameters": detector_descriptor.parameters,
+            "detector_digest": detector_digest,
         }),
     )?;
     let projection_identity = semantic_identity(
@@ -4512,15 +6054,6 @@ fn prepare_diagnostic_emission(
             "profile_semantic_id": provider.profile_semantic_id,
         }),
     )?;
-    let normalization_rule = semantic_identity(
-        "nq.protocol_report_normalization",
-        "1",
-        &json!({
-            "schema": "nq.diagnostic_normalization_rule.v1",
-            "protocol": nq_protocol::HELPER_PROTOCOL_VERSION,
-            "profile": profile_identity,
-        }),
-    )?;
     let selection_rule = semantic_identity(
         "nq.fresh_single_admitted_report",
         "1",
@@ -4530,39 +6063,277 @@ fn prepare_diagnostic_emission(
             "cardinality": "exactly_one_newly_admitted_report_with_no_prior_matching_history",
         }),
     )?;
+    Ok(DiagnosticEmissionBase {
+        producer: DiagnosticProducerV1 {
+            node_id: node_id.to_owned(),
+            build: historical_surface.build,
+            cohort: historical_surface.cohort,
+        },
+        request_id: DiagnosticRequestId(request.request_id.to_string()),
+        run_id: DiagnosticRunId(run_id.to_owned()),
+        question,
+        subject: DiagnosticSubjectV1 {
+            id: watcher.subject.clone(),
+            scope,
+        },
+        profile: profile_identity,
+        profile_semantic_id: Sha256Digest::parse(profile_semantic.as_str().to_owned())
+            .map_err(|error| EngineError::Invariant(error.to_string()))?,
+        vantage,
+        state_model,
+        evaluator: evaluator_identity,
+        threshold_policy,
+        projection: DiagnosticProjectionV1 {
+            identity: projection_identity,
+            omitted_distinctions: Vec::new(),
+        },
+        execution_clock: execution_clock.clone(),
+        started_at: parse_timestamp(&timestamp(capture.started_at))?,
+        attempt_interval: AcquisitionIntervalV2 {
+            started_at: parse_timestamp(&timestamp(capture.started_at))?,
+            ended_at: parse_timestamp(&timestamp(capture.finished_at))?,
+            clock: execution_clock,
+            qualification: historical_surface.clock_qualification,
+        },
+        capture_policy,
+        admission_rule,
+        normalization_rule: historical_surface.normalization_rule,
+        selection_rule,
+        limitations: historical_surface.limitations,
+        nonclaims: historical_surface.nonclaims,
+        expected_evaluator_artifact_digest: evaluator.artifact_digest().clone(),
+        expected_profile_semantic_id: profile_semantic,
+        expected_instance_id: watcher.instance_id.clone(),
+        expected_scope: watcher.scope.clone(),
+        expected_vantage: watcher.vantage.clone(),
+    })
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // One closed mapping from collection failure to diagnostic artifact.
+fn prepare_non_success_diagnostic(
+    node_id: &str,
+    watcher: &WatcherConfig,
+    profile: &'static dyn ProfileModule,
+    provider: &crate::provider_intake::ProviderIdentityV1,
+    request: &HelperRequest,
+    run_id: &str,
+    provider_intake_id: &str,
+    raw: Option<&[u8]>,
+    capture: &RunCapture,
+    evaluator: &EvaluatorRuntimeIdentity,
+    outcome: &CollectionOutcome,
+) -> Result<DiagnosticExecutionV2, EngineError> {
+    if outcome.run_id.as_deref() != Some(run_id) || outcome.instance_id != watcher.instance_id {
+        return Err(EngineError::Invariant(
+            "non-success diagnostic source outcome differs from its run or instance".into(),
+        ));
+    }
+    let base = prepare_diagnostic_emission_base(
+        node_id, watcher, profile, provider, request, run_id, capture, evaluator,
+    )?;
+    let expected = vec![ExpectedInputV1 {
+        expectation_id: "expected:current_provider_report".to_owned(),
+        role: "profile_report".to_owned(),
+        required: true,
+    }];
+    let selection_rule = base.selection_rule.clone();
+
+    match &outcome.result {
+        CollectionResult::Rejected { refusal } => {
+            let raw = raw.ok_or_else(|| {
+                EngineError::Invariant(
+                    "rejected diagnostic input has no retained raw provider bytes".into(),
+                )
+            })?;
+            let input_id = provider_intake_id.to_owned();
+            let profile_binding = match &refusal.origin {
+                GovernedRefusalOrigin::Profile(_) => Some(ProfileRefusalBindingV2::ArtifactProfile),
+                _ => None,
+            };
+            let inputs = DiagnosticInputAccountingV2 {
+                selection_rule,
+                expected,
+                received: vec![ReceivedInputV2 {
+                    input_id: input_id.clone(),
+                    expectation_id: "expected:current_provider_report".to_owned(),
+                    provider_intake_id: provider_intake_id.to_owned(),
+                    raw_artifact_id: RawArtifactId(nq_protocol::sha256_bytes(raw)),
+                    capture_mode: RawCaptureModeV1::ExactSource,
+                    capture_policy: base.capture_policy.clone(),
+                    availability_at_derivation: EvidenceAvailabilityV1::CommittedUnavailable,
+                    acquisition: base.attempt_interval.clone(),
+                    received_at: parse_timestamp(&timestamp(capture.finished_at))?,
+                }],
+                admitted: Vec::new(),
+                refused: vec![RefusedInputV2 {
+                    input_id,
+                    refusal: refusal.clone(),
+                    profile_binding,
+                }],
+                failed: Vec::new(),
+                excluded: Vec::new(),
+                selected: Vec::new(),
+            };
+            base.seal(
+                inputs,
+                Vec::new(),
+                Vec::new(),
+                None,
+                DiagnosticOutcomeV2 {
+                    derivation: DiagnosticDerivationV1::Refused,
+                    condition: DiagnosticConditionV1::Unresolved,
+                    coherence: DiagnosticCoherenceV1::NotEvaluated,
+                    coverage: DiagnosticCoverageV1::Missing,
+                    summary: "the required provider input was refused".to_owned(),
+                    refusals: vec![refusal.clone()],
+                    unsupported: Vec::new(),
+                },
+            )
+        }
+        CollectionResult::AcquisitionFailed { failure } => {
+            if raw.is_some() {
+                return Err(EngineError::Invariant(
+                    "failed-input diagnostic cannot discard retained provider bytes".into(),
+                ));
+            }
+            let failure_id = format!("failure:{provider_intake_id}");
+            let common = (
+                provider_intake_id.to_owned(),
+                base.attempt_interval.clone(),
+                FailedAcquisitionCustodyV2::NoBytesRetained,
+                failure.clone(),
+            );
+            let cause = if matches!(
+                failure.class,
+                AcquisitionFailureClass::Timeout
+                    | AcquisitionFailureClass::Eof
+                    | AcquisitionFailureClass::HelperExited
+                    | AcquisitionFailureClass::Disconnect
+            ) {
+                FailedInputCauseV2::ProviderNoResponse {
+                    provider_intake_id: common.0,
+                    attempt: common.1,
+                    raw_custody: common.2,
+                    failure: common.3,
+                }
+            } else {
+                FailedInputCauseV2::AcquisitionFailed {
+                    provider_intake_id: common.0,
+                    attempt: common.1,
+                    raw_custody: common.2,
+                    failure: common.3,
+                }
+            };
+            let claim_id = "claim:required_provider_input_available".to_owned();
+            let inputs = DiagnosticInputAccountingV2 {
+                selection_rule,
+                expected,
+                received: Vec::new(),
+                admitted: Vec::new(),
+                refused: Vec::new(),
+                failed: vec![FailedInputV2 {
+                    expectation_id: "expected:current_provider_report".to_owned(),
+                    failure_id: failure_id.clone(),
+                    cause,
+                }],
+                excluded: Vec::new(),
+                selected: Vec::new(),
+            };
+            base.seal(
+                inputs,
+                Vec::new(),
+                vec![DiagnosticClaimV2 {
+                    claim_id: claim_id.clone(),
+                    proposition:
+                        "the required provider input is available for diagnostic evaluation"
+                            .to_owned(),
+                    status: DiagnosticClaimStatusV1::Unknown,
+                    condition_effect: Some(DiagnosticConditionV1::Unresolved),
+                    dependency_input_ids: Vec::new(),
+                    dependency_refusal_ids: Vec::new(),
+                    dependency_failure_ids: vec![failure_id],
+                    state_binding_ids: Vec::new(),
+                    required_distinctions: Vec::new(),
+                    limitations: vec!["the bounded subject condition was not evaluated".to_owned()],
+                    nonclaims: vec![
+                        "provider acquisition failure does not establish subject failure"
+                            .to_owned(),
+                    ],
+                }],
+                Some(claim_id),
+                DiagnosticOutcomeV2 {
+                    derivation: DiagnosticDerivationV1::Partial,
+                    condition: DiagnosticConditionV1::Unresolved,
+                    coherence: DiagnosticCoherenceV1::NotEvaluated,
+                    coverage: DiagnosticCoverageV1::Missing,
+                    summary: "the required provider input was not acquired".to_owned(),
+                    refusals: Vec::new(),
+                    unsupported: Vec::new(),
+                },
+            )
+        }
+        CollectionResult::AdmissionRefused { .. } => Err(EngineError::DiagnosticUnsupported(
+            "admission refusal created no run and cannot be laundered into an execution artifact"
+                .into(),
+        )),
+        CollectionResult::Admitted { .. } => Err(EngineError::Invariant(
+            "admitted collection entered non-success diagnostic emission".into(),
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn prepare_diagnostic_emission(
+    node_id: &str,
+    watcher: &WatcherConfig,
+    profile: &'static dyn ProfileModule,
+    provider: &crate::provider_intake::ProviderIdentityV1,
+    request: &HelperRequest,
+    run_id: &str,
+    report_id: &str,
+    input_id: &str,
+    raw: &[u8],
+    normalized: &ProfileReportInput,
+    validated: &ValidatedReport,
+    capture: &RunCapture,
+    evaluator: &EvaluatorRuntimeIdentity,
+) -> Result<DiagnosticEmissionContext, EngineError> {
+    let base = prepare_diagnostic_emission_base(
+        node_id, watcher, profile, provider, request, run_id, capture, evaluator,
+    )?;
+    let normalized_document = canonical(normalized)?;
+    let projected_artifact_placeholder = ProjectedArtifactId(nq_protocol::sha256_bytes(
+        b"pending exact detector input projection",
+    ));
 
     let input_id = input_id.to_owned();
-    let inputs = DiagnosticInputAccountingV1 {
-        selection_rule,
+    let inputs = DiagnosticInputAccountingV2 {
+        selection_rule: base.selection_rule.clone(),
         expected: vec![ExpectedInputV1 {
             expectation_id: "expected:current_provider_report".to_owned(),
             role: "profile_report".to_owned(),
             required: true,
         }],
-        received: vec![ReceivedInputV1 {
+        received: vec![ReceivedInputV2 {
             input_id: input_id.clone(),
             expectation_id: "expected:current_provider_report".to_owned(),
+            provider_intake_id: input_id.clone(),
             raw_artifact_id: RawArtifactId(nq_protocol::sha256_bytes(raw)),
             capture_mode: RawCaptureModeV1::ExactSource,
-            capture_policy,
+            capture_policy: base.capture_policy.clone(),
             availability_at_derivation: EvidenceAvailabilityV1::CommittedUnavailable,
-            acquisition: AcquisitionIntervalV1 {
-                started_at: capture.started_at,
-                ended_at: capture.finished_at,
-                clock: execution_clock.clone(),
-                clock_uncertainty_ms: 0,
-            },
-            received_at: capture.finished_at,
+            acquisition: base.attempt_interval.clone(),
+            received_at: parse_timestamp(&timestamp(capture.finished_at))?,
         }],
         admitted: vec![AdmittedInputV1 {
             input_id: input_id.clone(),
-            admission_rule,
+            admission_rule: base.admission_rule.clone(),
             normalized_artifact_id: NormalizedArtifactId(nq_protocol::sha256_bytes(
                 normalized_document.as_bytes(),
             )),
-            normalization_rule,
+            normalization_rule: base.normalization_rule.clone(),
             projected_artifact_id: projected_artifact_placeholder.clone(),
-            projection_rule: projection_identity.clone(),
+            projection_rule: base.projection.identity.clone(),
         }],
         refused: Vec::new(),
         failed: Vec::new(),
@@ -4579,78 +6350,32 @@ fn prepare_diagnostic_emission(
         value: watcher.subject.clone(),
         supporting_input_ids: vec![input_id],
     }];
-    let limitations = vec![
-        DiagnosticLimitationV1 {
-            kind: DiagnosticLimitationKindV1::Other,
-            code: "absolute_clock_quality_unqualified".to_owned(),
-            detail: "timestamps share the local Linux wall clock; absolute UTC accuracy is not qualified"
-                .to_owned(),
-        },
-        DiagnosticLimitationV1 {
-            kind: DiagnosticLimitationKindV1::Other,
-            code: "boot_or_deployment_state_unbound".to_owned(),
-            detail:
-                "the current host profile does not export boot or deployment generation identity"
-                    .to_owned(),
-        },
-        DiagnosticLimitationV1 {
-            kind: DiagnosticLimitationKindV1::UnverifiedSeparation,
-            code: "failure_domain_separation_unverified".to_owned(),
-            detail: "this local execution carries no cross-vantage independence warrant"
-                .to_owned(),
-        },
-        DiagnosticLimitationV1 {
-            kind: DiagnosticLimitationKindV1::UnavailableEvidence,
-            code: "raw_evidence_not_publicly_retrievable".to_owned(),
-            detail: "exact raw provider bytes are committed in NQ custody but no supported raw-evidence retrieval surface exists"
-                .to_owned(),
-        },
-    ];
-    let nonclaims = vec![
-        "agreement with another artifact does not establish independent corroboration".to_owned(),
-        "this artifact grants no reliance, authorization, or action".to_owned(),
-        "this bounded diagnostic does not establish whole-subject health".to_owned(),
-    ];
 
     Ok(DiagnosticEmissionContext {
-        producer: DiagnosticProducerV1 {
-            node_id: node_id.to_owned(),
-            build,
-            cohort,
-        },
-        request_id: DiagnosticRequestId(request.request_id.to_string()),
-        run_id: DiagnosticRunId(run_id.to_owned()),
-        question,
-        subject: DiagnosticSubjectV1 {
-            id: watcher.subject.clone(),
-            scope,
-        },
-        profile: profile_identity,
-        vantage,
-        state_model,
-        evaluator: evaluator_identity,
-        threshold_policy,
-        projection: DiagnosticProjectionV1 {
-            identity: projection_identity,
-            omitted_distinctions: Vec::new(),
-        },
-        execution_clock: execution_clock.clone(),
-        started_at: capture.started_at,
-        attempt_interval: AcquisitionIntervalV1 {
-            started_at: capture.started_at,
-            ended_at: capture.finished_at,
-            clock: execution_clock,
-            clock_uncertainty_ms: 0,
-        },
+        producer: base.producer,
+        request_id: base.request_id,
+        run_id: base.run_id,
+        question: base.question,
+        subject: base.subject,
+        profile: base.profile,
+        profile_semantic_id: base.profile_semantic_id,
+        vantage: base.vantage,
+        state_model: base.state_model,
+        evaluator: base.evaluator,
+        threshold_policy: base.threshold_policy,
+        projection: base.projection,
+        execution_clock: base.execution_clock,
+        started_at: base.started_at,
+        attempt_interval: base.attempt_interval,
         inputs,
         state_bindings,
-        limitations,
-        nonclaims,
-        expected_evaluator_artifact_digest: evaluator.artifact_digest().clone(),
-        expected_profile_semantic_id: profile_semantic,
-        expected_instance_id: watcher.instance_id.clone(),
-        expected_scope: watcher.scope.clone(),
-        expected_vantage: watcher.vantage.clone(),
+        limitations: base.limitations,
+        nonclaims: base.nonclaims,
+        expected_evaluator_artifact_digest: base.expected_evaluator_artifact_digest,
+        expected_profile_semantic_id: base.expected_profile_semantic_id,
+        expected_instance_id: base.expected_instance_id,
+        expected_scope: base.expected_scope,
+        expected_vantage: base.expected_vantage,
         report_id: report_id.to_owned(),
         report_complete: validated.status == SemanticReportStatus::Complete,
     })
@@ -4760,13 +6485,11 @@ fn rejected_transport_submission(
     watcher: &WatcherConfig,
     capture: &RunCapture,
 ) -> Result<(Option<SubmissionInput>, Option<GovernedRefusal>), EngineError> {
-    let retains_exact_submission = !capture.stdout.is_empty()
-        && matches!(
-            capture.outcome,
-            AcquisitionOutcome::MalformedFraming { .. }
-                | AcquisitionOutcome::MalformedJson { .. }
-                | AcquisitionOutcome::ExitNonzero { .. }
-        );
+    // Any retained provider bytes are received-but-refused testimony,
+    // including partial output captured before a timeout, EOF, output limit,
+    // or carrier failure. Claiming `NoBytesRetained` in those cases would
+    // contradict the provider-intake custody record.
+    let retains_exact_submission = !capture.stdout.is_empty();
     if !retains_exact_submission {
         return Ok((None, None));
     }
@@ -5735,21 +7458,38 @@ pub fn record_component_status(
 ///
 /// Returns when the source, backup, or verification step fails.
 pub fn backup_store(store: &Store, destination: &Path) -> Result<(), EngineError> {
+    validate_semantic_history(store)?;
+    let _artifact = store.backup_verified(destination)?;
+    let reopened = Store::open(destination)?;
+    validate_semantic_history(&reopened)?;
+    Ok(())
+}
+
+/// Exhaustively reopen the complete persisted semantic chain.
+///
+/// This is the shared fail-closed boundary for operations that may disclose or
+/// preserve locally produced diagnostic artifacts. It proves admitted and
+/// rejected custody, run/status/evaluation correspondence, the provider's raw
+/// interpretation through its durable acknowledgment and canonical result, and
+/// finally every diagnostic artifact derived from that history.
+///
+/// Imported diagnostic artifacts deliberately remain custody-only and callers
+/// must not use this function to imply producer authentication for them.
+///
+/// # Errors
+///
+/// Returns when any persisted history plane is incomplete, corrupt, or does
+/// not correspond exactly to the plane from which it was derived.
+pub fn validate_semantic_history(
+    store: &Store,
+) -> Result<DiagnosticArtifactHistoryVerification, EngineError> {
     validate_admitted_report_history(store)?;
     validate_watcher_run_history(store)?;
     validate_status_history_v2(store)?;
     validate_rejected_custody_history(store)?;
     validate_evaluation_refusal_history(store)?;
     validate_provider_intake_history(store)?;
-    let _artifact = store.backup_verified(destination)?;
-    let reopened = Store::open(destination)?;
-    validate_admitted_report_history(&reopened)?;
-    validate_watcher_run_history(&reopened)?;
-    validate_status_history_v2(&reopened)?;
-    validate_rejected_custody_history(&reopened)?;
-    validate_evaluation_refusal_history(&reopened)?;
-    validate_provider_intake_history(&reopened)?;
-    Ok(())
+    validate_diagnostic_artifact_history(store)
 }
 
 /// Exact provider-intake history counts returned by typed reopening.
@@ -6416,7 +8156,7 @@ pub fn evaluation_history_bounded(
                 row.evaluation_sequence
             )));
         }
-        let envelope = validate_evaluation_refusal_row(store, &row)?;
+        let envelope = validate_evaluation_refusal_row(store, &row, true)?;
         reopened.push((row, envelope));
     }
 
@@ -6635,7 +8375,7 @@ where
         let page_len = page.len();
         for row in page {
             after_evaluation_sequence = Some(row.evaluation_sequence);
-            let envelope = validate_evaluation_refusal_row(store, &row)?;
+            let envelope = validate_evaluation_refusal_row(store, &row, true)?;
             validate_evaluation_finding_replay_step(&row, &envelope, &mut replay)?;
             visit(row, envelope)?;
             reopened = reopened.checked_add(1).ok_or_else(|| {
@@ -6718,6 +8458,7 @@ fn validate_evaluation_finding_replay_step(
 fn validate_evaluation_refusal_row(
     store: &Store,
     row: &nq_store::EvaluationRefusalHistoryRow,
+    require_current_catalog: bool,
 ) -> Result<EvaluationEnvelopeV2, EngineError> {
     if !matches!(row.refusal_count, 0 | 1)
         || i64::from(row.refusal_id.is_some()) != row.refusal_count
@@ -6751,36 +8492,6 @@ fn validate_evaluation_refusal_row(
     }
     let result = &envelope.result;
     envelope.validate()?;
-    let compiled = nq_profiles::resolve_profile_key(&result.profile.profile).ok_or_else(|| {
-        EngineError::Invariant(format!(
-            "evaluation {} names uncompiled profile {}/{}",
-            row.evaluation_id, result.profile.profile.id, result.profile.profile.version
-        ))
-    })?;
-    let compiled_digest = compiled
-        .descriptor()
-        .digest()
-        .map_err(|error| EngineError::Canonical(error.to_string()))?;
-    let compiled_semantic_id = profile_semantic_id(compiled.descriptor())
-        .map_err(|error| EngineError::Canonical(error.to_string()))?;
-    let detector = compiled
-        .detectors()
-        .iter()
-        .find(|detector| {
-            let descriptor = detector.descriptor();
-            descriptor.id == row.detector_id
-                && descriptor.version.to_string() == row.detector_version
-        })
-        .ok_or_else(|| {
-            EngineError::Invariant(format!(
-                "evaluation {} names detector {}/{} outside its compiled profile",
-                row.evaluation_id, row.detector_id, row.detector_version
-            ))
-        })?;
-    let detector_descriptor = detector.descriptor();
-    let compiled_detector_digest = detector_descriptor
-        .digest()
-        .map_err(EngineError::Canonical)?;
     if envelope.evaluation_id != row.evaluation_id
         || envelope.trigger_run_id != row.trigger_run_id
         || envelope.detector.id != row.detector_id
@@ -6794,15 +8505,54 @@ fn validate_evaluation_refusal_row(
         || row.evaluation_profile_version != result.profile.profile.version.to_string()
         || row.evaluation_profile_digest != result.profile.profile_digest.as_str()
         || row.evaluation_profile_semantic_id != result.profile.profile_semantic_id.as_str()
-        || compiled_digest != result.profile.profile_digest
-        || compiled_semantic_id != result.profile.profile_semantic_id
-        || row.detector_digest != compiled_detector_digest
-        || result.condition != detector_descriptor.condition
     {
         return Err(EngineError::Invariant(format!(
             "evaluation {} profile identity or semantic projection was substituted",
             row.evaluation_id
         )));
+    }
+    if require_current_catalog {
+        let compiled =
+            nq_profiles::resolve_profile_key(&result.profile.profile).ok_or_else(|| {
+                EngineError::Invariant(format!(
+                    "evaluation {} names uncompiled profile {}/{}",
+                    row.evaluation_id, result.profile.profile.id, result.profile.profile.version
+                ))
+            })?;
+        let compiled_digest = compiled
+            .descriptor()
+            .digest()
+            .map_err(|error| EngineError::Canonical(error.to_string()))?;
+        let compiled_semantic_id = profile_semantic_id(compiled.descriptor())
+            .map_err(|error| EngineError::Canonical(error.to_string()))?;
+        let detector = compiled
+            .detectors()
+            .iter()
+            .find(|detector| {
+                let descriptor = detector.descriptor();
+                descriptor.id == row.detector_id
+                    && descriptor.version.to_string() == row.detector_version
+            })
+            .ok_or_else(|| {
+                EngineError::Invariant(format!(
+                    "evaluation {} names detector {}/{} outside its compiled profile",
+                    row.evaluation_id, row.detector_id, row.detector_version
+                ))
+            })?;
+        let detector_descriptor = detector.descriptor();
+        let compiled_detector_digest = detector_descriptor
+            .digest()
+            .map_err(EngineError::Canonical)?;
+        if compiled_digest != result.profile.profile_digest
+            || compiled_semantic_id != result.profile.profile_semantic_id
+            || row.detector_digest != compiled_detector_digest
+            || result.condition != detector_descriptor.condition
+        {
+            return Err(EngineError::Invariant(format!(
+                "evaluation {} differs from the current compiled catalog",
+                row.evaluation_id
+            )));
+        }
     }
     if row.finding_event_id.is_some()
         && (row.finding_profile_id.as_deref() != Some(row.evaluation_profile_id.as_str())
@@ -8376,6 +10126,7 @@ sys.stdout.write("\n")
 
     const HOST_DIAGNOSTIC_HELPER: &str = r#"import datetime
 import json
+import os
 import sys
 
 request = json.load(sys.stdin)
@@ -8426,7 +10177,44 @@ report = {
         "tools": [],
     },
 }
-response = {"schema": "nq.helper.response.v1", "echo": echo, "outcome": {"kind": "report", "report": report}}
+mode_path = os.environ.get("NQ_DIAGNOSTIC_TEST_MODE")
+mode = "complete"
+if mode_path:
+    with open(mode_path, "r", encoding="utf-8") as source:
+        mode = source.read().strip()
+if mode == "no_response":
+    sys.exit(0)
+if mode == "partial_bytes_failure":
+    sys.stdout.write('{"schema":"nq.helper.response.v1","partial":')
+    sys.stdout.flush()
+    sys.exit(17)
+if mode == "helper_refusal":
+    refusal = {
+        "responsible_instance_id": request["instance_id"],
+        "boundary": "collection",
+        "code": "collection_failed",
+        "message": "bounded host collection refused",
+        "retriable": True,
+        "details": {"errno": "EAGAIN"},
+    }
+    response = {
+        "schema": "nq.helper.response.v1",
+        "echo": echo,
+        "outcome": {"kind": "refusal", "refusal": refusal},
+    }
+elif mode == "partial":
+    report["status"] = "partial"
+    report["coverage"][2]["state"] = "partial"
+    del report["observations"][0]["payload"]["load_1m"]
+    report["errors"] = [{
+        "code": "load_partial",
+        "severity": "error",
+        "message": "one-minute load was unavailable",
+        "retriable": True,
+    }]
+    response = {"schema": "nq.helper.response.v1", "echo": echo, "outcome": {"kind": "report", "report": report}}
+else:
+    response = {"schema": "nq.helper.response.v1", "echo": echo, "outcome": {"kind": "report", "report": report}}
 json.dump(response, sys.stdout, sort_keys=True, separators=(",", ":"))
 sys.stdout.write("\n")
 "#;
@@ -9255,6 +11043,7 @@ sys.stdout.write("\n")
                         .into_iter()
                         .map(|prepared| prepared.commit)
                         .collect(),
+                    diagnostic_artifact: None,
                     status: instance_status_event(watcher, &outcome)
                         .expect("canonical admitted status"),
                 })
@@ -9638,7 +11427,7 @@ sys.stdout.write("\n")
             submission,
         } = collection;
         let error = engine
-            .commit_non_success_collection(&watcher, intake, run, submission, &outcome)
+            .commit_non_success_collection(&watcher, intake, run, submission, outcome, None)
             .expect_err("mismatched source and result planes must fail before commit");
         assert!(matches!(
             error,
@@ -9865,16 +11654,21 @@ sys.stdout.write("\n")
         (config, watcher, lock)
     }
 
-    fn host_diagnostic_fixture(root: &Path) -> (NqConfig, WatcherConfig) {
+    fn host_diagnostic_fixture(root: &Path) -> (NqConfig, WatcherConfig, PathBuf) {
         fs::create_dir(root.join("admissions")).expect("fixture admissions root");
         let script = root.join("host_diagnostic_helper.py");
+        let mode = root.join("host_diagnostic_helper.mode");
         fs::write(&script, HOST_DIAGNOSTIC_HELPER).expect("write host diagnostic helper");
+        fs::write(&mode, "complete\n").expect("write host diagnostic helper mode");
         let watcher = WatcherConfig {
             instance_id: "host-diagnostic.primary".to_owned(),
             command: CommandConfig {
                 executable: PathBuf::from("/usr/bin/python3"),
                 args: vec![script.to_string_lossy().into_owned()],
-                env: BTreeMap::new(),
+                env: BTreeMap::from([(
+                    "NQ_DIAGNOSTIC_TEST_MODE".to_owned(),
+                    mode.to_string_lossy().into_owned(),
+                )]),
                 execution_account: nix::unistd::geteuid().as_raw().to_string(),
                 allow_same_identity_in_debug: true,
                 working_directory: root.to_path_buf(),
@@ -9909,7 +11703,43 @@ sys.stdout.write("\n")
             helper_runtime_dir: root.join("helpers"),
             watchers: vec![watcher.clone()],
         };
-        (config, watcher)
+        (config, watcher, mode)
+    }
+
+    fn admitted_host_diagnostic_fixture(
+        root: &Path,
+        genesis_id: &str,
+        evaluator_label: &[u8],
+    ) -> Option<(CollectionEngine, WatcherConfig, PathBuf)> {
+        let (config, watcher, mode) = host_diagnostic_fixture(root);
+        let mut store = Store::initialize(&config.database_path).expect("initialize store");
+        append_profile_descriptor(&mut store, resolve(&watcher).expect("host profile"))
+            .expect("profile descriptor");
+        store
+            .append_genesis(&GenesisInput {
+                genesis_id: genesis_id.to_owned(),
+                legacy_manifest_digest: None,
+                created_at: "2026-07-28T12:00:00.000Z".to_owned(),
+                detail: canonical(&json!({"source": "diagnostic-non-success-test"}))
+                    .expect("genesis detail"),
+            })
+            .expect("append genesis");
+        drop(store);
+        let evaluator =
+            EvaluatorRuntimeIdentity::for_test(nq_protocol::sha256_bytes(evaluator_label));
+        let mut engine =
+            CollectionEngine::open_with_evaluator_identity(&config, Ok(evaluator)).expect("engine");
+        if let Err(error) = engine.watcher_action(&watcher, "admit") {
+            if error.to_string().contains("\"class\":\"spawn_failed\"")
+                && fs::read_to_string("/proc/self/attr/current")
+                    .is_ok_and(|profile| profile.contains("unpriv_bwrap"))
+            {
+                eprintln!("skipping helper execution: sandbox AppArmor denies executable memfds");
+                return None;
+            }
+            panic!("fixture admission failed: {error}");
+        }
+        Some((engine, watcher, mode))
     }
 
     struct SemanticLineageFixture {
@@ -10737,7 +12567,7 @@ sys.stdout.write("\n")
     #[allow(clippy::too_many_lines)]
     fn diagnostic_execute_emits_exact_artifact_from_committed_host_evaluation() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let (config, watcher) = host_diagnostic_fixture(directory.path());
+        let (config, watcher, _mode) = host_diagnostic_fixture(directory.path());
         let mut store = Store::initialize(&config.database_path).expect("initialize store");
         append_profile_descriptor(&mut store, resolve(&watcher).expect("host profile"))
             .expect("profile descriptor");
@@ -10768,11 +12598,14 @@ sys.stdout.write("\n")
             panic!("fixture admission failed: {error}");
         }
 
-        let artifact = engine
+        let emitted = engine
             .diagnostic_execute(&watcher)
             .expect("admitted host execution emits a diagnostic");
+        let SupportedDiagnosticExecution::V2(artifact) = emitted else {
+            panic!("new live diagnostic executions use the v2 contract");
+        };
         artifact.validate().expect("live artifact validates");
-        assert_eq!(artifact.schema, DiagnosticExecutionSchema::V1);
+        assert_eq!(artifact.schema, DiagnosticExecutionSchemaV2::V2);
         assert_eq!(artifact.subject.id, watcher.subject);
         assert_eq!(artifact.profile.id, nq_profiles::host::PROFILE_ID);
         assert_eq!(artifact.question.id, "nq.host.load_pressure");
@@ -10804,13 +12637,28 @@ sys.stdout.write("\n")
 
         let original = artifact.canonical_bytes().expect("canonical live bytes");
         let reopened =
-            DiagnosticExecutionV1::decode_canonical(&original).expect("exact live bytes reopen");
+            DiagnosticExecutionV2::decode_canonical(&original).expect("exact live bytes reopen");
         assert_eq!(
             reopened
                 .canonical_bytes()
                 .expect("reopened canonical bytes"),
             original
         );
+        let stored_artifact_id = engine
+            .store
+            .diagnostic_artifact_id_for_run(artifact.run_id.as_str())
+            .expect("artifact index lookup")
+            .expect("local diagnostic artifact was committed");
+        assert_eq!(stored_artifact_id, artifact.artifact_id.0);
+        assert_eq!(
+            reopen_diagnostic_artifact(&engine.store, &stored_artifact_id)
+                .expect("strict durable artifact reopening")
+                .canonical_bytes()
+                .expect("durable artifact bytes"),
+            original
+        );
+        validate_diagnostic_artifact_history(&engine.store)
+            .expect("evaluated diagnostic history preserves exact semantics");
 
         let intakes = engine
             .store
@@ -10844,6 +12692,365 @@ sys.stdout.write("\n")
             1,
             "the refused second emission leaves no partial collection behind"
         );
+        drop(engine);
+        let reopened_store =
+            Store::open_read_only(&config.database_path).expect("store reopens after restart");
+        assert_eq!(
+            reopen_diagnostic_artifact(&reopened_store, &stored_artifact_id)
+                .expect("artifact survives process restart")
+                .canonical_bytes()
+                .expect("restart artifact bytes"),
+            original
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn diagnostic_execute_preserves_a_live_detector_refusal() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (config, watcher, mode) = host_diagnostic_fixture(directory.path());
+        let mut store = Store::initialize(&config.database_path).expect("initialize store");
+        append_profile_descriptor(&mut store, resolve(&watcher).expect("host profile"))
+            .expect("profile descriptor");
+        store
+            .append_genesis(&GenesisInput {
+                genesis_id: "diagnostic-refusal-test-genesis".to_owned(),
+                legacy_manifest_digest: None,
+                created_at: "2026-07-28T12:00:00.000Z".to_owned(),
+                detail: canonical(&json!({"source": "diagnostic-refusal-test"}))
+                    .expect("genesis detail"),
+            })
+            .expect("append genesis");
+        drop(store);
+
+        let evaluator = EvaluatorRuntimeIdentity::for_test(nq_protocol::sha256_bytes(
+            b"diagnostic-refusal-test-evaluator",
+        ));
+        let mut engine =
+            CollectionEngine::open_with_evaluator_identity(&config, Ok(evaluator)).expect("engine");
+        if let Err(error) = engine.watcher_action(&watcher, "admit") {
+            if error.to_string().contains("\"class\":\"spawn_failed\"")
+                && fs::read_to_string("/proc/self/attr/current")
+                    .is_ok_and(|profile| profile.contains("unpriv_bwrap"))
+            {
+                eprintln!("skipping helper execution: sandbox AppArmor denies executable memfds");
+                return;
+            }
+            panic!("fixture admission failed: {error}");
+        }
+        fs::write(&mode, "partial\n").expect("select partial live report");
+
+        let emitted = engine
+            .diagnostic_execute(&watcher)
+            .expect("admitted partial host execution emits a diagnostic refusal");
+        let SupportedDiagnosticExecution::V2(artifact) = emitted else {
+            panic!("new live diagnostic executions use the v2 contract");
+        };
+        artifact
+            .validate()
+            .expect("live refusal artifact validates");
+        assert_eq!(artifact.outcome.derivation, DiagnosticDerivationV1::Refused);
+        assert_eq!(
+            artifact.outcome.condition,
+            DiagnosticConditionV1::Unresolved
+        );
+        assert_eq!(
+            artifact.outcome.coherence,
+            DiagnosticCoherenceV1::NotEvaluated
+        );
+        assert_eq!(artifact.outcome.coverage, DiagnosticCoverageV1::Partial);
+        assert!(artifact.claims.is_empty());
+        assert!(artifact.primary_claim_id.is_none());
+        let [refusal] = artifact.outcome.refusals.as_slice() else {
+            panic!("exactly one governed diagnostic refusal");
+        };
+        let GovernedRefusalOrigin::Profile(profile) = &refusal.origin else {
+            panic!("detector refusal remains profile-origin testimony");
+        };
+        assert_eq!(
+            profile.refusal.code,
+            nq_profiles::ProfileRefusalCode::CannotEvaluate
+        );
+        assert_eq!(
+            profile.refusal.message,
+            "the newest host testimony lacks complete load coverage"
+        );
+        assert!(!refusal.refusal_id.is_empty());
+
+        let original = artifact.canonical_bytes().expect("canonical refusal bytes");
+        let reopened =
+            DiagnosticExecutionV2::decode_canonical(&original).expect("exact refusal bytes reopen");
+        assert_eq!(reopened, artifact);
+        let artifact_id = artifact.artifact_id.0.clone();
+        assert_eq!(
+            engine
+                .store
+                .diagnostic_artifact_id_for_run(artifact.run_id.as_str())
+                .expect("refusal artifact index")
+                .expect("refusal artifact committed"),
+            artifact_id
+        );
+        validate_diagnostic_artifact_history(&engine.store)
+            .expect("evaluated refusal history preserves exact semantics");
+        drop(engine);
+        let reopened_store =
+            Store::open_read_only(&config.database_path).expect("store reopens after restart");
+        assert_eq!(
+            reopen_diagnostic_artifact(&reopened_store, &artifact_id)
+                .expect("refusal artifact survives restart")
+                .canonical_bytes()
+                .expect("reopened refusal bytes"),
+            original
+        );
+    }
+
+    #[test]
+    fn diagnostic_execute_persists_exact_received_input_refusal_without_evaluation() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let Some((mut engine, watcher, mode)) = admitted_host_diagnostic_fixture(
+            directory.path(),
+            "diagnostic-input-refusal-test-genesis",
+            b"diagnostic-input-refusal-test-evaluator",
+        ) else {
+            return;
+        };
+        fs::write(&mode, "helper_refusal\n").expect("select helper refusal");
+
+        let emitted = engine
+            .diagnostic_execute(&watcher)
+            .expect("run-bearing input refusal emits an exact diagnostic artifact");
+        let SupportedDiagnosticExecution::V2(artifact) = emitted else {
+            panic!("new live diagnostic executions use the v2 contract");
+        };
+        artifact
+            .validate()
+            .expect("input refusal artifact validates");
+        assert_eq!(artifact.outcome.derivation, DiagnosticDerivationV1::Refused);
+        assert_eq!(
+            artifact.outcome.condition,
+            DiagnosticConditionV1::Unresolved
+        );
+        assert_eq!(artifact.outcome.coverage, DiagnosticCoverageV1::Missing);
+        assert_eq!(artifact.inputs.received.len(), 1);
+        let [refused] = artifact.inputs.refused.as_slice() else {
+            panic!("one exact received-input refusal");
+        };
+        assert!(refused.profile_binding.is_none());
+        let GovernedRefusalOrigin::Helper(helper) = &refused.refusal.origin else {
+            panic!("helper refusal remains helper-origin testimony");
+        };
+        assert_eq!(helper.details["errno"], "EAGAIN");
+        assert_eq!(
+            artifact.outcome.refusals.as_slice(),
+            std::slice::from_ref(&refused.refusal)
+        );
+        assert!(artifact.claims.is_empty());
+        assert!(artifact.primary_claim_id.is_none());
+        let original = artifact.canonical_bytes().expect("canonical refusal bytes");
+        let artifact_id = artifact.artifact_id.0.clone();
+        validate_diagnostic_artifact_history(&engine.store)
+            .expect("run-only refusal history verifies semantically");
+
+        drop(engine);
+        let reopened = Store::open_read_only(directory.path().join("nq.db")).expect("reopen store");
+        assert_eq!(
+            reopen_diagnostic_artifact(&reopened, &artifact_id)
+                .expect("reopen input refusal")
+                .canonical_bytes()
+                .expect("canonical reopened bytes"),
+            original
+        );
+        validate_diagnostic_artifact_history(&reopened)
+            .expect("restart verification preserves exact refusal");
+    }
+
+    #[test]
+    fn diagnostic_execute_persists_exact_provider_no_response_without_fabricated_custody() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let Some((mut engine, watcher, mode)) = admitted_host_diagnostic_fixture(
+            directory.path(),
+            "diagnostic-no-response-test-genesis",
+            b"diagnostic-no-response-test-evaluator",
+        ) else {
+            return;
+        };
+        fs::write(&mode, "no_response\n").expect("select provider EOF");
+
+        let emitted = engine
+            .diagnostic_execute(&watcher)
+            .expect("run-bearing provider EOF emits an exact partial diagnostic artifact");
+        let SupportedDiagnosticExecution::V2(artifact) = emitted else {
+            panic!("new live diagnostic executions use the v2 contract");
+        };
+        artifact
+            .validate()
+            .expect("provider-no-response artifact validates");
+        assert_eq!(artifact.outcome.derivation, DiagnosticDerivationV1::Partial);
+        assert_eq!(
+            artifact.outcome.condition,
+            DiagnosticConditionV1::Unresolved
+        );
+        assert_eq!(artifact.outcome.coverage, DiagnosticCoverageV1::Missing);
+        assert!(artifact.inputs.received.is_empty());
+        assert!(artifact.inputs.refused.is_empty());
+        let [failed] = artifact.inputs.failed.as_slice() else {
+            panic!("one exact failed input");
+        };
+        let FailedInputCauseV2::ProviderNoResponse {
+            provider_intake_id,
+            attempt,
+            raw_custody,
+            failure,
+        } = &failed.cause
+        else {
+            panic!("EOF remains provider no-response");
+        };
+        assert_eq!(*raw_custody, FailedAcquisitionCustodyV2::NoBytesRetained);
+        assert_eq!(failure.class, AcquisitionFailureClass::Eof);
+        assert_eq!(attempt, &artifact.attempt_interval);
+        assert_eq!(
+            engine
+                .store
+                .provider_intake_raw_bytes(provider_intake_id)
+                .expect("raw-custody lookup")
+                .expect("empty custody is explicit"),
+            Vec::<u8>::new()
+        );
+        let [claim] = artifact.claims.as_slice() else {
+            panic!("one bounded unknown claim");
+        };
+        assert_eq!(claim.status, DiagnosticClaimStatusV1::Unknown);
+        assert_eq!(
+            claim.dependency_failure_ids.as_slice(),
+            std::slice::from_ref(&failed.failure_id)
+        );
+        assert_eq!(
+            artifact.primary_claim_id.as_deref(),
+            Some(claim.claim_id.as_str())
+        );
+        let original = artifact.canonical_bytes().expect("canonical failure bytes");
+        let artifact_id = artifact.artifact_id.0.clone();
+        validate_diagnostic_artifact_history(&engine.store)
+            .expect("run-only failure history verifies semantically");
+
+        drop(engine);
+        let reopened = Store::open_read_only(directory.path().join("nq.db")).expect("reopen store");
+        assert_eq!(
+            reopen_diagnostic_artifact(&reopened, &artifact_id)
+                .expect("reopen provider no-response")
+                .canonical_bytes()
+                .expect("canonical reopened bytes"),
+            original
+        );
+        validate_diagnostic_artifact_history(&reopened)
+            .expect("restart verification preserves exact provider failure");
+    }
+
+    #[test]
+    fn diagnostic_execute_preserves_partial_provider_bytes_as_received_refused_input() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let Some((mut engine, watcher, mode)) = admitted_host_diagnostic_fixture(
+            directory.path(),
+            "diagnostic-partial-bytes-test-genesis",
+            b"diagnostic-partial-bytes-test-evaluator",
+        ) else {
+            return;
+        };
+        fs::write(&mode, "partial_bytes_failure\n").expect("select partial-byte failure");
+
+        let emitted = engine
+            .diagnostic_execute(&watcher)
+            .expect("retained provider bytes emit an exact diagnostic refusal");
+        let SupportedDiagnosticExecution::V2(artifact) = emitted else {
+            panic!("new live diagnostic executions use the v2 contract");
+        };
+        artifact
+            .validate()
+            .expect("partial-byte refusal artifact validates");
+        assert_eq!(artifact.outcome.derivation, DiagnosticDerivationV1::Refused);
+        assert_eq!(
+            artifact.outcome.condition,
+            DiagnosticConditionV1::Unresolved
+        );
+        assert_eq!(artifact.outcome.coverage, DiagnosticCoverageV1::Missing);
+        let [received] = artifact.inputs.received.as_slice() else {
+            panic!("retained partial bytes are one received input");
+        };
+        let [refused] = artifact.inputs.refused.as_slice() else {
+            panic!("retained partial bytes are one refused input");
+        };
+        assert_eq!(refused.input_id, received.input_id);
+        assert!(artifact.inputs.failed.is_empty());
+        let raw = engine
+            .store
+            .provider_intake_raw_bytes(&received.provider_intake_id)
+            .expect("raw-custody lookup")
+            .expect("partial bytes retained");
+        assert!(!raw.is_empty());
+        assert_eq!(received.raw_artifact_id.0, nq_protocol::sha256_bytes(&raw));
+        assert_eq!(
+            artifact.outcome.refusals.as_slice(),
+            std::slice::from_ref(&refused.refusal)
+        );
+        validate_diagnostic_artifact_history(&engine.store)
+            .expect("partial-byte refusal preserves exact semantic history");
+    }
+
+    #[test]
+    fn diagnostic_execute_keeps_pre_run_admission_refusal_outside_artifact_history() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (config, watcher, _mode) = host_diagnostic_fixture(directory.path());
+        let mut store = Store::initialize(&config.database_path).expect("initialize store");
+        append_profile_descriptor(&mut store, resolve(&watcher).expect("host profile"))
+            .expect("profile descriptor");
+        store
+            .append_genesis(&GenesisInput {
+                genesis_id: "diagnostic-admission-refusal-test-genesis".to_owned(),
+                legacy_manifest_digest: None,
+                created_at: "2026-07-28T12:00:00.000Z".to_owned(),
+                detail: canonical(&json!({"source": "diagnostic-admission-refusal-test"}))
+                    .expect("genesis detail"),
+            })
+            .expect("append genesis");
+        drop(store);
+
+        let evaluator = EvaluatorRuntimeIdentity::for_test(nq_protocol::sha256_bytes(
+            b"diagnostic-admission-refusal-test-evaluator",
+        ));
+        let mut engine =
+            CollectionEngine::open_with_evaluator_identity(&config, Ok(evaluator)).expect("engine");
+        let error = engine
+            .diagnostic_execute(&watcher)
+            .expect_err("missing active admission cannot become an execution artifact");
+        assert!(
+            error
+                .to_string()
+                .contains("produced no admitted determinate diagnostic execution")
+        );
+        assert!(
+            engine
+                .store
+                .watcher_run_outcomes_bounded(10, None)
+                .expect("watcher run history")
+                .is_empty()
+        );
+        assert!(
+            engine
+                .store
+                .provider_intakes_bounded(10, None)
+                .expect("provider intake history")
+                .is_empty()
+        );
+        assert!(
+            engine
+                .store
+                .diagnostic_artifact_commitments_bounded(10, None)
+                .expect("diagnostic artifact history")
+                .is_empty()
+        );
+        let status = status_snapshot_v3(&engine.store).expect("retained refusal status");
+        assert_eq!(status.components.len(), 1);
+        assert_eq!(status.components[0].code, "admission_refused");
     }
 
     #[test]
@@ -11262,6 +13469,7 @@ sys.stdout.write("\n")
                 Ok::<_, EngineError>(AdmittedCollectionCompletion {
                     value: (),
                     evaluations: Vec::new(),
+                    diagnostic_artifact: None,
                     status: StatusEventInput {
                         status_event_id: "status-run-1".to_owned(),
                         component_kind: "instance".to_owned(),
@@ -12589,6 +14797,7 @@ sys.stdout.write("\n")
         let descriptor = profile.descriptor();
         let mut run = nq_store::WatcherRunOutcomeRow {
             run_id: "run-profile-binding".to_owned(),
+            request_id: "request-profile-binding".to_owned(),
             instance_id: "profile.binding".to_owned(),
             admission_id: Some("admission-profile-binding".to_owned()),
             profile_id: descriptor.profile.id.clone(),

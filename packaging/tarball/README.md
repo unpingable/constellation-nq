@@ -4,9 +4,10 @@ The release builder creates an archive whose top directory is
 `nq-ng-VERSION-linux-ARCH`. Beneath that directory, paths are relative to
 `/usr`; extraction into a staging directory is recommended before privileged
 installation. `MANIFEST.files` documents the intended layout and modes. The
-assembler expands the compiled profile catalog, fixed protocol v1 corpus, and
-strict system-contract manifest into an exact allowlist, then refuses every
-missing/extra path, symlink, hard link, special file, or incorrect
+assembler expands the compiled profile catalog, fixed protocol v1 corpus,
+strict system-contract manifest, frozen diagnostic-execution v1 boundary, and
+sibling diagnostic-execution v2 boundary into an exact allowlist, then refuses
+every missing/extra path, symlink, hard link, special file, or incorrect
 file/directory mode before creating either artifact. Individual staged files
 are capped at 256 MiB and the expanded payload at 1 GiB. The manifest is the
 compact review copy of that enforced allowlist.
@@ -32,6 +33,8 @@ version. It also requires the descriptor inventory to equal the strict profile
 manifest and compiled registry, and matches the exact protocol fixture bytes
 to the receipt emitted by the supplied `nq`. It strictly verifies the
 system-contract assets and requires their compiled-profile fixture to match the
-exact catalog being packaged. Release automation must still supply the three
-binaries as one reviewed source-revision cohort; a version string is not a
-source identity.
+exact catalog being packaged. It separately verifies the exact v1 and v2
+language-neutral diagnostic contract manifests, schemas, canonical fixtures,
+artifact self-identities, and hostile-vector dispositions before and after
+staging. Release automation must still supply the three binaries as one
+reviewed source-revision cohort; a version string is not a source identity.

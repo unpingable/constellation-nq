@@ -874,6 +874,7 @@ impl ProviderIntakeV1 {
         })
     }
 
+    #[allow(clippy::too_many_lines)] // One fail-closed audit over identity, custody, timing, and interpretation.
     fn validate(&self) -> Result<(), ProviderIntakeError> {
         self.record.provider.verify_historical()?;
         let request_digest = nq_protocol::semantic_digest(&self.record.request)
@@ -915,31 +916,90 @@ impl ProviderIntakeV1 {
             outcome: self.record.native_outcome.outcome.clone(),
         };
         let expected_interpretation = interpret_response(&self.record.request, &reconstructed);
-        if self.record.schema != ProviderIntakeSchema::V1
-            || self.record.intake_id.is_empty()
-            || self.record.attempt_id.is_empty()
-            || self.record.idempotency_key != idempotency_key
-            || self.record.run_id.is_empty()
-            || self.record.request_id.is_empty()
-            || self.record.request_id != self.record.request.request_id.as_str()
-            || self.record.request_digest != request_digest
-            || self.record.context_digest != context_digest
-            || self.record.attempt_id == self.record.run_id
-            || !matches!(self.record.origin_carrier.as_str(), "stdio" | "unix")
-            || self.record.provider_sequence.is_some()
-            || self.record.started_at > self.record.deadline_at
-            || self.record.raw_length != self.raw_bytes.len()
-            || self.record.raw_sha256 != nq_protocol::sha256_bytes(&self.raw_bytes)
-            || self.record.native_outcome.stdout_bytes_retained != self.raw_bytes.len()
-            || self.record.native_outcome.stderr_bytes_retained != reconstructed.stderr.len()
-            || self.record.native_outcome.schema != RunResourceOutcomeSchema::V1
-            || self.record.interpretation != expected_interpretation
-            || self.record.started_at > self.record.finished_at
-            || self.record.finished_at > self.record.received_at
-        {
-            return Err(ProviderIntakeError::Invariant(
-                "provider intake identity, raw custody, or timing is inconsistent".into(),
-            ));
+        let inconsistencies = [
+            ("schema", self.record.schema != ProviderIntakeSchema::V1),
+            ("intake_id", self.record.intake_id.is_empty()),
+            ("attempt_id", self.record.attempt_id.is_empty()),
+            (
+                "idempotency_key",
+                self.record.idempotency_key != idempotency_key,
+            ),
+            ("run_id", self.record.run_id.is_empty()),
+            ("request_id_empty", self.record.request_id.is_empty()),
+            (
+                "request_id_binding",
+                self.record.request_id != self.record.request.request_id.as_str(),
+            ),
+            (
+                "request_digest",
+                self.record.request_digest != request_digest,
+            ),
+            (
+                "context_digest",
+                self.record.context_digest != context_digest,
+            ),
+            (
+                "attempt_run_identity",
+                self.record.attempt_id == self.record.run_id,
+            ),
+            (
+                "origin_carrier",
+                !matches!(self.record.origin_carrier.as_str(), "stdio" | "unix"),
+            ),
+            ("provider_sequence", self.record.provider_sequence.is_some()),
+            (
+                "deadline_order",
+                self.record.started_at > self.record.deadline_at,
+            ),
+            ("raw_length", self.record.raw_length != self.raw_bytes.len()),
+            (
+                "raw_digest",
+                self.record.raw_sha256 != nq_protocol::sha256_bytes(&self.raw_bytes),
+            ),
+            (
+                "stdout_length",
+                self.record.native_outcome.stdout_bytes_retained != self.raw_bytes.len(),
+            ),
+            (
+                "stderr_length",
+                self.record.native_outcome.stderr_bytes_retained != reconstructed.stderr.len(),
+            ),
+            (
+                "native_schema",
+                self.record.native_outcome.schema != RunResourceOutcomeSchema::V1,
+            ),
+            (
+                "attempt_time_order",
+                self.record.started_at > self.record.finished_at,
+            ),
+            (
+                "receive_time_order",
+                self.record.finished_at > self.record.received_at,
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(field, differs)| differs.then_some(field))
+        .collect::<Vec<_>>();
+        if !inconsistencies.is_empty() {
+            return Err(ProviderIntakeError::Invariant(format!(
+                "provider intake identity, raw custody, or timing is inconsistent: {}",
+                inconsistencies.join(", ")
+            )));
+        }
+        let stored_interpretation =
+            nq_store::CanonicalDocument::from_serializable(&self.record.interpretation)
+                .map_err(|error| ProviderIntakeError::Canonical(error.to_string()))?;
+        let expected_interpretation_document =
+            nq_store::CanonicalDocument::from_serializable(&expected_interpretation)
+                .map_err(|error| ProviderIntakeError::Canonical(error.to_string()))?;
+        if stored_interpretation.as_bytes() != expected_interpretation_document.as_bytes() {
+            return Err(ProviderIntakeError::Invariant(format!(
+                "provider interpretation differs from reconstruction from exact raw custody on historical reopening: stored {} {} but reconstructed {} {}",
+                self.record.interpretation.kind(),
+                stored_interpretation.digest(),
+                expected_interpretation.kind(),
+                expected_interpretation_document.digest()
+            )));
         }
         match (
             &self.record.native_outcome.outcome,
@@ -1299,7 +1359,7 @@ mod tests {
         assert!(matches!(
             parsed_substitution.validate(),
             Err(ProviderIntakeError::Invariant(message))
-                if message.contains("raw custody")
+                if message.contains("provider interpretation differs")
         ));
     }
 

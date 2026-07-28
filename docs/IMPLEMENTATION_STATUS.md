@@ -25,18 +25,25 @@ campaigns did not authorize deployment, parallel qualification, cutover, or
 the missing product breadth listed below. This status document grants no
 implementation authority.
 
-Current `main` now publishes the versioned
-`nq.diagnostic_execution.v1` schema, canonical/hostile vectors, verifier, and
-package subtree. One actual production-code path can emit exact canonical
-bytes for a fresh, determinate `nq.host/v1` execution through the
-developer-preview CLI. A reproducible package-root contract was consumed by a
-strict local read-only Nightshift importer, which also evaluated one explicit
-cross-vantage concordance dimension without modifying the NQ artifacts.
-That proof was deliberately narrow: emission was stdout-only from a debug
-build, the current package binary failed its pre-execution environment
-qualification, NQ does not durably store or re-export the diagnostic artifact
-as such, Nightshift intake is not durable, both lab vantages shared one local
-failure domain, and neither production subject was involved.
+Current `main` preserves the frozen versioned
+`nq.diagnostic_execution.v1` package and publishes the sibling
+`nq.diagnostic_execution.v2` schema, canonical/hostile vectors, verifier, and
+package subtree. One actual production-code path commits exact canonical v2
+bytes for a fresh admitted `nq.host/v1` load-pressure execution. The supported
+v2 outcomes include determinate evaluation, governed provider or detector
+refusal, and no-byte provider no-response/acquisition failure; an admission
+refusal creates no execution artifact. Each emitted artifact commits in the
+same transaction as its exact ordinary run/evaluation history, reopens before
+return, and supports restart-safe inspection plus exact export/import through
+the developer-preview CLI. The v1 package remains an immutable compatibility
+boundary rather than the current live-emission format.
+
+The cross-repository proof remains deliberately narrow: Nightshift intake is
+not durable, both lab vantages share one local failure domain, only the
+existing host load-pressure family emits the contract, pre-v5 history is not
+backfilled with invented artifacts, the production namespace and identity
+catalog remain records-only policy, and neither production subject is
+involved.
 
 ## Current developer preview
 
@@ -50,12 +57,16 @@ The repository implements the stage-one operational spine:
   and compiled detector evaluation;
 - explicit helper test/admission/rotation/rollback/revocation with immutable
   admission history and drift refusal;
-- a schema-v4 append-only SQLite evidence substrate. It retains schema v3's
-  exact raw/report/refusal/evaluation/finding/status custody and adds a
+- a schema-v5 append-only SQLite evidence substrate. It retains schema v3's
+  exact raw/report/refusal/evaluation/finding/status custody, schema v4's
   versioned provider-intake parent, a distinct NQ-derived local-provider
   admission, an exact local-watcher-run subtype, and a durable acknowledgment
-  returned only after commit. The only live provider kind is the existing NQ-controlled
-  local helper; this is not a remote or provider-neutral intake service;
+  returned only after commit. Schema v5 adds immutable diagnostic-artifact
+  commitments, exact payload custody, exclusive local/import origins, durable
+  import events, typed unsupported/unavailable/corrupt access states, and
+  exact rematerialization. The only live provider kind is the existing
+  NQ-controlled local helper; this is not a remote or provider-neutral intake
+  service;
 - one atomic collection-completion boundary: the provider attempt, local
   watcher run, exact native outcome and raw capture, raw submission when one
   exists, admission or linked refusal, report, evaluations/findings, status,
@@ -80,10 +91,18 @@ The repository implements the stage-one operational spine:
   `nq evaluations export`). V2 status returns an explicit conflict whenever
   evaluations exist, and older routes fail explicitly when they cannot
   represent the current carrier;
-- a canonical `nq.diagnostic_execution.v1` contract package and one bounded
-  fresh-execution emission path for the existing determinate
-  `nq.host.load_pressure/v1` result. This is not general historical/refusal
-  emission or a durable diagnostic-artifact store/export surface;
+- a frozen `nq.diagnostic_execution.v1` contract package, a sibling canonical
+  `nq.diagnostic_execution.v2` package, and one bounded live v2 path for the
+  existing `nq.host.load_pressure/v1` diagnostic. The live path preserves
+  determinate results, governed received-input or detector refusals, and
+  typed no-byte provider no-response/acquisition failures without converting
+  admission refusal into an execution. The artifact commits with its exact
+  source history, reopens before return, and is available through
+  `diagnostics inspect`, exact-byte `diagnostics export`, and custody-only
+  `diagnostics import`. Local inspection and export reverify the retained
+  semantic history; imported custody remains explicitly unauthenticated.
+  Import and access grant no reliance or authority and do not create a general
+  historical emitter;
 - a native host profile/helper plus the conformance fixture profile;
 - strict, bounded `SystemSpecV1` validation and deterministic compilation into
   schema-domain-separated `ScopeCut` proposals, ratification-bound cuts,
@@ -102,7 +121,8 @@ The repository implements the stage-one operational spine:
 - hostile tests for protocol planes, profile overclaim, append-only custody,
   evidence lifecycle, executable/config races, cross-process binding mutation,
   checkpoint isolation, provider identity and replay, schema integrity,
-  schema-v3 migration, live-WAL backup/restore, and cold-archive reopening.
+  schema-v3/v4 migration, live-WAL backup/restore, diagnostic-artifact
+  corruption and missing-byte states, and cold-archive reopening.
 
 The resident `nqd` scheduler is an implemented preview mechanism, not a claim
 that NQ owns the target product's recurrent monitoring posture. Under the
@@ -138,11 +158,13 @@ interpretation. Provider success or refusal is therefore still candidate input
 to NQ normalization and policy, not an NQ judgment. See
 [`PROVIDER_INTAKE_FOUNDATION.md`](PROVIDER_INTAKE_FOUNDATION.md).
 
-Schema v4 provides an exact v3-to-v4 migration only. It freezes and validates
-the released schema-v3 definition, takes a verified backup, and preserves each
-old watcher run with an explicit `provider_intake_not_recorded` gap. It derives
-a prospective local-provider admission from existing admission facts, but does
-not invent historical intake bytes, attempt identity, or acknowledgment.
+Schema v5 accepts only exact schema v4 directly, or exact schema v3 through the
+existing v3-to-v4 transition followed by the v4-to-v5 transition. Every source
+stage receives its own verified backup and migration receipt. The v3 step
+preserves each old watcher run with an explicit
+`provider_intake_not_recorded` gap; the v5 step records that historical
+diagnostic-artifact commitments were absent and synthesizes none. Migration
+therefore invents neither historical intake bytes nor diagnostic executions.
 
 ## Selected successor, deliberately not replacement-ready
 

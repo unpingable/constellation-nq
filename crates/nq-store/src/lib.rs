@@ -25,7 +25,10 @@ use thiserror::Error;
 
 const SCHEMA: &str = include_str!("schema.sql");
 const SCHEMA_V3: &str = include_str!("schema_v3.sql");
+const SCHEMA_V4: &str = include_str!("schema_v4.sql");
 const SCHEMA_V3_TO_V4_PROVIDER: &str = include_str!("schema_v3_to_v4_provider.sql");
+const SCHEMA_V4_TO_V5_DIAGNOSTIC_ARTIFACTS: &str =
+    include_str!("schema_v4_to_v5_diagnostic_artifacts.sql");
 const APPLICATION_ID: i64 = 1_313_951_303;
 
 const SCHEMA_METADATA_V4: &str = r"CREATE TABLE schema_metadata (
@@ -43,11 +46,31 @@ const SCHEMA_METADATA_V4: &str = r"CREATE TABLE schema_metadata (
 const SCHEMA_METADATA_V4_TRIGGERS: &str = "CREATE TRIGGER immutable_schema_metadata_update BEFORE UPDATE ON schema_metadata BEGIN SELECT RAISE(ABORT, 'append-only table'); END;\n\
      CREATE TRIGGER immutable_schema_metadata_delete BEFORE DELETE ON schema_metadata BEGIN SELECT RAISE(ABORT, 'append-only table'); END;";
 
+const SCHEMA_METADATA_V5: &str = r"CREATE TABLE schema_metadata (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    product TEXT NOT NULL CHECK (product = 'nq-ng'),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 5),
+    -- Digest of the exact schema.sql artifact compiled into the writing binary.
+    -- Rejects stale provisional-candidate databases at startup; it is NOT a
+    -- tamper attestation of the live SQLite schema (which the structural
+    -- fingerprint checks separately).
+    schema_artifact_digest TEXT NOT NULL CHECK (length(schema_artifact_digest) = 71 AND substr(schema_artifact_digest, 1, 7) = 'sha256:'),
+    initialized_at TEXT NOT NULL
+) STRICT;";
+
+const SCHEMA_METADATA_V5_TRIGGERS: &str = "CREATE TRIGGER immutable_schema_metadata_update BEFORE UPDATE ON schema_metadata BEGIN SELECT RAISE(ABORT, 'append-only table'); END;\n\
+     CREATE TRIGGER immutable_schema_metadata_delete BEFORE DELETE ON schema_metadata BEGIN SELECT RAISE(ABORT, 'append-only table'); END;";
+
 /// Exact schema-artifact digest of the qualified v0.1.0 store. It is retained
 /// only to validate an explicit v3-to-v4 upgrade source; normal opening never
 /// interprets v3 bytes as current storage.
 pub const SCHEMA_V3_ARTIFACT_DIGEST: &str =
     "sha256:3ea4295c7574ed41cc9d4389a216c21103a5b3851509988e300e788292f657e2";
+
+/// Exact schema-artifact digest of the qualified schema-v4 store. It is
+/// retained only to validate an explicit v4-to-v5 upgrade source.
+pub const SCHEMA_V4_ARTIFACT_DIGEST: &str =
+    "sha256:649b514a7cacddf4dbd55dad587947edd8499e9dc1ee6785370654075951cfa1";
 
 /// Schema tag bound into every admission-context digest preimage. Bump only when
 /// the constituent set or its canonicalization changes.
@@ -83,9 +106,16 @@ static EXPECTED_SCHEMA_V3_FINGERPRINT: LazyLock<Result<String, String>> = LazyLo
         .map_err(|error| error.to_string())?;
     schema_fingerprint(&connection).map_err(|error| error.to_string())
 });
+static EXPECTED_SCHEMA_V4_FINGERPRINT: LazyLock<Result<String, String>> = LazyLock::new(|| {
+    let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    connection
+        .execute_batch(SCHEMA_V4)
+        .map_err(|error| error.to_string())?;
+    schema_fingerprint(&connection).map_err(|error| error.to_string())
+});
 
 /// The only schema version understood by this crate.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Hard ceiling for one page returned through the public read model helpers.
 pub const MAX_PUBLIC_QUERY_ROWS: u32 = 1_000;
@@ -177,6 +207,137 @@ impl CanonicalDocument {
     pub fn digest(&self) -> &str {
         &self.digest
     }
+}
+
+/// Exact local origin for a diagnostic artifact committed atomically with one
+/// collection.
+///
+/// An admitted/evaluated artifact names its exact evaluation. A run-bearing
+/// non-success artifact has no evaluation and retains `None`; the absence is
+/// semantic and must never be filled from a later evaluation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiagnosticArtifactLocalOriginInput {
+    pub run_id: String,
+    pub evaluation_id: Option<String>,
+    pub completed_at: String,
+}
+
+/// Opaque canonical diagnostic artifact to commit with one local collection.
+///
+/// `artifact_id` is the contract-owned semantic identity. The store derives and
+/// separately persists the digest of the complete canonical bytes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiagnosticArtifactCommitInput {
+    pub artifact_id: Sha256Digest,
+    pub contract_schema: String,
+    pub canonical_bytes: CanonicalDocument,
+    pub local_origin: DiagnosticArtifactLocalOriginInput,
+}
+
+/// Opaque canonical diagnostic artifact entering this store through import.
+///
+/// Import establishes custody only. It does not authenticate the producer,
+/// admit the artifact as local testimony, or grant reliance or authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiagnosticArtifactImportInput {
+    pub import_id: String,
+    pub artifact_id: Sha256Digest,
+    pub contract_schema: String,
+    pub canonical_bytes: CanonicalDocument,
+    pub imported_at: String,
+}
+
+/// Imported custody commitment whose exact bytes are currently unavailable.
+///
+/// This can never be used as a local execution origin. A later exact import may
+/// rematerialize it only when length and complete-byte digest match.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnavailableDiagnosticArtifactImportInput {
+    pub import_id: String,
+    pub artifact_id: Sha256Digest,
+    pub contract_schema: String,
+    pub canonical_bytes_sha256: Sha256Digest,
+    pub canonical_bytes_length: u64,
+    pub imported_at: String,
+}
+
+/// Immutable origin of one diagnostic-artifact commitment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DiagnosticArtifactOrigin {
+    Local {
+        run_id: String,
+        evaluation_id: Option<String>,
+        completed_at: String,
+    },
+    Imported {
+        import_id: String,
+        imported_at: String,
+    },
+}
+
+/// Immutable storage commitment independent of current byte availability.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiagnosticArtifactCommitment {
+    pub artifact_sequence: u64,
+    pub artifact_id: Sha256Digest,
+    pub contract_schema: String,
+    pub canonical_bytes_sha256: Sha256Digest,
+    pub canonical_bytes_length: u64,
+    pub committed_at: String,
+    pub origin: DiagnosticArtifactOrigin,
+}
+
+/// Whether the caller declared support for the committed contract schema.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DiagnosticArtifactSchemaSupport {
+    Supported,
+    Unsupported { contract_schema: String },
+}
+
+/// Current materialization and verification state of committed artifact bytes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DiagnosticArtifactByteState {
+    VerifiedAvailable { canonical_bytes: CanonicalDocument },
+    CommittedUnavailable,
+    Corrupt { reason: String },
+}
+
+/// Orthogonal schema-support and byte-access result for one commitment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiagnosticArtifactAccess {
+    pub commitment: DiagnosticArtifactCommitment,
+    pub schema_support: DiagnosticArtifactSchemaSupport,
+    pub byte_state: DiagnosticArtifactByteState,
+}
+
+/// Exact artifact lookup result. A missing commitment is never reported as
+/// committed-but-unavailable.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(clippy::large_enum_variant)]
+pub enum DiagnosticArtifactLookup {
+    NotFound,
+    Found(DiagnosticArtifactAccess),
+}
+
+/// Result of a verified opaque artifact import.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiagnosticArtifactImportDisposition {
+    Committed,
+    CommittedUnavailable,
+    Existing,
+    Rematerialized,
+}
+
+/// Receipt returned after the import transaction commits.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiagnosticArtifactImportReceipt {
+    pub import_id: String,
+    pub artifact_id: Sha256Digest,
+    pub contract_schema: String,
+    pub canonical_bytes_sha256: Sha256Digest,
+    pub canonical_bytes_length: u64,
+    pub disposition: DiagnosticArtifactImportDisposition,
+    pub imported_at: String,
 }
 
 /// A compiled profile descriptor snapshot.
@@ -947,6 +1108,26 @@ pub enum ProviderIntakeCommit<T> {
     },
 }
 
+/// Atomic run-bearing non-success completion plus its exact historical
+/// diagnostic-artifact identity, when the original attempt committed one.
+///
+/// On replay, `diagnostic_artifact_id` is reopened from the original run
+/// origin. The store never creates a missing artifact for a completed attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NonSuccessCollectionArtifactCommit {
+    /// Existing provider-intake commit/replay result.
+    pub intake: ProviderIntakeCommit<()>,
+    /// Exact artifact bound to the run, or `None` when the original attempt did
+    /// not commit an artifact.
+    pub diagnostic_artifact_id: Option<Sha256Digest>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_NON_SUCCESS_AFTER_ARTIFACT_INSERT: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
 /// One NQ-derived admission of the local helper as a candidate-evidence
 /// provider. `source_admission_id` names the existing AdmissionLock record;
 /// this identity never represents admission of an individual report.
@@ -1066,6 +1247,7 @@ pub struct RejectedCustodyRow {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WatcherRunOutcomeRow {
     pub run_id: String,
+    pub request_id: String,
     pub instance_id: String,
     pub admission_id: Option<String>,
     pub profile_id: String,
@@ -1560,7 +1742,7 @@ impl Store {
         Ok(store)
     }
 
-    /// Open only an already-initialized, exactly compatible schema-v4 store.
+    /// Open only an already-initialized, exactly compatible schema-v5 store.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref();
         if !path.is_file() || std::fs::metadata(path)?.len() == 0 {
@@ -1664,6 +1846,27 @@ impl Store {
 
     fn validate_v3_upgrade_source(&self) -> Result<(), StoreError> {
         validate_v3_upgrade_source_connection(&self.connection)
+    }
+
+    /// Open the exact qualified schema-v4 store read-only for the separately
+    /// authorized v4-to-v5 migration.
+    pub fn open_v4_upgrade_source_read_only(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        if !path.is_file() || std::fs::metadata(path)?.len() == 0 {
+            return Err(StoreError::NotInitialized(path.to_path_buf()));
+        }
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        connection.pragma_update(None, "query_only", "ON")?;
+        let store = Self {
+            connection,
+            path: Some(path.to_path_buf()),
+        };
+        validate_v4_upgrade_source_connection(&store.connection)?;
+        Ok(store)
     }
 
     /// Checkpoint a writable backup copy and leave it in rollback-journal mode
@@ -1798,6 +2001,7 @@ impl Store {
         validate_refusal_invariants(&self.connection)?;
         validate_run_results(&self.connection)?;
         validate_evaluation_refusal_invariants(&self.connection)?;
+        validate_diagnostic_artifact_invariants(&self.connection)?;
         self.validate_admitted_report_associations()?;
         validate_status_sequence_lower_bound(&self.connection)?;
         validate_projection_invariants(&self.connection)
@@ -2400,6 +2604,370 @@ impl Store {
         ))
     }
 
+    /// Return one diagnostic artifact commitment and its current exact-byte
+    /// access state.
+    ///
+    /// `supported_contract_schemas` is consumer capability, not producer
+    /// standing. An unsupported schema remains orthogonal to whether its bytes
+    /// are available and intact.
+    pub fn diagnostic_artifact(
+        &self,
+        artifact_id: &Sha256Digest,
+        supported_contract_schemas: &[&str],
+    ) -> Result<DiagnosticArtifactLookup, StoreError> {
+        diagnostic_artifact_on_connection(&self.connection, artifact_id, supported_contract_schemas)
+    }
+
+    /// Locate the immutable artifact identity committed for one local run.
+    pub fn diagnostic_artifact_id_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<Sha256Digest>, StoreError> {
+        diagnostic_artifact_id_for_run_on_connection(&self.connection, run_id)
+    }
+
+    /// Reopen the exact canonical collection result bound to one completed run.
+    ///
+    /// This is historical status testimony only. It does not re-evaluate the
+    /// run or infer diagnostic truth from its local artifact origin.
+    pub fn collection_result_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<CanonicalDocument>, StoreError> {
+        let detail = self
+            .connection
+            .query_row(
+                "SELECT detail_json FROM status_events
+                 WHERE run_id = ?1
+                   AND component_kind = 'instance'",
+                [run_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        detail
+            .map(|bytes| {
+                CanonicalDocument::from_canonical_bytes(bytes).map_err(|error| {
+                    StoreError::Integrity(format!(
+                        "collection result for run {run_id} is not canonical: {error}"
+                    ))
+                })
+            })
+            .transpose()
+    }
+
+    /// Enumerate immutable artifact commitments in append order.
+    ///
+    /// The sequence is only a bounded query cursor. It never participates in
+    /// artifact identity or changes the meaning of returned commitments.
+    pub fn diagnostic_artifact_commitments_bounded(
+        &self,
+        limit: u32,
+        after_artifact_sequence: Option<u64>,
+    ) -> Result<Vec<DiagnosticArtifactCommitment>, StoreError> {
+        validate_public_limit(limit)?;
+        let after_sequence = after_artifact_sequence
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| StoreError::Invariant("artifact sequence cursor overflowed".into()))?;
+        let mut statement = self.connection.prepare(
+            "SELECT artifact_id FROM diagnostic_artifact_commitments
+             WHERE ?1 IS NULL OR artifact_sequence > ?1
+             ORDER BY artifact_sequence LIMIT ?2",
+        )?;
+        let artifact_ids = statement
+            .query_map(params![after_sequence, limit], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        artifact_ids
+            .into_iter()
+            .map(|artifact_id| {
+                let artifact_id = Sha256Digest::parse(artifact_id).map_err(|error| {
+                    StoreError::Integrity(format!(
+                        "diagnostic artifact index contains an invalid identity: {error}"
+                    ))
+                })?;
+                diagnostic_artifact_commitment_on_connection(&self.connection, &artifact_id)?
+                    .ok_or_else(|| {
+                        StoreError::Integrity(format!(
+                            "diagnostic artifact index lost commitment {artifact_id}"
+                        ))
+                    })
+            })
+            .collect()
+    }
+
+    /// Commit an imported artifact identity whose exact bytes are currently
+    /// unavailable.
+    ///
+    /// This is a custody-only origin and cannot satisfy a local execution
+    /// commit. A later exact import must match the committed full-byte digest
+    /// and length before the payload can be materialized.
+    #[allow(clippy::too_many_lines)]
+    pub fn import_unavailable_diagnostic_artifact(
+        &mut self,
+        input: &UnavailableDiagnosticArtifactImportInput,
+    ) -> Result<DiagnosticArtifactImportReceipt, StoreError> {
+        validate_bounded_identity("diagnostic artifact import_id", &input.import_id)?;
+        validate_bounded_identity(
+            "diagnostic artifact contract_schema",
+            &input.contract_schema,
+        )?;
+        let maximum_length = u64::try_from(MAX_STORED_JSON_BYTES).map_err(|_| {
+            StoreError::Invariant("diagnostic artifact storage bound overflowed".into())
+        })?;
+        if input.canonical_bytes_length == 0 || input.canonical_bytes_length > maximum_length {
+            return Err(StoreError::Invariant(
+                "diagnostic artifact committed byte length is outside storage bounds".into(),
+            ));
+        }
+        if chrono::DateTime::parse_from_rfc3339(&input.imported_at).is_err() {
+            return Err(StoreError::Invariant(
+                "diagnostic artifact imported_at is not RFC 3339".into(),
+            ));
+        }
+        let transaction = self.immediate_transaction()?;
+        if let Some(receipt) = diagnostic_artifact_import_preflight(
+            &transaction,
+            &input.import_id,
+            &input.artifact_id,
+            &input.contract_schema,
+            &input.canonical_bytes_sha256,
+            input.canonical_bytes_length,
+            &input.imported_at,
+        )? {
+            let commitment =
+                diagnostic_artifact_commitment_on_connection(&transaction, &input.artifact_id)?
+                    .ok_or_else(|| {
+                        StoreError::Integrity(
+                            "diagnostic artifact import references a missing commitment".into(),
+                        )
+                    })?;
+            if commitment.contract_schema != input.contract_schema
+                || commitment.canonical_bytes_sha256 != input.canonical_bytes_sha256
+                || commitment.canonical_bytes_length != input.canonical_bytes_length
+            {
+                return Err(StoreError::ReplayConflict(format!(
+                    "diagnostic artifact {} was reused for different schema or exact bytes",
+                    input.artifact_id
+                )));
+            }
+            return Ok(receipt);
+        }
+        let mut created_import_origin = false;
+        let disposition = if let Some(commitment) =
+            diagnostic_artifact_commitment_on_connection(&transaction, &input.artifact_id)?
+        {
+            if commitment.contract_schema != input.contract_schema
+                || commitment.canonical_bytes_sha256 != input.canonical_bytes_sha256
+                || commitment.canonical_bytes_length != input.canonical_bytes_length
+            {
+                return Err(StoreError::ReplayConflict(format!(
+                    "diagnostic artifact {} was reused for different schema or exact bytes",
+                    input.artifact_id
+                )));
+            }
+            DiagnosticArtifactImportDisposition::Existing
+        } else {
+            let byte_length = i64::try_from(input.canonical_bytes_length).map_err(|_| {
+                StoreError::Invariant("diagnostic artifact length overflowed".into())
+            })?;
+            transaction.execute(
+                "INSERT INTO diagnostic_artifact_commitments (
+                    artifact_id, contract_schema, canonical_bytes_sha256,
+                    canonical_bytes_length, committed_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    input.artifact_id.as_str(),
+                    input.contract_schema,
+                    input.canonical_bytes_sha256.as_str(),
+                    byte_length,
+                    input.imported_at,
+                ],
+            )?;
+            created_import_origin = true;
+            DiagnosticArtifactImportDisposition::CommittedUnavailable
+        };
+        insert_diagnostic_artifact_import_event(
+            &transaction,
+            &input.import_id,
+            &input.artifact_id,
+            &input.contract_schema,
+            &input.canonical_bytes_sha256,
+            input.canonical_bytes_length,
+            disposition,
+            &input.imported_at,
+        )?;
+        if created_import_origin {
+            transaction.execute(
+                "INSERT INTO imported_diagnostic_artifact_origins (
+                    artifact_id, import_id, imported_at, initial_outcome
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    input.artifact_id.as_str(),
+                    input.import_id,
+                    input.imported_at,
+                    diagnostic_artifact_import_disposition_name(disposition),
+                ],
+            )?;
+        }
+        validate_diagnostic_artifact_invariants(&transaction)?;
+        transaction.commit()?;
+        Ok(DiagnosticArtifactImportReceipt {
+            import_id: input.import_id.clone(),
+            artifact_id: input.artifact_id.clone(),
+            contract_schema: input.contract_schema.clone(),
+            canonical_bytes_sha256: input.canonical_bytes_sha256.clone(),
+            canonical_bytes_length: input.canonical_bytes_length,
+            disposition,
+            imported_at: input.imported_at.clone(),
+        })
+    }
+
+    /// Verify and commit an opaque canonical artifact received through an
+    /// explicit import operation.
+    ///
+    /// Import establishes custody only. An exact duplicate is idempotent. A
+    /// commitment whose bytes became unavailable may be rematerialized only by
+    /// bytes matching its original length and complete-byte digest.
+    #[allow(clippy::too_many_lines)]
+    pub fn import_diagnostic_artifact(
+        &mut self,
+        input: &DiagnosticArtifactImportInput,
+    ) -> Result<DiagnosticArtifactImportReceipt, StoreError> {
+        validate_diagnostic_artifact_document(
+            &input.artifact_id,
+            &input.contract_schema,
+            &input.canonical_bytes,
+        )?;
+        validate_bounded_identity("diagnostic artifact import_id", &input.import_id)?;
+        if chrono::DateTime::parse_from_rfc3339(&input.imported_at).is_err() {
+            return Err(StoreError::Invariant(
+                "diagnostic artifact imported_at is not RFC 3339".into(),
+            ));
+        }
+
+        let transaction = self.immediate_transaction()?;
+        let expected_digest = Sha256Digest::parse(input.canonical_bytes.digest().to_owned())
+            .map_err(|error| StoreError::Invariant(error.to_string()))?;
+        let expected_length = u64::try_from(input.canonical_bytes.as_bytes().len())
+            .map_err(|_| StoreError::Invariant("diagnostic artifact length overflowed".into()))?;
+
+        if let Some(receipt) = diagnostic_artifact_import_preflight(
+            &transaction,
+            &input.import_id,
+            &input.artifact_id,
+            &input.contract_schema,
+            &expected_digest,
+            expected_length,
+            &input.imported_at,
+        )? {
+            let commitment =
+                diagnostic_artifact_commitment_on_connection(&transaction, &input.artifact_id)?
+                    .ok_or_else(|| {
+                        StoreError::Integrity(
+                            "diagnostic artifact import references a missing commitment".into(),
+                        )
+                    })?;
+            if commitment.contract_schema != input.contract_schema
+                || commitment.canonical_bytes_sha256 != expected_digest
+                || commitment.canonical_bytes_length != expected_length
+            {
+                return Err(StoreError::ReplayConflict(format!(
+                    "diagnostic artifact {} was reused for different schema or exact bytes",
+                    input.artifact_id
+                )));
+            }
+            return Ok(receipt);
+        }
+        let existing =
+            diagnostic_artifact_commitment_on_connection(&transaction, &input.artifact_id)?;
+        let mut created_import_origin = false;
+        let disposition = if let Some(commitment) = existing {
+            if commitment.contract_schema != input.contract_schema
+                || commitment.canonical_bytes_sha256 != expected_digest
+                || commitment.canonical_bytes_length != expected_length
+            {
+                return Err(StoreError::ReplayConflict(format!(
+                    "diagnostic artifact {} was reused for different schema or exact bytes",
+                    input.artifact_id
+                )));
+            }
+            let stored_bytes = transaction
+                .query_row(
+                    "SELECT canonical_bytes FROM diagnostic_artifact_payloads
+                     WHERE artifact_id = ?1",
+                    [input.artifact_id.as_str()],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()?;
+            match stored_bytes {
+                Some(bytes) if bytes == input.canonical_bytes.as_bytes() => {
+                    DiagnosticArtifactImportDisposition::Existing
+                }
+                Some(_) => {
+                    return Err(StoreError::Integrity(format!(
+                        "diagnostic artifact {} payload conflicts with its immutable commitment",
+                        input.artifact_id
+                    )));
+                }
+                None => {
+                    transaction.execute(
+                        "INSERT INTO diagnostic_artifact_payloads (
+                            artifact_id, canonical_bytes
+                         ) VALUES (?1, ?2)",
+                        params![input.artifact_id.as_str(), input.canonical_bytes.as_bytes()],
+                    )?;
+                    DiagnosticArtifactImportDisposition::Rematerialized
+                }
+            }
+        } else {
+            insert_diagnostic_artifact_commitment(
+                &transaction,
+                &input.artifact_id,
+                &input.contract_schema,
+                &input.canonical_bytes,
+                &input.imported_at,
+            )?;
+            created_import_origin = true;
+            DiagnosticArtifactImportDisposition::Committed
+        };
+        insert_diagnostic_artifact_import_event(
+            &transaction,
+            &input.import_id,
+            &input.artifact_id,
+            &input.contract_schema,
+            &expected_digest,
+            expected_length,
+            disposition,
+            &input.imported_at,
+        )?;
+        if created_import_origin {
+            transaction.execute(
+                "INSERT INTO imported_diagnostic_artifact_origins (
+                    artifact_id, import_id, imported_at, initial_outcome
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    input.artifact_id.as_str(),
+                    input.import_id,
+                    input.imported_at,
+                    diagnostic_artifact_import_disposition_name(disposition),
+                ],
+            )?;
+        }
+        validate_diagnostic_artifact_invariants(&transaction)?;
+        transaction.commit()?;
+        Ok(DiagnosticArtifactImportReceipt {
+            import_id: input.import_id.clone(),
+            artifact_id: input.artifact_id.clone(),
+            contract_schema: input.contract_schema.clone(),
+            canonical_bytes_sha256: expected_digest,
+            canonical_bytes_length: expected_length,
+            disposition,
+            imported_at: input.imported_at.clone(),
+        })
+    }
+
     /// Atomically append an admitted run, custody, report, detector results,
     /// finding events, and its exact canonical instance result.
     ///
@@ -2456,6 +3024,10 @@ impl Store {
             insert_evaluation(&transaction, &input.evaluation, input.finding.as_ref())
                 .map_err(E::from)?;
         }
+        if let Some(artifact) = &completion.diagnostic_artifact {
+            insert_local_diagnostic_artifact(&transaction, collection, &completion, artifact)
+                .map_err(E::from)?;
+        }
         insert_status_event(
             &transaction,
             &completion.status,
@@ -2473,6 +3045,7 @@ impl Store {
         validate_refusal_invariants(&transaction).map_err(E::from)?;
         validate_run_results(&transaction).map_err(E::from)?;
         validate_evaluation_refusal_invariants(&transaction).map_err(E::from)?;
+        validate_diagnostic_artifact_invariants(&transaction).map_err(E::from)?;
         transaction
             .commit()
             .map_err(StoreError::from)
@@ -2492,8 +3065,27 @@ impl Store {
         collection: &CollectionInput,
         result: &RunResultStatusInput,
     ) -> Result<ProviderIntakeCommit<()>, StoreError> {
+        self.commit_non_success_collection_with_artifact(collection, result, None)
+            .map(|completion| completion.intake)
+    }
+
+    /// Atomically append one run-bearing non-success collection, its optional
+    /// exact diagnostic artifact, and its canonical result.
+    ///
+    /// A replay returns the artifact identity already bound to the original
+    /// run. It never invokes evaluation and never adds an artifact to a
+    /// previously completed attempt.
+    pub fn commit_non_success_collection_with_artifact(
+        &mut self,
+        collection: &CollectionInput,
+        result: &RunResultStatusInput,
+        diagnostic_artifact: Option<&DiagnosticArtifactCommitInput>,
+    ) -> Result<NonSuccessCollectionArtifactCommit, StoreError> {
         validate_collection(collection)?;
         validate_non_success_input(collection, result)?;
+        if let Some(artifact) = diagnostic_artifact {
+            validate_run_only_diagnostic_artifact(collection, artifact)?;
+        }
         let transaction = self.immediate_transaction()?;
         if let ProviderIntakePreflight::Existing {
             acknowledgment,
@@ -2501,14 +3093,27 @@ impl Store {
         } = provider_intake_preflight_on_connection(&transaction, &collection.intake, true)?
         {
             let receipt = collection_receipt_for_run(&transaction, &acknowledgment.run_id)?;
-            return Ok(ProviderIntakeCommit::Replayed {
-                receipt,
-                acknowledgment,
-                canonical_result,
+            let diagnostic_artifact_id =
+                diagnostic_artifact_id_for_run_on_connection(&transaction, &acknowledgment.run_id)?;
+            return Ok(NonSuccessCollectionArtifactCommit {
+                intake: ProviderIntakeCommit::Replayed {
+                    receipt,
+                    acknowledgment,
+                    canonical_result,
+                },
+                diagnostic_artifact_id,
             });
         }
         let receipt = insert_collection(&transaction, collection)?;
         validate_refusal_invariants(&transaction)?;
+        if let Some(artifact) = diagnostic_artifact {
+            insert_run_only_diagnostic_artifact(&transaction, collection, artifact)?;
+            if fail_non_success_after_artifact_insert_for_test() {
+                return Err(StoreError::Invariant(
+                    "injected failure after non-success diagnostic artifact insertion".into(),
+                ));
+            }
+        }
         insert_status_event(&transaction, &result.status, Some(&result.run_id))?;
         let acknowledgment = insert_provider_acknowledgment(
             &transaction,
@@ -2518,11 +3123,16 @@ impl Store {
         )?;
         validate_provider_intake_invariants(&transaction)?;
         validate_run_results(&transaction)?;
+        validate_diagnostic_artifact_invariants(&transaction)?;
         transaction.commit()?;
-        Ok(ProviderIntakeCommit::Committed {
-            receipt,
-            acknowledgment,
-            value: (),
+        Ok(NonSuccessCollectionArtifactCommit {
+            intake: ProviderIntakeCommit::Committed {
+                receipt,
+                acknowledgment,
+                value: (),
+            },
+            diagnostic_artifact_id: diagnostic_artifact
+                .map(|artifact| artifact.artifact_id.clone()),
         })
     }
 
@@ -2752,6 +3362,7 @@ impl Store {
             .query_row(
                 "SELECT run.run_id, run.instance_id, report.report_id,
                         report.report_sequence, report.report_status, report.semantic_digest,
+                        report.canonical_json,
                         COUNT(evaluation.evaluation_id)
                  FROM watcher_runs AS run
                  JOIN raw_submissions AS submission ON submission.run_id = run.run_id
@@ -2762,7 +3373,7 @@ impl Store {
                  WHERE run.run_id = ?1 AND submission.admission_outcome = 'admitted'
                  GROUP BY run.run_id, run.instance_id, report.report_id,
                           report.report_sequence, report.report_status,
-                          report.semantic_digest",
+                          report.semantic_digest, report.canonical_json",
                 [run_id],
                 |row| {
                     Ok(AdmittedCollectionRow {
@@ -2772,7 +3383,8 @@ impl Store {
                         report_sequence: row.get(3)?,
                         report_status: row.get(4)?,
                         semantic_digest: row.get(5)?,
-                        evaluations: row.get(6)?,
+                        canonical_json: row.get(6)?,
+                        evaluations: row.get(7)?,
                     })
                 },
             )
@@ -2854,7 +3466,7 @@ impl Store {
         let row = self
             .connection
             .query_row(
-                "SELECT run.run_id, run.instance_id, run.admission_id,
+                "SELECT run.run_id, run.request_id, run.instance_id, run.admission_id,
                         run.profile_id, run.profile_version, run.profile_digest,
                         admission.instance_id, admission.profile_id,
                         admission.profile_version, admission.profile_digest,
@@ -2870,20 +3482,21 @@ impl Store {
                 |row| {
                     Ok(WatcherRunOutcomeRow {
                         run_id: row.get(0)?,
-                        instance_id: row.get(1)?,
-                        admission_id: row.get(2)?,
-                        profile_id: row.get(3)?,
-                        profile_version: row.get(4)?,
-                        profile_digest: row.get(5)?,
-                        admission_instance_id: row.get(6)?,
-                        admission_profile_id: row.get(7)?,
-                        admission_profile_version: row.get(8)?,
-                        admission_profile_digest: row.get(9)?,
-                        profile_semantic_id: row.get(10)?,
-                        admission_detector_identity_digest: row.get(11)?,
-                        admission_evaluator_artifact_digest: row.get(12)?,
-                        acquisition_outcome: row.get(13)?,
-                        resource_outcome_json: row.get(14)?,
+                        request_id: row.get(1)?,
+                        instance_id: row.get(2)?,
+                        admission_id: row.get(3)?,
+                        profile_id: row.get(4)?,
+                        profile_version: row.get(5)?,
+                        profile_digest: row.get(6)?,
+                        admission_instance_id: row.get(7)?,
+                        admission_profile_id: row.get(8)?,
+                        admission_profile_version: row.get(9)?,
+                        admission_profile_digest: row.get(10)?,
+                        profile_semantic_id: row.get(11)?,
+                        admission_detector_identity_digest: row.get(12)?,
+                        admission_evaluator_artifact_digest: row.get(13)?,
+                        acquisition_outcome: row.get(14)?,
+                        resource_outcome_json: row.get(15)?,
                     })
                 },
             )
@@ -2910,7 +3523,7 @@ impl Store {
     ) -> Result<Vec<WatcherRunOutcomeRow>, StoreError> {
         validate_public_limit(limit)?;
         let mut statement = self.connection.prepare(
-            "SELECT run.run_id, run.instance_id, run.admission_id,
+            "SELECT run.run_id, run.request_id, run.instance_id, run.admission_id,
                     run.profile_id, run.profile_version, run.profile_digest,
                     admission.instance_id, admission.profile_id,
                     admission.profile_version, admission.profile_digest,
@@ -2928,20 +3541,21 @@ impl Store {
         let rows = statement.query_map(params![after_run_id, limit], |row| {
             Ok(WatcherRunOutcomeRow {
                 run_id: row.get(0)?,
-                instance_id: row.get(1)?,
-                admission_id: row.get(2)?,
-                profile_id: row.get(3)?,
-                profile_version: row.get(4)?,
-                profile_digest: row.get(5)?,
-                admission_instance_id: row.get(6)?,
-                admission_profile_id: row.get(7)?,
-                admission_profile_version: row.get(8)?,
-                admission_profile_digest: row.get(9)?,
-                profile_semantic_id: row.get(10)?,
-                admission_detector_identity_digest: row.get(11)?,
-                admission_evaluator_artifact_digest: row.get(12)?,
-                acquisition_outcome: row.get(13)?,
-                resource_outcome_json: row.get(14)?,
+                request_id: row.get(1)?,
+                instance_id: row.get(2)?,
+                admission_id: row.get(3)?,
+                profile_id: row.get(4)?,
+                profile_version: row.get(5)?,
+                profile_digest: row.get(6)?,
+                admission_instance_id: row.get(7)?,
+                admission_profile_id: row.get(8)?,
+                admission_profile_version: row.get(9)?,
+                admission_profile_digest: row.get(10)?,
+                profile_semantic_id: row.get(11)?,
+                admission_detector_identity_digest: row.get(12)?,
+                admission_evaluator_artifact_digest: row.get(13)?,
+                acquisition_outcome: row.get(14)?,
+                resource_outcome_json: row.get(15)?,
             })
         })?;
         let rows = rows.collect::<Result<Vec<_>, _>>()?;
@@ -3144,6 +3758,7 @@ pub struct EvaluationCommitInput {
 pub struct AdmittedCollectionCompletion<T> {
     pub value: T,
     pub evaluations: Vec<EvaluationCommitInput>,
+    pub diagnostic_artifact: Option<DiagnosticArtifactCommitInput>,
     pub status: StatusEventInput,
 }
 
@@ -3205,6 +3820,14 @@ pub struct EvaluationReceipt {
     pub evaluation_sequence: u64,
     pub evaluation_revision: u64,
     pub watermarks: Vec<EvaluationWatermark>,
+}
+
+/// Exact local-run origin of one persisted evaluation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvaluationOriginRow {
+    pub evaluation_id: String,
+    pub evaluation_sequence: i64,
+    pub trigger_run_id: Option<String>,
 }
 
 /// An admitted report row sufficient for profile-specific reconstruction.
@@ -3443,6 +4066,7 @@ pub struct AdmittedCollectionRow {
     pub report_sequence: i64,
     pub report_status: String,
     pub semantic_digest: String,
+    pub canonical_json: Vec<u8>,
     pub evaluations: i64,
 }
 
@@ -3675,6 +4299,47 @@ impl Store {
         result
     }
 
+    /// Create and verify the mandatory pre-upgrade backup of the exact
+    /// qualified schema-v4 store.
+    pub fn backup_v4_verified(
+        source: impl AsRef<Path>,
+        destination: impl AsRef<Path>,
+    ) -> Result<BackupArtifact, StoreError> {
+        let source_store = Self::open_v4_upgrade_source_read_only(source)?;
+        let destination = destination.as_ref();
+        if destination.exists() {
+            return Err(StoreError::Invariant(format!(
+                "backup destination already exists: {}",
+                destination.display()
+            )));
+        }
+        drop(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(destination)?,
+        );
+        let result = (|| {
+            let mut target =
+                Connection::open_with_flags(destination, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+            {
+                let backup = rusqlite::backup::Backup::new(&source_store.connection, &mut target)?;
+                backup.run_to_completion(64, std::time::Duration::from_millis(10), None)?;
+            }
+            drop(target);
+            drop(Self::open_v4_upgrade_source_read_only(destination)?);
+            Ok(BackupArtifact {
+                path: destination.to_path_buf(),
+                sha256: sha256_file(destination)?,
+                size_bytes: std::fs::metadata(destination)?.len(),
+            })
+        })();
+        if result.is_err() {
+            remove_database_artifact(destination);
+        }
+        result
+    }
+
     /// Explicitly migrate the exact qualified v0.1.0 schema-v3 store to v4.
     ///
     /// The caller must first create the verified backup named in `receipt`.
@@ -3684,7 +4349,7 @@ impl Store {
     pub fn upgrade_v3_to_v4(
         path: impl AsRef<Path>,
         receipt: &UpgradeReceiptInput,
-    ) -> Result<Self, StoreError> {
+    ) -> Result<(), StoreError> {
         let path = path.as_ref();
         validate_v3_to_v4_receipt(receipt)?;
         let backup_path = Path::new(&receipt.backup_location);
@@ -3759,7 +4424,7 @@ impl Store {
                  )
                  SELECT singleton, product, 4, ?1, initialized_at
                  FROM schema_metadata_v3",
-                [schema_artifact_digest()],
+                [SCHEMA_V4_ARTIFACT_DIGEST],
             )?;
             transaction.execute("DROP TABLE schema_metadata_v3", [])?;
             transaction.execute_batch(SCHEMA_METADATA_V4_TRIGGERS)?;
@@ -3796,12 +4461,11 @@ impl Store {
                     ],
                 )?;
             }
-            insert_upgrade_receipt(&transaction, receipt)?;
-            transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            transaction.pragma_update(None, "user_version", 4)?;
 
-            let expected = EXPECTED_SCHEMA_FINGERPRINT.as_ref().map_err(|error| {
+            let expected = EXPECTED_SCHEMA_V4_FINGERPRINT.as_ref().map_err(|error| {
                 StoreError::Integrity(format!(
-                    "compiled schema cannot be fingerprinted after migration: {error}"
+                    "compiled v4 schema cannot be fingerprinted after migration: {error}"
                 ))
             })?;
             let actual = schema_fingerprint(&transaction)?;
@@ -3813,13 +4477,136 @@ impl Store {
             validate_stored_digests(&transaction)?;
             validate_upgrade_receipts(&transaction)?;
             validate_all_admission_context_digests(&transaction)?;
-            validate_local_provider_admissions(&transaction)?;
             validate_provider_intake_invariants(&transaction)?;
             validate_refusal_invariants(&transaction)?;
             validate_run_results(&transaction)?;
             validate_evaluation_refusal_invariants(&transaction)?;
             validate_status_sequence_lower_bound(&transaction)?;
             validate_projection_invariants(&transaction)?;
+            let mut committed_receipt = receipt.clone();
+            committed_receipt.finished_at = now_utc();
+            insert_upgrade_receipt(&transaction, &committed_receipt)?;
+            validate_upgrade_receipts(&transaction)?;
+            validate_local_provider_admissions(&transaction)?;
+            transaction.commit()?;
+        }
+        validate_v4_upgrade_source_connection(&store.connection)?;
+        Ok(())
+    }
+
+    /// Explicitly migrate the exact qualified schema-v4 store to schema v5.
+    ///
+    /// No diagnostic artifact is synthesized from schema-v4 history. The
+    /// absence of a durable pre-v5 artifact commitment remains distinct from a
+    /// committed artifact whose bytes later became unavailable.
+    #[allow(clippy::too_many_lines)]
+    pub fn upgrade_v4_to_v5(
+        path: impl AsRef<Path>,
+        receipt: &UpgradeReceiptInput,
+    ) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        validate_v4_to_v5_receipt(receipt)?;
+        let backup_path = Path::new(&receipt.backup_location);
+        if !backup_path.is_file() || sha256_file(backup_path)? != receipt.backup_digest {
+            return Err(StoreError::Invariant(
+                "v4-to-v5 migration requires the exact verified backup named by its receipt".into(),
+            ));
+        }
+        let source_metadata = std::fs::metadata(path)?;
+        let backup_metadata = std::fs::metadata(backup_path)?;
+        if std::fs::canonicalize(path)? == std::fs::canonicalize(backup_path)?
+            || (source_metadata.dev(), source_metadata.ino())
+                == (backup_metadata.dev(), backup_metadata.ino())
+        {
+            return Err(StoreError::Invariant(
+                "v4-to-v5 migration backup must be distinct from the source database".into(),
+            ));
+        }
+        let backup_store = Self::open_v4_upgrade_source_read_only(backup_path)?;
+        let backup_logical_digest = v4_logical_state_digest(&backup_store.connection)?;
+        let source_store = Self::open_v4_upgrade_source_read_only(path)?;
+        let source_logical_digest = v4_logical_state_digest(&source_store.connection)?;
+        if source_logical_digest != backup_logical_digest {
+            return Err(StoreError::Invariant(format!(
+                "v4-to-v5 migration backup logical state {backup_logical_digest} does not match source {source_logical_digest}"
+            )));
+        }
+        drop(source_store);
+        drop(backup_store);
+
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        configure_connection(&connection, false)?;
+        let mut store = Self {
+            connection,
+            path: Some(path.to_path_buf()),
+        };
+        validate_v4_upgrade_source_connection(&store.connection)?;
+        {
+            let transaction = store.immediate_transaction()?;
+            validate_v4_upgrade_source_connection(&transaction)?;
+            if sha256_file(backup_path)? != receipt.backup_digest {
+                return Err(StoreError::Invariant(
+                    "v4-to-v5 migration backup changed after preflight validation".into(),
+                ));
+            }
+            let locked_backup = Self::open_v4_upgrade_source_read_only(backup_path)?;
+            let locked_backup_digest = v4_logical_state_digest(&locked_backup.connection)?;
+            let locked_source_digest = v4_logical_state_digest(&transaction)?;
+            if locked_source_digest != locked_backup_digest {
+                return Err(StoreError::Invariant(format!(
+                    "v4-to-v5 migration backup logical state {locked_backup_digest} does not match locked source {locked_source_digest}"
+                )));
+            }
+            drop(locked_backup);
+
+            transaction.execute_batch(
+                "DROP TRIGGER immutable_schema_metadata_update;
+                 DROP TRIGGER immutable_schema_metadata_delete;
+                 ALTER TABLE schema_metadata RENAME TO schema_metadata_v4;",
+            )?;
+            transaction.execute_batch(SCHEMA_METADATA_V5)?;
+            transaction.execute(
+                "INSERT INTO schema_metadata (
+                    singleton, product, schema_version, schema_artifact_digest, initialized_at
+                 )
+                 SELECT singleton, product, 5, ?1, initialized_at
+                 FROM schema_metadata_v4",
+                [schema_artifact_digest()],
+            )?;
+            transaction.execute("DROP TABLE schema_metadata_v4", [])?;
+            transaction.execute_batch(SCHEMA_METADATA_V5_TRIGGERS)?;
+            transaction.execute_batch(SCHEMA_V4_TO_V5_DIAGNOSTIC_ARTIFACTS)?;
+            transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+
+            let expected = EXPECTED_SCHEMA_FINGERPRINT.as_ref().map_err(|error| {
+                StoreError::Integrity(format!(
+                    "compiled schema cannot be fingerprinted after migration: {error}"
+                ))
+            })?;
+            let actual = schema_fingerprint(&transaction)?;
+            if &actual != expected {
+                return Err(StoreError::Integrity(format!(
+                    "migrated v5 schema fingerprint {actual} differs from fresh v5 {expected}"
+                )));
+            }
+            validate_stored_digests(&transaction)?;
+            validate_upgrade_receipts(&transaction)?;
+            validate_all_admission_context_digests(&transaction)?;
+            validate_local_provider_admissions(&transaction)?;
+            validate_provider_intake_invariants(&transaction)?;
+            validate_refusal_invariants(&transaction)?;
+            validate_run_results(&transaction)?;
+            validate_evaluation_refusal_invariants(&transaction)?;
+            validate_diagnostic_artifact_invariants(&transaction)?;
+            validate_status_sequence_lower_bound(&transaction)?;
+            validate_projection_invariants(&transaction)?;
+            let mut committed_receipt = receipt.clone();
+            committed_receipt.finished_at = now_utc();
+            insert_upgrade_receipt(&transaction, &committed_receipt)?;
+            validate_upgrade_receipts(&transaction)?;
             transaction.commit()?;
         }
         store.validate()?;
@@ -4151,6 +4938,28 @@ impl Store {
                 [],
                 |row| row.get(0),
             )
+            .map_err(StoreError::from)
+    }
+
+    /// Reopen one exact evaluation origin without scanning bounded history.
+    pub fn evaluation_origin(
+        &self,
+        evaluation_id: &str,
+    ) -> Result<Option<EvaluationOriginRow>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT evaluation_id, evaluation_sequence, trigger_run_id
+                 FROM evaluation_runs WHERE evaluation_id = ?1",
+                [evaluation_id],
+                |row| {
+                    Ok(EvaluationOriginRow {
+                        evaluation_id: row.get(0)?,
+                        evaluation_sequence: row.get(1)?,
+                        trigger_run_id: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
             .map_err(StoreError::from)
     }
 
@@ -4590,8 +5399,10 @@ fn insert_upgrade_receipt(
     validate_digest("binary_digest", &receipt.binary_digest)?;
     validate_digest("backup_digest", &receipt.backup_digest)?;
     validate_upgrade_receipt_times(receipt)?;
-    if receipt.from_schema_version == 3 && i64::from(receipt.to_schema_version) == SCHEMA_VERSION {
-        validate_v3_to_v4_receipt(receipt)?;
+    match (receipt.from_schema_version, receipt.to_schema_version) {
+        (3, 4) => validate_v3_to_v4_receipt(receipt)?,
+        (4, 5) => validate_v4_to_v5_receipt(receipt)?,
+        _ => {}
     }
     transaction.execute(
         "INSERT INTO upgrade_receipts (
@@ -4631,7 +5442,7 @@ fn validate_upgrade_receipt_times(receipt: &UpgradeReceiptInput) -> Result<(), S
 }
 
 fn validate_v3_to_v4_receipt(receipt: &UpgradeReceiptInput) -> Result<(), StoreError> {
-    if receipt.from_schema_version != 3 || i64::from(receipt.to_schema_version) != SCHEMA_VERSION {
+    if receipt.from_schema_version != 3 || receipt.to_schema_version != 4 {
         return Err(StoreError::Invariant(
             "v3-to-v4 migration receipt names the wrong version transition".into(),
         ));
@@ -4663,6 +5474,44 @@ fn validate_v3_to_v4_receipt(receipt: &UpgradeReceiptInput) -> Result<(), StoreE
     if receipt.verification != expected_verification {
         return Err(StoreError::Invariant(
             "v3-to-v4 migration receipt verification does not match the exact closed vocabulary"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_v4_to_v5_receipt(receipt: &UpgradeReceiptInput) -> Result<(), StoreError> {
+    if receipt.from_schema_version != 4 || receipt.to_schema_version != 5 {
+        return Err(StoreError::Invariant(
+            "v4-to-v5 migration receipt names the wrong version transition".into(),
+        ));
+    }
+    validate_digest("binary_digest", &receipt.binary_digest)?;
+    validate_digest("backup_digest", &receipt.backup_digest)?;
+    validate_upgrade_receipt_times(receipt)?;
+    let expected_migrations =
+        CanonicalDocument::from_serializable(&["schema_v4_to_v5_diagnostic_artifacts"])?;
+    if receipt.migrations != expected_migrations {
+        return Err(StoreError::Invariant(
+            "v4-to-v5 migration receipt does not name the exact migration vocabulary".into(),
+        ));
+    }
+    if receipt.result != "migrated" {
+        return Err(StoreError::Invariant(
+            "v4-to-v5 migration receipt result must be exactly migrated".into(),
+        ));
+    }
+    let expected_verification = CanonicalDocument::from_serializable(&serde_json::json!({
+        "integrity": "ok",
+        "source_schema_version": 4,
+        "source_schema_artifact_digest": SCHEMA_V4_ARTIFACT_DIGEST,
+        "backup_reopened": true,
+        "historical_diagnostic_artifacts": "no_durable_commitments",
+        "diagnostic_artifacts_synthesized": false,
+    }))?;
+    if receipt.verification != expected_verification {
+        return Err(StoreError::Invariant(
+            "v4-to-v5 migration receipt verification does not match the exact closed vocabulary"
                 .into(),
         ));
     }
@@ -4718,10 +5567,845 @@ fn validate_upgrade_receipts(connection: &Connection) -> Result<(), StoreError> 
             .map_err(|error| StoreError::Integrity(format!("{receipt_id}: {error}")))?;
         validate_upgrade_receipt_times(&receipt)
             .map_err(|error| StoreError::Integrity(format!("{receipt_id}: {error}")))?;
-        if from_schema_version == 3 && i64::from(to_schema_version) == SCHEMA_VERSION {
-            validate_v3_to_v4_receipt(&receipt)
-                .map_err(|error| StoreError::Integrity(format!("{receipt_id}: {error}")))?;
+        match (from_schema_version, to_schema_version) {
+            (3, 4) => validate_v3_to_v4_receipt(&receipt)
+                .map_err(|error| StoreError::Integrity(format!("{receipt_id}: {error}")))?,
+            (4, 5) => validate_v4_to_v5_receipt(&receipt)
+                .map_err(|error| StoreError::Integrity(format!("{receipt_id}: {error}")))?,
+            _ => {}
         }
+    }
+    Ok(())
+}
+
+fn validate_bounded_identity(label: &str, value: &str) -> Result<(), StoreError> {
+    if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+        return Err(StoreError::Invariant(format!(
+            "{label} must contain 1..=256 non-control bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn diagnostic_artifact_import_disposition_name(
+    disposition: DiagnosticArtifactImportDisposition,
+) -> &'static str {
+    match disposition {
+        DiagnosticArtifactImportDisposition::Committed => "committed",
+        DiagnosticArtifactImportDisposition::CommittedUnavailable => "committed_unavailable",
+        DiagnosticArtifactImportDisposition::Existing => "existing",
+        DiagnosticArtifactImportDisposition::Rematerialized => "rematerialized",
+    }
+}
+
+fn parse_diagnostic_artifact_import_disposition(
+    value: &str,
+) -> Result<DiagnosticArtifactImportDisposition, StoreError> {
+    match value {
+        "committed" => Ok(DiagnosticArtifactImportDisposition::Committed),
+        "committed_unavailable" => Ok(DiagnosticArtifactImportDisposition::CommittedUnavailable),
+        "existing" => Ok(DiagnosticArtifactImportDisposition::Existing),
+        "rematerialized" => Ok(DiagnosticArtifactImportDisposition::Rematerialized),
+        other => Err(StoreError::Integrity(format!(
+            "unknown diagnostic artifact import outcome {other}"
+        ))),
+    }
+}
+
+fn diagnostic_artifact_import_preflight(
+    connection: &Connection,
+    import_id: &str,
+    artifact_id: &Sha256Digest,
+    contract_schema: &str,
+    canonical_bytes_sha256: &Sha256Digest,
+    canonical_bytes_length: u64,
+    _imported_at: &str,
+) -> Result<Option<DiagnosticArtifactImportReceipt>, StoreError> {
+    let existing = connection
+        .query_row(
+            "SELECT artifact_id, contract_schema, canonical_bytes_sha256,
+                    canonical_bytes_length, outcome, imported_at
+             FROM diagnostic_artifact_import_events WHERE import_id = ?1",
+            [import_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        stored_artifact_id,
+        stored_contract_schema,
+        stored_digest,
+        stored_length,
+        outcome,
+        stored_imported_at,
+    )) = existing
+    else {
+        return Ok(None);
+    };
+    if stored_artifact_id != artifact_id.as_str()
+        || stored_contract_schema != contract_schema
+        || stored_digest != canonical_bytes_sha256.as_str()
+        || u64::try_from(stored_length).ok() != Some(canonical_bytes_length)
+    {
+        return Err(StoreError::ReplayConflict(format!(
+            "diagnostic artifact import {import_id} was reused for different evidence"
+        )));
+    }
+    Ok(Some(DiagnosticArtifactImportReceipt {
+        import_id: import_id.to_owned(),
+        artifact_id: artifact_id.clone(),
+        contract_schema: stored_contract_schema,
+        canonical_bytes_sha256: canonical_bytes_sha256.clone(),
+        canonical_bytes_length,
+        disposition: parse_diagnostic_artifact_import_disposition(&outcome)?,
+        imported_at: stored_imported_at,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)] // One immutable receipt row binds every exact import field.
+fn insert_diagnostic_artifact_import_event(
+    transaction: &Transaction<'_>,
+    import_id: &str,
+    artifact_id: &Sha256Digest,
+    contract_schema: &str,
+    canonical_bytes_sha256: &Sha256Digest,
+    canonical_bytes_length: u64,
+    disposition: DiagnosticArtifactImportDisposition,
+    imported_at: &str,
+) -> Result<(), StoreError> {
+    let canonical_bytes_length = i64::try_from(canonical_bytes_length)
+        .map_err(|_| StoreError::Invariant("diagnostic artifact length overflowed".into()))?;
+    transaction.execute(
+        "INSERT INTO diagnostic_artifact_import_events (
+            import_id, artifact_id, contract_schema, canonical_bytes_sha256,
+            canonical_bytes_length, outcome, imported_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            import_id,
+            artifact_id.as_str(),
+            contract_schema,
+            canonical_bytes_sha256.as_str(),
+            canonical_bytes_length,
+            diagnostic_artifact_import_disposition_name(disposition),
+            imported_at,
+        ],
+    )?;
+    Ok(())
+}
+
+fn canonical_document_schema(document: &CanonicalDocument) -> Result<String, StoreError> {
+    let value: Value = serde_json::from_slice(document.as_bytes())
+        .map_err(|error| StoreError::CanonicalJson(error.to_string()))?;
+    value
+        .as_object()
+        .and_then(|object| object.get("schema"))
+        .and_then(Value::as_str)
+        .filter(|schema| !schema.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            StoreError::Invariant(
+                "diagnostic artifact canonical document has no nonempty top-level schema".into(),
+            )
+        })
+}
+
+fn validate_diagnostic_artifact_document(
+    artifact_id: &Sha256Digest,
+    contract_schema: &str,
+    canonical_bytes: &CanonicalDocument,
+) -> Result<(), StoreError> {
+    validate_bounded_identity("diagnostic artifact contract_schema", contract_schema)?;
+    if canonical_document_schema(canonical_bytes)? != contract_schema {
+        return Err(StoreError::Invariant(format!(
+            "diagnostic artifact {artifact_id} contract schema disagrees with its canonical bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn insert_diagnostic_artifact_commitment(
+    transaction: &Transaction<'_>,
+    artifact_id: &Sha256Digest,
+    contract_schema: &str,
+    canonical_bytes: &CanonicalDocument,
+    committed_at: &str,
+) -> Result<(), StoreError> {
+    validate_diagnostic_artifact_document(artifact_id, contract_schema, canonical_bytes)?;
+    if chrono::DateTime::parse_from_rfc3339(committed_at).is_err() {
+        return Err(StoreError::Invariant(
+            "diagnostic artifact committed_at is not RFC 3339".into(),
+        ));
+    }
+    let byte_length = i64::try_from(canonical_bytes.as_bytes().len())
+        .map_err(|_| StoreError::Invariant("diagnostic artifact length overflowed".into()))?;
+    transaction.execute(
+        "INSERT INTO diagnostic_artifact_commitments (
+            artifact_id, contract_schema, canonical_bytes_sha256,
+            canonical_bytes_length, committed_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            artifact_id.as_str(),
+            contract_schema,
+            canonical_bytes.digest(),
+            byte_length,
+            committed_at,
+        ],
+    )?;
+    transaction.execute(
+        "INSERT INTO diagnostic_artifact_payloads (
+            artifact_id, canonical_bytes
+         ) VALUES (?1, ?2)",
+        params![artifact_id.as_str(), canonical_bytes.as_bytes()],
+    )?;
+    Ok(())
+}
+
+fn diagnostic_artifact_id_for_run_on_connection(
+    connection: &Connection,
+    run_id: &str,
+) -> Result<Option<Sha256Digest>, StoreError> {
+    let artifact_id = connection
+        .query_row(
+            "SELECT artifact_id FROM local_diagnostic_artifact_origins WHERE run_id = ?1",
+            [run_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    artifact_id
+        .map(|value| {
+            Sha256Digest::parse(value).map_err(|error| {
+                StoreError::Integrity(format!(
+                    "local diagnostic artifact for run {run_id} has invalid identity: {error}"
+                ))
+            })
+        })
+        .transpose()
+}
+
+fn validate_local_diagnostic_artifact_provenance(
+    artifact: &DiagnosticArtifactCommitInput,
+    run: &RunInput,
+) -> Result<(), StoreError> {
+    validate_local_diagnostic_artifact_provenance_fields(
+        &artifact.canonical_bytes,
+        &run.run_id,
+        &run.request_id,
+        &run.profile_id,
+        &run.profile_version,
+        &run.profile_digest,
+        &artifact.local_origin.completed_at,
+    )
+}
+
+fn validate_local_diagnostic_artifact_provenance_fields(
+    canonical_bytes: &CanonicalDocument,
+    run_id: &str,
+    request_id: &str,
+    profile_id: &str,
+    profile_version: &str,
+    profile_digest: &str,
+    completed_at: &str,
+) -> Result<(), StoreError> {
+    let value: Value = serde_json::from_slice(canonical_bytes.as_bytes())
+        .map_err(|error| StoreError::CanonicalJson(error.to_string()))?;
+    let string_at = |pointer: &str| {
+        value
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                StoreError::Invariant(format!(
+                    "local diagnostic artifact has no string provenance field {pointer}"
+                ))
+            })
+    };
+    let artifact_run_id = string_at("/run_id")?;
+    let artifact_request_id = string_at("/request_id")?;
+    let artifact_profile_id = string_at("/profile/id")?;
+    let artifact_profile_version = string_at("/profile/version")?;
+    let artifact_profile_digest = string_at("/profile/digest")?;
+    let artifact_completed_at = string_at("/completed_at")?;
+    let origin_completed_at = chrono::DateTime::parse_from_rfc3339(completed_at).map_err(|_| {
+        StoreError::Invariant(
+            "local diagnostic artifact origin completed_at is not RFC 3339".into(),
+        )
+    })?;
+    let artifact_completed_at = chrono::DateTime::parse_from_rfc3339(artifact_completed_at)
+        .map_err(|_| {
+            StoreError::Invariant("local diagnostic artifact completed_at is not RFC 3339".into())
+        })?;
+    if artifact_run_id != run_id
+        || artifact_request_id != request_id
+        || artifact_profile_id != profile_id
+        || artifact_profile_version != profile_version
+        || artifact_profile_digest != profile_digest
+        || artifact_completed_at != origin_completed_at
+    {
+        return Err(StoreError::Invariant(
+            "local diagnostic artifact run, request, or profile provenance or completion time differs from its origin".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn insert_local_diagnostic_artifact<T>(
+    transaction: &Transaction<'_>,
+    collection: &CollectionInput,
+    completion: &AdmittedCollectionCompletion<T>,
+    artifact: &DiagnosticArtifactCommitInput,
+) -> Result<(), StoreError> {
+    if artifact.local_origin.run_id != collection.run.run_id {
+        return Err(StoreError::Invariant(
+            "local diagnostic artifact run differs from its admitted collection".into(),
+        ));
+    }
+    validate_local_diagnostic_artifact_provenance(artifact, &collection.run)?;
+    let evaluation_id = artifact
+        .local_origin
+        .evaluation_id
+        .as_deref()
+        .ok_or_else(|| {
+            StoreError::Invariant(
+                "admitted diagnostic artifact requires an exact evaluation origin".into(),
+            )
+        })?;
+    let matching_evaluations = completion
+        .evaluations
+        .iter()
+        .filter(|input| input.evaluation.evaluation_id == evaluation_id)
+        .collect::<Vec<_>>();
+    let [evaluation] = matching_evaluations.as_slice() else {
+        return Err(StoreError::Invariant(
+            "local diagnostic artifact requires exactly one evaluation in the same completion"
+                .into(),
+        ));
+    };
+    if evaluation.evaluation.trigger_run_id.as_deref()
+        != Some(artifact.local_origin.run_id.as_str())
+    {
+        return Err(StoreError::Invariant(
+            "local diagnostic artifact evaluation is not triggered by its bound run".into(),
+        ));
+    }
+    insert_local_diagnostic_artifact_rows(transaction, artifact)
+}
+
+fn validate_run_only_diagnostic_artifact(
+    collection: &CollectionInput,
+    artifact: &DiagnosticArtifactCommitInput,
+) -> Result<(), StoreError> {
+    if artifact.local_origin.run_id != collection.run.run_id {
+        return Err(StoreError::Invariant(
+            "run-only diagnostic artifact differs from its non-success collection run".into(),
+        ));
+    }
+    if artifact.local_origin.evaluation_id.is_some() {
+        return Err(StoreError::Invariant(
+            "run-only diagnostic artifact cannot claim an evaluation origin".into(),
+        ));
+    }
+    validate_local_diagnostic_artifact_provenance(artifact, &collection.run)
+}
+
+fn insert_run_only_diagnostic_artifact(
+    transaction: &Transaction<'_>,
+    collection: &CollectionInput,
+    artifact: &DiagnosticArtifactCommitInput,
+) -> Result<(), StoreError> {
+    validate_run_only_diagnostic_artifact(collection, artifact)?;
+    insert_local_diagnostic_artifact_rows(transaction, artifact)
+}
+
+fn fail_non_success_after_artifact_insert_for_test() -> bool {
+    #[cfg(test)]
+    {
+        FAIL_NON_SUCCESS_AFTER_ARTIFACT_INSERT.with(std::cell::Cell::take)
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
+fn insert_local_diagnostic_artifact_rows(
+    transaction: &Transaction<'_>,
+    artifact: &DiagnosticArtifactCommitInput,
+) -> Result<(), StoreError> {
+    let committed_at = now_utc();
+    insert_diagnostic_artifact_commitment(
+        transaction,
+        &artifact.artifact_id,
+        &artifact.contract_schema,
+        &artifact.canonical_bytes,
+        &committed_at,
+    )?;
+    transaction.execute(
+        "INSERT INTO local_diagnostic_artifact_origins (
+            artifact_id, run_id, evaluation_id, completed_at
+         ) VALUES (?1, ?2, ?3, ?4)",
+        params![
+            artifact.artifact_id.as_str(),
+            artifact.local_origin.run_id,
+            artifact.local_origin.evaluation_id,
+            artifact.local_origin.completed_at,
+        ],
+    )?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)] // Keep exact commitment/origin reopening in one fail-closed audit.
+fn diagnostic_artifact_commitment_on_connection(
+    connection: &Connection,
+    artifact_id: &Sha256Digest,
+) -> Result<Option<DiagnosticArtifactCommitment>, StoreError> {
+    let row = connection
+        .query_row(
+            "SELECT artifact_sequence, artifact_id, contract_schema,
+                    canonical_bytes_sha256, canonical_bytes_length, committed_at
+             FROM diagnostic_artifact_commitments WHERE artifact_id = ?1",
+            [artifact_id.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((sequence, stored_id, contract_schema, bytes_digest, byte_length, committed_at)) = row
+    else {
+        return Ok(None);
+    };
+    if sequence <= 0 || byte_length <= 0 {
+        return Err(StoreError::Integrity(format!(
+            "diagnostic artifact {stored_id} has a nonpositive sequence or byte length"
+        )));
+    }
+    validate_bounded_identity(
+        "persisted diagnostic artifact contract_schema",
+        &contract_schema,
+    )
+    .map_err(|error| StoreError::Integrity(error.to_string()))?;
+    if chrono::DateTime::parse_from_rfc3339(&committed_at).is_err() {
+        return Err(StoreError::Integrity(format!(
+            "diagnostic artifact {stored_id} has invalid committed_at"
+        )));
+    }
+    let stored_id = Sha256Digest::parse(stored_id).map_err(|error| {
+        StoreError::Integrity(format!("diagnostic artifact identity is invalid: {error}"))
+    })?;
+    let canonical_bytes_sha256 = Sha256Digest::parse(bytes_digest).map_err(|error| {
+        StoreError::Integrity(format!(
+            "diagnostic artifact {stored_id} byte digest is invalid: {error}"
+        ))
+    })?;
+    let local_origin = connection
+        .query_row(
+            "SELECT run_id, evaluation_id, completed_at
+             FROM local_diagnostic_artifact_origins
+             WHERE artifact_id = ?1",
+            [stored_id.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let imported_origin = connection
+        .query_row(
+            "SELECT import_id, imported_at FROM imported_diagnostic_artifact_origins
+             WHERE artifact_id = ?1",
+            [stored_id.as_str()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    let origin = match (local_origin, imported_origin) {
+        (Some((run_id, evaluation_id, completed_at)), None) => {
+            let completed = chrono::DateTime::parse_from_rfc3339(&completed_at).map_err(|_| {
+                StoreError::Integrity(format!(
+                    "local diagnostic artifact {stored_id} has invalid completed_at"
+                ))
+            })?;
+            let committed =
+                chrono::DateTime::parse_from_rfc3339(&committed_at).expect("validated above");
+            if completed > committed {
+                return Err(StoreError::Integrity(format!(
+                    "local diagnostic artifact {stored_id} completes after its custody commitment"
+                )));
+            }
+            DiagnosticArtifactOrigin::Local {
+                run_id,
+                evaluation_id,
+                completed_at,
+            }
+        }
+        (None, Some((import_id, imported_at))) => {
+            if chrono::DateTime::parse_from_rfc3339(&imported_at).is_err() {
+                return Err(StoreError::Integrity(format!(
+                    "diagnostic artifact {stored_id} has invalid imported_at"
+                )));
+            }
+            DiagnosticArtifactOrigin::Imported {
+                import_id,
+                imported_at,
+            }
+        }
+        (None, None) => {
+            return Err(StoreError::Integrity(format!(
+                "diagnostic artifact {stored_id} has no exact origin"
+            )));
+        }
+        (Some(_), Some(_)) => {
+            return Err(StoreError::Integrity(format!(
+                "diagnostic artifact {stored_id} has more than one exact origin"
+            )));
+        }
+    };
+    Ok(Some(DiagnosticArtifactCommitment {
+        artifact_sequence: u64::try_from(sequence)
+            .map_err(|_| StoreError::Integrity("diagnostic artifact sequence overflowed".into()))?,
+        artifact_id: stored_id,
+        contract_schema,
+        canonical_bytes_sha256,
+        canonical_bytes_length: u64::try_from(byte_length).map_err(|_| {
+            StoreError::Integrity("diagnostic artifact byte length overflowed".into())
+        })?,
+        committed_at,
+        origin,
+    }))
+}
+
+fn diagnostic_artifact_on_connection(
+    connection: &Connection,
+    artifact_id: &Sha256Digest,
+    supported_contract_schemas: &[&str],
+) -> Result<DiagnosticArtifactLookup, StoreError> {
+    let Some(commitment) = diagnostic_artifact_commitment_on_connection(connection, artifact_id)?
+    else {
+        return Ok(DiagnosticArtifactLookup::NotFound);
+    };
+    let schema_support =
+        if supported_contract_schemas.contains(&commitment.contract_schema.as_str()) {
+            DiagnosticArtifactSchemaSupport::Supported
+        } else {
+            DiagnosticArtifactSchemaSupport::Unsupported {
+                contract_schema: commitment.contract_schema.clone(),
+            }
+        };
+    let payload = connection
+        .query_row(
+            "SELECT canonical_bytes FROM diagnostic_artifact_payloads
+             WHERE artifact_id = ?1",
+            [artifact_id.as_str()],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()?;
+    let byte_state = match payload {
+        None => DiagnosticArtifactByteState::CommittedUnavailable,
+        Some(bytes) => {
+            let actual_length = u64::try_from(bytes.len())
+                .map_err(|_| StoreError::Integrity("artifact byte length overflowed".into()))?;
+            let actual_digest = sha256_digest(&bytes);
+            if actual_length != commitment.canonical_bytes_length {
+                DiagnosticArtifactByteState::Corrupt {
+                    reason: format!(
+                        "stored byte length {actual_length} differs from committed {}",
+                        commitment.canonical_bytes_length
+                    ),
+                }
+            } else if actual_digest != commitment.canonical_bytes_sha256.as_str() {
+                DiagnosticArtifactByteState::Corrupt {
+                    reason: format!(
+                        "stored byte digest {actual_digest} differs from committed {}",
+                        commitment.canonical_bytes_sha256
+                    ),
+                }
+            } else {
+                match CanonicalDocument::from_canonical_bytes(bytes) {
+                    Err(error) => DiagnosticArtifactByteState::Corrupt {
+                        reason: format!("stored bytes are not canonical JSON: {error}"),
+                    },
+                    Ok(document) => match canonical_document_schema(&document) {
+                        Ok(schema) if schema == commitment.contract_schema => {
+                            DiagnosticArtifactByteState::VerifiedAvailable {
+                                canonical_bytes: document,
+                            }
+                        }
+                        Ok(schema) => DiagnosticArtifactByteState::Corrupt {
+                            reason: format!(
+                                "stored contract schema {schema} differs from committed {}",
+                                commitment.contract_schema
+                            ),
+                        },
+                        Err(error) => DiagnosticArtifactByteState::Corrupt {
+                            reason: error.to_string(),
+                        },
+                    },
+                }
+            }
+        }
+    };
+    Ok(DiagnosticArtifactLookup::Found(DiagnosticArtifactAccess {
+        commitment,
+        schema_support,
+        byte_state,
+    }))
+}
+
+fn validate_diagnostic_artifact_invariants(connection: &Connection) -> Result<(), StoreError> {
+    validate_diagnostic_artifact_origin_cardinality(connection)?;
+    validate_diagnostic_artifact_import_history(connection)?;
+    validate_local_diagnostic_artifact_origin_modes(connection)?;
+    validate_local_diagnostic_artifact_provenance_history(connection)
+}
+
+fn validate_diagnostic_artifact_import_history(connection: &Connection) -> Result<(), StoreError> {
+    let invalid_correspondence: Option<(String, String)> = connection
+        .query_row(
+            "SELECT event.import_id, event.artifact_id
+             FROM diagnostic_artifact_import_events AS event
+             LEFT JOIN diagnostic_artifact_commitments AS commitment
+               ON commitment.artifact_id = event.artifact_id
+             LEFT JOIN imported_diagnostic_artifact_origins AS origin
+               ON origin.import_id = event.import_id
+             WHERE commitment.artifact_id IS NULL
+                OR event.contract_schema <> commitment.contract_schema
+                OR event.canonical_bytes_sha256 <> commitment.canonical_bytes_sha256
+                OR event.canonical_bytes_length <> commitment.canonical_bytes_length
+                OR (
+                    event.outcome IN ('committed', 'committed_unavailable')
+                    AND (
+                        origin.artifact_id IS NULL
+                        OR origin.artifact_id <> event.artifact_id
+                        OR origin.imported_at <> event.imported_at
+                        OR origin.initial_outcome <> event.outcome
+                        OR commitment.committed_at <> event.imported_at
+                    )
+                )
+                OR (
+                    event.outcome IN ('existing', 'rematerialized')
+                    AND origin.artifact_id IS NOT NULL
+                )
+             ORDER BY event.import_sequence
+             LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((import_id, artifact_id)) = invalid_correspondence {
+        return Err(StoreError::Integrity(format!(
+            "diagnostic artifact import receipt {import_id} does not exactly correspond to commitment {artifact_id} and its custody origin"
+        )));
+    }
+
+    let mut statement = connection.prepare(
+        "SELECT import_id, imported_at
+         FROM diagnostic_artifact_import_events
+         ORDER BY import_sequence",
+    )?;
+    let events = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (import_id, imported_at) in events {
+        if chrono::DateTime::parse_from_rfc3339(&imported_at).is_err() {
+            return Err(StoreError::Integrity(format!(
+                "diagnostic artifact import receipt {import_id} has invalid imported_at"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_diagnostic_artifact_origin_cardinality(
+    connection: &Connection,
+) -> Result<(), StoreError> {
+    let invalid_origin: Option<(String, i64)> = connection
+        .query_row(
+            "SELECT commitment.artifact_id,
+                    (SELECT COUNT(*) FROM local_diagnostic_artifact_origins AS local
+                     WHERE local.artifact_id = commitment.artifact_id)
+                  + (SELECT COUNT(*) FROM imported_diagnostic_artifact_origins AS imported
+                     WHERE imported.artifact_id = commitment.artifact_id) AS origin_count
+             FROM diagnostic_artifact_commitments AS commitment
+             WHERE (
+                    (SELECT COUNT(*) FROM local_diagnostic_artifact_origins AS local
+                     WHERE local.artifact_id = commitment.artifact_id)
+                  + (SELECT COUNT(*) FROM imported_diagnostic_artifact_origins AS imported
+                     WHERE imported.artifact_id = commitment.artifact_id)
+                   ) <> 1
+             ORDER BY commitment.artifact_sequence LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((artifact_id, count)) = invalid_origin {
+        return Err(StoreError::Integrity(format!(
+            "diagnostic artifact {artifact_id} requires exactly one origin; found {count}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_local_diagnostic_artifact_origin_modes(
+    connection: &Connection,
+) -> Result<(), StoreError> {
+    let invalid_evaluated_local: Option<String> = connection
+        .query_row(
+            "SELECT local.artifact_id
+             FROM local_diagnostic_artifact_origins AS local
+             LEFT JOIN evaluation_runs AS evaluation
+               ON evaluation.evaluation_id = local.evaluation_id
+             WHERE local.evaluation_id IS NOT NULL
+               AND (
+                    evaluation.evaluation_id IS NULL
+                 OR evaluation.trigger_run_id IS NOT local.run_id
+               )
+             ORDER BY local.artifact_id LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(artifact_id) = invalid_evaluated_local {
+        return Err(StoreError::Integrity(format!(
+            "local diagnostic artifact {artifact_id} run/evaluation linkage disagrees"
+        )));
+    }
+    let invalid_run_only_local: Option<String> = connection
+        .query_row(
+            "SELECT local.artifact_id
+             FROM local_diagnostic_artifact_origins AS local
+             JOIN watcher_runs AS run ON run.run_id = local.run_id
+             WHERE local.evaluation_id IS NULL
+               AND (
+                    EXISTS (
+                        SELECT 1 FROM evaluation_runs AS evaluation
+                        WHERE evaluation.trigger_run_id = local.run_id
+                    )
+                 OR (
+                        run.acquisition_outcome = 'response'
+                    AND NOT EXISTS (
+                        SELECT 1 FROM raw_submissions AS submission
+                        WHERE submission.run_id = local.run_id
+                          AND submission.admission_outcome = 'rejected'
+                    )
+                 )
+                 OR NOT EXISTS (
+                        SELECT 1 FROM status_events AS status
+                        WHERE status.run_id = local.run_id
+                          AND status.component_kind = 'instance'
+                          AND status.component_id = run.instance_id
+                    )
+                 OR NOT EXISTS (
+                        SELECT 1 FROM provider_intake_acknowledgments AS acknowledgment
+                        WHERE acknowledgment.run_id = local.run_id
+                    )
+               )
+             ORDER BY local.artifact_id LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(artifact_id) = invalid_run_only_local {
+        return Err(StoreError::Integrity(format!(
+            "run-only diagnostic artifact {artifact_id} is not bound to one canonical non-success run"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_local_diagnostic_artifact_provenance_history(
+    connection: &Connection,
+) -> Result<(), StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT artifact_id FROM diagnostic_artifact_commitments
+         ORDER BY artifact_sequence",
+    )?;
+    let artifact_ids = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for value in artifact_ids {
+        let artifact_id = Sha256Digest::parse(value).map_err(|error| {
+            StoreError::Integrity(format!("diagnostic artifact identity is invalid: {error}"))
+        })?;
+        let Some(commitment) =
+            diagnostic_artifact_commitment_on_connection(connection, &artifact_id)?
+        else {
+            return Err(StoreError::Integrity(format!(
+                "diagnostic artifact index lost commitment {artifact_id}"
+            )));
+        };
+        let DiagnosticArtifactOrigin::Local {
+            run_id,
+            completed_at,
+            ..
+        } = &commitment.origin
+        else {
+            continue;
+        };
+        let payload = connection
+            .query_row(
+                "SELECT canonical_bytes FROM diagnostic_artifact_payloads
+                 WHERE artifact_id = ?1",
+                [artifact_id.as_str()],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        let Some(payload) = payload else {
+            continue;
+        };
+        let Ok(document) = CanonicalDocument::from_canonical_bytes(payload) else {
+            continue;
+        };
+        let run_binding = connection
+            .query_row(
+                "SELECT request_id, profile_id, profile_version, profile_digest
+                 FROM watcher_runs WHERE run_id = ?1",
+                [run_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| {
+                StoreError::Integrity(format!(
+                    "local diagnostic artifact {artifact_id} names missing run {run_id}"
+                ))
+            })?;
+        validate_local_diagnostic_artifact_provenance_fields(
+            &document,
+            run_id,
+            &run_binding.0,
+            &run_binding.1,
+            &run_binding.2,
+            &run_binding.3,
+            completed_at,
+        )
+        .map_err(|error| {
+            StoreError::Integrity(format!(
+                "local diagnostic artifact {artifact_id} provenance is invalid: {error}"
+            ))
+        })?;
     }
     Ok(())
 }
@@ -4948,6 +6632,75 @@ fn validate_v3_upgrade_source_connection(connection: &Connection) -> Result<(), 
     validate_projection_invariants(connection)
 }
 
+fn validate_v4_upgrade_source_connection(connection: &Connection) -> Result<(), StoreError> {
+    let version = pragma_i64(connection, "user_version")?;
+    if version != 4 {
+        return Err(StoreError::SchemaVersionMismatch {
+            found: version,
+            supported: 4,
+        });
+    }
+    let application_id = pragma_i64(connection, "application_id")?;
+    if application_id != APPLICATION_ID {
+        return Err(StoreError::ApplicationIdMismatch {
+            found: application_id,
+            expected: APPLICATION_ID,
+        });
+    }
+    let metadata: (i64, String) = connection.query_row(
+        "SELECT schema_version, schema_artifact_digest
+         FROM schema_metadata WHERE singleton = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if metadata.0 != 4 || metadata.1 != SCHEMA_V4_ARTIFACT_DIGEST {
+        return Err(StoreError::Integrity(
+            "schema-v4 metadata does not identify the exact qualified schema artifact".into(),
+        ));
+    }
+    if sha256_digest(SCHEMA_V4.as_bytes()) != SCHEMA_V4_ARTIFACT_DIGEST {
+        return Err(StoreError::Integrity(
+            "compiled schema_v4.sql does not match its pinned digest".into(),
+        ));
+    }
+    let quick_check: String =
+        connection.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+    if quick_check != "ok" {
+        return Err(StoreError::Integrity(quick_check));
+    }
+    let foreign_key_failures: i64 =
+        connection.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })?;
+    if foreign_key_failures != 0 {
+        return Err(StoreError::Integrity(format!(
+            "{foreign_key_failures} schema-v4 foreign-key violations"
+        )));
+    }
+    let expected = EXPECTED_SCHEMA_V4_FINGERPRINT.as_ref().map_err(|error| {
+        StoreError::Integrity(format!(
+            "compiled v4 schema cannot be fingerprinted: {error}"
+        ))
+    })?;
+    let actual = schema_fingerprint(connection)?;
+    if &actual != expected {
+        return Err(StoreError::Integrity(format!(
+            "schema-v4 definition fingerprint {actual} differs from exact qualified v4 {expected}"
+        )));
+    }
+    validate_stored_digests(connection)?;
+    validate_upgrade_receipts(connection)?;
+    validate_all_admission_context_digests(connection)?;
+    validate_local_provider_admissions(connection)?;
+    validate_provider_intake_invariants(connection)?;
+    validate_refusal_invariants(connection)?;
+    validate_run_results(connection)?;
+    validate_evaluation_refusal_invariants(connection)?;
+    validate_admitted_report_associations_connection(connection)?;
+    validate_status_sequence_lower_bound(connection)?;
+    validate_projection_invariants(connection)
+}
+
 fn validate_admitted_report_associations_connection(
     connection: &Connection,
 ) -> Result<(), StoreError> {
@@ -5029,6 +6782,14 @@ fn append_digest_field(hasher: &mut Sha256, bytes: &[u8]) -> Result<(), StoreErr
 /// row multiset. This deliberately excludes SQLite page layout while retaining
 /// value types, duplicate rows, `sqlite_sequence`, and every durable byte.
 fn v3_logical_state_digest(connection: &Connection) -> Result<String, StoreError> {
+    logical_state_digest(connection, b"nq.schema_v3.logical_state.v1\0")
+}
+
+fn v4_logical_state_digest(connection: &Connection) -> Result<String, StoreError> {
+    logical_state_digest(connection, b"nq.schema_v4.logical_state.v1\0")
+}
+
+fn logical_state_digest(connection: &Connection, domain: &[u8]) -> Result<String, StoreError> {
     let mut names =
         connection.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name")?;
     let table_names = names
@@ -5037,7 +6798,7 @@ fn v3_logical_state_digest(connection: &Connection) -> Result<String, StoreError
     drop(names);
 
     let mut state = Sha256::new();
-    state.update(b"nq.schema_v3.logical_state.v1\0");
+    state.update(domain);
     state.update(pragma_i64(connection, "application_id")?.to_be_bytes());
     state.update(pragma_i64(connection, "user_version")?.to_be_bytes());
     for table_name in table_names {
@@ -8613,6 +10374,22 @@ mod tests {
             .expect("record exact schema-v3 identity");
     }
 
+    fn write_empty_exact_v4(path: &Path) {
+        let connection = Connection::open(path).expect("open exact schema-v4 fixture");
+        connection
+            .execute_batch(SCHEMA_V4)
+            .expect("install exact schema-v4 definition");
+        connection
+            .execute(
+                "INSERT INTO schema_metadata (
+                    singleton, product, schema_version,
+                    schema_artifact_digest, initialized_at
+                 ) VALUES (1, 'nq-ng', 4, ?1, ?2)",
+                params![SCHEMA_V4_ARTIFACT_DIGEST, TIME],
+            )
+            .expect("record exact schema-v4 identity");
+    }
+
     fn exact_v3_to_v4_receipt(backup: &BackupArtifact) -> UpgradeReceiptInput {
         UpgradeReceiptInput {
             receipt_id: "upgrade-v3-v4-provider".to_owned(),
@@ -8634,6 +10411,30 @@ mod tests {
                 "historical_provider_intake": "explicit_gap_only",
                 "provider_intakes_synthesized": false,
                 "acknowledgments_synthesized": false,
+            })),
+        }
+    }
+
+    fn exact_v4_to_v5_receipt(backup: &BackupArtifact) -> UpgradeReceiptInput {
+        UpgradeReceiptInput {
+            receipt_id: "upgrade-v4-v5-diagnostic-artifacts".to_owned(),
+            from_schema_version: 4,
+            to_schema_version: 5,
+            migrations: document(json!(["schema_v4_to_v5_diagnostic_artifacts"])),
+            binary_digest: digest("migration-binary-v5"),
+            backup_digest: backup.sha256.clone(),
+            backup_location: backup.path.to_string_lossy().into_owned(),
+            started_at: "2026-07-28T12:00:00Z".to_owned(),
+            finished_at: "2026-07-28T12:00:01Z".to_owned(),
+            result: "migrated".to_owned(),
+            operator_identity: document(json!({"uid": 991})),
+            verification: document(json!({
+                "integrity": "ok",
+                "source_schema_version": 4,
+                "source_schema_artifact_digest": SCHEMA_V4_ARTIFACT_DIGEST,
+                "backup_reopened": true,
+                "historical_diagnostic_artifacts": "no_durable_commitments",
+                "diagnostic_artifacts_synthesized": false,
             })),
         }
     }
@@ -9101,6 +10902,35 @@ mod tests {
         }
     }
 
+    fn run_only_diagnostic_artifact(
+        collection: &CollectionInput,
+        suffix: &str,
+    ) -> DiagnosticArtifactCommitInput {
+        let artifact_id = typed_digest(&format!("run-only-diagnostic-artifact-{suffix}"));
+        DiagnosticArtifactCommitInput {
+            artifact_id: artifact_id.clone(),
+            contract_schema: "nq.diagnostic_execution.v1".to_owned(),
+            canonical_bytes: document(json!({
+                "schema": "nq.diagnostic_execution.v1",
+                "artifact_id": artifact_id.as_str(),
+                "run_id": collection.run.run_id,
+                "request_id": collection.run.request_id,
+                "profile": {
+                    "id": collection.run.profile_id,
+                    "version": collection.run.profile_version,
+                    "digest": collection.run.profile_digest,
+                },
+                "completed_at": TIME,
+                "fixture": suffix,
+            })),
+            local_origin: DiagnosticArtifactLocalOriginInput {
+                run_id: collection.run.run_id.clone(),
+                evaluation_id: None,
+                completed_at: TIME.to_owned(),
+            },
+        }
+    }
+
     /// Seed a historical row through the internal primitives, deliberately
     /// bypassing the public atomic commit API while retaining a canonical
     /// run-linked result. Hostile tests can then isolate the intended defect.
@@ -9309,6 +11139,7 @@ mod tests {
                 Ok::<_, StoreError>(AdmittedCollectionCompletion {
                     value: (),
                     evaluations: Vec::new(),
+                    diagnostic_artifact: None,
                     status: StatusEventInput {
                         status_event_id: format!("status-{run_id}"),
                         component_kind: "instance".to_owned(),
@@ -9333,6 +11164,127 @@ mod tests {
             },
         )?);
         Ok(receipt)
+    }
+
+    fn commit_diagnostic_artifact_fixture(
+        store: &mut Store,
+        suffix: &str,
+        profile_digest: &str,
+        artifact_evaluation_id: &str,
+    ) -> (
+        String,
+        Sha256Digest,
+        Result<ProviderIntakeCommit<()>, StoreError>,
+    ) {
+        let detector_digest = digest(&format!("diagnostic-detector-{suffix}"));
+        let evaluator_digest = typed_digest(&format!("diagnostic-evaluator-{suffix}"));
+        let mut identity = fixture_identity();
+        identity.detector_identity_digest =
+            detector_suite_identity_digest([detector_digest.as_str()])
+                .expect("diagnostic detector suite");
+        identity.evaluator_artifact_digest = evaluator_digest.clone();
+        let admission_id = format!("admission-diagnostic-{suffix}");
+        append_fixture_admission_with_identity(
+            store,
+            profile_digest,
+            "fixture-a",
+            &admission_id,
+            identity,
+        );
+        let mut bound_run = run("fixture-a", suffix, profile_digest);
+        bound_run.admission_id = Some(admission_id);
+        let run_id = bound_run.run_id.clone();
+        let evaluation_id = format!("evaluation-{suffix}");
+        let report_id = format!("report-{suffix}");
+        let collection = fixture_collection(
+            store,
+            bound_run,
+            Some(SubmissionInput {
+                submission_id: format!("submission-{suffix}"),
+                raw_bytes: format!("diagnostic {suffix}").into_bytes(),
+                received_at: TIME.to_owned(),
+                protocol_outcome: "valid_report".to_owned(),
+                disposition: SubmissionDisposition::Admitted(report(
+                    "fixture-a",
+                    suffix,
+                    profile_digest,
+                    document(json!({"diagnostic": suffix})),
+                )),
+            }),
+        );
+        let artifact_id = typed_digest(&format!("diagnostic-artifact-{suffix}"));
+        let artifact_document = document(json!({
+            "schema": "nq.diagnostic_execution.v1",
+            "artifact_id": artifact_id.as_str(),
+            "run_id": run_id,
+            "request_id": collection.run.request_id,
+            "profile": {
+                "id": collection.run.profile_id,
+                "version": collection.run.profile_version,
+                "digest": collection.run.profile_digest,
+            },
+            "completed_at": TIME,
+            "fixture": suffix,
+        }));
+        let result = store.commit_admitted_collection(&collection, |_view, receipt| {
+            let report_sequence = receipt.report_sequence.expect("pending report sequence");
+            Ok::<_, StoreError>(AdmittedCollectionCompletion {
+                value: (),
+                evaluations: vec![EvaluationCommitInput {
+                    evaluation: EvaluationInput {
+                        evaluation_id: evaluation_id.clone(),
+                        trigger_run_id: Some(run_id.clone()),
+                        detector_id: "fixture.detector".to_owned(),
+                        detector_version: "1".to_owned(),
+                        detector_digest: detector_digest.clone(),
+                        evaluator_artifact_digest: evaluator_digest.as_str().to_owned(),
+                        started_at: TIME.to_owned(),
+                        evaluated_at: TIME.to_owned(),
+                        outcome: "condition_explicitly_absent".to_owned(),
+                        detail: document(json!({"result": "absent"})),
+                        profile: evaluation_profile(profile_digest),
+                        watermarks: vec![EvaluationWatermark {
+                            instance_id: "fixture-a".to_owned(),
+                            max_report_sequence: report_sequence,
+                            watermark_received_at: Some(TIME.to_owned()),
+                        }],
+                        refusal: None,
+                    },
+                    finding: None,
+                }],
+                diagnostic_artifact: Some(DiagnosticArtifactCommitInput {
+                    artifact_id: artifact_id.clone(),
+                    contract_schema: "nq.diagnostic_execution.v1".to_owned(),
+                    canonical_bytes: artifact_document.clone(),
+                    local_origin: DiagnosticArtifactLocalOriginInput {
+                        run_id: run_id.clone(),
+                        evaluation_id: Some(artifact_evaluation_id.to_owned()),
+                        completed_at: TIME.to_owned(),
+                    },
+                }),
+                status: StatusEventInput {
+                    status_event_id: format!("status-{suffix}"),
+                    component_kind: "instance".to_owned(),
+                    component_id: "fixture-a".to_owned(),
+                    state: "healthy".to_owned(),
+                    code: "report_complete".to_owned(),
+                    detail: document(json!({
+                        "schema": "nq.collection_outcome.v2",
+                        "instance_id": "fixture-a",
+                        "run_id": run_id,
+                        "result": {
+                            "outcome": "admitted",
+                            "report_id": report_id,
+                            "report_status": "complete",
+                            "semantic_digest": receipt.semantic_digest,
+                            "evaluations": [{"result": "absent"}],
+                        },
+                    })),
+                    observed_at: TIME.to_owned(),
+                },
+            })
+        });
+        (run_id, artifact_id, result)
     }
 
     fn commit_rejected(
@@ -9838,6 +11790,7 @@ mod tests {
                     Ok::<_, StoreError>(AdmittedCollectionCompletion {
                         value: (),
                         evaluations,
+                        diagnostic_artifact: None,
                         status: StatusEventInput {
                             status_event_id: format!("status-suite-{suffix}"),
                             component_kind: "instance".to_owned(),
@@ -9963,6 +11916,7 @@ mod tests {
                         },
                         finding: None,
                     }],
+                    diagnostic_artifact: None,
                     status: StatusEventInput {
                         status_event_id: "status-collision".to_owned(),
                         component_kind: "instance".to_owned(),
@@ -10111,6 +12065,7 @@ mod tests {
                 Ok::<_, StoreError>(AdmittedCollectionCompletion {
                     value: (),
                     evaluations,
+                    diagnostic_artifact: None,
                     status: StatusEventInput {
                         status_event_id: "status-ordered-evaluations".to_owned(),
                         component_kind: "instance".to_owned(),
@@ -12334,8 +14289,7 @@ mod tests {
             Store::backup_v3_verified(&source_a, &backup).expect("verified backup of source A");
 
         let error = Store::upgrade_v3_to_v4(&source_b, &exact_v3_to_v4_receipt(&backup))
-            .err()
-            .expect("source A's valid backup cannot authorize migration of source B");
+            .expect_err("source A's valid backup cannot authorize migration of source B");
         assert!(matches!(
             error,
             StoreError::Invariant(message) if message.contains("logical state")
@@ -12627,7 +14581,9 @@ mod tests {
                 "acknowledgments_synthesized": false,
             })),
         };
-        let migrated = Store::upgrade_v3_to_v4(&source, &receipt).expect("exact v3 upgrades to v4");
+        Store::upgrade_v3_to_v4(&source, &receipt).expect("exact v3 upgrades to v4");
+        let migrated =
+            Store::open_v4_upgrade_source_read_only(&source).expect("migrated v4 reopens");
         assert_eq!(
             Store::database_schema_version(&source).expect("v4 version"),
             4
@@ -12693,6 +14649,903 @@ mod tests {
                 .is_none(),
             "a migrated checkpoint without a real provider acknowledgment cannot advance live intake"
         );
-        migrated.validate().expect("migrated v4 validates");
+        validate_v4_upgrade_source_connection(&migrated.connection).expect("migrated v4 validates");
+    }
+
+    #[test]
+    fn diagnostic_artifact_import_preserves_commitment_availability_and_corruption_states() {
+        let directory = tempdir().expect("temporary directory");
+        let database = directory.path().join("artifact.db");
+        let mut store = Store::initialize(&database).expect("store initializes");
+        let artifact_id = typed_digest("artifact-identity-not-full-byte-digest");
+        let artifact = document(json!({
+            "schema": "nq.diagnostic_execution.v1",
+            "artifact_id": artifact_id.as_str(),
+            "outcome": "fixture",
+        }));
+        assert_ne!(artifact_id.as_str(), artifact.digest());
+        let receipt = store
+            .import_diagnostic_artifact(&DiagnosticArtifactImportInput {
+                import_id: "import-initial".to_owned(),
+                artifact_id: artifact_id.clone(),
+                contract_schema: "nq.diagnostic_execution.v1".to_owned(),
+                canonical_bytes: artifact.clone(),
+                imported_at: TIME.to_owned(),
+            })
+            .expect("exact artifact import commits");
+        assert_eq!(
+            receipt.disposition,
+            DiagnosticArtifactImportDisposition::Committed
+        );
+        assert_eq!(receipt.canonical_bytes_sha256.as_str(), artifact.digest());
+        let replay = store
+            .import_diagnostic_artifact(&DiagnosticArtifactImportInput {
+                import_id: "import-initial".to_owned(),
+                artifact_id: artifact_id.clone(),
+                contract_schema: "nq.diagnostic_execution.v1".to_owned(),
+                canonical_bytes: artifact.clone(),
+                imported_at: "2026-07-28T12:00:30Z".to_owned(),
+            })
+            .expect("same import operation reopens its first committed receipt");
+        assert_eq!(replay, receipt);
+        drop(store);
+
+        let mut store = Store::open(&database).expect("store reopens after restart");
+        let DiagnosticArtifactLookup::Found(access) = store
+            .diagnostic_artifact(&artifact_id, &["nq.diagnostic_execution.v1"])
+            .expect("artifact lookup")
+        else {
+            panic!("artifact commitment disappeared");
+        };
+        assert_eq!(
+            access.schema_support,
+            DiagnosticArtifactSchemaSupport::Supported
+        );
+        assert_eq!(
+            access.commitment.canonical_bytes_sha256.as_str(),
+            artifact.digest()
+        );
+        assert!(matches!(
+            access.byte_state,
+            DiagnosticArtifactByteState::VerifiedAvailable { canonical_bytes }
+                if canonical_bytes == artifact
+        ));
+        let DiagnosticArtifactLookup::Found(unsupported) = store
+            .diagnostic_artifact(&artifact_id, &[])
+            .expect("unsupported-schema lookup")
+        else {
+            panic!("artifact commitment disappeared");
+        };
+        assert!(matches!(
+            unsupported.schema_support,
+            DiagnosticArtifactSchemaSupport::Unsupported { contract_schema }
+                if contract_schema == "nq.diagnostic_execution.v1"
+        ));
+        assert!(matches!(
+            unsupported.byte_state,
+            DiagnosticArtifactByteState::VerifiedAvailable { .. }
+        ));
+
+        // Simulate loss below the typed API while restoring the exact schema
+        // definition. The commitment remains valid and lookup must not invent
+        // bytes or report NotFound.
+        let delete_trigger: String = store
+            .connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                 WHERE type = 'trigger'
+                   AND name = 'immutable_diagnostic_artifact_payloads_delete'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("capture exact delete trigger");
+        store
+            .connection
+            .execute_batch(
+                "DROP TRIGGER immutable_diagnostic_artifact_payloads_delete;
+                 DELETE FROM diagnostic_artifact_payloads;",
+            )
+            .expect("simulate payload loss");
+        store
+            .connection
+            .execute_batch(&delete_trigger)
+            .expect("restore exact delete trigger");
+        store.validate().expect("commitment-only store validates");
+        let DiagnosticArtifactLookup::Found(unavailable) = store
+            .diagnostic_artifact(&artifact_id, &["nq.diagnostic_execution.v1"])
+            .expect("unavailable lookup")
+        else {
+            panic!("artifact commitment disappeared");
+        };
+        assert_eq!(
+            unavailable.byte_state,
+            DiagnosticArtifactByteState::CommittedUnavailable
+        );
+        let rematerialized = store
+            .import_diagnostic_artifact(&DiagnosticArtifactImportInput {
+                import_id: "import-rematerialize".to_owned(),
+                artifact_id: artifact_id.clone(),
+                contract_schema: "nq.diagnostic_execution.v1".to_owned(),
+                canonical_bytes: artifact.clone(),
+                imported_at: "2026-07-28T12:01:00Z".to_owned(),
+            })
+            .expect("matching exact bytes rematerialize");
+        assert_eq!(
+            rematerialized.disposition,
+            DiagnosticArtifactImportDisposition::Rematerialized
+        );
+
+        let corrupt_id = typed_digest("corrupt-artifact-identity");
+        let corrupt = document(json!({
+            "schema": "nq.diagnostic_execution.v1",
+            "artifact_id": corrupt_id.as_str(),
+            "outcome": "fixture",
+        }));
+        store
+            .import_diagnostic_artifact(&DiagnosticArtifactImportInput {
+                import_id: "import-corrupt".to_owned(),
+                artifact_id: corrupt_id.clone(),
+                contract_schema: "nq.diagnostic_execution.v1".to_owned(),
+                canonical_bytes: corrupt,
+                imported_at: TIME.to_owned(),
+            })
+            .expect("second artifact commits");
+        let update_trigger: String = store
+            .connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                 WHERE type = 'trigger'
+                   AND name = 'immutable_diagnostic_artifact_payloads_update'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("capture exact update trigger");
+        store
+            .connection
+            .execute_batch(
+                "DROP TRIGGER immutable_diagnostic_artifact_payloads_update;
+                 UPDATE diagnostic_artifact_payloads
+                 SET canonical_bytes = CAST(
+                    '{\"schema\":\"nq.diagnostic_execution.v1\"}' AS BLOB
+                 )
+                 WHERE artifact_id = (SELECT artifact_id
+                    FROM imported_diagnostic_artifact_origins
+                    WHERE import_id = 'import-corrupt');",
+            )
+            .expect("simulate corrupt bytes");
+        store
+            .connection
+            .execute_batch(&update_trigger)
+            .expect("restore exact update trigger");
+        store
+            .validate()
+            .expect("corruption remains an access state");
+        let DiagnosticArtifactLookup::Found(corrupt_access) = store
+            .diagnostic_artifact(&corrupt_id, &["nq.diagnostic_execution.v1"])
+            .expect("corrupt lookup")
+        else {
+            panic!("corrupt artifact commitment disappeared");
+        };
+        assert!(matches!(
+            corrupt_access.byte_state,
+            DiagnosticArtifactByteState::Corrupt { .. }
+        ));
+    }
+
+    #[test]
+    fn unavailable_import_is_custody_only_and_exact_import_rematerializes_it() {
+        let mut store = Store::initialize_in_memory().expect("store initializes");
+        let artifact_id = typed_digest("unavailable-artifact");
+        let artifact = document(json!({
+            "schema": "nq.diagnostic_execution.v1",
+            "artifact_id": artifact_id.as_str(),
+        }));
+        let commitment = store
+            .import_unavailable_diagnostic_artifact(&UnavailableDiagnosticArtifactImportInput {
+                import_id: "unavailable-import".to_owned(),
+                artifact_id: artifact_id.clone(),
+                contract_schema: "nq.diagnostic_execution.v1".to_owned(),
+                canonical_bytes_sha256: Sha256Digest::parse(artifact.digest().to_owned())
+                    .expect("typed full-byte digest"),
+                canonical_bytes_length: u64::try_from(artifact.as_bytes().len())
+                    .expect("fixture length"),
+                imported_at: TIME.to_owned(),
+            })
+            .expect("unavailable commitment imports");
+        assert_eq!(
+            commitment.disposition,
+            DiagnosticArtifactImportDisposition::CommittedUnavailable
+        );
+        let DiagnosticArtifactLookup::Found(unavailable) = store
+            .diagnostic_artifact(&artifact_id, &["nq.diagnostic_execution.v1"])
+            .expect("unavailable lookup")
+        else {
+            panic!("unavailable commitment missing");
+        };
+        assert!(matches!(
+            unavailable.commitment.origin,
+            DiagnosticArtifactOrigin::Imported { import_id, .. }
+                if import_id == "unavailable-import"
+        ));
+        assert_eq!(
+            unavailable.byte_state,
+            DiagnosticArtifactByteState::CommittedUnavailable
+        );
+        assert!(
+            store
+                .diagnostic_artifact_id_for_run("run-that-never-existed")
+                .expect("local lookup")
+                .is_none(),
+            "custody-only import became a local execution origin"
+        );
+        let rematerialized = store
+            .import_diagnostic_artifact(&DiagnosticArtifactImportInput {
+                import_id: "available-import".to_owned(),
+                artifact_id: artifact_id.clone(),
+                contract_schema: "nq.diagnostic_execution.v1".to_owned(),
+                canonical_bytes: artifact,
+                imported_at: "2026-07-28T12:01:00Z".to_owned(),
+            })
+            .expect("exact bytes rematerialize");
+        assert_eq!(
+            rematerialized.disposition,
+            DiagnosticArtifactImportDisposition::Rematerialized
+        );
+    }
+
+    #[test]
+    fn imported_receipts_reject_hostile_cross_links_and_field_substitution_after_restart() {
+        let mutations = [
+            "artifact_cross_link",
+            "contract",
+            "digest",
+            "length",
+            "time",
+            "outcome",
+        ];
+        for mutation in mutations {
+            let directory = tempdir().expect("temporary directory");
+            let database = directory.path().join(format!("{mutation}.db"));
+            let mut store = Store::initialize(&database).expect("store initializes");
+            let primary_artifact_id = typed_digest(&format!("{mutation}-artifact-a"));
+            let artifact_a = document(json!({
+                "schema": "nq.diagnostic_execution.v1",
+                "artifact_id": primary_artifact_id.as_str(),
+            }));
+            store
+                .import_diagnostic_artifact(&DiagnosticArtifactImportInput {
+                    import_id: "import-a".to_owned(),
+                    artifact_id: primary_artifact_id,
+                    contract_schema: "nq.diagnostic_execution.v1".to_owned(),
+                    canonical_bytes: artifact_a,
+                    imported_at: TIME.to_owned(),
+                })
+                .expect("first import");
+            let cross_link_target_id = typed_digest(&format!("{mutation}-artifact-b"));
+            let artifact_b = document(json!({
+                "schema": "nq.diagnostic_execution.v1",
+                "artifact_id": cross_link_target_id.as_str(),
+            }));
+            store
+                .import_diagnostic_artifact(&DiagnosticArtifactImportInput {
+                    import_id: "import-b".to_owned(),
+                    artifact_id: cross_link_target_id.clone(),
+                    contract_schema: "nq.diagnostic_execution.v1".to_owned(),
+                    canonical_bytes: artifact_b,
+                    imported_at: "2026-07-28T12:01:00Z".to_owned(),
+                })
+                .expect("second import");
+            let trigger: String = store
+                .connection
+                .query_row(
+                    "SELECT sql FROM sqlite_schema
+                     WHERE type = 'trigger'
+                       AND name = 'immutable_diagnostic_artifact_import_events_update'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("capture receipt update trigger");
+            store
+                .connection
+                .execute_batch("DROP TRIGGER immutable_diagnostic_artifact_import_events_update;")
+                .expect("drop receipt trigger below typed API");
+            match mutation {
+                "artifact_cross_link" => {
+                    store
+                        .connection
+                        .execute(
+                            "UPDATE diagnostic_artifact_import_events
+                             SET artifact_id = ?1 WHERE import_id = 'import-a'",
+                            [cross_link_target_id.as_str()],
+                        )
+                        .expect("cross-link receipt");
+                }
+                "contract" => {
+                    store
+                        .connection
+                        .execute(
+                            "UPDATE diagnostic_artifact_import_events
+                             SET contract_schema = 'nq.hostile.v1'
+                             WHERE import_id = 'import-a'",
+                            [],
+                        )
+                        .expect("substitute contract");
+                }
+                "digest" => {
+                    store
+                        .connection
+                        .execute(
+                            "UPDATE diagnostic_artifact_import_events
+                             SET canonical_bytes_sha256 = ?1
+                             WHERE import_id = 'import-a'",
+                            [typed_digest("hostile-receipt-digest").as_str()],
+                        )
+                        .expect("substitute digest");
+                }
+                "length" => {
+                    store
+                        .connection
+                        .execute(
+                            "UPDATE diagnostic_artifact_import_events
+                             SET canonical_bytes_length = canonical_bytes_length + 1
+                             WHERE import_id = 'import-a'",
+                            [],
+                        )
+                        .expect("substitute length");
+                }
+                "time" => {
+                    store
+                        .connection
+                        .execute(
+                            "UPDATE diagnostic_artifact_import_events
+                             SET imported_at = '2026-07-28T13:00:00Z'
+                             WHERE import_id = 'import-a'",
+                            [],
+                        )
+                        .expect("substitute time");
+                }
+                "outcome" => {
+                    store
+                        .connection
+                        .execute(
+                            "UPDATE diagnostic_artifact_import_events
+                             SET outcome = 'committed_unavailable'
+                             WHERE import_id = 'import-a'",
+                            [],
+                        )
+                        .expect("substitute outcome");
+                }
+                _ => unreachable!(),
+            }
+            store
+                .connection
+                .execute_batch(&trigger)
+                .expect("restore receipt trigger");
+            drop(store);
+
+            assert!(matches!(
+                Store::open(&database),
+                Err(StoreError::Integrity(message))
+                    if message.contains("does not exactly correspond")
+            ));
+        }
+    }
+
+    #[test]
+    fn local_artifact_completion_accepts_equivalent_rfc3339_spelling_only() {
+        let directory = tempdir().expect("temporary directory");
+        let database = directory.path().join("equivalent-completion-time.db");
+        let mut store = Store::initialize(&database).expect("store initializes");
+        let profile_digest = append_fixture_descriptor(&mut store);
+        let collection =
+            rejected_fixture_collection(&mut store, "fixture-a", "exact-second", &profile_digest);
+        let result = non_success_status(&collection.run.run_id, "fixture-a", "exact-second");
+        let mut artifact = run_only_diagnostic_artifact(&collection, "exact-second");
+
+        let mut shifted = artifact.clone();
+        shifted.canonical_bytes = document(json!({
+            "schema": "nq.diagnostic_execution.v1",
+            "artifact_id": shifted.artifact_id.as_str(),
+            "run_id": collection.run.run_id,
+            "request_id": collection.run.request_id,
+            "profile": {
+                "id": collection.run.profile_id,
+                "version": collection.run.profile_version,
+                "digest": collection.run.profile_digest,
+            },
+            "completed_at": "2026-07-16T12:00:00.001Z",
+            "fixture": "exact-second",
+        }));
+        assert!(matches!(
+            store.commit_non_success_collection_with_artifact(
+                &collection,
+                &result,
+                Some(&shifted),
+            ),
+            Err(StoreError::Invariant(message))
+                if message.contains("completion time differs")
+        ));
+
+        artifact.canonical_bytes = document(json!({
+            "schema": "nq.diagnostic_execution.v1",
+            "artifact_id": artifact.artifact_id.as_str(),
+            "run_id": collection.run.run_id,
+            "request_id": collection.run.request_id,
+            "profile": {
+                "id": collection.run.profile_id,
+                "version": collection.run.profile_version,
+                "digest": collection.run.profile_digest,
+            },
+            "completed_at": "2026-07-16T12:00:00Z",
+            "fixture": "exact-second",
+        }));
+        store
+            .commit_non_success_collection_with_artifact(&collection, &result, Some(&artifact))
+            .expect("equivalent exact-second completion spellings commit");
+        store.validate().expect("exact-second artifact validates");
+    }
+
+    #[test]
+    fn run_only_diagnostic_artifact_preserves_provenance_and_replay_identity() {
+        let directory = tempdir().expect("temporary directory");
+        let database = directory.path().join("run-only-artifact.db");
+        let mut store = Store::initialize(&database).expect("store initializes");
+        let profile_digest = append_fixture_descriptor(&mut store);
+        let collection =
+            rejected_fixture_collection(&mut store, "fixture-a", "run-only", &profile_digest);
+        let result = non_success_status(&collection.run.run_id, "fixture-a", "run-only");
+        let artifact = run_only_diagnostic_artifact(&collection, "run-only");
+
+        let mut future_completion = artifact.clone();
+        future_completion.local_origin.completed_at = "2099-01-01T00:00:00Z".to_owned();
+        future_completion.canonical_bytes = document(json!({
+            "schema": "nq.diagnostic_execution.v1",
+            "artifact_id": future_completion.artifact_id.as_str(),
+            "run_id": collection.run.run_id,
+            "request_id": collection.run.request_id,
+            "profile": {
+                "id": collection.run.profile_id,
+                "version": collection.run.profile_version,
+                "digest": collection.run.profile_digest,
+            },
+            "completed_at": future_completion.local_origin.completed_at,
+            "fixture": "run-only",
+        }));
+        assert!(matches!(
+            store.commit_non_success_collection_with_artifact(
+                &collection,
+                &result,
+                Some(&future_completion),
+            ),
+            Err(StoreError::Integrity(message))
+                if message.contains("completes after its custody commitment")
+        ));
+
+        let mut falsely_evaluated = artifact.clone();
+        falsely_evaluated.local_origin.evaluation_id = Some("evaluation-that-never-ran".to_owned());
+        assert!(matches!(
+            store.commit_non_success_collection_with_artifact(
+                &collection,
+                &result,
+                Some(&falsely_evaluated),
+            ),
+            Err(StoreError::Invariant(message))
+                if message.contains("cannot claim an evaluation origin")
+        ));
+
+        let mut substituted = artifact.clone();
+        substituted.canonical_bytes = document(json!({
+            "schema": "nq.diagnostic_execution.v1",
+            "artifact_id": substituted.artifact_id.as_str(),
+            "run_id": collection.run.run_id,
+            "request_id": "request-substituted",
+            "profile": {
+                "id": collection.run.profile_id,
+                "version": collection.run.profile_version,
+                "digest": collection.run.profile_digest,
+            },
+            "completed_at": TIME,
+        }));
+        assert!(matches!(
+            store.commit_non_success_collection_with_artifact(
+                &collection,
+                &result,
+                Some(&substituted),
+            ),
+            Err(StoreError::Invariant(message))
+                if message.contains("run, request, or profile provenance")
+        ));
+        assert_eq!(
+            store
+                .diagnostic_artifact_id_for_run(&collection.run.run_id)
+                .expect("failed provenance lookup"),
+            None
+        );
+
+        let committed = store
+            .commit_non_success_collection_with_artifact(&collection, &result, Some(&artifact))
+            .expect("run-only diagnostic artifact commits");
+        assert_eq!(
+            committed.diagnostic_artifact_id,
+            Some(artifact.artifact_id.clone())
+        );
+        assert!(matches!(
+            committed.intake,
+            ProviderIntakeCommit::Committed { .. }
+        ));
+        let DiagnosticArtifactLookup::Found(access) = store
+            .diagnostic_artifact(&artifact.artifact_id, &["nq.diagnostic_execution.v1"])
+            .expect("run-only artifact lookup")
+        else {
+            panic!("run-only artifact commitment is missing")
+        };
+        assert!(matches!(
+            access.commitment.origin,
+            DiagnosticArtifactOrigin::Local {
+                run_id,
+                evaluation_id: None,
+                completed_at,
+            } if run_id == collection.run.run_id && completed_at == TIME
+        ));
+        assert!(matches!(
+            access.byte_state,
+            DiagnosticArtifactByteState::VerifiedAvailable { canonical_bytes }
+                if canonical_bytes == artifact.canonical_bytes
+        ));
+        assert_eq!(
+            store
+                .collection_result_for_run(&collection.run.run_id)
+                .expect("run result lookup"),
+            Some(result.status.detail.clone())
+        );
+        store.validate().expect("run-only artifact validates");
+        drop(store);
+
+        let mut reopened = Store::open(&database).expect("store reopens");
+        let replayed = reopened
+            .commit_non_success_collection_with_artifact(&collection, &result, Some(&artifact))
+            .expect("exact non-success intake replays");
+        assert_eq!(
+            replayed.diagnostic_artifact_id,
+            Some(artifact.artifact_id.clone())
+        );
+        assert!(matches!(
+            replayed.intake,
+            ProviderIntakeCommit::Replayed { .. }
+        ));
+
+        let historical =
+            rejected_fixture_collection(&mut reopened, "fixture-a", "no-artifact", &profile_digest);
+        let historical_result =
+            non_success_status(&historical.run.run_id, "fixture-a", "no-artifact");
+        assert!(matches!(
+            reopened
+                .commit_non_success_collection(&historical, &historical_result)
+                .expect("historical non-success commits without artifact"),
+            ProviderIntakeCommit::Committed { .. }
+        ));
+        let candidate = run_only_diagnostic_artifact(&historical, "no-artifact");
+        let replay_without_synthesis = reopened
+            .commit_non_success_collection_with_artifact(
+                &historical,
+                &historical_result,
+                Some(&candidate),
+            )
+            .expect("historical non-success replays");
+        assert_eq!(replay_without_synthesis.diagnostic_artifact_id, None);
+        assert!(matches!(
+            replay_without_synthesis.intake,
+            ProviderIntakeCommit::Replayed { .. }
+        ));
+        assert_eq!(
+            reopened
+                .diagnostic_artifact(&candidate.artifact_id, &["nq.diagnostic_execution.v1"])
+                .expect("candidate lookup"),
+            DiagnosticArtifactLookup::NotFound
+        );
+    }
+
+    #[test]
+    fn run_only_artifact_failure_after_insertion_rolls_back_every_row() {
+        let (mut store, profile_digest) = configured_store();
+        let collection =
+            rejected_fixture_collection(&mut store, "fixture-a", "rollback", &profile_digest);
+        let result = non_success_status(&collection.run.run_id, "fixture-a", "rollback");
+        let artifact = run_only_diagnostic_artifact(&collection, "rollback");
+
+        FAIL_NON_SUCCESS_AFTER_ARTIFACT_INSERT.with(|fail| fail.set(true));
+        assert!(matches!(
+            store.commit_non_success_collection_with_artifact(
+                &collection,
+                &result,
+                Some(&artifact),
+            ),
+            Err(StoreError::Invariant(message))
+                if message.contains("injected failure after non-success")
+        ));
+
+        let identities = [
+            (
+                "provider_intake_attempts",
+                "intake_id",
+                collection.intake.intake_id.as_str(),
+            ),
+            (
+                "local_watcher_provider_intakes",
+                "run_id",
+                collection.run.run_id.as_str(),
+            ),
+            ("watcher_runs", "run_id", collection.run.run_id.as_str()),
+            ("raw_submissions", "run_id", collection.run.run_id.as_str()),
+            ("refusals", "run_id", collection.run.run_id.as_str()),
+            (
+                "diagnostic_artifact_commitments",
+                "artifact_id",
+                artifact.artifact_id.as_str(),
+            ),
+            (
+                "diagnostic_artifact_payloads",
+                "artifact_id",
+                artifact.artifact_id.as_str(),
+            ),
+            (
+                "local_diagnostic_artifact_origins",
+                "artifact_id",
+                artifact.artifact_id.as_str(),
+            ),
+            ("status_events", "run_id", collection.run.run_id.as_str()),
+            (
+                "provider_intake_acknowledgments",
+                "run_id",
+                collection.run.run_id.as_str(),
+            ),
+        ];
+        for (table, column, identity) in identities {
+            let count: i64 = store
+                .connection
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?1"),
+                    [identity],
+                    |row| row.get(0),
+                )
+                .unwrap_or_else(|error| panic!("count {table}.{column}: {error}"));
+            assert_eq!(count, 0, "{table}.{column} survived rollback");
+        }
+        assert_eq!(
+            store
+                .diagnostic_artifact(&artifact.artifact_id, &["nq.diagnostic_execution.v1"])
+                .expect("rolled-back artifact lookup"),
+            DiagnosticArtifactLookup::NotFound
+        );
+        store.validate().expect("rolled-back store remains valid");
+    }
+
+    #[test]
+    fn local_diagnostic_artifact_is_atomic_with_its_run_and_evaluation() {
+        let (mut store, profile_digest) = configured_store();
+        let (failed_run, failed_artifact, failed) = commit_diagnostic_artifact_fixture(
+            &mut store,
+            "diagnostic-mismatch",
+            &profile_digest,
+            "evaluation-not-in-this-completion",
+        );
+        assert!(matches!(
+            failed,
+            Err(StoreError::Invariant(message))
+                if message.contains("exactly one evaluation in the same completion")
+        ));
+        let failed_run_count: i64 = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM watcher_runs WHERE run_id = ?1",
+                [&failed_run],
+                |row| row.get(0),
+            )
+            .expect("failed run count");
+        assert_eq!(failed_run_count, 0);
+        assert_eq!(
+            store
+                .diagnostic_artifact(&failed_artifact, &["nq.diagnostic_execution.v1"])
+                .expect("failed artifact lookup"),
+            DiagnosticArtifactLookup::NotFound
+        );
+
+        let expected_evaluation = "evaluation-diagnostic-atomic";
+        let (run_id, artifact_id, committed) = commit_diagnostic_artifact_fixture(
+            &mut store,
+            "diagnostic-atomic",
+            &profile_digest,
+            expected_evaluation,
+        );
+        assert!(matches!(
+            committed,
+            Ok(ProviderIntakeCommit::Committed { .. })
+        ));
+        assert_eq!(
+            store
+                .diagnostic_artifact_id_for_run(&run_id)
+                .expect("artifact-by-run lookup"),
+            Some(artifact_id.clone())
+        );
+        let DiagnosticArtifactLookup::Found(access) = store
+            .diagnostic_artifact(&artifact_id, &["nq.diagnostic_execution.v1"])
+            .expect("local artifact lookup")
+        else {
+            panic!("local artifact commitment missing");
+        };
+        assert!(matches!(
+            access.commitment.origin,
+            DiagnosticArtifactOrigin::Local {
+                run_id: origin_run,
+                evaluation_id,
+                completed_at,
+            } if origin_run == run_id
+                && evaluation_id.as_deref() == Some(expected_evaluation)
+                && completed_at == TIME
+        ));
+        assert!(matches!(
+            access.byte_state,
+            DiagnosticArtifactByteState::VerifiedAvailable { .. }
+        ));
+        let origin = store
+            .evaluation_origin(expected_evaluation)
+            .expect("evaluation origin lookup")
+            .expect("evaluation origin");
+        assert_eq!(origin.evaluation_id, expected_evaluation);
+        assert!(origin.evaluation_sequence > 0);
+        assert_eq!(origin.trigger_run_id, Some(run_id));
+        store.validate().expect("atomic artifact store validates");
+    }
+
+    #[test]
+    fn local_artifact_provenance_rejects_swapped_run_and_evaluation_origins() {
+        let (mut store, profile_digest) = configured_store();
+        let (run_a, artifact_a, committed_a) = commit_diagnostic_artifact_fixture(
+            &mut store,
+            "origin-a",
+            &profile_digest,
+            "evaluation-origin-a",
+        );
+        let (run_b, artifact_b, committed_b) = commit_diagnostic_artifact_fixture(
+            &mut store,
+            "origin-b",
+            &profile_digest,
+            "evaluation-origin-b",
+        );
+        assert!(matches!(
+            (committed_a, committed_b),
+            (
+                Ok(ProviderIntakeCommit::Committed { .. }),
+                Ok(ProviderIntakeCommit::Committed { .. })
+            )
+        ));
+
+        let delete_trigger: String = store
+            .connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                 WHERE type = 'trigger'
+                   AND name = 'immutable_local_diagnostic_artifact_origins_delete'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("capture local-origin delete trigger");
+        store
+            .connection
+            .execute_batch(
+                "DROP TRIGGER immutable_local_diagnostic_artifact_origins_delete;
+                 DELETE FROM local_diagnostic_artifact_origins;",
+            )
+            .expect("remove origins below the typed API");
+        store
+            .connection
+            .execute(
+                "INSERT INTO local_diagnostic_artifact_origins (
+                    artifact_id, run_id, evaluation_id, completed_at
+                 ) VALUES (?1, ?2, 'evaluation-origin-b', ?3)",
+                params![artifact_a.as_str(), run_b, TIME],
+            )
+            .expect("substitute artifact A origin");
+        store
+            .connection
+            .execute(
+                "INSERT INTO local_diagnostic_artifact_origins (
+                    artifact_id, run_id, evaluation_id, completed_at
+                 ) VALUES (?1, ?2, 'evaluation-origin-a', ?3)",
+                params![artifact_b.as_str(), run_a, TIME],
+            )
+            .expect("substitute artifact B origin");
+        store
+            .connection
+            .execute_batch(&delete_trigger)
+            .expect("restore local-origin delete trigger");
+
+        assert!(matches!(
+            store.validate(),
+            Err(StoreError::Integrity(message))
+                if message.contains("provenance is invalid")
+                    && message.contains("run, request, or profile provenance")
+        ));
+    }
+
+    #[test]
+    fn local_artifact_provenance_rejects_substituted_completion_time() {
+        let (mut store, profile_digest) = configured_store();
+        let (_, artifact_id, committed) = commit_diagnostic_artifact_fixture(
+            &mut store,
+            "completion-time",
+            &profile_digest,
+            "evaluation-completion-time",
+        );
+        assert!(matches!(
+            committed,
+            Ok(ProviderIntakeCommit::Committed { .. })
+        ));
+        let trigger: String = store
+            .connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                 WHERE type = 'trigger'
+                   AND name = 'immutable_local_diagnostic_artifact_origins_update'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("capture local-origin update trigger");
+        store
+            .connection
+            .execute_batch("DROP TRIGGER immutable_local_diagnostic_artifact_origins_update;")
+            .expect("drop local-origin update trigger");
+        store
+            .connection
+            .execute(
+                "UPDATE local_diagnostic_artifact_origins
+                 SET completed_at = '2026-07-28T13:00:00Z'
+                 WHERE artifact_id = ?1",
+                [artifact_id.as_str()],
+            )
+            .expect("substitute completion time below typed API");
+        store
+            .connection
+            .execute_batch(&trigger)
+            .expect("restore local-origin update trigger");
+
+        assert!(matches!(
+            store.validate(),
+            Err(StoreError::Integrity(message))
+                if message.contains("provenance is invalid")
+                    && message.contains("completion time")
+        ));
+    }
+
+    #[test]
+    fn exact_v4_upgrade_adds_empty_artifact_custody_without_synthesis() {
+        let directory = tempdir().expect("temporary directory");
+        let source = directory.path().join("source-v4.db");
+        let backup_path = directory.path().join("backup-v4.db");
+        write_empty_exact_v4(&source);
+        let backup = Store::backup_v4_verified(&source, &backup_path).expect("verified v4 backup");
+        let receipt = exact_v4_to_v5_receipt(&backup);
+        let migrated = Store::upgrade_v4_to_v5(&source, &receipt).expect("exact v4 upgrades to v5");
+        assert_eq!(
+            Store::database_schema_version(&source).expect("source version"),
+            5
+        );
+        assert_eq!(
+            Store::database_schema_version(&backup_path).expect("backup version"),
+            4
+        );
+        let commitment_count: i64 = migrated
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM diagnostic_artifact_commitments",
+                [],
+                |row| row.get(0),
+            )
+            .expect("artifact commitment count");
+        assert_eq!(
+            commitment_count, 0,
+            "migration synthesized artifacts from schema-v4 absence"
+        );
+        migrated.validate().expect("migrated v5 validates");
     }
 }

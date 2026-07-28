@@ -13,10 +13,11 @@
 > minted `v0.1.0` release and post-release provider-intake receipts remain
 > frozen evidence. Current main is unpublished, untagged after `v0.1.0`, and
 > not deployed. It now includes one narrow canonical
-> `nq.diagnostic_execution.v1` emission path and a reproducible contract
-> package consumed by a local read-only Nightshift workflow; it does not yet
-> provide durable diagnostic-artifact storage/export, a generic host portrait,
-> or subject qualification.
+> `nq.diagnostic_execution.v2` production path, the frozen v1 consumer
+> boundary, schema-v5 immutable artifact custody, restart-safe inspection and
+> exact export/import, and reproducible v1/v2 contract packages. This local
+> untagged work is not remotely published and does not yet provide a generic
+> host portrait or subject qualification.
 
 The target NQ-ng product is a local-first deterministic diagnostic engine and
 recursive evidence fabric. For one exact profile, subject, scope, and vantage,
@@ -47,8 +48,8 @@ corpus, explicit profile registry, generic SQLite evidence substrate, bounded
 stdio and authenticated persistent-Unix helper supervisors, admission locks,
 detector lifecycle, daemon-local API/console, a broad developer-preview
 operator CLI, one native host helper, a canonical diagnostic-execution
-contract with one bounded live emission path, a Python wire-compatible
-specimen, and a bounded Rust compiler
+contract with one bounded live durable emission/export/import path, a Python
+wire-compatible specimen, and a bounded Rust compiler
 for authority-free system cuts and consumer-specific projections. The cut
 contract is not yet wired into daemon storage, NQ evaluation, Porter, NetBox,
 or AG. See

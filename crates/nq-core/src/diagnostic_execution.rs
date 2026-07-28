@@ -3,12 +3,15 @@
 //! The evaluation engine has one deliberately narrow producer for this
 //! contract: the exact current `nq.host/v1` load-pressure profile/detector, a
 //! fresh instance, one newly admitted report, and a determinate detector
-//! result. It emits only after the ordinary custody/evaluation transaction
-//! commits. History-aware manifests, detector
-//! refusals, durable diagnostic-artifact storage, and public re-export remain
-//! unsupported; the ordinary collection/history surfaces retain those source
-//! outcomes instead. A producer-selected evidence list is never treated as
-//! complete input accounting.
+//! result. The artifact commits atomically with the ordinary
+//! custody/evaluation transaction, and the engine reopens the committed bytes
+//! before returning them. The bounded producer preserves a compiled detector's
+//! governed `cannot_evaluate` result as a refused diagnostic rather than
+//! manufacturing a condition. Schema-v5 custody supports exact restart-safe
+//! inspection, export, and import; it does not broaden the deliberately narrow
+//! live producer or reconstruct artifacts for older history. A
+//! producer-selected evidence list is never treated as complete input
+//! accounting.
 
 use std::collections::{BTreeMap, BTreeSet};
 

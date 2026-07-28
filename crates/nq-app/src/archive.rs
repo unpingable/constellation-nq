@@ -110,6 +110,22 @@ pub struct VerifyReport {
     /// Exact number of schema-v3 watcher runs reopened as explicit provider-
     /// intake gaps. These are limitations, never synthesized evidence.
     pub historical_legacy_provider_intake_gaps_verified: Option<usize>,
+    /// Whether every diagnostic-artifact commitment was classified, every
+    /// available current-schema artifact reopened strictly, and no corrupt
+    /// payload was present.
+    pub historical_diagnostic_artifact_semantics_verified: Option<bool>,
+    /// Exact number of immutable diagnostic-artifact commitments visited.
+    pub historical_diagnostic_artifact_commitments_verified: Option<usize>,
+    /// Exact number of available current-schema artifacts reopened strictly.
+    pub historical_diagnostic_artifacts_reopened: Option<usize>,
+    /// Exact number of current-schema commitments with explicitly unavailable
+    /// bytes. These were not reconstructed.
+    pub historical_diagnostic_artifacts_committed_unavailable: Option<usize>,
+    /// Exact number of available canonical artifacts retained under an
+    /// unsupported schema and therefore not interpreted.
+    pub historical_unsupported_diagnostic_artifacts_available: Option<usize>,
+    /// Exact number of unsupported-schema commitments with unavailable bytes.
+    pub historical_unsupported_diagnostic_artifacts_committed_unavailable: Option<usize>,
     /// Always false: verification confirms history, it grants nothing.
     pub grants_authority: bool,
 }
@@ -122,6 +138,7 @@ struct HistoricalSemanticCounts {
     provider_intakes: usize,
     provider_intake_acknowledgments: usize,
     legacy_provider_intake_gaps: usize,
+    diagnostic_artifacts: nq_core::DiagnosticArtifactHistoryVerification,
 }
 
 fn validate_historical_semantics(store: &Store) -> Result<HistoricalSemanticCounts> {
@@ -165,6 +182,8 @@ fn validate_historical_semantics(store: &Store) -> Result<HistoricalSemanticCoun
     }
     let provider_history = nq_core::engine::validate_provider_intake_history(store)
         .context("reopen provider-intake and legacy-gap semantics")?;
+    let diagnostic_artifacts = nq_core::validate_diagnostic_artifact_history(store)
+        .context("reopen diagnostic-artifact commitments and available semantics")?;
     Ok(HistoricalSemanticCounts {
         admitted_reports,
         status_events,
@@ -173,6 +192,7 @@ fn validate_historical_semantics(store: &Store) -> Result<HistoricalSemanticCoun
         provider_intakes: provider_history.provider_intakes,
         provider_intake_acknowledgments: provider_history.acknowledgments,
         legacy_provider_intake_gaps: provider_history.legacy_gaps,
+        diagnostic_artifacts,
     })
 }
 
@@ -482,41 +502,13 @@ pub fn verify_archive(archive: &Path) -> Result<VerifyReport> {
     // The sealed source_openable flag cannot be downgraded to bypass semantic
     // validators: a structurally valid current store paired with `false`
     // refuses as a metadata contradiction.
-    let (
-        historical_database_verified,
-        historical_admitted_report_semantics_verified,
-        historical_admitted_reports_verified,
-        historical_status_semantics_verified,
-        historical_status_events_verified,
-        historical_rejected_custody_semantics_verified,
-        historical_rejected_custody_records_verified,
-        historical_evaluation_refusal_semantics_verified,
-        historical_evaluation_records_verified,
-        historical_provider_intake_semantics_verified,
-        historical_provider_intake_records_verified,
-        historical_provider_intake_acknowledgments_verified,
-        historical_legacy_provider_intake_gaps_verified,
-    ) = match (
+    let historical_counts = match (
         metadata.source_openable,
         Store::open_immutable(archive.join("db/nq.db")),
     ) {
         (true, Ok(store)) => {
             let counts = validate_historical_semantics(&store)?;
-            (
-                Some(true),
-                Some(true),
-                Some(counts.admitted_reports),
-                Some(true),
-                Some(counts.status_events),
-                Some(true),
-                Some(counts.rejected_custody_records),
-                Some(true),
-                Some(counts.evaluations),
-                Some(true),
-                Some(counts.provider_intakes),
-                Some(counts.provider_intake_acknowledgments),
-                Some(counts.legacy_provider_intake_gaps),
-            )
+            Some(counts)
         }
         (true, Err(error)) => {
             return Err(error).context(
@@ -528,28 +520,60 @@ pub fn verify_archive(archive: &Path) -> Result<VerifyReport> {
                 "archive records source_openable=false but its preserved database opens as a valid current store"
             );
         }
-        (false, Err(_)) => (
-            None, None, None, None, None, None, None, None, None, None, None, None, None,
-        ),
+        (false, Err(_)) => None,
     };
 
     Ok(VerifyReport {
         archive: archive.to_path_buf(),
         archive_format: metadata.archive_format,
         integrity_verified: true,
-        historical_database_verified,
-        historical_admitted_report_semantics_verified,
-        historical_admitted_reports_verified,
-        historical_status_semantics_verified,
-        historical_status_events_verified,
-        historical_rejected_custody_semantics_verified,
-        historical_rejected_custody_records_verified,
-        historical_evaluation_refusal_semantics_verified,
-        historical_evaluation_records_verified,
-        historical_provider_intake_semantics_verified,
-        historical_provider_intake_records_verified,
-        historical_provider_intake_acknowledgments_verified,
-        historical_legacy_provider_intake_gaps_verified,
+        historical_database_verified: historical_counts.as_ref().map(|_| true),
+        historical_admitted_report_semantics_verified: historical_counts.as_ref().map(|_| true),
+        historical_admitted_reports_verified: historical_counts
+            .as_ref()
+            .map(|counts| counts.admitted_reports),
+        historical_status_semantics_verified: historical_counts.as_ref().map(|_| true),
+        historical_status_events_verified: historical_counts
+            .as_ref()
+            .map(|counts| counts.status_events),
+        historical_rejected_custody_semantics_verified: historical_counts.as_ref().map(|_| true),
+        historical_rejected_custody_records_verified: historical_counts
+            .as_ref()
+            .map(|counts| counts.rejected_custody_records),
+        historical_evaluation_refusal_semantics_verified: historical_counts.as_ref().map(|_| true),
+        historical_evaluation_records_verified: historical_counts
+            .as_ref()
+            .map(|counts| counts.evaluations),
+        historical_provider_intake_semantics_verified: historical_counts.as_ref().map(|_| true),
+        historical_provider_intake_records_verified: historical_counts
+            .as_ref()
+            .map(|counts| counts.provider_intakes),
+        historical_provider_intake_acknowledgments_verified: historical_counts
+            .as_ref()
+            .map(|counts| counts.provider_intake_acknowledgments),
+        historical_legacy_provider_intake_gaps_verified: historical_counts
+            .as_ref()
+            .map(|counts| counts.legacy_provider_intake_gaps),
+        historical_diagnostic_artifact_semantics_verified: historical_counts.as_ref().map(|_| true),
+        historical_diagnostic_artifact_commitments_verified: historical_counts
+            .as_ref()
+            .map(|counts| counts.diagnostic_artifacts.commitments),
+        historical_diagnostic_artifacts_reopened: historical_counts
+            .as_ref()
+            .map(|counts| counts.diagnostic_artifacts.supported_available),
+        historical_diagnostic_artifacts_committed_unavailable: historical_counts
+            .as_ref()
+            .map(|counts| counts.diagnostic_artifacts.supported_committed_unavailable),
+        historical_unsupported_diagnostic_artifacts_available: historical_counts
+            .as_ref()
+            .map(|counts| counts.diagnostic_artifacts.unsupported_available),
+        historical_unsupported_diagnostic_artifacts_committed_unavailable: historical_counts
+            .as_ref()
+            .map(|counts| {
+                counts
+                    .diagnostic_artifacts
+                    .unsupported_committed_unavailable
+            }),
         grants_authority: false,
     })
 }
@@ -1055,6 +1079,76 @@ mod tests {
         archive
     }
 
+    fn diagnostic_artifact_archive(root: &Path) -> PathBuf {
+        let database = root.join("nq.db");
+        let mut store = Store::initialize(&database).expect("init store");
+        let bytes = include_bytes!("../../../diagnostic-contract/fixtures/valid/positive.json");
+        let document = nq_store::CanonicalDocument::from_canonical_bytes(bytes.to_vec())
+            .expect("positive diagnostic fixture is canonical");
+        let diagnostic = nq_core::DiagnosticExecutionV1::decode_canonical(document.as_bytes())
+            .expect("positive diagnostic fixture reopens");
+        store
+            .import_diagnostic_artifact(&nq_store::DiagnosticArtifactImportInput {
+                import_id: "archive-current-available".to_owned(),
+                artifact_id: diagnostic.artifact_id.0,
+                contract_schema: nq_core::diagnostic_execution::DIAGNOSTIC_EXECUTION_SCHEMA
+                    .to_owned(),
+                canonical_bytes: document,
+                imported_at: "2026-07-28T12:00:00Z".to_owned(),
+            })
+            .expect("import current diagnostic artifact");
+
+        let future_id = nq_protocol::sha256_bytes(b"archive-future-available");
+        let future = canonical(&serde_json::json!({
+            "schema": "nq.future_diagnostic_execution.v2",
+            "artifact_id": future_id,
+        }));
+        store
+            .import_diagnostic_artifact(&nq_store::DiagnosticArtifactImportInput {
+                import_id: "archive-future-available".to_owned(),
+                artifact_id: future_id,
+                contract_schema: "nq.future_diagnostic_execution.v2".to_owned(),
+                canonical_bytes: future,
+                imported_at: "2026-07-28T12:00:01Z".to_owned(),
+            })
+            .expect("import unsupported available artifact");
+
+        store
+            .import_unavailable_diagnostic_artifact(
+                &nq_store::UnavailableDiagnosticArtifactImportInput {
+                    import_id: "archive-current-unavailable".to_owned(),
+                    artifact_id: nq_protocol::sha256_bytes(b"archive-current-unavailable-id"),
+                    contract_schema: nq_core::diagnostic_execution::DIAGNOSTIC_EXECUTION_SCHEMA
+                        .to_owned(),
+                    canonical_bytes_sha256: nq_protocol::sha256_bytes(
+                        b"archive-current-unavailable-bytes",
+                    ),
+                    canonical_bytes_length: 32,
+                    imported_at: "2026-07-28T12:00:02Z".to_owned(),
+                },
+            )
+            .expect("commit unavailable current artifact");
+        store
+            .import_unavailable_diagnostic_artifact(
+                &nq_store::UnavailableDiagnosticArtifactImportInput {
+                    import_id: "archive-future-unavailable".to_owned(),
+                    artifact_id: nq_protocol::sha256_bytes(b"archive-future-unavailable-id"),
+                    contract_schema: "nq.future_diagnostic_execution.v2".to_owned(),
+                    canonical_bytes_sha256: nq_protocol::sha256_bytes(
+                        b"archive-future-unavailable-bytes",
+                    ),
+                    canonical_bytes_length: 31,
+                    imported_at: "2026-07-28T12:00:03Z".to_owned(),
+                },
+            )
+            .expect("commit unavailable unsupported artifact");
+        drop(store);
+        let config = write_config(root, &database);
+        let archive = root.join("archive");
+        create_archive(&config, &archive).expect("create diagnostic artifact archive");
+        archive
+    }
+
     fn provider_archive(root: &Path) -> (PathBuf, nq_store::ProviderIntakeRow, Vec<u8>) {
         let database = root.join("nq.db");
         drop(Store::initialize(&database).expect("init store"));
@@ -1426,7 +1520,32 @@ mod tests {
                 "acknowledgments_synthesized": false,
             })),
         };
-        drop(Store::upgrade_v3_to_v4(&database, &receipt).expect("upgrade schema-v3 store"));
+        Store::upgrade_v3_to_v4(&database, &receipt).expect("upgrade schema-v3 store");
+        let v4_backup = root.join("nq-v4.pre-upgrade.db");
+        let v4_backup =
+            Store::backup_v4_verified(&database, &v4_backup).expect("backup schema-v4 store");
+        let v4_receipt = nq_store::UpgradeReceiptInput {
+            receipt_id: "upgrade-archive-v4-v5".to_owned(),
+            from_schema_version: 4,
+            to_schema_version: 5,
+            migrations: canonical(&serde_json::json!(["schema_v4_to_v5_diagnostic_artifacts"])),
+            binary_digest: nq_protocol::sha256_bytes(b"archive-upgrade-binary").into_string(),
+            backup_digest: v4_backup.sha256,
+            backup_location: v4_backup.path.to_string_lossy().into_owned(),
+            started_at: "2026-07-20T12:00:04Z".to_owned(),
+            finished_at: "2026-07-20T12:00:05Z".to_owned(),
+            result: "migrated".to_owned(),
+            operator_identity: canonical(&serde_json::json!({"uid": 991})),
+            verification: canonical(&serde_json::json!({
+                "integrity": "ok",
+                "source_schema_version": 4,
+                "source_schema_artifact_digest": nq_store::SCHEMA_V4_ARTIFACT_DIGEST,
+                "backup_reopened": true,
+                "historical_diagnostic_artifacts": "no_durable_commitments",
+                "diagnostic_artifacts_synthesized": false,
+            })),
+        };
+        drop(Store::upgrade_v4_to_v5(&database, &v4_receipt).expect("upgrade schema-v4 store"));
         let config = write_config(root, &database);
         let archive = root.join("archive");
         create_archive(&config, &archive).expect("create migrated-v3 archive");
@@ -1499,6 +1618,35 @@ mod tests {
         assert_eq!(
             report.historical_legacy_provider_intake_gaps_verified,
             Some(0)
+        );
+        assert!(!report.grants_authority);
+    }
+
+    #[test]
+    fn diagnostic_artifact_availability_and_schema_support_survive_archive() {
+        let dir = tempfile::tempdir().expect("dir");
+        let archive = diagnostic_artifact_archive(dir.path());
+        let report = verify_archive(&archive).expect("verify diagnostic artifact archive");
+        assert_eq!(
+            report.historical_diagnostic_artifact_semantics_verified,
+            Some(true)
+        );
+        assert_eq!(
+            report.historical_diagnostic_artifact_commitments_verified,
+            Some(4)
+        );
+        assert_eq!(report.historical_diagnostic_artifacts_reopened, Some(1));
+        assert_eq!(
+            report.historical_diagnostic_artifacts_committed_unavailable,
+            Some(1)
+        );
+        assert_eq!(
+            report.historical_unsupported_diagnostic_artifacts_available,
+            Some(1)
+        );
+        assert_eq!(
+            report.historical_unsupported_diagnostic_artifacts_committed_unavailable,
+            Some(1)
         );
         assert!(!report.grants_authority);
     }

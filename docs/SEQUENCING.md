@@ -243,14 +243,18 @@ cross-diagnostic operational synthesis.
 
 ## Stage 6 — diagnostic-to-operational-posture loop
 
-Current bounded progress: `nq.diagnostic_execution.v1` is packaged with
-canonical and hostile vectors; one fresh determinate `nq.host/v1` execution
-can emit exact bytes; and an actual read-only Nightshift path strictly imports
-those bytes, evaluates closed inventory/currentness, and adds explicit
-cross-vantage concordance. This remains a local stdout/import vertical. NQ
-does not yet durably store or re-export the artifact, Nightshift intake and
-recurrence are not installed/durable, the package binary emission path is not
-qualified, and no real subject or independent external vantage is involved.
+Current bounded progress: the frozen `nq.diagnostic_execution.v1` package and
+its sibling `nq.diagnostic_execution.v2` package contain canonical and hostile
+vectors. One fresh admitted `nq.host/v1` load-pressure execution commits exact
+v2 bytes atomically with its source history for a determinate result, governed
+input/detector refusal, or typed no-byte acquisition failure; an admission
+refusal creates no execution artifact. Schema-v5 custody supports restart-safe
+inspection and exact export/import, and the read-only Nightshift consumer
+evaluates closed inventory/currentness and explicit cross-vantage concordance.
+This remains a local untagged vertical. Nightshift intake and recurrence are
+not installed or durable, the production namespace/identity catalog is not
+implemented, only one diagnostic family emits the contract, and no real
+subject or independent external vantage is involved.
 
 - Stabilize NQ's machine-facing read and export contract for individual
   diagnostic executions: exact profile, subject, scope, vantage, complete

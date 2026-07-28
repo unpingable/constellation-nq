@@ -41,6 +41,27 @@ DIAGNOSTIC_CONTRACT_FILES = (
     "fixtures/hostile/projection_collision_match.json",
     "fixtures/hostile/projection_collision_mismatch.json",
 )
+DIAGNOSTIC_CONTRACT_V2_FILES = (
+    "README.md",
+    "manifest.json",
+    "schemas/nq.diagnostic_execution.v2.schema.json",
+    "fixtures/valid/acquisition_failure.json",
+    "fixtures/valid/completed_bounded_clock.json",
+    "fixtures/valid/completed_unqualified_clock.json",
+    "fixtures/valid/detector_refusal_detail_a.json",
+    "fixtures/valid/detector_refusal_detail_b.json",
+    "fixtures/valid/multiple_input_refusals.json",
+    "fixtures/valid/provider_no_response.json",
+    "fixtures/valid/received_input_refusal.json",
+    "fixtures/valid/retained_acquisition_refusal.json",
+    "fixtures/valid/typed_unsupported.json",
+    "fixtures/hostile/acquisition_failure_with_timeout.json",
+    "fixtures/hostile/missing_refusal_frontier_member.json",
+    "fixtures/hostile/missing_unsupported_frontier.json",
+    "fixtures/hostile/no_response_with_spawn.json",
+    "fixtures/hostile/received_before_acquisition.json",
+    "fixtures/hostile/substituted_failure_dependency.json",
+)
 
 
 def sha256_file(path: Path) -> str:
@@ -77,9 +98,7 @@ def expected_files(descriptors: list[str]) -> dict[str, int]:
     files.update(
         {f"share/nq/profiles/{descriptor}": 0o644 for descriptor in descriptors}
     )
-    files.update(
-        {f"share/nq/protocol/schemas/{name}": 0o644 for name in SCHEMA_FILES}
-    )
+    files.update({f"share/nq/protocol/schemas/{name}": 0o644 for name in SCHEMA_FILES})
     files.update(
         {f"share/nq/protocol/fixtures/{name}": 0o644 for name in FIXTURE_FILES}
     )
@@ -90,6 +109,12 @@ def expected_files(descriptors: list[str]) -> dict[str, int]:
         {
             f"share/nq/diagnostic-contract/{name}": 0o644
             for name in DIAGNOSTIC_CONTRACT_FILES
+        }
+    )
+    files.update(
+        {
+            f"share/nq/diagnostic-contract-v2/{name}": 0o644
+            for name in DIAGNOSTIC_CONTRACT_V2_FILES
         }
     )
     return files
@@ -135,7 +160,10 @@ def verify(stage: Path, descriptors: list[str]) -> None:
     if len(descriptors) != len(set(descriptors)) or not descriptors:
         raise ValueError("descriptor arguments must be unique and non-empty")
     for descriptor in descriptors:
-        if descriptor == "manifest.json" or DESCRIPTOR_NAME.fullmatch(descriptor) is None:
+        if (
+            descriptor == "manifest.json"
+            or DESCRIPTOR_NAME.fullmatch(descriptor) is None
+        ):
             raise ValueError(f"unsafe descriptor name {descriptor!r}")
 
     files = expected_files(descriptors)

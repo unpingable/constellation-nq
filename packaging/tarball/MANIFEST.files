@@ -31,4 +31,8 @@ share/nq/diagnostic-contract/README.md                     0644
 share/nq/diagnostic-contract/manifest.json                 0644
 share/nq/diagnostic-contract/schemas/*.json                0644
 share/nq/diagnostic-contract/fixtures/**/*.json            0644
+share/nq/diagnostic-contract-v2/README.md                  0644
+share/nq/diagnostic-contract-v2/manifest.json              0644
+share/nq/diagnostic-contract-v2/schemas/*.json             0644
+share/nq/diagnostic-contract-v2/fixtures/**/*.json         0644
 share/nq/MANIFEST.sha256                                   0644

@@ -1,10 +1,10 @@
 PRAGMA application_id = 1313951303; -- "NQNG"
-PRAGMA user_version = 5;
+PRAGMA user_version = 4;
 
 CREATE TABLE schema_metadata (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     product TEXT NOT NULL CHECK (product = 'nq-ng'),
-    schema_version INTEGER NOT NULL CHECK (schema_version = 5),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 4),
     -- Digest of the exact schema.sql artifact compiled into the writing binary.
     -- Rejects stale provisional-candidate databases at startup; it is NOT a
     -- tamper attestation of the live SQLite schema (which the structural
@@ -394,68 +394,6 @@ CREATE TABLE refusals (
 ) STRICT;
 CREATE INDEX refusals_by_instance ON refusals(responsible_instance_id, created_at);
 
--- The commitment is the durable identity and exact-byte promise for one
--- diagnostic execution artifact. It remains present when the separately
--- materialized bytes are unavailable. The store treats the contract bytes as
--- opaque canonical JSON; diagnostic semantics remain owned by nq-core.
-CREATE TABLE diagnostic_artifact_commitments (
-    artifact_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-    artifact_id TEXT NOT NULL UNIQUE CHECK (length(artifact_id) = 71 AND substr(artifact_id, 1, 7) = 'sha256:'),
-    contract_schema TEXT NOT NULL CHECK (length(contract_schema) BETWEEN 1 AND 256),
-    canonical_bytes_sha256 TEXT NOT NULL CHECK (length(canonical_bytes_sha256) = 71 AND substr(canonical_bytes_sha256, 1, 7) = 'sha256:'),
-    canonical_bytes_length INTEGER NOT NULL CHECK (canonical_bytes_length > 0 AND canonical_bytes_length <= 16777216),
-    committed_at TEXT NOT NULL
-) STRICT;
-
--- Exact bytes are a materialization of the immutable commitment. They are
--- split deliberately so a missing materialization remains distinguishable
--- from an artifact identity that never existed. Product code never updates
--- these bytes; a later archive/prune protocol may remove and rematerialize
--- them without rewriting the commitment.
-CREATE TABLE diagnostic_artifact_payloads (
-    artifact_id TEXT PRIMARY KEY,
-    canonical_bytes BLOB NOT NULL CHECK (length(canonical_bytes) > 0 AND length(canonical_bytes) <= 16777216),
-    FOREIGN KEY (artifact_id) REFERENCES diagnostic_artifact_commitments(artifact_id)
-) STRICT;
-
--- A local artifact is bound to the exact run committed in the same
--- collection transaction. Admitted/evaluated artifacts also name their exact
--- evaluation; run-bearing non-success artifacts deliberately leave it null.
-CREATE TABLE local_diagnostic_artifact_origins (
-    artifact_id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL UNIQUE,
-    evaluation_id TEXT UNIQUE,
-    completed_at TEXT NOT NULL,
-    FOREIGN KEY (artifact_id) REFERENCES diagnostic_artifact_commitments(artifact_id),
-    FOREIGN KEY (run_id) REFERENCES watcher_runs(run_id),
-    FOREIGN KEY (evaluation_id) REFERENCES evaluation_runs(evaluation_id)
-) STRICT;
-
-CREATE TABLE diagnostic_artifact_import_events (
-    import_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-    import_id TEXT NOT NULL UNIQUE CHECK (length(import_id) BETWEEN 1 AND 256),
-    artifact_id TEXT NOT NULL,
-    contract_schema TEXT NOT NULL CHECK (length(contract_schema) BETWEEN 1 AND 256),
-    canonical_bytes_sha256 TEXT NOT NULL CHECK (length(canonical_bytes_sha256) = 71 AND substr(canonical_bytes_sha256, 1, 7) = 'sha256:'),
-    canonical_bytes_length INTEGER NOT NULL CHECK (canonical_bytes_length > 0 AND canonical_bytes_length <= 16777216),
-    outcome TEXT NOT NULL CHECK (outcome IN
-        ('committed', 'committed_unavailable', 'existing', 'rematerialized')),
-    imported_at TEXT NOT NULL,
-    FOREIGN KEY (artifact_id) REFERENCES diagnostic_artifact_commitments(artifact_id)
-) STRICT;
-
--- Imported artifacts receive custody only. The import identity and time do not
--- authenticate the producer or grant reliance, standing, or authority.
-CREATE TABLE imported_diagnostic_artifact_origins (
-    artifact_id TEXT PRIMARY KEY,
-    import_id TEXT NOT NULL UNIQUE,
-    imported_at TEXT NOT NULL,
-    initial_outcome TEXT NOT NULL CHECK (initial_outcome IN
-        ('committed', 'committed_unavailable')),
-    FOREIGN KEY (artifact_id) REFERENCES diagnostic_artifact_commitments(artifact_id),
-    FOREIGN KEY (import_id) REFERENCES diagnostic_artifact_import_events(import_id)
-) STRICT;
-
 CREATE TABLE finding_events (
     event_id TEXT PRIMARY KEY,
     finding_id TEXT NOT NULL,
@@ -762,16 +700,6 @@ CREATE TRIGGER immutable_evaluation_watermarks_update BEFORE UPDATE ON evaluatio
 CREATE TRIGGER immutable_evaluation_watermarks_delete BEFORE DELETE ON evaluation_watermarks BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER immutable_refusals_update BEFORE UPDATE ON refusals BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER immutable_refusals_delete BEFORE DELETE ON refusals BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
-CREATE TRIGGER immutable_diagnostic_artifact_commitments_update BEFORE UPDATE ON diagnostic_artifact_commitments BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
-CREATE TRIGGER immutable_diagnostic_artifact_commitments_delete BEFORE DELETE ON diagnostic_artifact_commitments BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
-CREATE TRIGGER immutable_diagnostic_artifact_payloads_update BEFORE UPDATE ON diagnostic_artifact_payloads BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
-CREATE TRIGGER immutable_diagnostic_artifact_payloads_delete BEFORE DELETE ON diagnostic_artifact_payloads BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
-CREATE TRIGGER immutable_local_diagnostic_artifact_origins_update BEFORE UPDATE ON local_diagnostic_artifact_origins BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
-CREATE TRIGGER immutable_local_diagnostic_artifact_origins_delete BEFORE DELETE ON local_diagnostic_artifact_origins BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
-CREATE TRIGGER immutable_diagnostic_artifact_import_events_update BEFORE UPDATE ON diagnostic_artifact_import_events BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
-CREATE TRIGGER immutable_diagnostic_artifact_import_events_delete BEFORE DELETE ON diagnostic_artifact_import_events BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
-CREATE TRIGGER immutable_imported_diagnostic_artifact_origins_update BEFORE UPDATE ON imported_diagnostic_artifact_origins BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
-CREATE TRIGGER immutable_imported_diagnostic_artifact_origins_delete BEFORE DELETE ON imported_diagnostic_artifact_origins BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER immutable_finding_events_update BEFORE UPDATE ON finding_events BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER immutable_finding_events_delete BEFORE DELETE ON finding_events BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER immutable_finding_evidence_update BEFORE UPDATE ON finding_evidence BEGIN SELECT RAISE(ABORT, 'append-only table'); END;

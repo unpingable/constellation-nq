@@ -191,6 +191,7 @@ python3 -B "$root/system-contract/verify_assets.py" \
     --profile-catalog "$profile_dir/manifest.json"
 python3 -B "$root/diagnostic-contract/verify_assets.py" \
     --source-vectors "$root/audit/nq-nightshift-stage6-foundation/vectors"
+python3 -B "$root/diagnostic-contract-v2/verify_assets.py"
 python3 - "${descriptors[@]}" <<'PY'
 import json
 import pathlib
@@ -295,6 +296,10 @@ install -Dm0644 "$root/diagnostic-contract/README.md" \
     "$stage/share/nq/diagnostic-contract/README.md"
 install -Dm0644 "$root/diagnostic-contract/manifest.json" \
     "$stage/share/nq/diagnostic-contract/manifest.json"
+install -Dm0644 "$root/diagnostic-contract-v2/README.md" \
+    "$stage/share/nq/diagnostic-contract-v2/README.md"
+install -Dm0644 "$root/diagnostic-contract-v2/manifest.json" \
+    "$stage/share/nq/diagnostic-contract-v2/manifest.json"
 
 while IFS= read -r -d '' source; do
     relative=${source#"$root/protocol/"}
@@ -323,6 +328,16 @@ done < <(
         -type f -name '*.json' -print0 | sort -z
 )
 
+while IFS= read -r -d '' source; do
+    relative=${source#"$root/diagnostic-contract-v2/"}
+    install -Dm0644 "$source" "$stage/share/nq/diagnostic-contract-v2/$relative"
+done < <(
+    find "$root/diagnostic-contract-v2/schemas" \
+        "$root/diagnostic-contract-v2/fixtures/valid" \
+        "$root/diagnostic-contract-v2/fixtures/hostile" \
+        -type f -name '*.json' -print0 | sort -z
+)
+
 # Re-run every asset/catalog verifier against the immutable staged copies.
 # Source files changing or being left partial after the earlier input checks
 # cannot turn into an unverified release payload.
@@ -336,6 +351,8 @@ python3 -B "$root/system-contract/verify_assets.py" \
 python3 -B "$root/diagnostic-contract/verify_assets.py" \
     --asset-root "$stage/share/nq/diagnostic-contract" \
     --source-vectors "$root/audit/nq-nightshift-stage6-foundation/vectors"
+python3 -B "$root/diagnostic-contract-v2/verify_assets.py" \
+    --asset-root "$stage/share/nq/diagnostic-contract-v2"
 
 (
     cd -- "$stage"
