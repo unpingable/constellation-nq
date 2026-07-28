@@ -18,8 +18,25 @@ That is a policy result, not an implementation result. Neither `sushi-k` nor
 authoritative; parallel qualification and cutover are not authorized. The
 current preview package and executable names are explicitly not the final
 production namespace because a bare `/usr/bin/nq` collides with Debian's
-unrelated package. Only the bounded blocker-closure unit identified by the
-ratification decision is authorized next.
+unrelated package. The focused blocker-closure unit remains incomplete. The
+operator subsequently authorized separate bounded Stage-6 foundation,
+published-consumer/concordance, and completeness-map campaigns. Those
+campaigns did not authorize deployment, parallel qualification, cutover, or
+the missing product breadth listed below. This status document grants no
+implementation authority.
+
+Current `main` now publishes the versioned
+`nq.diagnostic_execution.v1` schema, canonical/hostile vectors, verifier, and
+package subtree. One actual production-code path can emit exact canonical
+bytes for a fresh, determinate `nq.host/v1` execution through the
+developer-preview CLI. A reproducible package-root contract was consumed by a
+strict local read-only Nightshift importer, which also evaluated one explicit
+cross-vantage concordance dimension without modifying the NQ artifacts.
+That proof was deliberately narrow: emission was stdout-only from a debug
+build, the current package binary failed its pre-execution environment
+qualification, NQ does not durably store or re-export the diagnostic artifact
+as such, Nightshift intake is not durable, both lab vantages shared one local
+failure domain, and neither production subject was involved.
 
 ## Current developer preview
 
@@ -63,6 +80,10 @@ The repository implements the stage-one operational spine:
   `nq evaluations export`). V2 status returns an explicit conflict whenever
   evaluations exist, and older routes fail explicitly when they cannot
   represent the current carrier;
+- a canonical `nq.diagnostic_execution.v1` contract package and one bounded
+  fresh-execution emission path for the existing determinate
+  `nq.host.load_pressure/v1` result. This is not general historical/refusal
+  emission or a durable diagnostic-artifact store/export surface;
 - a native host profile/helper plus the conformance fixture profile;
 - strict, bounded `SystemSpecV1` validation and deterministic compilation into
   schema-domain-separated `ScopeCut` proposals, ratification-bound cuts,
@@ -136,7 +157,10 @@ The following governing-plan stages are not claimed by this preview:
 - ZFS, SMART, GPU, log-activity, and Prometheus sample-lane parity;
 - notification delivery workers and retention automation;
 - a historical multi-version migration chain and full install/upgrade matrix;
-- Nightshift conversion and its mandatory shipped-binary contract tests;
+- broad durable Nightshift conversion, installed recurrence, and shipped-binary
+  contract tests. One exact local read-only importer and additive concordance
+  evaluator are qualified separately, without durable intake or live-subject
+  correspondence;
 - an operator-approved legacy cut manifest produced from an actual old NQ;
 - DNS/TLS/reachability/path observation profiles;
 - WLP custody transport, remote enrollment, or fleet administration;

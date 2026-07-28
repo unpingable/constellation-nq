@@ -243,6 +243,15 @@ cross-diagnostic operational synthesis.
 
 ## Stage 6 — diagnostic-to-operational-posture loop
 
+Current bounded progress: `nq.diagnostic_execution.v1` is packaged with
+canonical and hostile vectors; one fresh determinate `nq.host/v1` execution
+can emit exact bytes; and an actual read-only Nightshift path strictly imports
+those bytes, evaluates closed inventory/currentness, and adds explicit
+cross-vantage concordance. This remains a local stdout/import vertical. NQ
+does not yet durably store or re-export the artifact, Nightshift intake and
+recurrence are not installed/durable, the package binary emission path is not
+qualified, and no real subject or independent external vantage is involved.
+
 - Stabilize NQ's machine-facing read and export contract for individual
   diagnostic executions: exact profile, subject, scope, vantage, complete
   expected/received/admitted/refused/failed/excluded/selected input accounting,
@@ -369,10 +378,16 @@ Stage 1 and the operator ratification gate are complete. Host Operational
 Portrait v1 is the normative specification; neither subject has earned
 completeness. The five focused blocker-closure obligations remain open.
 
-The operator separately authorized the bounded
+The operator separately authorized and completed the bounded
 [`NQ–Nightshift Stage 6 foundation`](../audit/nq-nightshift-stage6-foundation/CAMPAIGN.md)
-on 2026-07-27. That exception covers the canonical diagnostic-execution
-contract, hostile vectors, and the parallel receiver-side posture evaluator
-only. It does not authorize live engine conversion, general Stage 6 work,
-deployment, parallel qualification, notification, authority switch, or
-cutover.
+and a later published-consumer/cross-vantage-concordance vertical. The latter
+earned the narrow exact-byte producer/consumer path described above, not
+durable or deployed live-engine correspondence.
+
+The subsequent records-only product-completeness campaign ratified separate
+chassis, generic-host, subject, Classic-replacement, NQ-owned-constellation,
+and cross-system finish lines plus an evidence-derived remaining campaign
+graph. It did not authorize any of those implementation nodes. Current
+authority comes only from a later explicit operator decision; nothing here
+authorizes deployment, parallel qualification, notification, authority
+switch, or cutover.

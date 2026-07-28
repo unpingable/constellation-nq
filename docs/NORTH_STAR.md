@@ -266,14 +266,16 @@ not configured, condition-present, and explicitly absent outcomes must remain
 distinguishable. An empty configuration, absent series, or silent witness does
 not establish health.
 
-The only authorized next unit is the bounded Portrait v1 blocker-closure unit.
-It may close the exact subject inventories, Labelwatch/Driftwatch semantic
-contracts, production namespace, sushi-k platform binding, and external-vantage
-identities through records, design, evidence gathering, and narrowly necessary
-implementation. It may not deploy, start parallel qualification, switch
-authority, execute retirement, or claim subject completeness without focused
-conformance evidence. A full R1–R11 re-ratification is required only if that
-work materially changes the ratified specification.
+The Portrait v1 blocker-closure unit remains open: exact subject inventories,
+Labelwatch/Driftwatch semantic contracts, production namespace, sushi-k
+platform binding, and external-vantage identities are not closed. Later
+operator decisions separately authorized the bounded Stage-6 contract,
+published-consumer/concordance, and completeness-map campaigns; those
+exceptions did not close these blockers or authorize deployment, parallel
+qualification, authority switch, retirement, or subject completeness. Current
+implementation authority must come from the operator and its exact campaign
+record, not from this architecture document. A full R1–R11 re-ratification is
+required only if later work materially changes the ratified specification.
 
 ## Witness ecosystem
 

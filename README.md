@@ -1,6 +1,6 @@
 # NQ-ng
 
-> **Status (2026-07-27): selected successor development line, not the
+> **Status (2026-07-28): selected successor development line, not the
 > operationally authoritative NQ.** Classic at `~/git/nq-root/nq` remains the
 > live authority until NQ-NG earns functional equivalence, isolated parallel
 > qualification, and an explicit authority switch. The ratified direction is
@@ -12,7 +12,11 @@
 > replacement, parallel qualification, and cutover remain unauthorized. The
 > minted `v0.1.0` release and post-release provider-intake receipts remain
 > frozen evidence. Current main is unpublished, untagged after `v0.1.0`, and
-> not deployed.
+> not deployed. It now includes one narrow canonical
+> `nq.diagnostic_execution.v1` emission path and a reproducible contract
+> package consumed by a local read-only Nightshift workflow; it does not yet
+> provide durable diagnostic-artifact storage/export, a generic host portrait,
+> or subject qualification.
 
 The target NQ-ng product is a local-first deterministic diagnostic engine and
 recursive evidence fabric. For one exact profile, subject, scope, and vantage,
@@ -41,8 +45,10 @@ not itself authorize release, deployment, production reliance, or cutover.
 The current developer preview contains the protocol/SDK and executable hostile
 corpus, explicit profile registry, generic SQLite evidence substrate, bounded
 stdio and authenticated persistent-Unix helper supervisors, admission locks,
-detector lifecycle, daemon-local API/console, complete operator CLI, a native
-host helper, a Python wire-compatible specimen, and a bounded Rust compiler
+detector lifecycle, daemon-local API/console, a broad developer-preview
+operator CLI, one native host helper, a canonical diagnostic-execution
+contract with one bounded live emission path, a Python wire-compatible
+specimen, and a bounded Rust compiler
 for authority-free system cuts and consumer-specific projections. The cut
 contract is not yet wired into daemon storage, NQ evaluation, Porter, NetBox,
 or AG. See
