@@ -1,10 +1,14 @@
 //! Canonical contract for one bounded NQ diagnostic execution.
 //!
-//! This module is a contract foundation.  The current evaluation engine does
-//! not yet emit this artifact, and no conversion from
-//! [`crate::engine::EvaluationEnvelopeV2`] is claimed.  In particular, a
-//! producer-selected evidence list is insufficient to reconstruct the complete
-//! input accounting required here.
+//! The evaluation engine has one deliberately narrow producer for this
+//! contract: the exact current `nq.host/v1` load-pressure profile/detector, a
+//! fresh instance, one newly admitted report, and a determinate detector
+//! result. It emits only after the ordinary custody/evaluation transaction
+//! commits. History-aware manifests, detector
+//! refusals, durable diagnostic-artifact storage, and public re-export remain
+//! unsupported; the ordinary collection/history surfaces retain those source
+//! outcomes instead. A producer-selected evidence list is never treated as
+//! complete input accounting.
 
 use std::collections::{BTreeMap, BTreeSet};
 

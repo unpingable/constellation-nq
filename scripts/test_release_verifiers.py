@@ -51,6 +51,19 @@ def load_system_contract_module():
 system_contract = load_system_contract_module()
 
 
+def load_diagnostic_contract_module():
+    path = ROOT / "diagnostic-contract/verify_assets.py"
+    spec = importlib.util.spec_from_file_location("nq_verify_diagnostic_contract", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load diagnostic-contract verifier")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+diagnostic_contract = load_diagnostic_contract_module()
+
+
 class CatalogVerifierTest(unittest.TestCase):
     def copy_catalog(self, root: Path) -> Path:
         destination = root / "profiles"
@@ -195,6 +208,96 @@ class SystemContractPackagingTest(unittest.TestCase):
                     str(staged),
                     "--profile-catalog",
                     str(ROOT / "profiles/manifest.json"),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("schema file digest differs", result.stderr)
+
+
+class DiagnosticContractPackagingTest(unittest.TestCase):
+    def test_public_inventory_is_exactly_allowlisted(self) -> None:
+        contract_root = ROOT / "diagnostic-contract"
+        actual = {
+            path.relative_to(contract_root).as_posix()
+            for path in contract_root.rglob("*")
+            if path.is_file() and path.name != "verify_assets.py"
+        }
+        self.assertEqual(set(payload.DIAGNOSTIC_CONTRACT_FILES), actual)
+        release_files = payload.expected_files(["fixture.v1.json"])
+        for relative in actual:
+            self.assertIn(f"share/nq/diagnostic-contract/{relative}", release_files)
+
+    def test_frozen_corpus_and_projection_collision_pass(self) -> None:
+        contract_root = ROOT / "diagnostic-contract"
+        source_vectors = (
+            ROOT / "audit/nq-nightshift-stage6-foundation/vectors"
+        )
+        manifest_digest = diagnostic_contract.verify(contract_root, source_vectors)
+        self.assertEqual(
+            manifest_digest,
+            "sha256:bbf5b46b4f026380eb45679544970f9862fad15c936ea9cac985ce7c6bcfbcef",
+        )
+
+    def test_extra_asset_duplicate_key_and_source_drift_are_refused(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="nq-diagnostic-contract-"
+        ) as directory_name:
+            directory = Path(directory_name)
+            staged = directory / "diagnostic-contract"
+            shutil.copytree(ROOT / "diagnostic-contract", staged)
+            source_vectors = directory / "vectors"
+            shutil.copytree(
+                ROOT / "audit/nq-nightshift-stage6-foundation/vectors",
+                source_vectors,
+            )
+
+            extra = staged / "fixtures/valid/unlisted.json"
+            extra.write_text("{}\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "inventory differs"):
+                diagnostic_contract.verify(staged, source_vectors)
+            extra.unlink()
+
+            manifest = staged / "manifest.json"
+            original_manifest = manifest.read_text(encoding="utf-8")
+            manifest.write_text(
+                original_manifest.replace(
+                    '"schema": "nq.diagnostic_contract_assets.v1",',
+                    '"schema": "nq.diagnostic_contract_assets.v1",\n'
+                    '  "schema": "nq.diagnostic_contract_assets.v1",',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "duplicate JSON key"):
+                diagnostic_contract.verify(staged, source_vectors)
+            manifest.write_text(original_manifest, encoding="utf-8")
+
+            source = source_vectors / "positive.json"
+            source.write_bytes(source.read_bytes() + b"\n")
+            with self.assertRaisesRegex(ValueError, "frozen source vector"):
+                diagnostic_contract.verify(staged, source_vectors)
+
+    def test_staged_partial_schema_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="nq-diagnostic-contract-stage-"
+        ) as directory_name:
+            staged = Path(directory_name) / "diagnostic-contract"
+            shutil.copytree(ROOT / "diagnostic-contract", staged)
+            schema = staged / "schemas/nq.diagnostic_execution.v1.schema.json"
+            with schema.open("r+b") as output:
+                output.truncate(37)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-B",
+                    str(ROOT / "diagnostic-contract/verify_assets.py"),
+                    "--asset-root",
+                    str(staged),
                 ],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,

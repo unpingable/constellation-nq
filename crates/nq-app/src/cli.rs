@@ -68,6 +68,12 @@ pub enum Command {
     },
     /// Run one explicitly requested collection (never triggered by a read).
     Collect(InstanceArg),
+    /// Execute and emit one immutable bounded diagnostic artifact.
+    Diagnostics {
+        /// Diagnostic-execution workflow.
+        #[command(subcommand)]
+        command: DiagnosticsCommand,
+    },
     /// Diagnose configuration, storage, profiles, and admission drift.
     Doctor,
     /// Create a verified backup while the daemon is stopped.
@@ -182,6 +188,13 @@ pub enum WatcherCommand {
 pub struct InstanceArg {
     /// Configured instance ID.
     pub instance_id: String,
+}
+
+/// Bounded diagnostic-execution operations.
+#[derive(Debug, Subcommand)]
+pub enum DiagnosticsCommand {
+    /// Collect, evaluate, and emit exact `nq.diagnostic_execution.v1` bytes.
+    Execute(InstanceArg),
 }
 
 /// Backup workflow.
@@ -333,6 +346,7 @@ pub async fn run(options: Nq) -> Result<()> {
         Command::Collect(instance) => {
             collect_command(&options.config, &instance.instance_id, options.json).await
         }
+        Command::Diagnostics { command } => diagnostics_command(&options.config, command).await,
         Command::Doctor => doctor(&options.config, options.json),
         Command::Backup(arguments) => backup(&options.config, &arguments.destination, options.json),
         Command::Restore(arguments) => {
@@ -542,6 +556,26 @@ async fn collect_command(config_path: &Path, instance_id: &str, json_output: boo
         Ok(())
     } else {
         bail!("collection did not produce a complete or partial admitted report")
+    }
+}
+
+async fn diagnostics_command(config_path: &Path, command: DiagnosticsCommand) -> Result<()> {
+    match command {
+        DiagnosticsCommand::Execute(instance) => {
+            let config = NqConfig::load(config_path)?;
+            let watcher = config
+                .watcher(&instance.instance_id)
+                .with_context(|| format!("unknown instance {}", instance.instance_id))?
+                .clone();
+            let artifact = tokio::task::spawn_blocking(move || {
+                let mut engine = nq_core::CollectionEngine::open(&config)?;
+                engine.diagnostic_execute(&watcher)
+            })
+            .await??;
+            let bytes = artifact.canonical_bytes()?;
+            std::io::stdout().lock().write_all(&bytes)?;
+            Ok(())
+        }
     }
 }
 
@@ -1223,6 +1257,23 @@ helper_runtime_dir = "/run/nq/helpers"
     fn command_tree_exposes_required_operator_workflows() {
         use clap::CommandFactory;
         Nq::command().debug_assert();
+    }
+
+    #[test]
+    fn diagnostic_execute_has_one_explicit_bounded_instance() {
+        let options = Nq::try_parse_from(["nq", "diagnostics", "execute", "host-local"])
+            .expect("bounded diagnostic command parses");
+        let Command::Diagnostics {
+            command: DiagnosticsCommand::Execute(instance),
+        } = options.command
+        else {
+            panic!("diagnostic execute command expected");
+        };
+        assert_eq!(instance.instance_id, "host-local");
+        assert!(
+            Nq::try_parse_from(["nq", "diagnostics", "execute", "host-a", "host-b"]).is_err(),
+            "one invocation cannot silently broaden to multiple subjects"
+        );
     }
 
     #[test]

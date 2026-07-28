@@ -27,4 +27,8 @@ share/nq/protocol/fixtures/**/*.ndjson                     0644
 share/nq/system-contract/manifest.json                     0644
 share/nq/system-contract/schemas/*.json                    0644
 share/nq/system-contract/fixtures/valid/*.json             0644
+share/nq/diagnostic-contract/README.md                     0644
+share/nq/diagnostic-contract/manifest.json                 0644
+share/nq/diagnostic-contract/schemas/*.json                0644
+share/nq/diagnostic-contract/fixtures/**/*.json            0644
 share/nq/MANIFEST.sha256                                   0644

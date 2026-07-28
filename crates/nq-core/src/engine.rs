@@ -12,7 +12,8 @@ use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use nq_profiles::{
     DetectorInput, DetectorReport, DetectorState, EVALUATOR_SOURCE_DIGEST, EvidenceWatermark,
     ProfileModule, ProfileSemanticId, ReportInput as ProfileReportInput, ScopeGrant,
-    SemanticReportStatus, ValidatedReport, ValidationContext, VantageGrant, profile_semantic_id,
+    SemanticReportStatus, ValidatedReport, ValidationContext, VantageGrant, all_profiles,
+    profile_semantic_id,
 };
 use nq_protocol::{
     Capability, Checkpoint, CollectionBounds, HelperRequest, InstanceId, MonotonicClock,
@@ -40,6 +41,16 @@ use crate::config::{
     Carrier, CheckpointPolicy, NqConfig, ScopeConfig, VantageConfig, WatcherConfig,
 };
 use crate::coordination::{CoordinationError, InstanceGuard};
+use crate::diagnostic_execution::{
+    AcquisitionIntervalV1, AdmittedInputV1, DiagnosticArtifactId, DiagnosticClaimStatusV1,
+    DiagnosticClaimV1, DiagnosticCoherenceV1, DiagnosticConditionV1, DiagnosticCoverageV1,
+    DiagnosticDerivationV1, DiagnosticExecutionSchema, DiagnosticExecutionV1,
+    DiagnosticInputAccountingV1, DiagnosticLimitationKindV1, DiagnosticLimitationV1,
+    DiagnosticOutcomeV1, DiagnosticProducerV1, DiagnosticProjectionV1, DiagnosticRequestId,
+    DiagnosticRunId, DiagnosticStateBindingV1, DiagnosticSubjectV1, EvidenceAvailabilityV1,
+    ExpectedInputV1, NormalizedArtifactId, ProjectedArtifactId, RawArtifactId, RawCaptureModeV1,
+    ReceivedInputV1, SelectedInputV1, SemanticIdentityV1, diagnostic_canonicalization_identity,
+};
 use crate::evaluator_identity::EvaluatorRuntimeIdentity;
 use crate::identity::{ExecutionIdentity, VerifiedLaunch};
 use crate::provider_intake::{
@@ -88,6 +99,10 @@ pub enum EngineError {
         /// Profile version.
         version: u32,
     },
+    /// The deliberately bounded live diagnostic producer cannot represent this
+    /// execution without losing required input distinctions.
+    #[error("diagnostic execution unsupported: {0}")]
+    DiagnosticUnsupported(String),
     /// A strict identity token could not be constructed.
     #[error("invalid protocol identity: {0}")]
     Token(String),
@@ -1684,6 +1699,297 @@ pub struct CollectionEngine {
     evaluator_identity: Result<EvaluatorRuntimeIdentity, String>,
 }
 
+struct CollectionExecution {
+    outcome: CollectionOutcome,
+    diagnostic: Option<DiagnosticExecutionV1>,
+    diagnostic_reports: Option<Vec<DetectorReport>>,
+}
+
+impl CollectionExecution {
+    fn without_diagnostic(outcome: CollectionOutcome) -> Self {
+        Self {
+            outcome,
+            diagnostic: None,
+            diagnostic_reports: None,
+        }
+    }
+}
+
+const INITIAL_DIAGNOSTIC_PROFILE_DIGEST: &str =
+    "sha256:c8c10fed1cc5598d953b4defbc98e8c106fc59e035c249d43681698a5c7b4ff9";
+const INITIAL_DIAGNOSTIC_DETECTOR_ID: &str = "nq.host.load_pressure";
+const INITIAL_DIAGNOSTIC_DETECTOR_VERSION: u32 = 1;
+const INITIAL_DIAGNOSTIC_DETECTOR_DIGEST: &str =
+    "sha256:7de797da3d9d3a6ae8e21e5d77b95095453336cd38f606ffb3eb29ff6a32e2cf";
+
+#[derive(Clone)]
+struct DiagnosticEmissionContext {
+    producer: DiagnosticProducerV1,
+    request_id: DiagnosticRequestId,
+    run_id: DiagnosticRunId,
+    question: SemanticIdentityV1,
+    subject: DiagnosticSubjectV1,
+    profile: SemanticIdentityV1,
+    vantage: SemanticIdentityV1,
+    state_model: SemanticIdentityV1,
+    evaluator: SemanticIdentityV1,
+    threshold_policy: SemanticIdentityV1,
+    projection: DiagnosticProjectionV1,
+    execution_clock: SemanticIdentityV1,
+    started_at: DateTime<Utc>,
+    attempt_interval: AcquisitionIntervalV1,
+    inputs: DiagnosticInputAccountingV1,
+    state_bindings: Vec<DiagnosticStateBindingV1>,
+    limitations: Vec<DiagnosticLimitationV1>,
+    nonclaims: Vec<String>,
+    expected_evaluator_artifact_digest: Sha256Digest,
+    expected_profile_semantic_id: ProfileSemanticId,
+    expected_instance_id: String,
+    expected_scope: ScopeConfig,
+    expected_vantage: VantageConfig,
+    report_id: String,
+    report_complete: bool,
+}
+
+impl DiagnosticEmissionContext {
+    #[allow(clippy::too_many_lines)]
+    fn finish(
+        &self,
+        evaluation: &EvaluationEnvelopeV2,
+        detector_reports: &[DetectorReport],
+    ) -> Result<DiagnosticExecutionV1, EngineError> {
+        if evaluation.detector.id != self.question.id
+            || evaluation.detector.version != self.question.version
+            || evaluation.detector.digest != self.question.digest.as_str()
+            || evaluation.evaluator_artifact_digest != self.expected_evaluator_artifact_digest
+            || evaluation.profile.profile.id != self.profile.id
+            || evaluation.profile.profile.version.to_string() != self.profile.version
+            || evaluation.profile.profile_digest.as_str() != self.profile.digest.as_str()
+            || evaluation.profile.profile_semantic_id != self.expected_profile_semantic_id
+            || evaluation.result.profile != evaluation.profile
+            || evaluation.context.instance_id != self.expected_instance_id
+            || evaluation.context.subject != self.subject.id
+            || evaluation.context.scope != self.expected_scope
+            || evaluation.context.vantage != self.expected_vantage
+            || evaluation.trigger_run_id.as_deref() != Some(self.run_id.as_str())
+            || evaluation.watermark.instance_id != self.expected_instance_id
+            || evaluation.watermark.max_report_sequence == 0
+            || evaluation.result.watermark.0 != evaluation.watermark.max_report_sequence
+        {
+            return Err(EngineError::Invariant(
+                "prepared evaluation differs from the diagnostic emission context".into(),
+            ));
+        }
+
+        let [detector_report] = detector_reports else {
+            return Err(EngineError::Invariant(
+                "diagnostic execution requires exactly one detector input report".into(),
+            ));
+        };
+        if detector_report.report_id != self.report_id
+            || detector_report.report_sequence != evaluation.watermark.max_report_sequence
+        {
+            return Err(EngineError::Invariant(
+                "detector input occurrence differs from the diagnostic emission context".into(),
+            ));
+        }
+        if detector_report.report.observed_at < self.attempt_interval.started_at
+            || detector_report.report.observed_at > self.attempt_interval.ended_at
+            || detector_report
+                .report
+                .observations
+                .iter()
+                .any(|observation| {
+                    observation.observed_at < self.attempt_interval.started_at
+                        || observation.observed_at > self.attempt_interval.ended_at
+                })
+        {
+            return Err(EngineError::DiagnosticUnsupported(
+                "source observation time is not bounded by the NQ-owned helper execution interval"
+                    .into(),
+            ));
+        }
+
+        let report_sequence = evaluation.watermark.max_report_sequence;
+        let projection_document = canonical(&json!({
+            "schema": "nq.detector_input_projection.v1",
+            "instance_id": evaluation.context.instance_id,
+            "evaluated_at": evaluation.evaluated_at,
+            "watermark": report_sequence,
+            "reports": [{
+                "report_id": self.report_id,
+                "report_sequence": report_sequence,
+                "report": detector_report.report,
+            }],
+        }))?;
+        let projected_artifact_id =
+            ProjectedArtifactId(nq_protocol::sha256_bytes(projection_document.as_bytes()));
+        let mut inputs = self.inputs.clone();
+        let [admitted] = inputs.admitted.as_mut_slice() else {
+            return Err(EngineError::Invariant(
+                "diagnostic input accounting does not have exactly one admitted input".into(),
+            ));
+        };
+        admitted.projected_artifact_id = projected_artifact_id.clone();
+        let [selected] = inputs.selected.as_mut_slice() else {
+            return Err(EngineError::Invariant(
+                "diagnostic input accounting does not have exactly one selected input".into(),
+            ));
+        };
+        selected.projected_artifact_id = projected_artifact_id;
+
+        let (claims, primary_claim_id, outcome) = match evaluation.result.state {
+            DetectorState::Present | DetectorState::ExplicitlyAbsent => {
+                if !self.report_complete {
+                    return Err(EngineError::Invariant(
+                        "determinate diagnostic result came from incomplete report coverage".into(),
+                    ));
+                }
+                if evaluation.result.evidence.is_empty()
+                    || evaluation.result.evidence.iter().any(|evidence| {
+                        evidence.report_id != self.report_id
+                            || evidence.report_sequence != report_sequence
+                            || evidence.report_digest != detector_report.report.report_digest
+                            || match evidence.observation_ordinal {
+                                Some(ordinal) => {
+                                    !detector_report
+                                        .report
+                                        .observations
+                                        .iter()
+                                        .any(|observation| {
+                                            observation.ordinal == ordinal
+                                                && timestamp(observation.observed_at)
+                                                    == timestamp(evidence.observed_at)
+                                        })
+                                }
+                                None => {
+                                    timestamp(detector_report.report.observed_at)
+                                        != timestamp(evidence.observed_at)
+                                }
+                            }
+                    })
+                {
+                    return Err(EngineError::Invariant(
+                        "determinate diagnostic evidence differs from the exact detector input"
+                            .into(),
+                    ));
+                }
+                let condition = match evaluation.result.state {
+                    DetectorState::Present => DiagnosticConditionV1::Present,
+                    DetectorState::ExplicitlyAbsent => DiagnosticConditionV1::ExplicitlyAbsent,
+                    DetectorState::CannotEvaluate => unreachable!(),
+                };
+                let claim_id = format!("claim:{}", evaluation.result.condition);
+                let mut claim_limitations = evaluation.result.limitations.clone();
+                claim_limitations.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+                claim_limitations.dedup();
+                let mut claim_nonclaims = vec![
+                    "the causal source of the bounded condition is not established".to_owned(),
+                    "the host boot or deployment generation is not established".to_owned(),
+                ];
+                claim_nonclaims.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+                let claim = DiagnosticClaimV1 {
+                    claim_id: claim_id.clone(),
+                    proposition: match condition {
+                        DiagnosticConditionV1::Present => {
+                            format!(
+                                "bounded condition {} is present",
+                                evaluation.result.condition
+                            )
+                        }
+                        DiagnosticConditionV1::ExplicitlyAbsent => format!(
+                            "bounded condition {} is explicitly absent",
+                            evaluation.result.condition
+                        ),
+                        _ => unreachable!(),
+                    },
+                    status: DiagnosticClaimStatusV1::Established,
+                    condition_effect: Some(condition),
+                    dependency_input_ids: inputs
+                        .selected
+                        .iter()
+                        .map(|input| input.input_id.clone())
+                        .collect(),
+                    state_binding_ids: self
+                        .state_bindings
+                        .iter()
+                        .map(|binding| binding.binding_id.clone())
+                        .collect(),
+                    required_distinctions: vec!["subject_identity".to_owned()],
+                    limitations: claim_limitations,
+                    nonclaims: claim_nonclaims,
+                };
+                (
+                    vec![claim],
+                    Some(claim_id),
+                    DiagnosticOutcomeV1 {
+                        derivation: DiagnosticDerivationV1::Completed,
+                        condition,
+                        coherence: DiagnosticCoherenceV1::JointlyEstablished,
+                        coverage: DiagnosticCoverageV1::Complete,
+                        summary: evaluation.result.summary.clone(),
+                        refusal: None,
+                    },
+                )
+            }
+            DetectorState::CannotEvaluate => {
+                return Err(EngineError::DiagnosticUnsupported(format!(
+                    "the initial live producer does not emit detector refusals; retained refusal: {}",
+                    evaluation.result.summary
+                )));
+            }
+        };
+
+        // Sample completion after every fallible semantic derivation above and
+        // immediately before sealing the immutable artifact. Canonical
+        // serialization and self-digesting are the mechanical seal, not a
+        // second diagnostic evaluation.
+        let completed_at = parse_timestamp(&timestamp(Utc::now()))?;
+        if completed_at < evaluation.evaluated_at {
+            return Err(EngineError::Invariant(
+                "diagnostic completion precedes detector evaluation".into(),
+            ));
+        }
+        let mut artifact = DiagnosticExecutionV1 {
+            schema: DiagnosticExecutionSchema::V1,
+            artifact_id: DiagnosticArtifactId(nq_protocol::sha256_bytes(
+                b"diagnostic-execution-artifact-placeholder",
+            )),
+            canonicalization: diagnostic_canonicalization_identity()
+                .map_err(|error| EngineError::Canonical(error.to_string()))?,
+            producer: self.producer.clone(),
+            request_id: self.request_id.clone(),
+            run_id: self.run_id.clone(),
+            question: self.question.clone(),
+            subject: self.subject.clone(),
+            profile: self.profile.clone(),
+            vantage: self.vantage.clone(),
+            state_model: self.state_model.clone(),
+            evaluator: self.evaluator.clone(),
+            threshold_policy: self.threshold_policy.clone(),
+            projection: self.projection.clone(),
+            execution_clock: self.execution_clock.clone(),
+            started_at: self.started_at,
+            completed_at,
+            attempt_interval: self.attempt_interval.clone(),
+            inputs,
+            state_bindings: self.state_bindings.clone(),
+            claims,
+            primary_claim_id,
+            outcome,
+            limitations: self.limitations.clone(),
+            nonclaims: self.nonclaims.clone(),
+        };
+        artifact.artifact_id = artifact
+            .computed_artifact_id()
+            .map_err(|error| EngineError::Canonical(error.to_string()))?;
+        artifact
+            .canonical_bytes()
+            .map_err(|error| EngineError::Invariant(error.to_string()))?;
+        Ok(artifact)
+    }
+}
+
 struct BoundUnixRunner {
     binding_digest: Option<String>,
     runner: UnixRunner,
@@ -2090,8 +2396,52 @@ impl CollectionEngine {
     ///
     /// Returns only local engine/storage failures. Expected helper, protocol,
     /// and admission outcomes are retained and returned as `CollectionOutcome`.
-    #[allow(clippy::too_many_lines)]
     pub fn collect(&mut self, watcher: &WatcherConfig) -> Result<CollectionOutcome, EngineError> {
+        self.collect_internal(watcher, false)
+            .map(|execution| execution.outcome)
+    }
+
+    /// Execute one admitted collection and emit its exact bounded diagnostic.
+    ///
+    /// This is a deliberately narrow first live producer for
+    /// `nq.diagnostic_execution.v1`. It is sealed to the exact current
+    /// `nq.host/v1` load-pressure profile/detector identities and a fresh
+    /// evaluation context containing exactly the newly admitted report. The
+    /// fresh-history restriction keeps v1's complete input accounting truthful
+    /// until history-aware input manifests are implemented. Only determinate
+    /// detector results are emitted. It
+    /// returns only after the ordinary collection, custody, evaluation, and
+    /// status transaction commits. The returned artifact is not stored or
+    /// re-exportable by NQ, so this is a bounded executable integration surface,
+    /// not a durable live producer. Expected non-success collection outcomes
+    /// remain durably available through the existing collection/history
+    /// surfaces; they are not reconstructed into a diagnostic artifact after
+    /// information loss.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the profile does not have exactly one compiled detector,
+    /// collection fails locally, or the completed collection cannot emit the
+    /// complete v1 input accounting.
+    pub fn diagnostic_execute(
+        &mut self,
+        watcher: &WatcherConfig,
+    ) -> Result<DiagnosticExecutionV1, EngineError> {
+        let execution = self.collect_internal(watcher, true)?;
+        execution.diagnostic.ok_or_else(|| {
+            EngineError::DiagnosticUnsupported(format!(
+                "collection for {} produced no admitted determinate diagnostic execution; inspect the retained collection outcome",
+                watcher.instance_id
+            ))
+        })
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn collect_internal(
+        &mut self,
+        watcher: &WatcherConfig,
+        emit_diagnostic: bool,
+    ) -> Result<CollectionExecution, EngineError> {
         let _guard =
             InstanceGuard::acquire(&self.config.database_path, &watcher.instance_id, "collect")?;
         // Fail closed before any persistence: a collection stamps evaluator
@@ -2101,10 +2451,21 @@ impl CollectionEngine {
         self.require_evaluator_identity()?;
         self.reconcile_pending_binding(watcher)?;
         let profile = resolve(watcher)?;
+        let diagnostic_node_id = emit_diagnostic
+            .then(|| self.store.sole_genesis_id())
+            .transpose()?
+            .map(|genesis_id| format!("nq-store-genesis:{genesis_id}"));
         let descriptor_digest = profile
             .descriptor()
             .digest()
             .map_err(|error| EngineError::Canonical(error.to_string()))?;
+        if emit_diagnostic {
+            require_initial_diagnostic_profile(profile, descriptor_digest.as_str())?;
+            let snapshot = self
+                .store
+                .evidence_snapshot(std::slice::from_ref(&watcher.instance_id))?;
+            require_empty_diagnostic_history(&snapshot, watcher, descriptor_digest.as_str())?;
+        }
         let authoritative = match self.authoritative_active_lock(watcher) {
             Ok(Some(lock)) => lock,
             Ok(None) => {
@@ -2119,7 +2480,7 @@ impl CollectionEngine {
                     },
                 );
                 self.record_instance_status(watcher, &outcome)?;
-                return Ok(outcome);
+                return Ok(CollectionExecution::without_diagnostic(outcome));
             }
             Err(error) => {
                 self.stop_unix_runner(&watcher.instance_id);
@@ -2131,7 +2492,7 @@ impl CollectionEngine {
                 let outcome =
                     CollectionOutcome::admission_refused(watcher.instance_id.clone(), refusal);
                 self.record_instance_status(watcher, &outcome)?;
-                return Ok(outcome);
+                return Ok(CollectionExecution::without_diagnostic(outcome));
             }
         };
         let lock = match (|| {
@@ -2154,12 +2515,13 @@ impl CollectionEngine {
                 let outcome =
                     CollectionOutcome::admission_refused(watcher.instance_id.clone(), refusal);
                 self.record_instance_status(watcher, &outcome)?;
-                return Ok(outcome);
+                return Ok(CollectionExecution::without_diagnostic(outcome));
             }
         };
         let (lock, verification, launch) = lock;
         let provider =
             self.verified_local_provider(profile, &lock, &verification, launch.identity())?;
+        let provider_identity = provider.identity().clone();
         let checkpoint_contract_digest = checkpoint_contract_digest(
             watcher,
             &lock,
@@ -2228,7 +2590,7 @@ impl CollectionEngine {
                 canonical_result, ..
             } => {
                 let outcome = decode_collection_outcome(canonical_result.as_bytes())?;
-                return Ok(outcome);
+                return Ok(CollectionExecution::without_diagnostic(outcome));
             }
         }
 
@@ -2245,7 +2607,7 @@ impl CollectionEngine {
                 )?
             };
             self.commit_non_success_collection(watcher, intake_input, run, submission, &outcome)?;
-            return Ok(outcome);
+            return Ok(CollectionExecution::without_diagnostic(outcome));
         }
 
         let raw = intake.raw_bytes().to_vec();
@@ -2276,7 +2638,7 @@ impl CollectionEngine {
                     Some(submission),
                     &outcome,
                 )?;
-                return Ok(outcome);
+                return Ok(CollectionExecution::without_diagnostic(outcome));
             }
             ProviderResponseInterpretationV1::Validated { response } => response,
         };
@@ -2303,7 +2665,7 @@ impl CollectionEngine {
                     Some(submission),
                     &outcome,
                 )?;
-                Ok(outcome)
+                Ok(CollectionExecution::without_diagnostic(outcome))
             }
             ResponseOutcome::Report { report } => {
                 let report_digest = nq_protocol::semantic_digest(&report)
@@ -2339,7 +2701,7 @@ impl CollectionEngine {
                             Some(submission),
                             &outcome,
                         )?;
-                        return Ok(outcome);
+                        return Ok(CollectionExecution::without_diagnostic(outcome));
                     }
                 };
                 let context = ValidationContext::from_request(
@@ -2374,11 +2736,12 @@ impl CollectionEngine {
                             Some(submission),
                             &outcome,
                         )?;
-                        Ok(outcome)
+                        Ok(CollectionExecution::without_diagnostic(outcome))
                     }
                     Ok(validated) => {
                         let report_id = Uuid::new_v4().to_string();
                         let report_status = semantic_report_status(validated.status).to_owned();
+                        let submission_id = Uuid::new_v4().to_string();
                         let stored_report = store_report(
                             &report_id,
                             watcher,
@@ -2388,7 +2751,7 @@ impl CollectionEngine {
                             capture.finished_at,
                         )?;
                         let submission = SubmissionInput {
-                            submission_id: Uuid::new_v4().to_string(),
+                            submission_id,
                             raw_bytes: raw,
                             received_at: timestamp(capture.finished_at),
                             protocol_outcome: "valid_report".into(),
@@ -2411,6 +2774,14 @@ impl CollectionEngine {
                                 let snapshot = view.evidence_snapshot(std::slice::from_ref(
                                     &watcher.instance_id,
                                 ))?;
+                                if emit_diagnostic {
+                                    require_fresh_diagnostic_snapshot(
+                                        &snapshot,
+                                        watcher,
+                                        descriptor_digest.as_str(),
+                                        &report_id,
+                                    )?;
+                                }
                                 let current_findings = view.finding_snapshots()?;
                                 let prepared = prepare_instance_evaluations(
                                     watcher,
@@ -2420,6 +2791,17 @@ impl CollectionEngine {
                                     &current_findings,
                                     &evaluator_artifact_digest,
                                 )?;
+                                let diagnostic_reports = if emit_diagnostic {
+                                    let [evaluation] = prepared.as_slice() else {
+                                        return Err(EngineError::Invariant(
+                                            "diagnostic execution requires exactly one prepared evaluation"
+                                                .into(),
+                                        ));
+                                    };
+                                    Some(evaluation.detector_reports.clone())
+                                } else {
+                                    None
+                                };
                                 let evaluations = prepared
                                     .iter()
                                     .map(|prepared| prepared.envelope.clone())
@@ -2447,15 +2829,69 @@ impl CollectionEngine {
                                         .into_iter()
                                         .map(|prepared| prepared.commit)
                                         .collect(),
-                                    value: outcome,
+                                    value: CollectionExecution {
+                                        outcome,
+                                        diagnostic: None,
+                                        diagnostic_reports,
+                                    },
                                 })
                             },
                         )?;
                         match committed {
-                            ProviderIntakeCommit::Committed { value, .. } => Ok(value),
+                            ProviderIntakeCommit::Committed { mut value, .. } => {
+                                if let Some(node_id) = diagnostic_node_id.as_deref() {
+                                    let CollectionResult::Admitted { evaluations, .. } =
+                                        &value.outcome.result
+                                    else {
+                                        return Err(EngineError::Invariant(
+                                            "committed diagnostic execution is not an admitted collection"
+                                                .into(),
+                                        ));
+                                    };
+                                    let [evaluation] = evaluations.as_slice() else {
+                                        return Err(EngineError::Invariant(
+                                            "diagnostic execution requires exactly one committed evaluation"
+                                                .into(),
+                                        ));
+                                    };
+                                    let detector_reports =
+                                        value.diagnostic_reports.take().ok_or_else(|| {
+                                            EngineError::Invariant(
+                                                "committed diagnostic execution lost its exact detector input"
+                                                    .into(),
+                                            )
+                                        })?;
+                                    let submission =
+                                        collection.submission.as_ref().ok_or_else(|| {
+                                            EngineError::Invariant(
+                                                "committed diagnostic execution lost its admitted submission"
+                                                    .into(),
+                                            )
+                                        })?;
+                                    let context = prepare_diagnostic_emission(
+                                        node_id,
+                                        watcher,
+                                        profile,
+                                        &provider_identity,
+                                        &request,
+                                        &run_id,
+                                        &report_id,
+                                        &collection.intake.intake_id,
+                                        &submission.raw_bytes,
+                                        &normalized,
+                                        &validated,
+                                        &capture,
+                                        self.require_evaluator_identity()?,
+                                    )?;
+                                    value.diagnostic =
+                                        Some(context.finish(evaluation, &detector_reports)?);
+                                }
+                                Ok(value)
+                            }
                             ProviderIntakeCommit::Replayed {
                                 canonical_result, ..
-                            } => decode_collection_outcome(canonical_result.as_bytes()),
+                            } => decode_collection_outcome(canonical_result.as_bytes())
+                                .map(CollectionExecution::without_diagnostic),
                         }
                     }
                 }
@@ -3179,6 +3615,7 @@ struct FindingLineage<'a> {
 struct PreparedEvaluation {
     envelope: EvaluationEnvelopeV2,
     commit: EvaluationCommitInput,
+    detector_reports: Vec<DetectorReport>,
 }
 
 impl FindingLineage<'_> {
@@ -3247,7 +3684,14 @@ fn prepare_instance_evaluations(
             ),
             reports: &reports,
         };
-        let result = detector.evaluate(&detector_input);
+        let mut result = detector.evaluate(&detector_input);
+        // Evidence timestamps are persisted at the schema's millisecond
+        // precision. Seal the canonical evaluation from that same durable
+        // value so a helper's finer clock precision cannot create a result
+        // that commits successfully but later fails exact reopening.
+        for evidence in &mut result.evidence {
+            evidence.observed_at = parse_timestamp(&timestamp(evidence.observed_at))?;
+        }
         let descriptor = detector.descriptor();
         let detector_digest = descriptor.digest().map_err(EngineError::Canonical)?;
         let evaluation_id = Uuid::new_v4().to_string();
@@ -3371,6 +3815,7 @@ fn prepare_instance_evaluations(
                 evaluation,
                 finding,
             },
+            detector_reports: reports.clone(),
         });
     }
     prepared.sort_by(|left, right| {
@@ -3447,6 +3892,80 @@ fn evaluation_context_rows(
             },
         )
         .collect()
+}
+
+fn require_initial_diagnostic_profile(
+    profile: &'static dyn ProfileModule,
+    profile_digest: &str,
+) -> Result<(), EngineError> {
+    let descriptor = profile.descriptor();
+    let [detector] = profile.detectors() else {
+        return Err(EngineError::DiagnosticUnsupported(format!(
+            "initial diagnostic execution supports exactly one detector; profile {} v{} has {}",
+            descriptor.profile.id,
+            descriptor.profile.version,
+            profile.detectors().len()
+        )));
+    };
+    let detector_descriptor = detector.descriptor();
+    let detector_digest = detector_descriptor
+        .digest()
+        .map_err(EngineError::Canonical)?;
+    if descriptor.profile.id != nq_profiles::host::PROFILE_ID
+        || descriptor.profile.version != nq_profiles::host::PROFILE_VERSION
+        || profile_digest != INITIAL_DIAGNOSTIC_PROFILE_DIGEST
+        || detector_descriptor.id != INITIAL_DIAGNOSTIC_DETECTOR_ID
+        || detector_descriptor.version != INITIAL_DIAGNOSTIC_DETECTOR_VERSION
+        || detector_digest != INITIAL_DIAGNOSTIC_DETECTOR_DIGEST
+    {
+        return Err(EngineError::DiagnosticUnsupported(format!(
+            "initial diagnostic execution is sealed to nq.host/v1 load-pressure semantics; received {} v{} / {} v{}",
+            descriptor.profile.id,
+            descriptor.profile.version,
+            detector_descriptor.id,
+            detector_descriptor.version
+        )));
+    }
+    Ok(())
+}
+
+fn require_empty_diagnostic_history(
+    snapshot: &EvidenceSnapshot,
+    watcher: &WatcherConfig,
+    profile_digest: &str,
+) -> Result<(), EngineError> {
+    let matching = evaluation_context_rows(&snapshot.reports, watcher, profile_digest)?;
+    if matching.is_empty() {
+        return Ok(());
+    }
+    Err(EngineError::DiagnosticUnsupported(format!(
+        "diagnostic execution requires a fresh instance with no prior matching history; found {} reports for {}",
+        matching.len(),
+        watcher.instance_id
+    )))
+}
+
+fn require_fresh_diagnostic_snapshot(
+    snapshot: &EvidenceSnapshot,
+    watcher: &WatcherConfig,
+    profile_digest: &str,
+    current_report_id: &str,
+) -> Result<(), EngineError> {
+    let matching = evaluation_context_rows(&snapshot.reports, watcher, profile_digest)?;
+    let [report] = matching.as_slice() else {
+        return Err(EngineError::Invariant(format!(
+            "diagnostic execution requires one fresh admitted report and no prior matching history; found {} reports for {}",
+            matching.len(),
+            watcher.instance_id
+        )));
+    };
+    if report.report_id != current_report_id || report.instance_id != watcher.instance_id {
+        return Err(EngineError::Invariant(
+            "diagnostic execution fresh-history snapshot does not identify the current admitted report"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 struct DryExchange {
@@ -3769,6 +4288,372 @@ fn build_request(
     nq_protocol::validate_request(&request)
         .map_err(|error| EngineError::Protocol(error.to_string()))?;
     Ok(request)
+}
+
+fn semantic_identity(
+    id: impl Into<String>,
+    version: impl Into<String>,
+    descriptor: &impl Serialize,
+) -> Result<SemanticIdentityV1, EngineError> {
+    Ok(SemanticIdentityV1 {
+        id: id.into(),
+        version: version.into(),
+        digest: nq_protocol::semantic_digest(descriptor)
+            .map_err(|error| EngineError::Canonical(error.to_string()))?,
+    })
+}
+
+fn compiled_cohort_identity() -> Result<SemanticIdentityV1, EngineError> {
+    let mut profiles = all_profiles()
+        .iter()
+        .map(|profile| {
+            let descriptor = profile.descriptor();
+            let mut detectors = profile
+                .detectors()
+                .iter()
+                .map(|detector| {
+                    let descriptor = detector.descriptor();
+                    Ok(json!({
+                        "id": descriptor.id,
+                        "version": descriptor.version,
+                        "digest": descriptor.digest().map_err(EngineError::Canonical)?,
+                    }))
+                })
+                .collect::<Result<Vec<_>, EngineError>>()?;
+            detectors.sort_by(|left, right| {
+                left["id"]
+                    .as_str()
+                    .cmp(&right["id"].as_str())
+                    .then_with(|| left["version"].as_u64().cmp(&right["version"].as_u64()))
+            });
+            Ok(json!({
+                "id": descriptor.profile.id,
+                "version": descriptor.profile.version,
+                "digest": descriptor
+                    .digest()
+                    .map_err(|error| EngineError::Canonical(error.to_string()))?
+                    .as_str(),
+                "detectors": detectors,
+            }))
+        })
+        .collect::<Result<Vec<_>, EngineError>>()?;
+    profiles.sort_by(|left, right| {
+        left["id"]
+            .as_str()
+            .cmp(&right["id"].as_str())
+            .then_with(|| left["version"].as_u64().cmp(&right["version"].as_u64()))
+    });
+    semantic_identity(
+        "nq.compiled_cohort",
+        "1",
+        &json!({
+            "schema": "nq.compiled_cohort.v1",
+            "evaluator_source_digest": EVALUATOR_SOURCE_DIGEST,
+            "profiles": profiles,
+        }),
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn prepare_diagnostic_emission(
+    node_id: &str,
+    watcher: &WatcherConfig,
+    profile: &'static dyn ProfileModule,
+    provider: &crate::provider_intake::ProviderIdentityV1,
+    request: &HelperRequest,
+    run_id: &str,
+    report_id: &str,
+    input_id: &str,
+    raw: &[u8],
+    normalized: &ProfileReportInput,
+    validated: &ValidatedReport,
+    capture: &RunCapture,
+    evaluator: &EvaluatorRuntimeIdentity,
+) -> Result<DiagnosticEmissionContext, EngineError> {
+    let detector = profile.detectors().first().ok_or_else(|| {
+        EngineError::Invariant("diagnostic execution profile has no detector".into())
+    })?;
+    let detector_descriptor = detector.descriptor();
+    let detector_digest = detector_descriptor
+        .digest()
+        .map_err(EngineError::Canonical)?;
+    let profile_descriptor = profile.descriptor();
+    let profile_digest = profile_descriptor
+        .digest()
+        .map_err(|error| EngineError::Canonical(error.to_string()))?;
+    let profile_semantic = profile_semantic_id(profile_descriptor)
+        .map_err(|error| EngineError::Canonical(error.to_string()))?;
+    let normalized_document = canonical(normalized)?;
+    let projected_artifact_placeholder = ProjectedArtifactId(nq_protocol::sha256_bytes(
+        b"pending exact detector input projection",
+    ));
+
+    let build = semantic_identity(
+        "nq.evaluator_build",
+        env!("CARGO_PKG_VERSION"),
+        &json!({
+            "schema": "nq.evaluator_build.v1",
+            "artifact_digest": evaluator.artifact_digest(),
+            "artifact_identity_method": evaluator.artifact_identity_method(),
+            "target_triple": evaluator.target_triple(),
+            "platform_runtime_version": evaluator.platform_runtime_version(),
+            "crate_version": env!("CARGO_PKG_VERSION"),
+        }),
+    )?;
+    let cohort = compiled_cohort_identity()?;
+    let question = SemanticIdentityV1 {
+        id: detector_descriptor.id.clone(),
+        version: detector_descriptor.version.to_string(),
+        digest: Sha256Digest::parse(detector_digest.clone())
+            .map_err(|error| EngineError::Invariant(error.to_string()))?,
+    };
+    let profile_identity = SemanticIdentityV1 {
+        id: profile_descriptor.profile.id.clone(),
+        version: profile_descriptor.profile.version.to_string(),
+        digest: Sha256Digest::parse(profile_digest.as_str().to_owned())
+            .map_err(|error| EngineError::Invariant(error.to_string()))?,
+    };
+    let scope = semantic_identity(
+        format!("nq.scope.{}", watcher.scope.kind),
+        profile_descriptor.profile.version.to_string(),
+        &json!({
+            "schema": "nq.diagnostic_scope.v1",
+            "subject": watcher.subject,
+            "scope": watcher.scope,
+            "profile": profile_identity,
+        }),
+    )?;
+    let vantage = semantic_identity(
+        format!(
+            "nq.vantage.{}.{}.{}",
+            watcher.vantage.kind, node_id, watcher.instance_id
+        ),
+        provider.source_admission_id.clone(),
+        &json!({
+            "schema": "nq.diagnostic_vantage.v1",
+            "node_id": node_id,
+            "instance_id": watcher.instance_id,
+            "declared_vantage": watcher.vantage,
+            "provider": provider,
+        }),
+    )?;
+    let state_model = semantic_identity(
+        format!("{}.subject_binding_state", profile_descriptor.profile.id),
+        "1",
+        &json!({
+            "schema": "nq.subject_binding_state_model.v1",
+            "binding_kind": "subject_identity",
+            "profile": profile_identity,
+        }),
+    )?;
+    let evaluator_identity = semantic_identity(
+        "nq.detector_evaluator",
+        "1",
+        &json!({
+            "schema": "nq.detector_evaluator.v1",
+            "artifact_digest": evaluator.artifact_digest(),
+            "evaluator_source_digest": EVALUATOR_SOURCE_DIGEST,
+            "detector_digest": detector_digest,
+        }),
+    )?;
+    let threshold_policy = semantic_identity(
+        format!("{}.threshold_policy", detector_descriptor.id),
+        detector_descriptor.version.to_string(),
+        &json!({
+            "schema": "nq.detector_threshold_policy.v1",
+            "detector_id": detector_descriptor.id,
+            "detector_version": detector_descriptor.version,
+            "parameters": detector_descriptor.parameters,
+        }),
+    )?;
+    let projection_identity = semantic_identity(
+        "nq.detector_input_projection",
+        "1",
+        &json!({
+            "schema": "nq.detector_input_projection.v1",
+            "profile_semantic_id": profile_semantic.as_str(),
+            "detector_id": detector_descriptor.id,
+            "detector_version": detector_descriptor.version,
+            "detector_digest": detector_digest,
+            "fields": [
+                "instance_id",
+                "evaluated_at",
+                "watermark",
+                "reports[].report_id",
+                "reports[].report_sequence",
+                "reports[].report",
+            ],
+        }),
+    )?;
+    let execution_clock = semantic_identity(
+        "nq.local_linux_realtime",
+        "1",
+        &json!({
+            "schema": "nq.local_linux_realtime.v1",
+            "source": "CLOCK_REALTIME through chrono::Utc",
+            "relationship": "NQ bounds the local helper invocation; admitted source times must fall inside that interval",
+        }),
+    )?;
+    let capture_policy = semantic_identity(
+        "nq.capture.exact_provider_response",
+        "1",
+        &json!({
+            "schema": "nq.capture_policy.v1",
+            "mode": "exact_source",
+            "boundary": "provider_intake",
+        }),
+    )?;
+    let admission_rule = semantic_identity(
+        "nq.local_provider_admission",
+        "1",
+        &json!({
+            "schema": "nq.diagnostic_admission_rule.v1",
+            "provider_admission_id": provider.provider_admission_id,
+            "profile_semantic_id": provider.profile_semantic_id,
+        }),
+    )?;
+    let normalization_rule = semantic_identity(
+        "nq.protocol_report_normalization",
+        "1",
+        &json!({
+            "schema": "nq.diagnostic_normalization_rule.v1",
+            "protocol": nq_protocol::HELPER_PROTOCOL_VERSION,
+            "profile": profile_identity,
+        }),
+    )?;
+    let selection_rule = semantic_identity(
+        "nq.fresh_single_admitted_report",
+        "1",
+        &json!({
+            "schema": "nq.diagnostic_selection_rule.v1",
+            "question": question,
+            "cardinality": "exactly_one_newly_admitted_report_with_no_prior_matching_history",
+        }),
+    )?;
+
+    let input_id = input_id.to_owned();
+    let inputs = DiagnosticInputAccountingV1 {
+        selection_rule,
+        expected: vec![ExpectedInputV1 {
+            expectation_id: "expected:current_provider_report".to_owned(),
+            role: "profile_report".to_owned(),
+            required: true,
+        }],
+        received: vec![ReceivedInputV1 {
+            input_id: input_id.clone(),
+            expectation_id: "expected:current_provider_report".to_owned(),
+            raw_artifact_id: RawArtifactId(nq_protocol::sha256_bytes(raw)),
+            capture_mode: RawCaptureModeV1::ExactSource,
+            capture_policy,
+            availability_at_derivation: EvidenceAvailabilityV1::CommittedUnavailable,
+            acquisition: AcquisitionIntervalV1 {
+                started_at: capture.started_at,
+                ended_at: capture.finished_at,
+                clock: execution_clock.clone(),
+                clock_uncertainty_ms: 0,
+            },
+            received_at: capture.finished_at,
+        }],
+        admitted: vec![AdmittedInputV1 {
+            input_id: input_id.clone(),
+            admission_rule,
+            normalized_artifact_id: NormalizedArtifactId(nq_protocol::sha256_bytes(
+                normalized_document.as_bytes(),
+            )),
+            normalization_rule,
+            projected_artifact_id: projected_artifact_placeholder.clone(),
+            projection_rule: projection_identity.clone(),
+        }],
+        refused: Vec::new(),
+        failed: Vec::new(),
+        excluded: Vec::new(),
+        selected: vec![SelectedInputV1 {
+            input_id: input_id.clone(),
+            projected_artifact_id: projected_artifact_placeholder,
+            role: "profile_report".to_owned(),
+        }],
+    };
+    let state_bindings = vec![DiagnosticStateBindingV1 {
+        binding_id: "state:subject_identity".to_owned(),
+        kind: "subject_identity".to_owned(),
+        value: watcher.subject.clone(),
+        supporting_input_ids: vec![input_id],
+    }];
+    let limitations = vec![
+        DiagnosticLimitationV1 {
+            kind: DiagnosticLimitationKindV1::Other,
+            code: "absolute_clock_quality_unqualified".to_owned(),
+            detail: "timestamps share the local Linux wall clock; absolute UTC accuracy is not qualified"
+                .to_owned(),
+        },
+        DiagnosticLimitationV1 {
+            kind: DiagnosticLimitationKindV1::Other,
+            code: "boot_or_deployment_state_unbound".to_owned(),
+            detail:
+                "the current host profile does not export boot or deployment generation identity"
+                    .to_owned(),
+        },
+        DiagnosticLimitationV1 {
+            kind: DiagnosticLimitationKindV1::UnverifiedSeparation,
+            code: "failure_domain_separation_unverified".to_owned(),
+            detail: "this local execution carries no cross-vantage independence warrant"
+                .to_owned(),
+        },
+        DiagnosticLimitationV1 {
+            kind: DiagnosticLimitationKindV1::UnavailableEvidence,
+            code: "raw_evidence_not_publicly_retrievable".to_owned(),
+            detail: "exact raw provider bytes are committed in NQ custody but no supported raw-evidence retrieval surface exists"
+                .to_owned(),
+        },
+    ];
+    let nonclaims = vec![
+        "agreement with another artifact does not establish independent corroboration".to_owned(),
+        "this artifact grants no reliance, authorization, or action".to_owned(),
+        "this bounded diagnostic does not establish whole-subject health".to_owned(),
+    ];
+
+    Ok(DiagnosticEmissionContext {
+        producer: DiagnosticProducerV1 {
+            node_id: node_id.to_owned(),
+            build,
+            cohort,
+        },
+        request_id: DiagnosticRequestId(request.request_id.to_string()),
+        run_id: DiagnosticRunId(run_id.to_owned()),
+        question,
+        subject: DiagnosticSubjectV1 {
+            id: watcher.subject.clone(),
+            scope,
+        },
+        profile: profile_identity,
+        vantage,
+        state_model,
+        evaluator: evaluator_identity,
+        threshold_policy,
+        projection: DiagnosticProjectionV1 {
+            identity: projection_identity,
+            omitted_distinctions: Vec::new(),
+        },
+        execution_clock: execution_clock.clone(),
+        started_at: capture.started_at,
+        attempt_interval: AcquisitionIntervalV1 {
+            started_at: capture.started_at,
+            ended_at: capture.finished_at,
+            clock: execution_clock,
+            clock_uncertainty_ms: 0,
+        },
+        inputs,
+        state_bindings,
+        limitations,
+        nonclaims,
+        expected_evaluator_artifact_digest: evaluator.artifact_digest().clone(),
+        expected_profile_semantic_id: profile_semantic,
+        expected_instance_id: watcher.instance_id.clone(),
+        expected_scope: watcher.scope.clone(),
+        expected_vantage: watcher.vantage.clone(),
+        report_id: report_id.to_owned(),
+        report_complete: validated.status == SemanticReportStatus::Complete,
+    })
 }
 
 fn store_report(
@@ -4174,7 +5059,7 @@ fn admission_refusal_from_engine(
             AdmissionRefusalCode::CanonicalizationFailure,
             AdmissionRefusalDetails::Canonicalization { message },
         ),
-        EngineError::Invariant(message) => (
+        EngineError::DiagnosticUnsupported(message) | EngineError::Invariant(message) => (
             AdmissionRefusalBoundary::Internal,
             AdmissionRefusalCode::InvariantViolation,
             AdmissionRefusalDetails::Invariant { message },
@@ -7489,6 +8374,63 @@ json.dump(response, sys.stdout, sort_keys=True, separators=(",", ":"))
 sys.stdout.write("\n")
 "#;
 
+    const HOST_DIAGNOSTIC_HELPER: &str = r#"import datetime
+import json
+import sys
+
+request = json.load(sys.stdin)
+echo = dict(request)
+del echo["schema"]
+observed_at = (
+    datetime.datetime.now(datetime.timezone.utc)
+    .isoformat(timespec="microseconds")
+    .replace("+00:00", "Z")
+)
+binding = request["binding"]
+capabilities = request["granted_capabilities"]
+report = {
+    "schema": "nq.evidence_report.v1",
+    "profile": request["profile"],
+    "binding": binding,
+    "observed_at": observed_at,
+    "status": "complete",
+    "coverage": [
+        {"kind": "host_identity", "state": "complete"},
+        {"kind": "uptime", "state": "complete"},
+        {"kind": "load", "state": "complete"},
+    ],
+    "observations": [{
+        "ordinal": 0,
+        "kind": "host_snapshot",
+        "subject": binding["subject"],
+        "observed_at": observed_at,
+        "payload": {
+            "evidence_basis": {
+                "scope": binding["scope"],
+                "vantage": binding["vantage"],
+                "access_path": "procfs_sysinfo",
+                "basis": "kernel_snapshot",
+                "regime": "normal",
+                "capabilities_used": capabilities,
+            },
+            "hostname": "diagnostic-fixture",
+            "uptime_seconds": 3600,
+            "cpu_count": 4,
+            "load_1m": 1.0,
+        },
+    }],
+    "errors": [],
+    "used_capabilities": capabilities,
+    "backend": {
+        "implementation": {"name": "host-diagnostic-fixture", "version": "1"},
+        "tools": [],
+    },
+}
+response = {"schema": "nq.helper.response.v1", "echo": echo, "outcome": {"kind": "report", "report": report}}
+json.dump(response, sys.stdout, sort_keys=True, separators=(",", ":"))
+sys.stdout.write("\n")
+"#;
+
     fn test_run_resource(outcome: AcquisitionOutcome) -> CanonicalDocument {
         canonical(&RunResourceOutcomeV1 {
             schema: RunResourceOutcomeSchema::V1,
@@ -8923,6 +9865,53 @@ sys.stdout.write("\n")
         (config, watcher, lock)
     }
 
+    fn host_diagnostic_fixture(root: &Path) -> (NqConfig, WatcherConfig) {
+        fs::create_dir(root.join("admissions")).expect("fixture admissions root");
+        let script = root.join("host_diagnostic_helper.py");
+        fs::write(&script, HOST_DIAGNOSTIC_HELPER).expect("write host diagnostic helper");
+        let watcher = WatcherConfig {
+            instance_id: "host-diagnostic.primary".to_owned(),
+            command: CommandConfig {
+                executable: PathBuf::from("/usr/bin/python3"),
+                args: vec![script.to_string_lossy().into_owned()],
+                env: BTreeMap::new(),
+                execution_account: nix::unistd::geteuid().as_raw().to_string(),
+                allow_same_identity_in_debug: true,
+                working_directory: root.to_path_buf(),
+            },
+            carrier: Carrier::Stdio,
+            profile: ProfileSelection {
+                id: nq_profiles::host::PROFILE_ID.to_owned(),
+                version: nq_profiles::host::PROFILE_VERSION,
+            },
+            subject: "host:diagnostic-fixture".to_owned(),
+            scope: ScopeConfig {
+                kind: "host".to_owned(),
+                value: json!({"id": "diagnostic-fixture"}),
+            },
+            vantage: VantageConfig {
+                kind: "local".to_owned(),
+                value: json!({}),
+            },
+            capability_ceiling: BTreeSet::from([
+                "read_procfs".to_owned(),
+                "read_system_info".to_owned(),
+            ]),
+            schedule: ScheduleConfig::default(),
+            resources: ResourceLimits::default(),
+            checkpoint_policy: CheckpointPolicy::Disabled,
+        };
+        let config = NqConfig {
+            schema: crate::config::CONFIG_SCHEMA.to_owned(),
+            database_path: root.join("nq.db"),
+            socket_path: root.join("nqd.sock"),
+            admissions_dir: root.join("admissions"),
+            helper_runtime_dir: root.join("helpers"),
+            watchers: vec![watcher.clone()],
+        };
+        (config, watcher)
+    }
+
     struct SemanticLineageFixture {
         config: NqConfig,
         profile: &'static dyn ProfileModule,
@@ -9742,6 +10731,119 @@ sys.stdout.write("\n")
             outcome.result,
             CollectionResult::AdmissionRefused { .. }
         ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn diagnostic_execute_emits_exact_artifact_from_committed_host_evaluation() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (config, watcher) = host_diagnostic_fixture(directory.path());
+        let mut store = Store::initialize(&config.database_path).expect("initialize store");
+        append_profile_descriptor(&mut store, resolve(&watcher).expect("host profile"))
+            .expect("profile descriptor");
+        store
+            .append_genesis(&GenesisInput {
+                genesis_id: "diagnostic-test-genesis".to_owned(),
+                legacy_manifest_digest: None,
+                created_at: "2026-07-28T12:00:00.000Z".to_owned(),
+                detail: canonical(&json!({"source": "diagnostic-execution-test"}))
+                    .expect("genesis detail"),
+            })
+            .expect("append genesis");
+        drop(store);
+
+        let evaluator = EvaluatorRuntimeIdentity::for_test(nq_protocol::sha256_bytes(
+            b"diagnostic-execution-test-evaluator",
+        ));
+        let mut engine =
+            CollectionEngine::open_with_evaluator_identity(&config, Ok(evaluator)).expect("engine");
+        if let Err(error) = engine.watcher_action(&watcher, "admit") {
+            if error.to_string().contains("\"class\":\"spawn_failed\"")
+                && fs::read_to_string("/proc/self/attr/current")
+                    .is_ok_and(|profile| profile.contains("unpriv_bwrap"))
+            {
+                eprintln!("skipping helper execution: sandbox AppArmor denies executable memfds");
+                return;
+            }
+            panic!("fixture admission failed: {error}");
+        }
+
+        let artifact = engine
+            .diagnostic_execute(&watcher)
+            .expect("admitted host execution emits a diagnostic");
+        artifact.validate().expect("live artifact validates");
+        assert_eq!(artifact.schema, DiagnosticExecutionSchema::V1);
+        assert_eq!(artifact.subject.id, watcher.subject);
+        assert_eq!(artifact.profile.id, nq_profiles::host::PROFILE_ID);
+        assert_eq!(artifact.question.id, "nq.host.load_pressure");
+        assert_eq!(
+            artifact.outcome.derivation,
+            DiagnosticDerivationV1::Completed
+        );
+        assert_eq!(
+            artifact.outcome.condition,
+            DiagnosticConditionV1::ExplicitlyAbsent
+        );
+        assert_eq!(artifact.outcome.coverage, DiagnosticCoverageV1::Complete);
+        assert_eq!(
+            artifact.outcome.coherence,
+            DiagnosticCoherenceV1::JointlyEstablished
+        );
+        assert_eq!(artifact.inputs.expected.len(), 1);
+        assert_eq!(artifact.inputs.received.len(), 1);
+        assert_eq!(artifact.inputs.admitted.len(), 1);
+        assert_eq!(artifact.inputs.selected.len(), 1);
+        assert!(artifact.inputs.refused.is_empty());
+        assert!(artifact.inputs.failed.is_empty());
+        assert!(artifact.inputs.excluded.is_empty());
+        assert_eq!(artifact.state_bindings.len(), 1);
+        assert_eq!(
+            artifact.producer.node_id,
+            "nq-store-genesis:diagnostic-test-genesis"
+        );
+
+        let original = artifact.canonical_bytes().expect("canonical live bytes");
+        let reopened =
+            DiagnosticExecutionV1::decode_canonical(&original).expect("exact live bytes reopen");
+        assert_eq!(
+            reopened
+                .canonical_bytes()
+                .expect("reopened canonical bytes"),
+            original
+        );
+
+        let intakes = engine
+            .store
+            .provider_intakes_bounded(10, None)
+            .expect("provider intake history");
+        assert_eq!(intakes.len(), 1);
+        let raw = engine
+            .store
+            .provider_intake_raw_bytes(&intakes[0].intake_id)
+            .expect("raw custody lookup")
+            .expect("exact response retained");
+        assert_eq!(
+            artifact.inputs.received[0].raw_artifact_id.0,
+            nq_protocol::sha256_bytes(&raw)
+        );
+
+        let error = engine
+            .diagnostic_execute(&watcher)
+            .expect_err("history-aware input accounting is not silently fabricated");
+        assert!(
+            error
+                .to_string()
+                .contains("requires a fresh instance with no prior matching history")
+        );
+        assert_eq!(
+            engine
+                .store
+                .provider_intakes_bounded(10, None)
+                .expect("rolled-back intake history")
+                .len(),
+            1,
+            "the refused second emission leaves no partial collection behind"
+        );
     }
 
     #[test]

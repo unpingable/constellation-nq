@@ -189,6 +189,8 @@ except (ImportError, AttributeError) as error:
 PY
 python3 -B "$root/system-contract/verify_assets.py" \
     --profile-catalog "$profile_dir/manifest.json"
+python3 -B "$root/diagnostic-contract/verify_assets.py" \
+    --source-vectors "$root/audit/nq-nightshift-stage6-foundation/vectors"
 python3 - "${descriptors[@]}" <<'PY'
 import json
 import pathlib
@@ -289,6 +291,10 @@ install -Dm0644 "$root/protocol/README.md" \
     "$stage/share/nq/protocol/README.md"
 install -Dm0644 "$root/system-contract/manifest.json" \
     "$stage/share/nq/system-contract/manifest.json"
+install -Dm0644 "$root/diagnostic-contract/README.md" \
+    "$stage/share/nq/diagnostic-contract/README.md"
+install -Dm0644 "$root/diagnostic-contract/manifest.json" \
+    "$stage/share/nq/diagnostic-contract/manifest.json"
 
 while IFS= read -r -d '' source; do
     relative=${source#"$root/protocol/"}
@@ -307,6 +313,16 @@ done < <(
         -type f -name '*.json' -print0 | sort -z
 )
 
+while IFS= read -r -d '' source; do
+    relative=${source#"$root/diagnostic-contract/"}
+    install -Dm0644 "$source" "$stage/share/nq/diagnostic-contract/$relative"
+done < <(
+    find "$root/diagnostic-contract/schemas" \
+        "$root/diagnostic-contract/fixtures/valid" \
+        "$root/diagnostic-contract/fixtures/hostile" \
+        -type f -name '*.json' -print0 | sort -z
+)
+
 # Re-run every asset/catalog verifier against the immutable staged copies.
 # Source files changing or being left partial after the earlier input checks
 # cannot turn into an unverified release payload.
@@ -317,6 +333,9 @@ python3 -B "$root/scripts/verify_protocol_assets.py" \
 python3 -B "$root/system-contract/verify_assets.py" \
     --asset-root "$stage/share/nq/system-contract" \
     --profile-catalog "$stage/share/nq/profiles/manifest.json"
+python3 -B "$root/diagnostic-contract/verify_assets.py" \
+    --asset-root "$stage/share/nq/diagnostic-contract" \
+    --source-vectors "$root/audit/nq-nightshift-stage6-foundation/vectors"
 
 (
     cd -- "$stage"

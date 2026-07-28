@@ -31,6 +31,16 @@ SYSTEM_CONTRACT_FILES = (
     "fixtures/valid/scope_cut_proposal.json",
     "fixtures/valid/system_spec.json",
 )
+DIAGNOSTIC_CONTRACT_FILES = (
+    "README.md",
+    "manifest.json",
+    "schemas/nq.diagnostic_execution.v1.schema.json",
+    "fixtures/valid/positive.json",
+    "fixtures/valid/provider_no_response.json",
+    "fixtures/valid/refused.json",
+    "fixtures/hostile/projection_collision_match.json",
+    "fixtures/hostile/projection_collision_mismatch.json",
+)
 
 
 def sha256_file(path: Path) -> str:
@@ -75,6 +85,12 @@ def expected_files(descriptors: list[str]) -> dict[str, int]:
     )
     files.update(
         {f"share/nq/system-contract/{name}": 0o644 for name in SYSTEM_CONTRACT_FILES}
+    )
+    files.update(
+        {
+            f"share/nq/diagnostic-contract/{name}": 0o644
+            for name in DIAGNOSTIC_CONTRACT_FILES
+        }
     )
     return files
 

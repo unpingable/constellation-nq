@@ -1,0 +1,808 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.diagnostic_execution.v1.schema.json",
+  "title": "nq.diagnostic_execution.v1",
+  "description": "Closed structural schema for one immutable bounded NQ diagnostic execution. Cross-field semantic invariants remain enforced by the NQ implementation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "artifact_id",
+    "canonicalization",
+    "producer",
+    "request_id",
+    "run_id",
+    "question",
+    "subject",
+    "profile",
+    "vantage",
+    "state_model",
+    "evaluator",
+    "threshold_policy",
+    "projection",
+    "execution_clock",
+    "started_at",
+    "completed_at",
+    "attempt_interval",
+    "inputs",
+    "state_bindings",
+    "claims",
+    "outcome",
+    "limitations",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.diagnostic_execution.v1"
+    },
+    "artifact_id": {
+      "$ref": "#/$defs/digest"
+    },
+    "canonicalization": {
+      "const": {
+        "id": "rfc8785-jcs",
+        "version": "1",
+        "digest": "sha256:e49d92d4e86052e66ed2a481b9386d3b214ce3d2df5fd109a6491ccb9ffb24f3"
+      }
+    },
+    "producer": {
+      "$ref": "#/$defs/producer"
+    },
+    "request_id": {
+      "$ref": "#/$defs/nonEmpty"
+    },
+    "run_id": {
+      "$ref": "#/$defs/nonEmpty"
+    },
+    "question": {
+      "$ref": "#/$defs/semanticIdentity"
+    },
+    "subject": {
+      "$ref": "#/$defs/subject"
+    },
+    "profile": {
+      "$ref": "#/$defs/semanticIdentity"
+    },
+    "vantage": {
+      "$ref": "#/$defs/semanticIdentity"
+    },
+    "state_model": {
+      "$ref": "#/$defs/semanticIdentity"
+    },
+    "evaluator": {
+      "$ref": "#/$defs/semanticIdentity"
+    },
+    "threshold_policy": {
+      "$ref": "#/$defs/semanticIdentity"
+    },
+    "projection": {
+      "$ref": "#/$defs/projection"
+    },
+    "execution_clock": {
+      "$ref": "#/$defs/semanticIdentity"
+    },
+    "started_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "completed_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "attempt_interval": {
+      "$ref": "#/$defs/acquisitionInterval"
+    },
+    "inputs": {
+      "$ref": "#/$defs/inputAccounting"
+    },
+    "state_bindings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/stateBinding"
+      }
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/claim"
+      }
+    },
+    "primary_claim_id": {
+      "$ref": "#/$defs/nonEmpty"
+    },
+    "outcome": {
+      "$ref": "#/$defs/outcome"
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/limitation"
+      }
+    },
+    "nonclaims": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/nonEmpty"
+      }
+    }
+  },
+  "$defs": {
+    "nonEmpty": {
+      "type": "string",
+      "pattern": "\\S"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "semanticIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "digest"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "version": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_id",
+        "build",
+        "cohort"
+      ],
+      "properties": {
+        "node_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "build": {
+          "$ref": "#/$defs/semanticIdentity"
+        },
+        "cohort": {
+          "$ref": "#/$defs/semanticIdentity"
+        }
+      }
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "scope"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "scope": {
+          "$ref": "#/$defs/semanticIdentity"
+        }
+      }
+    },
+    "acquisitionInterval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "started_at",
+        "ended_at",
+        "clock",
+        "clock_uncertainty_ms"
+      ],
+      "properties": {
+        "started_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "ended_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "clock": {
+          "$ref": "#/$defs/semanticIdentity"
+        },
+        "clock_uncertainty_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        }
+      }
+    },
+    "expectedInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expectation_id",
+        "role",
+        "required"
+      ],
+      "properties": {
+        "expectation_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "role": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "required": {
+          "type": "boolean"
+        }
+      }
+    },
+    "receivedInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_id",
+        "expectation_id",
+        "raw_artifact_id",
+        "capture_mode",
+        "capture_policy",
+        "availability_at_derivation",
+        "acquisition",
+        "received_at"
+      ],
+      "properties": {
+        "input_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "expectation_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "raw_artifact_id": {
+          "$ref": "#/$defs/digest"
+        },
+        "capture_mode": {
+          "enum": [
+            "exact_source",
+            "earliest_boundary_redacted"
+          ]
+        },
+        "capture_policy": {
+          "$ref": "#/$defs/semanticIdentity"
+        },
+        "availability_at_derivation": {
+          "enum": [
+            "online",
+            "archived_retrievable",
+            "committed_unavailable"
+          ]
+        },
+        "acquisition": {
+          "$ref": "#/$defs/acquisitionInterval"
+        },
+        "received_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
+    },
+    "admittedInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_id",
+        "admission_rule",
+        "normalized_artifact_id",
+        "normalization_rule",
+        "projected_artifact_id",
+        "projection_rule"
+      ],
+      "properties": {
+        "input_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "admission_rule": {
+          "$ref": "#/$defs/semanticIdentity"
+        },
+        "normalized_artifact_id": {
+          "$ref": "#/$defs/digest"
+        },
+        "normalization_rule": {
+          "$ref": "#/$defs/semanticIdentity"
+        },
+        "projected_artifact_id": {
+          "$ref": "#/$defs/digest"
+        },
+        "projection_rule": {
+          "$ref": "#/$defs/semanticIdentity"
+        }
+      }
+    },
+    "refusedInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_id",
+        "refusal_id",
+        "code",
+        "reason"
+      ],
+      "properties": {
+        "input_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "refusal_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "code": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "reason": {
+          "$ref": "#/$defs/nonEmpty"
+        }
+      }
+    },
+    "failedInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expectation_id",
+        "failure_id",
+        "kind",
+        "reason"
+      ],
+      "properties": {
+        "expectation_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "failure_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "kind": {
+          "enum": [
+            "missing",
+            "no_response",
+            "acquisition_failed",
+            "unsupported"
+          ]
+        },
+        "reason": {
+          "$ref": "#/$defs/nonEmpty"
+        }
+      }
+    },
+    "excludedInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_id",
+        "projected_artifact_id",
+        "code",
+        "reason"
+      ],
+      "properties": {
+        "input_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "projected_artifact_id": {
+          "$ref": "#/$defs/digest"
+        },
+        "code": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "reason": {
+          "$ref": "#/$defs/nonEmpty"
+        }
+      }
+    },
+    "selectedInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_id",
+        "projected_artifact_id",
+        "role"
+      ],
+      "properties": {
+        "input_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "projected_artifact_id": {
+          "$ref": "#/$defs/digest"
+        },
+        "role": {
+          "$ref": "#/$defs/nonEmpty"
+        }
+      }
+    },
+    "inputAccounting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selection_rule",
+        "expected",
+        "received",
+        "admitted",
+        "refused",
+        "failed",
+        "excluded",
+        "selected"
+      ],
+      "properties": {
+        "selection_rule": {
+          "$ref": "#/$defs/semanticIdentity"
+        },
+        "expected": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/expectedInput"
+          }
+        },
+        "received": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/receivedInput"
+          }
+        },
+        "admitted": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/admittedInput"
+          }
+        },
+        "refused": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/refusedInput"
+          }
+        },
+        "failed": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/failedInput"
+          }
+        },
+        "excluded": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/excludedInput"
+          }
+        },
+        "selected": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/selectedInput"
+          }
+        }
+      }
+    },
+    "stateBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "binding_id",
+        "kind",
+        "value",
+        "supporting_input_ids"
+      ],
+      "properties": {
+        "binding_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "kind": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "value": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "supporting_input_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/nonEmpty"
+          }
+        }
+      }
+    },
+    "condition": {
+      "enum": [
+        "present",
+        "clean",
+        "explicitly_absent",
+        "unresolved",
+        "not_applicable"
+      ]
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "claim_id",
+        "proposition",
+        "status",
+        "dependency_input_ids",
+        "state_binding_ids",
+        "required_distinctions",
+        "limitations",
+        "nonclaims"
+      ],
+      "properties": {
+        "claim_id": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "proposition": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "status": {
+          "enum": [
+            "established",
+            "refuted",
+            "unknown",
+            "contradictory"
+          ]
+        },
+        "condition_effect": {
+          "$ref": "#/$defs/condition"
+        },
+        "dependency_input_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/nonEmpty"
+          }
+        },
+        "state_binding_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/nonEmpty"
+          }
+        },
+        "required_distinctions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/nonEmpty"
+          }
+        },
+        "limitations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/nonEmpty"
+          }
+        },
+        "nonclaims": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/nonEmpty"
+          }
+        }
+      }
+    },
+    "refusal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "reason"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "reason": {
+          "$ref": "#/$defs/nonEmpty"
+        }
+      }
+    },
+    "outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "derivation",
+        "condition",
+        "coherence",
+        "coverage",
+        "summary"
+      ],
+      "properties": {
+        "derivation": {
+          "enum": [
+            "completed",
+            "partial",
+            "refused",
+            "unsupported"
+          ]
+        },
+        "condition": {
+          "$ref": "#/$defs/condition"
+        },
+        "coherence": {
+          "enum": [
+            "jointly_established",
+            "pairwise_only",
+            "contradictory",
+            "state_incompatible",
+            "insufficient",
+            "not_evaluated"
+          ]
+        },
+        "coverage": {
+          "enum": [
+            "complete",
+            "partial",
+            "missing"
+          ]
+        },
+        "summary": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "refusal": {
+          "$ref": "#/$defs/refusal"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "derivation": {
+                "const": "refused"
+              }
+            },
+            "required": [
+              "derivation"
+            ]
+          },
+          "then": {
+            "required": [
+              "refusal"
+            ],
+            "properties": {
+              "condition": {
+                "const": "unresolved"
+              }
+            }
+          },
+          "else": {
+            "not": {
+              "required": [
+                "refusal"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "derivation": {
+                "const": "unsupported"
+              }
+            },
+            "required": [
+              "derivation"
+            ]
+          },
+          "then": {
+            "properties": {
+              "condition": {
+                "const": "unresolved"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "condition": {
+                "enum": [
+                  "clean",
+                  "explicitly_absent"
+                ]
+              }
+            },
+            "required": [
+              "condition"
+            ]
+          },
+          "then": {
+            "properties": {
+              "derivation": {
+                "const": "completed"
+              },
+              "coherence": {
+                "const": "jointly_established"
+              },
+              "coverage": {
+                "const": "complete"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "coherence": {
+                "enum": [
+                  "contradictory",
+                  "state_incompatible"
+                ]
+              }
+            },
+            "required": [
+              "coherence"
+            ]
+          },
+          "then": {
+            "properties": {
+              "condition": {
+                "const": "unresolved"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "limitation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "code",
+        "detail"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "projection_loss",
+            "missing_evidence",
+            "stale_evidence",
+            "state_mismatch",
+            "contradiction",
+            "coverage_gap",
+            "unverified_separation",
+            "unavailable_evidence",
+            "other"
+          ]
+        },
+        "code": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "detail": {
+          "$ref": "#/$defs/nonEmpty"
+        }
+      }
+    },
+    "omittedDistinction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "detail"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/nonEmpty"
+        },
+        "detail": {
+          "$ref": "#/$defs/nonEmpty"
+        }
+      }
+    },
+    "projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity",
+        "omitted_distinctions"
+      ],
+      "properties": {
+        "identity": {
+          "$ref": "#/$defs/semanticIdentity"
+        },
+        "omitted_distinctions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/omittedDistinction"
+          }
+        }
+      }
+    }
+  }
+}

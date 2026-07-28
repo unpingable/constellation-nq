@@ -1,0 +1,62 @@
+{
+  "schema": "nq.diagnostic_contract_assets.v1",
+  "digest_basis": "SHA-256 of exact file bytes; artifact_id is SHA-256 of RFC 8785 canonical artifact bytes with artifact_id omitted",
+  "contract": {
+    "schema": "nq.diagnostic_execution.v1",
+    "canonicalization": {
+      "id": "rfc8785-jcs",
+      "version": "1",
+      "digest": "sha256:e49d92d4e86052e66ed2a481b9386d3b214ce3d2df5fd109a6491ccb9ffb24f3"
+    },
+    "schema_path": "schemas/nq.diagnostic_execution.v1.schema.json",
+    "schema_sha256": "sha256:76d3ba3b74f7645a6f87c23094ceb089cd7fe238d9ab387b0d86c0bd53a57c93"
+  },
+  "documentation": {
+    "path": "README.md",
+    "sha256": "sha256:4b4dc83d2ad6701dcdc5a691425cff0cd87fc16de9b9091f8ede886a776cc85f"
+  },
+  "fixtures": [
+    {
+      "id": "positive",
+      "class": "valid",
+      "path": "fixtures/valid/positive.json",
+      "sha256": "sha256:89c7f685aa4aa717484dabe99b06e6ace9b8554f6e7be8e8b63fd9bf45df1545",
+      "artifact_id": "sha256:e9902caf4fcda034201f7ffea6442e692fd3ca110831d585c55d0eb81d8f8862",
+      "expected_disposition": "accepted"
+    },
+    {
+      "id": "provider_no_response",
+      "class": "valid",
+      "path": "fixtures/valid/provider_no_response.json",
+      "sha256": "sha256:0f423c64a49b108971f2c13c92553457bf2fb7c6ec050270a4587d7620bbe628",
+      "artifact_id": "sha256:2317140a92006ccff37cac92cb129e92c7d1205f0676457c364cc43055d80dab",
+      "expected_disposition": "accepted"
+    },
+    {
+      "id": "refused",
+      "class": "valid",
+      "path": "fixtures/valid/refused.json",
+      "sha256": "sha256:07680b2bada81225358a1203df2e67154ec3eccfc8a3c7225704d201ccdaaed3",
+      "artifact_id": "sha256:b47d3e5b82999221a31ffe18eaedf134bf3d69cd9cc9c09c5b4db5d3df1bc68c",
+      "expected_disposition": "accepted"
+    },
+    {
+      "id": "projection_collision_match",
+      "class": "hostile",
+      "path": "fixtures/hostile/projection_collision_match.json",
+      "sha256": "sha256:e70ebbf3d4745e063d33c664bf8063b2c56fc893f28a00b11215055264a4e609",
+      "artifact_id": "sha256:44d77dd1d806c7ff7be5d60b0b8437629ca1feeb20ff64859eeaa945f449ffc5",
+      "expected_disposition": "rejected_semantic_invariant",
+      "expected_error": "claim requires a distinction omitted by the projection"
+    },
+    {
+      "id": "projection_collision_mismatch",
+      "class": "hostile",
+      "path": "fixtures/hostile/projection_collision_mismatch.json",
+      "sha256": "sha256:74fda36f49652838a715e5c57dcecf27778963f27dbc3d2892a4a319118bb3cd",
+      "artifact_id": "sha256:6fb8b66b669181db8f592ceca3b159f1f2d300e24ce3608cf453ca71f9f55af1",
+      "expected_disposition": "rejected_semantic_invariant",
+      "expected_error": "claim requires a distinction omitted by the projection"
+    }
+  ]
+}

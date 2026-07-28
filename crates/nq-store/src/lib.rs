@@ -4518,6 +4518,32 @@ impl Store {
         Ok(())
     }
 
+    /// Return the sole immutable genesis identity of this initialized store.
+    ///
+    /// The diagnostic-execution producer uses this as its logical NQ node
+    /// generation.  It is deliberately a store-generation identity rather
+    /// than a hostname, path, process, or mutable configuration label.
+    pub fn sole_genesis_id(&self) -> Result<String, StoreError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT genesis_id FROM genesis_records ORDER BY genesis_id LIMIT 2")?;
+        let identities = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        match identities.as_slice() {
+            [identity] if !identity.is_empty() => Ok(identity.clone()),
+            [] => Err(StoreError::Invariant(
+                "initialized store has no genesis identity".into(),
+            )),
+            [_] => Err(StoreError::Invariant(
+                "initialized store has an empty genesis identity".into(),
+            )),
+            _ => Err(StoreError::Invariant(
+                "initialized store has more than one genesis identity".into(),
+            )),
+        }
+    }
+
     /// Append an opaque historical reference; it cannot create current finding state.
     pub fn append_legacy_reference(
         &mut self,
@@ -8616,6 +8642,47 @@ mod tests {
         let mut store = Store::initialize_in_memory().expect("store initializes");
         let profile_digest = append_fixture_descriptor(&mut store);
         (store, profile_digest)
+    }
+
+    #[test]
+    fn sole_genesis_identity_fails_closed_on_zero_or_multiple_records() {
+        let mut store = Store::initialize_in_memory().expect("store initializes");
+        assert!(
+            store
+                .sole_genesis_id()
+                .expect_err("a store without genesis cannot identify a node")
+                .to_string()
+                .contains("no genesis identity")
+        );
+
+        store
+            .append_genesis(&GenesisInput {
+                genesis_id: "genesis-a".to_owned(),
+                legacy_manifest_digest: None,
+                created_at: TIME.to_owned(),
+                detail: document(json!({"source": "test"})),
+            })
+            .expect("append first genesis");
+        assert_eq!(
+            store.sole_genesis_id().expect("one genesis is exact"),
+            "genesis-a"
+        );
+
+        store
+            .append_genesis(&GenesisInput {
+                genesis_id: "genesis-b".to_owned(),
+                legacy_manifest_digest: None,
+                created_at: TIME.to_owned(),
+                detail: document(json!({"source": "test"})),
+            })
+            .expect("append second genesis");
+        assert!(
+            store
+                .sole_genesis_id()
+                .expect_err("multiple genesis records cannot identify one node")
+                .to_string()
+                .contains("more than one genesis identity")
+        );
     }
 
     fn append_fixture_descriptor(store: &mut Store) -> String {
