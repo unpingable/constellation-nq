@@ -7,6 +7,7 @@
 pub mod admission;
 pub mod config;
 pub mod coordination;
+pub mod diagnostic_execution;
 pub mod engine;
 pub mod evaluator_identity;
 pub mod identity;
@@ -19,6 +20,19 @@ pub mod unix_runner;
 pub use admission::{AdmissionLock, AdmissionManager, AdmissionVerification};
 pub use config::{MAX_WATCHERS, NqConfig, WatcherConfig};
 pub use coordination::{CoordinationError, InstanceGuard};
+pub use diagnostic_execution::{
+    AcquisitionIntervalV1, AdmittedInputV1, DIAGNOSTIC_CANONICALIZATION_ID,
+    DIAGNOSTIC_EXECUTION_SCHEMA, DiagnosticArtifactId, DiagnosticClaimStatusV1, DiagnosticClaimV1,
+    DiagnosticCoherenceV1, DiagnosticConditionV1, DiagnosticCoverageV1, DiagnosticDerivationV1,
+    DiagnosticExecutionError, DiagnosticExecutionSchema, DiagnosticExecutionV1,
+    DiagnosticInputAccountingV1, DiagnosticLimitationKindV1, DiagnosticLimitationV1,
+    DiagnosticOutcomeV1, DiagnosticProducerV1, DiagnosticProjectionV1, DiagnosticRefusalV1,
+    DiagnosticRequestId, DiagnosticRunId, DiagnosticStateBindingV1, DiagnosticSubjectV1,
+    EvidenceAvailabilityV1, ExcludedInputV1, ExpectedInputV1, FailedInputV1, InputFailureKindV1,
+    NormalizedArtifactId, OmittedDistinctionV1, ProjectedArtifactId, RawArtifactId,
+    RawCaptureModeV1, ReceivedInputV1, RefusedInputV1, SelectedInputV1, SemanticIdentityV1,
+    diagnostic_canonicalization_identity,
+};
 pub use engine::{
     AcquisitionFailure, AcquisitionFailureClass, AcquisitionRefusal, AdmissionRefusal,
     AdmissionRefusalBoundary, AdmissionRefusalCode, AdmissionRefusalDetails,

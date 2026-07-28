@@ -365,8 +365,14 @@ No verdict is earned solely from source inspection when execution is possible.
 
 ## Immediate gate
 
-Stage 1 must finish with a green qualification record and a deployed-capability
-manifest. Host Operational Portrait v1 remains a candidate until the operator
-ratifies its exact requirements. Provider expansion, Prometheus integration,
-witness porting, application cohorts, and operator-surface implementation wait
-for that gate.
+Stage 1 and the operator ratification gate are complete. Host Operational
+Portrait v1 is the normative specification; neither subject has earned
+completeness. The five focused blocker-closure obligations remain open.
+
+The operator separately authorized the bounded
+[`NQ–Nightshift Stage 6 foundation`](../audit/nq-nightshift-stage6-foundation/CAMPAIGN.md)
+on 2026-07-27. That exception covers the canonical diagnostic-execution
+contract, hostile vectors, and the parallel receiver-side posture evaluator
+only. It does not authorize live engine conversion, general Stage 6 work,
+deployment, parallel qualification, notification, authority switch, or
+cutover.
