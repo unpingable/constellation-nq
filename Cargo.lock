@@ -687,8 +687,10 @@ dependencies = [
 name = "nq-host-role-runtime"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "ed25519-dalek",
  "hex",
+ "nix",
  "nq-host-role-contract",
  "nq-protocol",
  "nq-store",

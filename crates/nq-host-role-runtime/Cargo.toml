@@ -9,8 +9,10 @@ rust-version.workspace = true
 authors.workspace = true
 
 [dependencies]
+chrono.workspace = true
 ed25519-dalek.workspace = true
 hex.workspace = true
+nix = { workspace = true, features = ["time"] }
 nq-host-role-contract = { path = "../nq-host-role-contract" }
 nq-protocol = { path = "../nq-protocol" }
 nq-store = { path = "../nq-store" }

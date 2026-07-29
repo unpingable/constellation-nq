@@ -44,7 +44,8 @@ pub use dependency::{
 pub use inspector::{InspectorEntry, InspectorPage, InspectorProjection, InspectorProjectionState};
 pub(crate) use prelaunch::production_identity;
 pub use prelaunch::{
-    GovernedPrelaunchRequest, GovernedProductionIdentity, PreparedGovernedInvocation,
+    GovernedPrelaunchRequest, GovernedProductionIdentity, NativeDeadlinePrelaunchRequest,
+    NativeDeadlineProvenance, PreparedGovernedInvocation,
 };
 pub use runtime::{
     AppendDisposition as CustodyAppendDisposition, AppendRecord as CustodyRecord,
@@ -318,4 +319,35 @@ pub enum RuntimeError {
     /// Durable append returned a different checkpoint than the runtime opened.
     #[error("durable prelaunch checkpoint differs from the reopened frontier")]
     PrelaunchCheckpointMismatch,
+    /// A core custody transition named a launch other than the exact prepared
+    /// occurrence.
+    #[error("custody transition launch identity differs from the exact prepared launch")]
+    PreparedCustodyLaunchSubstitution,
+    /// The runtime could not read the exact Linux boot-id carrier.
+    #[error("runtime-owned deadline refused because Linux boot identity was unavailable")]
+    NativeDeadlineBootIdentityUnavailable,
+    /// Linux boot identity changed across the runtime-owned clock bracket.
+    #[error("runtime-owned deadline refused because Linux boot identity changed while sampling")]
+    NativeDeadlineBootIdentityChanged,
+    /// The exact Linux boot-id bytes were not the canonical procfs carrier.
+    #[error("runtime-owned deadline refused malformed Linux boot identity")]
+    NativeDeadlineBootIdentityMalformed,
+    /// One required native clock observation failed.
+    #[error("runtime-owned deadline refused because {0} was unavailable")]
+    NativeDeadlineClockUnavailable(&'static str),
+    /// One native clock observation could not be represented exactly.
+    #[error("runtime-owned deadline refused an invalid or overflowing {0} observation")]
+    NativeDeadlineClockInvalid(&'static str),
+    /// The runtime-owned deadline template exceeded the bounded carrier.
+    #[error("runtime-owned deadline policy is malformed or outside bounded representation")]
+    NativeDeadlinePolicyInvalid,
+    /// No unique cohort-named native clock qualification matched the launch.
+    #[error("runtime-owned deadline requires one exact cohort clock qualification")]
+    NativeDeadlineClockQualificationMissing,
+    /// The recomputed runtime-owned deadline refused the launch.
+    #[error("runtime-owned deadline evaluation refused launch: {0}")]
+    NativeDeadlineRefused(String),
+    /// Runtime-owned deadline provenance and the exact launch graph disagreed.
+    #[error("runtime-owned deadline provenance differs from the exact launch graph")]
+    NativeDeadlineProvenanceMismatch,
 }

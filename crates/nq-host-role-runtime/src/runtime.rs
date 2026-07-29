@@ -2,14 +2,17 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
     path::Path,
 };
 
+use chrono::{DateTime, Duration, SecondsFormat, Utc};
+use nix::time::{ClockId, clock_gettime};
 use nq_host_role_contract::{
-    ExternalRecordCatalog, IdentityCatalog, IdentityRef, RecordRef, RuntimeRecordSet,
-    RuntimeSchema, Token, ValidatedRuntimeRecord, ValidationContext,
+    ExternalRecordCatalog, IdentityCatalog, IdentityKind, IdentityRef, RecordRef, RuntimeRecordSet,
+    RuntimeSchema, Timestamp, Token, ValidatedRuntimeRecord, ValidationContext,
 };
-use nq_protocol::{Sha256Digest, sha256_bytes};
+use nq_protocol::{Sha256Digest, canonical_json_bytes, semantic_digest, sha256_bytes};
 use nq_store::{
     CanonicalDocument, GovernedCustodyInventoryEntry, GovernedCustodyReservation,
     GovernedProtectedFailureAccess, MAX_PUBLIC_QUERY_ROWS, RuntimeCheckpointDependencyBinding,
@@ -17,15 +20,17 @@ use nq_store::{
     RuntimeLedgerCheckpoint, RuntimeRecordAppendDisposition, RuntimeRecordBatchInput,
     RuntimeRecordInput, RuntimeRecordRow, Store, runtime_record_batch_digest,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::{
     ExternalDependencyAvailability, GovernedPrelaunchRequest, InspectorPage, InspectorProjection,
-    InspectorProjectionState, PreparedGovernedInvocation, Result, RuntimeDependencies,
-    RuntimeError, production_identity,
+    InspectorProjectionState, NativeDeadlinePrelaunchRequest, NativeDeadlineProvenance,
+    PreparedGovernedInvocation, Result, RuntimeDependencies, RuntimeError, production_identity,
 };
 
 const PROVIDER_INTAKE_SCHEMA: &str = "nq.provider_intake.v1";
+const LINUX_BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
+const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 /// One exact canonical record proposed for atomic append.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,6 +189,36 @@ struct GovernedPreflight {
     complete_records: RuntimeRecordSet,
 }
 
+struct NativeDeadlineSample {
+    realtime_before_ns: u64,
+    boottime_at_ns: u64,
+    realtime_after_ns: u64,
+    boot_epoch: Sha256Digest,
+}
+
+trait NativeDeadlineSource {
+    fn read_boot_id(&mut self) -> Result<Vec<u8>>;
+    fn realtime_ns(&mut self) -> Result<u64>;
+    fn boottime_ns(&mut self) -> Result<u64>;
+}
+
+struct LinuxNativeDeadlineSource;
+
+impl NativeDeadlineSource for LinuxNativeDeadlineSource {
+    fn read_boot_id(&mut self) -> Result<Vec<u8>> {
+        fs::read(LINUX_BOOT_ID_PATH)
+            .map_err(|_| RuntimeError::NativeDeadlineBootIdentityUnavailable)
+    }
+
+    fn realtime_ns(&mut self) -> Result<u64> {
+        linux_clock_ns(ClockId::CLOCK_REALTIME, "CLOCK_REALTIME")
+    }
+
+    fn boottime_ns(&mut self) -> Result<u64> {
+        linux_clock_ns(ClockId::CLOCK_BOOTTIME, "CLOCK_BOOTTIME")
+    }
+}
+
 /// Restart-safe host-role runtime over one schema-v7 [`Store`].
 pub struct HostRoleRuntime {
     store: Store,
@@ -287,11 +322,13 @@ impl HostRoleRuntime {
         self.provider_intakes.len()
     }
 
-    /// Return the exact physical custody frontiers classified during startup
-    /// or the most recent governed prelaunch.
+    /// Return the exact physical custody frontiers classified during startup.
     ///
     /// These entries are storage/recovery facts only. They do not resume work
-    /// or establish diagnostic outcomes.
+    /// or establish diagnostic outcomes. A newly prepared occurrence retains
+    /// its exclusive live custody handle, so it is inspected through
+    /// [`PreparedGovernedInvocation::live_custody_state`] rather than by
+    /// reopening the arena behind that handle.
     #[must_use]
     pub fn custody_frontiers(&self) -> &[GovernedCustodyInventoryEntry] {
         &self.custody_frontiers
@@ -422,12 +459,315 @@ impl HostRoleRuntime {
     ///
     /// Refuses graph, admission, identity, template, replay, or durable-custody
     /// failure. Exact replay never creates a second prepared invocation.
+    ///
+    /// This compatibility path does not earn runtime-owned native-deadline
+    /// provenance. Use [`Self::prepare_native_deadline_invocation`] when core
+    /// must receive an exact Linux boot epoch and `CLOCK_BOOTTIME` expiry.
     #[allow(clippy::needless_pass_by_value)]
     pub fn prepare_governed_invocation(
         &mut self,
         request: GovernedPrelaunchRequest,
     ) -> Result<PreparedGovernedInvocation> {
-        let preflight = self.preflight_governed(&request)?;
+        self.prepare_governed_invocation_inner(request, None)
+    }
+
+    /// Constructs and commits one launch from runtime-owned Linux clock and
+    /// boot-identity observations.
+    ///
+    /// The caller supplies no launch carrier, wall-clock launch timestamp,
+    /// monotonic observation, boot epoch, attempt deadline, or deadline
+    /// evaluation. The runtime requires the exact effective cohort to name one
+    /// typed native-clock qualification, brackets `CLOCK_BOOTTIME` with direct
+    /// `CLOCK_REALTIME` observations, binds the bracket to exact procfs
+    /// boot-id bytes, seals a deadline evaluation, derives the launch, and
+    /// commits both records in one launch checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Refuses before launch on graph, qualification, request-bound, boot-id,
+    /// clock, deadline, custody, or persistence failure.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn prepare_native_deadline_invocation(
+        &mut self,
+        request: NativeDeadlinePrelaunchRequest,
+    ) -> Result<PreparedGovernedInvocation> {
+        self.prepare_native_deadline_invocation_with_source(request, &mut LinuxNativeDeadlineSource)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn prepare_native_deadline_invocation_with_source(
+        &mut self,
+        request: NativeDeadlinePrelaunchRequest,
+        source: &mut impl NativeDeadlineSource,
+    ) -> Result<PreparedGovernedInvocation> {
+        if request.maximum_bracket_width_ns > MAX_SAFE_INTEGER
+            || request.bracket_policy.kind != IdentityKind::Policy
+            || request.reservation_custody.records.iter().any(|record| {
+                matches!(
+                    record.record_schema.as_str(),
+                    "nq.execution_launch.v1" | "nq.deadline_evaluation.v1"
+                )
+            })
+        {
+            return Err(RuntimeError::NativeDeadlinePolicyInvalid);
+        }
+
+        let candidate = self.validated_reservation_candidate(&request.reservation_custody)?;
+        let outer_request = required_record(
+            &candidate,
+            &request.outer_request_record_id,
+            RuntimeSchema::DiagnosticInvocationRequestV1,
+        )?;
+        let decision = required_record(
+            &candidate,
+            &request.invocation_decision_record_id,
+            RuntimeSchema::InvocationDecisionV1,
+        )?;
+        let reservation = required_record(
+            &candidate,
+            &request.custody_reservation_record_id,
+            RuntimeSchema::CustodyReservationV1,
+        )?;
+        if decision.record().as_value()["decision"] != "accepted"
+            || reservation.record().as_value()["decision"] != "reserved"
+        {
+            return Err(RuntimeError::PrelaunchNotAcceptedReservedLaunched);
+        }
+
+        let request_value = outer_request.record().as_value();
+        let reservation_value = reservation.record().as_value();
+        let activation_reference: RecordRef =
+            serde_json::from_value(reservation_value["activation"].clone())?;
+        let activation = exact_record(
+            &candidate,
+            &activation_reference,
+            RuntimeSchema::RuntimeActivationV1,
+        )?;
+        let clock_qualification =
+            exact_cohort_clock_qualification(&candidate, activation, outer_request)?;
+
+        let sample = sample_native_deadline(source)?;
+        let realtime_before = realtime_timestamp(sample.realtime_before_ns)?;
+        let realtime_after = realtime_timestamp(sample.realtime_after_ns)?;
+        let realtime_before_instant = Timestamp::parse(realtime_before.clone())?.instant();
+        let realtime_after_instant = Timestamp::parse(realtime_after.clone())?.instant();
+        let not_before =
+            Timestamp::parse(required_text(&request_value["time_bounds"], "not_before")?)?
+                .instant();
+        let request_deadline =
+            Timestamp::parse(required_text(&request_value["time_bounds"], "deadline")?)?.instant();
+        let maximum_execution_ms = request_value["time_bounds"]["maximum_execution_ms"]
+            .as_u64()
+            .ok_or(RuntimeError::NativeDeadlinePolicyInvalid)?;
+        let maximum_execution_ms_i64 = i64::try_from(maximum_execution_ms)
+            .map_err(|_| RuntimeError::NativeDeadlinePolicyInvalid)?;
+        let signed_bracket_ns = realtime_after_instant
+            .signed_duration_since(realtime_before_instant)
+            .num_nanoseconds()
+            .ok_or(RuntimeError::NativeDeadlineClockInvalid(
+                "CLOCK_REALTIME bracket",
+            ))?;
+        let bracket_width_ns = u64::try_from(signed_bracket_ns).unwrap_or(0);
+        if bracket_width_ns > MAX_SAFE_INTEGER {
+            return Err(RuntimeError::NativeDeadlineClockInvalid(
+                "CLOCK_REALTIME bracket",
+            ));
+        }
+        let attempt_deadline_instant = realtime_after_instant
+            .checked_add_signed(Duration::milliseconds(maximum_execution_ms_i64))
+            .ok_or(RuntimeError::NativeDeadlineClockInvalid(
+                "CLOCK_REALTIME deadline",
+            ))?;
+        let attempt_deadline = attempt_deadline_instant.to_rfc3339_opts(SecondsFormat::Nanos, true);
+        let boottime_expiry_ns = sample
+            .boottime_at_ns
+            .checked_add(maximum_execution_ms.checked_mul(1_000_000).ok_or(
+                RuntimeError::NativeDeadlineClockInvalid("CLOCK_BOOTTIME expiry"),
+            )?)
+            .ok_or(RuntimeError::NativeDeadlineClockInvalid(
+                "CLOCK_BOOTTIME expiry",
+            ))?;
+
+        let mut violations = Vec::new();
+        if signed_bracket_ns < 0 {
+            violations.push("realtime_bracket_reversed");
+        }
+        if request_deadline <= not_before {
+            violations.push("invalid_request_window");
+        }
+        if bracket_width_ns > request.maximum_bracket_width_ns {
+            violations.push("bracket_too_wide");
+        }
+        if realtime_after_instant < not_before {
+            violations.push("before_not_before");
+        }
+        if realtime_after_instant >= request_deadline {
+            violations.push("request_deadline_exhausted");
+        }
+        if attempt_deadline_instant > request_deadline {
+            violations.push("execution_budget_exceeds_request_deadline");
+        }
+
+        let mut deadline_value = json!({
+            "schema": "nq.deadline_evaluation.v1",
+            "evaluation_id": sha256_bytes(b"runtime-owned deadline identity placeholder"),
+            "namespace": request_value["namespace"],
+            "outer_request": outer_request.exact_reference(),
+            "activation": activation_reference,
+            "clock_qualification": clock_qualification,
+            "clock": request_value["time_bounds"]["clock"],
+            "request_bounds": {
+                "not_before": request_value["time_bounds"]["not_before"],
+                "deadline": request_value["time_bounds"]["deadline"],
+                "maximum_execution_ms": maximum_execution_ms,
+            },
+            "bracket_policy": {
+                "policy": request.bracket_policy,
+                "maximum_width_ns": request.maximum_bracket_width_ns,
+            },
+            "sample": {
+                "realtime_before": realtime_before,
+                "boottime_at_ns": sample.boottime_at_ns.to_string(),
+                "realtime_after": realtime_after,
+                "bracket_width_ns": bracket_width_ns,
+                "boot_epoch": sample.boot_epoch,
+            },
+            "derived": {
+                "launched_at": realtime_after,
+                "attempt_deadline": attempt_deadline,
+                "boottime_expiry_ns": boottime_expiry_ns.to_string(),
+            },
+            "decision": {
+                "state": if violations.is_empty() { "accepted" } else { "refused" },
+                "violations": violations,
+            },
+            "nonclaims": [
+                "does not reference or authorize an execution launch",
+                "does not establish source-evidence freshness or Nightshift currentness",
+                "does not grant reliance, authorization, or action",
+            ],
+        });
+        seal_semantic_identity(&mut deadline_value, "evaluation_id")?;
+        let deadline = ValidatedRuntimeRecord::validate_value(deadline_value)?;
+        let deadline_violations = deadline.record().as_value()["decision"]["violations"]
+            .as_array()
+            .expect("validated deadline violations");
+        if !deadline_violations.is_empty() {
+            let summary = deadline_violations
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(",");
+            return Err(RuntimeError::NativeDeadlineRefused(summary));
+        }
+
+        let deadline_reference = deadline.exact_reference();
+        let launched_at = deadline.record().as_value()["derived"]["launched_at"].clone();
+        let attempt_deadline = deadline.record().as_value()["derived"]["attempt_deadline"].clone();
+        let mut launch_value = json!({
+            "schema": "nq.execution_launch.v1",
+            "launch_id": sha256_bytes(b"runtime-owned launch identity placeholder"),
+            "namespace": request_value["namespace"],
+            "node": request_value["target"]["node"],
+            "outer_request": outer_request.exact_reference(),
+            "invocation_decision": decision.exact_reference(),
+            "activation_snapshot": activation.exact_reference(),
+            "custody_reservation": reservation.exact_reference(),
+            "profile": request_value["profile"],
+            "selected_witness_attachments":
+                request_value["expected_binding"]["witness_attachments"],
+            "prelaunch_checks": {
+                "authentication": request_value["authentication_evidence"],
+                "invocation_authorization": request_value["invocation_authorization"],
+                "generation_match": request.generation_match,
+                "deadline": deadline_reference,
+                "capability": request.capability,
+                "custody": reservation_value["reservation_commit"],
+            },
+            "launch_commit": request.launch_commit,
+            "launched_at": launched_at,
+            "attempt_deadline": attempt_deadline,
+            "maximum_execution_ms": maximum_execution_ms,
+            "clock": request_value["time_bounds"]["clock"],
+            "status": "launched",
+            "nonclaims": [
+                "launch does not establish diagnostic success",
+                "launch does not create recurrence or another invocation",
+            ],
+        });
+        seal_semantic_identity(&mut launch_value, "launch_id")?;
+        let launch = ValidatedRuntimeRecord::validate_value(launch_value)?;
+        let launch_reference = launch.exact_reference();
+        let checkpoint_id = semantic_digest(&json!({
+            "schema": "nq.runtime_owned_launch_checkpoint.v1",
+            "deadline_evaluation": deadline_reference,
+            "execution_launch": launch_reference,
+        }))?;
+        let committed_at = deadline.record().as_value()["derived"]["launched_at"]
+            .as_str()
+            .expect("validated launched_at")
+            .to_owned();
+        let provenance = NativeDeadlineProvenance {
+            evaluation: deadline.exact_reference(),
+            clock_qualification: clock_qualification.clone(),
+            boot_epoch: sample.boot_epoch,
+            boottime_observed_ns: sample.boottime_at_ns,
+            boottime_expiry_ns,
+        };
+        let governed = GovernedPrelaunchRequest {
+            reservation_custody: request.reservation_custody,
+            launch_custody: AppendRequest {
+                checkpoint_id: checkpoint_id.to_string(),
+                records: vec![
+                    AppendRecord::from_contract(&deadline, committed_at.clone()),
+                    AppendRecord::from_contract(&launch, committed_at),
+                ],
+            },
+            outer_request_record_id: request.outer_request_record_id,
+            invocation_decision_record_id: request.invocation_decision_record_id,
+            custody_reservation_record_id: request.custody_reservation_record_id,
+            execution_launch_record_id: launch.record_id().clone(),
+        };
+        self.prepare_governed_invocation_inner(governed, Some(provenance))
+    }
+
+    fn validated_reservation_candidate(
+        &self,
+        reservation: &AppendRequest,
+    ) -> Result<RuntimeRecordSet> {
+        let mut candidate = self.records.clone();
+        let mut provider_intakes = self.provider_intakes.clone();
+        let mut batch_records = RuntimeRecordSet::new();
+        for input in &reservation.records {
+            match Self::prepare_append_record(input)? {
+                PreparedRecord::Contract(record) => {
+                    candidate.insert(record.clone())?;
+                    batch_records.insert(record)?;
+                }
+                PreparedRecord::ProviderIntake(reference) => {
+                    provider_intakes.insert(reference.record_id.to_string(), reference);
+                }
+            }
+        }
+        self.dependencies
+            .validate_graph_dependencies(&batch_records)?;
+        let context = combined_historical_validation_context(
+            self.checkpoint_dependencies
+                .values()
+                .chain(std::iter::once(&self.dependencies)),
+            provider_intakes.values().cloned(),
+        )?;
+        candidate.validate(&context)?;
+        Ok(candidate)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn prepare_governed_invocation_inner(
+        &mut self,
+        request: GovernedPrelaunchRequest,
+        native_deadline: Option<NativeDeadlineProvenance>,
+    ) -> Result<PreparedGovernedInvocation> {
+        let preflight = self.preflight_governed(&request, native_deadline.as_ref())?;
         if self
             .rows_by_id
             .contains_key(request.execution_launch_record_id.as_str())
@@ -484,8 +824,6 @@ impl HostRoleRuntime {
             request.execution_launch_record_id.clone(),
             preflight.launched_at.clone(),
         )?;
-        drop(physical_custody);
-        self.custody_frontiers = self.store.governed_custody_inventory()?;
 
         Ok(PreparedGovernedInvocation {
             request_id: preflight.request_id,
@@ -501,14 +839,23 @@ impl HostRoleRuntime {
             dependencies: self.dependencies.clone(),
             dependency_custody_bytes,
             custody_reservation_spec: reservation_spec,
+            native_deadline,
+            live_custody: physical_custody,
         })
     }
 
     #[allow(clippy::too_many_lines)]
-    fn preflight_governed(&self, request: &GovernedPrelaunchRequest) -> Result<GovernedPreflight> {
-        if request.launch_custody.records.len() != 1
-            || request.launch_custody.records[0].record_id
-                != request.execution_launch_record_id.as_str()
+    fn preflight_governed(
+        &self,
+        request: &GovernedPrelaunchRequest,
+        native_deadline: Option<&NativeDeadlineProvenance>,
+    ) -> Result<GovernedPreflight> {
+        let expected_launch_record_count = if native_deadline.is_some() { 2 } else { 1 };
+        if request.launch_custody.records.len() != expected_launch_record_count
+            || !request.launch_custody.records.iter().any(|record| {
+                record.record_id == request.execution_launch_record_id.as_str()
+                    && record.record_schema == RuntimeSchema::ExecutionLaunchV1.as_str()
+            })
             || request
                 .reservation_custody
                 .records
@@ -516,6 +863,18 @@ impl HostRoleRuntime {
                 .any(|record| record.record_id == request.execution_launch_record_id.as_str())
         {
             return Err(RuntimeError::PrelaunchNotAcceptedReservedLaunched);
+        }
+        if let Some(native_deadline) = native_deadline
+            && (!request.launch_custody.records.iter().any(|record| {
+                record.record_id == native_deadline.evaluation.record_id.as_str()
+                    && record.record_schema == RuntimeSchema::DeadlineEvaluationV1.as_str()
+            }) || request
+                .reservation_custody
+                .records
+                .iter()
+                .any(|record| record.record_schema == RuntimeSchema::DeadlineEvaluationV1.as_str()))
+        {
+            return Err(RuntimeError::NativeDeadlineProvenanceMismatch);
         }
         let mut reservation_candidate = self.records.clone();
         let mut provider_intakes = self.provider_intakes.clone();
@@ -577,6 +936,43 @@ impl HostRoleRuntime {
             &request.execution_launch_record_id,
             RuntimeSchema::ExecutionLaunchV1,
         )?;
+        if let Some(native_deadline) = native_deadline {
+            let deadline = required_record(
+                &candidate,
+                &native_deadline.evaluation.record_id,
+                RuntimeSchema::DeadlineEvaluationV1,
+            )?;
+            if deadline.exact_reference() != native_deadline.evaluation
+                || launch.record().as_value()["prelaunch_checks"]["deadline"]
+                    != Value::from(native_deadline.evaluation.clone())
+                || deadline.record().as_value()["clock_qualification"]
+                    != Value::from(native_deadline.clock_qualification.clone())
+                || deadline.record().as_value()["sample"]["boot_epoch"]
+                    != native_deadline.boot_epoch.as_str()
+                || deadline.record().as_value()["sample"]["boottime_at_ns"].as_str()
+                    != Some(&native_deadline.boottime_observed_ns.to_string())
+                || deadline.record().as_value()["derived"]["boottime_expiry_ns"].as_str()
+                    != Some(&native_deadline.boottime_expiry_ns.to_string())
+                || deadline.record().as_value()["decision"]["state"] != "accepted"
+                || deadline.record().as_value()["decision"]["violations"]
+                    .as_array()
+                    .is_none_or(|violations| !violations.is_empty())
+            {
+                return Err(RuntimeError::NativeDeadlineProvenanceMismatch);
+            }
+            let selection = candidate.select_launch_correspondence(&launch.exact_reference())?;
+            if selection.launch() != &launch.exact_reference()
+                || selection.outer_request() != &outer_request.exact_reference()
+                || selection.activation()
+                    != &serde_json::from_value::<RecordRef>(
+                        launch.record().as_value()["activation_snapshot"].clone(),
+                    )?
+                || selection.native_clock_qualification() != &native_deadline.clock_qualification
+                || selection.deadline_evaluation() != &native_deadline.evaluation
+            {
+                return Err(RuntimeError::NativeDeadlineProvenanceMismatch);
+            }
+        }
         if decision.record().as_value()["decision"] != "accepted"
             || reservation.record().as_value()["decision"] != "reserved"
             || launch.record().as_value()["status"] != "launched"
@@ -1110,6 +1506,69 @@ impl HostRoleRuntime {
     }
 }
 
+fn linux_clock_ns(clock_id: ClockId, name: &'static str) -> Result<u64> {
+    let sample =
+        clock_gettime(clock_id).map_err(|_| RuntimeError::NativeDeadlineClockUnavailable(name))?;
+    let seconds = u64::try_from(sample.tv_sec())
+        .map_err(|_| RuntimeError::NativeDeadlineClockInvalid(name))?;
+    let nanoseconds = u64::try_from(sample.tv_nsec())
+        .map_err(|_| RuntimeError::NativeDeadlineClockInvalid(name))?;
+    if nanoseconds >= 1_000_000_000 {
+        return Err(RuntimeError::NativeDeadlineClockInvalid(name));
+    }
+    seconds
+        .checked_mul(1_000_000_000)
+        .and_then(|value| value.checked_add(nanoseconds))
+        .ok_or(RuntimeError::NativeDeadlineClockInvalid(name))
+}
+
+fn sample_native_deadline(source: &mut impl NativeDeadlineSource) -> Result<NativeDeadlineSample> {
+    let boot_before = source.read_boot_id()?;
+    validate_linux_boot_id(&boot_before)?;
+    let realtime_before_ns = source.realtime_ns()?;
+    let boottime_at_ns = source.boottime_ns()?;
+    let realtime_after_ns = source.realtime_ns()?;
+    let boot_after = source.read_boot_id()?;
+    validate_linux_boot_id(&boot_after)?;
+    if boot_before != boot_after {
+        return Err(RuntimeError::NativeDeadlineBootIdentityChanged);
+    }
+    Ok(NativeDeadlineSample {
+        realtime_before_ns,
+        boottime_at_ns,
+        realtime_after_ns,
+        boot_epoch: sha256_bytes(&boot_before),
+    })
+}
+
+fn validate_linux_boot_id(bytes: &[u8]) -> Result<()> {
+    let Some((uuid, suffix)) = bytes.split_last().map(|(last, prefix)| (prefix, *last)) else {
+        return Err(RuntimeError::NativeDeadlineBootIdentityMalformed);
+    };
+    if suffix != b'\n' || uuid.len() != 36 {
+        return Err(RuntimeError::NativeDeadlineBootIdentityMalformed);
+    }
+    for (index, byte) in uuid.iter().copied().enumerate() {
+        let expected_hyphen = matches!(index, 8 | 13 | 18 | 23);
+        if (expected_hyphen && byte != b'-')
+            || (!expected_hyphen && !matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return Err(RuntimeError::NativeDeadlineBootIdentityMalformed);
+        }
+    }
+    Ok(())
+}
+
+fn realtime_timestamp(nanoseconds: u64) -> Result<String> {
+    let seconds = i64::try_from(nanoseconds / 1_000_000_000)
+        .map_err(|_| RuntimeError::NativeDeadlineClockInvalid("CLOCK_REALTIME"))?;
+    let subsecond = u32::try_from(nanoseconds % 1_000_000_000)
+        .map_err(|_| RuntimeError::NativeDeadlineClockInvalid("CLOCK_REALTIME"))?;
+    DateTime::<Utc>::from_timestamp(seconds, subsecond)
+        .ok_or(RuntimeError::NativeDeadlineClockInvalid("CLOCK_REALTIME"))
+        .map(|timestamp| timestamp.to_rfc3339_opts(SecondsFormat::Nanos, true))
+}
+
 fn reopen_checkpoint_dependencies(
     store: &Store,
     checkpoint_id: &str,
@@ -1228,6 +1687,144 @@ fn required_record<'a>(
     Ok(record)
 }
 
+fn exact_record<'a>(
+    records: &'a RuntimeRecordSet,
+    reference: &RecordRef,
+    schema: RuntimeSchema,
+) -> Result<&'a ValidatedRuntimeRecord> {
+    let record = required_record(records, &reference.record_id, schema)?;
+    if record.exact_reference() != *reference {
+        return Err(RuntimeError::NativeDeadlineClockQualificationMissing);
+    }
+    Ok(record)
+}
+
+#[allow(clippy::too_many_lines)]
+fn exact_cohort_clock_qualification(
+    records: &RuntimeRecordSet,
+    activation: &ValidatedRuntimeRecord,
+    request: &ValidatedRuntimeRecord,
+) -> Result<RecordRef> {
+    let activation_value = activation.record().as_value();
+    let request_value = request.record().as_value();
+    let cohort_reference: RecordRef =
+        serde_json::from_value(activation_value["cohort_manifest"].clone())?;
+    let cohort = exact_record(
+        records,
+        &cohort_reference,
+        RuntimeSchema::StaticProfileCohortManifestV1,
+    )?;
+    let cohort_value = cohort.record().as_value();
+    let cohort_identity: IdentityRef = serde_json::from_value(cohort_value["cohort"].clone())?;
+    let cohort_generation = required_text(cohort_value, "generation")?;
+    let semantics_digest = cohort_semantics_digest(cohort_value)?;
+    let subject_platform_reference: RecordRef =
+        serde_json::from_value(activation_value["relations"]["subject_platform"].clone())?;
+    let subject_platform = exact_record(
+        records,
+        &subject_platform_reference,
+        RuntimeSchema::HostRoleRelationV1,
+    )?;
+    if subject_platform.record().as_value()["relation_kind"] != "subject_platform"
+        || subject_platform.record().as_value()["left"] != request_value["target"]["subject"]
+    {
+        return Err(RuntimeError::NativeDeadlineClockQualificationMissing);
+    }
+    let platform = &subject_platform.record().as_value()["right"];
+    let clock = &request_value["time_bounds"]["clock"];
+    let compatible_builds = cohort_value["compatible_builds"]
+        .as_array()
+        .ok_or(RuntimeError::NativeDeadlineClockQualificationMissing)?;
+    let qualification_references = cohort_value["qualification_records"]
+        .as_array()
+        .ok_or(RuntimeError::NativeDeadlineClockQualificationMissing)?;
+    let mut candidates = Vec::new();
+    for value in qualification_references {
+        let reference: RecordRef = serde_json::from_value(value.clone())?;
+        if reference.schema.as_str() != RuntimeSchema::NativeClockQualificationV1.as_str() {
+            continue;
+        }
+        let qualification = exact_record(
+            records,
+            &reference,
+            RuntimeSchema::NativeClockQualificationV1,
+        )?;
+        let value = qualification.record().as_value();
+        if value["namespace"] == cohort_value["namespace"]
+            && value["cohort"] == serde_json::to_value(&cohort_identity)?
+            && value["cohort_generation"] == cohort_generation
+            && value["cohort_semantics_digest"] == semantics_digest.as_str()
+            && value["production_clock"] == *clock
+            && value["platform"] == *platform
+            && compatible_builds
+                .iter()
+                .filter(|build| **build == value["production_build"])
+                .count()
+                == 1
+        {
+            candidates.push(qualification.exact_reference());
+        }
+    }
+    let [qualification] = candidates.as_slice() else {
+        return Err(RuntimeError::NativeDeadlineClockQualificationMissing);
+    };
+    Ok(qualification.clone())
+}
+
+fn cohort_semantics_digest(cohort: &Value) -> Result<Sha256Digest> {
+    let object = cohort
+        .as_object()
+        .ok_or(RuntimeError::NativeDeadlineClockQualificationMissing)?;
+    let mut body = serde_json::Map::new();
+    body.insert(
+        "semantic_schema".to_owned(),
+        Value::String("nq.static_profile_cohort_semantics.v1".to_owned()),
+    );
+    for field in [
+        "namespace",
+        "cohort",
+        "generation",
+        "effective_interval",
+        "members",
+        "compatible_builds",
+        "protocol_store_compatibility",
+        "nonclaims",
+    ] {
+        body.insert(
+            field.to_owned(),
+            object
+                .get(field)
+                .cloned()
+                .ok_or(RuntimeError::NativeDeadlineClockQualificationMissing)?,
+        );
+    }
+    Ok(semantic_digest(&Value::Object(body))?)
+}
+
+fn required_text<'a>(value: &'a Value, field: &'static str) -> Result<&'a str> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or(RuntimeError::NativeDeadlinePolicyInvalid)
+}
+
+fn seal_semantic_identity(value: &mut Value, identity_field: &'static str) -> Result<()> {
+    let object = value
+        .as_object_mut()
+        .ok_or(RuntimeError::NativeDeadlinePolicyInvalid)?;
+    object.remove(identity_field);
+    let identity = semantic_digest(&Value::Object(object.clone()))?;
+    object.insert(
+        identity_field.to_owned(),
+        Value::String(identity.to_string()),
+    );
+    let canonical = canonical_json_bytes(value)?;
+    if canonical.is_empty() {
+        return Err(RuntimeError::NativeDeadlinePolicyInvalid);
+    }
+    Ok(())
+}
+
 fn read_complete_ledger(
     store: &Store,
     checkpoint: Option<&RuntimeLedgerCheckpoint>,
@@ -1286,9 +1883,12 @@ mod tests {
     };
     use nq_protocol::{canonical_json_bytes, semantic_digest, sha256_bytes};
     use nq_store::{
-        GovernedCustodyInventoryEntry, GovernedCustodyRecoveryClass,
-        GovernedCustodyReservationLedgerBinding, GovernedCustodyState,
-        GovernedProtectedFailureAccess, Store,
+        GovernedAcquisitionCustodyInput, GovernedCustodyInventoryEntry,
+        GovernedCustodyRecoveryClass, GovernedCustodyReservationLedgerBinding,
+        GovernedCustodyState, GovernedDerivationCustodyClaim, GovernedProtectedFailureAccess,
+        GovernedProtectedTerminalClass, GovernedProtectedTerminalDeadlineCompliance,
+        GovernedProtectedTerminalDisposition, GovernedProtectedTerminalInput,
+        GovernedProtectedTerminalReason, Store,
     };
     use serde_json::{Map, Value, json};
     use tempfile::tempdir;
@@ -1313,6 +1913,16 @@ mod tests {
 
     #[allow(clippy::too_many_lines)]
     fn fixture() -> Fixture {
+        fixture_with_native_qualifications(false)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn native_fixture() -> Fixture {
+        fixture_with_native_qualifications(true)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn fixture_with_native_qualifications(include_native_qualifications: bool) -> Fixture {
         let document: Value = serde_json::from_str(RECORDS).expect("runtime contract specimen");
         let mut values = document["records"]
             .as_object()
@@ -1340,6 +1950,11 @@ mod tests {
             ],
         );
         values.retain(|name, _| original_closure.contains_key(name));
+        if include_native_qualifications {
+            let pre_qualification_refs = exact_runtime_refs(&values);
+            install_native_qualifications(&mut values);
+            stabilize_runtime_references(&mut values, pre_qualification_refs);
+        }
         let original_refs = exact_runtime_refs(&values);
         let external_inputs = replace_external_references(&mut values);
         stabilize_runtime_references(&mut values, original_refs);
@@ -1447,6 +2062,124 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
+    fn install_native_qualifications(values: &mut BTreeMap<String, Value>) {
+        let cohort = &values["cohort_manifest"];
+        let cohort_semantics_digest =
+            cohort_semantics_digest(cohort).expect("cohort semantics digest");
+        let namespace = cohort["namespace"].clone();
+        let cohort_identity = cohort["cohort"].clone();
+        let cohort_generation = cohort["generation"].clone();
+        let production_build = cohort["compatible_builds"][0].clone();
+        let production_profile = cohort["members"]["profiles"][0].clone();
+        let production_question = cohort["members"]["questions"][0].clone();
+        let qualification_evidence = cohort["qualification_records"][0].clone();
+        let production_clock = values["request"]["time_bounds"]["clock"].clone();
+        let platform = values["subject_platform_relation"]["right"].clone();
+        let mut profile = json!({
+            "schema": "nq.native_profile_qualification.v1",
+            "qualification_id": sha256_bytes(b"native profile placeholder"),
+            "namespace": namespace,
+            "cohort": cohort_identity,
+            "cohort_generation": cohort_generation,
+            "cohort_semantics_digest": cohort_semantics_digest,
+            "production_profile": production_profile,
+            "production_question": production_question,
+            "production_build": production_build,
+            "native_profile": {
+                "descriptor_schema": "nq.profile_descriptor.v1",
+                "profile_id": "nq.conformance",
+                "profile_version": 1,
+                "descriptor_digest": sha256_bytes(b"native profile descriptor"),
+                "semantic_identity_schema": "nq.profile_semantic_id.v1",
+                "semantic_identity_digest": sha256_bytes(b"native profile semantic identity"),
+                "evaluator_source_digest": sha256_bytes(b"native evaluator source"),
+                "helper_protocol_version": "nq.helper.v1",
+                "detector_closure": {
+                    "schema": "nq.detector_closure.v1",
+                    "identity_digest": sha256_bytes(b"native detector closure"),
+                    "detector_count": 0,
+                },
+            },
+            "native_evaluator": {
+                "artifact_digest": sha256_bytes(b"native evaluator artifact"),
+                "artifact_identity_method": "linux-proc-self-exe-fd-sha256-v1",
+                "target_triple": "x86_64-unknown-linux-gnu",
+            },
+            "qualification_evidence": [qualification_evidence],
+            "nonclaims": [
+                "relates production and native identities but does not equate them",
+                "does not establish invocation, reliance, authorization, or action",
+            ],
+        });
+        seal_semantic_identity(&mut profile, "qualification_id").expect("profile identity");
+        let profile = ValidatedRuntimeRecord::validate_value(profile).expect("profile qualifier");
+
+        let mut clock = json!({
+            "schema": "nq.native_clock_qualification.v1",
+            "qualification_id": sha256_bytes(b"native clock placeholder"),
+            "namespace": values["cohort_manifest"]["namespace"],
+            "cohort": values["cohort_manifest"]["cohort"],
+            "cohort_generation": values["cohort_manifest"]["generation"],
+            "cohort_semantics_digest": cohort_semantics_digest,
+            "production_clock": production_clock,
+            "production_build": values["cohort_manifest"]["compatible_builds"][0],
+            "platform": platform,
+            "absolute_time": {
+                "semantic_identity_digest": sha256_bytes(b"native CLOCK_REALTIME semantics"),
+                "observation_method": "clock_gettime-clock-realtime-v1",
+                "clock_id": "CLOCK_REALTIME",
+                "epoch": "unix",
+                "unit": "nanosecond",
+                "accuracy_qualification": {
+                    "status": "unqualified",
+                },
+            },
+            "boottime": {
+                "semantic_identity_digest": sha256_bytes(b"native CLOCK_BOOTTIME semantics"),
+                "observation_method": "clock_gettime-clock-boottime-v1",
+                "clock_id": "CLOCK_BOOTTIME",
+                "boot_epoch_binding_method": "linux-boot-id-v1",
+                "unit": "nanosecond",
+                "suspend_semantics": "includes_suspended_time",
+            },
+            "wall_to_monotonic_bridge": {
+                "semantic_identity_digest": sha256_bytes(b"native clock bracket semantics"),
+                "method": "realtime-boottime-bracket-v1",
+            },
+            "runner_watchdog": {
+                "method": "std-instant-v1",
+                "relation_to_governed_deadline": "auxiliary_non_equivalent",
+            },
+            "qualification_evidence": [
+                values["cohort_manifest"]["qualification_records"][0],
+            ],
+            "nonclaims": [
+                "UTC accuracy remains unqualified",
+                "does not establish cross-host clock coherence",
+                "runner watchdog is not the governed deadline",
+            ],
+        });
+        seal_semantic_identity(&mut clock, "qualification_id").expect("clock identity");
+        let clock = ValidatedRuntimeRecord::validate_value(clock).expect("clock qualifier");
+
+        values.get_mut("cohort_manifest").expect("cohort manifest")["qualification_records"]
+            .as_array_mut()
+            .expect("qualification records")
+            .extend([
+                Value::from(profile.exact_reference()),
+                Value::from(clock.exact_reference()),
+            ]);
+        values.insert(
+            "native_profile_qualification".to_owned(),
+            profile.record().as_value().clone(),
+        );
+        values.insert(
+            "native_clock_qualification".to_owned(),
+            clock.record().as_value().clone(),
+        );
+    }
+
     fn opaque_append(label: &str, committed_at: &str) -> AppendRequest {
         let canonical_bytes = canonical_json_bytes(&json!({
             "schema": PROVIDER_INTAKE_SCHEMA,
@@ -1472,6 +2205,549 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum ScriptedFailure {
+        FirstBootRead,
+        FirstRealtime,
+        Boottime,
+        SecondRealtime,
+        SecondBootRead,
+    }
+
+    struct ScriptedDeadlineSource {
+        realtime: [u64; 2],
+        boottime: u64,
+        boot_id: Vec<u8>,
+        changed_boot_id: Option<Vec<u8>>,
+        failure: Option<ScriptedFailure>,
+        realtime_reads: usize,
+        boot_reads: usize,
+    }
+
+    impl ScriptedDeadlineSource {
+        fn accepted() -> Self {
+            Self {
+                realtime: [
+                    realtime_ns("2026-07-28T22:02:02.000000000Z"),
+                    realtime_ns("2026-07-28T22:02:02.000001000Z"),
+                ],
+                boottime: 10_000_000_000_000_000,
+                boot_id: b"01234567-89ab-cdef-0123-456789abcdef\n".to_vec(),
+                changed_boot_id: None,
+                failure: None,
+                realtime_reads: 0,
+                boot_reads: 0,
+            }
+        }
+    }
+
+    impl NativeDeadlineSource for ScriptedDeadlineSource {
+        fn read_boot_id(&mut self) -> Result<Vec<u8>> {
+            let read = self.boot_reads;
+            self.boot_reads += 1;
+            if matches!(
+                (self.failure, read),
+                (Some(ScriptedFailure::FirstBootRead), 0)
+                    | (Some(ScriptedFailure::SecondBootRead), 1)
+            ) {
+                return Err(RuntimeError::NativeDeadlineBootIdentityUnavailable);
+            }
+            if read == 1
+                && let Some(changed) = &self.changed_boot_id
+            {
+                return Ok(changed.clone());
+            }
+            Ok(self.boot_id.clone())
+        }
+
+        fn realtime_ns(&mut self) -> Result<u64> {
+            let read = self.realtime_reads;
+            self.realtime_reads += 1;
+            if matches!(
+                (self.failure, read),
+                (Some(ScriptedFailure::FirstRealtime), 0)
+                    | (Some(ScriptedFailure::SecondRealtime), 1)
+            ) {
+                return Err(RuntimeError::NativeDeadlineClockUnavailable(
+                    "CLOCK_REALTIME",
+                ));
+            }
+            Ok(self.realtime[read])
+        }
+
+        fn boottime_ns(&mut self) -> Result<u64> {
+            if matches!(self.failure, Some(ScriptedFailure::Boottime)) {
+                return Err(RuntimeError::NativeDeadlineClockUnavailable(
+                    "CLOCK_BOOTTIME",
+                ));
+            }
+            Ok(self.boottime)
+        }
+    }
+
+    fn realtime_ns(value: &str) -> u64 {
+        u64::try_from(
+            Timestamp::parse(value)
+                .expect("timestamp")
+                .instant()
+                .timestamp_nanos_opt()
+                .expect("nanoseconds"),
+        )
+        .expect("positive realtime")
+    }
+
+    fn native_request(fixture: &Fixture) -> NativeDeadlinePrelaunchRequest {
+        let launch: Value =
+            serde_json::from_slice(&fixture.request.launch_custody.records[0].canonical_bytes)
+                .expect("generic launch");
+        let reservation = fixture
+            .request
+            .reservation_custody
+            .records
+            .iter()
+            .find(|record| {
+                record.record_id == fixture.request.custody_reservation_record_id.as_str()
+            })
+            .expect("reservation");
+        let reservation: Value =
+            serde_json::from_slice(&reservation.canonical_bytes).expect("reservation");
+        NativeDeadlinePrelaunchRequest {
+            reservation_custody: fixture.request.reservation_custody.clone(),
+            outer_request_record_id: fixture.request.outer_request_record_id.clone(),
+            invocation_decision_record_id: fixture.request.invocation_decision_record_id.clone(),
+            custody_reservation_record_id: fixture.request.custody_reservation_record_id.clone(),
+            generation_match: serde_json::from_value(
+                launch["prelaunch_checks"]["generation_match"].clone(),
+            )
+            .expect("generation check"),
+            capability: serde_json::from_value(launch["prelaunch_checks"]["capability"].clone())
+                .expect("capability check"),
+            launch_commit: serde_json::from_value(launch["launch_commit"].clone())
+                .expect("launch commit"),
+            bracket_policy: serde_json::from_value(reservation["calculation_rule"].clone())
+                .expect("bracket policy"),
+            maximum_bracket_width_ns: 100_000,
+        }
+    }
+
+    #[test]
+    fn native_deadline_is_runtime_owned_exact_and_supports_long_boottime() {
+        let fixture = native_fixture();
+        let directory = tempdir().expect("directory");
+        let database = directory.path().join("native-deadline.db");
+        let mut runtime =
+            HostRoleRuntime::initialize(&database, fixture.dependencies.clone()).expect("runtime");
+        let mut source = ScriptedDeadlineSource::accepted();
+        let prepared = runtime
+            .prepare_native_deadline_invocation_with_source(native_request(&fixture), &mut source)
+            .expect("runtime-owned deadline");
+        let provenance = prepared.native_deadline().expect("native provenance");
+        assert!(provenance.boottime_observed_ns() > MAX_SAFE_INTEGER);
+        assert_eq!(
+            provenance.boottime_expiry_ns(),
+            provenance.boottime_observed_ns() + 30_000_000_000
+        );
+        assert_eq!(
+            provenance.boot_epoch(),
+            &sha256_bytes(b"01234567-89ab-cdef-0123-456789abcdef\n")
+        );
+        assert_eq!(
+            prepared.live_custody_state().expect("live custody"),
+            GovernedCustodyState::LaunchClaimed
+        );
+
+        let snapshot = runtime.snapshot();
+        let deadline_row = runtime
+            .read_exact(&snapshot, provenance.evaluation().record_id.as_str())
+            .expect("deadline row");
+        let launch_row = runtime
+            .read_exact(&snapshot, prepared.execution_launch().record_id.as_str())
+            .expect("launch row");
+        let deadline: Value =
+            serde_json::from_slice(deadline_row.canonical_bytes.as_bytes()).expect("deadline JSON");
+        let launch: Value =
+            serde_json::from_slice(launch_row.canonical_bytes.as_bytes()).expect("launch JSON");
+        assert_eq!(
+            launch["prelaunch_checks"]["deadline"],
+            Value::from(provenance.evaluation().clone())
+        );
+        assert_eq!(
+            deadline["clock_qualification"],
+            Value::from(provenance.clock_qualification().clone())
+        );
+        assert_eq!(deadline["derived"]["launched_at"], launch["launched_at"]);
+        assert_eq!(
+            deadline["derived"]["attempt_deadline"],
+            launch["attempt_deadline"]
+        );
+        assert_eq!(
+            deadline["derived"]["boottime_expiry_ns"],
+            provenance.boottime_expiry_ns().to_string()
+        );
+        assert_eq!(
+            deadline_row.checkpoint_id, launch_row.checkpoint_id,
+            "deadline and launch commit atomically in the launch checkpoint"
+        );
+    }
+
+    #[test]
+    fn typed_deadline_submitted_through_generic_path_cannot_gain_native_provenance() {
+        let emitted_fixture = native_fixture();
+        let directory = tempdir().expect("directory");
+        let emitted_database = directory.path().join("emitted.db");
+        let mut emitted_runtime =
+            HostRoleRuntime::initialize(&emitted_database, emitted_fixture.dependencies.clone())
+                .expect("emitting runtime");
+        let mut source = ScriptedDeadlineSource::accepted();
+        let emitted = emitted_runtime
+            .prepare_native_deadline_invocation_with_source(
+                native_request(&emitted_fixture),
+                &mut source,
+            )
+            .expect("native emission");
+        let snapshot = emitted_runtime.snapshot();
+        let deadline = emitted_runtime
+            .read_exact(
+                &snapshot,
+                emitted
+                    .native_deadline()
+                    .expect("native deadline")
+                    .evaluation()
+                    .record_id
+                    .as_str(),
+            )
+            .expect("deadline row");
+        let launch = emitted_runtime
+            .read_exact(&snapshot, emitted.execution_launch().record_id.as_str())
+            .expect("launch row");
+        drop(emitted);
+
+        let supplied_fixture = native_fixture();
+        let mut generic = supplied_fixture.request;
+        generic.reservation_custody.records.push(AppendRecord {
+            record_id: deadline.record_id,
+            record_schema: deadline.record_schema,
+            canonical_bytes: deadline.canonical_bytes.as_bytes().to_vec(),
+            committed_at: deadline.committed_at,
+        });
+        generic.launch_custody.records = vec![AppendRecord {
+            record_id: launch.record_id.clone(),
+            record_schema: launch.record_schema,
+            canonical_bytes: launch.canonical_bytes.as_bytes().to_vec(),
+            committed_at: launch.committed_at,
+        }];
+        generic.execution_launch_record_id =
+            Sha256Digest::parse(launch.record_id).expect("launch identity");
+
+        let supplied_database = directory.path().join("supplied.db");
+        let mut supplied_runtime =
+            HostRoleRuntime::initialize(&supplied_database, supplied_fixture.dependencies)
+                .expect("supplied runtime");
+        let prepared = supplied_runtime
+            .prepare_governed_invocation(generic)
+            .expect("generic path may retain exact caller-supplied carrier");
+        assert!(
+            prepared.native_deadline().is_none(),
+            "only runtime-owned construction may mint native provenance"
+        );
+    }
+
+    #[test]
+    fn native_source_failures_refuse_before_any_launch_or_custody_commit() {
+        for (index, failure) in [
+            ScriptedFailure::FirstBootRead,
+            ScriptedFailure::FirstRealtime,
+            ScriptedFailure::Boottime,
+            ScriptedFailure::SecondRealtime,
+            ScriptedFailure::SecondBootRead,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let fixture = native_fixture();
+            let directory = tempdir().expect("directory");
+            let database = directory.path().join(format!("source-failure-{index}.db"));
+            let mut runtime = HostRoleRuntime::initialize(&database, fixture.dependencies.clone())
+                .expect("runtime");
+            let mut source = ScriptedDeadlineSource::accepted();
+            source.failure = Some(failure);
+            assert!(
+                runtime
+                    .prepare_native_deadline_invocation_with_source(
+                        native_request(&fixture),
+                        &mut source,
+                    )
+                    .is_err()
+            );
+            assert!(
+                runtime.snapshot().checkpoint.is_none(),
+                "source refusal cannot commit reservation or launch"
+            );
+            assert_eq!(runtime.contract_record_count(), 0);
+            assert!(
+                !database
+                    .with_file_name(format!("source-failure-{index}.db.nq-custody-v1"))
+                    .exists()
+            );
+        }
+
+        let fixture = native_fixture();
+        let directory = tempdir().expect("directory");
+        let database = directory.path().join("boot-rebind.db");
+        let mut runtime =
+            HostRoleRuntime::initialize(&database, fixture.dependencies.clone()).expect("runtime");
+        let mut source = ScriptedDeadlineSource::accepted();
+        source.changed_boot_id = Some(b"fedcba98-7654-3210-fedc-ba9876543210\n".to_vec());
+        assert!(matches!(
+            runtime.prepare_native_deadline_invocation_with_source(
+                native_request(&fixture),
+                &mut source,
+            ),
+            Err(RuntimeError::NativeDeadlineBootIdentityChanged)
+        ));
+        assert!(runtime.snapshot().checkpoint.is_none());
+    }
+
+    #[test]
+    fn exact_prepared_owns_terminal_authority_but_reopened_launch_does_not() {
+        let directory = tempdir().expect("directory");
+
+        let first = fixture();
+        let first_database = directory.path().join("owned-terminal.db");
+        let mut first_runtime =
+            HostRoleRuntime::initialize(&first_database, first.dependencies).expect("runtime");
+        let mut prepared = first_runtime
+            .prepare_governed_invocation(first.request)
+            .expect("prepared");
+        let launch_id = prepared.execution_launch().record_id.clone();
+        let substituted_launch = sha256_bytes(b"another exact launch occurrence");
+        let error = prepared
+            .terminalize_immediate_launch(GovernedProtectedTerminalInput {
+                execution_launch_record_id: substituted_launch,
+                terminal_class: GovernedProtectedTerminalClass::PreEffectRefusal,
+                reason: GovernedProtectedTerminalReason {
+                    code: "hostile.launch_substitution".to_owned(),
+                    detail: "a prepared occurrence cannot terminalize another launch".to_owned(),
+                },
+                launch_attempt_deadline: "2026-07-28T22:02:32Z".to_owned(),
+                terminalized_at: "2026-07-28T22:02:03Z".to_owned(),
+                deadline_compliance: GovernedProtectedTerminalDeadlineCompliance::WithinDeadline,
+            })
+            .expect_err("prepared occurrence is exact-launch bound");
+        assert!(matches!(
+            error,
+            RuntimeError::PreparedCustodyLaunchSubstitution
+        ));
+        assert_eq!(
+            prepared
+                .live_custody_state()
+                .expect("substitution leaves launch live"),
+            GovernedCustodyState::LaunchClaimed
+        );
+        let terminal_input = GovernedProtectedTerminalInput {
+            execution_launch_record_id: launch_id,
+            terminal_class: GovernedProtectedTerminalClass::PreEffectRefusal,
+            reason: GovernedProtectedTerminalReason {
+                code: "runtime.native_correspondence_refused".to_owned(),
+                detail: "exact prepared occurrence refused before provider effect".to_owned(),
+            },
+            launch_attempt_deadline: "2026-07-28T22:02:32Z".to_owned(),
+            terminalized_at: "2026-07-28T22:02:03Z".to_owned(),
+            deadline_compliance: GovernedProtectedTerminalDeadlineCompliance::WithinDeadline,
+        };
+        let terminalized = prepared
+            .terminalize_immediate_launch(terminal_input)
+            .expect("owned immediate terminal");
+        assert_eq!(
+            terminalized.disposition,
+            GovernedProtectedTerminalDisposition::Terminalized
+        );
+        assert_eq!(
+            prepared.live_custody_state().expect("terminal state"),
+            GovernedCustodyState::FailedIndeterminate
+        );
+
+        let second = fixture();
+        let second_database = directory.path().join("reopened-terminal.db");
+        let mut second_runtime =
+            HostRoleRuntime::initialize(&second_database, second.dependencies).expect("runtime");
+        let second_prepared = second_runtime
+            .prepare_governed_invocation(second.request)
+            .expect("prepared");
+        let reservation = second_prepared.custody_reservation_spec().clone();
+        let launch_id = second_prepared.execution_launch().record_id.clone();
+        drop(second_prepared);
+        drop(second_runtime);
+
+        let store = Store::open(&second_database).expect("store");
+        let mut reopened = store
+            .open_governed_custody(reservation)
+            .expect("reopened nonterminal launch");
+        let error = reopened
+            .terminalize_immediate_launch(GovernedProtectedTerminalInput {
+                execution_launch_record_id: launch_id,
+                terminal_class: GovernedProtectedTerminalClass::PreEffectRefusal,
+                reason: GovernedProtectedTerminalReason {
+                    code: "hostile.reopened_terminal".to_owned(),
+                    detail: "reopened custody must not mint no-further-execution authority"
+                        .to_owned(),
+                },
+                launch_attempt_deadline: "2026-07-28T22:02:32Z".to_owned(),
+                terminalized_at: "2026-07-28T22:02:03Z".to_owned(),
+                deadline_compliance: GovernedProtectedTerminalDeadlineCompliance::WithinDeadline,
+            })
+            .expect_err("reopened launch has no immediate terminal authority");
+        assert!(
+            error
+                .to_string()
+                .contains("reopened in-flight launch has no exact no-further-execution fence")
+        );
+        assert_eq!(
+            reopened.state().expect("still nonterminal"),
+            GovernedCustodyState::LaunchClaimed
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn prepared_custody_forwarders_preserve_exact_launch_and_transition_order() {
+        let fixture = fixture();
+        let directory = tempdir().expect("directory");
+        let database = directory.path().join("ordered-forwarders.db");
+        let mut runtime =
+            HostRoleRuntime::initialize(&database, fixture.dependencies).expect("runtime");
+        let mut prepared = runtime
+            .prepare_governed_invocation(fixture.request)
+            .expect("prepared");
+        let exact_launch = prepared.execution_launch().record_id.clone();
+        let reservation = prepared.custody_reservation_spec().clone();
+
+        let wrong_launch = sha256_bytes(b"foreign launch occurrence");
+        let error = prepared
+            .seal_acquisition(GovernedAcquisitionCustodyInput {
+                execution_launch_record_id: wrong_launch,
+                provider_intake_record_id: sha256_bytes(b"foreign provider intake"),
+                exact_provider_intake_bytes: b"{\"schema\":\"nq.provider_intake.v1\"}".to_vec(),
+                exact_raw_provider_bytes: b"foreign raw bytes".to_vec(),
+            })
+            .expect_err("another launch cannot use this prepared custody");
+        assert!(matches!(
+            error,
+            RuntimeError::PreparedCustodyLaunchSubstitution
+        ));
+
+        let claim = GovernedDerivationCustodyClaim {
+            derivation_id: sha256_bytes(b"ordered derivation"),
+            dependency_generation_id: reservation.dependency_generation_id.clone(),
+            dependency_generation_custody_digest: reservation
+                .dependency_generation_custody_digest
+                .clone(),
+            trust_anchor_id: reservation.trust_anchor_id.clone(),
+            evaluation_id: Some("evaluation-ordered".to_owned()),
+            profile_semantic_id: sha256_bytes(b"ordered profile semantics"),
+            evaluator_identity_digest: sha256_bytes(b"ordered evaluator identity"),
+            evaluator_artifact_digest: sha256_bytes(b"ordered evaluator artifact"),
+            derived_at: "2026-07-28T22:02:04Z".to_owned(),
+            clock_identity: sha256_bytes(b"ordered clock"),
+            clock_qualification_digest: semantic_digest(&json!({
+                "state": "unqualified",
+                "code": "ordered_test_unqualified",
+                "detail": "the ordered custody test establishes no finite UTC-error bound",
+            }))
+            .expect("clock qualification identity"),
+        };
+        assert!(
+            prepared.claim_derivation(claim.clone()).is_err(),
+            "derivation cannot skip acquisition custody"
+        );
+        assert!(
+            prepared
+                .seal_final_closure(b"not-a-closure".to_vec())
+                .is_err(),
+            "final closure cannot skip acquisition and derivation"
+        );
+        assert_eq!(
+            prepared.live_custody_state().expect("launch remains live"),
+            GovernedCustodyState::LaunchClaimed
+        );
+
+        let acquisition = prepared
+            .seal_acquisition(GovernedAcquisitionCustodyInput {
+                execution_launch_record_id: exact_launch.clone(),
+                provider_intake_record_id: sha256_bytes(b"ordered provider intake"),
+                exact_provider_intake_bytes: b"{\"schema\":\"nq.provider_intake.v1\"}".to_vec(),
+                exact_raw_provider_bytes: b"ordered raw bytes".to_vec(),
+            })
+            .expect("exact launch acquisition seals");
+        assert_eq!(acquisition.execution_launch_record_id, exact_launch);
+        assert_eq!(
+            prepared.live_custody_state().expect("acquisition state"),
+            GovernedCustodyState::AcquisitionSealed
+        );
+        assert!(
+            prepared
+                .seal_final_closure(b"still-not-a-closure".to_vec())
+                .is_err(),
+            "final closure cannot skip the derivation claim"
+        );
+        assert!(
+            prepared
+                .seal_acquisition(GovernedAcquisitionCustodyInput {
+                    execution_launch_record_id: exact_launch,
+                    provider_intake_record_id: sha256_bytes(b"second provider intake"),
+                    exact_provider_intake_bytes: b"{\"schema\":\"nq.provider_intake.v1\"}".to_vec(),
+                    exact_raw_provider_bytes: b"second raw bytes".to_vec(),
+                })
+                .is_err(),
+            "acquisition seals exactly once"
+        );
+        assert_eq!(
+            prepared
+                .live_custody_state()
+                .expect("failed skips preserve state"),
+            GovernedCustodyState::AcquisitionSealed
+        );
+
+        prepared
+            .claim_derivation(claim.clone())
+            .expect("derivation follows acquisition");
+        assert_eq!(
+            prepared.live_custody_state().expect("derivation state"),
+            GovernedCustodyState::DerivationClaimed
+        );
+        assert!(
+            prepared.claim_derivation(claim).is_err(),
+            "derivation claim is one-use"
+        );
+
+        let mut closure = json!({
+            "schema": "nq.governed_execution_custody_closure.v1",
+            "closure_id": sha256_bytes(b"placeholder closure"),
+        });
+        seal_semantic_identity(&mut closure, "closure_id").expect("closure identity");
+        let closure_bytes = canonical_json_bytes(&closure).expect("closure bytes");
+        prepared
+            .seal_final_closure(closure_bytes.clone())
+            .expect("final closure follows derivation");
+        assert_eq!(
+            prepared
+                .final_closure_bytes()
+                .expect("reopen closure")
+                .expect("closure present"),
+            closure_bytes
+        );
+        assert_eq!(
+            prepared.live_custody_state().expect("final state"),
+            GovernedCustodyState::FinalClosureIndexPending
+        );
+        assert!(
+            prepared
+                .seal_final_closure(b"second closure".to_vec())
+                .is_err(),
+            "final closure seals exactly once"
+        );
+    }
+
     #[test]
     fn governed_prelaunch_is_two_phase_physically_reserved_and_one_use() {
         let fixture = fixture();
@@ -1481,6 +2757,7 @@ mod tests {
         let mut runtime =
             HostRoleRuntime::initialize(&database, fixture.dependencies).expect("runtime");
         let request = fixture.request.clone();
+        let request_reservation_id = request.custody_reservation_record_id.clone();
         let prepared = runtime
             .prepare_governed_invocation(fixture.request)
             .expect("prepared invocation");
@@ -1490,12 +2767,8 @@ mod tests {
             prepared.reservation_checkpoint().last_record_sequence
                 < prepared.launch_checkpoint().first_record_sequence
         );
-        let custody_store = Store::open(&database).expect("custody store");
-        let custody = custody_store
-            .open_governed_custody(prepared.custody_reservation_spec().clone())
-            .expect("reopen custody");
         assert_eq!(
-            custody.state().expect("custody state"),
+            prepared.live_custody_state().expect("live custody state"),
             GovernedCustodyState::LaunchClaimed
         );
         assert_eq!(
@@ -1515,39 +2788,20 @@ mod tests {
                 .canonical_closure_bytes()
                 .expect("closure bytes")
         );
+        let reservation_spec = prepared.custody_reservation_spec().clone();
+        let dependency_custody_bytes = prepared.dependency_custody_bytes().to_vec();
+        drop(prepared);
+        let custody_store = Store::open(&database).expect("custody store");
+        let custody = custody_store
+            .open_governed_custody(reservation_spec)
+            .expect("reopen custody after exact prepared ownership ends");
         assert_eq!(
             custody
                 .dependency_closure_bytes()
                 .expect("physical dependency closure"),
-            prepared.dependency_custody_bytes()
+            dependency_custody_bytes
         );
         drop(custody);
-        let [GovernedCustodyInventoryEntry::Verified(frontier)] = runtime.custody_frontiers()
-        else {
-            panic!("one verified custody frontier");
-        };
-        assert_eq!(frontier.state, GovernedCustodyState::LaunchClaimed);
-        assert_eq!(
-            frontier.reservation_ledger_binding,
-            GovernedCustodyReservationLedgerBinding::Exact
-        );
-        assert_eq!(
-            frontier.recovery_class,
-            GovernedCustodyRecoveryClass::LaunchedWithoutAcquisition
-        );
-        assert_eq!(
-            frontier.reservation_record_id,
-            request.custody_reservation_record_id
-        );
-        assert_eq!(
-            runtime
-                .protected_failure(&frontier.reservation_record_id)
-                .expect("protected-failure read"),
-            GovernedProtectedFailureAccess::NotPresent {
-                arena_state: GovernedCustodyState::LaunchClaimed,
-            }
-        );
-        drop(prepared);
         assert!(matches!(
             runtime.prepare_governed_invocation(request),
             Err(RuntimeError::PrelaunchReplayCannotRerun)
@@ -1560,9 +2814,23 @@ mod tests {
         else {
             panic!("one verified startup frontier");
         };
+        assert_eq!(frontier.state, GovernedCustodyState::LaunchClaimed);
+        assert_eq!(
+            frontier.reservation_ledger_binding,
+            GovernedCustodyReservationLedgerBinding::Exact
+        );
         assert_eq!(
             frontier.recovery_class,
             GovernedCustodyRecoveryClass::LaunchedWithoutAcquisition
+        );
+        assert_eq!(frontier.reservation_record_id, request_reservation_id);
+        assert_eq!(
+            reopened
+                .protected_failure(&frontier.reservation_record_id)
+                .expect("protected-failure read"),
+            GovernedProtectedFailureAccess::NotPresent {
+                arena_state: GovernedCustodyState::LaunchClaimed,
+            }
         );
     }
 
@@ -1641,18 +2909,26 @@ mod tests {
         let database = directory.path().join("missing-arena.db");
         let mut runtime =
             HostRoleRuntime::initialize(&database, fixture.dependencies).expect("runtime");
-        runtime
+        let prepared = runtime
             .prepare_governed_invocation(fixture.request)
             .expect("prepared invocation");
-        let [GovernedCustodyInventoryEntry::Verified(frontier)] = runtime.custody_frontiers()
+        let reservation_manifest_digest = prepared
+            .custody_reservation_spec()
+            .reservation_manifest_digest
+            .clone();
+        drop(prepared);
+        drop(runtime);
+        let inventory_runtime =
+            HostRoleRuntime::open(&database, dependencies.clone()).expect("inventory runtime");
+        let [GovernedCustodyInventoryEntry::Verified(frontier)] =
+            inventory_runtime.custody_frontiers()
         else {
             panic!("one verified frontier");
         };
         let arena_path = database
             .with_file_name("missing-arena.db.nq-custody-v1")
             .join(&frontier.relative_path);
-        let reservation_manifest_digest = frontier.reservation_manifest_digest.clone();
-        drop(runtime);
+        drop(inventory_runtime);
         std::fs::remove_file(arena_path).expect("remove disposable arena specimen");
 
         let reopened =
@@ -2271,19 +3547,25 @@ mod tests {
     fn refresh_self_identity(value: &mut Value) {
         let schema = RuntimeSchema::parse(value["schema"].as_str().expect("schema"))
             .expect("runtime schema");
-        if schema != RuntimeSchema::DiagnosticInvocationRequestV1 {
+        if schema == RuntimeSchema::DiagnosticInvocationRequestV1 {
+            let mut preimage = value.clone();
+            let preimage = preimage.as_object_mut().expect("request object");
+            preimage.remove("request_digest");
+            preimage.remove("request_preimage_digest");
+            preimage.remove("invocation_authorization");
+            value["request_preimage_digest"] = Value::String(
+                semantic_digest(&Value::Object(preimage.clone()))
+                    .expect("request preimage")
+                    .to_string(),
+            );
+        } else if !matches!(
+            schema,
+            RuntimeSchema::NativeProfileQualificationV1
+                | RuntimeSchema::NativeClockQualificationV1
+                | RuntimeSchema::DeadlineEvaluationV1
+        ) {
             return;
         }
-        let mut preimage = value.clone();
-        let preimage = preimage.as_object_mut().expect("request object");
-        preimage.remove("request_digest");
-        preimage.remove("request_preimage_digest");
-        preimage.remove("invocation_authorization");
-        value["request_preimage_digest"] = Value::String(
-            semantic_digest(&Value::Object(preimage.clone()))
-                .expect("request preimage")
-                .to_string(),
-        );
         let object = value.as_object_mut().expect("runtime record object");
         object.remove(schema.record_id_field());
         let identity = semantic_digest(&Value::Object(object.clone())).expect("record identity");
