@@ -9,6 +9,12 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
+#[cfg(test)]
+use nq_host_role_contract::{
+    IdentityKind, IdentityRef, RecordRef, RuntimeSchema, ValidatedRuntimeRecord,
+};
+#[cfg(test)]
+use nq_host_role_runtime::PreparedGovernedInvocation;
 use nq_profiles::{
     DetectorInput, DetectorReport, DetectorState, EVALUATOR_SOURCE_DIGEST, EvidenceWatermark,
     ProfileModule, ProfileSemanticId, ReportInput as ProfileReportInput, ScopeGrant,
@@ -22,8 +28,7 @@ use nq_protocol::{
 use nq_store::{
     AdmissionIdentity, AdmissionInput, AdmittedCollectionCompletion, BindingEventInput,
     BindingMaterializationInput, CanonicalDocument, CollectionInput, CoverageInput,
-    DiagnosticArtifactByteState, DiagnosticArtifactCommitInput,
-    DiagnosticArtifactExecutionBindingInput, DiagnosticArtifactLocalOriginInput,
+    DiagnosticArtifactByteState, DiagnosticArtifactCommitInput, DiagnosticArtifactLocalOriginInput,
     DiagnosticArtifactLookup, DiagnosticArtifactOrigin, DiagnosticArtifactSchemaSupport,
     EvaluationCommitInput, EvaluationInput, EvaluationProfileBinding, EvidenceSnapshot,
     FindingEventInput, FindingEvidenceInput, FindingSnapshotRow, GenesisInput, ObservationInput,
@@ -113,6 +118,18 @@ pub enum EngineError {
     /// execution without losing required input distinctions.
     #[error("diagnostic execution unsupported: {0}")]
     DiagnosticUnsupported(String),
+    /// Test-only precursor refusal for native host-role correspondence checks.
+    ///
+    /// No production entry point may emit this until a refusal can terminalize
+    /// the already claimed custody occurrence.
+    #[cfg(test)]
+    #[error("governed diagnostic execution refused at {code:?}: {detail}")]
+    GovernedExecutionRefused {
+        /// Closed native seam check that refused.
+        code: GovernedExecutionRefusalCode,
+        /// Bounded operator-readable explanation.
+        detail: String,
+    },
     /// A strict identity token could not be constructed.
     #[error("invalid protocol identity: {0}")]
     Token(String),
@@ -135,6 +152,29 @@ pub enum EngineError {
     /// A typed acquisition failure returned by a dry watcher exchange.
     #[error("{0}")]
     AcquisitionFailed(Box<AcquisitionFailure>),
+}
+
+/// Test-only closed vocabulary for the native correspondence precursor.
+///
+/// The production API deliberately does not expose this seam while terminal
+/// custody and complete acquisition-plan correspondence remain unavailable.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GovernedExecutionRefusalCode {
+    /// A named immutable prelaunch record was absent or substituted.
+    PrelaunchRecordSubstitution,
+    /// The outer request occurrence differed.
+    OuterRequestSubstitution,
+    /// Node, subject, or vantage identity differed.
+    ProductionIdentitySubstitution,
+    /// The compiled and requested profiles differed.
+    ProfileIncompatible,
+    /// Clock identity or occurrence ordering differed.
+    ClockOrOccurrenceIncompatible,
+    /// The selected witness binding differed.
+    WitnessBindingMismatch,
+    /// Provider admission or provider/build correspondence differed.
+    ProviderAdmissionMismatch,
 }
 
 #[cfg(test)]
@@ -1765,38 +1805,10 @@ struct DiagnosticProductionIdentityV2 {
     cohort: SemanticIdentityV1,
 }
 
-/// Exact live inputs available when the engine has sealed a V2 artifact but
-/// has not yet committed its production binding.
-struct DiagnosticBindingSource<'a> {
-    /// Exact V2 artifact whose bytes and identity will be committed.
-    artifact: &'a DiagnosticExecutionV2,
-    /// Exact child provider-intake record retained by NQ.
-    provider_intake: &'a ProviderIntakeRecordV1,
-}
-
-/// Host-role callback that constructs the additive production identity
-/// companion without changing NQ's diagnostic artifact.
-///
-/// Implementations must return the complete runtime-ledger batch and linkage
-/// input. The store commits it atomically with the local artifact origin.
-trait DiagnosticExecutionBindingFactory {
-    /// Construct and validate the exact production binding.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed engine error when any required reference cannot be
-    /// resolved or the resulting closure would be incomplete.
-    fn build_execution_binding(
-        &self,
-        source: DiagnosticBindingSource<'_>,
-    ) -> Result<DiagnosticArtifactExecutionBindingInput, EngineError>;
-}
-
 #[derive(Clone)]
-struct DiagnosticInvocationContext<'a> {
+struct DiagnosticInvocationContext {
     request_id: Option<DiagnosticRequestId>,
     production: Option<DiagnosticProductionIdentityV2>,
-    binding_factory: Option<&'a dyn DiagnosticExecutionBindingFactory>,
 }
 
 #[derive(Debug)]
@@ -1817,30 +1829,25 @@ impl CollectionExecution {
     }
 }
 
+type DiagnosticCollectionPath = fn(
+    &mut CollectionEngine,
+    &WatcherConfig,
+    Option<&DiagnosticInvocationContext>,
+) -> Result<CollectionExecution, EngineError>;
+
+// Keep the closed diagnostic producer path typechecked as one implementation
+// unit while its only product entry remains deliberately withheld. Publishing
+// an invocation method before terminal custody exists would strand an already
+// claimed launch occurrence; this compile-time reference exposes no callable
+// API and performs no work.
+const _: DiagnosticCollectionPath = CollectionEngine::collect_internal;
+
 const INITIAL_DIAGNOSTIC_PROFILE_DIGEST: &str =
     "sha256:c8c10fed1cc5598d953b4defbc98e8c106fc59e035c249d43681698a5c7b4ff9";
 const INITIAL_DIAGNOSTIC_DETECTOR_ID: &str = "nq.host.load_pressure";
 const INITIAL_DIAGNOSTIC_DETECTOR_VERSION: u32 = 1;
 const INITIAL_DIAGNOSTIC_DETECTOR_DIGEST: &str =
     "sha256:7de797da3d9d3a6ae8e21e5d77b95095453336cd38f606ffb3eb29ff6a32e2cf";
-
-fn require_outer_diagnostic_request_id(
-    request_id: &DiagnosticRequestId,
-) -> Result<(), EngineError> {
-    let value = request_id.as_str();
-    if value.is_empty()
-        || value.len() > 255
-        || value
-            .bytes()
-            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
-    {
-        return Err(EngineError::Invariant(
-            "outer diagnostic request identity is empty, oversized, or contains whitespace"
-                .to_owned(),
-        ));
-    }
-    Ok(())
-}
 
 fn validate_diagnostic_production_identity(
     production: &DiagnosticProductionIdentityV2,
@@ -1878,6 +1885,357 @@ fn validate_diagnostic_production_identity(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+fn governed_refusal(code: GovernedExecutionRefusalCode, detail: impl Into<String>) -> EngineError {
+    EngineError::GovernedExecutionRefused {
+        code,
+        detail: detail.into(),
+    }
+}
+
+#[cfg(test)]
+fn governed_record<'a>(
+    prepared: &'a PreparedGovernedInvocation,
+    reference: &RecordRef,
+    expected_schema: RuntimeSchema,
+) -> Result<&'a ValidatedRuntimeRecord, EngineError> {
+    let record = prepared
+        .prelaunch_records()
+        .get(&reference.record_id)
+        .ok_or_else(|| {
+            governed_refusal(
+                GovernedExecutionRefusalCode::PrelaunchRecordSubstitution,
+                format!(
+                    "prepared invocation is missing {} {}",
+                    expected_schema.as_str(),
+                    reference.record_id
+                ),
+            )
+        })?;
+    if record.schema() != expected_schema || record.exact_reference() != *reference {
+        return Err(governed_refusal(
+            GovernedExecutionRefusalCode::PrelaunchRecordSubstitution,
+            format!(
+                "prepared invocation substituted exact {} {}",
+                expected_schema.as_str(),
+                reference.record_id
+            ),
+        ));
+    }
+    Ok(record)
+}
+
+#[cfg(test)]
+fn identity_ref_matches_semantic(
+    identity: &IdentityRef,
+    kind: IdentityKind,
+    expected: &SemanticIdentityV1,
+) -> bool {
+    identity.kind == kind
+        && identity.id.as_str() == expected.id
+        && identity.version.as_str() == expected.version
+        && identity.descriptor_digest == expected.digest
+}
+
+#[cfg(test)]
+fn native_execution_clock_identity() -> Result<SemanticIdentityV1, EngineError> {
+    semantic_identity(
+        "nq.local_linux_realtime",
+        "1",
+        &json!({
+            "schema": "nq.local_linux_realtime.v1",
+            "source": "CLOCK_REALTIME through chrono::Utc",
+            "relationship": "NQ bounds the local helper invocation; admitted source times must fall inside that interval",
+        }),
+    )
+}
+
+#[cfg(test)]
+fn validate_governed_clock_window(
+    request_clock: &IdentityRef,
+    launch_clock: &IdentityRef,
+    not_before: DateTime<Utc>,
+    request_deadline: DateTime<Utc>,
+    launched_at: DateTime<Utc>,
+    attempt_deadline: DateTime<Utc>,
+    acquisition_boundary: DateTime<Utc>,
+) -> Result<(), EngineError> {
+    let native_clock = native_execution_clock_identity()?;
+    if request_clock != launch_clock
+        || !identity_ref_matches_semantic(request_clock, IdentityKind::Clock, &native_clock)
+        || not_before > launched_at
+        || launched_at > acquisition_boundary
+        || acquisition_boundary >= attempt_deadline
+        || attempt_deadline > request_deadline
+    {
+        return Err(governed_refusal(
+            GovernedExecutionRefusalCode::ClockOrOccurrenceIncompatible,
+            "request and launch lack an applicable exact bridge to NQ's acquisition clock/window",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn validate_exact_provider_admission(
+    provider_admission_ref: &RecordRef,
+    provider_admission: &nq_store::LocalProviderAdmissionRow,
+    actual_provider_admission_id: &Sha256Digest,
+) -> Result<(), EngineError> {
+    if actual_provider_admission_id.as_str() != provider_admission.provider_admission_id
+        || provider_admission.contract_digest != provider_admission.provider_admission_id
+        || nq_protocol::sha256_bytes(&provider_admission.contract_json).as_str()
+            != provider_admission.provider_admission_id
+        || provider_admission_ref.schema.as_str() != nq_store::LOCAL_PROVIDER_ADMISSION_SCHEMA
+        || provider_admission_ref.record_id.as_str() != provider_admission.provider_admission_id
+        || provider_admission_ref.bytes_digest.as_str() != provider_admission.contract_digest
+    {
+        return Err(governed_refusal(
+            GovernedExecutionRefusalCode::ProviderAdmissionMismatch,
+            "selected witness does not name the exact NQ-derived local-provider admission",
+        ));
+    }
+    Ok(())
+}
+
+/// Apply the native NQ side of the governed-execution correspondence seam.
+///
+/// The host-role contract proves graph shape. This check separately binds that
+/// graph to the exact compiled profile, NQ clock, selected witness, and
+/// NQ-derived local-provider admission that would be used for the invocation.
+///
+/// This test-only precursor has no positive product path. It deliberately
+/// refuses after carrier matching because the ratified provider/build
+/// descriptor join is absent. It also does not yet close watcher instance,
+/// scope, capability, privilege, namespace, resource, command, and absolute
+/// deadline semantics; terminal custody must exist before any such refusal can
+/// consume a launched occurrence.
+#[allow(clippy::too_many_lines)]
+#[cfg(test)]
+#[allow(dead_code)]
+fn validate_governed_native_prelaunch(
+    prepared: &PreparedGovernedInvocation,
+    watcher: &WatcherConfig,
+    profile: &'static dyn ProfileModule,
+    profile_digest: &str,
+    provider: &VerifiedProvider,
+    provider_admission: &nq_store::LocalProviderAdmissionRow,
+) -> Result<(), EngineError> {
+    let request = governed_record(
+        prepared,
+        prepared.outer_request(),
+        RuntimeSchema::DiagnosticInvocationRequestV1,
+    )?;
+    let launch = governed_record(
+        prepared,
+        prepared.execution_launch(),
+        RuntimeSchema::ExecutionLaunchV1,
+    )?;
+    let request_value = request.record().as_value();
+    let launch_value = launch.record().as_value();
+    if request_value["request_id"].as_str() != Some(prepared.request_id())
+        || launch_value["outer_request"]
+            != serde_json::to_value(prepared.outer_request())
+                .map_err(|error| EngineError::Canonical(error.to_string()))?
+    {
+        return Err(governed_refusal(
+            GovernedExecutionRefusalCode::OuterRequestSubstitution,
+            "outer request identity or exact launch occurrence differs from the consumed token",
+        ));
+    }
+
+    let production = prepared.production_identity();
+    let request_node: IdentityRef = serde_json::from_value(request_value["target"]["node"].clone())
+        .map_err(|error| {
+            governed_refusal(
+                GovernedExecutionRefusalCode::ProductionIdentitySubstitution,
+                error.to_string(),
+            )
+        })?;
+    let request_subject: IdentityRef =
+        serde_json::from_value(request_value["target"]["subject"].clone()).map_err(|error| {
+            governed_refusal(
+                GovernedExecutionRefusalCode::ProductionIdentitySubstitution,
+                error.to_string(),
+            )
+        })?;
+    let request_vantage: IdentityRef =
+        serde_json::from_value(request_value["target"]["vantage"].clone()).map_err(|error| {
+            governed_refusal(
+                GovernedExecutionRefusalCode::ProductionIdentitySubstitution,
+                error.to_string(),
+            )
+        })?;
+    if &request_node != production.node()
+        || &request_subject != production.subject()
+        || &request_vantage != production.vantage()
+        || watcher.subject != production.subject().id.as_str()
+    {
+        return Err(governed_refusal(
+            GovernedExecutionRefusalCode::ProductionIdentitySubstitution,
+            "request, watcher, and prepared node/subject/vantage do not identify one occurrence",
+        ));
+    }
+
+    let requested_profile: IdentityRef = serde_json::from_value(request_value["profile"].clone())
+        .map_err(|error| {
+        governed_refusal(
+            GovernedExecutionRefusalCode::ProfileIncompatible,
+            error.to_string(),
+        )
+    })?;
+    let expected_profile = SemanticIdentityV1 {
+        id: watcher.profile.id.clone(),
+        version: watcher.profile.version.to_string(),
+        digest: Sha256Digest::parse(profile_digest.to_owned())
+            .map_err(|error| EngineError::Token(error.to_string()))?,
+    };
+    if !identity_ref_matches_semantic(
+        &requested_profile,
+        IdentityKind::DiagnosticProfile,
+        &expected_profile,
+    ) || profile.descriptor().profile.id != watcher.profile.id
+        || profile.descriptor().profile.version != watcher.profile.version
+    {
+        return Err(governed_refusal(
+            GovernedExecutionRefusalCode::ProfileIncompatible,
+            "outer request profile is not the exact compiled NQ profile selected by the watcher",
+        ));
+    }
+
+    let request_clock: IdentityRef =
+        serde_json::from_value(request_value["time_bounds"]["clock"].clone()).map_err(|error| {
+            governed_refusal(
+                GovernedExecutionRefusalCode::ClockOrOccurrenceIncompatible,
+                error.to_string(),
+            )
+        })?;
+    let launch_clock: IdentityRef =
+        serde_json::from_value(launch_value["clock"].clone()).map_err(|error| {
+            governed_refusal(
+                GovernedExecutionRefusalCode::ClockOrOccurrenceIncompatible,
+                error.to_string(),
+            )
+        })?;
+    let not_before = parse_timestamp(
+        request_value["time_bounds"]["not_before"]
+            .as_str()
+            .ok_or_else(|| {
+                governed_refusal(
+                    GovernedExecutionRefusalCode::ClockOrOccurrenceIncompatible,
+                    "outer request has no not-before instant",
+                )
+            })?,
+    )?;
+    let request_deadline = parse_timestamp(
+        request_value["time_bounds"]["deadline"]
+            .as_str()
+            .ok_or_else(|| {
+                governed_refusal(
+                    GovernedExecutionRefusalCode::ClockOrOccurrenceIncompatible,
+                    "outer request has no deadline",
+                )
+            })?,
+    )?;
+    let launched_at = parse_timestamp(launch_value["launched_at"].as_str().ok_or_else(|| {
+        governed_refusal(
+            GovernedExecutionRefusalCode::ClockOrOccurrenceIncompatible,
+            "execution launch has no launch instant",
+        )
+    })?)?;
+    let attempt_deadline =
+        parse_timestamp(launch_value["attempt_deadline"].as_str().ok_or_else(|| {
+            governed_refusal(
+                GovernedExecutionRefusalCode::ClockOrOccurrenceIncompatible,
+                "execution launch has no attempt deadline",
+            )
+        })?)?;
+    validate_governed_clock_window(
+        &request_clock,
+        &launch_clock,
+        not_before,
+        request_deadline,
+        launched_at,
+        attempt_deadline,
+        Utc::now(),
+    )?;
+
+    let selected = launch_value["selected_witness_attachments"]
+        .as_array()
+        .ok_or_else(|| {
+            governed_refusal(
+                GovernedExecutionRefusalCode::WitnessBindingMismatch,
+                "execution launch has no closed witness selection",
+            )
+        })?;
+    let [selected] = selected.as_slice() else {
+        return Err(governed_refusal(
+            GovernedExecutionRefusalCode::WitnessBindingMismatch,
+            "governed v2 execution requires exactly one selected witness",
+        ));
+    };
+    let selected: RecordRef = serde_json::from_value(selected.clone()).map_err(|error| {
+        governed_refusal(
+            GovernedExecutionRefusalCode::WitnessBindingMismatch,
+            error.to_string(),
+        )
+    })?;
+    let witness = governed_record(prepared, &selected, RuntimeSchema::WitnessAttachmentV1)?;
+    let witness_value = witness.record().as_value();
+    if witness_value["node"]
+        != serde_json::to_value(production.node())
+            .map_err(|error| EngineError::Canonical(error.to_string()))?
+        || !witness_value["supported_profiles"]
+            .as_array()
+            .is_some_and(|profiles| profiles.contains(&request_value["profile"]))
+    {
+        return Err(governed_refusal(
+            GovernedExecutionRefusalCode::WitnessBindingMismatch,
+            "selected witness does not bind the prepared node and exact requested profile",
+        ));
+    }
+
+    let provider_admission_ref: RecordRef =
+        serde_json::from_value(witness_value["provider_admission"].clone()).map_err(|error| {
+            governed_refusal(
+                GovernedExecutionRefusalCode::ProviderAdmissionMismatch,
+                error.to_string(),
+            )
+        })?;
+    validate_exact_provider_admission(
+        &provider_admission_ref,
+        provider_admission,
+        &provider.identity().provider_admission_id,
+    )?;
+    let declared_provider: IdentityRef = serde_json::from_value(witness_value["provider"].clone())
+        .map_err(|error| {
+            governed_refusal(
+                GovernedExecutionRefusalCode::ProviderAdmissionMismatch,
+                error.to_string(),
+            )
+        })?;
+    let declared_build: IdentityRef =
+        serde_json::from_value(witness_value["provider_build"].clone()).map_err(|error| {
+            governed_refusal(
+                GovernedExecutionRefusalCode::ProviderAdmissionMismatch,
+                error.to_string(),
+            )
+        })?;
+    Err(governed_refusal(
+        GovernedExecutionRefusalCode::ProviderAdmissionMismatch,
+        format!(
+            "exact provider-admission carrier {} matches NQ, but no ratified descriptor join maps attachment provider {}@{} and build {}@{} to native provider semantic identity {} and artifact {}",
+            provider_admission.provider_admission_id,
+            declared_provider.id,
+            declared_provider.version,
+            declared_build.id,
+            declared_build.version,
+            provider.identity().provider_semantic_id,
+            provider.identity().artifact_digest,
+        ),
+    ))
 }
 
 #[derive(Clone)]
@@ -2706,7 +3064,6 @@ impl CollectionEngine {
         let invocation = DiagnosticInvocationContext {
             request_id: None,
             production: None,
-            binding_factory: None,
         };
         let execution = self.collect_internal(watcher, Some(&invocation))?;
         execution.diagnostic.ok_or_else(|| {
@@ -2721,15 +3078,13 @@ impl CollectionEngine {
     fn collect_internal(
         &mut self,
         watcher: &WatcherConfig,
-        diagnostic_invocation: Option<&DiagnosticInvocationContext<'_>>,
+        diagnostic_invocation: Option<&DiagnosticInvocationContext>,
     ) -> Result<CollectionExecution, EngineError> {
         let emit_diagnostic = diagnostic_invocation.is_some();
         let diagnostic_request_id =
             diagnostic_invocation.and_then(|context| context.request_id.as_ref());
         let diagnostic_production =
             diagnostic_invocation.and_then(|context| context.production.as_ref());
-        let diagnostic_binding_factory =
-            diagnostic_invocation.and_then(|context| context.binding_factory);
         let _guard =
             InstanceGuard::acquire(&self.config.database_path, &watcher.instance_id, "collect")?;
         // Fail closed before any persistence: a collection stamps evaluator
@@ -2944,8 +3299,6 @@ impl CollectionEngine {
                 submission,
                 outcome,
                 diagnostic.as_ref(),
-                diagnostic_binding_factory,
-                Some(intake.record()),
             );
         }
 
@@ -3000,8 +3353,6 @@ impl CollectionEngine {
                     Some(submission),
                     outcome,
                     diagnostic.as_ref(),
-                    diagnostic_binding_factory,
-                    Some(intake.record()),
                 );
             }
             ProviderResponseInterpretationV1::Validated { response } => response,
@@ -3052,8 +3403,6 @@ impl CollectionEngine {
                     Some(submission),
                     outcome,
                     diagnostic.as_ref(),
-                    diagnostic_binding_factory,
-                    Some(intake.record()),
                 )
             }
             ResponseOutcome::Report { report } => {
@@ -3110,8 +3459,6 @@ impl CollectionEngine {
                             Some(submission),
                             outcome,
                             diagnostic.as_ref(),
-                            diagnostic_binding_factory,
-                            Some(intake.record()),
                         );
                     }
                 };
@@ -3172,8 +3519,6 @@ impl CollectionEngine {
                             Some(submission),
                             outcome,
                             diagnostic.as_ref(),
-                            diagnostic_binding_factory,
-                            Some(intake.record()),
                         )
                     }
                     Ok(validated) => {
@@ -3270,17 +3615,6 @@ impl CollectionEngine {
                                                     EngineError::Canonical(error.to_string())
                                                 })?,
                                             )?;
-                                        let execution_binding =
-                                            diagnostic_binding_factory
-                                                .map(|factory| {
-                                                    factory.build_execution_binding(
-                                                        DiagnosticBindingSource {
-                                                            artifact: &artifact,
-                                                            provider_intake: intake.record(),
-                                                        },
-                                                    )
-                                                })
-                                                .transpose()?;
                                         (
                                             Some(artifact_id.clone()),
                                             Some(DiagnosticArtifactCommitInput {
@@ -3300,7 +3634,7 @@ impl CollectionEngine {
                                                         completed_at: timestamp(
                                                             artifact.completed_at,
                                                         ),
-                                                        execution_binding,
+                                                        execution_binding: None,
                                                     },
                                             }),
                                         )
@@ -3922,7 +4256,6 @@ impl CollectionEngine {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)] // Keep the atomic collection/binding commit frontier explicit.
     fn commit_non_success_collection(
         &mut self,
         watcher: &WatcherConfig,
@@ -3931,8 +4264,6 @@ impl CollectionEngine {
         submission: Option<SubmissionInput>,
         outcome: CollectionOutcome,
         diagnostic: Option<&DiagnosticExecutionV2>,
-        binding_factory: Option<&dyn DiagnosticExecutionBindingFactory>,
-        provider_intake: Option<&ProviderIntakeRecordV1>,
     ) -> Result<CollectionExecution, EngineError> {
         let run_id = outcome.run_id.as_deref().ok_or_else(|| {
             EngineError::Invariant("non-success collection outcome has no run identity".into())
@@ -3947,21 +4278,6 @@ impl CollectionEngine {
         let result = RunResultStatusInput {
             run_id: run_id.to_owned(),
             status: instance_status_event(watcher, &outcome)?,
-        };
-        let execution_binding = match (diagnostic, binding_factory, provider_intake) {
-            (Some(artifact), Some(factory), Some(provider_intake)) => {
-                Some(factory.build_execution_binding(DiagnosticBindingSource {
-                    artifact,
-                    provider_intake,
-                })?)
-            }
-            (_, None, _) => None,
-            _ => {
-                return Err(EngineError::Invariant(
-                    "production binding factory, V2 artifact, and provider intake must be supplied together"
-                        .to_owned(),
-                ));
-            }
         };
         let artifact_commit = diagnostic
             .map(|artifact| {
@@ -3978,7 +4294,7 @@ impl CollectionEngine {
                         run_id: run_id.to_owned(),
                         evaluation_id: None,
                         completed_at: timestamp(artifact.completed_at),
-                        execution_binding,
+                        execution_binding: None,
                     },
                 })
             })
@@ -4704,6 +5020,55 @@ struct LocalV2HistoryContext {
     question: SemanticIdentityV1,
 }
 
+fn validate_provider_interpretation_derivation(
+    provider_intake: &ProviderIntakeRecordV1,
+    artifact: &DiagnosticExecutionV2,
+) -> Result<(), EngineError> {
+    let provider_refused = matches!(
+        &provider_intake.interpretation,
+        ProviderResponseInterpretationV1::ProtocolRejected { .. }
+            | ProviderResponseInterpretationV1::Validated {
+                response: nq_protocol::HelperResponse {
+                    outcome: ResponseOutcome::Refusal { .. },
+                    ..
+                },
+            }
+    );
+    if provider_refused
+        && (artifact.outcome.derivation != DiagnosticDerivationV1::Refused
+            || artifact
+                .claims
+                .iter()
+                .any(|claim| !matches!(claim.status, DiagnosticClaimStatusV1::Unknown))
+            || artifact.inputs.refused.iter().all(|input| {
+                artifact
+                    .inputs
+                    .received
+                    .iter()
+                    .find(|received| received.input_id == input.input_id)
+                    .is_none_or(|received| received.provider_intake_id != provider_intake.intake_id)
+            })
+            || !artifact.inputs.admitted.is_empty()
+            || !artifact.inputs.selected.is_empty())
+    {
+        return Err(EngineError::Invariant(format!(
+            "local v2 diagnostic artifact {} turns an explicit provider refusal into a determinate or admitted result",
+            artifact.artifact_id.0
+        )));
+    }
+    if matches!(
+        provider_intake.interpretation,
+        ProviderResponseInterpretationV1::NotAvailable
+    ) && artifact.outcome.derivation == DiagnosticDerivationV1::Completed
+    {
+        return Err(EngineError::Invariant(format!(
+            "local v2 diagnostic artifact {} turns provider no-response into a completed result",
+            artifact.artifact_id.0
+        )));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)]
 fn validate_local_v2_provider_correspondence(
     store: &Store,
@@ -5115,6 +5480,7 @@ fn validate_local_v2_provider_correspondence(
             )));
         }
     }
+    validate_provider_interpretation_derivation(&provider_intake, artifact)?;
     Ok(LocalV2HistoryContext {
         provider_intake,
         capture_policy,
@@ -7403,6 +7769,16 @@ fn admission_refusal_from_engine(
             AdmissionRefusalBoundary::Internal,
             AdmissionRefusalCode::InvariantViolation,
             AdmissionRefusalDetails::Invariant { message },
+        ),
+        #[cfg(test)]
+        EngineError::GovernedExecutionRefused { code, detail } => (
+            AdmissionRefusalBoundary::Internal,
+            AdmissionRefusalCode::InvariantViolation,
+            AdmissionRefusalDetails::Invariant {
+                message: format!(
+                    "test-only native correspondence precursor refused at {code:?}: {detail}"
+                ),
+            },
         ),
         EngineError::GovernedRefusal(refusal) => (
             fallback_boundary,
@@ -10688,6 +11064,40 @@ mod tests {
 
     use super::*;
 
+    fn test_runtime_dependency(label: &str) -> nq_store::RuntimeCheckpointDependencyInput {
+        let anchor = CanonicalDocument::from_serializable(&json!({
+            "schema": "nq.test_dependency_anchor.v1",
+            "label": label,
+        }))
+        .expect("test dependency anchor");
+        let trust_anchor_id =
+            Sha256Digest::parse(anchor.digest().to_owned()).expect("test anchor digest");
+        let generation = CanonicalDocument::from_serializable(&json!({
+            "schema": "nq.test_runtime_dependency_generation.v1",
+            "label": label,
+            "trust_anchor_id": trust_anchor_id,
+        }))
+        .expect("test dependency generation");
+        let dependency_generation_id =
+            Sha256Digest::parse(generation.digest().to_owned()).expect("test generation digest");
+        let canonical_custody = CanonicalDocument::from_serializable(&json!({
+            "schema": "nq.host_role_runtime_dependency_generation_custody.v1",
+            "generation_id": dependency_generation_id,
+            "generation_canonical_bytes": hex::encode(generation.as_bytes()),
+            "identity_catalog_canonical_bytes": "",
+            "external_dependency_canonical_bytes": "",
+            "authority_admission_canonical_bytes": "",
+            "trust_anchor_canonical_bytes": hex::encode(anchor.as_bytes()),
+            "admission_receipt_set_canonical_bytes": "",
+        }))
+        .expect("test dependency custody");
+        nq_store::RuntimeCheckpointDependencyInput {
+            dependency_generation_id,
+            trust_anchor_id,
+            canonical_custody,
+        }
+    }
+
     const SEMANTIC_TRANSPORT_HELPER: &str = r#"import datetime
 import json
 import os
@@ -12064,9 +12474,7 @@ sys.stdout.write("\n")
             submission,
         } = collection;
         let error = engine
-            .commit_non_success_collection(
-                &watcher, intake, run, submission, outcome, None, None, None,
-            )
+            .commit_non_success_collection(&watcher, intake, run, submission, outcome, None)
             .expect_err("mismatched source and result planes must fail before commit");
         assert!(matches!(
             error,
@@ -13203,6 +13611,125 @@ sys.stdout.write("\n")
     }
 
     #[test]
+    fn governed_clock_window_requires_one_exact_native_occurrence() {
+        let native_clock = native_execution_clock_identity().expect("native clock identity");
+        let clock = IdentityRef {
+            kind: IdentityKind::Clock,
+            id: nq_host_role_contract::IdentityId::parse(native_clock.id.clone())
+                .expect("clock identity"),
+            version: nq_host_role_contract::IdentityVersion::parse(native_clock.version.clone())
+                .expect("clock version"),
+            descriptor_digest: native_clock.digest,
+        };
+        let not_before = parse_timestamp("2026-07-29T12:00:00.000Z").expect("not before");
+        let launched_at = parse_timestamp("2026-07-29T12:00:01.000Z").expect("launch");
+        let acquisition = parse_timestamp("2026-07-29T12:00:02.000Z").expect("acquisition");
+        let attempt_deadline =
+            parse_timestamp("2026-07-29T12:00:03.000Z").expect("attempt deadline");
+        let request_deadline =
+            parse_timestamp("2026-07-29T12:00:04.000Z").expect("request deadline");
+
+        validate_governed_clock_window(
+            &clock,
+            &clock,
+            not_before,
+            request_deadline,
+            launched_at,
+            attempt_deadline,
+            acquisition,
+        )
+        .expect("one exact clock and ordered occurrence passes");
+
+        let mut substituted_clock = clock.clone();
+        substituted_clock.descriptor_digest =
+            nq_protocol::sha256_bytes(b"substituted-governed-clock");
+        assert!(matches!(
+            validate_governed_clock_window(
+                &clock,
+                &substituted_clock,
+                not_before,
+                request_deadline,
+                launched_at,
+                attempt_deadline,
+                acquisition,
+            ),
+            Err(EngineError::GovernedExecutionRefused {
+                code: GovernedExecutionRefusalCode::ClockOrOccurrenceIncompatible,
+                ..
+            })
+        ));
+        assert!(matches!(
+            validate_governed_clock_window(
+                &clock,
+                &clock,
+                not_before,
+                request_deadline,
+                launched_at,
+                attempt_deadline,
+                launched_at - Duration::milliseconds(1),
+            ),
+            Err(EngineError::GovernedExecutionRefused {
+                code: GovernedExecutionRefusalCode::ClockOrOccurrenceIncompatible,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn governed_provider_admission_requires_exact_nq_derived_carrier() {
+        let contract = CanonicalDocument::from_serializable(&json!({
+            "schema": nq_store::LOCAL_PROVIDER_ADMISSION_SCHEMA,
+            "source_admission_id": "admission:source",
+        }))
+        .expect("canonical provider admission");
+        let provider_admission_id =
+            Sha256Digest::parse(contract.digest().to_owned()).expect("provider admission digest");
+        let row = nq_store::LocalProviderAdmissionRow {
+            provider_admission_id: provider_admission_id.to_string(),
+            source_admission_id: "admission:source".to_owned(),
+            provider_semantic_id: "provider:semantic".to_owned(),
+            provider_artifact_digest: nq_protocol::sha256_bytes(b"provider-artifact").to_string(),
+            provider_protocol_identity: "nq.helper_protocol.v1".to_owned(),
+            provider_config_digest: nq_protocol::sha256_bytes(b"provider-config").to_string(),
+            contract_json: contract.as_bytes().to_vec(),
+            contract_digest: provider_admission_id.to_string(),
+            source_admitted_at: "2026-07-29T12:00:00.000Z".to_owned(),
+            derived_at: "2026-07-29T12:00:01.000Z".to_owned(),
+            derivation_kind: "nq_local_helper_provider".to_owned(),
+        };
+        let reference = RecordRef {
+            schema: nq_host_role_contract::Token::parse(nq_store::LOCAL_PROVIDER_ADMISSION_SCHEMA)
+                .expect("provider admission schema"),
+            record_id: provider_admission_id.clone(),
+            bytes_digest: provider_admission_id.clone(),
+        };
+
+        validate_exact_provider_admission(&reference, &row, &provider_admission_id)
+            .expect("exact NQ provider admission passes");
+
+        assert!(matches!(
+            validate_exact_provider_admission(
+                &reference,
+                &row,
+                &nq_protocol::sha256_bytes(b"other-provider-admission"),
+            ),
+            Err(EngineError::GovernedExecutionRefused {
+                code: GovernedExecutionRefusalCode::ProviderAdmissionMismatch,
+                ..
+            })
+        ));
+        let mut substituted_reference = reference;
+        substituted_reference.record_id = nq_protocol::sha256_bytes(b"substituted-provider-record");
+        assert!(matches!(
+            validate_exact_provider_admission(&substituted_reference, &row, &provider_admission_id,),
+            Err(EngineError::GovernedExecutionRefused {
+                code: GovernedExecutionRefusalCode::ProviderAdmissionMismatch,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)]
     fn production_history_uses_exact_execution_binding_not_current_topology() {
         fn digest(byte: char) -> String {
@@ -13459,11 +13986,16 @@ sys.stdout.write("\n")
         let directory = tempfile::tempdir().expect("store directory");
         let mut store =
             Store::initialize(directory.path().join("nq.db")).expect("runtime history store");
+        let runtime_dependency = test_runtime_dependency("production-history");
+        store
+            .establish_runtime_dependency_trust_root(&runtime_dependency.trust_anchor_id)
+            .expect("establish test runtime dependency root");
         store
             .append_runtime_records(&nq_store::RuntimeRecordBatchInput {
                 checkpoint_id: digest('c'),
                 expected_predecessor_checkpoint_id: None,
                 expected_predecessor_ledger_root: None,
+                dependency: runtime_dependency.clone(),
                 records: vec![
                     role.clone(),
                     node_subject.clone(),
@@ -13547,6 +14079,7 @@ sys.stdout.write("\n")
                 checkpoint_id: digest('0'),
                 expected_predecessor_checkpoint_id: Some(first_frontier.checkpoint_id),
                 expected_predecessor_ledger_root: Some(first_frontier.checkpoint_ledger_root),
+                dependency: runtime_dependency.clone(),
                 records: vec![
                     substituted_request,
                     later_vantage_relation,
@@ -13602,6 +14135,7 @@ sys.stdout.write("\n")
                 checkpoint_id: digest('5'),
                 expected_predecessor_checkpoint_id: Some(frontier.checkpoint_id),
                 expected_predecessor_ledger_root: Some(frontier.checkpoint_ledger_root),
+                dependency: runtime_dependency,
                 records: vec![hostile_binding_record],
             })
             .expect("append hostile binding");
@@ -13728,6 +14262,55 @@ sys.stdout.write("\n")
             artifact.inputs.received[0].raw_artifact_id.0,
             nq_protocol::sha256_bytes(&raw)
         );
+        let runs = engine
+            .store
+            .watcher_run_outcomes_bounded(10, None)
+            .expect("watcher run history");
+        let [run] = runs.as_slice() else {
+            panic!("exactly one watcher run");
+        };
+        let supported = SupportedDiagnosticExecution::V2(artifact.clone());
+        validate_local_v2_provider_correspondence(&engine.store, &supported, run, None)
+            .expect("native run, intake, time, and artifact correspondence passes");
+
+        let mut substituted_run = run.clone();
+        substituted_run.run_id = "run:substituted".to_owned();
+        assert!(matches!(
+            validate_local_v2_provider_correspondence(
+                &engine.store,
+                &supported,
+                &substituted_run,
+                None,
+            ),
+            Err(EngineError::Invariant(message))
+                if message.contains("substitutes provider-intake origin identity")
+        ));
+
+        let mut substituted_intake = artifact.clone();
+        substituted_intake.inputs.received[0].provider_intake_id = "intake:substituted".to_owned();
+        assert!(matches!(
+            validate_local_v2_provider_correspondence(
+                &engine.store,
+                &SupportedDiagnosticExecution::V2(substituted_intake),
+                run,
+                None,
+            ),
+            Err(EngineError::Invariant(message))
+                if message.contains("references missing provider intake")
+        ));
+
+        let mut backdated = artifact.clone();
+        backdated.started_at -= Duration::milliseconds(1);
+        assert!(matches!(
+            validate_local_v2_provider_correspondence(
+                &engine.store,
+                &SupportedDiagnosticExecution::V2(backdated),
+                run,
+                None,
+            ),
+            Err(EngineError::Invariant(message))
+                if message.contains("substitutes provider attempt timing")
+        ));
 
         let error = engine
             .diagnostic_execute(&watcher)
@@ -13900,6 +14483,31 @@ sys.stdout.write("\n")
         );
         assert!(artifact.claims.is_empty());
         assert!(artifact.primary_claim_id.is_none());
+        let intakes = engine
+            .store
+            .provider_intakes_bounded(10, None)
+            .expect("provider intake history");
+        let [intake_row] = intakes.as_slice() else {
+            panic!("one exact provider intake");
+        };
+        let exact_provider_bytes = engine
+            .store
+            .provider_intake_raw_bytes(&intake_row.intake_id)
+            .expect("provider raw custody")
+            .expect("provider raw bytes");
+        let intake = ProviderIntakeRecordV1::reopen_store_row(intake_row, &exact_provider_bytes)
+            .expect("exact provider intake reopens");
+        validate_provider_interpretation_derivation(&intake, &artifact)
+            .expect("provider refusal remains a diagnostic refusal");
+
+        let mut laundered = artifact.clone();
+        laundered.outcome.derivation = DiagnosticDerivationV1::Completed;
+        laundered.outcome.refusals.clear();
+        assert!(matches!(
+            validate_provider_interpretation_derivation(&intake, &laundered),
+            Err(EngineError::Invariant(message))
+                if message.contains("turns an explicit provider refusal")
+        ));
         let original = artifact.canonical_bytes().expect("canonical refusal bytes");
         let artifact_id = artifact.artifact_id.0.clone();
         validate_diagnostic_artifact_history(&engine.store)
@@ -13982,6 +14590,30 @@ sys.stdout.write("\n")
             artifact.primary_claim_id.as_deref(),
             Some(claim.claim_id.as_str())
         );
+        let intakes = engine
+            .store
+            .provider_intakes_bounded(10, None)
+            .expect("provider intake history");
+        let [intake_row] = intakes.as_slice() else {
+            panic!("one exact provider intake");
+        };
+        let exact_provider_bytes = engine
+            .store
+            .provider_intake_raw_bytes(&intake_row.intake_id)
+            .expect("provider raw custody")
+            .expect("explicit empty provider custody");
+        let intake = ProviderIntakeRecordV1::reopen_store_row(intake_row, &exact_provider_bytes)
+            .expect("exact provider intake reopens");
+        validate_provider_interpretation_derivation(&intake, &artifact)
+            .expect("provider no-response remains a partial diagnostic");
+
+        let mut laundered = artifact.clone();
+        laundered.outcome.derivation = DiagnosticDerivationV1::Completed;
+        assert!(matches!(
+            validate_provider_interpretation_derivation(&intake, &laundered),
+            Err(EngineError::Invariant(message))
+                if message.contains("turns provider no-response into a completed result")
+        ));
         let original = artifact.canonical_bytes().expect("canonical failure bytes");
         let artifact_id = artifact.artifact_id.0.clone();
         validate_diagnostic_artifact_history(&engine.store)

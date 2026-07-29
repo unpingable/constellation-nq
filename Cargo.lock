@@ -631,6 +631,8 @@ dependencies = [
  "libc",
  "nix",
  "nq-helper-sandbox",
+ "nq-host-role-contract",
+ "nq-host-role-runtime",
  "nq-profiles",
  "nq-protocol",
  "nq-store",
