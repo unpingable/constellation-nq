@@ -9,8 +9,17 @@ skunkworks decision:
 - path `audits/nq-host-role-runtime-contract-v1`.
 
 The package embeds and hashes the exact 26 primary schemas plus
-`nq.host_role_common.v1`. It also carries a mechanically generated 50-record
-specimen from that decision and replays it in the Rust conformance suite.
+`nq.host_role_common.v1`. It also carries a 50-record implementation-era
+derivative of the decision specimen and replays it in the Rust conformance
+suite. The derivative corrects one defect in the 3A specimen: an authorization
+for a quarantined restore is represented as `begin_restore`, not
+`complete_restore`. The immutable 3A source remains historical evidence; the
+correction changes no ratified contract law and is identified independently as
+`nq.host_role_runtime_specimen.implementation_corrected.v1`, with exact SHA-256
+`sha256:263f9ccf4a0de93762188b49701f3da88a87e1d49e6c2a86f6104ba92261d774`.
+The embedded asset therefore does not claim byte-exact fixture correspondence
+to commit `d8aba7b…`.
+
 Every carrier is executed against the embedded JSON Schema as well as the
 closed Rust semantic checks. A vocabulary meta-test refuses future embedded
 schema keywords, formats, or patterns that the local executor does not

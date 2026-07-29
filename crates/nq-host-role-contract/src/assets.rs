@@ -15,6 +15,15 @@ pub const CONTRACT_SOURCE_TREE: &str = "b88a7a9ad380ed770d936f54f6da7eef1a9a15fe
 pub const CONTRACT_SOURCE_PATH: &str = "audits/nq-host-role-runtime-contract-v1";
 
 const MANIFEST_BYTES: &[u8] = include_bytes!("../assets/manifest.json");
+const CORRECTED_SPECIMEN_BYTES: &[u8] =
+    include_bytes!("../assets/host-role-runtime-records.v1.json");
+
+/// Independent identity of the implementation-era corrected specimen.
+pub const CORRECTED_SPECIMEN_IDENTITY: &str =
+    "nq.host_role_runtime_specimen.implementation_corrected.v1";
+/// SHA-256 of the exact corrected specimen bytes embedded by this package.
+pub const CORRECTED_SPECIMEN_SHA256: &str =
+    "sha256:263f9ccf4a0de93762188b49701f3da88a87e1d49e6c2a86f6104ba92261d774";
 
 /// Package provenance record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +132,31 @@ pub fn verified_package_manifest() -> Result<ContractPackageManifest> {
         return Err(ContractError::AssetManifestSubstitution);
     }
     Ok(manifest)
+}
+
+/// Verifies and returns the implementation-era corrected fixture.
+///
+/// This fixture is derived from the 3A decision specimen but is not claimed to
+/// be byte-identical to it. Its correction record preserves that distinction.
+///
+/// # Errors
+///
+/// Refuses digest, identity, source, or correction-record substitution.
+pub fn verified_corrected_specimen() -> Result<&'static [u8]> {
+    if sha256_bytes(CORRECTED_SPECIMEN_BYTES).as_str() != CORRECTED_SPECIMEN_SHA256 {
+        return Err(ContractError::AssetManifestSubstitution);
+    }
+    let value: serde_json::Value = serde_json::from_slice(CORRECTED_SPECIMEN_BYTES)?;
+    if value["derivative_identity"] != CORRECTED_SPECIMEN_IDENTITY
+        || value["normative_source_commit"] != CONTRACT_SOURCE_COMMIT
+        || value["correction_record"]["normative_effect"]
+            != "none; ratified contract law is unchanged"
+        || value["correction_record"]["source_specimen_status"]
+            != "3A source specimen defect remains preserved in immutable history"
+    {
+        return Err(ContractError::AssetManifestSubstitution);
+    }
+    Ok(CORRECTED_SPECIMEN_BYTES)
 }
 
 pub(crate) fn embedded_schema_bytes(schema: &str) -> Option<&'static [u8]> {

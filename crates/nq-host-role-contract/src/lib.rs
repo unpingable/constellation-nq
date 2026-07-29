@@ -16,8 +16,9 @@ mod record;
 mod schema;
 
 pub use assets::{
-    CONTRACT_SOURCE_COMMIT, CONTRACT_SOURCE_PATH, CONTRACT_SOURCE_TREE, ContractPackageManifest,
-    ContractSource, SchemaAsset, verified_package_manifest,
+    CONTRACT_SOURCE_COMMIT, CONTRACT_SOURCE_PATH, CONTRACT_SOURCE_TREE,
+    CORRECTED_SPECIMEN_IDENTITY, CORRECTED_SPECIMEN_SHA256, ContractPackageManifest,
+    ContractSource, SchemaAsset, verified_corrected_specimen, verified_package_manifest,
 };
 pub use graph::{ExternalRecordCatalog, RuntimeRecordSet, ValidationContext};
 pub use identity::{

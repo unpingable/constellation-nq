@@ -1,20 +1,22 @@
-//! Conformance and hostile tests against the exact ratified 3A specimen.
+//! Conformance and hostile tests against the identified corrected derivative.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use nq_host_role_contract::{
-    CONTRACT_SOURCE_COMMIT, ContractError, ExternalRecordCatalog, IdentityCatalog, IdentityRef,
-    RecordRef, RuntimeRecordSet, RuntimeSchema, ValidatedRuntimeRecord, ValidationContext,
+    CONTRACT_SOURCE_COMMIT, CORRECTED_SPECIMEN_IDENTITY, CORRECTED_SPECIMEN_SHA256, ContractError,
+    ExternalRecordCatalog, IdentityCatalog, IdentityRef, RecordRef, RuntimeRecordSet,
+    RuntimeSchema, ValidatedRuntimeRecord, ValidationContext, verified_corrected_specimen,
     verified_package_manifest,
 };
 use nq_protocol::{Sha256Digest, canonical_json_bytes, semantic_digest, sha256_bytes};
 use serde_json::{Value, json};
 
-const RECORDS: &str = include_str!("../assets/host-role-runtime-records.v1.json");
-
 fn specimen() -> (BTreeMap<String, Value>, RuntimeRecordSet, ValidationContext) {
-    let fixture: Value = serde_json::from_str(RECORDS).expect("embedded specimen is JSON");
-    assert_eq!(fixture["source_commit"], CONTRACT_SOURCE_COMMIT);
+    let exact = verified_corrected_specimen().expect("corrected specimen provenance");
+    assert_eq!(sha256_bytes(exact).as_str(), CORRECTED_SPECIMEN_SHA256);
+    let fixture: Value = serde_json::from_slice(exact).expect("embedded specimen is JSON");
+    assert_eq!(fixture["derivative_identity"], CORRECTED_SPECIMEN_IDENTITY);
+    assert_eq!(fixture["normative_source_commit"], CONTRACT_SOURCE_COMMIT);
     let records = fixture["records"]
         .as_object()
         .expect("fixture records are an object");
