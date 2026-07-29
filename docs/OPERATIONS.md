@@ -8,10 +8,12 @@ database, admits a helper, migrates data, enables the service, or starts it.
 The walkthrough below uses the one-shot `stdio` conformance specimen; the same
 protocol exchange is also supported by a supervised persistent `unix` helper
 carrier with private sockets and peer-credential checks. The preview includes
-compiled profiles, admission locks, explicit collection, a resident scheduler,
-SQLite schema v5, verified SQLite backup/restore, exact qualified
-v3-to-v4-to-v5 migration, immutable diagnostic-artifact custody and
-export/import, read-only exports, the Unix API, and an opt-in loopback console.
+compiled profiles, admission locks, explicit bounded one-shot collection, a
+resident read/API service with no recurrence, SQLite schema v6, verified SQLite
+backup/restore, exact qualified migrations, immutable diagnostic-artifact
+custody and export/import, read-only exports, the Unix API, and an opt-in
+loopback console. Nightshift, not NQ, owns recurrence, expiry, and current
+operational posture.
 Broader historical migration chains, notifications, retention automation,
 privileged hardware helpers, and package-driven upgrades are not implemented
 yet.
@@ -136,6 +138,10 @@ sudo -u nq nq --config /etc/nq/nq.toml config check
 Review and replace the sample nonce before admission. The sample's helper path
 is `/usr/lib/nq/helpers/nq_conformance_helper.py`; a source-tree execution must
 use a candidate configuration with the helper's absolute source path instead.
+The executable configuration schema is `nq.config.v2`; its
+`watchers.invocation.deadline_ms` is a one-shot bound. Removed v1 schedule,
+jitter, and acquisition retry-backoff fields are rejected rather than
+reinterpreted.
 One daemon accepts at most 32 watcher instances. Each admitted launch chain is
 also bounded to 32 byte artifacts, 32 MiB per artifact, and 64 MiB in total;
 live sealed launch snapshots share a 512 MiB process ceiling. `config check`,
@@ -153,11 +159,12 @@ With the sample watcher configured, `doctor` is expected to report a missing
 admission until the next section is complete. That is a useful failed state,
 not a reason to create a lock by hand.
 
-The current binary normally opens only SQLite schema v5. It has two exact
-migration sources: schema v4, and the exact schema-v3 artifact shipped in the
-qualified `v0.1.0` release. `admin upgrade` validates the complete source
-schema and stored semantics, creates and reopens a digest-addressed backup for
-each transition, and applies v3-to-v4 and then v4-to-v5 transactionally.
+The current binary normally opens only SQLite schema v6. It has three exact
+migration sources: schema v5, schema v4, and the exact schema-v3 artifact
+shipped in the qualified `v0.1.0` release. `admin upgrade` validates the
+complete source schema and stored semantics, creates and reopens a
+digest-addressed backup for each transition, and applies the required
+v3-to-v4, v4-to-v5, and v5-to-v6 steps transactionally.
 Historical v3 watcher runs retain explicit `provider_intake_not_recorded`
 gaps; the migration manufactures neither provider identities, raw captures,
 durable acknowledgments, nor diagnostic artifacts that the source never
@@ -165,11 +172,11 @@ stored. Any historical v3 checkpoint bytes remain preserved for reopening,
 but cannot advance the live cursor because no exact provider-intake
 acknowledgment exists for them.
 
-Schema v1, schema v2, stale or modified v3/v4 databases, and every other
+Schema v1, schema v2, stale or modified v3/v4/v5 databases, and every other
 incompatible representation remain fail-closed and byte-preserved. `init`,
 normal open, backup/restore, and daemon startup refuse them without rewriting
-their meaning. Preserve incompatible bytes with a cold archive; such an archive
-records `source_openable=false` and makes no semantic-reopen claim.
+their meaning. Preserve incompatible bytes with a cold archive; such an
+archive records `source_openable=false` and makes no semantic-reopen claim.
 
 At a hard successor cut, provide the already-created immutable legacy manifest
 digest; this records a reference and imports no legacy finding state:
@@ -363,8 +370,12 @@ systemctl status nqd.service
 journalctl -u nqd.service
 ```
 
-The console and API are read-only and never trigger collection. CLI exports
-read the same durable model:
+Starting or restarting `nqd` never invokes a watcher. The service retains the
+local read surface and runtime state; a bounded diagnostic requires an
+explicit `nq collect INSTANCE`, `nq diagnostics execute INSTANCE`, or
+`nqd --once` request. Nightshift will own repeated requests. The console and
+API are read-only and never trigger collection. CLI exports read the same
+durable model:
 
 ```sh
 sudo -u nq nq --config /etc/nq/nq.toml status export
@@ -480,9 +491,9 @@ that local correspondence is not inferred for imported bytes.
 ## Apply configuration safely
 
 There is no daemon reload in this preview. Validate a root-owned candidate,
-stop scheduling, apply it atomically, restore the intended ownership (the
-atomic temporary is owned by the invoking operator), admit affected
-instances, and restart:
+stop the resident read service, apply it atomically, restore the intended
+ownership (the atomic temporary is owned by the invoking operator), admit
+affected instances, and restart:
 
 `config apply` accepts only a regular, final-non-symlink candidate of at most
 1 MiB. It retains the exact bytes it validates, refuses source mutation or

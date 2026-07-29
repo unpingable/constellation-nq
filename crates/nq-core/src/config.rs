@@ -12,12 +12,16 @@ use thiserror::Error;
 use nq_helper_sandbox::IsolationLimits;
 
 /// The supported configuration document schema.
-pub const CONFIG_SCHEMA: &str = "nq.config.v1";
+///
+/// V2 removes NQ-owned recurrence, jitter, and acquisition retry-backoff
+/// policy. Each configured watcher now carries only a bounded one-shot
+/// invocation policy; Nightshift owns if and when another request is made.
+pub const CONFIG_SCHEMA: &str = "nq.config.v2";
 
 /// Maximum accepted UTF-8 configuration document size.
 pub const MAX_CONFIG_BYTES: usize = 1_048_576;
 
-/// Maximum independently scheduled watcher instances in one daemon.
+/// Maximum configured one-shot watcher bindings in one daemon.
 ///
 /// Together with the per-launch descriptor cap, this keeps the service's
 /// worst-case retained helper descriptors below the packaged `LimitNOFILE`.
@@ -66,7 +70,7 @@ pub struct NqConfig {
     /// Root for NQ-owned private persistent-helper socket directories.
     #[serde(default = "default_helper_runtime_dir")]
     pub helper_runtime_dir: PathBuf,
-    /// Independently scheduled watcher instances.
+    /// Configured watcher bindings available to explicit one-shot requests.
     #[serde(default)]
     pub watchers: Vec<WatcherConfig>,
 }
@@ -93,9 +97,9 @@ pub struct WatcherConfig {
     /// Configured capability ceiling.
     #[serde(default)]
     pub capability_ceiling: BTreeSet<String>,
-    /// Independent scheduling policy.
+    /// Bounded one-shot invocation policy.
     #[serde(default)]
-    pub schedule: ScheduleConfig,
+    pub invocation: InvocationPolicy,
     /// Per-request resource limits.
     #[serde(default)]
     pub resources: ResourceLimits,
@@ -167,30 +171,18 @@ pub struct VantageConfig {
     pub value: serde_json::Value,
 }
 
-/// Per-instance scheduling and deadline policy.
+/// Per-instance bounded one-shot invocation policy.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct ScheduleConfig {
-    /// Collection cadence.
-    pub interval_seconds: u64,
-    /// Maximum symmetric startup jitter.
-    pub jitter_seconds: u64,
-    /// Hard request deadline.
+pub struct InvocationPolicy {
+    /// Hard deadline for one explicitly requested helper invocation.
     pub deadline_ms: u64,
-    /// Initial retry backoff.
-    pub retry_backoff_seconds: u64,
-    /// Maximum retry backoff.
-    pub max_retry_backoff_seconds: u64,
 }
 
-impl Default for ScheduleConfig {
+impl Default for InvocationPolicy {
     fn default() -> Self {
         Self {
-            interval_seconds: 300,
-            jitter_seconds: 15,
             deadline_ms: 30_000,
-            retry_backoff_seconds: 10,
-            max_retry_backoff_seconds: 300,
         }
     }
 }
@@ -463,30 +455,10 @@ impl NqConfig {
                     "binding JSON exceeds 65536 bytes",
                 ));
             }
-            if watcher.schedule.interval_seconds == 0 {
+            if !(10..=3_600_000).contains(&watcher.invocation.deadline_ms) {
                 return Err(invalid(
-                    format!("{base}.schedule.interval_seconds"),
-                    "must be non-zero",
-                ));
-            }
-            if watcher.schedule.interval_seconds > 31_536_000
-                || watcher.schedule.jitter_seconds > watcher.schedule.interval_seconds
-            {
-                return Err(invalid(
-                    format!("{base}.schedule"),
-                    "interval is capped at one year and jitter may not exceed interval",
-                ));
-            }
-            if !(10..=3_600_000).contains(&watcher.schedule.deadline_ms) {
-                return Err(invalid(
-                    format!("{base}.schedule.deadline_ms"),
+                    format!("{base}.invocation.deadline_ms"),
                     "must be between 10 and 3600000",
-                ));
-            }
-            if watcher.schedule.retry_backoff_seconds > watcher.schedule.max_retry_backoff_seconds {
-                return Err(invalid(
-                    format!("{base}.schedule"),
-                    "initial retry backoff exceeds maximum",
                 ));
             }
             if !(256..=16_777_216).contains(&watcher.resources.max_response_bytes) {
@@ -705,7 +677,7 @@ mod tests {
     fn minimal() -> String {
         format!(
             r#"
-schema = "nq.config.v1"
+schema = "nq.config.v2"
 database_path = "/var/lib/nq/nq.db"
 admissions_dir = "/var/lib/nq/admissions"
 
@@ -734,8 +706,37 @@ version = 1
     #[test]
     fn parses_minimal_strict_config() {
         let config = NqConfig::from_toml(&minimal()).expect("valid config");
-        assert_eq!(config.watchers[0].schedule.deadline_ms, 30_000);
+        assert_eq!(config.watchers[0].invocation.deadline_ms, 30_000);
         assert_eq!(config.watchers[0].carrier, Carrier::Stdio);
+    }
+
+    #[test]
+    fn recurrence_fields_are_not_part_of_the_supported_config_schema() {
+        for forbidden in [
+            "[watchers.schedule]\ninterval_seconds = 60\ndeadline_ms = 1000",
+            "[watchers.invocation]\ndeadline_ms = 1000\njitter_seconds = 5",
+            "[watchers.invocation]\ndeadline_ms = 1000\nretry_backoff_seconds = 5",
+            "[watchers.invocation]\ndeadline_ms = 1000\nmax_retry_backoff_seconds = 30",
+        ] {
+            let candidate = format!("{}\n{forbidden}\n", minimal());
+            assert!(
+                matches!(NqConfig::from_toml(&candidate), Err(ConfigError::Toml(_))),
+                "recurrence field must be rejected: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn v1_schedule_configuration_is_rejected_instead_of_reinterpreted() {
+        let mut v1 = minimal().replace("schema = \"nq.config.v2\"", "schema = \"nq.config.v1\"");
+        v1.push_str(
+            "\n[watchers.schedule]\ninterval_seconds = 60\njitter_seconds = 0\n\
+             deadline_ms = 1000\nretry_backoff_seconds = 1\nmax_retry_backoff_seconds = 10\n",
+        );
+        assert!(
+            NqConfig::from_toml(&v1).is_err(),
+            "the removed scheduler policy must not be silently mapped to one-shot invocation"
+        );
     }
 
     #[test]

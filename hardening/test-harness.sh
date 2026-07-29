@@ -58,10 +58,16 @@ require_text "$guest" 'carrier = "unix"'
 require_text "$guest" 'run_nq watcher test conformance-local'
 require_text "$guest" 'run_nq watcher admit conformance-local'
 require_text "$guest" 'run_nq collect conformance-local'
-require_text "$guest" 'reports_after_restart=$(admitted_report_count)'
-require_text "$guest" 'wait_for_admitted_report_after "$reports_after_restart" service-restart'
+require_text "$guest" 'reports_before_restart=$(admitted_report_count)'
+require_text "$guest" \
+    'assert_no_autonomous_collection_after "$reports_before_restart" service-restart'
+require_text "$guest" 'collect_explicitly_after "$reports_before_restart" service-restart'
 require_text "$guest" 'reports_after_reboot=$(admitted_report_count)'
-require_text "$guest" 'wait_for_admitted_report_after "$reports_after_reboot" service-reboot'
+require_text "$guest" \
+    'assert_no_autonomous_collection_after "$reports_after_reboot" service-reboot'
+require_text "$guest" 'collect_explicitly_after "$reports_after_reboot" service-reboot'
+require_text "$guest" "grep -Eq 'interval_seconds|jitter_seconds|retry_backoff_seconds'"
+require_text "$guest" 'installed NQ configuration still contains recurrence policy'
 require_text "$guest" 'dpkg --remove nq-ng'
 require_text "$guest" 'dpkg --purge nq-ng'
 # A package transaction must invalidate the admitted execution identity, and

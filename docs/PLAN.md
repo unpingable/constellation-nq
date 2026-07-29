@@ -7,7 +7,10 @@
 > `~/git/nq-root/nq`; this repository is an experimental mechanism branch
 > (see the README status banner). The plan is preserved unrewritten as the
 > historical intent and structural audit it records; its per-mechanism
-> content remains the donor inventory.
+> content remains the donor inventory. It is not current product policy:
+> in particular, the scheduler and notification ownership assigned to `nqd`
+> below is superseded. Current NQ performs only explicit bounded invocations;
+> Nightshift owns recurrence, current posture, and notification.
 
 ## Summary
 

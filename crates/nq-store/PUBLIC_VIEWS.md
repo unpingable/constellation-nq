@@ -26,10 +26,12 @@ linkage. API callers receive an explicit requirement to use V3.
 
 ## `public_status_snapshot_v1`
 
-One row per `(component_kind, component_id)` for daemon, database, profile
-catalog, admission, scheduler, instance, evaluation, and notification health.
-It follows `status_current` into immutable `status_events`; the detail document
-is canonical JSON. Current typed instance results use
+One row per `(component_kind, component_id)` in the historical store
+vocabulary. `scheduler` and `notification` remain accepted only so immutable
+pre-v2 status rows can be reopened; current NQ code cannot emit those kinds,
+and the supported current-status DTO/query projections omit them. The view
+follows `status_current` into immutable `status_events`; the detail document is
+canonical JSON. Current typed instance results use
 `nq.collection_outcome.v1` for non-admitted outcomes and
 `nq.collection_outcome.v2` for admitted outcomes carrying their exact ordered
 `EvaluationEnvelopeV2` set. Product status/API/CLI code reopens them through
@@ -69,9 +71,11 @@ therefore does not have this live-append limitation.
 
 ## `public_notification_status_v1`
 
-One row per immutable outbox item. Delivery state is derived from immutable
-attempts and the configured attempt ceiling. `pending`, `delivered`, and
-`failed` remain visible without rewriting the outbox item.
+Legacy storage projection retained to verify immutable outbox history. Current
+NQ does not enqueue or deliver notifications and does not treat this view as
+current product posture; Nightshift owns notification intent and delivery.
+For historical rows, delivery state remains derived from immutable attempts
+and the configured attempt ceiling without rewriting the outbox item.
 
 Raw profile report payloads remain intentionally absent from these projections.
 They stay bounded canonical JSON on admitted reports and observations and are

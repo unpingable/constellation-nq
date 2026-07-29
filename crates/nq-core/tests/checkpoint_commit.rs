@@ -114,7 +114,7 @@ fn checkpoint_config(root: &Path) -> NqConfig {
     let state = root.join("helper.state");
     let log = root.join("requests.ndjson");
     NqConfig::from_toml(&format!(
-        r#"schema = "nq.config.v1"
+        r#"schema = "nq.config.v2"
 database_path = "{}"
 socket_path = "{}"
 admissions_dir = "{}"
@@ -139,12 +139,8 @@ working_directory = "{}"
 id = "nq.conformance"
 version = 1
 
-[watchers.schedule]
-interval_seconds = 60
-jitter_seconds = 0
+[watchers.invocation]
 deadline_ms = 5000
-retry_backoff_seconds = 1
-max_retry_backoff_seconds = 10
 
 [watchers.resources]
 max_response_bytes = 1048576

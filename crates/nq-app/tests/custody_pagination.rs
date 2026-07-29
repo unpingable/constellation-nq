@@ -31,7 +31,7 @@ fn write_config(root: &Path, database: &Path) -> PathBuf {
     fs::write(
         &config,
         format!(
-            "schema = \"nq.config.v1\"\ndatabase_path = \"{}\"\nsocket_path = \"{}\"\n\
+            "schema = \"nq.config.v2\"\ndatabase_path = \"{}\"\nsocket_path = \"{}\"\n\
              admissions_dir = \"{}\"\nhelper_runtime_dir = \"{}\"\n",
             database.display(),
             root.join("nqd.sock").display(),

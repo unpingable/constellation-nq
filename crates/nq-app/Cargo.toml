@@ -19,7 +19,6 @@ nq-helper-sandbox = { path = "../nq-helper-sandbox" }
 nq-profiles = { path = "../nq-profiles" }
 nq-protocol = { path = "../nq-protocol" }
 nq-store = { path = "../nq-store" }
-rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

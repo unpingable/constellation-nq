@@ -88,8 +88,8 @@ pub enum EngineError {
     /// Generic store failure.
     #[error(transparent)]
     Store(#[from] nq_store::StoreError),
-    /// Admission construction or verification failed outside a scheduled
-    /// attempt.
+    /// Admission construction or verification failed before a bounded
+    /// invocation began.
     #[error(transparent)]
     Admission(#[from] AdmissionError),
     /// Per-instance collection/binding serialization failed.
@@ -1450,9 +1450,9 @@ pub enum CollectionResult {
     },
 }
 
-/// Persisted canonical result of one scheduled or explicitly requested
-/// collection. Common association fields occur once and every dependent result
-/// remains in its authoritative typed object.
+/// Persisted canonical result of one explicitly requested bounded collection.
+/// Common association fields occur once and every dependent result remains in
+/// its authoritative typed object.
 #[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CollectionOutcome {
@@ -1541,10 +1541,14 @@ impl CollectionOutcome {
         &self.instance_id
     }
 
-    /// Whether scheduling should resume at its normal cadence. A valid `failed`
-    /// report is committed but still asks the scheduler to use retry backoff.
+    /// Whether this one-shot invocation produced an admitted complete or
+    /// partial report.
+    ///
+    /// A valid `failed` report remains durable provider testimony, but does not
+    /// satisfy the bounded request. This predicate has no cadence, retry,
+    /// freshness, or posture meaning.
     #[must_use]
-    pub fn is_success(&self) -> bool {
+    pub fn has_admitted_usable_report(&self) -> bool {
         matches!(
             &self.result,
             CollectionResult::Admitted { report_status, .. } if report_status != "failed"
@@ -2873,7 +2877,7 @@ impl CollectionEngine {
             request.clone(),
             provider,
             carrier_name(watcher.carrier).to_owned(),
-            watcher.schedule.deadline_ms,
+            watcher.invocation.deadline_ms,
             &checkpoint_contract_digest,
         )?;
         let capture = self.run_capture(
@@ -3409,25 +3413,6 @@ impl CollectionEngine {
         }
     }
 
-    /// Re-evaluate compiled detectors at a new wall-clock time without
-    /// collecting or refreshing any evidence.
-    ///
-    /// # Errors
-    ///
-    /// Returns when the profile is unavailable, admitted evidence cannot be
-    /// reconstructed, or the evaluation cannot be committed atomically.
-    pub fn freshness_sweep(&mut self, watcher: &WatcherConfig) -> Result<usize, EngineError> {
-        let _guard = InstanceGuard::acquire(
-            &self.config.database_path,
-            &watcher.instance_id,
-            "freshness-sweep",
-        )?;
-        self.reconcile_pending_binding(watcher)?;
-        let profile = resolve(watcher)?;
-        self.evaluate_instance(watcher, profile, None)
-            .map(|evaluations| evaluations.len())
-    }
-
     /// Activate one retained historical admission under the same serialized,
     /// crash-recoverable transition protocol used by admission and rotation.
     ///
@@ -3821,7 +3806,7 @@ impl CollectionEngine {
         binding_digest: Option<&str>,
         launch: VerifiedLaunch,
     ) -> RunCapture {
-        let deadline = StdDuration::from_millis(watcher.schedule.deadline_ms);
+        let deadline = StdDuration::from_millis(watcher.invocation.deadline_ms);
         match watcher.carrier {
             Carrier::Stdio => {
                 self.runner
@@ -4066,42 +4051,6 @@ impl CollectionEngine {
             diagnostic: reopened_diagnostic,
             diagnostic_artifact_id: completion.diagnostic_artifact_id,
         })
-    }
-
-    #[allow(clippy::too_many_lines)]
-    fn evaluate_instance(
-        &mut self,
-        watcher: &WatcherConfig,
-        profile: &'static dyn ProfileModule,
-        trigger_run_id: Option<&str>,
-    ) -> Result<Vec<EvaluationEnvelopeV2>, EngineError> {
-        let snapshot = self
-            .store
-            .evidence_snapshot(std::slice::from_ref(&watcher.instance_id))?;
-        validate_evaluation_refusal_history(&self.store)?;
-        let current_findings = self.store.finding_snapshots()?;
-        let evaluator_artifact_digest = self
-            .require_evaluator_identity()?
-            .artifact_digest()
-            .as_str()
-            .to_owned();
-        let prepared = prepare_instance_evaluations(
-            watcher,
-            profile,
-            trigger_run_id,
-            &snapshot,
-            &current_findings,
-            &evaluator_artifact_digest,
-        )?;
-        let mut evaluations = Vec::with_capacity(prepared.len());
-        for prepared in prepared {
-            self.store.commit_evaluation(
-                &prepared.commit.evaluation,
-                prepared.commit.finding.as_ref(),
-            )?;
-            evaluations.push(prepared.envelope);
-        }
-        Ok(evaluations)
     }
 }
 
@@ -6404,7 +6353,7 @@ fn build_request(
         deadline: MonotonicDeadline {
             clock: MonotonicClock::LinuxBoottime,
             expires_at_ns: boottime_ns()?
-                .saturating_add(watcher.schedule.deadline_ms.saturating_mul(1_000_000)),
+                .saturating_add(watcher.invocation.deadline_ms.saturating_mul(1_000_000)),
         },
         bounds: CollectionBounds {
             max_response_bytes: u32::try_from(watcher.resources.max_response_bytes)
@@ -8127,8 +8076,9 @@ pub fn append_genesis(store: &mut Store, legacy_digest: Option<String>) -> Resul
 ///
 /// # Errors
 ///
-/// Returns when the details cannot be canonicalized or the durable status
-/// event violates the storage contract.
+/// Returns when the details cannot be canonicalized, the durable status event
+/// violates the storage contract, or a caller tries to emit a legacy
+/// scheduler/notification kind that NQ no longer owns.
 pub fn record_component_status(
     store: &mut Store,
     component_kind: &str,
@@ -8137,6 +8087,11 @@ pub fn record_component_status(
     code: &str,
     details: &Value,
 ) -> Result<(), EngineError> {
+    if matches!(component_kind, "scheduler" | "notification") {
+        return Err(EngineError::Invariant(format!(
+            "{component_kind} status is legacy decode-only; current NQ cannot emit it"
+        )));
+    }
     store.record_status(&StatusEventInput {
         status_event_id: Uuid::new_v4().to_string(),
         component_kind: component_kind.to_owned(),
@@ -8658,6 +8613,7 @@ pub fn status_snapshot(store: &Store) -> Result<StatusSnapshotV1, EngineError> {
     let components = store
         .status_snapshots()?
         .into_iter()
+        .filter(|row| !is_legacy_decode_only_status_kind(&row.component_kind))
         .map(status_from_row)
         .collect::<Result<Vec<_>, _>>()?;
     Ok(StatusSnapshotV1 {
@@ -8683,6 +8639,7 @@ pub fn status_snapshot_v2(store: &Store) -> Result<StatusSnapshotV2, EngineError
     let components = store
         .status_snapshots()?
         .into_iter()
+        .filter(|row| !is_legacy_decode_only_status_kind(&row.component_kind))
         .map(|row| status_from_row_v2(store, row))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(StatusSnapshotV2 {
@@ -8747,6 +8704,7 @@ pub fn status_snapshot_v3(store: &Store) -> Result<StatusSnapshotV3, EngineError
     };
     let mut components = status_rows
         .into_iter()
+        .filter(|row| !is_legacy_decode_only_status_kind(&row.component_kind))
         .map(|row| status_from_row_v3(store, row))
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -10012,8 +9970,14 @@ pub fn public_query(store: &Store, sql: &str, limit: u32) -> Result<Vec<Value>, 
         }
         "select * from public_status_snapshot_v1" => {
             validate_status_history_v2(store)?;
+            if !(1..=nq_store::MAX_PUBLIC_QUERY_ROWS).contains(&limit) {
+                return Err(EngineError::Invariant(format!(
+                    "status query limit must be between 1 and {}",
+                    nq_store::MAX_PUBLIC_QUERY_ROWS
+                )));
+            }
             store
-                .status_snapshots_bounded(limit, None)?
+                .current_status_snapshots_bounded(limit, None)?
                 .into_iter()
                 .map(status_from_row)
                 .map(|result| {
@@ -10684,6 +10648,10 @@ fn parse_component_kind(value: &str) -> Result<ComponentKind, EngineError> {
     }
 }
 
+fn is_legacy_decode_only_status_kind(value: &str) -> bool {
+    matches!(value, "scheduler" | "notification")
+}
+
 fn parse_health_state(value: &str) -> Result<HealthState, EngineError> {
     match value {
         "healthy" => Ok(HealthState::Healthy),
@@ -10739,7 +10707,8 @@ mod tests {
 
     use crate::admission::{ADMISSION_SCHEMA, AdmittedProfile, OperatorIdentity};
     use crate::config::{
-        CommandConfig, ProfileSelection, ResourceLimits, ScheduleConfig, ScopeConfig, VantageConfig,
+        CommandConfig, InvocationPolicy, ProfileSelection, ResourceLimits, ScopeConfig,
+        VantageConfig,
     };
     use crate::provider_intake::{
         ProviderIdentitySchema, ProviderIdentityV1, ProviderIntakeContextSchema,
@@ -12313,7 +12282,7 @@ sys.stdout.write("\n")
                 value: json!({}),
             },
             capability_ceiling: BTreeSet::new(),
-            schedule: ScheduleConfig::default(),
+            invocation: InvocationPolicy::default(),
             resources: ResourceLimits::default(),
             checkpoint_policy: CheckpointPolicy::Disabled,
         };
@@ -12390,7 +12359,7 @@ sys.stdout.write("\n")
                 "read_procfs".to_owned(),
                 "read_system_info".to_owned(),
             ]),
-            schedule: ScheduleConfig::default(),
+            invocation: InvocationPolicy::default(),
             resources: ResourceLimits::default(),
             checkpoint_policy: CheckpointPolicy::Disabled,
         };
@@ -12831,7 +12800,7 @@ sys.stdout.write("\n")
             format!("sha256:{}", "a".repeat(64)),
             Vec::new(),
         );
-        assert!(!outcome.is_success());
+        assert!(!outcome.has_admitted_usable_report());
         assert!(matches!(outcome.result, CollectionResult::Admitted { .. }));
     }
 
@@ -14943,6 +14912,95 @@ sys.stdout.write("\n")
             },
         );
         assert!(invalid_acquisition.validate().is_err());
+    }
+
+    #[test]
+    fn scheduler_and_notification_status_are_legacy_decode_only() {
+        let mut store = Store::initialize_in_memory().expect("status store");
+        for kind in ["scheduler", "notification"] {
+            assert!(matches!(
+                record_component_status(
+                    &mut store,
+                    kind,
+                    "legacy",
+                    "healthy",
+                    "historical",
+                    &json!({"source": "pre-v2"}),
+                ),
+                Err(EngineError::Invariant(message))
+                    if message == format!(
+                        "{kind} status is legacy decode-only; current NQ cannot emit it"
+                    )
+            ));
+            store
+                .record_status(&StatusEventInput {
+                    status_event_id: format!("legacy-{kind}"),
+                    component_kind: kind.to_owned(),
+                    component_id: "legacy".to_owned(),
+                    state: "healthy".to_owned(),
+                    code: "historical".to_owned(),
+                    detail: canonical(&json!({"source": "pre-v2"})).expect("legacy detail"),
+                    observed_at: "2026-07-20T12:00:00.000Z".to_owned(),
+                })
+                .expect("historical store schema remains reopenable");
+        }
+
+        assert_eq!(
+            validate_status_history_v2(&store).expect("reopen legacy immutable history"),
+            2
+        );
+        assert!(
+            status_snapshot(&store)
+                .expect("v1 current status")
+                .components
+                .is_empty()
+        );
+        assert!(
+            status_snapshot_v2(&store)
+                .expect("v2 current status")
+                .components
+                .is_empty()
+        );
+        assert!(
+            status_snapshot_v3(&store)
+                .expect("v3 current status")
+                .components
+                .is_empty()
+        );
+        assert!(
+            public_query(&store, "SELECT * FROM public_status_snapshot_v1", 10)
+                .expect("bounded current-status query")
+                .is_empty()
+        );
+
+        for index in 0..nq_store::MAX_PUBLIC_QUERY_ROWS {
+            store
+                .record_status(&StatusEventInput {
+                    status_event_id: format!("legacy-notification-{index:04}"),
+                    component_kind: "notification".to_owned(),
+                    component_id: format!("legacy-{index:04}"),
+                    state: "healthy".to_owned(),
+                    code: "historical".to_owned(),
+                    detail: canonical(&json!({"source": "pre-v2"})).expect("legacy detail"),
+                    observed_at: "2026-07-20T12:00:00.000Z".to_owned(),
+                })
+                .expect("saturate legacy status prefix");
+        }
+        record_component_status(
+            &mut store,
+            "profile_catalog",
+            "compiled",
+            "healthy",
+            "catalog_loaded",
+            &json!({"profile_count": 1}),
+        )
+        .expect("emit current NQ-owned status");
+
+        let bounded = public_query(&store, "SELECT * FROM public_status_snapshot_v1", 1)
+            .expect("legacy-saturated bounded current-status query");
+        assert_eq!(bounded.len(), 1);
+        assert_eq!(bounded[0]["kind"], "profile_catalog");
+        assert_eq!(bounded[0]["id"], "compiled");
     }
 
     #[test]

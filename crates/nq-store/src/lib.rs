@@ -5404,6 +5404,46 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    /// Read one bounded page of current NQ-owned status after a component
+    /// cursor.
+    ///
+    /// The historical store vocabulary still admits `scheduler` and
+    /// `notification` so immutable old rows can be verified. They are excluded
+    /// in SQL before applying the caller's limit, preventing a saturated
+    /// legacy prefix from hiding a current NQ-owned component.
+    pub fn current_status_snapshots_bounded(
+        &self,
+        limit: u32,
+        after_component: Option<(&str, &str)>,
+    ) -> Result<Vec<StatusSnapshotRow>, StoreError> {
+        validate_public_limit(limit)?;
+        let (after_kind, after_id) =
+            after_component.map_or((None, None), |(kind, id)| (Some(kind), Some(id)));
+        let mut statement = self.connection.prepare(
+            "SELECT component_kind, component_id, state, code, detail_json, observed_at
+             FROM public_status_snapshot_v1
+             WHERE component_kind NOT IN ('scheduler', 'notification')
+               AND (
+                   ?1 IS NULL
+                   OR component_kind > ?1
+                   OR (component_kind = ?1 AND component_id > ?2)
+               )
+             ORDER BY component_kind, component_id LIMIT ?3",
+        )?;
+        let rows = statement.query_map(params![after_kind, after_id, limit], |row| {
+            Ok(StatusSnapshotRow {
+                component_kind: row.get(0)?,
+                component_id: row.get(1)?,
+                state: row.get(2)?,
+                code: row.get(3)?,
+                detail_json: row.get(4)?,
+                observed_at: row.get(5)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
     /// Read one bounded page of immutable status history after a sequence.
     ///
     /// This is the semantic-reopen path for archives. It reads source events,

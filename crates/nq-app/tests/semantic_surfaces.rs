@@ -40,7 +40,7 @@ fn write_config(root: &Path, database: &Path) -> PathBuf {
     fs::write(
         &config,
         format!(
-            "schema = \"nq.config.v1\"\ndatabase_path = \"{}\"\nsocket_path = \"{}\"\n\
+            "schema = \"nq.config.v2\"\ndatabase_path = \"{}\"\nsocket_path = \"{}\"\n\
              admissions_dir = \"{}\"\nhelper_runtime_dir = \"{}\"\n",
             database.display(),
             root.join("nqd.sock").display(),
@@ -99,7 +99,7 @@ print(json.dumps(response, allow_nan=False, sort_keys=True, separators=(",", ":"
     fs::write(
         &config,
         format!(
-            r#"schema = "nq.config.v1"
+            r#"schema = "nq.config.v2"
 database_path = "{}"
 socket_path = "{}"
 admissions_dir = "{}"
@@ -124,12 +124,8 @@ working_directory = "{}"
 id = "nq.conformance"
 version = 1
 
-[watchers.schedule]
-interval_seconds = 60
-jitter_seconds = 0
+[watchers.invocation]
 deadline_ms = 5000
-retry_backoff_seconds = 1
-max_retry_backoff_seconds = 10
 
 [watchers.resources]
 max_response_bytes = 1048576

@@ -42,7 +42,7 @@ fn failure(output: Output) -> String {
 fn write_config(root: &Path, name: &str, database: &Path) -> PathBuf {
     let path = root.join(format!("{name}.toml"));
     let contents = format!(
-        r#"schema = "nq.config.v1"
+        r#"schema = "nq.config.v2"
 database_path = "{}"
 socket_path = "{}"
 admissions_dir = "{}"
@@ -176,7 +176,7 @@ fn write_host_diagnostic_config_with_mode(
     fs::write(
         &config,
         format!(
-            r#"schema = "nq.config.v1"
+            r#"schema = "nq.config.v2"
 database_path = "{}"
 socket_path = "{}"
 admissions_dir = "{}"
@@ -209,12 +209,8 @@ value = {{ id = "diagnostic-fixture" }}
 kind = "local"
 value = {{}}
 
-[watchers.schedule]
-interval_seconds = 60
-jitter_seconds = 0
+[watchers.invocation]
 deadline_ms = 5000
-retry_backoff_seconds = 1
-max_retry_backoff_seconds = 10
 
 [watchers.resources]
 max_response_bytes = 1048576

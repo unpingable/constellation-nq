@@ -720,7 +720,7 @@ fn render_console(status: &[u8], findings: &[u8]) -> String {
          body{{font:15px system-ui,sans-serif;max-width:80rem;margin:2rem auto;padding:0 1rem;color:#18202a}}\
          h1,h2{{font-weight:600}}pre{{white-space:pre-wrap;background:#f4f6f8;padding:1rem;border-radius:.4rem;overflow:auto}}\
          .note{{color:#53606d}}</style></head><body><h1>NQ-ng</h1>\
-         <p class=\"note\">Read-only local evidence console. Collection is scheduled independently of this page.</p>\
+         <p class=\"note\">Read-only local evidence console. Diagnostics run only through an explicit bounded invocation.</p>\
          <h2>Status</h2><pre>{status}</pre><h2>Findings</h2><pre>{findings}</pre></body></html>"
     )
 }

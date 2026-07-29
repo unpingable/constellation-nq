@@ -438,14 +438,6 @@ fn initialize(config_path: &Path, arguments: InitArgs, json_output: bool) -> Res
         "catalog_loaded",
         &json!({"profile_count": all_profiles().len()}),
     )?;
-    nq_core::engine::record_component_status(
-        &mut store,
-        "notification",
-        "outbox",
-        "healthy",
-        "outbox_empty",
-        &json!({"delivery_enabled": false}),
-    )?;
     print_value(
         &json!({
             "initialized": true,
@@ -575,7 +567,7 @@ async fn collect_command(config_path: &Path, instance_id: &str, json_output: boo
         engine.collect(&watcher)
     })
     .await??;
-    let successful = result.is_success();
+    let successful = result.has_admitted_usable_report();
     print_collection_outcome(&result, json_output)?;
     if successful {
         Ok(())
@@ -1996,7 +1988,7 @@ mod tests {
     use nq_protocol::{InstanceId, Refusal, RefusalBoundary, RefusalCode, canonical_json_bytes};
 
     fn config_fixture() -> &'static str {
-        r#"schema = "nq.config.v1"
+        r#"schema = "nq.config.v2"
 database_path = "/var/lib/nq/nq.db"
 socket_path = "/run/nq/nqd.sock"
 admissions_dir = "/var/lib/nq/admissions"
@@ -2120,7 +2112,7 @@ helper_runtime_dir = "/run/nq/helpers"
         fs::write(
             &config,
             format!(
-                r#"schema = "nq.config.v1"
+                r#"schema = "nq.config.v2"
 database_path = "{}"
 socket_path = "{}"
 admissions_dir = "{}"

@@ -127,19 +127,28 @@ print(row[0])
 PY
 }
 
-wait_for_admitted_report_after() {
+assert_no_autonomous_collection_after() {
     local earlier=$1 label=$2 count
-    for _ in {1..90}; do
-        count=$(admitted_report_count)
-        if ((count > earlier)); then
-            printf '%s_before=%s\n%s_after=%s\n' \
-                "$label" "$earlier" "$label" "$count" \
-                >>"$RESULTS/AF_UNIX_RESTART_COUNTS"
-            return 0
-        fi
-        sleep 1
-    done
-    fail "no admitted cross-UID Unix report appeared after $label"
+    # The removed preview scheduler used a two-second cadence in this drill.
+    # Waiting beyond that old interval is a hostile proof that daemon start,
+    # restart, and reboot no longer create diagnostic work.
+    sleep 3
+    count=$(admitted_report_count)
+    [[ $count == "$earlier" ]] || fail \
+        "nqd created an autonomous report after $label ($earlier -> $count)"
+    printf '%s_autonomous_before=%s\n%s_autonomous_after=%s\n' \
+        "$label" "$earlier" "$label" "$count" \
+        >>"$RESULTS/AF_UNIX_RESTART_COUNTS"
+}
+
+collect_explicitly_after() {
+    local earlier=$1 label=$2 count
+    run_nq collect conformance-local
+    count=$(admitted_report_count)
+    ((count > earlier)) || fail "explicit collection produced no report after $label"
+    printf '%s_explicit_before=%s\n%s_explicit_after=%s\n' \
+        "$label" "$earlier" "$label" "$count" \
+        >>"$RESULTS/AF_UNIX_RESTART_COUNTS"
 }
 
 assert_layout() {
@@ -186,9 +195,12 @@ install_config_and_admit() {
         /usr/share/doc/nq-ng/examples/nq.toml "$CONFIG"
     sed -i 's/carrier = "stdio"/carrier = "unix"/' "$CONFIG"
     sed -i 's/replace-with-a-local-nonce/noble-hardening-fixed-nonce/' "$CONFIG"
-    sed -i 's/interval_seconds = 300/interval_seconds = 2/' "$CONFIG"
-    sed -i 's/jitter_seconds = 15/jitter_seconds = 0/' "$CONFIG"
     grep -qx 'carrier = "unix"' "$CONFIG" || fail "Unix carrier was not selected"
+    grep -qx '\[watchers.invocation\]' "$CONFIG" || fail \
+        "one-shot invocation policy is absent"
+    if grep -Eq 'interval_seconds|jitter_seconds|retry_backoff_seconds' "$CONFIG"; then
+        fail "installed NQ configuration still contains recurrence policy"
+    fi
     runuser -u nq -- /usr/bin/nq --config="$CONFIG" config check
     runuser -u nq -- /usr/bin/nq --config="$CONFIG" init
 
@@ -232,17 +244,20 @@ if [[ $phase == before-reboot ]]; then
     reports_before_start=$(admitted_report_count)
     systemctl start nqd.service
     systemctl is-active --quiet nqd.service
-    wait_for_admitted_report_after "$reports_before_start" service-start
+    assert_no_autonomous_collection_after "$reports_before_start" service-start
+    collect_explicitly_after "$reports_before_start" service-start
+    reports_before_restart=$(admitted_report_count)
     systemctl restart nqd.service
     systemctl is-active --quiet nqd.service
-    reports_after_restart=$(admitted_report_count)
-    wait_for_admitted_report_after "$reports_after_restart" service-restart
+    assert_no_autonomous_collection_after "$reports_before_restart" service-restart
+    collect_explicitly_after "$reports_before_restart" service-restart
     systemctl stop nqd.service
     inactive || fail "explicit stop did not make nqd inactive"
     reports_before_second_start=$(admitted_report_count)
     systemctl start nqd.service
     systemctl is-active --quiet nqd.service
-    wait_for_admitted_report_after "$reports_before_second_start" second-service-start
+    assert_no_autonomous_collection_after "$reports_before_second_start" second-service-start
+    collect_explicitly_after "$reports_before_second_start" second-service-start
     systemctl is-enabled --quiet nqd.service
     journalctl -u nqd.service --no-pager >"$RESULTS/journal-before-reboot.log"
     cat /proc/sys/kernel/random/boot_id >"$RESULTS/BOOT_ID_BEFORE"
@@ -259,7 +274,8 @@ current_check=post-reboot-service
 systemctl is-enabled --quiet nqd.service || fail "nqd was not enabled across reboot"
 systemctl is-active --quiet nqd.service || fail "nqd was not active after reboot"
 reports_after_reboot=$(admitted_report_count)
-wait_for_admitted_report_after "$reports_after_reboot" service-reboot
+assert_no_autonomous_collection_after "$reports_after_reboot" service-reboot
+collect_explicitly_after "$reports_after_reboot" service-reboot
 printf 'AF_UNIX_CROSS_UID=pass\n' >>"$RESULTS/REQUIRED_CHECKS"
 journalctl -b -u nqd.service --no-pager >"$RESULTS/journal-after-reboot.log"
 

@@ -405,13 +405,17 @@ pub enum ComponentKind {
     ProfileCatalog,
     /// Admission bindings.
     Admission,
-    /// Independent scheduler.
+    /// Legacy decode-only scheduler status retained so immutable pre-v2 status
+    /// rows remain inspectable. Current NQ code must never emit this kind.
     Scheduler,
     /// Watcher instance.
     Instance,
     /// Detector evaluator.
     Evaluation,
-    /// Notification outbox/delivery.
+    /// Legacy decode-only notification status retained so immutable pre-v2
+    /// status rows remain inspectable. Nightshift owns current notification
+    /// posture and delivery semantics; current NQ code must never emit this
+    /// kind.
     Notification,
 }
 

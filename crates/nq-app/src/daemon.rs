@@ -140,7 +140,7 @@ async fn collect_once(config: NqConfig) -> Result<()> {
     let mut failures = 0;
     while let Some(result) = tasks.join_next().await {
         match result {
-            Ok(Ok(outcome)) if outcome.is_success() => {
+            Ok(Ok(outcome)) if outcome.has_admitted_usable_report() => {
                 let governed_result = canonical_result_document(&outcome)?;
                 info!(
                     instance = %outcome.instance_id(),
@@ -235,8 +235,12 @@ mod tests {
     }
 
     #[test]
-    fn resident_daemon_contains_no_recurrence_or_freshness_loop() {
-        let source = include_str!("daemon.rs");
+    fn resident_and_read_surfaces_cannot_create_recurrent_provider_work() {
+        fn production(source: &'static str) -> &'static str {
+            source.split("#[cfg(test)]").next().unwrap_or(source)
+        }
+
+        let daemon = production(include_str!("daemon.rs"));
         for (left, right) in [
             ("schedule_", "instance"),
             ("sweep_", "freshness"),
@@ -247,9 +251,71 @@ mod tests {
         ] {
             let forbidden = format!("{left}{right}");
             assert!(
-                !source.contains(&forbidden),
+                !daemon.contains(&forbidden),
                 "resident NQ must not own Nightshift recurrence token {forbidden}"
             );
+        }
+        assert!(
+            daemon.contains("if options.once {")
+                && daemon.contains("return collect_once(config).await;"),
+            "the only daemon collection path must remain explicitly gated by --once"
+        );
+        assert_eq!(
+            daemon.matches("collect_one(config, watcher)").count(),
+            1,
+            "daemon startup or restart must not add another provider invocation path"
+        );
+
+        let api = production(include_str!("api.rs"));
+        for forbidden in ["CollectionEngine", "diagnostic_execute", "collect_one"] {
+            assert!(
+                !api.contains(forbidden),
+                "the resident read API must not invoke diagnostics through {forbidden}"
+            );
+        }
+
+        let config = production(include_str!("../../nq-core/src/config.rs"));
+        for (left, right) in [
+            ("Schedule", "Config"),
+            ("interval_", "seconds"),
+            ("jitter_", "seconds"),
+            ("retry_backoff_", "seconds"),
+            ("max_retry_backoff_", "seconds"),
+        ] {
+            let forbidden = format!("{left}{right}");
+            assert!(
+                !config.contains(&forbidden),
+                "current NQ configuration must not accept recurrence field {forbidden}"
+            );
+        }
+
+        let intake = production(include_str!("../../nq-core/src/provider_intake.rs"));
+        for (left, right) in [
+            ("Command::", "new"),
+            (".sp", "awn("),
+            ("run_", "capture("),
+            (".col", "lect("),
+        ] {
+            let forbidden = format!("{left}{right}");
+            assert!(
+                !intake.contains(&forbidden),
+                "provider intake testimony must not launch or recur through {forbidden}"
+            );
+        }
+
+        for source in [
+            daemon,
+            api,
+            production(include_str!("cli.rs")),
+            production(include_str!("archive.rs")),
+        ] {
+            for (left, right) in [("\"sched", "uler\""), ("\"notific", "ation\"")] {
+                let forbidden = format!("{left}{right}");
+                assert!(
+                    !source.contains(&forbidden),
+                    "current NQ application code must not emit legacy {forbidden} status"
+                );
+            }
         }
     }
 

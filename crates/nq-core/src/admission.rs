@@ -571,8 +571,8 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     use crate::config::{
-        Carrier, CheckpointPolicy, CommandConfig, ProfileSelection, ResourceLimits, ScheduleConfig,
-        ScopeConfig, VantageConfig,
+        Carrier, CheckpointPolicy, CommandConfig, InvocationPolicy, ProfileSelection,
+        ResourceLimits, ScopeConfig, VantageConfig,
     };
 
     use super::*;
@@ -603,7 +603,7 @@ mod tests {
                 value: serde_json::json!({}),
             },
             capability_ceiling: BTreeSet::from(["fixture.read".into()]),
-            schedule: ScheduleConfig::default(),
+            invocation: InvocationPolicy::default(),
             resources: ResourceLimits::default(),
             checkpoint_policy: CheckpointPolicy::Disabled,
         }

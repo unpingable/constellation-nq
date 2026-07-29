@@ -1,5 +1,5 @@
-# Strict nq.config.v1 example using the first-party compiled host profile.
-schema = "nq.config.v1"
+# Strict nq.config.v2 example using the first-party compiled host profile.
+schema = "nq.config.v2"
 database_path = "/var/lib/nq/nq.db"
 socket_path = "/run/nq/nqd.sock"
 admissions_dir = "/var/lib/nq/admissions"
@@ -31,12 +31,8 @@ value = { id = "local" }
 kind = "local"
 value = {}
 
-[watchers.schedule]
-interval_seconds = 300
-jitter_seconds = 15
+[watchers.invocation]
 deadline_ms = 30000
-retry_backoff_seconds = 10
-max_retry_backoff_seconds = 300
 
 [watchers.resources]
 max_response_bytes = 1048576

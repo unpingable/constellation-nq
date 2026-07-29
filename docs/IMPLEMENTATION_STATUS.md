@@ -49,7 +49,10 @@ involved.
 
 The repository implements the stage-one operational spine:
 
-- the `nq` operator CLI and resident `nqd` scheduler;
+- the `nq` operator CLI and resident read-only `nqd` service; bounded
+  diagnostics run only through an explicit request (`nqd --once` remains a
+  finite install/test entry point), while NQ configuration carries only a
+  one-shot execution deadline;
 - strict version-pinned NDJSON helper contracts, schemas, fixtures, Rust DTOs,
   and an independent Python conformance specimen;
 - one-shot stdio and supervised request/response Unix carriers;
@@ -124,13 +127,13 @@ The repository implements the stage-one operational spine:
   schema-v3/v4 migration, live-WAL backup/restore, diagnostic-artifact
   corruption and missing-byte states, and cold-archive reopening.
 
-The resident `nqd` scheduler is an implemented preview mechanism, not a claim
-that NQ owns the target product's recurrent monitoring posture. Under the
-current north star, NQ runs bounded diagnostics while Nightshift owns
-recurrence, expiry, campaigns, transition detection, and the estate-level
-operational view. Any migration or narrowing of the existing scheduler
-requires its own implementation campaign; this status record does not pretend
-that work has already occurred.
+The resident `nqd` service does not schedule or refresh diagnostics. NQ runs
+one bounded invocation when explicitly requested and retains acquisition retry
+disposition only as provider testimony. Nightshift owns recurrence, expiry,
+campaigns, transition detection, and the estate-level operational view.
+Historical `scheduler` and `notification` status vocabulary remains
+decode-only so immutable old rows can be verified; current NQ APIs neither
+emit nor project those rows as current component posture.
 
 The preview treats the SQLite binding history as authoritative. Active
 admission files are crash-recoverable materializations, and every collection
