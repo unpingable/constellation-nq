@@ -10,14 +10,16 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use nq_protocol::{Sha256Digest, canonical_json_bytes, sha256_bytes};
+use chrono::{DateTime, Utc};
+use nq_protocol::{Sha256Digest, canonical_json_bytes, semantic_digest, sha256_bytes};
 use rusqlite::OptionalExtension;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::custody_arena::{
-    AcquisitionCarrier, ArenaInventoryEntry, ArenaLayout, ArenaPrelaunchBinding, ArenaState,
-    CustodyArena, DerivationClaim, DerivedV2ClosureCandidate,
+    AcquisitionCarrier, ArenaFailureCarrierCandidate, ArenaInventoryEntry, ArenaLayout,
+    ArenaPrelaunchBinding, ArenaState, CustodyArena, DerivationClaim, DerivedV2ClosureCandidate,
+    acquisition_carrier_capacity_bound,
 };
 use crate::{
     DiagnosticArtifactByteState, DiagnosticArtifactLookup, DiagnosticArtifactOrigin,
@@ -36,6 +38,32 @@ use crate::{
 /// This is an on-disk storage format, not an NQ/Nightshift product contract.
 /// Its presence alone establishes no diagnostic or reliance semantics.
 pub const GOVERNED_CUSTODY_CLOSURE_SCHEMA: &str = "nq.governed_execution_custody_closure.v1";
+/// Corrected closure schema that keeps evaluator semantic identity distinct
+/// from executable identity and represents clock qualification without a
+/// numeric sentinel.
+pub const GOVERNED_CUSTODY_CLOSURE_V2_SCHEMA: &str = "nq.governed_execution_custody_closure.v2";
+
+/// Canonical store-owned terminal carrier for one launched occurrence that
+/// cannot reach a complete V2 closure.
+///
+/// The document records a custody terminal, not a diagnostic disposition,
+/// reliance decision, authorization, or action result.
+pub const GOVERNED_PROTECTED_TERMINAL_SCHEMA: &str = "nq.governed_protected_terminal.v1";
+
+/// Return the exact arena payload capacity required to encode the two supplied
+/// opaque acquisition maxima.
+///
+/// The result includes the acquisition carrier's eight-byte framing length and
+/// its canonical typed header. It deliberately does not guess either payload
+/// bound and does not include the arena section's separately allocated physical
+/// header.
+pub fn governed_acquisition_capacity_bound(
+    max_provider_intake_bytes: u64,
+    max_raw_bytes: u64,
+) -> Result<u64, StoreError> {
+    acquisition_carrier_capacity_bound(max_provider_intake_bytes, max_raw_bytes)
+        .map_err(custody_error)
+}
 
 /// Exact immutable identity and capacity bound established before launch.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -227,6 +255,270 @@ pub enum GovernedProtectedFailureAccess {
     VerifiedAvailable(GovernedProtectedFailure),
 }
 
+/// Why a launched occurrence ended without a complete V2 closure.
+///
+/// These remain separate custody-terminal classes. Neither is a diagnostic
+/// outcome.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GovernedProtectedTerminalClass {
+    /// Core refused before any provider effect was permitted.
+    PreEffectRefusal,
+    /// A postlaunch failure prevented complete V2 closure.
+    PostlaunchFailure,
+}
+
+/// The exact deadline assessment supplied at terminalization time.
+///
+/// `NotEstablished` is a first-class result. Reopening this carrier never
+/// recomputes or refreshes the assessment.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GovernedProtectedTerminalDeadlineCompliance {
+    WithinDeadline,
+    DeadlineReachedOrExceeded,
+    NotEstablished,
+}
+
+/// Exact typed reason retained inside one custody terminal.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GovernedProtectedTerminalReason {
+    pub code: String,
+    pub detail: String,
+}
+
+/// Caller-supplied occurrence facts for immediate terminalization.
+///
+/// Reservation and request identities are not caller fields; the custody
+/// handle supplies them from its immutable prelaunch binding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GovernedProtectedTerminalInput {
+    pub execution_launch_record_id: Sha256Digest,
+    pub terminal_class: GovernedProtectedTerminalClass,
+    pub reason: GovernedProtectedTerminalReason,
+    pub launch_attempt_deadline: String,
+    pub terminalized_at: String,
+    pub deadline_compliance: GovernedProtectedTerminalDeadlineCompliance,
+}
+
+/// Exact reservation identity retained by a protected terminal.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GovernedProtectedTerminalReservation {
+    pub record_id: Sha256Digest,
+    pub manifest_digest: Sha256Digest,
+}
+
+/// Exact outer-request identity retained by a protected terminal.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GovernedProtectedTerminalRequest {
+    pub record_id: Sha256Digest,
+    pub request_id: String,
+    pub bytes_digest: Sha256Digest,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum GovernedProtectedTerminalMode {
+    ImmediateOwnedLaunch,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum GovernedProtectedTerminalStanding {
+    CustodyOnly,
+}
+
+/// Typed canonical document committed to the protected-failure arena.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GovernedProtectedTerminalDocument {
+    pub schema: String,
+    pub terminal_id: Sha256Digest,
+    pub reservation: GovernedProtectedTerminalReservation,
+    pub outer_request: GovernedProtectedTerminalRequest,
+    pub execution_launch_record_id: Sha256Digest,
+    pub launch_claimed_at: String,
+    terminalization_mode: GovernedProtectedTerminalMode,
+    pub terminal_class: GovernedProtectedTerminalClass,
+    pub reason: GovernedProtectedTerminalReason,
+    pub launch_attempt_deadline: String,
+    pub terminalized_at: String,
+    pub deadline_compliance: GovernedProtectedTerminalDeadlineCompliance,
+    standing: GovernedProtectedTerminalStanding,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct GovernedProtectedTerminalPreimage {
+    schema: String,
+    reservation: GovernedProtectedTerminalReservation,
+    outer_request: GovernedProtectedTerminalRequest,
+    execution_launch_record_id: Sha256Digest,
+    launch_claimed_at: String,
+    terminalization_mode: GovernedProtectedTerminalMode,
+    terminal_class: GovernedProtectedTerminalClass,
+    reason: GovernedProtectedTerminalReason,
+    launch_attempt_deadline: String,
+    terminalized_at: String,
+    deadline_compliance: GovernedProtectedTerminalDeadlineCompliance,
+    standing: GovernedProtectedTerminalStanding,
+}
+
+/// Canonical self-identified protected terminal and its exact committed bytes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GovernedProtectedTerminal {
+    document: GovernedProtectedTerminalDocument,
+    exact_bytes: Vec<u8>,
+}
+
+impl GovernedProtectedTerminal {
+    fn create(
+        reservation: &GovernedCustodyReservation,
+        launch_claimed_at: String,
+        input: GovernedProtectedTerminalInput,
+    ) -> Result<Self, StoreError> {
+        validate_terminal_reason(&input.reason)?;
+        validate_terminal_times(
+            &launch_claimed_at,
+            &input.launch_attempt_deadline,
+            &input.terminalized_at,
+            input.deadline_compliance,
+        )?;
+        let preimage = GovernedProtectedTerminalPreimage {
+            schema: GOVERNED_PROTECTED_TERMINAL_SCHEMA.to_owned(),
+            reservation: GovernedProtectedTerminalReservation {
+                record_id: reservation.reservation_record_id.clone(),
+                manifest_digest: reservation.reservation_manifest_digest.clone(),
+            },
+            outer_request: GovernedProtectedTerminalRequest {
+                record_id: reservation.outer_request_record_id.clone(),
+                request_id: reservation.outer_request_id.clone(),
+                bytes_digest: reservation.outer_request_digest.clone(),
+            },
+            execution_launch_record_id: input.execution_launch_record_id,
+            launch_claimed_at,
+            terminalization_mode: GovernedProtectedTerminalMode::ImmediateOwnedLaunch,
+            terminal_class: input.terminal_class,
+            reason: input.reason,
+            launch_attempt_deadline: input.launch_attempt_deadline,
+            terminalized_at: input.terminalized_at,
+            deadline_compliance: input.deadline_compliance,
+            standing: GovernedProtectedTerminalStanding::CustodyOnly,
+        };
+        let terminal_id = semantic_digest(&preimage).map_err(|error| {
+            StoreError::Invariant(format!(
+                "protected terminal identity cannot be derived: {error}"
+            ))
+        })?;
+        let document = GovernedProtectedTerminalDocument {
+            schema: preimage.schema,
+            terminal_id,
+            reservation: preimage.reservation,
+            outer_request: preimage.outer_request,
+            execution_launch_record_id: preimage.execution_launch_record_id,
+            launch_claimed_at: preimage.launch_claimed_at,
+            terminalization_mode: preimage.terminalization_mode,
+            terminal_class: preimage.terminal_class,
+            reason: preimage.reason,
+            launch_attempt_deadline: preimage.launch_attempt_deadline,
+            terminalized_at: preimage.terminalized_at,
+            deadline_compliance: preimage.deadline_compliance,
+            standing: preimage.standing,
+        };
+        let exact_bytes = canonical_json_bytes(&document).map_err(|error| {
+            StoreError::Invariant(format!("protected terminal cannot be encoded: {error}"))
+        })?;
+        Self::from_exact_bytes(exact_bytes)
+    }
+
+    /// Reopen one exact canonical protected terminal without refreshing its
+    /// deadline assessment or assigning diagnostic standing.
+    pub fn from_exact_bytes(exact_bytes: Vec<u8>) -> Result<Self, StoreError> {
+        let document: GovernedProtectedTerminalDocument = serde_json::from_slice(&exact_bytes)
+            .map_err(|error| {
+                StoreError::Invariant(format!("protected terminal cannot be decoded: {error}"))
+            })?;
+        if document.schema != GOVERNED_PROTECTED_TERMINAL_SCHEMA
+            || document.terminalization_mode != GovernedProtectedTerminalMode::ImmediateOwnedLaunch
+            || document.standing != GovernedProtectedTerminalStanding::CustodyOnly
+            || canonical_json_bytes(&document).map_err(|error| {
+                StoreError::Invariant(format!(
+                    "protected terminal cannot be canonicalized: {error}"
+                ))
+            })? != exact_bytes
+        {
+            return Err(StoreError::Invariant(
+                "protected terminal schema, mode, standing, or canonical bytes differ".into(),
+            ));
+        }
+        validate_terminal_reason(&document.reason)?;
+        validate_terminal_times(
+            &document.launch_claimed_at,
+            &document.launch_attempt_deadline,
+            &document.terminalized_at,
+            document.deadline_compliance,
+        )?;
+        let preimage = GovernedProtectedTerminalPreimage {
+            schema: document.schema.clone(),
+            reservation: document.reservation.clone(),
+            outer_request: document.outer_request.clone(),
+            execution_launch_record_id: document.execution_launch_record_id.clone(),
+            launch_claimed_at: document.launch_claimed_at.clone(),
+            terminalization_mode: document.terminalization_mode,
+            terminal_class: document.terminal_class,
+            reason: document.reason.clone(),
+            launch_attempt_deadline: document.launch_attempt_deadline.clone(),
+            terminalized_at: document.terminalized_at.clone(),
+            deadline_compliance: document.deadline_compliance,
+            standing: document.standing,
+        };
+        let expected_id = semantic_digest(&preimage).map_err(|error| {
+            StoreError::Invariant(format!(
+                "protected terminal identity cannot be reopened: {error}"
+            ))
+        })?;
+        if expected_id != document.terminal_id {
+            return Err(StoreError::Invariant(
+                "protected terminal identity differs from its exact preimage".into(),
+            ));
+        }
+        Ok(Self {
+            document,
+            exact_bytes,
+        })
+    }
+
+    /// Return the typed immutable document.
+    #[must_use]
+    pub const fn document(&self) -> &GovernedProtectedTerminalDocument {
+        &self.document
+    }
+
+    /// Return the exact canonical bytes committed to protected custody.
+    #[must_use]
+    pub fn exact_bytes(&self) -> &[u8] {
+        &self.exact_bytes
+    }
+}
+
+/// Whether an immediate terminalization wrote once or reopened the exact same
+/// already-terminal carrier.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GovernedProtectedTerminalDisposition {
+    Terminalized,
+    AlreadyTerminalized,
+}
+
+/// Result of immediate protected terminalization.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GovernedProtectedTerminalization {
+    pub disposition: GovernedProtectedTerminalDisposition,
+    pub terminal: GovernedProtectedTerminal,
+    pub commitment: GovernedCustodyCommitment,
+}
+
 /// Result of comparing one sealed governed closure with the store's exact
 /// committed SQL projection.
 ///
@@ -322,10 +614,15 @@ struct GovernedProjectionDerivation {
     trust_anchor_id: Sha256Digest,
     evaluation_id: Option<String>,
     profile_semantic_id: Sha256Digest,
+    #[serde(default)]
+    evaluator_semantic_digest: Option<Sha256Digest>,
     evaluator_artifact_digest: Sha256Digest,
     derived_at: String,
     clock_identity: Sha256Digest,
-    clock_uncertainty_ms: u64,
+    #[serde(default)]
+    clock_uncertainty_ms: Option<u64>,
+    #[serde(default)]
+    clock_qualification_digest: Option<Sha256Digest>,
 }
 
 impl GovernedProjectionDerivation {
@@ -337,10 +634,12 @@ impl GovernedProjectionDerivation {
             && self.trust_anchor_id == claim.trust_anchor_id
             && self.evaluation_id == claim.evaluation_id
             && self.profile_semantic_id == claim.profile_semantic_id
+            && self.evaluator_semantic_digest == claim.evaluator_semantic_digest
             && self.evaluator_artifact_digest == claim.evaluator_artifact_digest
             && self.derived_at == claim.derived_at
             && self.clock_identity == claim.clock_identity
             && self.clock_uncertainty_ms == claim.clock_uncertainty_ms
+            && self.clock_qualification_digest == claim.clock_qualification_digest
     }
 }
 
@@ -403,10 +702,14 @@ pub struct GovernedDerivationCustodyClaim {
     pub trust_anchor_id: Sha256Digest,
     pub evaluation_id: Option<String>,
     pub profile_semantic_id: Sha256Digest,
+    /// Semantic evaluator identity carried by the V2 diagnostic contract.
+    ///
+    /// This is deliberately distinct from the executable artifact digest.
+    pub evaluator_identity_digest: Sha256Digest,
     pub evaluator_artifact_digest: Sha256Digest,
     pub derived_at: String,
     pub clock_identity: Sha256Digest,
-    pub clock_uncertainty_ms: u64,
+    pub clock_qualification_digest: Sha256Digest,
 }
 
 impl From<GovernedDerivationCustodyClaim> for DerivationClaim {
@@ -418,12 +721,71 @@ impl From<GovernedDerivationCustodyClaim> for DerivationClaim {
             trust_anchor_id: value.trust_anchor_id,
             evaluation_id: value.evaluation_id,
             profile_semantic_id: value.profile_semantic_id,
+            evaluator_semantic_digest: Some(value.evaluator_identity_digest),
             evaluator_artifact_digest: value.evaluator_artifact_digest,
             derived_at: value.derived_at,
             clock_identity: value.clock_identity,
-            clock_uncertainty_ms: value.clock_uncertainty_ms,
+            clock_uncertainty_ms: None,
+            clock_qualification_digest: Some(value.clock_qualification_digest),
         }
     }
+}
+
+fn terminal_timestamp(value: &str, field: &str) -> Result<DateTime<Utc>, StoreError> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|error| {
+            StoreError::Invariant(format!(
+                "protected terminal {field} is not an RFC 3339 instant: {error}"
+            ))
+        })
+}
+
+fn validate_terminal_reason(reason: &GovernedProtectedTerminalReason) -> Result<(), StoreError> {
+    if reason.code.is_empty()
+        || reason.code.len() > 128
+        || !reason
+            .code
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':'))
+        || reason.detail.is_empty()
+        || reason.detail.len() > 2_048
+        || reason.detail.bytes().any(|byte| byte == 0)
+    {
+        return Err(StoreError::Invariant(
+            "protected terminal reason is empty, oversized, or malformed".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_terminal_times(
+    launch_claimed_at: &str,
+    launch_attempt_deadline: &str,
+    terminalized_at: &str,
+    compliance: GovernedProtectedTerminalDeadlineCompliance,
+) -> Result<(), StoreError> {
+    let claimed = terminal_timestamp(launch_claimed_at, "launch_claimed_at")?;
+    let deadline = terminal_timestamp(launch_attempt_deadline, "launch_attempt_deadline")?;
+    let terminalized = terminal_timestamp(terminalized_at, "terminalized_at")?;
+    if terminalized < claimed {
+        return Err(StoreError::Invariant(
+            "protected terminal predates its exact physical launch claim".into(),
+        ));
+    }
+    let ordering_matches = match compliance {
+        GovernedProtectedTerminalDeadlineCompliance::WithinDeadline => terminalized < deadline,
+        GovernedProtectedTerminalDeadlineCompliance::DeadlineReachedOrExceeded => {
+            terminalized >= deadline
+        }
+        GovernedProtectedTerminalDeadlineCompliance::NotEstablished => true,
+    };
+    if !ordering_matches {
+        return Err(StoreError::Invariant(
+            "protected terminal deadline assessment contradicts its retained exact instants".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Digest and byte length of one durably sealed arena section.
@@ -441,6 +803,7 @@ pub struct GovernedCustody {
     database_path: PathBuf,
     reservation: GovernedCustodyReservation,
     arena: CustodyArena,
+    immediate_launch_record_id: Option<Sha256Digest>,
 }
 
 impl GovernedCustody {
@@ -460,6 +823,7 @@ impl GovernedCustody {
             database_path: database_path.to_path_buf(),
             reservation,
             arena,
+            immediate_launch_record_id: None,
         })
     }
 
@@ -479,6 +843,7 @@ impl GovernedCustody {
             database_path: database_path.to_path_buf(),
             reservation,
             arena,
+            immediate_launch_record_id: None,
         })
     }
 
@@ -508,8 +873,10 @@ impl GovernedCustody {
         claimed_at: String,
     ) -> Result<(), StoreError> {
         self.arena
-            .claim(execution_launch_record_id, claimed_at)
-            .map_err(custody_error)
+            .claim(execution_launch_record_id.clone(), claimed_at)
+            .map_err(custody_error)?;
+        self.immediate_launch_record_id = Some(execution_launch_record_id);
+        Ok(())
     }
 
     /// Seal and immediately reopen exact opaque provider-intake and raw bytes.
@@ -550,6 +917,18 @@ impl GovernedCustody {
         let raw = self.arena.reopen_raw_token().map_err(custody_error)?;
         self.arena
             .claim_derivation(raw, claim.into())
+            .map(|_| ())
+            .map_err(custody_error)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn claim_legacy_derivation_v1_for_reopen_test(
+        &mut self,
+        claim: DerivationClaim,
+    ) -> Result<(), StoreError> {
+        let raw = self.arena.reopen_raw_token().map_err(custody_error)?;
+        self.arena
+            .claim_derivation(raw, claim)
             .map(|_| ())
             .map_err(custody_error)
     }
@@ -608,6 +987,125 @@ impl GovernedCustody {
     /// diagnostic outcome.
     pub fn protected_failure_bytes(&self) -> Result<Option<Vec<u8>>, StoreError> {
         self.arena.protected_failure_bytes().map_err(custody_error)
+    }
+
+    /// Terminalize the exact launch claimed by this live custody handle.
+    ///
+    /// This method is deliberately unavailable for a merely reopened
+    /// nonterminal launch. A restart loses the in-memory one-use launch
+    /// authority, and storage alone cannot prove that no prior executor can
+    /// still perform work. Exact replay of an already committed terminal is
+    /// idempotent because it performs no new transition.
+    pub fn terminalize_immediate_launch(
+        &mut self,
+        input: GovernedProtectedTerminalInput,
+    ) -> Result<GovernedProtectedTerminalization, StoreError> {
+        let inspection = self.arena.inspection().map_err(custody_error)?;
+        let actual_launch = inspection
+            .execution_launch_record_id
+            .as_ref()
+            .ok_or_else(|| {
+                StoreError::Invariant(
+                    "protected terminal requires an exact physical launch claim".into(),
+                )
+            })?;
+        if actual_launch != &input.execution_launch_record_id {
+            return Err(StoreError::Invariant(
+                "protected terminal launch identity differs from the physical launch claim".into(),
+            ));
+        }
+        let launch_claimed_at = inspection.claimed_at.clone().ok_or_else(|| {
+            StoreError::Invariant("protected terminal launch claim time is absent".into())
+        })?;
+        let terminal =
+            GovernedProtectedTerminal::create(&self.reservation, launch_claimed_at, input)?;
+        if inspection.state == ArenaState::FailedIndeterminate {
+            let existing = self
+                .arena
+                .protected_failure_bytes()
+                .map_err(custody_error)?
+                .ok_or_else(|| {
+                    StoreError::Invariant(
+                        "terminal custody state has no protected terminal bytes".into(),
+                    )
+                })?;
+            if existing != terminal.exact_bytes {
+                return Err(StoreError::Invariant(
+                    "launched occurrence is already terminalized by different exact bytes".into(),
+                ));
+            }
+            let terminal = GovernedProtectedTerminal::from_exact_bytes(existing)?;
+            return Ok(GovernedProtectedTerminalization {
+                disposition: GovernedProtectedTerminalDisposition::AlreadyTerminalized,
+                commitment: GovernedCustodyCommitment {
+                    bytes_digest: sha256_bytes(terminal.exact_bytes()),
+                    byte_length: u64::try_from(terminal.exact_bytes().len()).map_err(|_| {
+                        StoreError::Invariant(
+                            "protected terminal byte length exceeds address space".into(),
+                        )
+                    })?,
+                },
+                terminal,
+            });
+        }
+        if self.immediate_launch_record_id.as_ref() != Some(actual_launch) {
+            return Err(StoreError::Invariant(
+                "reopened in-flight launch has no exact no-further-execution fence; recovery terminalization is unavailable"
+                    .into(),
+            ));
+        }
+        if !matches!(
+            inspection.state,
+            ArenaState::Claimed | ArenaState::RawEvidenceSealed | ArenaState::DerivationClaimed
+        ) {
+            return Err(StoreError::Invariant(
+                "only an in-flight launched occurrence can enter protected terminal custody".into(),
+            ));
+        }
+        if terminal.document.terminal_class == GovernedProtectedTerminalClass::PreEffectRefusal
+            && inspection.state != ArenaState::Claimed
+        {
+            return Err(StoreError::Invariant(
+                "pre-effect refusal cannot terminalize an occurrence after acquisition custody"
+                    .into(),
+            ));
+        }
+        let candidate =
+            ArenaFailureCarrierCandidate::parse_protected_terminal(terminal.exact_bytes.clone())
+                .map_err(custody_error)?;
+        let section = self
+            .arena
+            .seal_failure(candidate, ArenaState::FailedIndeterminate)
+            .map_err(custody_error)?;
+        let reopened = self
+            .arena
+            .protected_failure_bytes()
+            .map_err(custody_error)?
+            .ok_or_else(|| {
+                StoreError::Invariant("committed protected terminal cannot be reopened".into())
+            })?;
+        if reopened != terminal.exact_bytes {
+            return Err(StoreError::Invariant(
+                "reopened protected terminal differs from committed exact bytes".into(),
+            ));
+        }
+        Ok(GovernedProtectedTerminalization {
+            disposition: GovernedProtectedTerminalDisposition::Terminalized,
+            commitment: GovernedCustodyCommitment {
+                bytes_digest: section.payload_digest().clone(),
+                byte_length: section.payload_length(),
+            },
+            terminal,
+        })
+    }
+
+    /// Reopen a typed protected terminal without refreshing any retained fact.
+    pub fn protected_terminal(&self) -> Result<Option<GovernedProtectedTerminal>, StoreError> {
+        self.arena
+            .protected_failure_bytes()
+            .map_err(custody_error)?
+            .map(GovernedProtectedTerminal::from_exact_bytes)
+            .transpose()
     }
 }
 
@@ -864,7 +1362,10 @@ impl Store {
                     format!("final closure shape is incompatible: {error}"),
                 )
             })?;
-        if closure.schema != GOVERNED_CUSTODY_CLOSURE_SCHEMA {
+        if !matches!(
+            closure.schema.as_str(),
+            GOVERNED_CUSTODY_CLOSURE_SCHEMA | GOVERNED_CUSTODY_CLOSURE_V2_SCHEMA
+        ) {
             return Err(projection_integrity(
                 reservation_record_id,
                 "final closure schema differs",
@@ -929,26 +1430,25 @@ impl Store {
                 "reservation checkpoint identity, digest, or arena binding differs",
             ));
         }
-        if reservation_checkpoint_records.len() != 3
-            || !reservation_checkpoint_records
-                .iter()
-                .any(|record| record == &outer_request_record)
-            || !reservation_checkpoint_records
-                .iter()
-                .any(|record| record == &invocation_decision_record)
-            || !reservation_checkpoint_records
-                .iter()
-                .any(|record| record == &reservation_record)
-            || outer_request_record.record_schema != "nq.diagnostic_invocation_request.v1"
-            || invocation_decision_record.record_schema != "nq.invocation_decision.v1"
-            || reservation_record.record_schema != "nq.custody_reservation.v1"
-            || exact_json_string(
-                reservation_record_id,
-                &invocation_decision_record,
-                "decision",
-            )?
-            .as_deref()
-                != Some("accepted")
+        if !checkpoint_has_unique_exact_record(
+            &reservation_checkpoint_records,
+            &outer_request_record,
+            "nq.diagnostic_invocation_request.v1",
+        ) || !checkpoint_has_unique_exact_record(
+            &reservation_checkpoint_records,
+            &invocation_decision_record,
+            "nq.invocation_decision.v1",
+        ) || !checkpoint_has_unique_exact_record(
+            &reservation_checkpoint_records,
+            &reservation_record,
+            "nq.custody_reservation.v1",
+        ) || exact_json_string(
+            reservation_record_id,
+            &invocation_decision_record,
+            "decision",
+        )?
+        .as_deref()
+            != Some("accepted")
         {
             return Err(projection_integrity(
                 reservation_record_id,
@@ -962,12 +1462,17 @@ impl Store {
             &closure.prelaunch.launch_checkpoint,
             "launch",
         )?;
-        let [launch_record] = launch_checkpoint_records.as_slice() else {
+        let launch_records = launch_checkpoint_records
+            .iter()
+            .filter(|record| record.record_schema == "nq.execution_launch.v1")
+            .collect::<Vec<_>>();
+        let [launch_record] = launch_records.as_slice() else {
             return Err(projection_integrity(
                 reservation_record_id,
                 "launch checkpoint does not contain exactly one execution launch",
             ));
         };
+        let launch_record = *launch_record;
         if launch_record.record_schema != "nq.execution_launch.v1"
             || launch_record.record_id
                 != inspection
@@ -986,6 +1491,33 @@ impl Store {
                 reservation_record_id,
                 "launch checkpoint membership, predecessor, or physical claim time differs",
             ));
+        }
+        let deadline_records = launch_checkpoint_records
+            .iter()
+            .filter(|record| record.record_schema == "nq.deadline_evaluation.v1")
+            .collect::<Vec<_>>();
+        match deadline_records.as_slice() {
+            [] if launch_checkpoint_records.len() == 1 => {
+                // Compatibility for already-committed launch-only checkpoints.
+                // This shape has no native-deadline provenance to upgrade.
+            }
+            [deadline_record] if launch_checkpoint_records.len() == 2 => {
+                verify_native_launch_checkpoint(
+                    reservation_record_id,
+                    deadline_record,
+                    launch_record,
+                    &reservation_checkpoint_records,
+                    &outer_request_record,
+                    &invocation_decision_record,
+                    &reservation_record,
+                )?;
+            }
+            _ => {
+                return Err(projection_integrity(
+                    reservation_record_id,
+                    "launch checkpoint is neither one legacy launch nor one exact deadline-plus-launch pair",
+                ));
+            }
         }
         let physical_derivation = inspection.derivation_claim.as_ref().ok_or_else(|| {
             projection_integrity(
@@ -1030,16 +1562,29 @@ impl Store {
                 "only the production V2 diagnostic contract may be indexed",
             ));
         }
+        let diagnostic_evaluator_digest = closure
+            .diagnostic
+            .pointer("/evaluator/digest")
+            .and_then(Value::as_str);
+        let evaluator_corresponds = match closure.schema.as_str() {
+            GOVERNED_CUSTODY_CLOSURE_SCHEMA => {
+                closure.derivation.evaluator_semantic_digest.is_none()
+                    && diagnostic_evaluator_digest
+                        == Some(closure.derivation.evaluator_artifact_digest.as_str())
+            }
+            GOVERNED_CUSTODY_CLOSURE_V2_SCHEMA => closure
+                .derivation
+                .evaluator_semantic_digest
+                .as_ref()
+                .is_some_and(|identity| diagnostic_evaluator_digest == Some(identity.as_str())),
+            _ => false,
+        };
         if closure
             .diagnostic
             .pointer("/profile_semantic_id")
             .and_then(Value::as_str)
             != Some(closure.derivation.profile_semantic_id.as_str())
-            || closure
-                .diagnostic
-                .pointer("/evaluator/digest")
-                .and_then(Value::as_str)
-                != Some(closure.derivation.evaluator_artifact_digest.as_str())
+            || !evaluator_corresponds
             || closure
                 .diagnostic
                 .pointer("/completed_at")
@@ -1057,20 +1602,51 @@ impl Store {
                 "diagnostic profile, evaluator, derivation time, or clock differs from custody",
             ));
         }
-        if closure
+        let clock_qualification = closure
             .diagnostic
-            .pointer("/attempt_interval/qualification/state")
-            .and_then(Value::as_str)
-            == Some("bounded")
-            && closure
-                .diagnostic
-                .pointer("/attempt_interval/qualification/maximum_error_ms")
-                .and_then(Value::as_u64)
-                != Some(closure.derivation.clock_uncertainty_ms)
-        {
+            .pointer("/attempt_interval/qualification")
+            .ok_or_else(|| {
+                projection_integrity(
+                    reservation_record_id,
+                    "diagnostic clock qualification is absent",
+                )
+            })?;
+        let clock_corresponds = match closure.schema.as_str() {
+            GOVERNED_CUSTODY_CLOSURE_SCHEMA => {
+                closure.derivation.clock_qualification_digest.is_none()
+                    && closure
+                        .derivation
+                        .clock_uncertainty_ms
+                        .is_some_and(|uncertainty| {
+                            clock_qualification.get("state").and_then(Value::as_str)
+                                == Some("bounded")
+                                && clock_qualification
+                                    .get("maximum_error_ms")
+                                    .and_then(Value::as_u64)
+                                    == Some(uncertainty)
+                        })
+            }
+            GOVERNED_CUSTODY_CLOSURE_V2_SCHEMA => {
+                closure.derivation.clock_uncertainty_ms.is_none()
+                    && matches!(
+                        clock_qualification.get("state").and_then(Value::as_str),
+                        Some("bounded" | "unqualified")
+                    )
+                    && closure
+                        .derivation
+                        .clock_qualification_digest
+                        .as_ref()
+                        .is_some_and(|expected| {
+                            semantic_digest(clock_qualification)
+                                .is_ok_and(|actual| actual == *expected)
+                        })
+            }
+            _ => false,
+        };
+        if !clock_corresponds {
             return Err(projection_integrity(
                 reservation_record_id,
-                "bounded diagnostic clock uncertainty differs from custody",
+                "diagnostic clock qualification differs from custody",
             ));
         }
         let diagnostic_artifact_id = Sha256Digest::parse(
@@ -1399,6 +1975,116 @@ fn exact_checkpoint(
     Ok((checkpoint, records))
 }
 
+fn checkpoint_has_unique_exact_record(
+    records: &[RuntimeRecordRow],
+    expected: &RuntimeRecordRow,
+    schema: &str,
+) -> bool {
+    expected.record_schema == schema
+        && records
+            .iter()
+            .filter(|record| record.record_schema == schema)
+            .count()
+            == 1
+        && records.iter().any(|record| record == expected)
+}
+
+#[allow(clippy::too_many_lines)] // The native deadline/launch join is intentionally explicit.
+fn verify_native_launch_checkpoint(
+    reservation_record_id: &Sha256Digest,
+    deadline_record: &RuntimeRecordRow,
+    launch_record: &RuntimeRecordRow,
+    reservation_checkpoint_records: &[RuntimeRecordRow],
+    outer_request_record: &RuntimeRecordRow,
+    invocation_decision_record: &RuntimeRecordRow,
+    reservation_record: &RuntimeRecordRow,
+) -> Result<(), StoreError> {
+    let deadline = exact_json_value(reservation_record_id, deadline_record)?;
+    let launch = exact_json_value(reservation_record_id, launch_record)?;
+    let deadline_reference = exact_json_reference(
+        reservation_record_id,
+        launch_record,
+        &launch,
+        "/prelaunch_checks/deadline",
+    )?;
+    let launch_outer_request = exact_json_reference(
+        reservation_record_id,
+        launch_record,
+        &launch,
+        "/outer_request",
+    )?;
+    let launch_decision = exact_json_reference(
+        reservation_record_id,
+        launch_record,
+        &launch,
+        "/invocation_decision",
+    )?;
+    let launch_reservation = exact_json_reference(
+        reservation_record_id,
+        launch_record,
+        &launch,
+        "/custody_reservation",
+    )?;
+    let deadline_outer_request = exact_json_reference(
+        reservation_record_id,
+        deadline_record,
+        &deadline,
+        "/outer_request",
+    )?;
+    let deadline_activation = exact_json_reference(
+        reservation_record_id,
+        deadline_record,
+        &deadline,
+        "/activation",
+    )?;
+    let launch_activation = exact_json_reference(
+        reservation_record_id,
+        launch_record,
+        &launch,
+        "/activation_snapshot",
+    )?;
+    let clock_qualification = exact_json_reference(
+        reservation_record_id,
+        deadline_record,
+        &deadline,
+        "/clock_qualification",
+    )?;
+
+    let exact_topology_reference = |reference: &ExactRuntimeRecordReference, schema: &str| {
+        reference.schema == schema
+            && reservation_checkpoint_records
+                .iter()
+                .any(|record| reference.matches(record))
+    };
+    let deadline_violations_are_empty = deadline
+        .pointer("/decision/violations")
+        .and_then(Value::as_array)
+        .is_some_and(Vec::is_empty);
+    if !deadline_reference.matches(deadline_record)
+        || deadline_reference.schema != "nq.deadline_evaluation.v1"
+        || !launch_outer_request.matches(outer_request_record)
+        || !deadline_outer_request.matches(outer_request_record)
+        || !launch_decision.matches(invocation_decision_record)
+        || !launch_reservation.matches(reservation_record)
+        || deadline_activation != launch_activation
+        || !exact_topology_reference(&deadline_activation, "nq.runtime_activation.v1")
+        || !exact_topology_reference(&clock_qualification, "nq.native_clock_qualification.v1")
+        || deadline.pointer("/decision/state").and_then(Value::as_str) != Some("accepted")
+        || !deadline_violations_are_empty
+        || deadline.pointer("/derived/launched_at") != launch.get("launched_at")
+        || deadline.pointer("/derived/attempt_deadline") != launch.get("attempt_deadline")
+        || deadline.get("clock") != launch.get("clock")
+        || deadline.pointer("/request_bounds/maximum_execution_ms")
+            != launch.get("maximum_execution_ms")
+    {
+        return Err(projection_integrity(
+            reservation_record_id,
+            "native deadline provenance or its exact deadline-to-launch join differs",
+        ));
+    }
+    Ok(())
+}
+
 fn checkpoint_runtime_records(
     connection: &rusqlite::Connection,
     reservation_record_id: &Sha256Digest,
@@ -1431,20 +2117,52 @@ fn exact_json_string(
     record: &RuntimeRecordRow,
     field: &str,
 ) -> Result<Option<String>, StoreError> {
-    let value: Value =
-        serde_json::from_slice(record.canonical_bytes.as_bytes()).map_err(|error| {
-            projection_integrity(
-                reservation_record_id,
-                format!(
-                    "runtime record {} cannot be decoded: {error}",
-                    record.record_id
-                ),
-            )
-        })?;
+    let value = exact_json_value(reservation_record_id, record)?;
     Ok(value
         .get(field)
         .and_then(Value::as_str)
         .map(ToOwned::to_owned))
+}
+
+fn exact_json_value(
+    reservation_record_id: &Sha256Digest,
+    record: &RuntimeRecordRow,
+) -> Result<Value, StoreError> {
+    serde_json::from_slice(record.canonical_bytes.as_bytes()).map_err(|error| {
+        projection_integrity(
+            reservation_record_id,
+            format!(
+                "runtime record {} cannot be decoded: {error}",
+                record.record_id
+            ),
+        )
+    })
+}
+
+fn exact_json_reference(
+    reservation_record_id: &Sha256Digest,
+    record: &RuntimeRecordRow,
+    value: &Value,
+    pointer: &str,
+) -> Result<ExactRuntimeRecordReference, StoreError> {
+    serde_json::from_value(value.pointer(pointer).cloned().ok_or_else(|| {
+        projection_integrity(
+            reservation_record_id,
+            format!(
+                "runtime record {} has no exact reference at {pointer}",
+                record.record_id
+            ),
+        )
+    })?)
+    .map_err(|error| {
+        projection_integrity(
+            reservation_record_id,
+            format!(
+                "runtime record {} has an invalid exact reference at {pointer}: {error}",
+                record.record_id
+            ),
+        )
+    })
 }
 
 fn exact_runtime_record(
@@ -1561,6 +2279,10 @@ mod tests {
         }
     }
 
+    fn create_database_placeholder(path: &Path) {
+        std::fs::File::create(path).expect("database placeholder");
+    }
+
     fn protected_failure_bytes(
         reservation: &GovernedCustodyReservation,
         launch: &Sha256Digest,
@@ -1590,6 +2312,319 @@ mod tests {
         let failure_id = semantic_digest(&value).expect("failure identity");
         value.insert("failure_id".into(), Value::String(failure_id.to_string()));
         canonical_json_bytes(&value).expect("failure carrier")
+    }
+
+    fn terminal_input(
+        launch: &Sha256Digest,
+        class: GovernedProtectedTerminalClass,
+        reason_code: &str,
+    ) -> GovernedProtectedTerminalInput {
+        GovernedProtectedTerminalInput {
+            execution_launch_record_id: launch.clone(),
+            terminal_class: class,
+            reason: GovernedProtectedTerminalReason {
+                code: reason_code.into(),
+                detail: format!("exact {reason_code} detail"),
+            },
+            launch_attempt_deadline: "2026-07-29T22:31:00Z".into(),
+            terminalized_at: "2026-07-29T22:30:00Z".into(),
+            deadline_compliance: GovernedProtectedTerminalDeadlineCompliance::WithinDeadline,
+        }
+    }
+
+    #[test]
+    fn immediate_terminal_is_canonical_typed_custody_only_and_exactly_idempotent() {
+        let directory = tempdir().expect("directory");
+        let database = directory.path().join("nq.db");
+        create_database_placeholder(&database);
+        let dependencies = b"exact dependency closure";
+        let reservation = reservation(dependencies);
+        let launch = digest("protected-terminal-launch");
+        let mut custody = GovernedCustody::reserve(&database, reservation.clone(), dependencies)
+            .expect("reserve custody");
+        custody
+            .claim_launch(launch.clone(), "2026-07-29T22:29:00Z".into())
+            .expect("launch claim");
+        let input = terminal_input(
+            &launch,
+            GovernedProtectedTerminalClass::PreEffectRefusal,
+            "native_clock_correspondence_unavailable",
+        );
+        let committed = custody
+            .terminalize_immediate_launch(input.clone())
+            .expect("immediate terminal");
+        assert_eq!(
+            committed.disposition,
+            GovernedProtectedTerminalDisposition::Terminalized
+        );
+        assert_eq!(
+            committed.terminal.document().reservation.record_id,
+            reservation.reservation_record_id
+        );
+        assert_eq!(
+            committed.terminal.document().outer_request.record_id,
+            reservation.outer_request_record_id
+        );
+        assert_eq!(
+            committed.terminal.document().execution_launch_record_id,
+            launch
+        );
+        assert_eq!(
+            committed.terminal.document().deadline_compliance,
+            GovernedProtectedTerminalDeadlineCompliance::WithinDeadline
+        );
+        let value: Value =
+            serde_json::from_slice(committed.terminal.exact_bytes()).expect("terminal JSON");
+        assert_eq!(value["standing"], "custody_only");
+        assert!(value.get("diagnostic_outcome").is_none());
+        assert!(value.get("reliance").is_none());
+        assert!(value.get("authorization").is_none());
+        assert!(value.get("action").is_none());
+        assert_eq!(
+            canonical_json_bytes(&value).expect("canonical terminal"),
+            committed.terminal.exact_bytes()
+        );
+        assert_eq!(
+            sha256_bytes(committed.terminal.exact_bytes()),
+            committed.commitment.bytes_digest
+        );
+
+        let replay = custody
+            .terminalize_immediate_launch(input)
+            .expect("exact replay is idempotent");
+        assert_eq!(
+            replay.disposition,
+            GovernedProtectedTerminalDisposition::AlreadyTerminalized
+        );
+        assert_eq!(replay.terminal, committed.terminal);
+        assert_eq!(
+            custody
+                .protected_terminal()
+                .expect("typed terminal read")
+                .expect("terminal present"),
+            committed.terminal
+        );
+
+        let changed = terminal_input(
+            &launch,
+            GovernedProtectedTerminalClass::PreEffectRefusal,
+            "different_refusal",
+        );
+        assert!(matches!(
+            custody.terminalize_immediate_launch(changed),
+            Err(StoreError::Invariant(message))
+                if message.contains("already terminalized by different exact bytes")
+        ));
+    }
+
+    #[test]
+    fn protected_terminal_substitution_and_wrong_launch_fail_closed() {
+        let directory = tempdir().expect("directory");
+        let database = directory.path().join("nq.db");
+        create_database_placeholder(&database);
+        let dependencies = b"exact dependency closure";
+        let reservation = reservation(dependencies);
+        let launch = digest("exact-launch");
+        let wrong_launch = digest("wrong-launch");
+        let mut custody = GovernedCustody::reserve(&database, reservation.clone(), dependencies)
+            .expect("reserve custody");
+        custody
+            .claim_launch(launch.clone(), "2026-07-29T22:29:00Z".into())
+            .expect("launch claim");
+        assert!(matches!(
+            custody.terminalize_immediate_launch(terminal_input(
+                &wrong_launch,
+                GovernedProtectedTerminalClass::PreEffectRefusal,
+                "wrong_launch"
+            )),
+            Err(StoreError::Invariant(message))
+                if message.contains("launch identity differs")
+        ));
+        assert_eq!(
+            custody.state().expect("state"),
+            GovernedCustodyState::LaunchClaimed
+        );
+
+        let terminal = GovernedProtectedTerminal::create(
+            &reservation,
+            "2026-07-29T22:29:00Z".into(),
+            terminal_input(
+                &launch,
+                GovernedProtectedTerminalClass::PreEffectRefusal,
+                "substitution",
+            ),
+        )
+        .expect("terminal");
+        let mut value: Value =
+            serde_json::from_slice(terminal.exact_bytes()).expect("terminal JSON");
+        value["reservation"]["record_id"] = Value::String(digest("substituted").to_string());
+        let mut preimage = value.as_object().expect("object").clone();
+        preimage.remove("terminal_id");
+        value["terminal_id"] = Value::String(
+            semantic_digest(&preimage)
+                .expect("substituted self identity")
+                .to_string(),
+        );
+        let substituted = canonical_json_bytes(&value).expect("substituted canonical bytes");
+        GovernedProtectedTerminal::from_exact_bytes(substituted.clone())
+            .expect("substitution remains internally self-consistent");
+        let candidate = ArenaFailureCarrierCandidate::parse_protected_terminal(substituted)
+            .expect("typed candidate");
+        assert!(matches!(
+            custody
+                .arena
+                .seal_failure(candidate, ArenaState::FailedIndeterminate),
+            Err(crate::custody_arena::ArenaError::Invalid(message))
+                if message.contains("differs from reservation")
+        ));
+    }
+
+    #[test]
+    fn postlaunch_failure_remains_distinct_from_pre_effect_refusal() {
+        let directory = tempdir().expect("directory");
+        let database = directory.path().join("nq.db");
+        create_database_placeholder(&database);
+        let dependencies = b"exact dependency closure";
+        let reservation = reservation(dependencies);
+        let launch = digest("postlaunch-failure-launch");
+        let mut custody = GovernedCustody::reserve(&database, reservation, dependencies)
+            .expect("reserve custody");
+        custody
+            .claim_launch(launch.clone(), "2026-07-29T22:29:00Z".into())
+            .expect("launch claim");
+        custody
+            .seal_acquisition(GovernedAcquisitionCustodyInput {
+                execution_launch_record_id: launch.clone(),
+                provider_intake_record_id: digest("postlaunch-provider-intake"),
+                exact_provider_intake_bytes: b"exact provider intake".to_vec(),
+                exact_raw_provider_bytes: b"partial raw response".to_vec(),
+            })
+            .expect("seal acquisition");
+
+        assert!(matches!(
+            custody.terminalize_immediate_launch(terminal_input(
+                &launch,
+                GovernedProtectedTerminalClass::PreEffectRefusal,
+                "late_pre_effect_label"
+            )),
+            Err(StoreError::Invariant(message))
+                if message.contains("after acquisition custody")
+        ));
+        let terminal = custody
+            .terminalize_immediate_launch(terminal_input(
+                &launch,
+                GovernedProtectedTerminalClass::PostlaunchFailure,
+                "evaluation_cannot_close",
+            ))
+            .expect("postlaunch protected terminal");
+        assert_eq!(
+            terminal.terminal.document().terminal_class,
+            GovernedProtectedTerminalClass::PostlaunchFailure
+        );
+        assert_eq!(
+            terminal.terminal.document().reason.code,
+            "evaluation_cannot_close"
+        );
+        assert_eq!(
+            custody.state().expect("state"),
+            GovernedCustodyState::FailedIndeterminate
+        );
+    }
+
+    #[test]
+    fn reopened_inflight_launch_cannot_substitute_time_for_a_recovery_fence() {
+        let directory = tempdir().expect("directory");
+        let database = directory.path().join("nq.db");
+        create_database_placeholder(&database);
+        let dependencies = b"exact dependency closure";
+        let reservation = reservation(dependencies);
+        let launch = digest("recovery-launch");
+        let mut custody = GovernedCustody::reserve(&database, reservation.clone(), dependencies)
+            .expect("reserve custody");
+        custody
+            .claim_launch(launch.clone(), "2026-07-29T22:29:00Z".into())
+            .expect("launch claim");
+        drop(custody);
+
+        let mut reopened =
+            GovernedCustody::open(&database, reservation).expect("reopen in-flight custody");
+        let timely = terminal_input(
+            &launch,
+            GovernedProtectedTerminalClass::PostlaunchFailure,
+            "recovery_without_fence",
+        );
+        assert!(matches!(
+            reopened.terminalize_immediate_launch(timely),
+            Err(StoreError::Invariant(message))
+                if message.contains("no exact no-further-execution fence")
+        ));
+
+        let mut late = terminal_input(
+            &launch,
+            GovernedProtectedTerminalClass::PostlaunchFailure,
+            "late_recovery_is_not_a_fence",
+        );
+        late.terminalized_at = "2026-07-29T22:32:00Z".into();
+        late.deadline_compliance =
+            GovernedProtectedTerminalDeadlineCompliance::DeadlineReachedOrExceeded;
+        assert!(matches!(
+            reopened.terminalize_immediate_launch(late),
+            Err(StoreError::Invariant(message))
+                if message.contains("no exact no-further-execution fence")
+        ));
+        assert_eq!(
+            reopened.state().expect("state"),
+            GovernedCustodyState::LaunchClaimed
+        );
+    }
+
+    #[test]
+    fn deadline_assessment_is_exact_and_not_inferred_or_refreshed() {
+        let directory = tempdir().expect("directory");
+        let database = directory.path().join("nq.db");
+        create_database_placeholder(&database);
+        let dependencies = b"exact dependency closure";
+        let reservation = reservation(dependencies);
+        let launch = digest("deadline-launch");
+        let mut custody = GovernedCustody::reserve(&database, reservation.clone(), dependencies)
+            .expect("reserve custody");
+        custody
+            .claim_launch(launch.clone(), "2026-07-29T22:29:00Z".into())
+            .expect("launch claim");
+
+        let mut contradictory = terminal_input(
+            &launch,
+            GovernedProtectedTerminalClass::PreEffectRefusal,
+            "contradictory_deadline",
+        );
+        contradictory.deadline_compliance =
+            GovernedProtectedTerminalDeadlineCompliance::DeadlineReachedOrExceeded;
+        assert!(matches!(
+            custody.terminalize_immediate_launch(contradictory),
+            Err(StoreError::Invariant(message))
+                if message.contains("deadline assessment contradicts")
+        ));
+
+        let mut unknown = terminal_input(
+            &launch,
+            GovernedProtectedTerminalClass::PreEffectRefusal,
+            "clock_correspondence_missing",
+        );
+        unknown.deadline_compliance = GovernedProtectedTerminalDeadlineCompliance::NotEstablished;
+        let committed = custody
+            .terminalize_immediate_launch(unknown)
+            .expect("explicitly unestablished deadline");
+        drop(custody);
+        let reopened = GovernedCustody::open(&database, reservation).expect("reopen terminal");
+        let reopened_terminal = reopened
+            .protected_terminal()
+            .expect("typed terminal read")
+            .expect("terminal present");
+        assert_eq!(
+            reopened_terminal.document().deadline_compliance,
+            GovernedProtectedTerminalDeadlineCompliance::NotEstablished
+        );
+        assert_eq!(reopened_terminal, committed.terminal);
     }
 
     #[test]

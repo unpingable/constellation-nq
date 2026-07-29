@@ -32,6 +32,7 @@ const SUPERBLOCK_JSON_OFFSET: usize = 128;
 const MAX_SUPERBLOCK_JSON_BYTES: usize = 3072;
 const FORMAT_VERSION: u8 = 1;
 const ACQUISITION_CARRIER_SCHEMA: &str = "nq.acquisition_custody_carrier.v1";
+const PROTECTED_TERMINAL_SCHEMA: &str = "nq.governed_protected_terminal.v1";
 
 #[derive(Debug, Error)]
 pub(crate) enum ArenaError {
@@ -218,6 +219,55 @@ impl AcquisitionCarrier {
         carrier.validate()?;
         Ok(carrier)
     }
+}
+
+/// Return the exact encoded payload capacity required for an acquisition
+/// carrier with the supplied maximum opaque byte lengths.
+///
+/// This uses the same header type and canonical encoder as
+/// [`AcquisitionCarrier::encode`]. Digest values are fixed-width protocol
+/// identities, so the resulting header length is exact for the two supplied
+/// byte-length bounds without allocating either payload.
+pub(crate) fn acquisition_carrier_capacity_bound(
+    max_provider_intake_bytes: u64,
+    max_raw_bytes: u64,
+) -> Result<u64, ArenaError> {
+    if max_provider_intake_bytes == 0 {
+        return Err(ArenaError::Invalid(
+            "maximum provider-intake bytes must be positive".into(),
+        ));
+    }
+    8_u64
+        .checked_add(max_provider_intake_bytes)
+        .and_then(|length| length.checked_add(max_raw_bytes))
+        .ok_or_else(|| {
+            ArenaError::Invalid("acquisition carrier capacity bound overflowed".into())
+        })?;
+    let placeholder_digest = sha256_bytes(&[]);
+    let header = AcquisitionCarrierHeader {
+        schema: ACQUISITION_CARRIER_SCHEMA.to_owned(),
+        execution_launch_record_id: placeholder_digest.clone(),
+        provider_intake_record_id: placeholder_digest.clone(),
+        provider_intake_bytes: ByteCaptureCommitment {
+            state: CapturedBytesState::Captured,
+            byte_length: max_provider_intake_bytes,
+            bytes_digest: placeholder_digest.clone(),
+        },
+        raw_provider_bytes: ByteCaptureCommitment {
+            state: CapturedBytesState::Captured,
+            byte_length: max_raw_bytes,
+            bytes_digest: placeholder_digest,
+        },
+    };
+    let header_bytes = canonical_json_bytes(&header)
+        .map_err(|error| ArenaError::Invalid(format!("cannot encode carrier bound: {error}")))?;
+    let header_length = u64::try_from(header_bytes.len())
+        .map_err(|_| ArenaError::Invalid("carrier-bound header length overflowed".into()))?;
+    8_u64
+        .checked_add(header_length)
+        .and_then(|length| length.checked_add(max_provider_intake_bytes))
+        .and_then(|length| length.checked_add(max_raw_bytes))
+        .ok_or_else(|| ArenaError::Invalid("acquisition carrier capacity bound overflowed".into()))
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -455,10 +505,15 @@ pub(crate) struct DerivationClaim {
     pub(crate) trust_anchor_id: Sha256Digest,
     pub(crate) evaluation_id: Option<String>,
     pub(crate) profile_semantic_id: Sha256Digest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) evaluator_semantic_digest: Option<Sha256Digest>,
     pub(crate) evaluator_artifact_digest: Sha256Digest,
     pub(crate) derived_at: String,
     pub(crate) clock_identity: Sha256Digest,
-    pub(crate) clock_uncertainty_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) clock_uncertainty_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) clock_qualification_digest: Option<Sha256Digest>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -540,11 +595,7 @@ impl DerivedV2ClosureCandidate {
         token: DerivationCustodyToken,
         exact_bytes: Vec<u8>,
     ) -> Result<Self, ArenaError> {
-        validate_semantic_document(
-            &exact_bytes,
-            "nq.governed_execution_custody_closure.v1",
-            "closure_id",
-        )?;
+        validate_governed_closure_document(&exact_bytes)?;
         Ok(Self { token, exact_bytes })
     }
 }
@@ -567,6 +618,11 @@ pub(crate) struct ArenaFailureCarrierCandidate {
 impl ArenaFailureCarrierCandidate {
     pub(crate) fn parse_precursor(exact_bytes: Vec<u8>) -> Result<Self, ArenaError> {
         validate_semantic_document(&exact_bytes, "nq.governed_custody_failure.v1", "failure_id")?;
+        Ok(Self { exact_bytes })
+    }
+
+    pub(crate) fn parse_protected_terminal(exact_bytes: Vec<u8>) -> Result<Self, ArenaError> {
+        validate_semantic_document(&exact_bytes, PROTECTED_TERMINAL_SCHEMA, "terminal_id")?;
         Ok(Self { exact_bytes })
     }
 }
@@ -2274,12 +2330,26 @@ fn validate_final_v2_correspondence(
     _prelaunch: &ArenaPrelaunchBinding,
     _claim: &DerivationClaim,
 ) -> Result<(), ArenaError> {
-    let _ = validate_semantic_document(
-        exact_bytes,
-        "nq.governed_execution_custody_closure.v1",
-        "closure_id",
-    )?;
+    let _ = validate_governed_closure_document(exact_bytes)?;
     Ok(())
+}
+
+fn validate_governed_closure_document(exact_bytes: &[u8]) -> Result<Value, ArenaError> {
+    let value: Value = serde_json::from_slice(exact_bytes)
+        .map_err(|error| ArenaError::Invalid(format!("cannot decode final closure: {error}")))?;
+    let schema = value
+        .get("schema")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ArenaError::Invalid("final closure schema is absent".into()))?;
+    if !matches!(
+        schema,
+        "nq.governed_execution_custody_closure.v1" | "nq.governed_execution_custody_closure.v2"
+    ) {
+        return Err(ArenaError::Invalid(
+            "final closure schema is unsupported".into(),
+        ));
+    }
+    validate_semantic_document(exact_bytes, schema, "closure_id")
 }
 
 fn validate_failure_correspondence(
@@ -2288,6 +2358,35 @@ fn validate_failure_correspondence(
     launch: Option<&Sha256Digest>,
     terminal_state: ArenaState,
 ) -> Result<(), ArenaError> {
+    let value: Value = serde_json::from_slice(exact_bytes)
+        .map_err(|error| ArenaError::Invalid(format!("cannot decode failure carrier: {error}")))?;
+    if value["schema"] == PROTECTED_TERMINAL_SCHEMA {
+        let value =
+            validate_semantic_document(exact_bytes, PROTECTED_TERMINAL_SCHEMA, "terminal_id")?;
+        let exact_reservation = &value["reservation"];
+        let exact_request = &value["outer_request"];
+        return match (terminal_state, launch) {
+            (ArenaState::FailedIndeterminate, Some(launch))
+                if exact_reservation["record_id"]
+                    == prelaunch.reservation_record_id.as_str()
+                    && exact_reservation["manifest_digest"]
+                        == prelaunch.reservation_manifest_digest.as_str()
+                    && exact_request["record_id"]
+                        == prelaunch.outer_request_record_id.as_str()
+                    && exact_request["request_id"] == prelaunch.outer_request_id
+                    && exact_request["bytes_digest"]
+                        == prelaunch.outer_request_digest.as_str()
+                    && value["execution_launch_record_id"] == launch.as_str()
+                    && value["terminalization_mode"] == "immediate_owned_launch" =>
+            {
+                Ok(())
+            }
+            _ => Err(ArenaError::Invalid(
+                "protected terminal differs from reservation, request, launch, mode, or terminal state"
+                    .into(),
+            )),
+        };
+    }
     let value =
         validate_semantic_document(exact_bytes, "nq.governed_custody_failure.v1", "failure_id")?;
     if value["reservation_id"] != prelaunch.reservation_record_id.as_str()
@@ -2384,6 +2483,11 @@ mod tests {
     }
 
     fn derivation_claim() -> DerivationClaim {
+        let clock_qualification = json!({
+            "state": "unqualified",
+            "code": "fixture_clock_unqualified",
+            "detail": "the fixture establishes no finite UTC-error bound",
+        });
         DerivationClaim {
             derivation_id: digest(b"derivation"),
             dependency_generation_id: digest(b"dependency-generation"),
@@ -2391,10 +2495,15 @@ mod tests {
             trust_anchor_id: digest(b"trust-anchor"),
             evaluation_id: Some("evaluation-001".into()),
             profile_semantic_id: digest(b"profile"),
-            evaluator_artifact_digest: digest(b"evaluator"),
+            evaluator_semantic_digest: Some(digest(b"evaluator-semantic")),
+            evaluator_artifact_digest: digest(b"evaluator-artifact"),
             derived_at: "2026-07-29T12:00:01Z".into(),
             clock_identity: digest(b"clock"),
-            clock_uncertainty_ms: 1,
+            clock_uncertainty_ms: None,
+            clock_qualification_digest: Some(
+                nq_protocol::semantic_digest(&clock_qualification)
+                    .expect("clock qualification identity"),
+            ),
         }
     }
 
@@ -2420,7 +2529,14 @@ mod tests {
         );
         diagnostic.insert(
             "evaluator".into(),
-            json!({"digest": claim.evaluator_artifact_digest, "id": "evaluator", "version": "1"}),
+            json!({
+                "digest": claim
+                    .evaluator_semantic_digest
+                    .as_ref()
+                    .expect("new fixture has evaluator semantic identity"),
+                "id": "evaluator",
+                "version": "1"
+            }),
         );
         diagnostic.insert(
             "execution_clock".into(),
@@ -2429,6 +2545,16 @@ mod tests {
         diagnostic.insert(
             "profile_semantic_id".into(),
             Value::String(claim.profile_semantic_id.as_str().to_owned()),
+        );
+        diagnostic.insert(
+            "attempt_interval".into(),
+            json!({
+                "qualification": {
+                    "state": "unqualified",
+                    "code": "fixture_clock_unqualified",
+                    "detail": "the fixture establishes no finite UTC-error bound",
+                },
+            }),
         );
         diagnostic.insert(
             "request_id".into(),
@@ -2452,7 +2578,7 @@ mod tests {
             json!({"generation_id": digest(b"dependencies")}),
         );
         semantic_document(
-            "nq.governed_execution_custody_closure.v1",
+            "nq.governed_execution_custody_closure.v2",
             "closure_id",
             closure,
         )
@@ -2977,6 +3103,111 @@ mod tests {
         assert!(matches!(
             empty_intake.encode(),
             Err(ArenaError::Invalid(message)) if message.contains("no provider-intake bytes")
+        ));
+    }
+
+    #[test]
+    fn acquisition_capacity_bound_matches_exact_encoder_at_decimal_boundaries() {
+        let launch = digest(b"capacity-launch");
+        let intake = digest(b"capacity-intake");
+        for (provider_bytes, raw_bytes) in [
+            (1_usize, 0_usize),
+            (9, 10),
+            (10, 99),
+            (99, 100),
+            (100, 1_000),
+        ] {
+            let carrier = AcquisitionCarrier {
+                execution_launch_record_id: launch.clone(),
+                provider_intake_record_id: intake.clone(),
+                exact_provider_intake_bytes: vec![b'i'; provider_bytes],
+                exact_raw_provider_bytes: vec![b'r'; raw_bytes],
+            };
+            let encoded = carrier.encode().expect("exact acquisition carrier");
+            let bound = acquisition_carrier_capacity_bound(
+                u64::try_from(provider_bytes).expect("provider bound"),
+                u64::try_from(raw_bytes).expect("raw bound"),
+            )
+            .expect("capacity bound");
+            assert_eq!(
+                u64::try_from(encoded.len()).expect("encoded length"),
+                bound,
+                "bound must use the encoder's exact canonical header at ({provider_bytes}, {raw_bytes})"
+            );
+        }
+    }
+
+    #[test]
+    fn acquisition_capacity_bound_is_the_exact_arena_acceptance_boundary() {
+        let directory = tempdir().expect("directory");
+        let launch = digest(b"capacity-boundary-launch");
+        let intake = digest(b"capacity-boundary-intake");
+        let carrier = AcquisitionCarrier {
+            execution_launch_record_id: launch.clone(),
+            provider_intake_record_id: intake,
+            exact_provider_intake_bytes: vec![b'i'; 17],
+            exact_raw_provider_bytes: vec![b'r'; 31],
+        };
+        let bound = acquisition_carrier_capacity_bound(17, 31).expect("capacity bound");
+
+        let exact_database = directory.path().join("exact.db");
+        File::create(&exact_database).expect("database placeholder");
+        let mut exact_prelaunch = prelaunch("capacity-exact");
+        exact_prelaunch.dependency_generation_custody_digest = sha256_bytes(b"dependency");
+        let exact_layout =
+            ArenaLayout::new(4_096, bound, 4_096, 4_096).expect("exact-bound layout");
+        let mut exact = CustodyArena::create(
+            &exact_database,
+            exact_prelaunch,
+            exact_layout,
+            b"dependency",
+        )
+        .expect("exact-bound arena");
+        exact
+            .claim(launch.clone(), "2026-07-29T12:00:00Z".into())
+            .expect("claim");
+        exact
+            .seal_acquisition(carrier.clone())
+            .expect("exact bound accepts exact carrier");
+
+        let short_database = directory.path().join("short.db");
+        File::create(&short_database).expect("database placeholder");
+        let mut short_prelaunch = prelaunch("capacity-short");
+        short_prelaunch.dependency_generation_custody_digest = sha256_bytes(b"dependency");
+        let short_layout = ArenaLayout::new(4_096, bound - 1, 4_096, 4_096).expect("short layout");
+        let mut short = CustodyArena::create(
+            &short_database,
+            short_prelaunch,
+            short_layout,
+            b"dependency",
+        )
+        .expect("short arena");
+        short
+            .claim(launch, "2026-07-29T12:00:00Z".into())
+            .expect("claim");
+        let Err(error) = short.seal_acquisition(carrier) else {
+            panic!("one byte below the exact bound must refuse");
+        };
+        assert!(
+            matches!(&error, ArenaError::Invalid(message)
+                if message.contains("requires") && message.contains("capacity")),
+            "unexpected short-capacity refusal: {error:?}"
+        );
+    }
+
+    #[test]
+    fn acquisition_capacity_bound_rejects_empty_intake_and_arithmetic_overflow() {
+        assert!(matches!(
+            acquisition_carrier_capacity_bound(0, 1),
+            Err(ArenaError::Invalid(message)) if message.contains("must be positive")
+        ));
+        assert!(matches!(
+            acquisition_carrier_capacity_bound(u64::MAX, 0),
+            Err(ArenaError::Invalid(message)) if message.contains("overflowed")
+        ));
+        assert!(matches!(
+            acquisition_carrier_capacity_bound(1, u64::MAX),
+            Err(ArenaError::Invalid(message)) if message.contains("overflowed")
         ));
     }
 

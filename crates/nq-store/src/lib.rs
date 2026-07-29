@@ -21,12 +21,18 @@ mod custody_arena;
 mod governed_custody;
 
 pub use governed_custody::{
-    CustodiedAcquisition, GOVERNED_CUSTODY_CLOSURE_SCHEMA, GovernedAcquisitionCustodyInput,
-    GovernedCustody, GovernedCustodyCommitment, GovernedCustodyInspection,
-    GovernedCustodyInventoryEntry, GovernedCustodyRecoveryClass, GovernedCustodyReservation,
+    CustodiedAcquisition, GOVERNED_CUSTODY_CLOSURE_SCHEMA, GOVERNED_CUSTODY_CLOSURE_V2_SCHEMA,
+    GOVERNED_PROTECTED_TERMINAL_SCHEMA, GovernedAcquisitionCustodyInput, GovernedCustody,
+    GovernedCustodyCommitment, GovernedCustodyInspection, GovernedCustodyInventoryEntry,
+    GovernedCustodyRecoveryClass, GovernedCustodyReservation,
     GovernedCustodyReservationLedgerBinding, GovernedCustodyState, GovernedDerivationCustodyClaim,
     GovernedProjectionVerification, GovernedProjectionVerificationDisposition,
-    GovernedProtectedFailure, GovernedProtectedFailureAccess,
+    GovernedProtectedFailure, GovernedProtectedFailureAccess, GovernedProtectedTerminal,
+    GovernedProtectedTerminalClass, GovernedProtectedTerminalDeadlineCompliance,
+    GovernedProtectedTerminalDisposition, GovernedProtectedTerminalDocument,
+    GovernedProtectedTerminalInput, GovernedProtectedTerminalReason,
+    GovernedProtectedTerminalRequest, GovernedProtectedTerminalReservation,
+    GovernedProtectedTerminalization, governed_acquisition_capacity_bound,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -176,6 +182,7 @@ pub const SUPPORTED_RUNTIME_RECORD_SCHEMAS: &[&str] = &[
     "nq.authenticated_artifact_envelope.v1",
     "nq.buffer_delivery_policy.v1",
     "nq.custody_reservation.v1",
+    "nq.deadline_evaluation.v1",
     "nq.decommission_cut.v1",
     "nq.decommission_ledger_snapshot.v1",
     "nq.diagnostic_invocation_request.v1",
@@ -187,6 +194,8 @@ pub const SUPPORTED_RUNTIME_RECORD_SCHEMAS: &[&str] = &[
     "nq.inspector_result_set.v1",
     "nq.inspector_snapshot.v1",
     "nq.invocation_decision.v1",
+    "nq.native_clock_qualification.v1",
+    "nq.native_profile_qualification.v1",
     "nq.node_enrollment.v1",
     "nq.node_key_lifecycle_event.v1",
     "nq.operation_authorization.v1",
@@ -13774,19 +13783,30 @@ mod tests {
         TrustAnchor,
         Evaluation,
         ProfileSemantic,
+        EvaluatorIdentity,
         EvaluatorArtifact,
         DerivedAt,
         ClockIdentity,
-        ClockUncertainty,
+        ClockQualification,
     }
 
     #[derive(Clone, Copy)]
     enum GovernedProjectionFixtureMode {
         Complete,
+        LegacyV1Complete,
+        FullTopologyNativeLaunch,
+        DuplicateOuterRequestInReservation,
+        DuplicateInvocationDecisionInReservation,
+        DuplicateCustodyReservationInReservation,
         MissingSql,
         RawSubstitution,
         ProviderDocumentSubstitution,
         IncompleteRuntimeWriteSet,
+        DiagnosticEvaluatorArtifactMasquerade,
+        DiagnosticClockQualificationSubstitution,
+        NativeDeadlineReferenceSubstitution,
+        NativeDeadlineProvenanceSubstitution,
+        NativeLaunchExtraneousRecord,
         DerivationSubstitution(GovernedDerivationSubstitution),
         ReservationCheckpointIdentitySubstitution,
         ReservationCheckpointDigestSubstitution,
@@ -13799,9 +13819,11 @@ mod tests {
 
     struct GovernedProjectionFixture {
         store: Store,
-        _directory: tempfile::TempDir,
+        directory: tempfile::TempDir,
+        reservation: GovernedCustodyReservation,
         reservation_record_id: Sha256Digest,
         diagnostic_artifact_id: Sha256Digest,
+        exact_closure_bytes: Vec<u8>,
     }
 
     fn governed_runtime_record(
@@ -13829,6 +13851,14 @@ mod tests {
     fn governed_projection_fixture(
         mode: GovernedProjectionFixtureMode,
     ) -> GovernedProjectionFixture {
+        let legacy_v1 = matches!(mode, GovernedProjectionFixtureMode::LegacyV1Complete);
+        let native_launch = matches!(
+            mode,
+            GovernedProjectionFixtureMode::FullTopologyNativeLaunch
+                | GovernedProjectionFixtureMode::NativeDeadlineReferenceSubstitution
+                | GovernedProjectionFixtureMode::NativeDeadlineProvenanceSubstitution
+                | GovernedProjectionFixtureMode::NativeLaunchExtraneousRecord
+        );
         let directory = tempdir().expect("governed fixture directory");
         let database = directory.path().join("nq.db");
         let mut store = Store::initialize(&database).expect("governed fixture store");
@@ -13863,27 +13893,192 @@ mod tests {
                 "reservation": "governed-projection",
             }),
         );
+        let role_manifest = governed_runtime_record(
+            typed_digest("governed-role-manifest"),
+            "nq.role_manifest.v1",
+            json!({
+                "schema": "nq.role_manifest.v1",
+                "fixture": "full-topology-role",
+            }),
+        );
+        let cohort_manifest = governed_runtime_record(
+            typed_digest("governed-cohort-manifest"),
+            "nq.static_profile_cohort_manifest.v1",
+            json!({
+                "schema": "nq.static_profile_cohort_manifest.v1",
+                "fixture": "full-topology-cohort",
+            }),
+        );
+        let node_enrollment = governed_runtime_record(
+            typed_digest("governed-node-enrollment"),
+            "nq.node_enrollment.v1",
+            json!({
+                "schema": "nq.node_enrollment.v1",
+                "fixture": "full-topology-node",
+            }),
+        );
+        let activation = governed_runtime_record(
+            typed_digest("governed-runtime-activation"),
+            "nq.runtime_activation.v1",
+            json!({
+                "schema": "nq.runtime_activation.v1",
+                "fixture": "full-topology-activation",
+            }),
+        );
+        let witness = governed_runtime_record(
+            typed_digest("governed-witness-attachment"),
+            "nq.witness_attachment.v1",
+            json!({
+                "schema": "nq.witness_attachment.v1",
+                "fixture": "full-topology-witness",
+            }),
+        );
+        let profile_qualification = governed_runtime_record(
+            typed_digest("governed-native-profile-qualification"),
+            "nq.native_profile_qualification.v1",
+            json!({
+                "schema": "nq.native_profile_qualification.v1",
+                "fixture": "full-topology-profile-qualification",
+            }),
+        );
+        let native_clock_qualification = governed_runtime_record(
+            typed_digest("governed-native-clock-qualification"),
+            "nq.native_clock_qualification.v1",
+            json!({
+                "schema": "nq.native_clock_qualification.v1",
+                "fixture": "full-topology-clock-qualification",
+            }),
+        );
+        let deadline = governed_runtime_record(
+            typed_digest("governed-deadline-evaluation"),
+            "nq.deadline_evaluation.v1",
+            json!({
+                "schema": "nq.deadline_evaluation.v1",
+                "outer_request": governed_record_reference(&outer_request),
+                "activation": governed_record_reference(&activation),
+                "clock_qualification": governed_record_reference(&native_clock_qualification),
+                "clock": {"fixture": "boottime-realtime-bridge"},
+                "request_bounds": {
+                    "maximum_execution_ms": 1_000,
+                },
+                "sample": {
+                    "boot_epoch": typed_digest("governed-boot-epoch"),
+                    "boottime_at_ns": "1000000000",
+                },
+                "derived": {
+                    "launched_at": if matches!(
+                        mode,
+                        GovernedProjectionFixtureMode::NativeDeadlineProvenanceSubstitution
+                    ) {
+                        "2026-07-29T23:59:58Z"
+                    } else {
+                        TIME
+                    },
+                    "attempt_deadline": "2026-07-30T00:00:01Z",
+                    "boottime_expiry_ns": "2000000000",
+                },
+                "decision": {
+                    "state": "accepted",
+                    "violations": [],
+                },
+            }),
+        );
+        let launch_deadline_reference = if matches!(
+            mode,
+            GovernedProjectionFixtureMode::NativeDeadlineReferenceSubstitution
+        ) {
+            json!({
+                "schema": "nq.deadline_evaluation.v1",
+                "record_id": typed_digest("substituted-deadline-reference"),
+                "bytes_digest": deadline.canonical_bytes.digest(),
+            })
+        } else {
+            governed_record_reference(&deadline)
+        };
         let execution_launch = governed_runtime_record(
             typed_digest("governed-execution-launch"),
             "nq.execution_launch.v1",
-            json!({
-                "schema": "nq.execution_launch.v1",
-                "status": "launched",
-                "launched_at": TIME,
-                "outer_request": governed_record_reference(&outer_request),
-                "invocation_decision": governed_record_reference(&invocation_decision),
-            }),
+            if native_launch {
+                json!({
+                    "schema": "nq.execution_launch.v1",
+                    "status": "launched",
+                    "launched_at": TIME,
+                    "attempt_deadline": "2026-07-30T00:00:01Z",
+                    "maximum_execution_ms": 1_000,
+                    "clock": {"fixture": "boottime-realtime-bridge"},
+                    "outer_request": governed_record_reference(&outer_request),
+                    "invocation_decision": governed_record_reference(&invocation_decision),
+                    "custody_reservation": governed_record_reference(&reservation_record),
+                    "activation_snapshot": governed_record_reference(&activation),
+                    "prelaunch_checks": {
+                        "deadline": launch_deadline_reference,
+                    },
+                })
+            } else {
+                json!({
+                    "schema": "nq.execution_launch.v1",
+                    "status": "launched",
+                    "launched_at": TIME,
+                    "outer_request": governed_record_reference(&outer_request),
+                    "invocation_decision": governed_record_reference(&invocation_decision),
+                })
+            },
         );
+        let mut reservation_records = vec![
+            outer_request.clone(),
+            invocation_decision.clone(),
+            reservation_record.clone(),
+        ];
+        if native_launch {
+            reservation_records.extend([
+                role_manifest,
+                cohort_manifest,
+                node_enrollment,
+                activation,
+                witness,
+                profile_qualification,
+                native_clock_qualification,
+            ]);
+        }
+        match mode {
+            GovernedProjectionFixtureMode::DuplicateOuterRequestInReservation => {
+                reservation_records.push(governed_runtime_record(
+                    typed_digest("duplicate-governed-outer-request"),
+                    "nq.diagnostic_invocation_request.v1",
+                    json!({
+                        "schema": "nq.diagnostic_invocation_request.v1",
+                        "request_id": "duplicate-outer-request",
+                    }),
+                ));
+            }
+            GovernedProjectionFixtureMode::DuplicateInvocationDecisionInReservation => {
+                reservation_records.push(governed_runtime_record(
+                    typed_digest("duplicate-governed-invocation-decision"),
+                    "nq.invocation_decision.v1",
+                    json!({
+                        "schema": "nq.invocation_decision.v1",
+                        "decision": "accepted",
+                    }),
+                ));
+            }
+            GovernedProjectionFixtureMode::DuplicateCustodyReservationInReservation => {
+                reservation_records.push(governed_runtime_record(
+                    typed_digest("duplicate-governed-custody-reservation"),
+                    "nq.custody_reservation.v1",
+                    json!({
+                        "schema": "nq.custody_reservation.v1",
+                        "reservation": "duplicate-governed-projection",
+                    }),
+                ));
+            }
+            _ => {}
+        }
         let reservation_batch = RuntimeRecordBatchInput {
             checkpoint_id: typed_digest("governed-reservation-checkpoint").into_string(),
             expected_predecessor_checkpoint_id: None,
             expected_predecessor_ledger_root: None,
             dependency: dependency.clone(),
-            records: vec![
-                outer_request.clone(),
-                invocation_decision.clone(),
-                reservation_record.clone(),
-            ],
+            records: reservation_records,
         };
         let reservation_batch_digest =
             runtime_record_batch_digest(&reservation_batch).expect("reservation batch digest");
@@ -13933,7 +14128,25 @@ mod tests {
                     .clone(),
             ),
             dependency: dependency.clone(),
-            records: vec![execution_launch.clone()],
+            records: if native_launch {
+                let mut records = vec![deadline.clone(), execution_launch.clone()];
+                if matches!(
+                    mode,
+                    GovernedProjectionFixtureMode::NativeLaunchExtraneousRecord
+                ) {
+                    records.push(governed_runtime_record(
+                        typed_digest("extraneous-native-launch-record"),
+                        "nq.host_role_lifecycle_event.v1",
+                        json!({
+                            "schema": "nq.host_role_lifecycle_event.v1",
+                            "fixture": "must not share a native launch checkpoint",
+                        }),
+                    ));
+                }
+                records
+            } else {
+                vec![execution_launch.clone()]
+            },
         };
         let launch_receipt = store
             .append_runtime_records(&launch_batch)
@@ -13965,19 +14178,52 @@ mod tests {
             }),
         );
         let diagnostic_artifact_id = typed_digest("governed-diagnostic-artifact");
+        let evaluator_identity_digest = typed_digest("governed-evaluator-identity");
+        let clock_qualification = if legacy_v1 {
+            json!({
+                "state": "bounded",
+                "maximum_error_ms": 1,
+            })
+        } else {
+            json!({
+                "state": "unqualified",
+                "code": "fixture_clock_unqualified",
+                "detail": "the fixture establishes no finite UTC-error bound",
+            })
+        };
+        let clock_qualification_digest =
+            nq_protocol::semantic_digest(&clock_qualification).expect("clock qualification");
+        let diagnostic_clock_qualification = if matches!(
+            mode,
+            GovernedProjectionFixtureMode::DiagnosticClockQualificationSubstitution
+        ) {
+            json!({
+                "state": "unqualified",
+                "code": "substituted_clock_qualification",
+                "detail": "hostile diagnostic-side substitution",
+            })
+        } else {
+            clock_qualification.clone()
+        };
+        let diagnostic_evaluator_digest = if legacy_v1
+            || matches!(
+                mode,
+                GovernedProjectionFixtureMode::DiagnosticEvaluatorArtifactMasquerade
+            ) {
+            collection.intake.evaluator_artifact_digest.clone()
+        } else {
+            evaluator_identity_digest.clone()
+        };
         let diagnostic = document(json!({
             "schema": "nq.diagnostic_execution.v2",
             "artifact_id": diagnostic_artifact_id,
             "run_id": collection.run.run_id,
             "request_id": outer_request_id,
             "attempt_interval": {
-                "qualification": {
-                    "state": "bounded",
-                    "maximum_error_ms": 1,
-                },
+                "qualification": diagnostic_clock_qualification,
             },
             "evaluator": {
-                "digest": collection.intake.evaluator_artifact_digest,
+                "digest": diagnostic_evaluator_digest,
             },
             "execution_clock": {
                 "digest": typed_digest("governed-clock"),
@@ -14078,14 +14324,36 @@ mod tests {
             trust_anchor_id: dependency.trust_anchor_id.clone(),
             evaluation_id: None,
             profile_semantic_id: collection.intake.profile_semantic_id.clone(),
+            evaluator_identity_digest: evaluator_identity_digest.clone(),
             evaluator_artifact_digest: collection.intake.evaluator_artifact_digest.clone(),
             derived_at: TIME.to_owned(),
             clock_identity: typed_digest("governed-clock"),
-            clock_uncertainty_ms: 1,
+            clock_qualification_digest,
         };
-        custody
-            .claim_derivation(derivation_claim.clone())
-            .expect("physical derivation claim");
+        if legacy_v1 {
+            custody
+                .claim_legacy_derivation_v1_for_reopen_test(crate::custody_arena::DerivationClaim {
+                    derivation_id: derivation_claim.derivation_id.clone(),
+                    dependency_generation_id: derivation_claim.dependency_generation_id.clone(),
+                    dependency_generation_custody_digest: derivation_claim
+                        .dependency_generation_custody_digest
+                        .clone(),
+                    trust_anchor_id: derivation_claim.trust_anchor_id.clone(),
+                    evaluation_id: derivation_claim.evaluation_id.clone(),
+                    profile_semantic_id: derivation_claim.profile_semantic_id.clone(),
+                    evaluator_semantic_digest: None,
+                    evaluator_artifact_digest: derivation_claim.evaluator_artifact_digest.clone(),
+                    derived_at: derivation_claim.derived_at.clone(),
+                    clock_identity: derivation_claim.clock_identity.clone(),
+                    clock_uncertainty_ms: Some(1),
+                    clock_qualification_digest: None,
+                })
+                .expect("legacy V1 physical derivation claim");
+        } else {
+            custody
+                .claim_derivation(derivation_claim.clone())
+                .expect("physical derivation claim");
+        }
 
         let runtime_records = if matches!(
             mode,
@@ -14124,11 +14392,11 @@ mod tests {
                 governed_record_reference(&reservation_record),
             ]
         } else {
-            vec![
-                governed_record_reference(&outer_request),
-                governed_record_reference(&invocation_decision),
-                governed_record_reference(&reservation_record),
-            ]
+            reservation_batch
+                .records
+                .iter()
+                .map(governed_record_reference)
+                .collect()
         };
         let launch_checkpoint_id = if matches!(
             mode,
@@ -14153,7 +14421,11 @@ mod tests {
         ) {
             vec![governed_record_reference(&reservation_record)]
         } else {
-            vec![governed_record_reference(&execution_launch)]
+            launch_batch
+                .records
+                .iter()
+                .map(governed_record_reference)
+                .collect()
         };
         let derivation_substitution = match mode {
             GovernedProjectionFixtureMode::DerivationSubstitution(field) => Some(field),
@@ -14209,6 +14481,14 @@ mod tests {
         } else {
             derivation_claim.profile_semantic_id.clone()
         };
+        let closure_evaluator_identity_digest = if matches!(
+            derivation_substitution,
+            Some(GovernedDerivationSubstitution::EvaluatorIdentity)
+        ) {
+            typed_digest("substituted-evaluator-identity")
+        } else {
+            derivation_claim.evaluator_identity_digest.clone()
+        };
         let closure_evaluator_artifact_digest = if matches!(
             derivation_substitution,
             Some(GovernedDerivationSubstitution::EvaluatorArtifact)
@@ -14233,18 +14513,22 @@ mod tests {
         } else {
             derivation_claim.clock_identity.clone()
         };
-        let closure_clock_uncertainty = if matches!(
+        let closure_clock_qualification_digest = if matches!(
             derivation_substitution,
-            Some(GovernedDerivationSubstitution::ClockUncertainty)
+            Some(GovernedDerivationSubstitution::ClockQualification)
         ) {
-            derivation_claim.clock_uncertainty_ms + 1
+            typed_digest("substituted-clock-qualification")
         } else {
-            derivation_claim.clock_uncertainty_ms
+            derivation_claim.clock_qualification_digest.clone()
         };
         let final_batch_digest =
             runtime_record_batch_digest(&final_batch).expect("final checkpoint digest");
         let mut closure = json!({
-            "schema": GOVERNED_CUSTODY_CLOSURE_SCHEMA,
+            "schema": if legacy_v1 {
+                GOVERNED_CUSTODY_CLOSURE_SCHEMA
+            } else {
+                GOVERNED_CUSTODY_CLOSURE_V2_SCHEMA
+            },
             "reservation": governed_record_reference(&reservation_record),
             "prelaunch": {
                 "outer_request": governed_record_reference(&outer_request),
@@ -14275,10 +14559,11 @@ mod tests {
                 "trust_anchor_id": closure_trust_anchor,
                 "evaluation_id": closure_evaluation_id,
                 "profile_semantic_id": closure_profile_semantic_id,
+                "evaluator_semantic_digest": closure_evaluator_identity_digest,
                 "evaluator_artifact_digest": closure_evaluator_artifact_digest,
                 "derived_at": closure_derived_at,
                 "clock_identity": closure_clock_identity,
-                "clock_uncertainty_ms": closure_clock_uncertainty,
+                "clock_qualification_digest": closure_clock_qualification_digest,
             },
             "diagnostic": serde_json::from_slice::<Value>(diagnostic.as_bytes())
                 .expect("diagnostic value"),
@@ -14297,15 +14582,24 @@ mod tests {
                 "custody_bytes_digest": dependency_custody_digest,
             },
         });
+        if legacy_v1 {
+            let derivation = closure
+                .get_mut("derivation")
+                .and_then(Value::as_object_mut)
+                .expect("closure derivation object");
+            derivation.remove("evaluator_semantic_digest");
+            derivation.remove("clock_qualification_digest");
+            derivation.insert("clock_uncertainty_ms".to_owned(), json!(1));
+        }
         let closure_id = nq_protocol::semantic_digest(&closure).expect("governed closure identity");
         closure
             .as_object_mut()
             .expect("closure object")
             .insert("closure_id".to_owned(), json!(closure_id));
+        let exact_closure_bytes =
+            nq_protocol::canonical_json_bytes(&closure).expect("governed closure bytes");
         custody
-            .seal_final_closure(
-                nq_protocol::canonical_json_bytes(&closure).expect("governed closure bytes"),
-            )
+            .seal_final_closure(exact_closure_bytes.clone())
             .expect("physical final closure");
         drop(custody);
 
@@ -14325,9 +14619,11 @@ mod tests {
 
         GovernedProjectionFixture {
             store,
-            _directory: directory,
-            reservation_record_id: reservation.reservation_record_id,
+            directory,
+            reservation_record_id: reservation.reservation_record_id.clone(),
+            reservation,
             diagnostic_artifact_id,
+            exact_closure_bytes,
         }
     }
 
@@ -14377,6 +14673,131 @@ mod tests {
     }
 
     #[test]
+    fn governed_projection_reopens_committed_v1_closure_byte_identically() {
+        let fixture = governed_projection_fixture(GovernedProjectionFixtureMode::LegacyV1Complete);
+        let database = fixture
+            .store
+            .path()
+            .expect("filesystem-backed fixture")
+            .to_path_buf();
+        let reservation = fixture.reservation.clone();
+        let reservation_record_id = fixture.reservation_record_id.clone();
+        let exact_closure_bytes = fixture.exact_closure_bytes.clone();
+        let directory = fixture.directory;
+        drop(fixture.store);
+
+        let reopened_store = Store::open(&database).expect("reopen committed V1 store");
+        let reopened_custody = reopened_store
+            .open_governed_custody(reservation)
+            .expect("reopen committed V1 arena");
+        assert_eq!(
+            reopened_custody
+                .final_closure_bytes()
+                .expect("reopen exact closure"),
+            Some(exact_closure_bytes),
+            "V1 bytes must not be upgraded or re-encoded during reopen"
+        );
+        drop(reopened_custody);
+        reopened_store
+            .verify_governed_projection_and_mark_indexed(&reservation_record_id)
+            .expect("legacy V1 projection remains verifiable");
+        drop(directory);
+    }
+
+    #[test]
+    fn governed_projection_accepts_full_topology_and_native_deadline_launch_pair() {
+        let fixture =
+            governed_projection_fixture(GovernedProjectionFixtureMode::FullTopologyNativeLaunch);
+        let closure: Value =
+            serde_json::from_slice(&fixture.exact_closure_bytes).expect("V2 closure JSON");
+        assert_ne!(
+            closure["derivation"]["evaluator_semantic_digest"],
+            closure["derivation"]["evaluator_artifact_digest"],
+            "semantic evaluator identity must remain distinct from executable identity"
+        );
+        assert!(
+            closure["derivation"].get("clock_uncertainty_ms").is_none(),
+            "V2 must not encode an unqualified clock as a numeric sentinel"
+        );
+        assert_eq!(
+            closure["derivation"]["clock_qualification_digest"],
+            Value::String(
+                nq_protocol::semantic_digest(
+                    &closure["diagnostic"]["attempt_interval"]["qualification"]
+                )
+                .expect("exact clock qualification digest")
+                .to_string()
+            )
+        );
+        fixture
+            .store
+            .verify_governed_projection_and_mark_indexed(&fixture.reservation_record_id)
+            .expect("full exact topology and native deadline provenance");
+    }
+
+    #[test]
+    fn governed_projection_refuses_semantic_executable_and_clock_substitution() {
+        for mode in [
+            GovernedProjectionFixtureMode::DiagnosticEvaluatorArtifactMasquerade,
+            GovernedProjectionFixtureMode::DiagnosticClockQualificationSubstitution,
+        ] {
+            let fixture = governed_projection_fixture(mode);
+            let error = fixture
+                .store
+                .verify_governed_projection_and_mark_indexed(&fixture.reservation_record_id)
+                .expect_err("diagnostic-side identity substitution must refuse");
+            assert!(
+                matches!(error, StoreError::Integrity(ref message)
+                    if message.contains("governed projection")),
+                "{error}"
+            );
+            assert_governed_projection_pending(&fixture.store, &fixture.reservation_record_id);
+        }
+    }
+
+    #[test]
+    fn governed_projection_refuses_native_deadline_reference_or_provenance_substitution() {
+        for mode in [
+            GovernedProjectionFixtureMode::NativeDeadlineReferenceSubstitution,
+            GovernedProjectionFixtureMode::NativeDeadlineProvenanceSubstitution,
+            GovernedProjectionFixtureMode::NativeLaunchExtraneousRecord,
+        ] {
+            let fixture = governed_projection_fixture(mode);
+            let error = fixture
+                .store
+                .verify_governed_projection_and_mark_indexed(&fixture.reservation_record_id)
+                .expect_err("native deadline substitution must refuse");
+            assert!(
+                matches!(error, StoreError::Integrity(ref message)
+                    if message.contains("deadline")),
+                "{error}"
+            );
+            assert_governed_projection_pending(&fixture.store, &fixture.reservation_record_id);
+        }
+    }
+
+    #[test]
+    fn governed_projection_refuses_duplicate_essential_reservation_records() {
+        for mode in [
+            GovernedProjectionFixtureMode::DuplicateOuterRequestInReservation,
+            GovernedProjectionFixtureMode::DuplicateInvocationDecisionInReservation,
+            GovernedProjectionFixtureMode::DuplicateCustodyReservationInReservation,
+        ] {
+            let fixture = governed_projection_fixture(mode);
+            let error = fixture
+                .store
+                .verify_governed_projection_and_mark_indexed(&fixture.reservation_record_id)
+                .expect_err("an essential reservation record must be unique");
+            assert!(
+                matches!(error, StoreError::Integrity(ref message)
+                    if message.contains("reservation checkpoint membership")),
+                "{error}"
+            );
+            assert_governed_projection_pending(&fixture.store, &fixture.reservation_record_id);
+        }
+    }
+
+    #[test]
     fn governed_projection_verification_refuses_missing_or_mismatching_sql() {
         for mode in [
             GovernedProjectionFixtureMode::MissingSql,
@@ -14420,6 +14841,9 @@ mod tests {
                 GovernedDerivationSubstitution::ProfileSemantic,
             ),
             GovernedProjectionFixtureMode::DerivationSubstitution(
+                GovernedDerivationSubstitution::EvaluatorIdentity,
+            ),
+            GovernedProjectionFixtureMode::DerivationSubstitution(
                 GovernedDerivationSubstitution::EvaluatorArtifact,
             ),
             GovernedProjectionFixtureMode::DerivationSubstitution(
@@ -14429,7 +14853,7 @@ mod tests {
                 GovernedDerivationSubstitution::ClockIdentity,
             ),
             GovernedProjectionFixtureMode::DerivationSubstitution(
-                GovernedDerivationSubstitution::ClockUncertainty,
+                GovernedDerivationSubstitution::ClockQualification,
             ),
             GovernedProjectionFixtureMode::ReservationCheckpointIdentitySubstitution,
             GovernedProjectionFixtureMode::ReservationCheckpointDigestSubstitution,
@@ -20098,6 +20522,75 @@ mod tests {
             substituted.validate(),
             Err(StoreError::Integrity(_))
         ));
+    }
+
+    #[test]
+    fn runtime_ledger_admits_exact_native_correspondence_vocabulary_only() {
+        const CORRESPONDENCE_SCHEMAS: [&str; 3] = [
+            "nq.native_profile_qualification.v1",
+            "nq.native_clock_qualification.v1",
+            "nq.deadline_evaluation.v1",
+        ];
+        for schema in CORRESPONDENCE_SCHEMAS {
+            assert!(
+                SUPPORTED_RUNTIME_RECORD_SCHEMAS.contains(&schema),
+                "{schema} must be an ordinary exact-custody runtime record"
+            );
+        }
+
+        let mut store = Store::initialize_in_memory().expect("store initializes");
+        let admitted = initial_runtime_batch(
+            CORRESPONDENCE_SCHEMAS
+                .into_iter()
+                .enumerate()
+                .map(|(index, schema)| {
+                    runtime_record(
+                        &format!("native-correspondence-{index}"),
+                        schema,
+                        "2026-07-29T12:00:00Z",
+                    )
+                })
+                .collect(),
+        );
+        establish_runtime_root(&mut store, &admitted.dependency);
+        let committed = store
+            .append_runtime_records(&admitted)
+            .expect("exact correspondence vocabulary is admitted");
+
+        for hostile_schema in [
+            "nq.native_profile_qualification.v2",
+            "nq.native_clock_qualification.v2",
+            "nq.deadline_evaluation.v2",
+            "nq.native_profile_qualification.v1.extra",
+        ] {
+            let hostile = RuntimeRecordBatchInput {
+                checkpoint_id: digest(&format!("hostile-{hostile_schema}")),
+                expected_predecessor_checkpoint_id: Some(
+                    committed.checkpoint.checkpoint_id.clone(),
+                ),
+                expected_predecessor_ledger_root: Some(
+                    committed.checkpoint.checkpoint_ledger_root.clone(),
+                ),
+                dependency: admitted.dependency.clone(),
+                records: vec![runtime_record(
+                    &format!("hostile-{hostile_schema}"),
+                    hostile_schema,
+                    "2026-07-29T12:00:01Z",
+                )],
+            };
+            assert!(matches!(
+                store.append_runtime_records(&hostile),
+                Err(StoreError::Invariant(message)) if message.contains("unsupported schema")
+            ));
+            assert_eq!(
+                store
+                    .runtime_ledger_checkpoint()
+                    .expect("checkpoint reads")
+                    .expect("checkpoint remains"),
+                committed.checkpoint,
+                "hostile near-match must not move the ledger frontier"
+            );
+        }
     }
 
     #[test]
