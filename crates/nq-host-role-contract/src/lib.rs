@@ -20,7 +20,9 @@ pub use assets::{
     CORRECTED_SPECIMEN_IDENTITY, CORRECTED_SPECIMEN_SHA256, ContractPackageManifest,
     ContractSource, SchemaAsset, verified_corrected_specimen, verified_package_manifest,
 };
-pub use graph::{ExternalRecordCatalog, RuntimeRecordSet, ValidationContext};
+pub use graph::{
+    ExecutionBindingSourceCorpus, ExternalRecordCatalog, RuntimeRecordSet, ValidationContext,
+};
 pub use identity::{
     CatalogSnapshot, EffectiveInterval, Generation, IdentityCatalog, IdentityId, IdentityKey,
     IdentityKind, IdentityRef, IdentityVersion, NamespaceId, NamespaceSnapshot, NamespaceVersion,
@@ -224,6 +226,45 @@ pub enum ContractError {
     /// Diagnostic contract was not V2.
     #[error("binding does not name nq.diagnostic_execution.v2")]
     UnsupportedDiagnosticContract,
+    /// Exact binding source bytes were not RFC 8785 canonical JSON.
+    #[error("execution binding source bytes are not exact RFC 8785 canonical JSON")]
+    NonCanonicalBindingSource,
+    /// One binding source identity was reused with another schema, digest, or bytes.
+    #[error("execution binding source reference substituted exact bytes")]
+    BindingSourceReferenceSubstitution,
+    /// The exact source corpus exceeded the v1 entry bound.
+    #[error("execution binding source corpus exceeds 16 unique entries")]
+    BindingSourceCorpusEntryLimit,
+    /// The exact source corpus exceeded the v1 byte bound.
+    #[error("execution binding source corpus exceeds 131072 bytes")]
+    BindingSourceCorpusByteLimit,
+    /// An exact source or descriptor named by a binding was absent.
+    #[error("unresolved execution binding source {0}")]
+    UnresolvedBindingSource(String),
+    /// The supplied corpus contained bytes outside the exact consumed closure.
+    #[error("unused execution binding source {0}")]
+    UnusedBindingSource(String),
+    /// A resolved slot named a non-normative source artifact or pointer.
+    #[error("execution binding slot {0} substituted its normative source or JSON pointer")]
+    BindingSourceJoin(String),
+    /// Two resolved slots reused one source-artifact/source-pointer pair.
+    #[error("execution binding resolved identity sources are not pairwise unique")]
+    DuplicateBindingSource,
+    /// The exact pointed value differed from the claimed production identity.
+    #[error("execution binding slot {0} differs from its exact pointed identity")]
+    BindingSourceIdentityMismatch(String),
+    /// Exact descriptor bytes did not match the identity's descriptor commitment.
+    #[error("execution binding slot {0} substituted its descriptor digest")]
+    BindingDescriptorDigestMismatch(String),
+    /// Exact descriptor bytes did not name the identity key they describe.
+    #[error("execution binding slot {0} substituted its descriptor preimage")]
+    BindingDescriptorPreimageMismatch(String),
+    /// The current V2 product path selected other than one witness.
+    #[error("execution identity binding must select exactly one witness attachment")]
+    BindingWitnessMultiplicity,
+    /// The current V2 product path carried other than one provider attempt.
+    #[error("execution identity binding must carry exactly one provider attempt")]
+    BindingProviderAttemptMultiplicity,
     /// Signed pointer projection did not match its digest.
     #[error("signed-field projection digest mismatch")]
     SignedProjectionMismatch,

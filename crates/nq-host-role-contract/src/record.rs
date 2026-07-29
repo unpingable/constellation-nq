@@ -2014,7 +2014,7 @@ fn validate_signed_projection(
     Ok(())
 }
 
-fn resolve_pointer<'a>(document: &'a Value, pointer: &str) -> Result<&'a Value> {
+pub(crate) fn resolve_pointer<'a>(document: &'a Value, pointer: &str) -> Result<&'a Value> {
     if pointer.is_empty() {
         return Ok(document);
     }
@@ -2023,22 +2023,49 @@ fn resolve_pointer<'a>(document: &'a Value, pointer: &str) -> Result<&'a Value> 
         .strip_prefix('/')
         .ok_or_else(|| ContractError::InvalidJsonPointer(pointer.to_owned()))?;
     for raw in path.split('/') {
-        let token = raw.replace("~1", "/").replace("~0", "~");
-        current = match current {
-            Value::Object(object) => object
-                .get(&token)
-                .ok_or_else(|| ContractError::UnresolvedJsonPointer(pointer.to_owned()))?,
-            Value::Array(array) => array
-                .get(
-                    token
-                        .parse::<usize>()
-                        .map_err(|_| ContractError::UnresolvedJsonPointer(pointer.to_owned()))?,
-                )
-                .ok_or_else(|| ContractError::UnresolvedJsonPointer(pointer.to_owned()))?,
-            _ => return Err(ContractError::UnresolvedJsonPointer(pointer.to_owned())),
-        };
+        let token = decode_pointer_token(raw, pointer)?;
+        current =
+            match current {
+                Value::Object(object) => object
+                    .get(&token)
+                    .ok_or_else(|| ContractError::UnresolvedJsonPointer(pointer.to_owned()))?,
+                Value::Array(array) => {
+                    let canonical_index = token == "0"
+                        || (token
+                            .as_bytes()
+                            .first()
+                            .is_some_and(|first| first.is_ascii_digit() && *first != b'0')
+                            && token.as_bytes().iter().all(u8::is_ascii_digit));
+                    if !canonical_index {
+                        return Err(ContractError::UnresolvedJsonPointer(pointer.to_owned()));
+                    }
+                    array
+                        .get(token.parse::<usize>().map_err(|_| {
+                            ContractError::UnresolvedJsonPointer(pointer.to_owned())
+                        })?)
+                        .ok_or_else(|| ContractError::UnresolvedJsonPointer(pointer.to_owned()))?
+                }
+                _ => return Err(ContractError::UnresolvedJsonPointer(pointer.to_owned())),
+            };
     }
     Ok(current)
+}
+
+fn decode_pointer_token(raw: &str, pointer: &str) -> Result<String> {
+    let mut decoded = String::with_capacity(raw.len());
+    let mut characters = raw.chars();
+    while let Some(character) = characters.next() {
+        if character != '~' {
+            decoded.push(character);
+            continue;
+        }
+        match characters.next() {
+            Some('0') => decoded.push('~'),
+            Some('1') => decoded.push('/'),
+            _ => return Err(ContractError::InvalidJsonPointer(pointer.to_owned())),
+        }
+    }
+    Ok(decoded)
 }
 
 fn require_exact_fields_generic(

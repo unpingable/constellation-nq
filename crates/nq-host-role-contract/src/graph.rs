@@ -2,14 +2,19 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nq_protocol::{Sha256Digest, semantic_digest};
+use nq_protocol::{Sha256Digest, canonical_json_bytes, semantic_digest, sha256_bytes};
 use serde_json::{Map, Value};
 
 use crate::{
     ContractError, Result,
     identity::{EffectiveInterval, IdentityCatalog, IdentityRef, RecordRef, Timestamp},
-    record::{RuntimeSchema, ValidatedRuntimeRecord},
+    record::{RuntimeSchema, ValidatedRuntimeRecord, resolve_pointer},
 };
+
+const MAX_EXECUTION_BINDING_SOURCE_ENTRIES: usize = 16;
+const MAX_EXECUTION_BINDING_SOURCE_BYTES: usize = 131_072;
+const PRODUCTION_IDENTITY_DESCRIPTOR_SCHEMA: &str = "nq.production_identity_descriptor.v1";
+const CONTRACT_SPECIMEN_IDENTITY_DESCRIPTOR_SCHEMA: &str = "nq.contract_specimen_identity.v1";
 
 /// Exact externally retained record references admitted for one validation.
 ///
@@ -46,6 +51,120 @@ pub struct ValidationContext {
     pub identities: IdentityCatalog,
     /// Exact dependencies retained outside this record graph.
     pub external_records: ExternalRecordCatalog,
+}
+
+#[derive(Debug, Clone)]
+struct CanonicalBindingSource {
+    reference: RecordRef,
+    canonical_bytes: Vec<u8>,
+    value: Value,
+}
+
+/// Exact canonical source corpus used to qualify V2 identity-binding joins.
+///
+/// The ordinary external-reference catalog establishes only that a reference
+/// is admitted. This corpus carries the exact bytes needed to prove that a
+/// binding's source pointer and descriptor preimage actually say what the
+/// binding claims. Corpus membership grants no invocation, reliance, or
+/// operational authority. One v1 corpus is closed at 16 unique entries and
+/// 131072 exact bytes; qualification additionally requires every entry to be
+/// consumed by the validated binding closure.
+#[derive(Debug, Default, Clone)]
+pub struct ExecutionBindingSourceCorpus {
+    sources: BTreeMap<(String, Sha256Digest), CanonicalBindingSource>,
+    total_bytes: usize,
+}
+
+impl ExecutionBindingSourceCorpus {
+    /// Creates an empty exact-byte source corpus.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            sources: BTreeMap::new(),
+            total_bytes: 0,
+        }
+    }
+
+    /// Inserts one exact canonical JSON source under its immutable reference.
+    ///
+    /// Exact replay is idempotent. Reusing `(schema, record_id)` with another
+    /// reference or byte sequence is refused as source substitution.
+    ///
+    /// # Errors
+    ///
+    /// Refuses noncanonical JSON, schema/reference mismatch, byte-digest
+    /// substitution, source-identity reuse, or either closed-corpus bound.
+    pub fn insert_canonical(
+        &mut self,
+        reference: RecordRef,
+        canonical_bytes: Vec<u8>,
+    ) -> Result<()> {
+        let value: Value = serde_json::from_slice(&canonical_bytes)?;
+        if canonical_json_bytes(&value)? != canonical_bytes {
+            return Err(ContractError::NonCanonicalBindingSource);
+        }
+        if value.get("schema").and_then(Value::as_str) != Some(reference.schema.as_str())
+            || sha256_bytes(&canonical_bytes) != reference.bytes_digest
+        {
+            return Err(ContractError::BindingSourceReferenceSubstitution);
+        }
+        let key = (reference.schema.to_string(), reference.record_id.clone());
+        match self.sources.get(&key) {
+            Some(existing)
+                if existing.reference == reference
+                    && existing.canonical_bytes == canonical_bytes =>
+            {
+                Ok(())
+            }
+            Some(_) => Err(ContractError::BindingSourceReferenceSubstitution),
+            None => {
+                if self.sources.len() >= MAX_EXECUTION_BINDING_SOURCE_ENTRIES {
+                    return Err(ContractError::BindingSourceCorpusEntryLimit);
+                }
+                let new_total = self
+                    .total_bytes
+                    .checked_add(canonical_bytes.len())
+                    .ok_or(ContractError::BindingSourceCorpusByteLimit)?;
+                if new_total > MAX_EXECUTION_BINDING_SOURCE_BYTES {
+                    return Err(ContractError::BindingSourceCorpusByteLimit);
+                }
+                self.sources.insert(
+                    key,
+                    CanonicalBindingSource {
+                        reference,
+                        canonical_bytes,
+                        value,
+                    },
+                );
+                self.total_bytes = new_total;
+                Ok(())
+            }
+        }
+    }
+
+    /// Inserts one already validated runtime record as an exact source.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same refusals as [`Self::insert_canonical`].
+    pub fn insert_record(&mut self, record: &ValidatedRuntimeRecord) -> Result<()> {
+        self.insert_canonical(record.exact_reference(), record.canonical_bytes().to_vec())
+    }
+
+    fn resolve(&self, reference: &RecordRef) -> Result<&CanonicalBindingSource> {
+        let key = (reference.schema.to_string(), reference.record_id.clone());
+        match self.sources.get(&key) {
+            Some(source) if &source.reference == reference => Ok(source),
+            Some(_) => Err(ContractError::BindingSourceReferenceSubstitution),
+            None => Err(ContractError::UnresolvedBindingSource(
+                reference.record_id.to_string(),
+            )),
+        }
+    }
+
+    fn references(&self) -> impl Iterator<Item = &RecordRef> {
+        self.sources.values().map(|source| &source.reference)
+    }
 }
 
 /// Closed immutable runtime record graph.
@@ -114,6 +233,11 @@ impl RuntimeRecordSet {
     /// ratified topology, generation, invocation, delivery, and inspector
     /// joins implemented by this package.
     ///
+    /// This structural graph validation does not possess exact external
+    /// descriptor bytes. A graph containing
+    /// `nq.execution_identity_binding.v2` is production-source-qualified only
+    /// by [`Self::validate_with_execution_binding_sources`].
+    ///
     /// # Errors
     ///
     /// Returns a typed refusal at the first failed invariant. No record is
@@ -127,6 +251,56 @@ impl RuntimeRecordSet {
         self.validate_invocations()?;
         self.validate_bindings()?;
         self.validate_delivery()?;
+        Ok(())
+    }
+
+    /// Validates the complete graph and every V2 binding against exact
+    /// canonical source and descriptor bytes.
+    ///
+    /// This is the qualified source-complete binding entry point. It first
+    /// applies every invariant from [`Self::validate`], then proves the ratified
+    /// source-artifact/source-pointer joins, exact pointed identities, unique
+    /// source pairs, descriptor preimage commitments, and exact closed source
+    /// corpus.
+    ///
+    /// The current V2 carrier selects exactly one witness attachment and one
+    /// provider-attempt reference. This shared contract proves their closed
+    /// carrier shape only. Native `nq-core` must separately prove that its
+    /// typed provider attempt corresponds to that witness, provider, and
+    /// admission; this package does not interpret provider-native semantics.
+    /// A product consumer must also require its admitted production identity
+    /// descriptor schema; the shared package accepts the exact frozen contract
+    /// specimen descriptor schema for non-production conformance vectors.
+    ///
+    /// # Errors
+    ///
+    /// Returns every refusal from [`Self::validate`] plus the exact binding
+    /// source-corpus refusals.
+    pub fn validate_with_execution_binding_sources(
+        &self,
+        context: &ValidationContext,
+        sources: &ExecutionBindingSourceCorpus,
+    ) -> Result<()> {
+        self.validate(context)?;
+        self.validate_execution_binding_sources(sources)
+    }
+
+    fn validate_execution_binding_sources(
+        &self,
+        sources: &ExecutionBindingSourceCorpus,
+    ) -> Result<()> {
+        let mut consumed = BTreeSet::new();
+        for binding in self.by_schema(RuntimeSchema::ExecutionIdentityBindingV2) {
+            self.validate_execution_binding_source(binding, sources, &mut consumed)?;
+        }
+        if let Some(unused) = sources
+            .references()
+            .find(|reference| !consumed.contains(*reference))
+        {
+            return Err(ContractError::UnusedBindingSource(
+                unused.record_id.to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -1444,7 +1618,155 @@ impl RuntimeRecordSet {
                     "binding witness attachment closure",
                 ));
             }
+            let witness_attachments = value["witness_attachments"]
+                .as_array()
+                .ok_or(ContractError::ExpectedArray)?;
+            if witness_attachments.len() != 1
+                || witness_attachments
+                    != launch.record().as_value()["selected_witness_attachments"]
+                        .as_array()
+                        .ok_or(ContractError::ExpectedArray)?
+            {
+                return Err(ContractError::BindingWitnessMultiplicity);
+            }
+            if value["provider_attempts"]
+                .as_array()
+                .ok_or(ContractError::ExpectedArray)?
+                .len()
+                != 1
+            {
+                return Err(ContractError::BindingProviderAttemptMultiplicity);
+            }
         }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_lines)] // Eight ratified slots form one closed source-join law.
+    fn validate_execution_binding_source(
+        &self,
+        binding: &ValidatedRuntimeRecord,
+        sources: &ExecutionBindingSourceCorpus,
+        consumed: &mut BTreeSet<RecordRef>,
+    ) -> Result<()> {
+        let value = binding.record().as_value();
+        let request = self.resolve_field(value, "outer_request")?;
+        let activation = self.resolve_field(value, "activation")?;
+        let role = self.resolve_field(value, "role_manifest")?;
+        let cohort = self.resolve_field(value, "static_profile_cohort_manifest")?;
+        require_schema(request, RuntimeSchema::DiagnosticInvocationRequestV1)?;
+        require_schema(activation, RuntimeSchema::RuntimeActivationV1)?;
+        require_schema(role, RuntimeSchema::RoleManifestV1)?;
+        require_schema(cohort, RuntimeSchema::StaticProfileCohortManifestV1)?;
+        if value["source_relations"] != activation.record().as_value()["relations"] {
+            return Err(ContractError::BindingSourceJoin(
+                "source_relations".to_owned(),
+            ));
+        }
+
+        let relations = value["source_relations"]
+            .as_object()
+            .ok_or(ContractError::ExpectedObject("source_relations"))?;
+        let node_subject = self.resolve_value(&relations["node_subject"])?;
+        let subject_platform = self.resolve_value(&relations["subject_platform"])?;
+        let node_vantage = self.resolve_value(&relations["node_vantage"])?;
+        for relation in [node_subject, subject_platform, node_vantage] {
+            require_schema(relation, RuntimeSchema::HostRoleRelationV1)?;
+        }
+
+        let resolved = value["resolved_references"]
+            .as_object()
+            .ok_or(ContractError::ExpectedObject("resolved_references"))?;
+        let expected_slots = [
+            ("node", activation, "/node".to_owned()),
+            ("subject", node_subject, "/right".to_owned()),
+            ("platform", subject_platform, "/right".to_owned()),
+            ("vantage", node_vantage, "/right".to_owned()),
+            ("role", role, "/role".to_owned()),
+            ("static_profile_cohort", cohort, "/cohort".to_owned()),
+        ];
+        let mut source_pairs = BTreeSet::new();
+        for slot in [
+            "node",
+            "subject",
+            "platform",
+            "vantage",
+            "role",
+            "static_profile_cohort",
+            "witness",
+            "diagnostic_profile",
+        ] {
+            let entry = resolved[slot]
+                .as_object()
+                .ok_or(ContractError::ExpectedObject("resolved_references[]"))?;
+            let source: RecordRef = serde_json::from_value(entry["source_artifact"].clone())?;
+            let pointer = entry["source_pointer"]
+                .as_str()
+                .ok_or(ContractError::ExpectedString("source_pointer"))?
+                .to_owned();
+            if !source_pairs.insert((source, pointer)) {
+                return Err(ContractError::DuplicateBindingSource);
+            }
+        }
+        for (slot, source, pointer) in expected_slots {
+            validate_resolved_binding_source(slot, resolved, source, &pointer, sources, consumed)?;
+        }
+
+        let selected_witnesses = value["witness_attachments"]
+            .as_array()
+            .ok_or(ContractError::ExpectedArray)?
+            .as_slice();
+        if selected_witnesses.len() != 1 {
+            return Err(ContractError::BindingWitnessMultiplicity);
+        }
+        let selected_witness = self.resolve_value(&selected_witnesses[0])?;
+        require_schema(selected_witness, RuntimeSchema::WitnessAttachmentV1)?;
+        validate_resolved_binding_source(
+            "witness",
+            resolved,
+            selected_witness,
+            "/witness",
+            sources,
+            consumed,
+        )?;
+
+        if value["provider_attempts"]
+            .as_array()
+            .ok_or(ContractError::ExpectedArray)?
+            .len()
+            != 1
+        {
+            return Err(ContractError::BindingProviderAttemptMultiplicity);
+        }
+        let profile = &request.record().as_value()["profile"];
+        let profiles = cohort.record().as_value()["members"]["profiles"]
+            .as_array()
+            .ok_or(ContractError::ExpectedArray)?;
+        let matching_profile_indexes = profiles
+            .iter()
+            .enumerate()
+            .filter_map(|(index, candidate)| (candidate == profile).then_some(index))
+            .collect::<Vec<_>>();
+        if matching_profile_indexes.len() != 1 {
+            return Err(ContractError::BindingSourceJoin(
+                "diagnostic_profile".to_owned(),
+            ));
+        }
+        validate_resolved_binding_source(
+            "diagnostic_profile",
+            resolved,
+            cohort,
+            &format!("/members/profiles/{}", matching_profile_indexes[0]),
+            sources,
+            consumed,
+        )?;
+        let resolution_engine_identity: IdentityRef =
+            serde_json::from_value(value["resolver"].clone())?;
+        validate_unreferenced_identity_descriptor(
+            "resolver",
+            &resolution_engine_identity,
+            sources,
+            consumed,
+        )?;
         Ok(())
     }
 
@@ -2215,6 +2537,112 @@ fn require_schema(record: &ValidatedRuntimeRecord, expected: RuntimeSchema) -> R
     Ok(())
 }
 
+fn validate_resolved_binding_source(
+    slot: &str,
+    resolved: &Map<String, Value>,
+    expected_source: &ValidatedRuntimeRecord,
+    expected_pointer: &str,
+    sources: &ExecutionBindingSourceCorpus,
+    consumed: &mut BTreeSet<RecordRef>,
+) -> Result<()> {
+    let entry = resolved[slot]
+        .as_object()
+        .ok_or(ContractError::ExpectedObject("resolved_references[]"))?;
+    let source_reference: RecordRef = serde_json::from_value(entry["source_artifact"].clone())?;
+    let source_pointer = entry["source_pointer"]
+        .as_str()
+        .ok_or(ContractError::ExpectedString("source_pointer"))?;
+    if source_reference != expected_source.exact_reference() || source_pointer != expected_pointer {
+        return Err(ContractError::BindingSourceJoin(slot.to_owned()));
+    }
+    let source = sources.resolve(&source_reference)?;
+    consumed.insert(source_reference);
+    if source.canonical_bytes != expected_source.canonical_bytes() {
+        return Err(ContractError::BindingSourceReferenceSubstitution);
+    }
+    let pointed = resolve_pointer(&source.value, source_pointer)?;
+    let pointed_identity: IdentityRef = serde_json::from_value(pointed.clone())
+        .map_err(|_| ContractError::BindingSourceIdentityMismatch(slot.to_owned()))?;
+    let claimed_identity: IdentityRef = serde_json::from_value(entry["identity"].clone())?;
+    if pointed_identity != claimed_identity {
+        return Err(ContractError::BindingSourceIdentityMismatch(
+            slot.to_owned(),
+        ));
+    }
+
+    let descriptor_reference: RecordRef = serde_json::from_value(entry["descriptor"].clone())?;
+    let descriptor = sources.resolve(&descriptor_reference)?;
+    consumed.insert(descriptor_reference.clone());
+    if claimed_identity.descriptor_digest != descriptor_reference.bytes_digest {
+        return Err(ContractError::BindingDescriptorDigestMismatch(
+            slot.to_owned(),
+        ));
+    }
+    validate_identity_descriptor(slot, &claimed_identity, descriptor)
+}
+
+fn validate_unreferenced_identity_descriptor(
+    slot: &str,
+    identity: &IdentityRef,
+    sources: &ExecutionBindingSourceCorpus,
+    consumed: &mut BTreeSet<RecordRef>,
+) -> Result<()> {
+    let candidates = sources
+        .sources
+        .values()
+        .filter(|source| source.reference.bytes_digest == identity.descriptor_digest)
+        .collect::<Vec<_>>();
+    let [descriptor] = candidates.as_slice() else {
+        return if candidates.is_empty() {
+            Err(ContractError::UnresolvedBindingSource(
+                identity.descriptor_digest.to_string(),
+            ))
+        } else {
+            Err(ContractError::DuplicateBindingSource)
+        };
+    };
+    consumed.insert(descriptor.reference.clone());
+    validate_identity_descriptor(slot, identity, descriptor)
+}
+
+fn validate_identity_descriptor(
+    slot: &str,
+    identity: &IdentityRef,
+    descriptor: &CanonicalBindingSource,
+) -> Result<()> {
+    if !matches!(
+        descriptor.reference.schema.as_str(),
+        PRODUCTION_IDENTITY_DESCRIPTOR_SCHEMA | CONTRACT_SPECIMEN_IDENTITY_DESCRIPTOR_SCHEMA
+    ) {
+        return Err(ContractError::BindingDescriptorPreimageMismatch(
+            slot.to_owned(),
+        ));
+    }
+    let descriptor_object = descriptor
+        .value
+        .as_object()
+        .ok_or_else(|| ContractError::BindingDescriptorPreimageMismatch(slot.to_owned()))?;
+    let exact_fields = descriptor_object
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if exact_fields != BTreeSet::from(["schema", "kind", "id", "version"]) {
+        return Err(ContractError::BindingDescriptorPreimageMismatch(
+            slot.to_owned(),
+        ));
+    }
+    let identity_value = serde_json::to_value(identity)?;
+    if ["kind", "id", "version"]
+        .into_iter()
+        .any(|field| descriptor_object.get(field) != identity_value.get(field))
+    {
+        return Err(ContractError::BindingDescriptorPreimageMismatch(
+            slot.to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn require_reference_equal(
     source: &Value,
     field: &'static str,
@@ -2369,12 +2797,21 @@ impl From<RecordRef> for Value {
 mod tests {
     use std::collections::BTreeMap;
 
+    use nq_protocol::{Sha256Digest, canonical_json_bytes, sha256_bytes};
     use serde_json::{Value, json};
 
-    use super::{RuntimeRecordSet, expected_administrative_shape};
-    use crate::{ContractError, ValidatedRuntimeRecord};
+    use super::{
+        CONTRACT_SPECIMEN_IDENTITY_DESCRIPTOR_SCHEMA, ExecutionBindingSourceCorpus,
+        PRODUCTION_IDENTITY_DESCRIPTOR_SCHEMA, RuntimeRecordSet, collect_carriers,
+        expected_administrative_shape,
+    };
+    use crate::{
+        ContractError, ExternalRecordCatalog, IdentityCatalog, IdentityRef, RecordRef, Token,
+        ValidatedRuntimeRecord, ValidationContext, record::resolve_pointer,
+    };
 
     const RECORDS: &str = include_str!("../assets/host-role-runtime-records.v1.json");
+    type DescriptorSources = Vec<(RecordRef, Vec<u8>)>;
 
     #[test]
     fn every_ratified_administrative_operation_has_one_exact_shape_law() {
@@ -2482,6 +2919,483 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn derived_3b_source_complete_successor_qualifies_through_full_entry() {
+        let (_, records, context, sources) = source_complete_successor();
+        records
+            .validate_with_execution_binding_sources(&context, &sources)
+            .expect("derived 3B successor has exact graph and source correspondence");
+    }
+
+    #[test]
+    fn source_valid_global_graph_invalid_refuses_at_full_entry() {
+        let (mut values, descriptors) = source_complete_successor_values();
+        binding_mut(&mut values)["diagnostic"]["request_id"] = json!("substituted-request");
+        let values = source_qualification_slice(&values);
+        let records = record_set(values.clone());
+        let context = validation_context(&records);
+        let sources = source_corpus_from_materialized(&values, descriptors);
+        records
+            .validate_execution_binding_sources(&sources)
+            .expect("source correspondence remains exact");
+        assert!(matches!(
+            records.validate_with_execution_binding_sources(&context, &sources),
+            Err(ContractError::TopologyJoin(
+                "binding relation/request closure"
+            ))
+        ));
+    }
+
+    #[test]
+    fn frozen_3a_structural_specimen_does_not_earn_exact_source_qualification() {
+        let values = fixture_values();
+        let records = record_set(values.clone());
+        let context = validation_context(&records);
+        let sources = runtime_binding_sources(&values);
+        assert!(records.validate(&context).is_ok());
+        assert!(matches!(
+            records.validate_with_execution_binding_sources(&context, &sources),
+            Err(ContractError::UnresolvedBindingSource(_))
+        ));
+
+        // The exact identity descriptor preimage cannot be relabelled with the
+        // frozen structural specimen's unrelated external descriptor reference.
+        let node = &values["execution_binding"]["resolved_references"]["node"];
+        let descriptor = identity_descriptor_bytes(&node["identity"]);
+        let frozen_reference: RecordRef =
+            serde_json::from_value(node["descriptor"].clone()).expect("frozen descriptor ref");
+        let mut attempted = ExecutionBindingSourceCorpus::new();
+        assert!(matches!(
+            attempted.insert_canonical(frozen_reference, descriptor),
+            Err(ContractError::BindingSourceReferenceSubstitution)
+        ));
+    }
+
+    #[test]
+    fn execution_binding_source_corpus_refuses_unclosed_and_missing_inputs() {
+        let (values, records, context, mut missing_source) = source_complete_successor();
+        let node_source: RecordRef = serde_json::from_value(
+            values["execution_binding"]["resolved_references"]["node"]["source_artifact"].clone(),
+        )
+        .expect("node source");
+        remove_source(&mut missing_source, &node_source);
+        assert!(matches!(
+            records.validate_with_execution_binding_sources(&context, &missing_source),
+            Err(ContractError::UnresolvedBindingSource(_))
+        ));
+
+        let (_, records, context, mut missing_descriptor) = source_complete_successor();
+        let node_descriptor: RecordRef = serde_json::from_value(
+            values["execution_binding"]["resolved_references"]["node"]["descriptor"].clone(),
+        )
+        .expect("node descriptor");
+        remove_source(&mut missing_descriptor, &node_descriptor);
+        assert!(matches!(
+            records.validate_with_execution_binding_sources(&context, &missing_descriptor),
+            Err(ContractError::UnresolvedBindingSource(_))
+        ));
+
+        let (values, records, context, mut missing_resolver_descriptor) =
+            source_complete_successor();
+        let resolver: IdentityRef =
+            serde_json::from_value(values["execution_binding"]["resolver"].clone())
+                .expect("resolver identity");
+        let resolver_descriptor = missing_resolver_descriptor
+            .sources
+            .values()
+            .find(|source| source.reference.bytes_digest == resolver.descriptor_digest)
+            .expect("resolver descriptor source")
+            .reference
+            .clone();
+        remove_source(&mut missing_resolver_descriptor, &resolver_descriptor);
+        assert!(matches!(
+            records.validate_with_execution_binding_sources(&context, &missing_resolver_descriptor),
+            Err(ContractError::UnresolvedBindingSource(_))
+        ));
+
+        let records = RuntimeRecordSet::new();
+        let context = ValidationContext::default();
+        let mut unused = ExecutionBindingSourceCorpus::new();
+        let bytes = canonical_json_bytes(&json!({
+            "schema": PRODUCTION_IDENTITY_DESCRIPTOR_SCHEMA,
+            "kind": "subject",
+            "id": "lab/unused",
+            "version": "1",
+        }))
+        .expect("unused canonical source");
+        let digest = sha256_bytes(&bytes);
+        unused
+            .insert_canonical(
+                RecordRef {
+                    schema: Token::parse(PRODUCTION_IDENTITY_DESCRIPTOR_SCHEMA)
+                        .expect("source schema"),
+                    record_id: digest.clone(),
+                    bytes_digest: digest,
+                },
+                bytes,
+            )
+            .expect("bounded unused entry");
+        assert!(matches!(
+            records.validate_with_execution_binding_sources(&context, &unused),
+            Err(ContractError::UnusedBindingSource(_))
+        ));
+    }
+
+    #[test]
+    fn execution_binding_source_corpus_refuses_carrier_substitution() {
+        let noncanonical = br#"{"schema": "nq.test_source.v1"}"#.to_vec();
+        let noncanonical_digest = sha256_bytes(&noncanonical);
+        let mut corpus = ExecutionBindingSourceCorpus::new();
+        assert!(matches!(
+            corpus.insert_canonical(
+                RecordRef {
+                    schema: Token::parse("nq.test_source.v1").expect("source schema"),
+                    record_id: noncanonical_digest.clone(),
+                    bytes_digest: noncanonical_digest,
+                },
+                noncanonical,
+            ),
+            Err(ContractError::NonCanonicalBindingSource)
+        ));
+
+        let canonical =
+            canonical_json_bytes(&json!({"schema": "nq.test_source.v1"})).expect("canonical");
+        let canonical_digest = sha256_bytes(&canonical);
+        assert!(matches!(
+            corpus.insert_canonical(
+                RecordRef {
+                    schema: Token::parse("nq.other_source.v1").expect("substituted schema"),
+                    record_id: canonical_digest.clone(),
+                    bytes_digest: canonical_digest.clone(),
+                },
+                canonical.clone(),
+            ),
+            Err(ContractError::BindingSourceReferenceSubstitution)
+        ));
+        assert!(matches!(
+            corpus.insert_canonical(
+                RecordRef {
+                    schema: Token::parse("nq.test_source.v1").expect("source schema"),
+                    record_id: canonical_digest.clone(),
+                    bytes_digest: Sha256Digest::parse(
+                        "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                    )
+                    .expect("hostile digest"),
+                },
+                canonical.clone(),
+            ),
+            Err(ContractError::BindingSourceReferenceSubstitution)
+        ));
+
+        let stable_id = Sha256Digest::parse(
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .expect("stable source identity");
+        corpus
+            .insert_canonical(
+                RecordRef {
+                    schema: Token::parse("nq.test_source.v1").expect("source schema"),
+                    record_id: stable_id.clone(),
+                    bytes_digest: canonical_digest,
+                },
+                canonical,
+            )
+            .expect("first exact occurrence");
+        let replacement =
+            canonical_json_bytes(&json!({"schema": "nq.test_source.v1", "replacement": true}))
+                .expect("replacement source");
+        assert!(matches!(
+            corpus.insert_canonical(
+                RecordRef {
+                    schema: Token::parse("nq.test_source.v1").expect("source schema"),
+                    record_id: stable_id,
+                    bytes_digest: sha256_bytes(&replacement),
+                },
+                replacement,
+            ),
+            Err(ContractError::BindingSourceReferenceSubstitution)
+        ));
+    }
+
+    #[test]
+    fn execution_binding_source_corpus_enforces_v1_count_and_byte_bounds() {
+        let mut counted = ExecutionBindingSourceCorpus::new();
+        for index in 0..16 {
+            let bytes =
+                canonical_json_bytes(&json!({"schema": "nq.test_source.v1", "index": index}))
+                    .expect("bounded source");
+            let digest = sha256_bytes(&bytes);
+            counted
+                .insert_canonical(
+                    RecordRef {
+                        schema: Token::parse("nq.test_source.v1").expect("source schema"),
+                        record_id: digest.clone(),
+                        bytes_digest: digest,
+                    },
+                    bytes,
+                )
+                .expect("within entry limit");
+        }
+        let overflow = canonical_json_bytes(&json!({"schema": "nq.test_source.v1", "index": 16}))
+            .expect("overflow source");
+        let overflow_digest = sha256_bytes(&overflow);
+        assert!(matches!(
+            counted.insert_canonical(
+                RecordRef {
+                    schema: Token::parse("nq.test_source.v1").expect("source schema"),
+                    record_id: overflow_digest.clone(),
+                    bytes_digest: overflow_digest,
+                },
+                overflow,
+            ),
+            Err(ContractError::BindingSourceCorpusEntryLimit)
+        ));
+
+        let oversized = canonical_json_bytes(&json!({
+            "schema": "nq.test_source.v1",
+            "payload": "x".repeat(131_072),
+        }))
+        .expect("oversized source");
+        let oversized_digest = sha256_bytes(&oversized);
+        let mut bytes = ExecutionBindingSourceCorpus::new();
+        assert!(matches!(
+            bytes.insert_canonical(
+                RecordRef {
+                    schema: Token::parse("nq.test_source.v1").expect("source schema"),
+                    record_id: oversized_digest.clone(),
+                    bytes_digest: oversized_digest,
+                },
+                oversized,
+            ),
+            Err(ContractError::BindingSourceCorpusByteLimit)
+        ));
+    }
+
+    #[test]
+    fn current_v2_binding_refuses_unused_extra_witness_and_attempt_multiplicity() {
+        let (mut witness_values, descriptors) = source_complete_successor_values();
+        binding_mut(&mut witness_values)["witness_attachments"]
+            .as_array_mut()
+            .expect("witness attachments")
+            .push(json!({
+                "schema": "nq.witness_attachment.v1",
+                "record_id": "sha256:abababababababababababababababababababababababababababababababab",
+                "bytes_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            }));
+        let sources = source_corpus_from_materialized(&witness_values, descriptors);
+        let records = record_set(witness_values);
+        assert!(matches!(
+            records.validate_execution_binding_sources(&sources),
+            Err(ContractError::BindingWitnessMultiplicity)
+        ));
+
+        let (mut attempt_values, descriptors) = source_complete_successor_values();
+        binding_mut(&mut attempt_values)["provider_attempts"]
+            .as_array_mut()
+            .expect("provider attempts")
+            .push(json!({
+                "schema": "nq.external_record.v1",
+                "record_id": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "bytes_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            }));
+        let sources = source_corpus_from_materialized(&attempt_values, descriptors);
+        let records = record_set(attempt_values);
+        assert!(matches!(
+            records.validate_execution_binding_sources(&sources),
+            Err(ContractError::BindingProviderAttemptMultiplicity)
+        ));
+    }
+
+    #[test]
+    fn execution_binding_source_pointer_and_artifact_substitution_refuse() {
+        let mut pointer = fixture_values();
+        binding_mut(&mut pointer)["resolved_references"]["node"]["source_pointer"] =
+            json!("/resolved/node");
+        let (records, sources) = binding_source_fixture(pointer);
+        assert!(matches!(
+            records.validate_execution_binding_sources(&sources),
+            Err(ContractError::BindingSourceJoin(slot)) if slot == "node"
+        ));
+
+        let mut artifact = fixture_values();
+        let relation =
+            ValidatedRuntimeRecord::validate_value(artifact["node_subject_relation"].clone())
+                .expect("node-subject relation");
+        binding_mut(&mut artifact)["resolved_references"]["subject"]["source_artifact"] =
+            serde_json::to_value(relation.exact_reference()).expect("relation reference");
+        binding_mut(&mut artifact)["resolved_references"]["subject"]["source_pointer"] =
+            json!("/left");
+        let (records, sources) = binding_source_fixture(artifact);
+        assert!(matches!(
+            records.validate_execution_binding_sources(&sources),
+            Err(ContractError::BindingSourceJoin(slot)) if slot == "subject"
+        ));
+    }
+
+    #[test]
+    fn execution_binding_duplicate_source_pair_and_pointed_identity_refuse() {
+        let mut duplicate = fixture_values();
+        let activation = ValidatedRuntimeRecord::validate_value(duplicate["activation"].clone())
+            .expect("activation");
+        binding_mut(&mut duplicate)["resolved_references"]["subject"]["source_artifact"] =
+            serde_json::to_value(activation.exact_reference()).expect("activation reference");
+        binding_mut(&mut duplicate)["resolved_references"]["subject"]["source_pointer"] =
+            json!("/node");
+        let (records, sources) = binding_source_fixture(duplicate);
+        assert!(matches!(
+            records.validate_execution_binding_sources(&sources),
+            Err(ContractError::DuplicateBindingSource)
+        ));
+
+        let mut identity = fixture_values();
+        binding_mut(&mut identity)["resolved_references"]["node"]["identity"]["id"] =
+            json!("lab/substituted-node");
+        let (records, sources) = binding_source_fixture(identity);
+        assert!(matches!(
+            records.validate_execution_binding_sources(&sources),
+            Err(ContractError::BindingSourceIdentityMismatch(slot)) if slot == "node"
+        ));
+    }
+
+    #[test]
+    fn execution_binding_descriptor_reference_and_preimage_are_load_bearing() {
+        let mut values = fixture_values();
+        let descriptors = materialize_binding_descriptors(&mut values);
+        let subject_descriptor =
+            values["execution_binding"]["resolved_references"]["subject"]["descriptor"].clone();
+        binding_mut(&mut values)["resolved_references"]["node"]["descriptor"] = subject_descriptor;
+        let (records, sources) = binding_source_fixture_from_materialized(values, descriptors);
+        assert!(matches!(
+            records.validate_execution_binding_sources(&sources),
+            Err(ContractError::BindingDescriptorDigestMismatch(slot)) if slot == "node"
+        ));
+    }
+
+    #[test]
+    fn execution_binding_descriptor_relabel_cannot_hide_behind_a_matching_digest() {
+        for (field, substitution) in [
+            ("kind", json!("subject")),
+            ("id", json!("lab/relabelled-node")),
+            ("version", json!("2")),
+        ] {
+            let mut values = fixture_values();
+            let mut descriptors = materialize_binding_descriptors(&mut values);
+            let old_descriptor: RecordRef = serde_json::from_value(
+                values["execution_binding"]["resolved_references"]["node"]["descriptor"].clone(),
+            )
+            .expect("old node descriptor");
+            let mut descriptor = json!({"schema": CONTRACT_SPECIMEN_IDENTITY_DESCRIPTOR_SCHEMA,
+                    "kind": "nq_node", "id": "lab/node-a", "version": "1"});
+            descriptor[field] = substitution;
+            let descriptor_bytes =
+                canonical_json_bytes(&descriptor).expect("hostile descriptor bytes");
+            let descriptor_digest = sha256_bytes(&descriptor_bytes);
+            let descriptor_reference = RecordRef {
+                schema: Token::parse(CONTRACT_SPECIMEN_IDENTITY_DESCRIPTOR_SCHEMA)
+                    .expect("descriptor schema"),
+                record_id: descriptor_digest.clone(),
+                bytes_digest: descriptor_digest.clone(),
+            };
+            let binding = binding_mut(&mut values);
+            binding["resolved_references"]["node"]["identity"]["descriptor_digest"] =
+                Value::String(descriptor_digest.to_string());
+            binding["resolved_references"]["node"]["descriptor"] =
+                serde_json::to_value(&descriptor_reference).expect("descriptor reference");
+            values.get_mut("activation").expect("activation")["node"]["descriptor_digest"] =
+                Value::String(descriptor_digest.to_string());
+            let activation = ValidatedRuntimeRecord::validate_value(values["activation"].clone())
+                .expect("hostile activation");
+            let activation_reference =
+                serde_json::to_value(activation.exact_reference()).expect("activation reference");
+            let binding = binding_mut(&mut values);
+            binding["activation"] = activation_reference.clone();
+            binding["resolved_references"]["node"]["source_artifact"] = activation_reference;
+            descriptors.retain(|(reference, _)| reference != &old_descriptor);
+            descriptors.push((descriptor_reference, descriptor_bytes));
+
+            let (records, sources) = binding_source_fixture_from_materialized(values, descriptors);
+            assert!(matches!(
+                records.validate_execution_binding_sources(&sources),
+                Err(ContractError::BindingDescriptorPreimageMismatch(slot)) if slot == "node"
+            ));
+        }
+
+        let mut values = fixture_values();
+        let mut descriptors = materialize_binding_descriptors(&mut values);
+        let old_descriptor: RecordRef = serde_json::from_value(
+            values["execution_binding"]["resolved_references"]["node"]["descriptor"].clone(),
+        )
+        .expect("old node descriptor");
+        let descriptor = json!({
+            "schema": CONTRACT_SPECIMEN_IDENTITY_DESCRIPTOR_SCHEMA,
+            "kind": "nq_node",
+            "id": "lab/node-a",
+            "version": "1",
+            "policy": "smuggled",
+        });
+        let descriptor_bytes = canonical_json_bytes(&descriptor).expect("hostile descriptor bytes");
+        let descriptor_digest = sha256_bytes(&descriptor_bytes);
+        let descriptor_reference = RecordRef {
+            schema: Token::parse(CONTRACT_SPECIMEN_IDENTITY_DESCRIPTOR_SCHEMA)
+                .expect("descriptor schema"),
+            record_id: descriptor_digest.clone(),
+            bytes_digest: descriptor_digest.clone(),
+        };
+        let binding = binding_mut(&mut values);
+        binding["resolved_references"]["node"]["identity"]["descriptor_digest"] =
+            Value::String(descriptor_digest.to_string());
+        binding["resolved_references"]["node"]["descriptor"] =
+            serde_json::to_value(&descriptor_reference).expect("descriptor reference");
+        values.get_mut("activation").expect("activation")["node"]["descriptor_digest"] =
+            Value::String(descriptor_digest.to_string());
+        let activation = ValidatedRuntimeRecord::validate_value(values["activation"].clone())
+            .expect("hostile activation");
+        let activation_reference =
+            serde_json::to_value(activation.exact_reference()).expect("activation reference");
+        let binding = binding_mut(&mut values);
+        binding["activation"] = activation_reference.clone();
+        binding["resolved_references"]["node"]["source_artifact"] = activation_reference;
+        descriptors.retain(|(reference, _)| reference != &old_descriptor);
+        descriptors.push((descriptor_reference, descriptor_bytes));
+        let (records, sources) = binding_source_fixture_from_materialized(values, descriptors);
+        assert!(matches!(
+            records.validate_execution_binding_sources(&sources),
+            Err(ContractError::BindingDescriptorPreimageMismatch(slot)) if slot == "node"
+        ));
+    }
+
+    #[test]
+    fn json_pointer_resolution_is_exact_rfc6901() {
+        let document = json!({
+            "a/b": {
+                "~key": ["zero", "one"],
+            },
+        });
+        assert_eq!(
+            resolve_pointer(&document, "/a~1b/~0key/1").expect("exact pointer"),
+            "one"
+        );
+        assert!(matches!(
+            resolve_pointer(&document, "/a~2b"),
+            Err(ContractError::InvalidJsonPointer(_))
+        ));
+        assert!(matches!(
+            resolve_pointer(&document, "/a~1b/~0key/01"),
+            Err(ContractError::UnresolvedJsonPointer(_))
+        ));
+        assert!(matches!(
+            resolve_pointer(
+                &document,
+                "/a~1b/~0key/999999999999999999999999999999999999"
+            ),
+            Err(ContractError::UnresolvedJsonPointer(_))
+        ));
+        assert!(matches!(
+            resolve_pointer(&document, "/a~1b/~"),
+            Err(ContractError::InvalidJsonPointer(_))
+        ));
+    }
+
     fn fixture_values() -> BTreeMap<String, Value> {
         let fixture: Value = serde_json::from_str(RECORDS).expect("fixture");
         fixture["records"]
@@ -2490,6 +3404,216 @@ mod tests {
             .iter()
             .map(|(name, value)| (name.clone(), value.clone()))
             .collect()
+    }
+
+    fn binding_mut(values: &mut BTreeMap<String, Value>) -> &mut Value {
+        values
+            .get_mut("execution_binding")
+            .expect("execution binding")
+    }
+
+    fn binding_source_fixture(
+        mut values: BTreeMap<String, Value>,
+    ) -> (RuntimeRecordSet, ExecutionBindingSourceCorpus) {
+        let descriptors = materialize_binding_descriptors(&mut values);
+        binding_source_fixture_from_materialized(values, descriptors)
+    }
+
+    fn materialize_binding_descriptors(values: &mut BTreeMap<String, Value>) -> DescriptorSources {
+        let slots = [
+            "node",
+            "subject",
+            "platform",
+            "vantage",
+            "role",
+            "static_profile_cohort",
+            "witness",
+            "diagnostic_profile",
+        ];
+        let mut descriptors = Vec::new();
+        for slot in slots {
+            let identity =
+                values["execution_binding"]["resolved_references"][slot]["identity"].clone();
+            let descriptor = json!({
+                "schema": CONTRACT_SPECIMEN_IDENTITY_DESCRIPTOR_SCHEMA,
+                "kind": identity["kind"],
+                "id": identity["id"],
+                "version": identity["version"],
+            });
+            let bytes = canonical_json_bytes(&descriptor).expect("descriptor bytes");
+            let digest = sha256_bytes(&bytes);
+            let reference = RecordRef {
+                schema: Token::parse(CONTRACT_SPECIMEN_IDENTITY_DESCRIPTOR_SCHEMA)
+                    .expect("descriptor schema"),
+                record_id: digest.clone(),
+                bytes_digest: digest,
+            };
+            binding_mut(values)["resolved_references"][slot]["descriptor"] =
+                serde_json::to_value(&reference).expect("descriptor reference");
+            descriptors.push((reference, bytes));
+        }
+        let resolver = values["execution_binding"]["resolver"].clone();
+        let resolver_bytes = identity_descriptor_bytes(&resolver);
+        let resolver_digest = sha256_bytes(&resolver_bytes);
+        binding_mut(values)["resolver"]["descriptor_digest"] =
+            Value::String(resolver_digest.to_string());
+        descriptors.push((
+            RecordRef {
+                schema: Token::parse(CONTRACT_SPECIMEN_IDENTITY_DESCRIPTOR_SCHEMA)
+                    .expect("resolver descriptor schema"),
+                record_id: resolver_digest.clone(),
+                bytes_digest: resolver_digest,
+            },
+            resolver_bytes,
+        ));
+        descriptors
+    }
+
+    fn binding_source_fixture_from_materialized(
+        values: BTreeMap<String, Value>,
+        descriptors: DescriptorSources,
+    ) -> (RuntimeRecordSet, ExecutionBindingSourceCorpus) {
+        let sources = source_corpus_from_materialized(&values, descriptors);
+        (record_set(values), sources)
+    }
+
+    fn source_corpus_from_materialized(
+        values: &BTreeMap<String, Value>,
+        descriptors: DescriptorSources,
+    ) -> ExecutionBindingSourceCorpus {
+        let mut sources = runtime_binding_sources(values);
+        for (reference, bytes) in descriptors {
+            sources
+                .insert_canonical(reference, bytes)
+                .expect("descriptor source");
+        }
+        sources
+    }
+
+    fn runtime_binding_sources(values: &BTreeMap<String, Value>) -> ExecutionBindingSourceCorpus {
+        let mut sources = ExecutionBindingSourceCorpus::new();
+        for name in [
+            "activation",
+            "node_subject_relation",
+            "subject_platform_relation",
+            "node_vantage_relation",
+            "role_manifest",
+            "cohort_manifest",
+            "witness_attachment",
+        ] {
+            let record = ValidatedRuntimeRecord::validate_value(values[name].clone())
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            sources.insert_record(&record).expect("runtime source");
+        }
+        sources
+    }
+
+    fn source_complete_successor() -> (
+        BTreeMap<String, Value>,
+        RuntimeRecordSet,
+        ValidationContext,
+        ExecutionBindingSourceCorpus,
+    ) {
+        let (values, descriptors) = source_complete_successor_values();
+        let values = source_qualification_slice(&values);
+        let records = record_set(values.clone());
+        let context = validation_context(&records);
+        let sources = source_corpus_from_materialized(&values, descriptors);
+        (values, records, context, sources)
+    }
+
+    fn source_complete_successor_values() -> (BTreeMap<String, Value>, DescriptorSources) {
+        let mut values = fixture_values();
+        let descriptors = materialize_binding_descriptors(&mut values);
+        (values, descriptors)
+    }
+
+    fn source_qualification_slice(values: &BTreeMap<String, Value>) -> BTreeMap<String, Value> {
+        const RECORDS: [&str; 28] = [
+            "activate_key_authorization",
+            "activate_node_authorization",
+            "activate_witness_authorization",
+            "activation",
+            "admin_authorization",
+            "admit_witness_authorization",
+            "bootstrap_authorization",
+            "bootstrap_event",
+            "buffer_delivery_policy",
+            "cohort_manifest",
+            "custody_reservation",
+            "enroll_event",
+            "enrollment",
+            "execution_binding",
+            "execution_launch",
+            "invocation_authorization",
+            "invocation_decision",
+            "key_event",
+            "lifecycle_event",
+            "node_cohort_relation",
+            "node_role_relation",
+            "node_subject_relation",
+            "node_vantage_relation",
+            "request",
+            "role_manifest",
+            "subject_platform_relation",
+            "witness_attachment",
+            "witness_event",
+        ];
+        RECORDS
+            .into_iter()
+            .map(|name| {
+                (
+                    name.to_owned(),
+                    values
+                        .get(name)
+                        .unwrap_or_else(|| panic!("missing source-qualification record {name}"))
+                        .clone(),
+                )
+            })
+            .collect()
+    }
+
+    fn validation_context(records: &RuntimeRecordSet) -> ValidationContext {
+        let local_ids = records
+            .records()
+            .map(|record| record.record_id().clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut identities = IdentityCatalog::new();
+        let mut external_records = ExternalRecordCatalog::new();
+        for record in records.records() {
+            let mut carriers = Vec::new();
+            let mut references = Vec::new();
+            collect_carriers(record.record().as_value(), &mut carriers, &mut references)
+                .expect("valid record carriers");
+            for identity in carriers {
+                identities.insert(identity).expect("consistent identity");
+            }
+            for reference in references {
+                if !local_ids.contains(&reference.record_id) {
+                    external_records.insert(reference);
+                }
+            }
+        }
+        ValidationContext {
+            identities,
+            external_records,
+        }
+    }
+
+    fn identity_descriptor_bytes(identity: &Value) -> Vec<u8> {
+        canonical_json_bytes(&json!({
+            "schema": CONTRACT_SPECIMEN_IDENTITY_DESCRIPTOR_SCHEMA,
+            "kind": identity["kind"],
+            "id": identity["id"],
+            "version": identity["version"],
+        }))
+        .expect("identity descriptor bytes")
+    }
+
+    fn remove_source(corpus: &mut ExecutionBindingSourceCorpus, reference: &RecordRef) {
+        let key = (reference.schema.to_string(), reference.record_id.clone());
+        let removed = corpus.sources.remove(&key).expect("source to remove");
+        corpus.total_bytes -= removed.canonical_bytes.len();
     }
 
     fn record_set(values: BTreeMap<String, Value>) -> RuntimeRecordSet {
