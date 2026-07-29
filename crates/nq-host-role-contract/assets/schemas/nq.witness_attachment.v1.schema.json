@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.witness_attachment.v1.schema.json",
+  "title": "nq.witness_attachment.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "attachment_id",
+    "namespace",
+    "generation",
+    "node",
+    "enrollment",
+    "role",
+    "role_manifest",
+    "role_slot",
+    "witness_class",
+    "witness",
+    "provider",
+    "provider_build",
+    "provider_admission",
+    "privileges",
+    "namespaces",
+    "resources",
+    "supported_profiles",
+    "effective_interval",
+    "initial_state",
+    "attachment_authorization",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.witness_attachment.v1"
+    },
+    "attachment_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "namespace": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/namespaceSnapshot"
+    },
+    "generation": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/generation"
+    },
+    "node": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nqNodeIdentityReference"
+    },
+    "enrollment": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nodeEnrollmentReference"
+    },
+    "role": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/roleIdentityReference"
+    },
+    "role_manifest": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/roleManifestReference"
+    },
+    "role_slot": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+    },
+    "witness_class": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/witnessIdentityReference"
+    },
+    "witness": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/witnessIdentityReference"
+    },
+    "provider": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/providerIdentityReference"
+    },
+    "provider_build": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/buildIdentityReference"
+    },
+    "provider_admission": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+    },
+    "privileges": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+      }
+    },
+    "namespaces": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+      }
+    },
+    "resources": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "identity"
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "mount",
+              "device",
+              "socket",
+              "credential_reference"
+            ]
+          },
+          "identity": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+          }
+        }
+      }
+    },
+    "supported_profiles": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/diagnosticProfileIdentityReference"
+      }
+    },
+    "effective_interval": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/effectiveInterval"
+    },
+    "initial_state": {
+      "const": "admitted_inactive"
+    },
+    "attachment_authorization": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/operationAuthorizationReference"
+    },
+    "nonclaims": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nonclaims"
+    }
+  }
+}

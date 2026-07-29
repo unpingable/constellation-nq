@@ -1,0 +1,329 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.execution_identity_binding.v2.schema.json",
+  "title": "nq.execution_identity_binding.v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "binding_id",
+    "diagnostic",
+    "namespace",
+    "resolver",
+    "outer_request",
+    "invocation_decision",
+    "execution_launch",
+    "enrollment",
+    "activation",
+    "source_relations",
+    "role_manifest",
+    "static_profile_cohort_manifest",
+    "witness_attachments",
+    "provider_attempts",
+    "resolved_references",
+    "binding_result",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.execution_identity_binding.v2"
+    },
+    "binding_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "request_id",
+        "artifact_id",
+        "file_bytes_digest"
+      ],
+      "properties": {
+        "schema": {
+          "const": "nq.diagnostic_execution.v2"
+        },
+        "request_id": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        },
+        "artifact_id": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "file_bytes_digest": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        }
+      }
+    },
+    "namespace": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/namespaceSnapshot"
+    },
+    "resolver": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/resolverIdentityReference"
+    },
+    "outer_request": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/diagnosticInvocationRequestReference"
+    },
+    "invocation_decision": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/invocationDecisionReference"
+    },
+    "execution_launch": {
+      "$ref": "#/$defs/executionLaunchReference"
+    },
+    "enrollment": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nodeEnrollmentReference"
+    },
+    "activation": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/runtimeActivationReference"
+    },
+    "source_relations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_subject",
+        "subject_platform",
+        "node_vantage",
+        "node_role",
+        "node_static_profile_cohort"
+      ],
+      "properties": {
+        "node_subject": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/hostRoleRelationReference"
+        },
+        "subject_platform": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/hostRoleRelationReference"
+        },
+        "node_vantage": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/hostRoleRelationReference"
+        },
+        "node_role": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/hostRoleRelationReference"
+        },
+        "node_static_profile_cohort": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/hostRoleRelationReference"
+        }
+      }
+    },
+    "role_manifest": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/roleManifestReference"
+    },
+    "static_profile_cohort_manifest": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/staticProfileCohortManifestReference"
+    },
+    "witness_attachments": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/witnessAttachmentReference"
+      }
+    },
+    "provider_attempts": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+      }
+    },
+    "resolved_references": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node",
+        "subject",
+        "platform",
+        "vantage",
+        "role",
+        "static_profile_cohort",
+        "witness",
+        "diagnostic_profile"
+      ],
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/resolvedNqNode"
+        },
+        "subject": {
+          "$ref": "#/$defs/resolvedSubject"
+        },
+        "platform": {
+          "$ref": "#/$defs/resolvedPlatform"
+        },
+        "vantage": {
+          "$ref": "#/$defs/resolvedVantage"
+        },
+        "role": {
+          "$ref": "#/$defs/resolvedRole"
+        },
+        "static_profile_cohort": {
+          "$ref": "#/$defs/resolvedStaticProfileCohort"
+        },
+        "witness": {
+          "$ref": "#/$defs/resolvedWitness"
+        },
+        "diagnostic_profile": {
+          "$ref": "#/$defs/resolvedDiagnosticProfile"
+        }
+      }
+    },
+    "binding_result": {
+      "const": "resolved"
+    },
+    "nonclaims": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nonclaims"
+    }
+  },
+  "$defs": {
+    "executionLaunchReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.execution_launch.v1"
+            }
+          }
+        }
+      ]
+    },
+    "resolvedReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_artifact",
+        "source_pointer",
+        "identity",
+        "descriptor"
+      ],
+      "properties": {
+        "source_artifact": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        "source_pointer": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "identity": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+        },
+        "descriptor": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        }
+      }
+    },
+    "resolvedNqNode": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/resolvedReference"
+        },
+        {
+          "properties": {
+            "identity": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/nqNodeIdentityReference"
+            }
+          }
+        }
+      ]
+    },
+    "resolvedSubject": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/resolvedReference"
+        },
+        {
+          "properties": {
+            "identity": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/subjectIdentityReference"
+            }
+          }
+        }
+      ]
+    },
+    "resolvedPlatform": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/resolvedReference"
+        },
+        {
+          "properties": {
+            "identity": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/platformIdentityReference"
+            }
+          }
+        }
+      ]
+    },
+    "resolvedVantage": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/resolvedReference"
+        },
+        {
+          "properties": {
+            "identity": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/vantageIdentityReference"
+            }
+          }
+        }
+      ]
+    },
+    "resolvedRole": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/resolvedReference"
+        },
+        {
+          "properties": {
+            "identity": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/roleIdentityReference"
+            }
+          }
+        }
+      ]
+    },
+    "resolvedStaticProfileCohort": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/resolvedReference"
+        },
+        {
+          "properties": {
+            "identity": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/staticCohortIdentityReference"
+            }
+          }
+        }
+      ]
+    },
+    "resolvedWitness": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/resolvedReference"
+        },
+        {
+          "properties": {
+            "identity": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/witnessIdentityReference"
+            }
+          }
+        }
+      ]
+    },
+    "resolvedDiagnosticProfile": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/resolvedReference"
+        },
+        {
+          "properties": {
+            "identity": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/diagnosticProfileIdentityReference"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

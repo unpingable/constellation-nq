@@ -1,0 +1,478 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.inspector_result_set.v1.schema.json",
+  "title": "nq.inspector_result_set.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "snapshot_id",
+    "created_at",
+    "ledger_generation",
+    "ledger_commit",
+    "query",
+    "result_records",
+    "index_state",
+    "completeness",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.inspector_result_set.v1"
+    },
+    "snapshot_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "created_at": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+    },
+    "ledger_generation": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/generation"
+    },
+    "ledger_commit": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "query": {
+      "$ref": "#/$defs/query"
+    },
+    "result_records": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+      }
+    },
+    "index_state": {
+      "enum": [
+        "verified",
+        "rebuilding",
+        "corrupt",
+        "unavailable"
+      ]
+    },
+    "completeness": {
+      "$ref": "#/$defs/completeness"
+    },
+    "nonclaims": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nonclaims"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "query": {
+            "properties": {
+              "sensitivity": {
+                "const": "sensitive_evidence"
+              }
+            },
+            "required": [
+              "sensitivity"
+            ]
+          }
+        },
+        "required": [
+          "query"
+        ]
+      },
+      "then": {
+        "properties": {
+          "query": {
+            "properties": {
+              "sensitive_read_authorization": {
+                "$ref": "#/$defs/authorizationReference"
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "query": {
+            "properties": {
+              "sensitive_read_authorization": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "nonNegativeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "nullableTimestamp": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+        }
+      ]
+    },
+    "authorizationReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.operation_authorization.v1"
+            }
+          }
+        }
+      ]
+    },
+    "query": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "query_occurrence_id",
+        "query_digest",
+        "requested_at",
+        "requesting_principal",
+        "authentication_evidence",
+        "sensitive_read_authorization",
+        "sensitivity",
+        "scope",
+        "bounds"
+      ],
+      "properties": {
+        "query_occurrence_id": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        },
+        "query_digest": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "requested_at": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+        },
+        "requesting_principal": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+        },
+        "authentication_evidence": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        "sensitive_read_authorization": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/authorizationReference"
+            }
+          ]
+        },
+        "sensitivity": {
+          "enum": [
+            "metadata_only",
+            "ordinary_records",
+            "sensitive_evidence"
+          ]
+        },
+        "scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "record_schemas",
+            "record_ids",
+            "nodes",
+            "subjects",
+            "created_interval",
+            "include_dependency_closure"
+          ],
+          "properties": {
+            "record_schemas": {
+              "type": "array",
+              "maxItems": 64,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+              }
+            },
+            "record_ids": {
+              "type": "array",
+              "maxItems": 1000,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+              }
+            },
+            "nodes": {
+              "type": "array",
+              "maxItems": 128,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+              }
+            },
+            "subjects": {
+              "type": "array",
+              "maxItems": 128,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+              }
+            },
+            "created_interval": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "from",
+                "until"
+              ],
+              "properties": {
+                "from": {
+                  "$ref": "#/$defs/nullableTimestamp"
+                },
+                "until": {
+                  "$ref": "#/$defs/nullableTimestamp"
+                }
+              }
+            },
+            "include_dependency_closure": {
+              "type": "boolean"
+            }
+          }
+        },
+        "bounds": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "maximum_result_records",
+            "maximum_result_set_bytes",
+            "maximum_page_records",
+            "maximum_page_response_bytes",
+            "deadline"
+          ],
+          "properties": {
+            "maximum_result_records": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "maximum_result_set_bytes": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "maximum_page_records": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "maximum_page_response_bytes": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "deadline": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+            }
+          }
+        }
+      }
+    },
+    "omission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reason",
+        "count",
+        "records",
+        "records_digest",
+        "record_listing",
+        "policy"
+      ],
+      "properties": {
+        "reason": {
+          "enum": [
+            "authorization_redaction",
+            "sensitive_evidence_not_authorized",
+            "committed_unavailable",
+            "unsupported_schema",
+            "index_unavailable",
+            "time_limit",
+            "size_limit",
+            "corrupt_canonical_record",
+            "reference_unresolved"
+          ]
+        },
+        "count": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/positiveInteger"
+            }
+          ]
+        },
+        "records": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+          }
+        },
+        "records_digest": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+            }
+          ]
+        },
+        "record_listing": {
+          "enum": [
+            "exact_refs",
+            "digest_only",
+            "unknown"
+          ]
+        },
+        "policy": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "count": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "records": {
+              "minItems": 1
+            },
+            "records_digest": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+            },
+            "record_listing": {
+              "const": "exact_refs"
+            }
+          }
+        },
+        {
+          "properties": {
+            "count": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "records": {
+              "maxItems": 0
+            },
+            "records_digest": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+            },
+            "record_listing": {
+              "const": "digest_only"
+            }
+          }
+        },
+        {
+          "properties": {
+            "count": {
+              "type": "null"
+            },
+            "records": {
+              "maxItems": 0
+            },
+            "records_digest": {
+              "type": "null"
+            },
+            "record_listing": {
+              "const": "unknown"
+            }
+          }
+        }
+      ]
+    },
+    "completeness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "matched_record_count",
+        "available_record_count",
+        "omitted_record_count",
+        "omissions",
+        "ledger_index_exhaustive"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "complete",
+            "incomplete"
+          ]
+        },
+        "matched_record_count": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/nonNegativeInteger"
+            }
+          ]
+        },
+        "available_record_count": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "omitted_record_count": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/nonNegativeInteger"
+            }
+          ]
+        },
+        "omissions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/omission"
+          }
+        },
+        "ledger_index_exhaustive": {
+          "type": "boolean"
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "status": {
+              "const": "complete"
+            },
+            "matched_record_count": {
+              "$ref": "#/$defs/nonNegativeInteger"
+            },
+            "omitted_record_count": {
+              "const": 0
+            },
+            "omissions": {
+              "maxItems": 0
+            },
+            "ledger_index_exhaustive": {
+              "const": true
+            }
+          }
+        },
+        {
+          "properties": {
+            "status": {
+              "const": "incomplete"
+            },
+            "omissions": {
+              "minItems": 1
+            }
+          }
+        }
+      ]
+    }
+  }
+}

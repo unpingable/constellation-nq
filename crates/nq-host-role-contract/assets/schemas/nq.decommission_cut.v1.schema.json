@@ -1,0 +1,370 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.decommission_cut.v1.schema.json",
+  "title": "nq.decommission_cut.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "cut_id",
+    "namespace",
+    "node",
+    "enrollment",
+    "activation",
+    "administrative_authorization",
+    "predecessor_cut",
+    "effective_at",
+    "fence_transaction_id",
+    "ledger_snapshot",
+    "accepted_prestart_dispositions",
+    "in_flight",
+    "committed_deliveries",
+    "unresolved_counts",
+    "new_request_policy",
+    "historical_read_policy",
+    "result_state",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.decommission_cut.v1"
+    },
+    "cut_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "namespace": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/namespaceSnapshot"
+    },
+    "node": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nqNodeIdentityReference"
+    },
+    "enrollment": {
+      "$ref": "#/$defs/enrollmentReference"
+    },
+    "activation": {
+      "$ref": "#/$defs/activationReference"
+    },
+    "administrative_authorization": {
+      "$ref": "#/$defs/authorizationReference"
+    },
+    "predecessor_cut": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/decommissionCutReference"
+        }
+      ]
+    },
+    "effective_at": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+    },
+    "fence_transaction_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "ledger_snapshot": {
+      "$ref": "#/$defs/ledgerSnapshotReference"
+    },
+    "accepted_prestart_dispositions": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "request",
+          "decision",
+          "terminal_disposition"
+        ],
+        "properties": {
+          "request": {
+            "$ref": "#/$defs/requestReference"
+          },
+          "decision": {
+            "$ref": "#/$defs/decisionReference"
+          },
+          "terminal_disposition": {
+            "const": "decommissioned_before_start"
+          }
+        }
+      }
+    },
+    "in_flight": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "launch",
+          "original_deadline"
+        ],
+        "properties": {
+          "launch": {
+            "$ref": "#/$defs/launchReference"
+          },
+          "original_deadline": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+          }
+        }
+      }
+    },
+    "committed_deliveries": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "delivery",
+          "destination",
+          "destination_generation",
+          "transport_policy"
+        ],
+        "properties": {
+          "delivery": {
+            "$ref": "#/$defs/deliveryReference"
+          },
+          "destination": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+          },
+          "destination_generation": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/generation"
+          },
+          "transport_policy": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+          }
+        }
+      }
+    },
+    "unresolved_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accepted_not_launched",
+        "in_flight",
+        "committed_deliveries"
+      ],
+      "properties": {
+        "accepted_not_launched": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "in_flight": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "committed_deliveries": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "new_request_policy": {
+      "const": "refuse"
+    },
+    "historical_read_policy": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/policyIdentityReference"
+    },
+    "result_state": {
+      "enum": [
+        "draining",
+        "decommissioned"
+      ]
+    },
+    "nonclaims": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nonclaims"
+    }
+  },
+  "$defs": {
+    "enrollmentReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.node_enrollment.v1"
+            }
+          }
+        }
+      ]
+    },
+    "activationReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.runtime_activation.v1"
+            }
+          }
+        }
+      ]
+    },
+    "authorizationReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.operation_authorization.v1"
+            }
+          }
+        }
+      ]
+    },
+    "decommissionCutReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.decommission_cut.v1"
+            }
+          }
+        }
+      ]
+    },
+    "ledgerSnapshotReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.decommission_ledger_snapshot.v1"
+            }
+          }
+        }
+      ]
+    },
+    "requestReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.diagnostic_invocation_request.v1"
+            }
+          }
+        }
+      ]
+    },
+    "decisionReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.invocation_decision.v1"
+            }
+          }
+        }
+      ]
+    },
+    "launchReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.execution_launch.v1"
+            }
+          }
+        }
+      ]
+    },
+    "deliveryReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.artifact_delivery_record.v1"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "result_state": {
+            "const": "draining"
+          }
+        },
+        "required": [
+          "result_state"
+        ]
+      },
+      "then": {
+        "properties": {
+          "predecessor_cut": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "result_state": {
+            "const": "decommissioned"
+          }
+        },
+        "required": [
+          "result_state"
+        ]
+      },
+      "then": {
+        "properties": {
+          "predecessor_cut": {
+            "$ref": "#/$defs/decommissionCutReference"
+          },
+          "accepted_prestart_dispositions": {
+            "maxItems": 0
+          },
+          "in_flight": {
+            "maxItems": 0
+          },
+          "committed_deliveries": {
+            "maxItems": 0
+          },
+          "unresolved_counts": {
+            "properties": {
+              "accepted_not_launched": {
+                "const": 0
+              },
+              "in_flight": {
+                "const": 0
+              },
+              "committed_deliveries": {
+                "const": 0
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

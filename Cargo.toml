@@ -4,6 +4,7 @@ members = [
     "crates/nq-build-info",
     "crates/nq-helper-sandbox",
     "crates/nq-protocol",
+    "crates/nq-host-role-contract",
     "crates/nq-system-contract",
     "crates/nq-profiles",
     "crates/nq-store",

@@ -1,0 +1,214 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.invocation_decision.v1.schema.json",
+  "title": "nq.invocation_decision.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "decision_id",
+    "request",
+    "request_digest",
+    "activation_snapshot",
+    "authentication_evidence",
+    "invocation_authorization",
+    "decision",
+    "policy",
+    "decided_at",
+    "clock",
+    "custody",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.invocation_decision.v1"
+    },
+    "decision_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "request": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/diagnosticInvocationRequestReference"
+    },
+    "request_digest": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "activation_snapshot": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/runtimeActivationReference"
+    },
+    "authentication_evidence": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+    },
+    "invocation_authorization": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/operationAuthorizationReference"
+    },
+    "decision": {
+      "enum": [
+        "accepted",
+        "authentication_refused",
+        "authorization_refused",
+        "binding_refused",
+        "capability_refused",
+        "deadline_refused",
+        "custody_refused",
+        "stale_before_start",
+        "decommissioned_before_start"
+      ]
+    },
+    "policy": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/policyIdentityReference"
+    },
+    "decided_at": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+    },
+    "clock": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/clockIdentityReference"
+    },
+    "custody": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/reservedCustody"
+        },
+        {
+          "$ref": "#/$defs/refusedCustody"
+        },
+        {
+          "$ref": "#/$defs/notApplicableCustody"
+        }
+      ]
+    },
+    "nonclaims": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nonclaims"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "const": "accepted"
+          }
+        },
+        "required": [
+          "decision"
+        ]
+      },
+      "then": {
+        "properties": {
+          "custody": {
+            "$ref": "#/$defs/reservedCustody"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "const": "custody_refused"
+          }
+        },
+        "required": [
+          "decision"
+        ]
+      },
+      "then": {
+        "properties": {
+          "custody": {
+            "$ref": "#/$defs/refusedCustody"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "enum": [
+              "authentication_refused",
+              "authorization_refused",
+              "binding_refused",
+              "capability_refused",
+              "deadline_refused",
+              "stale_before_start",
+              "decommissioned_before_start"
+            ]
+          }
+        },
+        "required": [
+          "decision"
+        ]
+      },
+      "then": {
+        "properties": {
+          "custody": {
+            "$ref": "#/$defs/notApplicableCustody"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "reservationReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.custody_reservation.v1"
+            }
+          }
+        }
+      ]
+    },
+    "reservedCustody": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "reservation"
+      ],
+      "properties": {
+        "state": {
+          "const": "reserved"
+        },
+        "reservation": {
+          "$ref": "#/$defs/reservationReference"
+        }
+      }
+    },
+    "refusedCustody": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "reservation"
+      ],
+      "properties": {
+        "state": {
+          "const": "refused"
+        },
+        "reservation": {
+          "$ref": "#/$defs/reservationReference"
+        }
+      }
+    },
+    "notApplicableCustody": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "reservation"
+      ],
+      "properties": {
+        "state": {
+          "const": "not_applicable"
+        },
+        "reservation": {
+          "type": "null"
+        }
+      }
+    }
+  }
+}

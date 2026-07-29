@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.authenticated_artifact_envelope.v1.schema.json",
+  "title": "nq.authenticated_artifact_envelope.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "envelope_id",
+    "created_at",
+    "artifact",
+    "execution_binding",
+    "producer_node",
+    "producer_activation",
+    "producer_key_generation",
+    "intended_receiver",
+    "destination_generation",
+    "transport_policy",
+    "authentication",
+    "replay_key",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.authenticated_artifact_envelope.v1"
+    },
+    "envelope_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "created_at": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "artifact_id",
+        "file_bytes_digest",
+        "byte_length",
+        "media_type",
+        "transfer_mode"
+      ],
+      "properties": {
+        "schema": {
+          "const": "nq.diagnostic_execution.v2"
+        },
+        "artifact_id": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "file_bytes_digest": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "byte_length": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "media_type": {
+          "const": "application/vnd.nq.diagnostic-execution.v2+json"
+        },
+        "transfer_mode": {
+          "const": "detached_exact_canonical_bytes"
+        }
+      }
+    },
+    "execution_binding": {
+      "$ref": "#/$defs/executionBindingReference"
+    },
+    "producer_node": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+    },
+    "producer_activation": {
+      "$ref": "#/$defs/activationReference"
+    },
+    "producer_key_generation": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+    },
+    "intended_receiver": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+    },
+    "destination_generation": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/generation"
+    },
+    "transport_policy": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+    },
+    "authentication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scheme",
+        "policy",
+        "canonicalization",
+        "signed_fields",
+        "signed_content_digest",
+        "evidence_bytes_digest",
+        "evidence_byte_length",
+        "evidence_transfer_mode"
+      ],
+      "properties": {
+        "scheme": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+        },
+        "policy": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+        },
+        "canonicalization": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+        },
+        "signed_fields": {
+          "const": [
+            "/schema",
+            "/created_at",
+            "/artifact",
+            "/execution_binding",
+            "/producer_node",
+            "/producer_activation",
+            "/producer_key_generation",
+            "/intended_receiver",
+            "/destination_generation",
+            "/transport_policy",
+            "/authentication/scheme",
+            "/authentication/policy",
+            "/authentication/canonicalization",
+            "/replay_key",
+            "/nonclaims"
+          ]
+        },
+        "signed_content_digest": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "evidence_bytes_digest": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "evidence_byte_length": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "evidence_transfer_mode": {
+          "const": "detached_exact_bytes"
+        }
+      }
+    },
+    "replay_key": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "nonclaims": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nonclaims"
+    }
+  },
+  "$defs": {
+    "executionBindingReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.execution_identity_binding.v2"
+            }
+          }
+        }
+      ]
+    },
+    "activationReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.runtime_activation.v1"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

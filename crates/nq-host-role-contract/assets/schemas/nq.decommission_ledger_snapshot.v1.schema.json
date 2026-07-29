@@ -1,0 +1,382 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.decommission_ledger_snapshot.v1.schema.json",
+  "title": "nq.decommission_ledger_snapshot.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "snapshot_id",
+    "namespace",
+    "node",
+    "enrollment",
+    "activation",
+    "store_checkpoint",
+    "evaluated_at",
+    "evaluator",
+    "ledger_entries",
+    "ledger_entry_count",
+    "ledger_entries_digest",
+    "accepted_not_launched",
+    "in_flight",
+    "committed_deliveries",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.decommission_ledger_snapshot.v1"
+    },
+    "snapshot_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "namespace": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/namespaceSnapshot"
+    },
+    "node": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nqNodeIdentityReference"
+    },
+    "enrollment": {
+      "$ref": "#/$defs/enrollmentReference"
+    },
+    "activation": {
+      "$ref": "#/$defs/activationReference"
+    },
+    "store_checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "checkpoint_id",
+        "frontier_scope",
+        "store",
+        "store_genesis_id",
+        "commit_sequence",
+        "predecessor_ledger_root_digest",
+        "committed_through",
+        "atomic_request_fence",
+        "canonical_records",
+        "canonical_record_count",
+        "canonical_record_set_digest",
+        "ledger_root_digest",
+        "custody_commit"
+      ],
+      "properties": {
+        "checkpoint_id": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "frontier_scope": {
+          "const": "complete_node_enrollment_occurrence"
+        },
+        "store": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+        },
+        "store_genesis_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "commit_sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "predecessor_ledger_root_digest": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+            }
+          ]
+        },
+        "committed_through": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+        },
+        "atomic_request_fence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "transaction_id",
+            "operation",
+            "linearization_time",
+            "new_request_policy"
+          ],
+          "properties": {
+            "transaction_id": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+            },
+            "operation": {
+              "enum": [
+                "begin_decommission",
+                "complete_decommission"
+              ]
+            },
+            "linearization_time": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+            },
+            "new_request_policy": {
+              "const": "refuse"
+            }
+          }
+        },
+        "canonical_records": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/sourceLedgerEntry"
+          }
+        },
+        "canonical_record_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "canonical_record_set_digest": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "ledger_root_digest": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "custody_commit": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "commit_id",
+            "policy",
+            "canonicalization",
+            "signed_content_digest",
+            "authentication_evidence"
+          ],
+          "properties": {
+            "commit_id": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+            },
+            "policy": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/policyIdentityReference"
+            },
+            "canonicalization": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+            },
+            "signed_content_digest": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+            },
+            "authentication_evidence": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+            }
+          }
+        }
+      }
+    },
+    "evaluated_at": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+    },
+    "evaluator": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/evaluatorIdentityReference"
+    },
+    "ledger_entries": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/sourceLedgerEntry"
+      }
+    },
+    "ledger_entry_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "ledger_entries_digest": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "accepted_not_launched": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "request",
+          "decision"
+        ],
+        "properties": {
+          "request": {
+            "$ref": "#/$defs/requestReference"
+          },
+          "decision": {
+            "$ref": "#/$defs/decisionReference"
+          }
+        }
+      }
+    },
+    "in_flight": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "launch",
+          "original_deadline"
+        ],
+        "properties": {
+          "launch": {
+            "$ref": "#/$defs/launchReference"
+          },
+          "original_deadline": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+          }
+        }
+      }
+    },
+    "committed_deliveries": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "delivery",
+          "destination",
+          "destination_generation",
+          "transport_policy"
+        ],
+        "properties": {
+          "delivery": {
+            "$ref": "#/$defs/deliveryReference"
+          },
+          "destination": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+          },
+          "destination_generation": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/generation"
+          },
+          "transport_policy": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+          }
+        }
+      }
+    },
+    "nonclaims": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nonclaims"
+    }
+  },
+  "$defs": {
+    "sourceLedgerEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record",
+        "committed_at"
+      ],
+      "properties": {
+        "record": {
+          "$ref": "#/$defs/sourceRecordReference"
+        },
+        "committed_at": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+        }
+      }
+    },
+    "enrollmentReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.node_enrollment.v1"
+            }
+          }
+        }
+      ]
+    },
+    "activationReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.runtime_activation.v1"
+            }
+          }
+        }
+      ]
+    },
+    "sourceRecordReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "enum": [
+                "nq.diagnostic_invocation_request.v1",
+                "nq.invocation_decision.v1",
+                "nq.execution_launch.v1",
+                "nq.execution_identity_binding.v2",
+                "nq.artifact_delivery_record.v1",
+                "nq.decommission_cut.v1"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "requestReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.diagnostic_invocation_request.v1"
+            }
+          }
+        }
+      ]
+    },
+    "decisionReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.invocation_decision.v1"
+            }
+          }
+        }
+      ]
+    },
+    "launchReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.execution_launch.v1"
+            }
+          }
+        }
+      ]
+    },
+    "deliveryReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.artifact_delivery_record.v1"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

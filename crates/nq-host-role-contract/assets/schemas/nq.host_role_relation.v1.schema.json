@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.host_role_relation.v1.schema.json",
+  "title": "nq.host_role_relation.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "relation_id",
+    "namespace",
+    "relation_kind",
+    "left",
+    "right",
+    "generation",
+    "effective_interval",
+    "administrative_authorization",
+    "continuity_decision",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.host_role_relation.v1"
+    },
+    "relation_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "namespace": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/namespaceSnapshot"
+    },
+    "relation_kind": {
+      "enum": [
+        "node_subject",
+        "subject_platform",
+        "node_vantage",
+        "node_role",
+        "node_static_profile_cohort"
+      ]
+    },
+    "left": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+    },
+    "right": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+    },
+    "generation": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/generation"
+    },
+    "effective_interval": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/effectiveInterval"
+    },
+    "administrative_authorization": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/operationAuthorizationReference"
+    },
+    "continuity_decision": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        }
+      ]
+    },
+    "nonclaims": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nonclaims"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "relation_kind": {
+            "const": "node_subject"
+          }
+        },
+        "required": [
+          "relation_kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "left": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/nqNodeIdentityReference"
+          },
+          "right": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/subjectIdentityReference"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "relation_kind": {
+            "const": "subject_platform"
+          }
+        },
+        "required": [
+          "relation_kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "left": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/subjectIdentityReference"
+          },
+          "right": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/platformIdentityReference"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "relation_kind": {
+            "const": "node_vantage"
+          }
+        },
+        "required": [
+          "relation_kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "left": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/nqNodeIdentityReference"
+          },
+          "right": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/vantageIdentityReference"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "relation_kind": {
+            "const": "node_role"
+          }
+        },
+        "required": [
+          "relation_kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "left": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/nqNodeIdentityReference"
+          },
+          "right": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/roleIdentityReference"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "relation_kind": {
+            "const": "node_static_profile_cohort"
+          }
+        },
+        "required": [
+          "relation_kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "left": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/nqNodeIdentityReference"
+          },
+          "right": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/staticCohortIdentityReference"
+          }
+        }
+      }
+    }
+  ]
+}

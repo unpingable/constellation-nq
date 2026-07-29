@@ -1,0 +1,287 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.host_role_lifecycle_event.v1.schema.json",
+  "title": "nq.host_role_lifecycle_event.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "event_id",
+    "namespace",
+    "node",
+    "operation",
+    "from_state",
+    "to_state",
+    "occurred_at",
+    "administrative_authorization",
+    "predecessor_events",
+    "input_records",
+    "result_records",
+    "reason",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.host_role_lifecycle_event.v1"
+    },
+    "event_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "namespace": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/namespaceSnapshot"
+    },
+    "node": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+    },
+    "operation": {
+      "enum": [
+        "bootstrap",
+        "enroll",
+        "activate",
+        "rekey",
+        "rehome",
+        "change_role",
+        "change_static_profile_cohort",
+        "begin_restore",
+        "complete_restore",
+        "begin_decommission",
+        "complete_decommission"
+      ]
+    },
+    "from_state": {
+      "enum": [
+        "unbootstrapped",
+        "bootstrapped_unenrolled",
+        "enrolled_inactive",
+        "active",
+        "draining",
+        "recovery_quarantined"
+      ]
+    },
+    "to_state": {
+      "enum": [
+        "bootstrapped_unenrolled",
+        "enrolled_inactive",
+        "active",
+        "draining",
+        "decommissioned",
+        "recovery_quarantined"
+      ]
+    },
+    "occurred_at": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+    },
+    "administrative_authorization": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/operationAuthorizationReference"
+    },
+    "predecessor_events": {
+      "type": "array",
+      "maxItems": 1,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+      }
+    },
+    "input_records": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+      }
+    },
+    "result_records": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+      }
+    },
+    "operation_proof": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    },
+    "nonclaims": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nonclaims"
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "operation": {
+          "const": "bootstrap"
+        },
+        "from_state": {
+          "const": "unbootstrapped"
+        },
+        "to_state": {
+          "const": "bootstrapped_unenrolled"
+        },
+        "predecessor_events": {
+          "maxItems": 0
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "enroll"
+        },
+        "from_state": {
+          "const": "bootstrapped_unenrolled"
+        },
+        "to_state": {
+          "const": "enrolled_inactive"
+        },
+        "predecessor_events": {
+          "minItems": 1,
+          "maxItems": 1
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "activate"
+        },
+        "from_state": {
+          "const": "enrolled_inactive"
+        },
+        "to_state": {
+          "const": "active"
+        },
+        "predecessor_events": {
+          "minItems": 1,
+          "maxItems": 1
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "enum": [
+            "rekey",
+            "rehome",
+            "change_role",
+            "change_static_profile_cohort"
+          ]
+        },
+        "from_state": {
+          "const": "enrolled_inactive"
+        },
+        "to_state": {
+          "const": "enrolled_inactive"
+        },
+        "predecessor_events": {
+          "minItems": 1,
+          "maxItems": 1
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "enum": [
+            "rekey",
+            "rehome",
+            "change_role",
+            "change_static_profile_cohort"
+          ]
+        },
+        "from_state": {
+          "const": "active"
+        },
+        "to_state": {
+          "const": "active"
+        },
+        "predecessor_events": {
+          "minItems": 1,
+          "maxItems": 1
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "begin_restore"
+        },
+        "from_state": {
+          "const": "bootstrapped_unenrolled"
+        },
+        "to_state": {
+          "const": "recovery_quarantined"
+        },
+        "predecessor_events": {
+          "minItems": 1,
+          "maxItems": 1
+        }
+      }
+    },
+    {
+      "required": [
+        "operation_proof"
+      ],
+      "properties": {
+        "operation": {
+          "const": "complete_restore"
+        },
+        "from_state": {
+          "const": "recovery_quarantined"
+        },
+        "to_state": {
+          "const": "enrolled_inactive"
+        },
+        "predecessor_events": {
+          "minItems": 1,
+          "maxItems": 1
+        }
+      }
+    },
+    {
+      "required": [
+        "operation_proof"
+      ],
+      "properties": {
+        "operation": {
+          "const": "begin_decommission"
+        },
+        "from_state": {
+          "enum": [
+            "enrolled_inactive",
+            "active"
+          ]
+        },
+        "to_state": {
+          "const": "draining"
+        },
+        "predecessor_events": {
+          "minItems": 1,
+          "maxItems": 1
+        }
+      }
+    },
+    {
+      "required": [
+        "operation_proof"
+      ],
+      "properties": {
+        "operation": {
+          "const": "complete_decommission"
+        },
+        "from_state": {
+          "const": "draining"
+        },
+        "to_state": {
+          "const": "decommissioned"
+        },
+        "predecessor_events": {
+          "minItems": 1,
+          "maxItems": 1
+        }
+      }
+    }
+  ]
+}

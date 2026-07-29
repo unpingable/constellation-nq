@@ -1,0 +1,320 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.artifact_delivery_attempt.v1.schema.json",
+  "title": "nq.artifact_delivery_attempt.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "attempt_record_id",
+    "attempt_occurrence_id",
+    "attempt_number",
+    "envelope",
+    "artifact",
+    "producer_node",
+    "producer_key_generation",
+    "destination",
+    "destination_generation",
+    "transport",
+    "transport_policy",
+    "started_at",
+    "completed_at",
+    "outcome",
+    "predecessor_attempt_record",
+    "next_attempt_not_before",
+    "response_evidence",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.artifact_delivery_attempt.v1"
+    },
+    "attempt_record_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "attempt_occurrence_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+    },
+    "attempt_number": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "envelope": {
+      "$ref": "#/$defs/envelopeReference"
+    },
+    "artifact": {
+      "$ref": "#/$defs/artifact"
+    },
+    "producer_node": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+    },
+    "producer_key_generation": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+    },
+    "destination": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+    },
+    "destination_generation": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/generation"
+    },
+    "transport": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+    },
+    "transport_policy": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+    },
+    "started_at": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+    },
+    "completed_at": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+        }
+      ]
+    },
+    "outcome": {
+      "enum": [
+        "in_progress",
+        "transport_unavailable",
+        "transport_timeout",
+        "receiver_rate_limited",
+        "ambiguous_possible_acceptance",
+        "terminal_rejected",
+        "transport_completed_receipt_pending"
+      ]
+    },
+    "predecessor_attempt_record": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/attemptReference"
+        }
+      ]
+    },
+    "next_attempt_not_before": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+        }
+      ]
+    },
+    "response_evidence": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/transportResponseEvidence"
+        }
+      ]
+    },
+    "nonclaims": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nonclaims"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "in_progress"
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "completed_at": {
+            "type": "null"
+          },
+          "next_attempt_not_before": {
+            "type": "null"
+          },
+          "response_evidence": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "enum": [
+              "transport_unavailable",
+              "transport_timeout",
+              "receiver_rate_limited",
+              "ambiguous_possible_acceptance"
+            ]
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "completed_at": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+          },
+          "next_attempt_not_before": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "terminal_rejected"
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "completed_at": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+          },
+          "next_attempt_not_before": {
+            "type": "null"
+          },
+          "response_evidence": {
+            "$ref": "#/$defs/transportResponseEvidence"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "transport_completed_receipt_pending"
+          }
+        },
+        "required": [
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "completed_at": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+          },
+          "next_attempt_not_before": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "artifact_id",
+        "file_bytes_digest",
+        "byte_length"
+      ],
+      "properties": {
+        "schema": {
+          "const": "nq.diagnostic_execution.v2"
+        },
+        "artifact_id": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "file_bytes_digest": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "byte_length": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "envelopeReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.authenticated_artifact_envelope.v1"
+            }
+          }
+        }
+      ]
+    },
+    "attemptReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.artifact_delivery_attempt.v1"
+            }
+          }
+        }
+      ]
+    },
+    "transportResponseEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "response_id",
+        "received_at",
+        "outcome_code",
+        "capture_policy",
+        "captured_bytes_digest",
+        "captured_byte_length",
+        "truncated"
+      ],
+      "properties": {
+        "response_id": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "received_at": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+        },
+        "outcome_code": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        },
+        "capture_policy": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+        },
+        "captured_bytes_digest": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "captured_byte_length": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1048576
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

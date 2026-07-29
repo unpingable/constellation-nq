@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.role_manifest.v1.schema.json",
+  "title": "nq.role_manifest.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "manifest_id",
+    "namespace",
+    "role",
+    "generation",
+    "effective_interval",
+    "subject_scope_classes",
+    "capability_classes",
+    "permitted_profiles",
+    "witness_slots",
+    "custody_policy",
+    "buffer_policy",
+    "delivery_policy",
+    "buffer_delivery_policy_record",
+    "compatible_static_profile_cohorts",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.role_manifest.v1"
+    },
+    "manifest_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "namespace": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/namespaceSnapshot"
+    },
+    "role": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/roleIdentityReference"
+    },
+    "generation": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/generation"
+    },
+    "effective_interval": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/effectiveInterval"
+    },
+    "subject_scope_classes": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/scopeIdentityReference"
+      }
+    },
+    "capability_classes": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/capabilityIdentityReference"
+      }
+    },
+    "permitted_profiles": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/diagnosticProfileIdentityReference"
+      }
+    },
+    "witness_slots": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "slot_id",
+          "requirement",
+          "witness_class",
+          "privilege_ceiling",
+          "namespace_ceiling",
+          "supported_profiles"
+        ],
+        "properties": {
+          "slot_id": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+          },
+          "requirement": {
+            "enum": [
+              "required",
+              "optional"
+            ]
+          },
+          "witness_class": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/witnessIdentityReference"
+          },
+          "privilege_ceiling": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+            }
+          },
+          "namespace_ceiling": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+            }
+          },
+          "supported_profiles": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/diagnosticProfileIdentityReference"
+            }
+          }
+        }
+      }
+    },
+    "custody_policy": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/policyIdentityReference"
+    },
+    "buffer_policy": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/policyIdentityReference"
+    },
+    "delivery_policy": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/policyIdentityReference"
+    },
+    "buffer_delivery_policy_record": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+    },
+    "compatible_static_profile_cohorts": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "cohort",
+          "manifest",
+          "generation"
+        ],
+        "properties": {
+          "cohort": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/staticCohortIdentityReference"
+          },
+          "manifest": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/staticProfileCohortManifestReference"
+          },
+          "generation": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/generation"
+          }
+        }
+      }
+    },
+    "nonclaims": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nonclaims"
+    }
+  }
+}

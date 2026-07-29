@@ -1,0 +1,384 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.operation_authorization.v1.schema.json",
+  "title": "nq.operation_authorization.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "authorization_id",
+    "scope",
+    "authorizing_principal",
+    "requesting_principal",
+    "operation",
+    "binding",
+    "effective_interval",
+    "policy",
+    "decision",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.operation_authorization.v1"
+    },
+    "authorization_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "scope": {
+      "enum": [
+        "administrative_lifecycle",
+        "diagnostic_invocation",
+        "sensitive_read"
+      ]
+    },
+    "authorizing_principal": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/principalIdentityReference"
+    },
+    "requesting_principal": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/principalIdentityReference"
+    },
+    "operation": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+    },
+    "binding": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/administrativeBinding"
+        },
+        {
+          "$ref": "#/$defs/invocationBinding"
+        },
+        {
+          "$ref": "#/$defs/sensitiveReadBinding"
+        }
+      ]
+    },
+    "effective_interval": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/effectiveInterval"
+    },
+    "policy": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/policyIdentityReference"
+    },
+    "decision": {
+      "enum": [
+        "granted",
+        "refused"
+      ]
+    },
+    "nonclaims": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nonclaims"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "scope": {
+            "const": "administrative_lifecycle"
+          }
+        },
+        "required": [
+          "scope"
+        ]
+      },
+      "then": {
+        "properties": {
+          "operation": {
+            "enum": [
+              "bootstrap",
+              "enroll",
+              "activate_node",
+              "activate_witness",
+              "activate_key",
+              "rekey",
+              "rehome",
+              "change_role",
+              "change_static_profile_cohort",
+              "admit_witness",
+              "suspend_witness",
+              "resume_witness",
+              "retire_witness",
+              "begin_restore",
+              "complete_restore",
+              "begin_decommission",
+              "complete_decommission"
+            ]
+          },
+          "binding": {
+            "$ref": "#/$defs/administrativeBinding"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "scope": {
+            "const": "diagnostic_invocation"
+          }
+        },
+        "required": [
+          "scope"
+        ]
+      },
+      "then": {
+        "properties": {
+          "operation": {
+            "const": "diagnostic.invoke"
+          },
+          "binding": {
+            "$ref": "#/$defs/invocationBinding"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "scope": {
+            "const": "sensitive_read"
+          }
+        },
+        "required": [
+          "scope"
+        ]
+      },
+      "then": {
+        "properties": {
+          "operation": {
+            "const": "inspector.read_sensitive"
+          },
+          "binding": {
+            "$ref": "#/$defs/sensitiveReadBinding"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "administrativeBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "transition_occurrence_id",
+        "authorized_records",
+        "from_state",
+        "to_state",
+        "node",
+        "subject",
+        "platform",
+        "vantage",
+        "role_manifest_id",
+        "role_generation",
+        "cohort_manifest_id",
+        "cohort_generation",
+        "witness_attachment_ids",
+        "active_key",
+        "deployment_generation",
+        "configuration_generation",
+        "input_snapshot_digest"
+      ],
+      "properties": {
+        "transition_occurrence_id": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "authorized_records": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/authorizedRecordIdentity"
+          }
+        },
+        "from_state": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        },
+        "to_state": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        },
+        "node": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/nqNodeIdentityReference"
+        },
+        "subject": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/subjectIdentityReference"
+        },
+        "platform": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/platformIdentityReference"
+        },
+        "vantage": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/vantageIdentityReference"
+        },
+        "role_manifest_id": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "role_generation": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/generation"
+        },
+        "cohort_manifest_id": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "cohort_generation": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/generation"
+        },
+        "witness_attachment_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+          }
+        },
+        "active_key": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/keyGenerationIdentityReference"
+        },
+        "deployment_generation": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/deploymentGenerationIdentityReference"
+        },
+        "configuration_generation": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/configurationGenerationIdentityReference"
+        },
+        "input_snapshot_digest": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        }
+      }
+    },
+    "authorizedRecordIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "record_id",
+        "record_preimage_digest"
+      ],
+      "properties": {
+        "schema": {
+          "enum": [
+            "nq.node_enrollment.v1",
+            "nq.runtime_activation.v1",
+            "nq.witness_attachment.v1",
+            "nq.host_role_relation.v1",
+            "nq.host_role_lifecycle_event.v1",
+            "nq.witness_lifecycle_event.v1",
+            "nq.node_key_lifecycle_event.v1",
+            "nq.restore_activation_proof.v1",
+            "nq.decommission_cut.v1"
+          ]
+        },
+        "record_id": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "record_preimage_digest": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        }
+      }
+    },
+    "invocationBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_preimage_digest",
+        "node",
+        "subject",
+        "vantage",
+        "profile",
+        "activation_id",
+        "activation_generation",
+        "role_manifest_id",
+        "role_generation",
+        "cohort_manifest_id",
+        "cohort_generation",
+        "witness_attachment_ids",
+        "purpose_digest",
+        "time_bounds_digest",
+        "delivery_binding_digest"
+      ],
+      "properties": {
+        "request_preimage_digest": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "node": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/nqNodeIdentityReference"
+        },
+        "subject": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/subjectIdentityReference"
+        },
+        "vantage": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/vantageIdentityReference"
+        },
+        "profile": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/diagnosticProfileIdentityReference"
+        },
+        "activation_id": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "activation_generation": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/generation"
+        },
+        "role_manifest_id": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "role_generation": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/generation"
+        },
+        "cohort_manifest_id": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "cohort_generation": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/generation"
+        },
+        "witness_attachment_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+          }
+        },
+        "purpose_digest": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "time_bounds_digest": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "delivery_binding_digest": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        }
+      }
+    },
+    "sensitiveReadBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "query_preimage_digest",
+        "maximum_result_records",
+        "maximum_result_set_bytes",
+        "maximum_page_records",
+        "maximum_page_response_bytes"
+      ],
+      "properties": {
+        "query_preimage_digest": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "maximum_result_records": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "maximum_result_set_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "maximum_page_records": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "maximum_page_response_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,260 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.restore_activation_proof.v1.schema.json",
+  "title": "nq.restore_activation_proof.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "proof_id",
+    "namespace",
+    "node",
+    "predecessor_enrollment",
+    "restore_operation",
+    "restored_snapshot_manifest",
+    "restored_store_genesis_id",
+    "source_deployment_generation",
+    "new_deployment_generation",
+    "administrative_authorization",
+    "closure_verification",
+    "prior_occurrence_fencing",
+    "identity_uniqueness",
+    "key_revalidation",
+    "binding_revalidation",
+    "new_key_event",
+    "activation_candidate",
+    "decision",
+    "decided_at",
+    "evaluator",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.restore_activation_proof.v1"
+    },
+    "proof_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "namespace": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/namespaceSnapshot"
+    },
+    "node": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nqNodeIdentityReference"
+    },
+    "predecessor_enrollment": {
+      "$ref": "#/$defs/enrollmentReference"
+    },
+    "restore_operation": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+    },
+    "restored_snapshot_manifest": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+    },
+    "restored_store_genesis_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+    },
+    "source_deployment_generation": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/deploymentGenerationIdentityReference"
+    },
+    "new_deployment_generation": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/deploymentGenerationIdentityReference"
+    },
+    "administrative_authorization": {
+      "$ref": "#/$defs/authorizationReference"
+    },
+    "closure_verification": {
+      "$ref": "#/$defs/check"
+    },
+    "prior_occurrence_fencing": {
+      "$ref": "#/$defs/check"
+    },
+    "identity_uniqueness": {
+      "$ref": "#/$defs/check"
+    },
+    "key_revalidation": {
+      "$ref": "#/$defs/check"
+    },
+    "binding_revalidation": {
+      "$ref": "#/$defs/check"
+    },
+    "new_key_event": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/keyEventReference"
+        }
+      ]
+    },
+    "activation_candidate": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/activationReference"
+        }
+      ]
+    },
+    "decision": {
+      "enum": [
+        "recovery_quarantined",
+        "eligible_enrolled_inactive",
+        "replacement_required"
+      ]
+    },
+    "decided_at": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+    },
+    "evaluator": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/evaluatorIdentityReference"
+    },
+    "nonclaims": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nonclaims"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "const": "eligible_enrolled_inactive"
+          }
+        },
+        "required": [
+          "decision"
+        ]
+      },
+      "then": {
+        "properties": {
+          "closure_verification": {
+            "$ref": "#/$defs/establishedCheck"
+          },
+          "prior_occurrence_fencing": {
+            "$ref": "#/$defs/establishedCheck"
+          },
+          "identity_uniqueness": {
+            "$ref": "#/$defs/establishedCheck"
+          },
+          "key_revalidation": {
+            "$ref": "#/$defs/establishedCheck"
+          },
+          "binding_revalidation": {
+            "$ref": "#/$defs/establishedCheck"
+          },
+          "new_key_event": {
+            "$ref": "#/$defs/keyEventReference"
+          },
+          "activation_candidate": {
+            "$ref": "#/$defs/activationReference"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "activation_candidate": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "enrollmentReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.node_enrollment.v1"
+            }
+          }
+        }
+      ]
+    },
+    "authorizationReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.operation_authorization.v1"
+            }
+          }
+        }
+      ]
+    },
+    "keyEventReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.node_key_lifecycle_event.v1"
+            }
+          }
+        }
+      ]
+    },
+    "activationReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.runtime_activation.v1"
+            }
+          }
+        }
+      ]
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "evidence",
+        "policy"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "established",
+            "refuted",
+            "unresolved",
+            "unavailable"
+          ]
+        },
+        "evidence": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        "policy": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/policyIdentityReference"
+        }
+      }
+    },
+    "establishedCheck": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/check"
+        },
+        {
+          "properties": {
+            "status": {
+              "const": "established"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

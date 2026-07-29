@@ -1,0 +1,177 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.execution_launch.v1.schema.json",
+  "title": "nq.execution_launch.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "launch_id",
+    "namespace",
+    "node",
+    "outer_request",
+    "invocation_decision",
+    "activation_snapshot",
+    "custody_reservation",
+    "profile",
+    "selected_witness_attachments",
+    "prelaunch_checks",
+    "launch_commit",
+    "launched_at",
+    "attempt_deadline",
+    "maximum_execution_ms",
+    "clock",
+    "status",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.execution_launch.v1"
+    },
+    "launch_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "namespace": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/namespaceSnapshot"
+    },
+    "node": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nqNodeIdentityReference"
+    },
+    "outer_request": {
+      "$ref": "#/$defs/requestReference"
+    },
+    "invocation_decision": {
+      "$ref": "#/$defs/decisionReference"
+    },
+    "activation_snapshot": {
+      "$ref": "#/$defs/activationReference"
+    },
+    "custody_reservation": {
+      "$ref": "#/$defs/reservationReference"
+    },
+    "profile": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/diagnosticProfileIdentityReference"
+    },
+    "selected_witness_attachments": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+      }
+    },
+    "prelaunch_checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authentication",
+        "invocation_authorization",
+        "generation_match",
+        "deadline",
+        "capability",
+        "custody"
+      ],
+      "properties": {
+        "authentication": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        "invocation_authorization": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        "generation_match": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        "deadline": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        "capability": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        "custody": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        }
+      }
+    },
+    "launch_commit": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+    },
+    "launched_at": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+    },
+    "attempt_deadline": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+    },
+    "maximum_execution_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "clock": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/clockIdentityReference"
+    },
+    "status": {
+      "const": "launched"
+    },
+    "nonclaims": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nonclaims"
+    }
+  },
+  "$defs": {
+    "requestReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.diagnostic_invocation_request.v1"
+            }
+          }
+        }
+      ]
+    },
+    "decisionReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.invocation_decision.v1"
+            }
+          }
+        }
+      ]
+    },
+    "activationReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.runtime_activation.v1"
+            }
+          }
+        }
+      ]
+    },
+    "reservationReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.custody_reservation.v1"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

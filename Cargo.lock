@@ -594,6 +594,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nq-host-role-contract"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "nq-protocol",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "nq-profiles"
 version = "0.1.0"
 dependencies = [

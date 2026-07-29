@@ -1,0 +1,673 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.artifact_delivery_record.v1.schema.json",
+  "title": "nq.artifact_delivery_record.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "delivery_record_id",
+    "artifact",
+    "producer_node",
+    "producer_key_generation",
+    "destination",
+    "destination_generation",
+    "transport_policy",
+    "state",
+    "occurred_at",
+    "predecessor",
+    "envelope",
+    "attempt",
+    "receiver_custody_receipt",
+    "next_attempt_not_before",
+    "terminal_reason",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.artifact_delivery_record.v1"
+    },
+    "delivery_record_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "artifact": {
+      "$ref": "#/$defs/artifact"
+    },
+    "producer_node": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+    },
+    "producer_key_generation": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+    },
+    "destination": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+        }
+      ]
+    },
+    "destination_generation": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/generation"
+        }
+      ]
+    },
+    "transport_policy": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+        }
+      ]
+    },
+    "state": {
+      "enum": [
+        "not_required",
+        "export_committed",
+        "queued",
+        "attempt_in_progress",
+        "retry_scheduled",
+        "delivery_ambiguous",
+        "acknowledged_custody",
+        "terminal_rejected",
+        "attempts_exhausted",
+        "blocked_backpressure",
+        "committed_unavailable"
+      ]
+    },
+    "occurred_at": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+    },
+    "predecessor": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/deliveryRecordReference"
+        }
+      ]
+    },
+    "envelope": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/envelopeReference"
+        }
+      ]
+    },
+    "attempt": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/attemptReference"
+        }
+      ]
+    },
+    "receiver_custody_receipt": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/custodyReceiptReference"
+        }
+      ]
+    },
+    "next_attempt_not_before": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+        }
+      ]
+    },
+    "terminal_reason": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "enum": [
+            "receiver_rejected_authentication",
+            "receiver_rejected_authorization",
+            "receiver_rejected_destination",
+            "receiver_rejected_schema",
+            "receiver_rejected_artifact_identity",
+            "receiver_rejected_transport_policy",
+            "transport_terminal_rejection",
+            "attempt_budget_exhausted",
+            "queue_capacity_unavailable",
+            "artifact_bytes_unavailable"
+          ]
+        }
+      ]
+    },
+    "nonclaims": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nonclaims"
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/notRequired"
+    },
+    {
+      "$ref": "#/$defs/exportCommitted"
+    },
+    {
+      "$ref": "#/$defs/queued"
+    },
+    {
+      "$ref": "#/$defs/attemptInProgress"
+    },
+    {
+      "$ref": "#/$defs/retryScheduled"
+    },
+    {
+      "$ref": "#/$defs/deliveryAmbiguous"
+    },
+    {
+      "$ref": "#/$defs/acknowledgedCustody"
+    },
+    {
+      "$ref": "#/$defs/terminalRejected"
+    },
+    {
+      "$ref": "#/$defs/attemptsExhausted"
+    },
+    {
+      "$ref": "#/$defs/blockedBackpressure"
+    },
+    {
+      "$ref": "#/$defs/committedUnavailable"
+    }
+  ],
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "artifact_id",
+        "file_bytes_digest",
+        "byte_length"
+      ],
+      "properties": {
+        "schema": {
+          "const": "nq.diagnostic_execution.v2"
+        },
+        "artifact_id": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "file_bytes_digest": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "byte_length": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "deliveryRecordReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.artifact_delivery_record.v1"
+            }
+          }
+        }
+      ]
+    },
+    "envelopeReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.authenticated_artifact_envelope.v1"
+            }
+          }
+        }
+      ]
+    },
+    "attemptReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.artifact_delivery_attempt.v1"
+            }
+          }
+        }
+      ]
+    },
+    "custodyReceiptReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nightshift.artifact_custody_receipt.v1"
+            }
+          }
+        }
+      ]
+    },
+    "nonNullDestination": {
+      "properties": {
+        "destination": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+        },
+        "destination_generation": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/generation"
+        },
+        "transport_policy": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+        }
+      }
+    },
+    "nonNullPredecessor": {
+      "properties": {
+        "predecessor": {
+          "$ref": "#/$defs/deliveryRecordReference"
+        }
+      }
+    },
+    "nonNullEnvelope": {
+      "properties": {
+        "envelope": {
+          "$ref": "#/$defs/envelopeReference"
+        }
+      }
+    },
+    "nonNullAttempt": {
+      "properties": {
+        "attempt": {
+          "$ref": "#/$defs/attemptReference"
+        }
+      }
+    },
+    "nullAttemptAndReceipt": {
+      "properties": {
+        "attempt": {
+          "type": "null"
+        },
+        "receiver_custody_receipt": {
+          "type": "null"
+        }
+      }
+    },
+    "noNextOrTerminal": {
+      "properties": {
+        "next_attempt_not_before": {
+          "type": "null"
+        },
+        "terminal_reason": {
+          "type": "null"
+        }
+      }
+    },
+    "notRequired": {
+      "properties": {
+        "state": {
+          "const": "not_required"
+        },
+        "destination": {
+          "type": "null"
+        },
+        "destination_generation": {
+          "type": "null"
+        },
+        "transport_policy": {
+          "type": "null"
+        },
+        "predecessor": {
+          "type": "null"
+        },
+        "envelope": {
+          "type": "null"
+        },
+        "attempt": {
+          "type": "null"
+        },
+        "receiver_custody_receipt": {
+          "type": "null"
+        },
+        "next_attempt_not_before": {
+          "type": "null"
+        },
+        "terminal_reason": {
+          "type": "null"
+        }
+      }
+    },
+    "exportCommitted": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/nonNullDestination"
+        },
+        {
+          "$ref": "#/$defs/nullAttemptAndReceipt"
+        },
+        {
+          "$ref": "#/$defs/noNextOrTerminal"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "export_committed"
+            },
+            "predecessor": {
+              "type": "null"
+            },
+            "envelope": {
+              "type": "null"
+            }
+          }
+        }
+      ]
+    },
+    "queued": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/nonNullDestination"
+        },
+        {
+          "$ref": "#/$defs/nonNullPredecessor"
+        },
+        {
+          "$ref": "#/$defs/nonNullEnvelope"
+        },
+        {
+          "$ref": "#/$defs/nullAttemptAndReceipt"
+        },
+        {
+          "$ref": "#/$defs/noNextOrTerminal"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "queued"
+            }
+          }
+        }
+      ]
+    },
+    "attemptInProgress": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/nonNullDestination"
+        },
+        {
+          "$ref": "#/$defs/nonNullPredecessor"
+        },
+        {
+          "$ref": "#/$defs/nonNullEnvelope"
+        },
+        {
+          "$ref": "#/$defs/nonNullAttempt"
+        },
+        {
+          "$ref": "#/$defs/noNextOrTerminal"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "attempt_in_progress"
+            },
+            "receiver_custody_receipt": {
+              "type": "null"
+            }
+          }
+        }
+      ]
+    },
+    "retryScheduled": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/nonNullDestination"
+        },
+        {
+          "$ref": "#/$defs/nonNullPredecessor"
+        },
+        {
+          "$ref": "#/$defs/nonNullEnvelope"
+        },
+        {
+          "$ref": "#/$defs/nonNullAttempt"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "retry_scheduled"
+            },
+            "receiver_custody_receipt": {
+              "type": "null"
+            },
+            "next_attempt_not_before": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+            },
+            "terminal_reason": {
+              "type": "null"
+            }
+          }
+        }
+      ]
+    },
+    "deliveryAmbiguous": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/nonNullDestination"
+        },
+        {
+          "$ref": "#/$defs/nonNullPredecessor"
+        },
+        {
+          "$ref": "#/$defs/nonNullEnvelope"
+        },
+        {
+          "$ref": "#/$defs/nonNullAttempt"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "delivery_ambiguous"
+            },
+            "receiver_custody_receipt": {
+              "type": "null"
+            },
+            "next_attempt_not_before": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+            },
+            "terminal_reason": {
+              "type": "null"
+            }
+          }
+        }
+      ]
+    },
+    "acknowledgedCustody": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/nonNullDestination"
+        },
+        {
+          "$ref": "#/$defs/nonNullPredecessor"
+        },
+        {
+          "$ref": "#/$defs/nonNullEnvelope"
+        },
+        {
+          "$ref": "#/$defs/nonNullAttempt"
+        },
+        {
+          "$ref": "#/$defs/noNextOrTerminal"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "acknowledged_custody"
+            },
+            "receiver_custody_receipt": {
+              "$ref": "#/$defs/custodyReceiptReference"
+            }
+          }
+        }
+      ]
+    },
+    "terminalRejected": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/nonNullDestination"
+        },
+        {
+          "$ref": "#/$defs/nonNullPredecessor"
+        },
+        {
+          "$ref": "#/$defs/nonNullEnvelope"
+        },
+        {
+          "$ref": "#/$defs/nonNullAttempt"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "terminal_rejected"
+            },
+            "receiver_custody_receipt": {
+              "type": "null"
+            },
+            "next_attempt_not_before": {
+              "type": "null"
+            },
+            "terminal_reason": {
+              "enum": [
+                "receiver_rejected_authentication",
+                "receiver_rejected_authorization",
+                "receiver_rejected_destination",
+                "receiver_rejected_schema",
+                "receiver_rejected_artifact_identity",
+                "receiver_rejected_transport_policy",
+                "transport_terminal_rejection"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "attemptsExhausted": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/nonNullDestination"
+        },
+        {
+          "$ref": "#/$defs/nonNullPredecessor"
+        },
+        {
+          "$ref": "#/$defs/nonNullEnvelope"
+        },
+        {
+          "$ref": "#/$defs/nonNullAttempt"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "attempts_exhausted"
+            },
+            "receiver_custody_receipt": {
+              "type": "null"
+            },
+            "next_attempt_not_before": {
+              "type": "null"
+            },
+            "terminal_reason": {
+              "const": "attempt_budget_exhausted"
+            }
+          }
+        }
+      ]
+    },
+    "blockedBackpressure": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/nonNullDestination"
+        },
+        {
+          "$ref": "#/$defs/nonNullPredecessor"
+        },
+        {
+          "$ref": "#/$defs/nonNullEnvelope"
+        },
+        {
+          "$ref": "#/$defs/nullAttemptAndReceipt"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "blocked_backpressure"
+            },
+            "next_attempt_not_before": {
+              "type": "null"
+            },
+            "terminal_reason": {
+              "const": "queue_capacity_unavailable"
+            }
+          }
+        }
+      ]
+    },
+    "committedUnavailable": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/nonNullDestination"
+        },
+        {
+          "$ref": "#/$defs/nonNullPredecessor"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "committed_unavailable"
+            },
+            "receiver_custody_receipt": {
+              "type": "null"
+            },
+            "next_attempt_not_before": {
+              "type": "null"
+            },
+            "terminal_reason": {
+              "const": "artifact_bytes_unavailable"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

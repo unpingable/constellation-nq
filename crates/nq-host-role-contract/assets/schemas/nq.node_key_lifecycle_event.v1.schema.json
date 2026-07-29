@@ -1,0 +1,220 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.node_key_lifecycle_event.v1.schema.json",
+  "title": "nq.node_key_lifecycle_event.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "event_id",
+    "namespace",
+    "node",
+    "key",
+    "key_generation",
+    "verification_material",
+    "operation",
+    "from_state",
+    "to_state",
+    "occurred_at",
+    "administrative_authorization",
+    "transition_bundle",
+    "predecessor_event",
+    "replacement_key_event",
+    "resulting_activation",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.node_key_lifecycle_event.v1"
+    },
+    "event_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "namespace": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/namespaceSnapshot"
+    },
+    "node": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nqNodeIdentityReference"
+    },
+    "key": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/keyGenerationIdentityReference"
+    },
+    "key_generation": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/generation"
+    },
+    "verification_material": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+    },
+    "operation": {
+      "enum": [
+        "activate",
+        "supersede",
+        "revoke"
+      ]
+    },
+    "from_state": {
+      "enum": [
+        "pending",
+        "active"
+      ]
+    },
+    "to_state": {
+      "enum": [
+        "active",
+        "superseded",
+        "revoked"
+      ]
+    },
+    "occurred_at": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+    },
+    "administrative_authorization": {
+      "$ref": "#/$defs/authorizationReference"
+    },
+    "transition_bundle": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+    },
+    "predecessor_event": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/keyEventReference"
+        }
+      ]
+    },
+    "replacement_key_event": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/keyEventReference"
+        }
+      ]
+    },
+    "resulting_activation": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/activationReference"
+        }
+      ]
+    },
+    "nonclaims": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nonclaims"
+    }
+  },
+  "$defs": {
+    "authorizationReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.operation_authorization.v1"
+            }
+          }
+        }
+      ]
+    },
+    "keyEventReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.node_key_lifecycle_event.v1"
+            }
+          }
+        }
+      ]
+    },
+    "activationReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.runtime_activation.v1"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "operation": {
+          "const": "activate"
+        },
+        "from_state": {
+          "const": "pending"
+        },
+        "to_state": {
+          "const": "active"
+        },
+        "replacement_key_event": {
+          "type": "null"
+        },
+        "resulting_activation": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "supersede"
+        },
+        "from_state": {
+          "const": "active"
+        },
+        "to_state": {
+          "const": "superseded"
+        },
+        "predecessor_event": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        "replacement_key_event": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        "resulting_activation": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "revoke"
+        },
+        "from_state": {
+          "const": "active"
+        },
+        "to_state": {
+          "const": "revoked"
+        },
+        "predecessor_event": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        "replacement_key_event": {
+          "type": "null"
+        },
+        "resulting_activation": {
+          "type": "null"
+        }
+      }
+    }
+  ]
+}

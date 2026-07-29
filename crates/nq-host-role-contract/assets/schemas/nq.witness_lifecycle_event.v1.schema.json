@@ -1,0 +1,221 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.witness_lifecycle_event.v1.schema.json",
+  "title": "nq.witness_lifecycle_event.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "event_id",
+    "namespace",
+    "node",
+    "attachment",
+    "witness",
+    "attachment_generation",
+    "operation",
+    "from_state",
+    "to_state",
+    "occurred_at",
+    "administrative_authorization",
+    "predecessor_event",
+    "input_records",
+    "result_records",
+    "reason",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.witness_lifecycle_event.v1"
+    },
+    "event_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "namespace": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/namespaceSnapshot"
+    },
+    "node": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nqNodeIdentityReference"
+    },
+    "attachment": {
+      "$ref": "#/$defs/attachmentReference"
+    },
+    "witness": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/witnessIdentityReference"
+    },
+    "attachment_generation": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/generation"
+    },
+    "operation": {
+      "enum": [
+        "activate",
+        "suspend",
+        "resume",
+        "retire"
+      ]
+    },
+    "from_state": {
+      "enum": [
+        "admitted_inactive",
+        "active",
+        "suspended"
+      ]
+    },
+    "to_state": {
+      "enum": [
+        "active",
+        "suspended",
+        "retired"
+      ]
+    },
+    "occurred_at": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+    },
+    "administrative_authorization": {
+      "$ref": "#/$defs/authorizationReference"
+    },
+    "predecessor_event": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/witnessEventReference"
+        }
+      ]
+    },
+    "input_records": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+      }
+    },
+    "result_records": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+      }
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    },
+    "nonclaims": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nonclaims"
+    }
+  },
+  "$defs": {
+    "attachmentReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.witness_attachment.v1"
+            }
+          }
+        }
+      ]
+    },
+    "authorizationReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.operation_authorization.v1"
+            }
+          }
+        }
+      ]
+    },
+    "witnessEventReference": {
+      "allOf": [
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.witness_lifecycle_event.v1"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "operation": {
+          "const": "activate"
+        },
+        "from_state": {
+          "const": "admitted_inactive"
+        },
+        "to_state": {
+          "const": "active"
+        },
+        "predecessor_event": {
+          "type": "null"
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "suspend"
+        },
+        "from_state": {
+          "const": "active"
+        },
+        "to_state": {
+          "const": "suspended"
+        },
+        "predecessor_event": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "resume"
+        },
+        "from_state": {
+          "const": "suspended"
+        },
+        "to_state": {
+          "const": "active"
+        },
+        "predecessor_event": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "retire"
+        },
+        "from_state": {
+          "enum": [
+            "admitted_inactive",
+            "active",
+            "suspended"
+          ]
+        },
+        "to_state": {
+          "const": "retired"
+        }
+      }
+    }
+  ]
+}

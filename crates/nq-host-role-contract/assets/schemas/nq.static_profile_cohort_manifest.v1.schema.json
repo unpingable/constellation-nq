@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.static_profile_cohort_manifest.v1.schema.json",
+  "title": "nq.static_profile_cohort_manifest.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "manifest_id",
+    "namespace",
+    "cohort",
+    "generation",
+    "effective_interval",
+    "members",
+    "compatible_builds",
+    "protocol_store_compatibility",
+    "qualification_records",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.static_profile_cohort_manifest.v1"
+    },
+    "manifest_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "namespace": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/namespaceSnapshot"
+    },
+    "cohort": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/staticCohortIdentityReference"
+    },
+    "generation": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/generation"
+    },
+    "effective_interval": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/effectiveInterval"
+    },
+    "members": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profiles",
+        "questions",
+        "evaluators",
+        "detector_suites",
+        "schemas",
+        "canonicalization_rules",
+        "normalization_rules",
+        "projection_rules",
+        "threshold_policies"
+      ],
+      "properties": {
+        "profiles": {
+          "$ref": "#/$defs/diagnosticProfileSet"
+        },
+        "questions": {
+          "$ref": "#/$defs/diagnosticQuestionSet"
+        },
+        "evaluators": {
+          "$ref": "#/$defs/evaluatorSet"
+        },
+        "detector_suites": {
+          "$ref": "#/$defs/detectorSuiteSet"
+        },
+        "schemas": {
+          "$ref": "#/$defs/contractSchemaSet"
+        },
+        "canonicalization_rules": {
+          "$ref": "#/$defs/canonicalizationSet"
+        },
+        "normalization_rules": {
+          "$ref": "#/$defs/normalizationRuleSet"
+        },
+        "projection_rules": {
+          "$ref": "#/$defs/projectionSet"
+        },
+        "threshold_policies": {
+          "$ref": "#/$defs/thresholdPolicySet"
+        }
+      }
+    },
+    "compatible_builds": {
+      "$ref": "#/$defs/buildSet"
+    },
+    "protocol_store_compatibility": {
+      "$ref": "#/$defs/compatibilitySet"
+    },
+    "qualification_records": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+      }
+    },
+    "nonclaims": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nonclaims"
+    }
+  },
+  "$defs": {
+    "diagnosticProfileSet": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/diagnosticProfileIdentityReference"
+      }
+    },
+    "diagnosticQuestionSet": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/diagnosticQuestionIdentityReference"
+      }
+    },
+    "evaluatorSet": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/evaluatorIdentityReference"
+      }
+    },
+    "detectorSuiteSet": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/detectorSuiteIdentityReference"
+      }
+    },
+    "contractSchemaSet": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/contractSchemaIdentityReference"
+      }
+    },
+    "canonicalizationSet": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/canonicalizationIdentityReference"
+      }
+    },
+    "normalizationRuleSet": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/normalizationRuleIdentityReference"
+      }
+    },
+    "projectionSet": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/projectionIdentityReference"
+      }
+    },
+    "thresholdPolicySet": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/thresholdPolicyIdentityReference"
+      }
+    },
+    "buildSet": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/buildIdentityReference"
+      }
+    },
+    "compatibilitySet": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/compatibilityIdentityReference"
+      }
+    }
+  }
+}

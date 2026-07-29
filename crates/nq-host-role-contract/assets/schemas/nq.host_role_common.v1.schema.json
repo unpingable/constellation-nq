@@ -1,0 +1,666 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.host_role_common.v1.schema.json",
+  "title": "NQ host-role common definitions v1",
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "generation": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*$"
+    },
+    "token": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^[A-Za-z0-9._:/@+-]+$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "identityReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id",
+        "version",
+        "descriptor_digest"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9._-]+(?:/[a-z0-9._-]+)*$"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[a-z0-9._-]+(?:/[a-z0-9._-]+)*$"
+        },
+        "descriptor_digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "nqNodeIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "nq_node"
+            }
+          }
+        }
+      ]
+    },
+    "subjectIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "subject"
+            }
+          }
+        }
+      ]
+    },
+    "platformIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "platform"
+            }
+          }
+        }
+      ]
+    },
+    "vantageIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "vantage"
+            }
+          }
+        }
+      ]
+    },
+    "roleIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "role"
+            }
+          }
+        }
+      ]
+    },
+    "staticCohortIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "static_cohort"
+            }
+          }
+        }
+      ]
+    },
+    "witnessIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "witness"
+            }
+          }
+        }
+      ]
+    },
+    "providerIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "provider"
+            }
+          }
+        }
+      ]
+    },
+    "buildIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "build"
+            }
+          }
+        }
+      ]
+    },
+    "diagnosticProfileIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "diagnostic_profile"
+            }
+          }
+        }
+      ]
+    },
+    "diagnosticQuestionIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "diagnostic_question"
+            }
+          }
+        }
+      ]
+    },
+    "evaluatorIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "evaluator"
+            }
+          }
+        }
+      ]
+    },
+    "detectorSuiteIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "detector_suite"
+            }
+          }
+        }
+      ]
+    },
+    "contractSchemaIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "contract_schema"
+            }
+          }
+        }
+      ]
+    },
+    "canonicalizationIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "canonicalization"
+            }
+          }
+        }
+      ]
+    },
+    "normalizationRuleIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "normalization_rule"
+            }
+          }
+        }
+      ]
+    },
+    "projectionIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "projection"
+            }
+          }
+        }
+      ]
+    },
+    "thresholdPolicyIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "threshold_policy"
+            }
+          }
+        }
+      ]
+    },
+    "compatibilityIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "compatibility"
+            }
+          }
+        }
+      ]
+    },
+    "scopeIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "scope"
+            }
+          }
+        }
+      ]
+    },
+    "capabilityIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "capability"
+            }
+          }
+        }
+      ]
+    },
+    "policyIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "policy"
+            }
+          }
+        }
+      ]
+    },
+    "deploymentGenerationIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "deployment_generation"
+            }
+          }
+        }
+      ]
+    },
+    "configurationGenerationIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "configuration_generation"
+            }
+          }
+        }
+      ]
+    },
+    "keyGenerationIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "key_generation"
+            }
+          }
+        }
+      ]
+    },
+    "resolverIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "resolver"
+            }
+          }
+        }
+      ]
+    },
+    "principalIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "principal"
+            }
+          }
+        }
+      ]
+    },
+    "consumerClassIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "consumer_class"
+            }
+          }
+        }
+      ]
+    },
+    "destinationIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "destination"
+            }
+          }
+        }
+      ]
+    },
+    "clockIdentityReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/identityReference"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "clock"
+            }
+          }
+        }
+      ]
+    },
+    "recordReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "record_id",
+        "bytes_digest"
+      ],
+      "properties": {
+        "schema": {
+          "$ref": "#/$defs/token"
+        },
+        "record_id": {
+          "$ref": "#/$defs/digest"
+        },
+        "bytes_digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "hostRoleRelationReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.host_role_relation.v1"
+            }
+          }
+        }
+      ]
+    },
+    "roleManifestReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.role_manifest.v1"
+            }
+          }
+        }
+      ]
+    },
+    "staticProfileCohortManifestReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.static_profile_cohort_manifest.v1"
+            }
+          }
+        }
+      ]
+    },
+    "nodeEnrollmentReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.node_enrollment.v1"
+            }
+          }
+        }
+      ]
+    },
+    "runtimeActivationReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.runtime_activation.v1"
+            }
+          }
+        }
+      ]
+    },
+    "witnessAttachmentReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.witness_attachment.v1"
+            }
+          }
+        }
+      ]
+    },
+    "diagnosticInvocationRequestReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.diagnostic_invocation_request.v1"
+            }
+          }
+        }
+      ]
+    },
+    "invocationDecisionReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.invocation_decision.v1"
+            }
+          }
+        }
+      ]
+    },
+    "operationAuthorizationReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/recordReference"
+        },
+        {
+          "properties": {
+            "schema": {
+              "const": "nq.operation_authorization.v1"
+            }
+          }
+        }
+      ]
+    },
+    "namespaceSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "namespace_id",
+        "namespace_version",
+        "catalog_generation",
+        "catalog_id"
+      ],
+      "properties": {
+        "namespace_id": {
+          "const": "nq.production"
+        },
+        "namespace_version": {
+          "const": "1"
+        },
+        "catalog_generation": {
+          "$ref": "#/$defs/generation"
+        },
+        "catalog_id": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "effectiveInterval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "effective_from"
+      ],
+      "properties": {
+        "effective_from": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "effective_until": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
+    },
+    "nonclaims": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}

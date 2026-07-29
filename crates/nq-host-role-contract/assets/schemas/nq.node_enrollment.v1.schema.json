@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.node_enrollment.v1.schema.json",
+  "title": "nq.node_enrollment.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "enrollment_id",
+    "namespace",
+    "node",
+    "store_genesis_id",
+    "enrolled_at",
+    "enrollment_authorization",
+    "initial_key",
+    "initial_relations",
+    "deployment_generation",
+    "configuration_generation",
+    "lineage",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.node_enrollment.v1"
+    },
+    "enrollment_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "namespace": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/namespaceSnapshot"
+    },
+    "node": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nqNodeIdentityReference"
+    },
+    "store_genesis_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+    },
+    "enrolled_at": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+    },
+    "enrollment_authorization": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/operationAuthorizationReference"
+    },
+    "initial_key": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/keyGenerationIdentityReference"
+    },
+    "initial_relations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_subject",
+        "subject_platform",
+        "node_vantage",
+        "node_role",
+        "node_static_profile_cohort"
+      ],
+      "properties": {
+        "node_subject": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/hostRoleRelationReference"
+        },
+        "subject_platform": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/hostRoleRelationReference"
+        },
+        "node_vantage": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/hostRoleRelationReference"
+        },
+        "node_role": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/hostRoleRelationReference"
+        },
+        "node_static_profile_cohort": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/hostRoleRelationReference"
+        }
+      }
+    },
+    "deployment_generation": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/deploymentGenerationIdentityReference"
+    },
+    "configuration_generation": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/configurationGenerationIdentityReference"
+    },
+    "lineage": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "first_enrollment"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "predecessor_node",
+            "predecessor_enrollment",
+            "continuity_decision"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "replacement",
+                "recovery"
+              ]
+            },
+            "predecessor_node": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/nqNodeIdentityReference"
+            },
+            "predecessor_enrollment": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/nodeEnrollmentReference"
+            },
+            "continuity_decision": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+            }
+          }
+        }
+      ]
+    },
+    "nonclaims": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nonclaims"
+    }
+  }
+}

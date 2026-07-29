@@ -1,0 +1,201 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.buffer_delivery_policy.v1.schema.json",
+  "title": "nq.buffer_delivery_policy.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "policy_id",
+    "namespace",
+    "generation",
+    "policy_identities",
+    "effective_interval",
+    "capacity",
+    "reservation",
+    "ordering",
+    "duplicate_law",
+    "retry",
+    "offline",
+    "backpressure",
+    "acknowledgement",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.buffer_delivery_policy.v1"
+    },
+    "policy_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "namespace": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/namespaceSnapshot"
+    },
+    "generation": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/generation"
+    },
+    "policy_identities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "custody",
+        "buffer",
+        "delivery"
+      ],
+      "properties": {
+        "custody": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+        },
+        "buffer": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+        },
+        "delivery": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+        }
+      }
+    },
+    "effective_interval": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/effectiveInterval"
+    },
+    "capacity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "total_bytes",
+        "high_watermark_bytes",
+        "protected_failure_receipt_bytes",
+        "maximum_single_execution_closure_bytes",
+        "maximum_queue_entries"
+      ],
+      "properties": {
+        "total_bytes": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "high_watermark_bytes": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "protected_failure_receipt_bytes": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "maximum_single_execution_closure_bytes": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "maximum_queue_entries": {
+          "$ref": "#/$defs/positiveInteger"
+        }
+      }
+    },
+    "reservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "before_provider_launch",
+        "transient_evaluation_fallback"
+      ],
+      "properties": {
+        "mode": {
+          "const": "profile_maximum_closure_plus_required_ledgers"
+        },
+        "before_provider_launch": {
+          "const": true
+        },
+        "transient_evaluation_fallback": {
+          "const": false
+        }
+      }
+    },
+    "ordering": {
+      "const": "per_destination_artifact_commit_sequence"
+    },
+    "duplicate_law": {
+      "const": "exact_idempotent_collision_on_substitution"
+    },
+    "retry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maximum_attempts",
+        "attempt_delays_ms",
+        "durable_next_attempt_deadline",
+        "retryable_outcomes"
+      ],
+      "properties": {
+        "maximum_attempts": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "attempt_delays_ms": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "durable_next_attempt_deadline": {
+          "const": true
+        },
+        "retryable_outcomes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "transport_unavailable",
+              "transport_timeout",
+              "receiver_rate_limited",
+              "ambiguous_possible_acceptance"
+            ]
+          }
+        }
+      }
+    },
+    "offline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "local_execution",
+        "automatic_diagnostic_reinvocation"
+      ],
+      "properties": {
+        "local_execution": {
+          "const": "separately_received_authorized_requests_only"
+        },
+        "automatic_diagnostic_reinvocation": {
+          "const": false
+        }
+      }
+    },
+    "backpressure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "at_high_watermark",
+        "at_reservation_failure"
+      ],
+      "properties": {
+        "at_high_watermark": {
+          "const": "admit_only_if_exact_reservation_remains"
+        },
+        "at_reservation_failure": {
+          "const": "refuse_before_acquisition"
+        }
+      }
+    },
+    "acknowledgement": {
+      "const": "authenticated_receiver_custody_of_exact_bytes_only"
+    },
+    "nonclaims": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nonclaims"
+    }
+  },
+  "$defs": {
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    }
+  }
+}
