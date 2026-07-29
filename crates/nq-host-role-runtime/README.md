@@ -18,13 +18,25 @@ an older identity descriptor.
 Schema-v6 checkpoints migrate as an exact `legacy_unbound` prefix. The
 migration creates no dependency generation or trust anchor for history that
 never stored one. Such history remains structurally readable but cannot be
-semantically reopened by this runtime.
+semantically reopened by this runtime. Establishing a new dependency trust
+root after a v6-to-v7 migration is explicitly unsupported until a separately
+governed and attributed bootstrap operation exists.
 
 The runtime exposes checkpoint-pinned exact reads and a disposable inspector
 projection, and resolves historical execution topology from the exact records
 and dependency generation effective at execution time. Missing dependency
 bytes remain committed-unavailable; substituted or malformed bytes remain
 corrupt. Neither state is reconstructed from a caller's current generation.
+At startup it also inventories the database-owned physical custody arenas and
+classifies their exact crash frontiers. Unreadable entries remain visible, and
+protected-failure bytes can be retrieved exactly. These are read-only custody
+facts, not diagnostic outcomes or permission to resume an occurrence.
+
+The generic runtime append remains crate-private, so downstream code cannot
+append invocation, launch, execution-binding, provider-intake, delivery, or
+inspector records around the governed prelaunch path. Likewise, the public
+custody facade cannot assert that a final closure has been indexed; a future
+store-owned SQL/custody verification gate must earn that transition.
 
 This boundary detects substitution of current configuration, checkpoint
 bindings, or retained dependency closures while the separately committed

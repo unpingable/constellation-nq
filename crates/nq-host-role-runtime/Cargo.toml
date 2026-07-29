@@ -8,6 +8,10 @@ license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 
+[features]
+default = []
+test-fixtures = []
+
 [dependencies]
 ed25519-dalek.workspace = true
 hex.workspace = true

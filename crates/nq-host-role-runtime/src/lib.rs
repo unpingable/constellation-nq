@@ -12,6 +12,25 @@
 //! current generation cannot reinterpret them or select a new root.
 //! Dependencies grant no invocation, reliance, authorization, or mutation
 //! authority.
+//!
+//! The generic custody append is deliberately not a downstream API. In
+//! particular, a caller cannot bypass governed prelaunch by appending an
+//! execution-bearing record directly:
+//!
+//! ```compile_fail
+//! use nq_host_role_runtime::{CustodyAppendRequest, HostRoleRuntime};
+//!
+//! fn bypass(runtime: &mut HostRoleRuntime, request: &CustodyAppendRequest) {
+//!     runtime.append_custody_only(request).unwrap();
+//! }
+//! ```
+//!
+//! Test-only prepared-invocation construction is also absent from the default
+//! product feature set:
+//!
+//! ```compile_fail
+//! use nq_host_role_runtime::PreparedGovernedInvocationTestParts;
+//! ```
 
 mod dependency;
 mod inspector;
@@ -30,6 +49,8 @@ pub use dependency::{
     SignedAdmissionReceiptSet,
 };
 pub use inspector::{InspectorEntry, InspectorPage, InspectorProjection, InspectorProjectionState};
+#[cfg(feature = "test-fixtures")]
+pub use prelaunch::PreparedGovernedInvocationTestParts;
 pub(crate) use prelaunch::production_identity;
 pub use prelaunch::{
     GovernedPrelaunchRequest, GovernedProductionIdentity, PreparedGovernedInvocation,
@@ -42,6 +63,11 @@ pub use runtime::{
 };
 
 use nq_protocol::Sha256Digest;
+pub use nq_store::{
+    GovernedCustodyInspection, GovernedCustodyInventoryEntry, GovernedCustodyRecoveryClass,
+    GovernedCustodyReservationLedgerBinding, GovernedCustodyState, GovernedProtectedFailure,
+    GovernedProtectedFailureAccess,
+};
 use thiserror::Error;
 
 /// Result returned by the host-role runtime boundary.

@@ -22,8 +22,10 @@ mod governed_custody;
 
 pub use governed_custody::{
     CustodiedAcquisition, GOVERNED_CUSTODY_CLOSURE_SCHEMA, GovernedAcquisitionCustodyInput,
-    GovernedCustody, GovernedCustodyCommitment, GovernedCustodyReservation, GovernedCustodyState,
-    GovernedDerivationCustodyClaim,
+    GovernedCustody, GovernedCustodyCommitment, GovernedCustodyInspection,
+    GovernedCustodyInventoryEntry, GovernedCustodyRecoveryClass, GovernedCustodyReservation,
+    GovernedCustodyReservationLedgerBinding, GovernedCustodyState, GovernedDerivationCustodyClaim,
+    GovernedProtectedFailure, GovernedProtectedFailureAccess,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -3058,6 +3060,21 @@ impl Store {
                 )));
             }
             None => {
+                let migrated_from_v6: bool = transaction.query_row(
+                    "SELECT EXISTS (
+                        SELECT 1
+                        FROM runtime_dependency_binding_migration_boundaries
+                        WHERE singleton = 1
+                    )",
+                    [],
+                    |row| row.get(0),
+                )?;
+                if migrated_from_v6 {
+                    return Err(StoreError::Invariant(
+                        "post-v6 runtime dependency trust-root bootstrap is unsupported without a separately governed and attributed bootstrap operation"
+                            .into(),
+                    ));
+                }
                 let generation_count: i64 = transaction.query_row(
                     "SELECT COUNT(*) FROM runtime_dependency_generation_commitments",
                     [],
@@ -19744,21 +19761,22 @@ mod tests {
             &legacy_checkpoint,
             runtime_dependency("post-v6-migration"),
         );
-        establish_runtime_root(&mut migrated, &current.dependency);
-        let current_receipt = migrated
-            .append_runtime_records(&current)
-            .expect("new v7 checkpoint after legacy prefix");
+        let error = migrated
+            .establish_runtime_dependency_trust_root(&current.dependency.trust_anchor_id)
+            .expect_err("migration cannot self-bootstrap a production trust root");
         assert!(matches!(
-            migrated
-                .runtime_checkpoint_dependency(&current_receipt.checkpoint.checkpoint_id)
-                .expect("current dependency access")
-                .expect("current dependency binding")
-                .binding,
-            RuntimeCheckpointDependencyBinding::Authenticated { .. }
+            error,
+            StoreError::Invariant(message)
+                if message.contains("post-v6 runtime dependency trust-root bootstrap is unsupported")
+        ));
+        assert!(matches!(
+            migrated.append_runtime_records(&current),
+            Err(StoreError::Invariant(message))
+                if message.contains("trust root must be established")
         ));
         migrated
             .validate()
-            .expect("mixed legacy/v7 history validates");
+            .expect("legacy-unbound migrated history remains explicitly quarantined");
     }
 
     #[test]

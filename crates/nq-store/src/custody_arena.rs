@@ -479,6 +479,18 @@ pub(crate) struct ArenaInspection {
     pub(crate) recovered_torn_superblock: bool,
 }
 
+#[derive(Debug)]
+pub(crate) enum ArenaInventoryEntry {
+    Verified {
+        relative_path: PathBuf,
+        inspection: Box<ArenaInspection>,
+    },
+    Unreadable {
+        relative_path: PathBuf,
+        reason: String,
+    },
+}
+
 /// One-use proof that the typed acquisition carrier was synced, reopened, and
 /// verified against the exact launch identity.
 ///
@@ -683,6 +695,120 @@ impl CustodyArena {
         {
             return Err(ArenaError::Invalid(
                 "arena prelaunch binding or digest-derived filename differs".into(),
+            ));
+        }
+        let arena = Self {
+            path,
+            file,
+            header,
+            active_superblock,
+            selected_superblock_digest,
+            recovered_torn_superblock,
+            poisoned: false,
+            #[cfg(test)]
+            failpoint: None,
+        };
+        arena.verify_file_shape()?;
+        arena.verify_sealed_sections()?;
+        Ok(arena)
+    }
+
+    /// Inspect every arena owned by one database occurrence.
+    ///
+    /// Inventory is deliberately physical and read-only. It classifies durable
+    /// frontiers without deciding whether a diagnostic succeeded, whether an
+    /// invocation should resume, or whether a protected failure should be
+    /// synthesized. An unreadable entry remains visible instead of being
+    /// omitted from startup state.
+    pub(crate) fn inventory(
+        database_path: &Path,
+        maximum_entries: usize,
+    ) -> Result<Vec<ArenaInventoryEntry>, ArenaError> {
+        let root = Self::root_for_database(database_path)?;
+        match fs::symlink_metadata(&root) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        }
+        let root_identity = verify_arena_root(database_path, &root)?;
+        let mut relative_paths = fs::read_dir(&root)?
+            .map(|entry| entry.map(|entry| PathBuf::from(entry.file_name())))
+            .collect::<Result<Vec<_>, _>>()?;
+        relative_paths.sort();
+        if relative_paths.len() > maximum_entries {
+            return Err(ArenaError::Invalid(format!(
+                "custody arena inventory exceeds the bounded limit of {maximum_entries}"
+            )));
+        }
+        relative_paths
+            .into_iter()
+            .map(|relative_path| {
+                match Self::open_discovered(database_path, &root, &root_identity, &relative_path) {
+                    Ok(arena) => {
+                        let inspection = arena.inspection()?;
+                        Ok(ArenaInventoryEntry::Verified {
+                            relative_path,
+                            inspection: Box::new(inspection),
+                        })
+                    }
+                    Err(error) => Ok(ArenaInventoryEntry::Unreadable {
+                        relative_path,
+                        reason: error.to_string(),
+                    }),
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn open_by_reservation(
+        database_path: &Path,
+        reservation_id: &Sha256Digest,
+    ) -> Result<Option<Self>, ArenaError> {
+        let root = Self::root_for_database(database_path)?;
+        match fs::symlink_metadata(&root) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
+        let root_identity = verify_arena_root(database_path, &root)?;
+        let relative_path = Self::relative_path(reservation_id);
+        match Self::open_discovered(database_path, &root, &root_identity, &relative_path) {
+            Ok(arena) => Ok(Some(arena)),
+            Err(ArenaError::Io(error)) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn open_discovered(
+        database_path: &Path,
+        root: &Path,
+        root_identity: &RootIdentity,
+        relative_path: &Path,
+    ) -> Result<Self, ArenaError> {
+        if relative_path
+            .parent()
+            .is_some_and(|parent| !parent.as_os_str().is_empty())
+            || relative_path.file_name() != Some(relative_path.as_os_str())
+        {
+            return Err(ArenaError::Invalid(
+                "custody inventory entry is not one root-relative filename".into(),
+            ));
+        }
+        let path = root.join(relative_path);
+        let file = lock_lifetime_exclusive(open_arena_file(
+            database_path,
+            root,
+            relative_path,
+            root_identity,
+        )?)?;
+        verify_arena_file(database_path, root, &file)?;
+        let first = read_superblock(&file, 0);
+        let second = read_superblock(&file, 1);
+        let (header, active_superblock, selected_superblock_digest, recovered_torn_superblock) =
+            select_superblock(first, second)?;
+        if Self::relative_path(&header.prelaunch.reservation_record_id) != relative_path {
+            return Err(ArenaError::Invalid(
+                "arena embedded reservation identity differs from its filename".into(),
             ));
         }
         let arena = Self {

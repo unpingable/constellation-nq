@@ -11,11 +11,11 @@ use nq_host_role_contract::{
 };
 use nq_protocol::{Sha256Digest, sha256_bytes};
 use nq_store::{
-    CanonicalDocument, GovernedCustodyReservation, MAX_PUBLIC_QUERY_ROWS,
-    RuntimeCheckpointDependencyBinding, RuntimeCheckpointDependencyInput,
-    RuntimeDependencyGenerationByteState, RuntimeLedgerCheckpoint, RuntimeRecordAppendDisposition,
-    RuntimeRecordBatchInput, RuntimeRecordInput, RuntimeRecordRow, Store,
-    runtime_record_batch_digest,
+    CanonicalDocument, GovernedCustodyInventoryEntry, GovernedCustodyReservation,
+    GovernedProtectedFailureAccess, MAX_PUBLIC_QUERY_ROWS, RuntimeCheckpointDependencyBinding,
+    RuntimeCheckpointDependencyInput, RuntimeDependencyGenerationByteState,
+    RuntimeLedgerCheckpoint, RuntimeRecordAppendDisposition, RuntimeRecordBatchInput,
+    RuntimeRecordInput, RuntimeRecordRow, Store, runtime_record_batch_digest,
 };
 use serde_json::Value;
 
@@ -195,6 +195,7 @@ pub struct HostRoleRuntime {
     provider_intakes: BTreeMap<String, RecordRef>,
     checkpoint_dependencies: BTreeMap<String, RuntimeDependencies>,
     inspector: InspectorProjection,
+    custody_frontiers: Vec<GovernedCustodyInventoryEntry>,
 }
 
 impl HostRoleRuntime {
@@ -231,6 +232,7 @@ impl HostRoleRuntime {
     /// Refuses every condition described by [`Self::open`].
     pub fn from_store(store: Store, dependencies: RuntimeDependencies) -> Result<Self> {
         store.validate()?;
+        let custody_frontiers = store.governed_custody_inventory()?;
         let reopened = Self::reopen_state(&store, &dependencies)?;
         Ok(Self {
             store,
@@ -242,6 +244,7 @@ impl HostRoleRuntime {
             provider_intakes: reopened.provider_intakes,
             checkpoint_dependencies: reopened.checkpoint_dependencies,
             inspector: reopened.inspector,
+            custody_frontiers,
         })
     }
 
@@ -284,6 +287,31 @@ impl HostRoleRuntime {
         self.provider_intakes.len()
     }
 
+    /// Return the exact physical custody frontiers classified during startup
+    /// or the most recent governed prelaunch.
+    ///
+    /// These entries are storage/recovery facts only. They do not resume work
+    /// or establish diagnostic outcomes.
+    #[must_use]
+    pub fn custody_frontiers(&self) -> &[GovernedCustodyInventoryEntry] {
+        &self.custody_frontiers
+    }
+
+    /// Re-read one exact protected-failure carrier without interpreting it.
+    ///
+    /// # Errors
+    ///
+    /// Refuses an unreadable, corrupt, substituted, or concurrently locked
+    /// custody arena.
+    pub fn protected_failure(
+        &self,
+        reservation_record_id: &Sha256Digest,
+    ) -> Result<GovernedProtectedFailureAccess> {
+        self.store
+            .governed_protected_failure(reservation_record_id)
+            .map_err(RuntimeError::from)
+    }
+
     /// Atomically appends records for custody only after validating the
     /// complete resulting graph.
     ///
@@ -291,16 +319,11 @@ impl HostRoleRuntime {
     /// frontier. A batch cannot splice into history. Exact replay is supported
     /// only for the current checkpoint; mixed replay/new batches are refused.
     ///
-    /// This low-level API does not create an execution grant and cannot launch
-    /// a provider. Production invocation must use
-    /// [`Self::prepare_governed_invocation`].
-    ///
-    /// # Errors
-    ///
-    /// Refuses invalid carriers, substitution, graph failure, mixed replay,
-    /// stale frontier, or store failure. No new store rows are committed when
-    /// precommit validation refuses.
-    pub fn append_custody_only(&mut self, request: &AppendRequest) -> Result<AppendResult> {
+    /// This is intentionally crate-private. Allowing downstream callers to
+    /// append invocation, launch, execution-binding, provider-intake, delivery,
+    /// or inspector records through a generic custody API would bypass the
+    /// governed occurrence path.
+    fn append_custody_only(&mut self, request: &AppendRequest) -> Result<AppendResult> {
         Sha256Digest::parse(request.checkpoint_id.clone())
             .map_err(|_| RuntimeError::ReplayBatchMismatch)?;
         let prepared = request
@@ -461,6 +484,8 @@ impl HostRoleRuntime {
             request.execution_launch_record_id.clone(),
             preflight.launched_at.clone(),
         )?;
+        drop(physical_custody);
+        self.custody_frontiers = self.store.governed_custody_inventory()?;
 
         Ok(PreparedGovernedInvocation {
             request_id: preflight.request_id,
@@ -1260,7 +1285,11 @@ mod tests {
         IdentityId, IdentityKind, IdentityVersion, RuntimeSchema, ValidatedRuntimeRecord,
     };
     use nq_protocol::{canonical_json_bytes, semantic_digest, sha256_bytes};
-    use nq_store::{GovernedCustodyState, Store};
+    use nq_store::{
+        GovernedCustodyInventoryEntry, GovernedCustodyRecoveryClass,
+        GovernedCustodyReservationLedgerBinding, GovernedCustodyState,
+        GovernedProtectedFailureAccess, Store,
+    };
     use serde_json::{Map, Value, json};
     use tempfile::tempdir;
 
@@ -1448,6 +1477,7 @@ mod tests {
         let fixture = fixture();
         let directory = tempdir().expect("directory");
         let database = directory.path().join("nq.db");
+        let reopened_dependencies = fixture.dependencies.clone();
         let mut runtime =
             HostRoleRuntime::initialize(&database, fixture.dependencies).expect("runtime");
         let request = fixture.request.clone();
@@ -1491,11 +1521,49 @@ mod tests {
                 .expect("physical dependency closure"),
             prepared.dependency_custody_bytes()
         );
+        drop(custody);
+        let [GovernedCustodyInventoryEntry::Verified(frontier)] = runtime.custody_frontiers()
+        else {
+            panic!("one verified custody frontier");
+        };
+        assert_eq!(frontier.state, GovernedCustodyState::LaunchClaimed);
+        assert_eq!(
+            frontier.reservation_ledger_binding,
+            GovernedCustodyReservationLedgerBinding::Exact
+        );
+        assert_eq!(
+            frontier.recovery_class,
+            GovernedCustodyRecoveryClass::LaunchedWithoutAcquisition
+        );
+        assert_eq!(
+            frontier.reservation_record_id,
+            request.custody_reservation_record_id
+        );
+        assert_eq!(
+            runtime
+                .protected_failure(&frontier.reservation_record_id)
+                .expect("protected-failure read"),
+            GovernedProtectedFailureAccess::NotPresent {
+                arena_state: GovernedCustodyState::LaunchClaimed,
+            }
+        );
         drop(prepared);
         assert!(matches!(
             runtime.prepare_governed_invocation(request),
             Err(RuntimeError::PrelaunchReplayCannotRerun)
         ));
+        drop(runtime);
+
+        let reopened = HostRoleRuntime::open(&database, reopened_dependencies)
+            .expect("restart classifies physical frontier");
+        let [GovernedCustodyInventoryEntry::Verified(frontier)] = reopened.custody_frontiers()
+        else {
+            panic!("one verified startup frontier");
+        };
+        assert_eq!(
+            frontier.recovery_class,
+            GovernedCustodyRecoveryClass::LaunchedWithoutAcquisition
+        );
     }
 
     #[test]
@@ -1533,6 +1601,76 @@ mod tests {
             !database
                 .with_file_name("capacity.db.nq-custody-v1")
                 .exists()
+        );
+    }
+
+    #[test]
+    fn startup_inventory_keeps_an_unreadable_arena_entry_visible() {
+        let fixture = fixture();
+        let directory = tempdir().expect("directory");
+        let database = directory.path().join("inventory.db");
+        let mut runtime =
+            HostRoleRuntime::initialize(&database, fixture.dependencies.clone()).expect("runtime");
+        runtime
+            .prepare_governed_invocation(fixture.request)
+            .expect("prepared invocation");
+        drop(runtime);
+
+        let root = database.with_file_name("inventory.db.nq-custody-v1");
+        std::fs::write(root.join("unexpected-entry"), b"not an arena")
+            .expect("hostile custody-root entry");
+        let reopened =
+            HostRoleRuntime::open(&database, fixture.dependencies).expect("runtime reopens");
+        assert_eq!(reopened.custody_frontiers().len(), 2);
+        assert!(reopened.custody_frontiers().iter().any(|entry| {
+            matches!(
+                entry,
+                GovernedCustodyInventoryEntry::Unreadable { relative_path, reason }
+                    if relative_path == std::path::Path::new("unexpected-entry")
+                        && reason.contains("custody arena")
+            )
+        }));
+    }
+
+    #[test]
+    fn startup_inventory_reports_a_committed_reservation_with_missing_arena_bytes() {
+        let fixture = fixture();
+        let dependencies = fixture.dependencies.clone();
+        let reservation_id = fixture.request.custody_reservation_record_id.clone();
+        let directory = tempdir().expect("directory");
+        let database = directory.path().join("missing-arena.db");
+        let mut runtime =
+            HostRoleRuntime::initialize(&database, fixture.dependencies).expect("runtime");
+        runtime
+            .prepare_governed_invocation(fixture.request)
+            .expect("prepared invocation");
+        let [GovernedCustodyInventoryEntry::Verified(frontier)] = runtime.custody_frontiers()
+        else {
+            panic!("one verified frontier");
+        };
+        let arena_path = database
+            .with_file_name("missing-arena.db.nq-custody-v1")
+            .join(&frontier.relative_path);
+        let reservation_manifest_digest = frontier.reservation_manifest_digest.clone();
+        drop(runtime);
+        std::fs::remove_file(arena_path).expect("remove disposable arena specimen");
+
+        let reopened =
+            HostRoleRuntime::open(&database, dependencies).expect("ledger remains inspectable");
+        assert_eq!(
+            reopened.custody_frontiers(),
+            &[
+                GovernedCustodyInventoryEntry::MissingForCommittedReservation {
+                    reservation_record_id: reservation_id.clone(),
+                    reservation_manifest_digest,
+                }
+            ]
+        );
+        assert_eq!(
+            reopened
+                .protected_failure(&reservation_id)
+                .expect("missing-arena protected-failure read"),
+            GovernedProtectedFailureAccess::ArenaMissing
         );
     }
 

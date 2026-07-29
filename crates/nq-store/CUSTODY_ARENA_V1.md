@@ -5,9 +5,13 @@ implementation required by the already-ratified custody invariant. It does not
 authorize deployment, recurrence, action, or a change to the diagnostic
 contract.
 
-The implementation is store-private and has zero product callers. The shipped
-SQLite schema remains v6. No arena/index projection, restart scanner,
-backup/archive integration, or cycle-free NQ-core validation bridge is claimed.
+The physical implementation remains store-private. The schema-v7 host-role
+runtime now reserves and claims arenas during governed prelaunch and performs
+a bounded, read-only startup inventory. That inventory classifies exact
+physical frontiers and keeps unreadable entries visible; it does not resume an
+invocation, synthesize a failure, or establish a diagnostic result. No
+arena/index projection, backup/archive integration, or cycle-free NQ-core
+validation bridge is claimed.
 
 ## Reason
 
@@ -268,7 +272,9 @@ previewed and authorized operation.
 Schema-v6 migration cannot attach a new arena or authenticated dependency
 generation to pre-existing launch-shaped records. Such history is refused or
 explicitly quarantined as legacy unqualified provenance; it is never upgraded
-into governed current truth.
+into governed current truth. The public store bootstrap operation also refuses
+to establish a dependency trust root after a v6-to-v7 migration boundary;
+no unattributed post-migration bootstrap path is implied.
 
 ## API stop rules
 
@@ -278,11 +284,14 @@ into governed current truth.
 - No final-seal token exists before the V2 closure is synced and reopened.
 - SQLite projection cannot accept caller bytes that differ from the sealed
   final closure.
+- The public governed-custody facade cannot mark a final closure indexed.
+  Store-owned exact SQL/custody verification remains required before that
+  state can become product-reachable.
 - Neither exact replay nor a copied/relabeled capability mints another launch.
 - Arena/index availability is orthogonal to diagnostic outcome.
-- A future NQ Monitor read contract may inspect arena and projection state but
-  cannot repair, evaluate, schedule, or authorize anything. No such read
-  integration exists today.
+- The host-role runtime may inspect arena and protected-failure state through
+  bounded read-only methods. Those methods cannot repair, evaluate, schedule,
+  authorize, or classify a diagnostic outcome.
 - The arena module is not a public arbitrary-byte sealing surface. Rust crate
   privacy proves it is unreachable to downstream crates. There is no shipped
   production entry or core/store validation bridge today; later integration
