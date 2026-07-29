@@ -25,7 +25,8 @@ use serde_json::{Value, json};
 use crate::{
     ExternalDependencyAvailability, GovernedPrelaunchRequest, InspectorPage, InspectorProjection,
     InspectorProjectionState, NativeDeadlinePrelaunchRequest, NativeDeadlineProvenance,
-    PreparedGovernedInvocation, Result, RuntimeDependencies, RuntimeError, production_identity,
+    PreparedGovernedInvocation, Result, RuntimeDependencies, RuntimeError,
+    prelaunch::exact_append_membership, production_identity,
 };
 
 const PROVIDER_INTAKE_SCHEMA: &str = "nq.provider_intake.v1";
@@ -184,6 +185,7 @@ struct GovernedPreflight {
     launched_at: String,
     raw_capacity_bytes: u64,
     dependency_closure_capacity_bytes: u64,
+    diagnostic_artifact_capacity_bytes: u64,
     final_capacity_bytes: u64,
     protected_failure_capacity_bytes: u64,
     complete_records: RuntimeRecordSet,
@@ -761,7 +763,7 @@ impl HostRoleRuntime {
         Ok(candidate)
     }
 
-    #[allow(clippy::needless_pass_by_value)]
+    #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
     fn prepare_governed_invocation_inner(
         &mut self,
         request: GovernedPrelaunchRequest,
@@ -780,6 +782,9 @@ impl HostRoleRuntime {
         let trust_anchor_id = self.dependencies.custody().trust_anchor_id()?;
         let reservation_batch = self.store_batch_for(&request.reservation_custody)?;
         let reservation_batch_digest = runtime_record_batch_digest(&reservation_batch)?;
+        let reservation_checkpoint_records =
+            exact_append_membership(&request.reservation_custody.records)?;
+        let launch_checkpoint_records = exact_append_membership(&request.launch_custody.records)?;
         let reservation_spec = GovernedCustodyReservation {
             reservation_record_id: request.custody_reservation_record_id.clone(),
             reservation_manifest_digest: preflight.custody_reservation.bytes_digest.clone(),
@@ -796,6 +801,7 @@ impl HostRoleRuntime {
             prelaunch_checkpoint_digest: reservation_batch_digest,
             dependency_closure_capacity_bytes: preflight.dependency_closure_capacity_bytes,
             raw_capacity_bytes: preflight.raw_capacity_bytes,
+            diagnostic_artifact_capacity_bytes: preflight.diagnostic_artifact_capacity_bytes,
             final_capacity_bytes: preflight.final_capacity_bytes,
             protected_failure_capacity_bytes: preflight.protected_failure_capacity_bytes,
         };
@@ -820,9 +826,35 @@ impl HostRoleRuntime {
         {
             return Err(RuntimeError::PrelaunchReplayCannotRerun);
         }
+        if reservation_result.checkpoint.record_count
+            != u64::try_from(reservation_checkpoint_records.len())
+                .map_err(|_| RuntimeError::PrelaunchCheckpointMismatch)?
+            || launch_result.checkpoint.record_count
+                != u64::try_from(launch_checkpoint_records.len())
+                    .map_err(|_| RuntimeError::PrelaunchCheckpointMismatch)?
+        {
+            return Err(RuntimeError::PrelaunchCheckpointMismatch);
+        }
         physical_custody.claim_launch(
             request.execution_launch_record_id.clone(),
             preflight.launched_at.clone(),
+        )?;
+        let mut historical_dependencies_by_generation = BTreeMap::new();
+        for dependencies in self
+            .checkpoint_dependencies
+            .values()
+            .chain(std::iter::once(&self.dependencies))
+        {
+            historical_dependencies_by_generation
+                .entry(dependencies.generation_id().clone())
+                .or_insert_with(|| dependencies.clone());
+        }
+        let historical_dependencies = historical_dependencies_by_generation
+            .into_values()
+            .collect::<Vec<_>>();
+        let historical_validation_context = combined_historical_validation_context(
+            historical_dependencies.iter(),
+            self.provider_intakes.values().cloned(),
         )?;
 
         Ok(PreparedGovernedInvocation {
@@ -830,12 +862,16 @@ impl HostRoleRuntime {
             production: preflight.production,
             reservation_checkpoint: reservation_result.checkpoint,
             launch_checkpoint: launch_result.checkpoint,
+            reservation_checkpoint_records,
+            launch_checkpoint_records,
             outer_request: preflight.outer_request,
             invocation_decision: preflight.invocation_decision,
             custody_reservation: preflight.custody_reservation,
             execution_launch: preflight.execution_launch,
             prelaunch_records: preflight.complete_records,
             existing_provider_intakes: self.provider_intakes.values().cloned().collect(),
+            historical_validation_context,
+            historical_dependencies,
             dependencies: self.dependencies.clone(),
             dependency_custody_bytes,
             custody_reservation_spec: reservation_spec,
@@ -1016,6 +1052,10 @@ impl HostRoleRuntime {
             .get("dependency_closure_bytes")
             .and_then(Value::as_u64)
             .ok_or(RuntimeError::PrelaunchIdentityMismatch)?;
+        let diagnostic_artifact_capacity_bytes = component_bounds
+            .get("diagnostic_artifact_bytes")
+            .and_then(Value::as_u64)
+            .ok_or(RuntimeError::PrelaunchIdentityMismatch)?;
         let reserved_bytes = reservation.record().as_value()["reserved_bytes"]
             .as_u64()
             .ok_or(RuntimeError::PrelaunchIdentityMismatch)?;
@@ -1038,6 +1078,7 @@ impl HostRoleRuntime {
             launched_at,
             raw_capacity_bytes,
             dependency_closure_capacity_bytes,
+            diagnostic_artifact_capacity_bytes,
             final_capacity_bytes,
             protected_failure_capacity_bytes,
             complete_records: candidate,
@@ -1909,20 +1950,29 @@ mod tests {
         external_inputs: Vec<(RecordRef, Vec<u8>)>,
         operation_authorizations: Vec<RecordRef>,
         authentication: Vec<RecordRef>,
+        resolver: IdentityRef,
     }
 
     #[allow(clippy::too_many_lines)]
     fn fixture() -> Fixture {
-        fixture_with_native_qualifications(false)
+        fixture_with_configuration(false, false)
     }
 
     #[allow(clippy::too_many_lines)]
     fn native_fixture() -> Fixture {
-        fixture_with_native_qualifications(true)
+        fixture_with_configuration(true, false)
     }
 
     #[allow(clippy::too_many_lines)]
-    fn fixture_with_native_qualifications(include_native_qualifications: bool) -> Fixture {
+    fn diagnostic_capacity_one_under_fixture() -> Fixture {
+        fixture_with_configuration(false, true)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn fixture_with_configuration(
+        include_native_qualifications: bool,
+        diagnostic_capacity_one_under: bool,
+    ) -> Fixture {
         let document: Value = serde_json::from_str(RECORDS).expect("runtime contract specimen");
         let mut values = document["records"]
             .as_object()
@@ -1950,13 +2000,20 @@ mod tests {
             ],
         );
         values.retain(|name, _| original_closure.contains_key(name));
+        let original_refs = exact_runtime_refs(&values);
+        increase_fixture_dependency_capacity(&mut values);
+        if diagnostic_capacity_one_under {
+            reduce_fixture_diagnostic_capacity_one_byte(&mut values);
+        }
+        let mut external_inputs = install_production_identity_descriptors(&mut values);
+        stabilize_runtime_references(&mut values, original_refs);
         if include_native_qualifications {
             let pre_qualification_refs = exact_runtime_refs(&values);
             install_native_qualifications(&mut values);
             stabilize_runtime_references(&mut values, pre_qualification_refs);
         }
         let original_refs = exact_runtime_refs(&values);
-        let external_inputs = replace_external_references(&mut values);
+        external_inputs.extend(replace_external_references(&mut values));
         stabilize_runtime_references(&mut values, original_refs);
         let records = values
             .iter()
@@ -1990,6 +2047,20 @@ mod tests {
                 &mut identities,
                 &mut external_refs,
             );
+        }
+        let (resolver, resolver_source) =
+            production_identity_source(IdentityKind::Resolver, "nq-production-resolver", "1");
+        identities.push(resolver.clone());
+        external_inputs.push(resolver_source);
+        for identity in &identities {
+            let descriptor = external_inputs
+                .iter()
+                .find(|(reference, _)| {
+                    reference.bytes_digest == identity.descriptor_digest
+                        && reference.schema.as_str() == "nq.production_identity_descriptor.v1"
+                })
+                .unwrap_or_else(|| panic!("descriptor bytes for {identity:?}"));
+            external_refs.insert(descriptor.0.clone());
         }
         let external_by_ref = external_inputs.into_iter().collect::<BTreeMap<_, _>>();
         let exact_external_inputs = external_refs
@@ -2059,6 +2130,7 @@ mod tests {
             external_inputs: retained_external_inputs,
             operation_authorizations: retained_operation_authorizations,
             authentication: retained_authentication,
+            resolver,
         }
     }
 
@@ -2194,6 +2266,189 @@ mod tests {
                 committed_at,
             )],
         }
+    }
+
+    fn final_provider_intake(label: &str) -> AppendRecord {
+        let canonical_bytes = canonical_json_bytes(&json!({
+            "schema": PROVIDER_INTAKE_SCHEMA,
+            "intake_id": format!("intake:{label}"),
+            "fixture": label,
+        }))
+        .expect("opaque provider intake");
+        AppendRecord::provider_intake(
+            sha256_bytes(&canonical_bytes).to_string(),
+            canonical_bytes,
+            "2026-07-29T21:00:03Z",
+        )
+    }
+
+    fn exact_prepared_record<'a>(
+        prepared: &'a PreparedGovernedInvocation,
+        reference: &RecordRef,
+    ) -> &'a ValidatedRuntimeRecord {
+        let record = prepared
+            .prelaunch_records()
+            .get(&reference.record_id)
+            .unwrap_or_else(|| panic!("prepared record {reference:?}"));
+        assert_eq!(record.exact_reference(), *reference);
+        record
+    }
+
+    fn identity_descriptor_reference(
+        prepared: &PreparedGovernedInvocation,
+        identity: &IdentityRef,
+    ) -> RecordRef {
+        prepared
+            .historical_dependencies
+            .iter()
+            .flat_map(|dependencies| {
+                dependencies
+                    .external_dependency_snapshot()
+                    .dependencies
+                    .iter()
+            })
+            .find(|dependency| {
+                dependency.reference.bytes_digest == identity.descriptor_digest
+                    && dependency.reference.schema.as_str()
+                        == "nq.production_identity_descriptor.v1"
+            })
+            .unwrap_or_else(|| panic!("identity descriptor for {identity:?}"))
+            .reference
+            .clone()
+    }
+
+    fn resolved_binding_source(
+        prepared: &PreparedGovernedInvocation,
+        source: &ValidatedRuntimeRecord,
+        pointer: &str,
+        identity: &IdentityRef,
+    ) -> Value {
+        json!({
+            "identity": identity,
+            "source_artifact": source.exact_reference(),
+            "source_pointer": pointer,
+            "descriptor": identity_descriptor_reference(prepared, identity),
+        })
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn final_execution_binding(
+        prepared: &PreparedGovernedInvocation,
+        resolver: &IdentityRef,
+        provider_intake: &RecordRef,
+    ) -> ValidatedRuntimeRecord {
+        let request = exact_prepared_record(prepared, prepared.outer_request());
+        let launch = exact_prepared_record(prepared, prepared.execution_launch());
+        let activation_reference: RecordRef =
+            serde_json::from_value(launch.record().as_value()["activation_snapshot"].clone())
+                .expect("activation reference");
+        let activation = exact_prepared_record(prepared, &activation_reference);
+        let activation_value = activation.record().as_value();
+        let relation = |name: &str| {
+            let reference: RecordRef =
+                serde_json::from_value(activation_value["relations"][name].clone())
+                    .unwrap_or_else(|error| panic!("{name}: {error}"));
+            exact_prepared_record(prepared, &reference)
+        };
+        let node_subject = relation("node_subject");
+        let subject_platform = relation("subject_platform");
+        let node_vantage = relation("node_vantage");
+        let role_reference: RecordRef =
+            serde_json::from_value(activation_value["role_manifest"].clone())
+                .expect("role manifest");
+        let role = exact_prepared_record(prepared, &role_reference);
+        let cohort_reference: RecordRef =
+            serde_json::from_value(activation_value["cohort_manifest"].clone())
+                .expect("cohort manifest");
+        let cohort = exact_prepared_record(prepared, &cohort_reference);
+        let witness_reference: RecordRef = serde_json::from_value(
+            launch.record().as_value()["selected_witness_attachments"][0].clone(),
+        )
+        .expect("selected witness");
+        let witness = exact_prepared_record(prepared, &witness_reference);
+
+        let node: IdentityRef =
+            serde_json::from_value(activation_value["node"].clone()).expect("node");
+        let subject: IdentityRef =
+            serde_json::from_value(node_subject.record().as_value()["right"].clone())
+                .expect("subject");
+        let platform: IdentityRef =
+            serde_json::from_value(subject_platform.record().as_value()["right"].clone())
+                .expect("platform");
+        let vantage: IdentityRef =
+            serde_json::from_value(node_vantage.record().as_value()["right"].clone())
+                .expect("vantage");
+        let role_identity: IdentityRef =
+            serde_json::from_value(role.record().as_value()["role"].clone())
+                .expect("role identity");
+        let cohort_identity: IdentityRef =
+            serde_json::from_value(cohort.record().as_value()["cohort"].clone())
+                .expect("cohort identity");
+        let witness_identity: IdentityRef =
+            serde_json::from_value(witness.record().as_value()["witness"].clone())
+                .expect("witness identity");
+        let requested_profile: IdentityRef =
+            serde_json::from_value(request.record().as_value()["profile"].clone())
+                .expect("requested profile");
+        let profiles = cohort.record().as_value()["members"]["profiles"]
+            .as_array()
+            .expect("cohort profiles");
+        let profile_index = profiles
+            .iter()
+            .position(|profile| profile == &request.record().as_value()["profile"])
+            .expect("requested profile in cohort");
+        let enrollment_reference: RecordRef =
+            serde_json::from_value(activation_value["enrollment"].clone()).expect("enrollment");
+
+        let mut binding = json!({
+            "schema": RuntimeSchema::ExecutionIdentityBindingV2.as_str(),
+            "binding_id": sha256_bytes(b"final binding placeholder"),
+            "diagnostic": {
+                "schema": "nq.diagnostic_execution.v2",
+                "artifact_id": sha256_bytes(b"final diagnostic artifact"),
+                "file_bytes_digest": sha256_bytes(b"final diagnostic artifact bytes"),
+                "request_id": prepared.request_id(),
+            },
+            "namespace": request.record().as_value()["namespace"],
+            "resolver": resolver,
+            "outer_request": request.exact_reference(),
+            "invocation_decision": prepared.invocation_decision(),
+            "execution_launch": launch.exact_reference(),
+            "enrollment": enrollment_reference,
+            "activation": activation.exact_reference(),
+            "source_relations": activation_value["relations"],
+            "role_manifest": role.exact_reference(),
+            "static_profile_cohort_manifest": cohort.exact_reference(),
+            "witness_attachments": [witness.exact_reference()],
+            "provider_attempts": [provider_intake],
+            "resolved_references": {
+                "node": resolved_binding_source(prepared, activation, "/node", &node),
+                "subject":
+                    resolved_binding_source(prepared, node_subject, "/right", &subject),
+                "platform":
+                    resolved_binding_source(prepared, subject_platform, "/right", &platform),
+                "vantage":
+                    resolved_binding_source(prepared, node_vantage, "/right", &vantage),
+                "role": resolved_binding_source(prepared, role, "/role", &role_identity),
+                "static_profile_cohort":
+                    resolved_binding_source(prepared, cohort, "/cohort", &cohort_identity),
+                "witness":
+                    resolved_binding_source(prepared, witness, "/witness", &witness_identity),
+                "diagnostic_profile": resolved_binding_source(
+                    prepared,
+                    cohort,
+                    &format!("/members/profiles/{profile_index}"),
+                    &requested_profile,
+                ),
+            },
+            "binding_result": "resolved",
+            "nonclaims": [
+                "does not modify nq.diagnostic_execution.v2 bytes",
+                "does not establish reliance or authorization",
+            ],
+        });
+        seal_semantic_identity(&mut binding, "binding_id").expect("binding identity");
+        ValidatedRuntimeRecord::validate_value(binding).expect("execution binding")
     }
 
     fn extra_identity(id: &str) -> IdentityRef {
@@ -2723,6 +2978,10 @@ mod tests {
         let mut closure = json!({
             "schema": "nq.governed_execution_custody_closure.v1",
             "closure_id": sha256_bytes(b"placeholder closure"),
+            "diagnostic": {
+                "schema": "nq.diagnostic_execution.v2",
+                "fixture": "ordered custody capacity component",
+            },
         });
         seal_semantic_identity(&mut closure, "closure_id").expect("closure identity");
         let closure_bytes = canonical_json_bytes(&closure).expect("closure bytes");
@@ -2869,6 +3128,428 @@ mod tests {
             !database
                 .with_file_name("capacity.db.nq-custody-v1")
                 .exists()
+        );
+    }
+
+    #[test]
+    fn prepared_retains_diagnostic_capacity_separately_from_final_partition() {
+        let directory = tempdir().expect("directory");
+        let baseline = fixture();
+        let mut baseline_runtime = HostRoleRuntime::initialize(
+            directory.path().join("diagnostic-capacity-baseline.db"),
+            baseline.dependencies,
+        )
+        .expect("baseline runtime");
+        let baseline = baseline_runtime
+            .prepare_governed_invocation(baseline.request)
+            .expect("baseline prepared invocation");
+
+        let one_under = diagnostic_capacity_one_under_fixture();
+        let mut one_under_runtime = HostRoleRuntime::initialize(
+            directory.path().join("diagnostic-capacity-one-under.db"),
+            one_under.dependencies,
+        )
+        .expect("one-under runtime");
+        let one_under = one_under_runtime
+            .prepare_governed_invocation(one_under.request)
+            .expect("one-under prepared invocation");
+
+        assert_eq!(
+            one_under.diagnostic_artifact_capacity_bytes() + 1,
+            baseline.diagnostic_artifact_capacity_bytes()
+        );
+        assert_eq!(
+            one_under
+                .custody_reservation_spec()
+                .diagnostic_artifact_capacity_bytes,
+            one_under.diagnostic_artifact_capacity_bytes()
+        );
+        assert_eq!(
+            one_under.custody_reservation_spec().final_capacity_bytes,
+            baseline.custody_reservation_spec().final_capacity_bytes,
+            "aggregate final capacity deliberately remains unchanged"
+        );
+    }
+
+    #[test]
+    fn prepared_final_batch_is_source_complete_frozen_and_pure() {
+        let fixture = fixture();
+        let expected_reservation_records =
+            exact_append_membership(&fixture.request.reservation_custody.records)
+                .expect("reservation membership");
+        let expected_launch_records =
+            exact_append_membership(&fixture.request.launch_custody.records)
+                .expect("launch membership");
+        let resolver = fixture.resolver.clone();
+        let directory = tempdir().expect("directory");
+        let database = directory.path().join("qualified-final-batch.db");
+        let mut runtime =
+            HostRoleRuntime::initialize(&database, fixture.dependencies).expect("runtime");
+        let prepared = runtime
+            .prepare_governed_invocation(fixture.request)
+            .expect("prepared invocation");
+        let frozen_frontier = runtime.snapshot();
+
+        assert_eq!(
+            prepared.reservation_checkpoint_records(),
+            expected_reservation_records
+        );
+        assert_eq!(
+            prepared.launch_checkpoint_records(),
+            expected_launch_records
+        );
+
+        let provider_intake = final_provider_intake("qualified");
+        let provider_reference = exact_append_membership(std::slice::from_ref(&provider_intake))
+            .expect("provider reference")
+            .remove(0);
+        let binding = final_execution_binding(&prepared, &resolver, &provider_reference);
+        let binding_reference = binding.exact_reference();
+        let qualified = prepared
+            .qualify_final_batch(provider_intake, binding)
+            .expect("source-complete final batch");
+
+        assert_eq!(qualified.provider_intake(), &provider_reference);
+        assert_eq!(qualified.execution_binding(), &binding_reference);
+        assert_eq!(
+            qualified.runtime_records(),
+            &[provider_reference, binding_reference]
+        );
+        assert_eq!(qualified.batch().records.len(), 2);
+        assert_eq!(
+            qualified
+                .batch()
+                .expected_predecessor_checkpoint_id
+                .as_deref(),
+            Some(prepared.launch_checkpoint().checkpoint_id.as_str())
+        );
+        assert_eq!(
+            qualified.batch().expected_predecessor_ledger_root.as_ref(),
+            Some(&prepared.launch_checkpoint().checkpoint_ledger_root)
+        );
+        assert_eq!(
+            &qualified.batch().dependency.dependency_generation_id,
+            prepared.dependencies().generation_id()
+        );
+        assert_eq!(
+            qualified.batch_digest(),
+            &runtime_record_batch_digest(qualified.batch()).expect("batch digest")
+        );
+        assert_eq!(
+            runtime.snapshot(),
+            frozen_frontier,
+            "qualification owns no append authority"
+        );
+    }
+
+    #[test]
+    fn final_batch_refuses_descriptor_source_substitution() {
+        let fixture = fixture();
+        let resolver = fixture.resolver.clone();
+        let directory = tempdir().expect("directory");
+        let database = directory.path().join("source-substitution.db");
+        let mut runtime =
+            HostRoleRuntime::initialize(&database, fixture.dependencies).expect("runtime");
+        let prepared = runtime
+            .prepare_governed_invocation(fixture.request)
+            .expect("prepared invocation");
+        let provider_intake = final_provider_intake("source-substitution");
+        let provider_reference = exact_append_membership(std::slice::from_ref(&provider_intake))
+            .expect("provider reference")
+            .remove(0);
+        let binding = final_execution_binding(&prepared, &resolver, &provider_reference);
+        let mut hostile = binding.record().as_value().clone();
+        hostile["resolved_references"]["node"]["descriptor"] =
+            hostile["resolved_references"]["subject"]["descriptor"].clone();
+        seal_semantic_identity(&mut hostile, "binding_id").expect("hostile binding identity");
+        let hostile =
+            ValidatedRuntimeRecord::validate_value(hostile).expect("structural hostile binding");
+
+        let error = prepared
+            .qualify_final_batch(provider_intake, hostile)
+            .expect_err("descriptor substitution must fail source-complete validation");
+        assert!(matches!(
+            error,
+            RuntimeError::Contract(
+                nq_host_role_contract::ContractError::BindingDescriptorDigestMismatch(_)
+                    | nq_host_role_contract::ContractError::BindingDescriptorPreimageMismatch(_)
+            )
+        ));
+    }
+
+    #[test]
+    fn final_batch_refuses_missing_historical_source_bytes() {
+        let fixture = fixture();
+        let resolver = fixture.resolver.clone();
+        let runtime_identities = fixture.runtime_identities.clone();
+        let external_inputs = fixture.external_inputs.clone();
+        let operation_authorizations = fixture.operation_authorizations.clone();
+        let authentication = fixture.authentication.clone();
+        let directory = tempdir().expect("directory");
+        let database = directory.path().join("missing-historical-source.db");
+        let mut runtime =
+            HostRoleRuntime::initialize(&database, fixture.dependencies).expect("runtime");
+        let mut prepared = runtime
+            .prepare_governed_invocation(fixture.request)
+            .expect("prepared invocation");
+        let provider_intake = final_provider_intake("missing-historical-source");
+        let provider_reference = exact_append_membership(std::slice::from_ref(&provider_intake))
+            .expect("provider reference")
+            .remove(0);
+        let binding = final_execution_binding(&prepared, &resolver, &provider_reference);
+        let missing_descriptor: RecordRef = serde_json::from_value(
+            binding.record().as_value()["resolved_references"]["node"]["descriptor"].clone(),
+        )
+        .expect("node descriptor");
+        let dependencies_without_source = authenticated_runtime_fixture(
+            41,
+            runtime_identities,
+            external_inputs
+                .into_iter()
+                .filter(|(reference, _)| reference != &missing_descriptor)
+                .collect(),
+            operation_authorizations,
+            authentication,
+        );
+        prepared.historical_dependencies = vec![dependencies_without_source];
+
+        let error = prepared
+            .qualify_final_batch(provider_intake, binding)
+            .expect_err("missing exact historical bytes must refuse");
+        assert!(matches!(
+            error,
+            RuntimeError::HistoricalDependencyMissing(record_id)
+                if record_id == missing_descriptor.record_id.to_string()
+        ));
+    }
+
+    #[test]
+    fn final_batch_ignores_unselected_exact_dependency_sources() {
+        let fixture = fixture();
+        assert!(
+            fixture.external_inputs.len() > 9,
+            "fixture must carry exact dependency sources outside the selected binding corpus"
+        );
+        let resolver = fixture.resolver.clone();
+        let directory = tempdir().expect("directory");
+        let database = directory.path().join("unselected-sources.db");
+        let mut runtime =
+            HostRoleRuntime::initialize(&database, fixture.dependencies).expect("runtime");
+        let prepared = runtime
+            .prepare_governed_invocation(fixture.request)
+            .expect("prepared invocation");
+        let provider_intake = final_provider_intake("unselected-sources");
+        let provider_reference = exact_append_membership(std::slice::from_ref(&provider_intake))
+            .expect("provider reference")
+            .remove(0);
+        let binding = final_execution_binding(&prepared, &resolver, &provider_reference);
+
+        prepared
+            .qualify_final_batch(provider_intake, binding)
+            .expect("unselected exact dependencies are not admitted as binding sources");
+    }
+
+    #[test]
+    fn final_batch_source_qualifies_prior_historical_bindings() {
+        let fixture = fixture();
+        let resolver = fixture.resolver.clone();
+        let directory = tempdir().expect("directory");
+        let database = directory.path().join("historical-binding-sources.db");
+        let mut runtime =
+            HostRoleRuntime::initialize(&database, fixture.dependencies).expect("runtime");
+        let mut prepared = runtime
+            .prepare_governed_invocation(fixture.request)
+            .expect("prepared invocation");
+
+        let prior_provider = final_provider_intake("prior-historical");
+        let prior_provider_reference =
+            exact_append_membership(std::slice::from_ref(&prior_provider))
+                .expect("prior provider reference")
+                .remove(0);
+        let prior_binding =
+            final_execution_binding(&prepared, &resolver, &prior_provider_reference);
+        prepared
+            .prelaunch_records
+            .insert(prior_binding)
+            .expect("prior historical binding");
+        prepared
+            .historical_validation_context
+            .external_records
+            .insert(prior_provider_reference);
+
+        let current_provider = final_provider_intake("current-historical");
+        let current_provider_reference =
+            exact_append_membership(std::slice::from_ref(&current_provider))
+                .expect("current provider reference")
+                .remove(0);
+        let current_binding =
+            final_execution_binding(&prepared, &resolver, &current_provider_reference);
+
+        prepared
+            .qualify_final_batch(current_provider, current_binding)
+            .expect("complete graph source-qualifies prior and current bindings");
+    }
+
+    #[test]
+    fn topology_changed_bindings_use_separate_historical_source_corpora() {
+        let fixture = fixture();
+        let historical_dependencies = fixture.dependencies.clone();
+        let historical_resolver = fixture.resolver.clone();
+        let historical_resolver_descriptor = fixture
+            .external_inputs
+            .iter()
+            .find(|(reference, _)| {
+                reference.bytes_digest == historical_resolver.descriptor_digest
+                    && reference.schema.as_str() == "nq.production_identity_descriptor.v1"
+            })
+            .expect("historical resolver descriptor")
+            .0
+            .clone();
+        let (current_resolver, current_resolver_source) =
+            production_identity_source(IdentityKind::Resolver, "nq-production-resolver", "2");
+        let mut current_identities = fixture
+            .runtime_identities
+            .clone()
+            .into_iter()
+            .filter(|identity| identity != &historical_resolver)
+            .collect::<Vec<_>>();
+        current_identities.push(current_resolver.clone());
+        let mut current_external = fixture
+            .external_inputs
+            .clone()
+            .into_iter()
+            .filter(|(reference, _)| reference != &historical_resolver_descriptor)
+            .collect::<Vec<_>>();
+        current_external.push(current_resolver_source);
+        let current_dependencies = authenticated_runtime_fixture(
+            41,
+            current_identities,
+            current_external,
+            fixture.operation_authorizations.clone(),
+            fixture.authentication.clone(),
+        );
+        assert!(
+            !current_dependencies
+                .external_dependency_snapshot()
+                .dependencies
+                .iter()
+                .any(|dependency| dependency.reference == historical_resolver_descriptor)
+        );
+
+        let directory = tempdir().expect("directory");
+        let database = directory.path().join("topology-changed-source-corpora.db");
+        let mut runtime =
+            HostRoleRuntime::initialize(&database, current_dependencies).expect("current runtime");
+        let mut prepared = runtime
+            .prepare_governed_invocation(fixture.request)
+            .expect("current prepared invocation");
+        prepared
+            .historical_dependencies
+            .push(historical_dependencies);
+        prepared.historical_validation_context = combined_historical_validation_context(
+            prepared.historical_dependencies.iter(),
+            std::iter::empty(),
+        )
+        .expect("two-generation historical context");
+
+        let historical_provider = final_provider_intake("historical-topology");
+        let historical_provider_reference =
+            exact_append_membership(std::slice::from_ref(&historical_provider))
+                .expect("historical provider reference")
+                .remove(0);
+        let historical_binding = final_execution_binding(
+            &prepared,
+            &historical_resolver,
+            &historical_provider_reference,
+        );
+        prepared
+            .prelaunch_records
+            .insert(historical_binding)
+            .expect("historical topology binding");
+        prepared
+            .historical_validation_context
+            .external_records
+            .insert(historical_provider_reference);
+
+        let current_provider = final_provider_intake("current-topology");
+        let current_provider_reference =
+            exact_append_membership(std::slice::from_ref(&current_provider))
+                .expect("current provider reference")
+                .remove(0);
+        let current_binding =
+            final_execution_binding(&prepared, &current_resolver, &current_provider_reference);
+
+        prepared
+            .qualify_final_batch(current_provider, current_binding)
+            .expect("each topology generation receives its own closed source corpus");
+    }
+
+    #[test]
+    fn prepared_final_batch_cannot_be_reinterpreted_by_current_generation() {
+        let fixture = fixture();
+        let resolver = fixture.resolver.clone();
+        let g1_generation = fixture.dependencies.generation_id().clone();
+        let mut g2_identities = fixture.runtime_identities.clone();
+        g2_identities.push(extra_identity("capability/final-batch-g2-only"));
+        let g2 = authenticated_runtime_fixture(
+            41,
+            g2_identities,
+            fixture.external_inputs.clone(),
+            fixture.operation_authorizations.clone(),
+            fixture.authentication.clone(),
+        );
+        assert_ne!(g2.generation_id(), &g1_generation);
+
+        let directory = tempdir().expect("directory");
+        let database = directory.path().join("frozen-final-generation.db");
+        let mut runtime =
+            HostRoleRuntime::initialize(&database, fixture.dependencies).expect("g1 runtime");
+        let prepared = runtime
+            .prepare_governed_invocation(fixture.request)
+            .expect("g1 prepared invocation");
+        let g1_launch = prepared.launch_checkpoint().clone();
+        drop(runtime);
+
+        let mut runtime = HostRoleRuntime::open(&database, g2.clone()).expect("g2 runtime");
+        let g2_frontier = runtime
+            .append_custody_only(&opaque_append(
+                "final-batch-g2-current",
+                "2026-07-29T21:05:00Z",
+            ))
+            .expect("g2 frontier")
+            .checkpoint;
+        drop(runtime);
+
+        let provider_intake = final_provider_intake("frozen-g1");
+        let provider_reference = exact_append_membership(std::slice::from_ref(&provider_intake))
+            .expect("provider reference")
+            .remove(0);
+        let binding = final_execution_binding(&prepared, &resolver, &provider_reference);
+        let qualified = prepared
+            .qualify_final_batch(provider_intake, binding)
+            .expect("prepared G1 semantics remain exact");
+
+        assert_eq!(
+            qualified.batch().dependency.dependency_generation_id,
+            g1_generation
+        );
+        assert_eq!(
+            qualified
+                .batch()
+                .expected_predecessor_checkpoint_id
+                .as_deref(),
+            Some(g1_launch.checkpoint_id.as_str())
+        );
+        assert_ne!(
+            qualified
+                .batch()
+                .expected_predecessor_checkpoint_id
+                .as_deref(),
+            Some(g2_frontier.checkpoint_id.as_str())
+        );
+        assert_ne!(
+            qualified.batch().dependency.dependency_generation_id,
+            *g2.generation_id()
         );
     }
 
@@ -3173,6 +3854,152 @@ mod tests {
                 (name.clone(), record.exact_reference())
             })
             .collect()
+    }
+
+    fn increase_fixture_dependency_capacity(values: &mut BTreeMap<String, Value>) {
+        let reservation = values
+            .get_mut("custody_reservation")
+            .expect("custody reservation");
+        let previous = reservation["component_bounds"]["dependency_closure_bytes"]
+            .as_u64()
+            .expect("dependency capacity");
+        let replacement = 262_144_u64;
+        let increase = replacement
+            .checked_sub(previous)
+            .expect("larger dependency capacity");
+        reservation["component_bounds"]["dependency_closure_bytes"] = json!(replacement);
+        for field in ["reserved_bytes", "total_required_bytes"] {
+            reservation[field] = json!(
+                reservation[field]
+                    .as_u64()
+                    .expect("reservation total")
+                    .checked_add(increase)
+                    .expect("reservation total capacity")
+            );
+        }
+    }
+
+    fn reduce_fixture_diagnostic_capacity_one_byte(values: &mut BTreeMap<String, Value>) {
+        let reservation = values
+            .get_mut("custody_reservation")
+            .expect("custody reservation");
+        let capacity = reservation["component_bounds"]["diagnostic_artifact_bytes"]
+            .as_u64()
+            .expect("diagnostic artifact capacity");
+        reservation["component_bounds"]["diagnostic_artifact_bytes"] = json!(
+            capacity
+                .checked_sub(1)
+                .expect("positive diagnostic artifact capacity")
+        );
+        reservation["total_required_bytes"] = json!(
+            reservation["total_required_bytes"]
+                .as_u64()
+                .expect("reservation total")
+                .checked_sub(1)
+                .expect("positive reservation total")
+        );
+    }
+
+    fn install_production_identity_descriptors(
+        values: &mut BTreeMap<String, Value>,
+    ) -> Vec<(RecordRef, Vec<u8>)> {
+        let mut sources = BTreeMap::<(String, String, String), (RecordRef, Vec<u8>)>::new();
+        for value in values.values_mut() {
+            rewrite_identity_descriptors(value, &mut sources);
+        }
+        sources.into_values().collect()
+    }
+
+    fn rewrite_identity_descriptors(
+        value: &mut Value,
+        sources: &mut BTreeMap<(String, String, String), (RecordRef, Vec<u8>)>,
+    ) {
+        match value {
+            Value::Object(object)
+                if object.keys().map(String::as_str).collect::<BTreeSet<_>>()
+                    == BTreeSet::from(["kind", "id", "version", "descriptor_digest"]) =>
+            {
+                let key = (
+                    object["kind"].as_str().expect("identity kind").to_owned(),
+                    object["id"].as_str().expect("identity id").to_owned(),
+                    object["version"]
+                        .as_str()
+                        .expect("identity version")
+                        .to_owned(),
+                );
+                let (reference, _) = sources.entry(key.clone()).or_insert_with(|| {
+                    let bytes = canonical_json_bytes(&json!({
+                        "schema": "nq.production_identity_descriptor.v1",
+                        "kind": key.0,
+                        "id": key.1,
+                        "version": key.2,
+                    }))
+                    .expect("production identity descriptor");
+                    let bytes_digest = sha256_bytes(&bytes);
+                    (
+                        RecordRef {
+                            schema: Token::parse("nq.production_identity_descriptor.v1")
+                                .expect("descriptor schema"),
+                            record_id: semantic_digest(
+                                &serde_json::from_slice::<Value>(&bytes).expect("descriptor value"),
+                            )
+                            .expect("descriptor identity"),
+                            bytes_digest: bytes_digest.clone(),
+                        },
+                        bytes,
+                    )
+                });
+                object.insert(
+                    "descriptor_digest".to_owned(),
+                    Value::String(reference.bytes_digest.to_string()),
+                );
+            }
+            Value::Object(object) => {
+                for child in object.values_mut() {
+                    rewrite_identity_descriptors(child, sources);
+                }
+            }
+            Value::Array(array) => {
+                for child in array {
+                    rewrite_identity_descriptors(child, sources);
+                }
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+        }
+    }
+
+    fn production_identity_source(
+        kind: IdentityKind,
+        id: &str,
+        version: &str,
+    ) -> (IdentityRef, (RecordRef, Vec<u8>)) {
+        let kind_value = serde_json::to_value(kind).expect("identity kind");
+        let bytes = canonical_json_bytes(&json!({
+            "schema": "nq.production_identity_descriptor.v1",
+            "kind": kind_value,
+            "id": id,
+            "version": version,
+        }))
+        .expect("production identity descriptor");
+        let bytes_digest = sha256_bytes(&bytes);
+        let reference = RecordRef {
+            schema: Token::parse("nq.production_identity_descriptor.v1")
+                .expect("descriptor schema"),
+            record_id: semantic_digest(
+                &serde_json::from_slice::<Value>(&bytes).expect("descriptor value"),
+            )
+            .expect("descriptor identity"),
+            bytes_digest: bytes_digest.clone(),
+        };
+        (
+            IdentityRef {
+                kind,
+                id: IdentityId::parse(id).expect("identity id"),
+                version: IdentityVersion::parse(version).expect("identity version"),
+                descriptor_digest: bytes_digest,
+            },
+            (reference, bytes),
+        )
     }
 
     fn replace_external_references(

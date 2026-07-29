@@ -5,16 +5,40 @@
 //! provider invocation, engine result source, finalizer, or execution-binding
 //! constructor.
 
-use nq_host_role_contract::{IdentityRef, RecordRef, RuntimeRecordSet};
-use nq_protocol::Sha256Digest;
+use std::collections::BTreeSet;
+
+use nq_host_role_contract::{
+    ExecutionBindingSourceCorpus, IdentityRef, RecordRef, RuntimeRecordSet, RuntimeSchema, Token,
+    ValidatedRuntimeRecord, ValidationContext,
+};
+use nq_protocol::{Sha256Digest, semantic_digest, sha256_bytes};
 use nq_store::{
-    CustodiedAcquisition, GovernedAcquisitionCustodyInput, GovernedCustody,
+    CanonicalDocument, CustodiedAcquisition, GovernedAcquisitionCustodyInput, GovernedCustody,
     GovernedCustodyCommitment, GovernedCustodyReservation, GovernedCustodyState,
     GovernedDerivationCustodyClaim, GovernedProtectedTerminalInput,
-    GovernedProtectedTerminalization, RuntimeLedgerCheckpoint,
+    GovernedProtectedTerminalization, RuntimeCheckpointDependencyInput, RuntimeLedgerCheckpoint,
+    RuntimeRecordBatchInput, RuntimeRecordInput, runtime_record_batch_digest,
+};
+use serde_json::{Value, json};
+
+use crate::{
+    ExternalDependencyAvailability, Result, RuntimeDependencies, RuntimeError,
+    runtime::{AppendRecord, AppendRequest},
 };
 
-use crate::{Result, RuntimeDependencies, runtime::AppendRequest};
+const PROVIDER_INTAKE_SCHEMA: &str = "nq.provider_intake.v1";
+const PRODUCTION_IDENTITY_DESCRIPTOR_SCHEMA: &str = "nq.production_identity_descriptor.v1";
+const FINAL_CHECKPOINT_SCHEMA: &str = "nq.governed_final_runtime_checkpoint.v1";
+const BINDING_SOURCE_SLOTS: [&str; 8] = [
+    "node",
+    "subject",
+    "platform",
+    "vantage",
+    "role",
+    "static_profile_cohort",
+    "witness",
+    "diagnostic_profile",
+];
 
 /// Two-phase prelaunch plan.
 ///
@@ -152,6 +176,54 @@ impl GovernedProductionIdentity {
     }
 }
 
+/// Source-qualified terminal runtime batch for one prepared invocation.
+///
+/// This carrier is constructible only through
+/// [`PreparedGovernedInvocation::qualify_final_batch`]. It exposes the exact
+/// store batch and immutable references required by NQ core's atomic
+/// diagnostic projection, but owns no append handle and grants no generic
+/// runtime mutation authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QualifiedGovernedFinalBatch {
+    batch: RuntimeRecordBatchInput,
+    batch_digest: Sha256Digest,
+    provider_intake: RecordRef,
+    execution_binding: RecordRef,
+    runtime_records: [RecordRef; 2],
+}
+
+impl QualifiedGovernedFinalBatch {
+    /// Return the exact source-qualified store batch.
+    #[must_use]
+    pub const fn batch(&self) -> &RuntimeRecordBatchInput {
+        &self.batch
+    }
+
+    /// Return the exact canonical batch digest.
+    #[must_use]
+    pub const fn batch_digest(&self) -> &Sha256Digest {
+        &self.batch_digest
+    }
+
+    /// Return the exact opaque provider-intake record.
+    #[must_use]
+    pub const fn provider_intake(&self) -> &RecordRef {
+        &self.provider_intake
+    }
+
+    /// Return the exact source-qualified V2 execution binding.
+    #[must_use]
+    pub const fn execution_binding(&self) -> &RecordRef {
+        &self.execution_binding
+    }
+
+    /// Return the closed ordered checkpoint membership.
+    #[must_use]
+    pub const fn runtime_records(&self) -> &[RecordRef; 2] {
+        &self.runtime_records
+    }
+}
+
 /// Non-cloneable result of a validated and durably claimed prelaunch.
 ///
 /// This is not an execution grant. It exposes only the exact material NQ core
@@ -164,12 +236,16 @@ pub struct PreparedGovernedInvocation {
     pub(crate) production: GovernedProductionIdentity,
     pub(crate) reservation_checkpoint: RuntimeLedgerCheckpoint,
     pub(crate) launch_checkpoint: RuntimeLedgerCheckpoint,
+    pub(crate) reservation_checkpoint_records: Vec<RecordRef>,
+    pub(crate) launch_checkpoint_records: Vec<RecordRef>,
     pub(crate) outer_request: RecordRef,
     pub(crate) invocation_decision: RecordRef,
     pub(crate) custody_reservation: RecordRef,
     pub(crate) execution_launch: RecordRef,
     pub(crate) prelaunch_records: RuntimeRecordSet,
     pub(crate) existing_provider_intakes: Vec<RecordRef>,
+    pub(crate) historical_validation_context: ValidationContext,
+    pub(crate) historical_dependencies: Vec<RuntimeDependencies>,
     pub(crate) dependencies: RuntimeDependencies,
     pub(crate) dependency_custody_bytes: Vec<u8>,
     pub(crate) custody_reservation_spec: GovernedCustodyReservation,
@@ -207,6 +283,18 @@ impl PreparedGovernedInvocation {
     #[must_use]
     pub const fn launch_checkpoint(&self) -> &RuntimeLedgerCheckpoint {
         &self.launch_checkpoint
+    }
+
+    /// Return the exact ordered reservation-checkpoint membership.
+    #[must_use]
+    pub fn reservation_checkpoint_records(&self) -> &[RecordRef] {
+        &self.reservation_checkpoint_records
+    }
+
+    /// Return the exact ordered launch-checkpoint membership.
+    #[must_use]
+    pub fn launch_checkpoint_records(&self) -> &[RecordRef] {
+        &self.launch_checkpoint_records
     }
 
     /// Return the exact outer request reference.
@@ -263,6 +351,16 @@ impl PreparedGovernedInvocation {
         &self.custody_reservation_spec
     }
 
+    /// Return the exact ratified diagnostic-artifact component bound.
+    ///
+    /// This is intentionally distinct from the larger final-closure
+    /// partition, which also carries binding, closure, and index material.
+    #[must_use]
+    pub const fn diagnostic_artifact_capacity_bytes(&self) -> u64 {
+        self.custody_reservation_spec
+            .diagnostic_artifact_capacity_bytes
+    }
+
     /// Return runtime-owned native-deadline provenance when this invocation
     /// used the sealed native preparation path.
     ///
@@ -283,6 +381,222 @@ impl PreparedGovernedInvocation {
     /// Refuses an unreadable or corrupt arena.
     pub fn live_custody_state(&self) -> Result<GovernedCustodyState> {
         self.live_custody.state().map_err(Into::into)
+    }
+
+    /// Qualify the only terminal runtime write set accepted for this launch.
+    ///
+    /// The method accepts exactly one opaque provider-intake append and one
+    /// already validated V2 execution-binding record. It reconstructs the
+    /// binding's transitive historical runtime graph, admits only the exact
+    /// source and descriptor bytes selected by that binding, and invokes the
+    /// contract's source-complete validation entry point. The resulting batch
+    /// remains bound to the dependency generation and launch frontier frozen
+    /// in this prepared token.
+    ///
+    /// This is a pure qualification step. It performs no append, custody
+    /// transition, provider invocation, diagnostic derivation, scheduling, or
+    /// authorization.
+    ///
+    /// # Errors
+    ///
+    /// Refuses malformed provider custody, a non-V2 or graph-incompatible
+    /// binding, source substitution or unavailability, an extraneous selected
+    /// source, dependency-generation mismatch, or an invalid final batch.
+    pub fn qualify_final_batch(
+        &self,
+        provider_intake: AppendRecord,
+        execution_binding: ValidatedRuntimeRecord,
+    ) -> Result<QualifiedGovernedFinalBatch> {
+        if execution_binding.schema() != RuntimeSchema::ExecutionIdentityBindingV2 {
+            return Err(RuntimeError::NotExecutionBinding(
+                execution_binding.record_id().to_string(),
+            ));
+        }
+        let provider_intake_ref = exact_provider_intake_reference(&provider_intake)?;
+        let execution_binding_ref = execution_binding.exact_reference();
+        let committed_at = provider_intake.committed_at.clone();
+        let binding_append = AppendRecord::from_contract(&execution_binding, committed_at);
+
+        let mut batch_contract_records = RuntimeRecordSet::new();
+        batch_contract_records.insert(execution_binding.clone())?;
+        self.dependencies
+            .validate_graph_dependencies(&batch_contract_records)?;
+
+        let binding_graph = self.complete_historical_graph(execution_binding)?;
+        let mut context = self.historical_validation_context.clone();
+        context.external_records.insert(provider_intake_ref.clone());
+        let historical_bindings = binding_graph
+            .records()
+            .filter(|record| record.schema() == RuntimeSchema::ExecutionIdentityBindingV2)
+            .map(ValidatedRuntimeRecord::exact_reference)
+            .collect::<Vec<_>>();
+        for historical_binding in historical_bindings {
+            let sources = self.binding_selected_sources(&binding_graph, &historical_binding)?;
+            binding_graph.validate_execution_binding_with_sources(
+                &context,
+                &historical_binding,
+                &sources,
+            )?;
+        }
+
+        let checkpoint_id = semantic_digest(&json!({
+            "schema": FINAL_CHECKPOINT_SCHEMA,
+            "execution_launch": self.execution_launch,
+            "dependency_generation_id": self.dependencies.generation_id(),
+            "provider_intake": provider_intake_ref,
+            "execution_binding": execution_binding_ref,
+            "committed_at": provider_intake.committed_at,
+        }))?;
+        let batch = RuntimeRecordBatchInput {
+            checkpoint_id: checkpoint_id.to_string(),
+            expected_predecessor_checkpoint_id: Some(self.launch_checkpoint.checkpoint_id.clone()),
+            expected_predecessor_ledger_root: Some(
+                self.launch_checkpoint.checkpoint_ledger_root.clone(),
+            ),
+            dependency: dependency_input(&self.dependencies)?,
+            records: vec![
+                store_record_input(provider_intake)?,
+                store_record_input(binding_append)?,
+            ],
+        };
+        let batch_digest = runtime_record_batch_digest(&batch)?;
+        let runtime_records = [provider_intake_ref.clone(), execution_binding_ref.clone()];
+        Ok(QualifiedGovernedFinalBatch {
+            batch,
+            batch_digest,
+            provider_intake: provider_intake_ref,
+            execution_binding: execution_binding_ref,
+            runtime_records,
+        })
+    }
+
+    fn complete_historical_graph(
+        &self,
+        execution_binding: ValidatedRuntimeRecord,
+    ) -> Result<RuntimeRecordSet> {
+        let mut graph = self.prelaunch_records.clone();
+        graph.insert(execution_binding)?;
+        Ok(graph)
+    }
+
+    fn binding_selected_sources(
+        &self,
+        binding_graph: &RuntimeRecordSet,
+        execution_binding: &RecordRef,
+    ) -> Result<ExecutionBindingSourceCorpus> {
+        let execution_binding = binding_graph
+            .get(&execution_binding.record_id)
+            .filter(|record| record.exact_reference() == *execution_binding)
+            .ok_or_else(|| {
+                RuntimeError::HistoricalDependencyMissing(execution_binding.record_id.to_string())
+            })?;
+        let mut corpus = ExecutionBindingSourceCorpus::new();
+        let value = execution_binding.record().as_value();
+        let resolution_entries =
+            value["resolved_references"]
+                .as_object()
+                .ok_or(RuntimeError::LedgerCarrierMismatch(
+                    "execution binding resolved references",
+                ))?;
+        for slot in BINDING_SOURCE_SLOTS {
+            let entry =
+                resolution_entries[slot]
+                    .as_object()
+                    .ok_or(RuntimeError::LedgerCarrierMismatch(
+                        "execution binding resolved source",
+                    ))?;
+            let source: RecordRef = serde_json::from_value(entry["source_artifact"].clone())?;
+            let descriptor: RecordRef = serde_json::from_value(entry["descriptor"].clone())?;
+            self.insert_exact_binding_source(&mut corpus, binding_graph, &source)?;
+            self.insert_exact_binding_source(&mut corpus, binding_graph, &descriptor)?;
+        }
+
+        let resolver: IdentityRef = serde_json::from_value(value["resolver"].clone())?;
+        let resolver_candidates = self
+            .historical_dependencies
+            .iter()
+            .flat_map(|dependencies| {
+                dependencies
+                    .external_dependency_snapshot()
+                    .dependencies
+                    .iter()
+            })
+            .filter(|dependency| {
+                dependency.reference.schema.as_str() == PRODUCTION_IDENTITY_DESCRIPTOR_SCHEMA
+                    && dependency.reference.bytes_digest == resolver.descriptor_digest
+            })
+            .map(|dependency| dependency.reference.clone())
+            .collect::<BTreeSet<_>>();
+        for reference in resolver_candidates {
+            self.insert_exact_binding_source(&mut corpus, binding_graph, &reference)?;
+        }
+        Ok(corpus)
+    }
+
+    fn insert_exact_binding_source(
+        &self,
+        corpus: &mut ExecutionBindingSourceCorpus,
+        binding_graph: &RuntimeRecordSet,
+        reference: &RecordRef,
+    ) -> Result<()> {
+        if RuntimeSchema::parse(reference.schema.as_str()).is_ok() {
+            let record = binding_graph.get(&reference.record_id).ok_or_else(|| {
+                RuntimeError::HistoricalDependencyMissing(reference.record_id.to_string())
+            })?;
+            if record.exact_reference() != *reference {
+                return Err(RuntimeError::HistoricalDependencyMissing(
+                    reference.record_id.to_string(),
+                ));
+            }
+            corpus.insert_record(record)?;
+            return Ok(());
+        }
+        let mut exact_bytes = None;
+        let mut unavailable = false;
+        for dependency in self
+            .historical_dependencies
+            .iter()
+            .flat_map(|dependencies| {
+                dependencies
+                    .external_dependency_snapshot()
+                    .dependencies
+                    .iter()
+            })
+            .filter(|dependency| dependency.reference == *reference)
+        {
+            if dependency.availability == ExternalDependencyAvailability::CommittedUnavailable {
+                unavailable = true;
+                continue;
+            }
+            let bytes = hex::decode(
+                dependency
+                    .exact_bytes_hex
+                    .as_deref()
+                    .ok_or(RuntimeError::ExternalDependencyAvailabilityMismatch)?,
+            )
+            .map_err(|_| RuntimeError::ExternalDependencyBytesMalformed)?;
+            match &exact_bytes {
+                Some(existing) if existing != &bytes => {
+                    return Err(RuntimeError::ExternalDependencyByteSubstitution(
+                        reference.record_id.to_string(),
+                    ));
+                }
+                Some(_) => {}
+                None => exact_bytes = Some(bytes),
+            }
+        }
+        if let Some(bytes) = exact_bytes {
+            corpus.insert_canonical(reference.clone(), bytes)?;
+            return Ok(());
+        }
+        if unavailable {
+            return Err(RuntimeError::ExternalDependencyUnavailable(
+                reference.record_id.to_string(),
+            ));
+        }
+        Err(RuntimeError::HistoricalDependencyMissing(
+            reference.record_id.to_string(),
+        ))
     }
 
     /// Seal and reopen exact provider-intake and raw bytes through this
@@ -368,6 +682,76 @@ impl PreparedGovernedInvocation {
             .terminalize_immediate_launch(input)
             .map_err(Into::into)
     }
+}
+
+pub(crate) fn exact_append_membership(records: &[AppendRecord]) -> Result<Vec<RecordRef>> {
+    records.iter().map(exact_append_reference).collect()
+}
+
+fn exact_append_reference(record: &AppendRecord) -> Result<RecordRef> {
+    let canonical = CanonicalDocument::from_canonical_bytes(record.canonical_bytes.clone())?;
+    let value: Value = serde_json::from_slice(canonical.as_bytes())?;
+    if value.get("schema").and_then(Value::as_str) != Some(record.record_schema.as_str()) {
+        return Err(RuntimeError::LedgerCarrierMismatch("record schema"));
+    }
+    let record_id = Sha256Digest::parse(record.record_id.clone())
+        .map_err(|_| RuntimeError::LedgerCarrierMismatch("record identity"))?;
+    match RuntimeSchema::parse(&record.record_schema) {
+        Ok(_) => {
+            let typed = ValidatedRuntimeRecord::decode_canonical(canonical.as_bytes())?;
+            if typed.record_id() != &record_id
+                || typed.schema().as_str() != record.record_schema
+                || typed.bytes_digest().as_str() != canonical.digest()
+            {
+                return Err(RuntimeError::LedgerCarrierMismatch(
+                    "typed runtime record identity",
+                ));
+            }
+            Ok(typed.exact_reference())
+        }
+        Err(_) if record.record_schema == PROVIDER_INTAKE_SCHEMA => {
+            if !value.is_object() {
+                return Err(RuntimeError::InvalidProviderIntakeCarrier);
+            }
+            Ok(RecordRef {
+                schema: Token::parse(PROVIDER_INTAKE_SCHEMA)?,
+                record_id,
+                bytes_digest: sha256_bytes(canonical.as_bytes()),
+            })
+        }
+        Err(_) => Err(RuntimeError::UnsupportedLedgerSchema(
+            record.record_schema.clone(),
+        )),
+    }
+}
+
+fn exact_provider_intake_reference(record: &AppendRecord) -> Result<RecordRef> {
+    let reference = exact_append_reference(record)?;
+    if reference.schema.as_str() != PROVIDER_INTAKE_SCHEMA {
+        return Err(RuntimeError::InvalidProviderIntakeCarrier);
+    }
+    Ok(reference)
+}
+
+fn store_record_input(record: AppendRecord) -> Result<RuntimeRecordInput> {
+    Ok(RuntimeRecordInput {
+        record_id: record.record_id,
+        record_schema: record.record_schema,
+        canonical_bytes: CanonicalDocument::from_canonical_bytes(record.canonical_bytes)?,
+        committed_at: record.committed_at,
+    })
+}
+
+fn dependency_input(
+    dependencies: &RuntimeDependencies,
+) -> Result<RuntimeCheckpointDependencyInput> {
+    Ok(RuntimeCheckpointDependencyInput {
+        dependency_generation_id: dependencies.generation_id().clone(),
+        trust_anchor_id: dependencies.custody().trust_anchor_id()?,
+        canonical_custody: CanonicalDocument::from_canonical_bytes(
+            dependencies.custody().canonical_closure_bytes()?,
+        )?,
+    })
 }
 
 pub(crate) fn production_identity(

@@ -45,7 +45,7 @@ pub use inspector::{InspectorEntry, InspectorPage, InspectorProjection, Inspecto
 pub(crate) use prelaunch::production_identity;
 pub use prelaunch::{
     GovernedPrelaunchRequest, GovernedProductionIdentity, NativeDeadlinePrelaunchRequest,
-    NativeDeadlineProvenance, PreparedGovernedInvocation,
+    NativeDeadlineProvenance, PreparedGovernedInvocation, QualifiedGovernedFinalBatch,
 };
 pub use runtime::{
     AppendDisposition as CustodyAppendDisposition, AppendRecord as CustodyRecord,

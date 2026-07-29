@@ -863,6 +863,51 @@ impl RuntimeRecordSet {
         self.validate_execution_binding_sources(sources)
     }
 
+    /// Validates the complete historical graph and one exact V2 binding
+    /// against a source corpus closed to that binding.
+    ///
+    /// The V1 source-corpus bound intentionally describes one binding
+    /// occurrence. Requiring one aggregate corpus for every historical
+    /// binding would either make later topology generations impossible or
+    /// silently reinterpret the bound as a growing archive. This entry point
+    /// therefore applies every graph invariant first, resolves the selected
+    /// immutable binding exactly, and then consumes only that binding's
+    /// complete source corpus.
+    ///
+    /// This is not a weaker validation mode: all historical records remain in
+    /// the graph passed to [`Self::validate`], while source completeness and
+    /// the no-unused-source law are checked independently for the named
+    /// occurrence.
+    ///
+    /// # Errors
+    ///
+    /// Returns every refusal from [`Self::validate`], an absent or substituted
+    /// binding refusal, or any exact source-corpus refusal.
+    pub fn validate_execution_binding_with_sources(
+        &self,
+        context: &ValidationContext,
+        binding: &RecordRef,
+        sources: &ExecutionBindingSourceCorpus,
+    ) -> Result<()> {
+        self.validate(context)?;
+        let binding_record = self.exact_record(
+            binding,
+            RuntimeSchema::ExecutionIdentityBindingV2,
+            "selected execution binding absent or substituted",
+        )?;
+        let mut consumed = BTreeSet::new();
+        self.validate_execution_binding_source(binding_record, sources, &mut consumed)?;
+        if let Some(unused) = sources
+            .references()
+            .find(|reference| !consumed.contains(*reference))
+        {
+            return Err(ContractError::UnusedBindingSource(
+                unused.record_id.to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_execution_binding_sources(
         &self,
         sources: &ExecutionBindingSourceCorpus,
@@ -3705,13 +3750,13 @@ impl From<RecordRef> for Value {
 mod tests {
     use std::collections::BTreeMap;
 
-    use nq_protocol::{Sha256Digest, canonical_json_bytes, sha256_bytes};
+    use nq_protocol::{Sha256Digest, canonical_json_bytes, semantic_digest, sha256_bytes};
     use serde_json::{Value, json};
 
     use super::{
-        CONTRACT_SPECIMEN_IDENTITY_DESCRIPTOR_SCHEMA, ExecutionBindingSourceCorpus,
-        PRODUCTION_IDENTITY_DESCRIPTOR_SCHEMA, RuntimeRecordSet, collect_carriers,
-        expected_administrative_shape, static_cohort_semantics_digest,
+        CONTRACT_SPECIMEN_IDENTITY_DESCRIPTOR_SCHEMA, CanonicalBindingSource,
+        ExecutionBindingSourceCorpus, PRODUCTION_IDENTITY_DESCRIPTOR_SCHEMA, RuntimeRecordSet,
+        collect_carriers, expected_administrative_shape, static_cohort_semantics_digest,
     };
     use crate::{
         ContractError, ExternalRecordCatalog, IdentityCatalog, IdentityRef, RecordRef, Token,
@@ -3720,6 +3765,14 @@ mod tests {
 
     const RECORDS: &str = include_str!("../assets/host-role-runtime-records.v1.json");
     type DescriptorSources = Vec<(RecordRef, Vec<u8>)>;
+    type NamedBindingSourceFixture = (
+        RuntimeRecordSet,
+        ValidationContext,
+        RecordRef,
+        ExecutionBindingSourceCorpus,
+        RecordRef,
+        ExecutionBindingSourceCorpus,
+    );
 
     #[test]
     fn cohort_semantics_digest_covers_every_noncyclic_verdict_field() {
@@ -3868,6 +3921,57 @@ mod tests {
         records
             .validate_with_execution_binding_sources(&context, &sources)
             .expect("derived 3B successor has exact graph and source correspondence");
+    }
+
+    #[test]
+    fn named_bindings_use_separate_bounded_corpora_across_topology_change() {
+        let (records, context, first_binding, first_sources, second_binding, second_sources) =
+            topology_changed_binding_sources();
+        records
+            .validate_execution_binding_with_sources(&context, &first_binding, &first_sources)
+            .expect("first topology binding");
+        records
+            .validate_execution_binding_with_sources(&context, &second_binding, &second_sources)
+            .expect("second topology binding");
+        assert_eq!(first_sources.sources.len(), 16);
+        assert_eq!(second_sources.sources.len(), 16);
+        assert_ne!(
+            first_sources.references().collect::<Vec<_>>(),
+            second_sources.references().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn named_binding_refuses_missing_substituted_and_unused_input() {
+        let (records, context, binding, sources, _, _) = topology_changed_binding_sources();
+        let binding_record = records.get(&binding.record_id).expect("selected binding");
+        let node_source: RecordRef = serde_json::from_value(
+            binding_record.record().as_value()["resolved_references"]["node"]["source_artifact"]
+                .clone(),
+        )
+        .expect("node source");
+        let mut missing = sources.clone();
+        remove_source(&mut missing, &node_source);
+        assert!(matches!(
+            records.validate_execution_binding_with_sources(&context, &binding, &missing),
+            Err(ContractError::UnresolvedBindingSource(_))
+        ));
+
+        let mut substituted = binding.clone();
+        substituted.bytes_digest = sha256_bytes(b"substituted binding bytes");
+        assert!(matches!(
+            records.validate_execution_binding_with_sources(&context, &substituted, &sources),
+            Err(ContractError::InvocationJoin(
+                "selected execution binding absent or substituted"
+            ))
+        ));
+
+        let mut unused = sources;
+        force_unused_binding_source(&mut unused);
+        assert!(matches!(
+            records.validate_execution_binding_with_sources(&context, &binding, &unused),
+            Err(ContractError::UnusedBindingSource(_))
+        ));
     }
 
     #[test]
@@ -4575,6 +4679,102 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    fn topology_changed_binding_sources() -> NamedBindingSourceFixture {
+        let (values, descriptors) = source_complete_successor_values();
+        let mut values = source_qualification_slice(&values);
+        let first_sources = source_corpus_from_materialized(&values, descriptors);
+        let first_binding =
+            ValidatedRuntimeRecord::validate_value(values["execution_binding"].clone())
+                .expect("first binding")
+                .exact_reference();
+        let first_resolver: IdentityRef =
+            serde_json::from_value(values["execution_binding"]["resolver"].clone())
+                .expect("first resolver");
+        let first_resolver_source = first_sources
+            .sources
+            .values()
+            .find(|source| source.reference.bytes_digest == first_resolver.descriptor_digest)
+            .expect("first resolver source")
+            .reference
+            .clone();
+
+        let mut second_binding = values["execution_binding"].clone();
+        let mut second_resolver = second_binding["resolver"].clone();
+        second_resolver["version"] = json!("2");
+        let second_resolver_bytes = identity_descriptor_bytes(&second_resolver);
+        let second_resolver_digest = sha256_bytes(&second_resolver_bytes);
+        second_resolver["descriptor_digest"] = Value::String(second_resolver_digest.to_string());
+        second_binding["resolver"] = second_resolver;
+        second_binding["diagnostic"]["artifact_id"] =
+            Value::String(sha256_bytes(b"second topology artifact").to_string());
+        second_binding["diagnostic"]["file_bytes_digest"] =
+            Value::String(sha256_bytes(b"second topology artifact bytes").to_string());
+        seal_test_semantic_identity(&mut second_binding, "binding_id");
+        let second_binding_record =
+            ValidatedRuntimeRecord::validate_value(second_binding.clone()).expect("second binding");
+        let second_binding_reference = second_binding_record.exact_reference();
+        values.insert("execution_binding_generation_2".to_owned(), second_binding);
+
+        let mut second_sources = first_sources.clone();
+        remove_source(&mut second_sources, &first_resolver_source);
+        second_sources
+            .insert_canonical(
+                RecordRef {
+                    schema: Token::parse(CONTRACT_SPECIMEN_IDENTITY_DESCRIPTOR_SCHEMA)
+                        .expect("second resolver descriptor schema"),
+                    record_id: second_resolver_digest.clone(),
+                    bytes_digest: second_resolver_digest,
+                },
+                second_resolver_bytes,
+            )
+            .expect("second resolver source");
+
+        let records = record_set(values);
+        let context = validation_context(&records);
+        (
+            records,
+            context,
+            first_binding,
+            first_sources,
+            second_binding_reference,
+            second_sources,
+        )
+    }
+
+    fn seal_test_semantic_identity(value: &mut Value, field: &str) {
+        let object = value.as_object_mut().expect("semantic identity object");
+        object.remove(field);
+        let identity =
+            semantic_digest(&Value::Object(object.clone())).expect("test semantic identity");
+        object.insert(field.to_owned(), Value::String(identity.to_string()));
+    }
+
+    fn force_unused_binding_source(corpus: &mut ExecutionBindingSourceCorpus) {
+        let bytes = canonical_json_bytes(&json!({
+            "schema": PRODUCTION_IDENTITY_DESCRIPTOR_SCHEMA,
+            "kind": "subject",
+            "id": "lab/forced-unused",
+            "version": "1",
+        }))
+        .expect("forced unused bytes");
+        let reference = RecordRef {
+            schema: Token::parse(PRODUCTION_IDENTITY_DESCRIPTOR_SCHEMA)
+                .expect("forced unused schema"),
+            record_id: sha256_bytes(b"forced unused source identity"),
+            bytes_digest: sha256_bytes(&bytes),
+        };
+        let value = serde_json::from_slice(&bytes).expect("forced unused value");
+        corpus.total_bytes += bytes.len();
+        corpus.sources.insert(
+            (reference.schema.to_string(), reference.record_id.clone()),
+            CanonicalBindingSource {
+                reference,
+                canonical_bytes: bytes,
+                value,
+            },
+        );
     }
 
     fn validation_context(records: &RuntimeRecordSet) -> ValidationContext {
