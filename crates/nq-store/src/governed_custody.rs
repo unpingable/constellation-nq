@@ -1804,19 +1804,17 @@ impl Store {
     /// V2 encoder bound.
     ///
     /// This check is intended after the reservation and launch checkpoints
-    /// commit but before provider effect. It verifies storage capacity only.
+    /// commit but before provider effect. It verifies committed SQL
+    /// correspondence and storage sizing only. It deliberately does not
+    /// reopen the arena: the prepared invocation retains the exact live
+    /// custody handle across this call, and this sizing result grants no arena
+    /// authority.
     #[allow(clippy::too_many_lines)]
     pub fn verify_governed_execution_custody_closure_v2_capacity(
         &self,
         reservation: &GovernedCustodyReservation,
         launch_checkpoint_id: &Sha256Digest,
     ) -> Result<GovernedExecutionCustodyClosureV2Capacity, StoreError> {
-        let database_path = self.path().ok_or_else(|| {
-            StoreError::Invariant(
-                "governed capacity verification requires a filesystem-backed store".into(),
-            )
-        })?;
-        let _arena = GovernedCustody::open(database_path, reservation.clone())?;
         let snapshot = self.connection.unchecked_transaction()?;
         validate_runtime_record_ledger(&snapshot)?;
         let reservation_checkpoint = runtime_checkpoint_by_id_on_connection(
