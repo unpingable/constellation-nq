@@ -5,6 +5,18 @@
 //! The schema deliberately separates byte-for-byte custody from admitted semantic
 //! evidence. Durable facts are append-only. The two mutable tables are explicitly
 //! rebuildable pointers to the latest finding and status events.
+//!
+//! The custody arena precursor is deliberately store-private:
+//!
+//! ```compile_fail
+//! use nq_store::custody_arena::CustodyArena;
+//! ```
+//!
+//! No product code references this module today. The privacy proof prevents a
+//! downstream arbitrary-byte seal API, but also means the cycle-free
+//! NQ-core/store validation bridge remains unimplemented and unqualified.
+
+mod custody_arena;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;

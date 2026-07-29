@@ -7,6 +7,9 @@ rust-version.workspace = true
 
 [dependencies]
 chrono.workspace = true
+hex.workspace = true
+libc.workspace = true
+nix.workspace = true
 nq-protocol = { path = "../nq-protocol" }
 rusqlite.workspace = true
 serde.workspace = true

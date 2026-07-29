@@ -635,6 +635,9 @@ name = "nq-store"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "hex",
+ "libc",
+ "nix",
  "nq-protocol",
  "rusqlite",
  "serde",
