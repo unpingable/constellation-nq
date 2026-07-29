@@ -1102,6 +1102,30 @@ impl CustodyArena {
         self.read_committed_section(SectionKind::RawEvidence)
     }
 
+    /// Reopen and decode the exact acquisition carrier at any post-acquisition
+    /// frontier without reconstructing a one-use derivation capability.
+    ///
+    /// This read exists for Store-owned arena/SQL projection verification. It
+    /// advances no state and assigns no provider or diagnostic semantics.
+    pub(crate) fn acquisition_for_projection(&self) -> Result<AcquisitionCarrier, ArenaError> {
+        self.ensure_usable()?;
+        if !matches!(
+            self.header.state,
+            ArenaState::RawEvidenceSealed
+                | ArenaState::DerivationClaimed
+                | ArenaState::FinalV2SealedIndexPending
+                | ArenaState::FinalV2SealedIndexed
+        ) {
+            return Err(ArenaError::Invalid(
+                "arena has no acquisition carrier available for projection verification".into(),
+            ));
+        }
+        let bytes = self
+            .read_committed_section(SectionKind::RawEvidence)?
+            .ok_or_else(|| ArenaError::Invalid("raw acquisition is unavailable".into()))?;
+        AcquisitionCarrier::decode(&bytes)
+    }
+
     pub(crate) fn dependency_closure_bytes(&self) -> Result<Vec<u8>, ArenaError> {
         self.ensure_usable()?;
         self.read_committed_section(SectionKind::DependencyClosure)?

@@ -1,20 +1,34 @@
 //! Opaque exact-byte custody for one governed diagnostic invocation.
 //!
-//! This module deliberately exposes storage mechanics only. It does not parse
-//! provider intake, establish an evaluator occurrence, validate a diagnostic
-//! execution, construct an execution binding, or authorize SQLite indexing.
-//! Those semantic checks belong to `nq-core`.
+//! This module deliberately exposes storage mechanics only. A Store-owned
+//! verifier may advance the physical index frontier only after exact arena/SQL
+//! correspondence is reopened from a reservation identity. It does not
+//! establish native provider correspondence, an evaluator occurrence,
+//! diagnostic semantic validity, reliance, or authority; those semantic checks
+//! belong to `nq-core` and its consumers.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use nq_protocol::Sha256Digest;
+use nq_protocol::{Sha256Digest, canonical_json_bytes, sha256_bytes};
+use rusqlite::OptionalExtension;
+use serde::Deserialize;
+use serde_json::Value;
 
 use crate::custody_arena::{
     AcquisitionCarrier, ArenaInventoryEntry, ArenaLayout, ArenaPrelaunchBinding, ArenaState,
     CustodyArena, DerivationClaim, DerivedV2ClosureCandidate,
 };
-use crate::{MAX_PUBLIC_QUERY_ROWS, Store, StoreError};
+use crate::{
+    DiagnosticArtifactByteState, DiagnosticArtifactLookup, DiagnosticArtifactOrigin,
+    MAX_PUBLIC_QUERY_ROWS, RuntimeCheckpointDependencyBinding,
+    RuntimeDependencyGenerationByteState, RuntimeLedgerCheckpoint, RuntimeRecordRow, Store,
+    StoreError, diagnostic_artifact_execution_binding_on_connection,
+    diagnostic_artifact_on_connection, runtime_checkpoint_by_id_on_connection,
+    runtime_checkpoint_dependency_on_connection, runtime_record_by_id_on_connection,
+    validate_diagnostic_artifact_invariants, validate_provider_intake_invariants,
+    validate_runtime_record_ledger,
+};
 
 /// Store-internal carrier schema used to keep the exact core-validated closure
 /// in a preallocated custody arena.
@@ -120,7 +134,12 @@ pub enum GovernedCustodyRecoveryClass {
     /// Exact final bytes exist, but their SQLite projection has not been
     /// independently verified.
     FinalClosureAwaitingProjection,
-    /// Exact final bytes and their verified projection were both recorded.
+    /// Exact final bytes reached the projection-verified frontier.
+    ///
+    /// This physical state bit records the completed transition; it is not a
+    /// current integrity oracle. Readers that need present correspondence must
+    /// rerun the reservation-only verifier, especially after later SQL
+    /// corruption.
     Indexed,
     /// One exact protected failure carrier terminalized the invocation.
     ProtectedFailure,
@@ -208,6 +227,33 @@ pub enum GovernedProtectedFailureAccess {
     VerifiedAvailable(GovernedProtectedFailure),
 }
 
+/// Result of comparing one sealed governed closure with the store's exact
+/// committed SQL projection.
+///
+/// This is a storage-correspondence result only. It does not establish that
+/// NQ core produced a semantically valid diagnostic, that a consumer may rely
+/// on it, or that any action is authorized.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GovernedProjectionVerification {
+    pub reservation_record_id: Sha256Digest,
+    pub closure_id: Sha256Digest,
+    pub diagnostic_artifact_id: Sha256Digest,
+    pub runtime_checkpoint_id: Sha256Digest,
+    pub disposition: GovernedProjectionVerificationDisposition,
+}
+
+/// Whether exact projection verification advanced the physical frontier or
+/// idempotently reverified an already-indexed frontier.
+///
+/// Neither disposition assigns provider, diagnostic, reliance, or authority
+/// semantics. Public callers can assemble matching storage projections; native
+/// semantic correspondence remains an independent NQ-core obligation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GovernedProjectionVerificationDisposition {
+    Indexed,
+    AlreadyIndexed,
+}
+
 /// Exact opaque provider occurrence bytes reopened from durable custody.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CustodiedAcquisition {
@@ -215,6 +261,113 @@ pub struct CustodiedAcquisition {
     pub provider_intake_record_id: Sha256Digest,
     pub exact_provider_intake_bytes: Vec<u8>,
     pub exact_raw_provider_bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct ExactRuntimeRecordReference {
+    schema: String,
+    record_id: Sha256Digest,
+    bytes_digest: Sha256Digest,
+}
+
+impl ExactRuntimeRecordReference {
+    fn matches(&self, record: &RuntimeRecordRow) -> bool {
+        self.schema == record.record_schema
+            && self.record_id.as_str() == record.record_id
+            && self.bytes_digest == record.canonical_bytes_sha256
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct GovernedProjectionAcquisition {
+    execution_launch_record_id: Sha256Digest,
+    provider_intake: ExactRuntimeRecordReference,
+    intake_id: String,
+    raw_provider_bytes_digest: Sha256Digest,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct GovernedProjectionLocalOrigin {
+    run_id: String,
+    evaluation_id: Option<String>,
+    completed_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct GovernedProjectionCheckpoint {
+    checkpoint_id: Sha256Digest,
+    batch_digest: Sha256Digest,
+    runtime_records: Vec<ExactRuntimeRecordReference>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct GovernedProjectionPrelaunch {
+    outer_request: ExactRuntimeRecordReference,
+    invocation_decision: ExactRuntimeRecordReference,
+    reservation_checkpoint: GovernedProjectionCheckpoint,
+    launch_checkpoint: GovernedProjectionCheckpoint,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct GovernedProjectionDerivation {
+    derivation_id: Sha256Digest,
+    dependency_generation_id: Sha256Digest,
+    dependency_generation_custody_digest: Sha256Digest,
+    trust_anchor_id: Sha256Digest,
+    evaluation_id: Option<String>,
+    profile_semantic_id: Sha256Digest,
+    evaluator_artifact_digest: Sha256Digest,
+    derived_at: String,
+    clock_identity: Sha256Digest,
+    clock_uncertainty_ms: u64,
+}
+
+impl GovernedProjectionDerivation {
+    fn matches(&self, claim: &DerivationClaim) -> bool {
+        self.derivation_id == claim.derivation_id
+            && self.dependency_generation_id == claim.dependency_generation_id
+            && self.dependency_generation_custody_digest
+                == claim.dependency_generation_custody_digest
+            && self.trust_anchor_id == claim.trust_anchor_id
+            && self.evaluation_id == claim.evaluation_id
+            && self.profile_semantic_id == claim.profile_semantic_id
+            && self.evaluator_artifact_digest == claim.evaluator_artifact_digest
+            && self.derived_at == claim.derived_at
+            && self.clock_identity == claim.clock_identity
+            && self.clock_uncertainty_ms == claim.clock_uncertainty_ms
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct GovernedProjectionDependencyGeneration {
+    checkpoint_id: Sha256Digest,
+    checkpoint_digest: Sha256Digest,
+    generation_id: Sha256Digest,
+    trust_anchor_id: Sha256Digest,
+    custody_bytes_digest: Sha256Digest,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct GovernedProjectionClosure {
+    schema: String,
+    closure_id: Sha256Digest,
+    reservation: ExactRuntimeRecordReference,
+    prelaunch: GovernedProjectionPrelaunch,
+    acquisition: GovernedProjectionAcquisition,
+    derivation: GovernedProjectionDerivation,
+    diagnostic: Value,
+    local_origin: GovernedProjectionLocalOrigin,
+    execution_binding: ExactRuntimeRecordReference,
+    runtime_records: Vec<ExactRuntimeRecordReference>,
+    dependency_generation: GovernedProjectionDependencyGeneration,
 }
 
 impl From<&AcquisitionCarrier> for CustodiedAcquisition {
@@ -646,6 +799,730 @@ impl Store {
             },
         ))
     }
+
+    /// Verify that one sealed physical closure corresponds exactly to the
+    /// already-committed SQL artifact, local origin, execution binding,
+    /// provider occurrence, runtime-record batch, and dependency generation,
+    /// then durably mark the arena indexed.
+    ///
+    /// The reservation identity is the only caller input. All verdict-shaped
+    /// bytes and row identities are reopened from store-owned custody. A
+    /// missing or mismatching projection leaves an index-pending arena
+    /// unchanged. Repeating the operation on an indexed arena rechecks the
+    /// complete correspondence instead of trusting the prior state bit.
+    ///
+    /// This method proves storage correspondence only. NQ core remains
+    /// responsible for native provider, evaluator, profile, and diagnostic
+    /// semantic validation before sealing the closure.
+    #[allow(clippy::too_many_lines)] // One closed comparison keeps omissions auditable.
+    pub fn verify_governed_projection_and_mark_indexed(
+        &self,
+        reservation_record_id: &Sha256Digest,
+    ) -> Result<GovernedProjectionVerification, StoreError> {
+        let database_path = self.path().ok_or_else(|| {
+            projection_integrity(
+                reservation_record_id,
+                "projection verification requires a filesystem-backed initialized store",
+            )
+        })?;
+        let mut arena = CustodyArena::open_by_reservation(database_path, reservation_record_id)
+            .map_err(custody_error)?
+            .ok_or_else(|| {
+                projection_integrity(reservation_record_id, "physical custody arena is absent")
+            })?;
+        let inspection = arena.inspection().map_err(custody_error)?;
+        if inspection.reservation_id != *reservation_record_id {
+            return Err(projection_integrity(
+                reservation_record_id,
+                "arena reservation identity differs",
+            ));
+        }
+        let disposition = match inspection.state {
+            ArenaState::FinalV2SealedIndexPending => {
+                GovernedProjectionVerificationDisposition::Indexed
+            }
+            ArenaState::FinalV2SealedIndexed => {
+                GovernedProjectionVerificationDisposition::AlreadyIndexed
+            }
+            state => {
+                return Err(projection_integrity(
+                    reservation_record_id,
+                    format!("arena state {state:?} has no final projection to verify"),
+                ));
+            }
+        };
+        let exact_closure_bytes = arena
+            .final_v2_closure_bytes()
+            .map_err(custody_error)?
+            .ok_or_else(|| {
+                projection_integrity(reservation_record_id, "final closure bytes are absent")
+            })?;
+        let closure: GovernedProjectionClosure = serde_json::from_slice(&exact_closure_bytes)
+            .map_err(|error| {
+                projection_integrity(
+                    reservation_record_id,
+                    format!("final closure shape is incompatible: {error}"),
+                )
+            })?;
+        if closure.schema != GOVERNED_CUSTODY_CLOSURE_SCHEMA {
+            return Err(projection_integrity(
+                reservation_record_id,
+                "final closure schema differs",
+            ));
+        }
+
+        // One SQLite read transaction gives every row comparison below one
+        // immutable projection snapshot. The arena sections are themselves
+        // sealed and immutable at these frontiers.
+        let snapshot = self.connection.unchecked_transaction()?;
+        validate_runtime_record_ledger(&snapshot)?;
+        validate_provider_intake_invariants(&snapshot)?;
+        validate_diagnostic_artifact_invariants(&snapshot)?;
+
+        let reservation_record = exact_runtime_record(
+            &snapshot,
+            reservation_record_id,
+            &closure.reservation,
+            "custody reservation",
+        )?;
+        if closure.reservation.schema != "nq.custody_reservation.v1"
+            || closure.reservation.record_id != *reservation_record_id
+            || closure.reservation.bytes_digest != inspection.prelaunch.reservation_manifest_digest
+            || reservation_record.checkpoint_id
+                != inspection.prelaunch.prelaunch_checkpoint_id.as_str()
+        {
+            return Err(projection_integrity(
+                reservation_record_id,
+                "reservation reference differs from the arena prelaunch binding",
+            ));
+        }
+        let outer_request_record = exact_runtime_record(
+            &snapshot,
+            reservation_record_id,
+            &closure.prelaunch.outer_request,
+            "outer request",
+        )?;
+        let invocation_decision_record = exact_runtime_record(
+            &snapshot,
+            reservation_record_id,
+            &closure.prelaunch.invocation_decision,
+            "accepted invocation decision",
+        )?;
+        let (reservation_checkpoint, reservation_checkpoint_records) = exact_checkpoint(
+            &snapshot,
+            reservation_record_id,
+            &closure.prelaunch.reservation_checkpoint,
+            "reservation",
+        )?;
+        if reservation_checkpoint.checkpoint_id
+            != inspection.prelaunch.prelaunch_checkpoint_id.as_str()
+            || reservation_checkpoint.batch_digest
+                != inspection.prelaunch.prelaunch_checkpoint_digest
+            || reservation_record.checkpoint_id != reservation_checkpoint.checkpoint_id
+            || closure.prelaunch.outer_request.record_id
+                != inspection.prelaunch.outer_request_record_id
+            || closure.prelaunch.outer_request.bytes_digest
+                != inspection.prelaunch.outer_request_digest
+        {
+            return Err(projection_integrity(
+                reservation_record_id,
+                "reservation checkpoint identity, digest, or arena binding differs",
+            ));
+        }
+        if reservation_checkpoint_records.len() != 3
+            || !reservation_checkpoint_records
+                .iter()
+                .any(|record| record == &outer_request_record)
+            || !reservation_checkpoint_records
+                .iter()
+                .any(|record| record == &invocation_decision_record)
+            || !reservation_checkpoint_records
+                .iter()
+                .any(|record| record == &reservation_record)
+            || outer_request_record.record_schema != "nq.diagnostic_invocation_request.v1"
+            || invocation_decision_record.record_schema != "nq.invocation_decision.v1"
+            || reservation_record.record_schema != "nq.custody_reservation.v1"
+            || exact_json_string(
+                reservation_record_id,
+                &invocation_decision_record,
+                "decision",
+            )?
+            .as_deref()
+                != Some("accepted")
+        {
+            return Err(projection_integrity(
+                reservation_record_id,
+                "reservation checkpoint membership or accepted-decision state differs",
+            ));
+        }
+
+        let (launch_checkpoint, launch_checkpoint_records) = exact_checkpoint(
+            &snapshot,
+            reservation_record_id,
+            &closure.prelaunch.launch_checkpoint,
+            "launch",
+        )?;
+        let [launch_record] = launch_checkpoint_records.as_slice() else {
+            return Err(projection_integrity(
+                reservation_record_id,
+                "launch checkpoint does not contain exactly one execution launch",
+            ));
+        };
+        if launch_record.record_schema != "nq.execution_launch.v1"
+            || launch_record.record_id
+                != inspection
+                    .execution_launch_record_id
+                    .as_ref()
+                    .map(Sha256Digest::as_str)
+                    .unwrap_or_default()
+            || launch_record.record_id != closure.acquisition.execution_launch_record_id.as_str()
+            || launch_checkpoint.predecessor_checkpoint_id.as_deref()
+                != Some(reservation_checkpoint.checkpoint_id.as_str())
+            || inspection.claimed_at.as_deref()
+                != exact_json_string(reservation_record_id, launch_record, "launched_at")?
+                    .as_deref()
+        {
+            return Err(projection_integrity(
+                reservation_record_id,
+                "launch checkpoint membership, predecessor, or physical claim time differs",
+            ));
+        }
+        let physical_derivation = inspection.derivation_claim.as_ref().ok_or_else(|| {
+            projection_integrity(
+                reservation_record_id,
+                "final physical frontier has no derivation claim",
+            )
+        })?;
+        if !closure.derivation.matches(physical_derivation)
+            || closure.derivation.dependency_generation_id
+                != closure.dependency_generation.generation_id
+            || closure.derivation.dependency_generation_custody_digest
+                != closure.dependency_generation.custody_bytes_digest
+            || closure.derivation.trust_anchor_id != closure.dependency_generation.trust_anchor_id
+            || closure.derivation.evaluation_id != closure.local_origin.evaluation_id
+        {
+            return Err(projection_integrity(
+                reservation_record_id,
+                "sealed derivation differs from the complete physical claim or local origin",
+            ));
+        }
+
+        let exact_diagnostic_bytes =
+            canonical_json_bytes(&closure.diagnostic).map_err(|error| {
+                projection_integrity(
+                    reservation_record_id,
+                    format!("embedded diagnostic cannot be canonicalized: {error}"),
+                )
+            })?;
+        let diagnostic_schema = closure
+            .diagnostic
+            .get("schema")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                projection_integrity(
+                    reservation_record_id,
+                    "embedded diagnostic schema is absent",
+                )
+            })?;
+        if diagnostic_schema != "nq.diagnostic_execution.v2" {
+            return Err(projection_integrity(
+                reservation_record_id,
+                "only the production V2 diagnostic contract may be indexed",
+            ));
+        }
+        if closure
+            .diagnostic
+            .pointer("/profile_semantic_id")
+            .and_then(Value::as_str)
+            != Some(closure.derivation.profile_semantic_id.as_str())
+            || closure
+                .diagnostic
+                .pointer("/evaluator/digest")
+                .and_then(Value::as_str)
+                != Some(closure.derivation.evaluator_artifact_digest.as_str())
+            || closure
+                .diagnostic
+                .pointer("/completed_at")
+                .and_then(Value::as_str)
+                != Some(closure.derivation.derived_at.as_str())
+            || closure.local_origin.completed_at != closure.derivation.derived_at
+            || closure
+                .diagnostic
+                .pointer("/execution_clock/digest")
+                .and_then(Value::as_str)
+                != Some(closure.derivation.clock_identity.as_str())
+        {
+            return Err(projection_integrity(
+                reservation_record_id,
+                "diagnostic profile, evaluator, derivation time, or clock differs from custody",
+            ));
+        }
+        if closure
+            .diagnostic
+            .pointer("/attempt_interval/qualification/state")
+            .and_then(Value::as_str)
+            == Some("bounded")
+            && closure
+                .diagnostic
+                .pointer("/attempt_interval/qualification/maximum_error_ms")
+                .and_then(Value::as_u64)
+                != Some(closure.derivation.clock_uncertainty_ms)
+        {
+            return Err(projection_integrity(
+                reservation_record_id,
+                "bounded diagnostic clock uncertainty differs from custody",
+            ));
+        }
+        let diagnostic_artifact_id = Sha256Digest::parse(
+            closure
+                .diagnostic
+                .get("artifact_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    projection_integrity(
+                        reservation_record_id,
+                        "embedded diagnostic artifact identity is absent",
+                    )
+                })?
+                .to_owned(),
+        )
+        .map_err(|error| {
+            projection_integrity(
+                reservation_record_id,
+                format!("embedded diagnostic identity is invalid: {error}"),
+            )
+        })?;
+        let DiagnosticArtifactLookup::Found(artifact) = diagnostic_artifact_on_connection(
+            &snapshot,
+            &diagnostic_artifact_id,
+            &[diagnostic_schema],
+        )?
+        else {
+            return Err(projection_integrity(
+                reservation_record_id,
+                "diagnostic artifact SQL commitment is absent",
+            ));
+        };
+        let DiagnosticArtifactByteState::VerifiedAvailable { canonical_bytes } =
+            &artifact.byte_state
+        else {
+            return Err(projection_integrity(
+                reservation_record_id,
+                "diagnostic artifact bytes are unavailable or corrupt",
+            ));
+        };
+        if canonical_bytes.as_bytes() != exact_diagnostic_bytes
+            || artifact.commitment.contract_schema != diagnostic_schema
+        {
+            return Err(projection_integrity(
+                reservation_record_id,
+                "embedded diagnostic differs from its exact SQL commitment",
+            ));
+        }
+        match &artifact.commitment.origin {
+            DiagnosticArtifactOrigin::Local {
+                run_id,
+                evaluation_id,
+                completed_at,
+                execution_binding_record_id,
+            } if run_id == &closure.local_origin.run_id
+                && evaluation_id == &closure.local_origin.evaluation_id
+                && completed_at == &closure.local_origin.completed_at
+                && execution_binding_record_id.as_deref()
+                    == Some(closure.execution_binding.record_id.as_str()) => {}
+            _ => {
+                return Err(projection_integrity(
+                    reservation_record_id,
+                    "diagnostic local origin differs from the sealed closure",
+                ));
+            }
+        }
+
+        let binding = diagnostic_artifact_execution_binding_on_connection(
+            &snapshot,
+            &diagnostic_artifact_id,
+        )?
+        .ok_or_else(|| {
+            projection_integrity(
+                reservation_record_id,
+                "diagnostic execution binding is absent",
+            )
+        })?;
+        if !closure
+            .execution_binding
+            .matches(&binding.execution_binding)
+            || closure.execution_binding.schema != "nq.execution_identity_binding.v2"
+        {
+            return Err(projection_integrity(
+                reservation_record_id,
+                "execution binding reference differs from SQL",
+            ));
+        }
+        if binding.outer_request != outer_request_record
+            || binding.invocation_decision != invocation_decision_record
+            || binding.execution_launch != *launch_record
+            || binding.outer_request.record_id
+                != inspection.prelaunch.outer_request_record_id.as_str()
+            || binding.outer_request_id != inspection.prelaunch.outer_request_id
+            || closure.acquisition.execution_launch_record_id.as_str()
+                != binding.execution_launch.record_id
+        {
+            return Err(projection_integrity(
+                reservation_record_id,
+                "request or launch binding differs from the physical arena",
+            ));
+        }
+        let [(provider_record, provider_attempt)] = binding.provider_attempts.as_slice() else {
+            return Err(projection_integrity(
+                reservation_record_id,
+                "one physical acquisition requires exactly one SQL provider attempt",
+            ));
+        };
+        if !closure.acquisition.provider_intake.matches(provider_record)
+            || closure.acquisition.provider_intake.schema != "nq.provider_intake.v1"
+            || closure.acquisition.intake_id != provider_attempt.intake_id
+        {
+            return Err(projection_integrity(
+                reservation_record_id,
+                "provider-attempt binding differs from the sealed closure",
+            ));
+        }
+        let acquisition = arena.acquisition_for_projection().map_err(custody_error)?;
+        if acquisition.execution_launch_record_id != closure.acquisition.execution_launch_record_id
+            || acquisition.provider_intake_record_id
+                != closure.acquisition.provider_intake.record_id
+            || acquisition.exact_provider_intake_bytes != provider_record.canonical_bytes.as_bytes()
+        {
+            return Err(projection_integrity(
+                reservation_record_id,
+                "physical provider-intake carrier differs from SQL",
+            ));
+        }
+        let provider_projection = snapshot
+            .query_row(
+                "SELECT intake_digest, raw_sha256, profile_semantic_id,
+                        evaluator_artifact_digest, raw_bytes
+                 FROM provider_intake_attempts WHERE intake_id = ?1",
+                [&closure.acquisition.intake_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Vec<u8>>(4)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| {
+                projection_integrity(reservation_record_id, "provider intake SQL row is absent")
+            })?;
+        let (
+            provider_intake_digest,
+            provider_raw_digest,
+            provider_profile_semantic_id,
+            provider_evaluator_artifact_digest,
+            raw_provider_bytes,
+        ) = provider_projection;
+        if provider_intake_digest != provider_record.record_id
+            || provider_raw_digest != closure.acquisition.raw_provider_bytes_digest.as_str()
+            || provider_profile_semantic_id != closure.derivation.profile_semantic_id.as_str()
+            || provider_evaluator_artifact_digest
+                != closure.derivation.evaluator_artifact_digest.as_str()
+            || sha256_bytes(&raw_provider_bytes) != closure.acquisition.raw_provider_bytes_digest
+            || raw_provider_bytes != acquisition.exact_raw_provider_bytes
+        {
+            return Err(projection_integrity(
+                reservation_record_id,
+                "physical raw acquisition differs from the SQL provider occurrence",
+            ));
+        }
+
+        let checkpoint_id = Sha256Digest::parse(binding.execution_binding.checkpoint_id.clone())
+            .map_err(|error| {
+                projection_integrity(
+                    reservation_record_id,
+                    format!("projection checkpoint identity is invalid: {error}"),
+                )
+            })?;
+        if checkpoint_id != closure.dependency_generation.checkpoint_id {
+            return Err(projection_integrity(
+                reservation_record_id,
+                "closure dependency checkpoint differs from the binding batch",
+            ));
+        }
+        let checkpoint = runtime_checkpoint_by_id_on_connection(&snapshot, checkpoint_id.as_str())?
+            .ok_or_else(|| {
+                projection_integrity(reservation_record_id, "projection checkpoint is absent")
+            })?;
+        let checkpoint_records =
+            checkpoint_runtime_records(&snapshot, reservation_record_id, &checkpoint)?;
+        if checkpoint.batch_digest != closure.dependency_generation.checkpoint_digest
+            || checkpoint.record_count
+                != u64::try_from(checkpoint_records.len()).map_err(|_| {
+                    projection_integrity(
+                        reservation_record_id,
+                        "projection checkpoint record count overflowed",
+                    )
+                })?
+            || closure.runtime_records.len() != checkpoint_records.len()
+            || closure
+                .runtime_records
+                .iter()
+                .zip(&checkpoint_records)
+                .any(|(reference, record)| !reference.matches(record))
+            || !checkpoint_records
+                .iter()
+                .any(|record| record.record_id == binding.execution_binding.record_id)
+            || !checkpoint_records
+                .iter()
+                .any(|record| record.record_id == provider_record.record_id)
+        {
+            return Err(projection_integrity(
+                reservation_record_id,
+                "sealed runtime-record write set differs from the exact SQL checkpoint",
+            ));
+        }
+
+        let dependency_bytes = arena.dependency_closure_bytes().map_err(custody_error)?;
+        if sha256_bytes(&dependency_bytes) != closure.dependency_generation.custody_bytes_digest
+            || closure.dependency_generation.generation_id
+                != inspection.prelaunch.dependency_generation_id
+            || closure.dependency_generation.trust_anchor_id != inspection.prelaunch.trust_anchor_id
+        {
+            return Err(projection_integrity(
+                reservation_record_id,
+                "sealed dependency generation differs from arena prelaunch",
+            ));
+        }
+        verify_checkpoint_dependency(
+            &snapshot,
+            reservation_record_id,
+            &reservation_checkpoint.checkpoint_id,
+            &closure.dependency_generation,
+            &dependency_bytes,
+        )?;
+        verify_checkpoint_dependency(
+            &snapshot,
+            reservation_record_id,
+            &launch_checkpoint.checkpoint_id,
+            &closure.dependency_generation,
+            &dependency_bytes,
+        )?;
+        verify_checkpoint_dependency(
+            &snapshot,
+            reservation_record_id,
+            &checkpoint.checkpoint_id,
+            &closure.dependency_generation,
+            &dependency_bytes,
+        )?;
+        drop(snapshot);
+
+        if disposition == GovernedProjectionVerificationDisposition::Indexed {
+            let token = arena.reopen_final_token().map_err(custody_error)?;
+            arena.mark_indexed(token).map_err(custody_error)?;
+            drop(arena);
+            let reopened = CustodyArena::open_by_reservation(database_path, reservation_record_id)
+                .map_err(custody_error)?
+                .ok_or_else(|| {
+                    projection_integrity(
+                        reservation_record_id,
+                        "indexed arena disappeared during durable reopen",
+                    )
+                })?;
+            let reopened_inspection = reopened.inspection().map_err(custody_error)?;
+            if reopened_inspection.state != ArenaState::FinalV2SealedIndexed
+                || reopened
+                    .final_v2_closure_bytes()
+                    .map_err(custody_error)?
+                    .as_deref()
+                    != Some(exact_closure_bytes.as_slice())
+            {
+                return Err(projection_integrity(
+                    reservation_record_id,
+                    "indexed transition did not durably preserve the exact closure",
+                ));
+            }
+        }
+
+        Ok(GovernedProjectionVerification {
+            reservation_record_id: reservation_record_id.clone(),
+            closure_id: closure.closure_id,
+            diagnostic_artifact_id,
+            runtime_checkpoint_id: checkpoint_id,
+            disposition,
+        })
+    }
+}
+
+fn exact_checkpoint(
+    connection: &rusqlite::Connection,
+    reservation_record_id: &Sha256Digest,
+    expected: &GovernedProjectionCheckpoint,
+    label: &str,
+) -> Result<(RuntimeLedgerCheckpoint, Vec<RuntimeRecordRow>), StoreError> {
+    let checkpoint =
+        runtime_checkpoint_by_id_on_connection(connection, expected.checkpoint_id.as_str())?
+            .ok_or_else(|| {
+                projection_integrity(
+                    reservation_record_id,
+                    format!("{label} checkpoint is absent"),
+                )
+            })?;
+    if checkpoint.batch_digest != expected.batch_digest {
+        return Err(projection_integrity(
+            reservation_record_id,
+            format!("{label} checkpoint digest differs from its sealed reference"),
+        ));
+    }
+    let records = checkpoint_runtime_records(connection, reservation_record_id, &checkpoint)?;
+    if checkpoint.record_count
+        != u64::try_from(records.len()).map_err(|_| {
+            projection_integrity(
+                reservation_record_id,
+                format!("{label} checkpoint record count overflowed"),
+            )
+        })?
+        || expected.runtime_records.len() != records.len()
+        || expected
+            .runtime_records
+            .iter()
+            .zip(&records)
+            .any(|(reference, record)| !reference.matches(record))
+    {
+        return Err(projection_integrity(
+            reservation_record_id,
+            format!("{label} checkpoint membership differs from its sealed reference"),
+        ));
+    }
+    Ok((checkpoint, records))
+}
+
+fn checkpoint_runtime_records(
+    connection: &rusqlite::Connection,
+    reservation_record_id: &Sha256Digest,
+    checkpoint: &RuntimeLedgerCheckpoint,
+) -> Result<Vec<RuntimeRecordRow>, StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT record_id FROM runtime_record_ledger
+         WHERE checkpoint_id = ?1 ORDER BY record_sequence",
+    )?;
+    statement
+        .query_map([&checkpoint.checkpoint_id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|record_id| {
+            runtime_record_by_id_on_connection(connection, &record_id)?.ok_or_else(|| {
+                projection_integrity(
+                    reservation_record_id,
+                    format!(
+                        "checkpoint {} lost runtime record {record_id}",
+                        checkpoint.checkpoint_id
+                    ),
+                )
+            })
+        })
+        .collect()
+}
+
+fn exact_json_string(
+    reservation_record_id: &Sha256Digest,
+    record: &RuntimeRecordRow,
+    field: &str,
+) -> Result<Option<String>, StoreError> {
+    let value: Value =
+        serde_json::from_slice(record.canonical_bytes.as_bytes()).map_err(|error| {
+            projection_integrity(
+                reservation_record_id,
+                format!(
+                    "runtime record {} cannot be decoded: {error}",
+                    record.record_id
+                ),
+            )
+        })?;
+    Ok(value
+        .get(field)
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned))
+}
+
+fn exact_runtime_record(
+    connection: &rusqlite::Connection,
+    reservation_record_id: &Sha256Digest,
+    reference: &ExactRuntimeRecordReference,
+    label: &str,
+) -> Result<RuntimeRecordRow, StoreError> {
+    let record = runtime_record_by_id_on_connection(connection, reference.record_id.as_str())?
+        .ok_or_else(|| {
+            projection_integrity(
+                reservation_record_id,
+                format!("{label} runtime record is absent"),
+            )
+        })?;
+    if !reference.matches(&record) {
+        return Err(projection_integrity(
+            reservation_record_id,
+            format!("{label} runtime record differs from its sealed reference"),
+        ));
+    }
+    Ok(record)
+}
+
+fn verify_checkpoint_dependency(
+    connection: &rusqlite::Connection,
+    reservation_record_id: &Sha256Digest,
+    checkpoint_id: &str,
+    expected: &GovernedProjectionDependencyGeneration,
+    exact_dependency_bytes: &[u8],
+) -> Result<(), StoreError> {
+    let access = runtime_checkpoint_dependency_on_connection(connection, checkpoint_id)?
+        .ok_or_else(|| {
+            projection_integrity(
+                reservation_record_id,
+                format!("checkpoint {checkpoint_id} has no dependency binding"),
+            )
+        })?;
+    let RuntimeCheckpointDependencyBinding::Authenticated {
+        dependency_generation_id,
+        trust_anchor_id,
+        canonical_bytes_sha256,
+        ..
+    } = access.binding
+    else {
+        return Err(projection_integrity(
+            reservation_record_id,
+            format!("checkpoint {checkpoint_id} has only a legacy dependency binding"),
+        ));
+    };
+    let Some(RuntimeDependencyGenerationByteState::VerifiedAvailable { canonical_custody }) =
+        access.byte_state
+    else {
+        return Err(projection_integrity(
+            reservation_record_id,
+            format!("checkpoint {checkpoint_id} dependency bytes are unavailable or corrupt"),
+        ));
+    };
+    if dependency_generation_id != expected.generation_id
+        || trust_anchor_id != expected.trust_anchor_id
+        || canonical_bytes_sha256 != expected.custody_bytes_digest
+        || canonical_custody.as_bytes() != exact_dependency_bytes
+    {
+        return Err(projection_integrity(
+            reservation_record_id,
+            format!("checkpoint {checkpoint_id} dependency closure differs"),
+        ));
+    }
+    Ok(())
+}
+
+fn projection_integrity(
+    reservation_record_id: &Sha256Digest,
+    message: impl std::fmt::Display,
+) -> StoreError {
+    StoreError::Integrity(format!(
+        "governed projection {reservation_record_id} failed exact correspondence: {message}"
+    ))
 }
 
 fn custody_error(error: impl std::fmt::Display) -> StoreError {
