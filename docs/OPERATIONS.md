@@ -9,7 +9,7 @@ The walkthrough below uses the one-shot `stdio` conformance specimen; the same
 protocol exchange is also supported by a supervised persistent `unix` helper
 carrier with private sockets and peer-credential checks. The preview includes
 compiled profiles, admission locks, explicit bounded one-shot collection, a
-resident read/API service with no recurrence, SQLite schema v6, verified SQLite
+resident read/API service with no recurrence, SQLite schema v7, verified SQLite
 backup/restore, exact qualified migrations, immutable diagnostic-artifact
 custody and export/import, read-only exports, the Unix API, and an opt-in
 loopback console. Nightshift, not NQ, owns recurrence, expiry, and current
@@ -159,12 +159,12 @@ With the sample watcher configured, `doctor` is expected to report a missing
 admission until the next section is complete. That is a useful failed state,
 not a reason to create a lock by hand.
 
-The current binary normally opens only SQLite schema v6. It has three exact
-migration sources: schema v5, schema v4, and the exact schema-v3 artifact
-shipped in the qualified `v0.1.0` release. `admin upgrade` validates the
-complete source schema and stored semantics, creates and reopens a
+The current binary normally opens only SQLite schema v7. It has four exact
+migration sources: schema v6, schema v5, schema v4, and the exact schema-v3
+artifact shipped in the qualified `v0.1.0` release. `admin upgrade` validates
+the complete source schema and stored semantics, creates and reopens a
 digest-addressed backup for each transition, and applies the required
-v3-to-v4, v4-to-v5, and v5-to-v6 steps transactionally.
+v3-to-v4, v4-to-v5, v5-to-v6, and v6-to-v7 steps transactionally.
 Historical v3 watcher runs retain explicit `provider_intake_not_recorded`
 gaps; the migration manufactures neither provider identities, raw captures,
 durable acknowledgments, nor diagnostic artifacts that the source never
@@ -172,7 +172,23 @@ stored. Any historical v3 checkpoint bytes remain preserved for reopening,
 but cannot advance the live cursor because no exact provider-intake
 acknowledgment exists for them.
 
-Schema v1, schema v2, stale or modified v3/v4/v5 databases, and every other
+Schema v7 binds every new runtime-ledger checkpoint to the exact authenticated
+runtime-dependency generation, retained canonical custody, and trust-anchor
+identity used by the host-role runtime. The host-role runtime separately
+freezes one immutable dependency-admission trust-root identity for the store
+occurrence; each historical closure must authenticate under that root rather
+than selecting its own verifier. The v6-to-v7 migration does not invent that
+root or checkpoint provenance for existing checkpoints: it freezes them as one
+`legacy_unbound` prefix. Those records retain their exact schema-v6 batch and
+ledger identities, but the host-role runtime refuses to semantically reopen
+them as though an authenticated historical dependency closure had existed.
+
+This is substitution resistance while the separately committed SQLite root
+record remains intact, not proof against coordinated offline replacement of
+the complete store. Deployment custody and backup verification must protect
+the database as a whole.
+
+Schema v1, schema v2, stale or modified v3/v4/v5/v6 databases, and every other
 incompatible representation remain fail-closed and byte-preserved. `init`,
 normal open, backup/restore, and daemon startup refuse them without rewriting
 their meaning. Preserve incompatible bytes with a cold archive; such an

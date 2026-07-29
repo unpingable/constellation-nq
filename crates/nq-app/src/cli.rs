@@ -1194,6 +1194,45 @@ fn finalize_upgrade_backup(
     Ok(backup)
 }
 
+fn upgrade_v6_to_current(
+    database_path: &Path,
+    backup_directory: &Path,
+    binary_digest: &str,
+    operator_identity: &CanonicalDocument,
+) -> Result<(Store, PathBuf, nq_store::BackupArtifact)> {
+    let started_at = chrono::Utc::now();
+    let temporary_backup =
+        backup_directory.join(format!(".nq-upgrade-{}.db", uuid::Uuid::new_v4()));
+    let artifact = Store::backup_v6_verified(database_path, &temporary_backup)?;
+    let backup = finalize_upgrade_backup(&temporary_backup, backup_directory, &artifact.sha256)?;
+    let receipt = UpgradeReceiptInput {
+        receipt_id: uuid::Uuid::new_v4().to_string(),
+        from_schema_version: 6,
+        to_schema_version: 7,
+        migrations: CanonicalDocument::from_serializable(&[
+            "schema_v6_to_v7_runtime_dependencies",
+        ])?,
+        binary_digest: binary_digest.to_owned(),
+        backup_digest: artifact.sha256.clone(),
+        backup_location: backup.display().to_string(),
+        started_at: started_at.to_rfc3339(),
+        finished_at: started_at.to_rfc3339(),
+        result: "migrated".into(),
+        operator_identity: operator_identity.clone(),
+        verification: CanonicalDocument::from_serializable(&json!({
+            "integrity": "ok",
+            "source_schema_version": 6,
+            "source_schema_artifact_digest": nq_store::SCHEMA_V6_ARTIFACT_DIGEST,
+            "backup_reopened": true,
+            "historical_dependency_binding": "legacy_unbound",
+            "dependency_generations_synthesized": false,
+            "trust_anchors_synthesized": false,
+        }))?,
+    };
+    let store = Store::upgrade_v6_to_v7(database_path, &receipt)?;
+    Ok((store, backup, artifact))
+}
+
 #[allow(clippy::too_many_lines)]
 fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -> Result<()> {
     match command {
@@ -1242,13 +1281,13 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                         from_schema_version: u32::try_from(nq_store::SCHEMA_VERSION)?,
                         to_schema_version: u32::try_from(nq_store::SCHEMA_VERSION)?,
                         migrations: CanonicalDocument::from_serializable(&Vec::<String>::new())?,
-                        binary_digest,
+                        binary_digest: binary_digest.clone(),
                         backup_digest: backup_digest.clone(),
                         backup_location: backup.display().to_string(),
                         started_at: started_at.to_rfc3339(),
                         finished_at: finished_at.to_rfc3339(),
                         result: "already_current".into(),
-                        operator_identity,
+                        operator_identity: operator_identity.clone(),
                         verification: CanonicalDocument::from_serializable(&json!({
                             "integrity": "ok",
                             "schema_version": nq_store::SCHEMA_VERSION,
@@ -1357,13 +1396,13 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                         migrations: CanonicalDocument::from_serializable(&[
                             "schema_v5_to_v6_runtime_ledger",
                         ])?,
-                        binary_digest,
+                        binary_digest: binary_digest.clone(),
                         backup_digest: v5_artifact.sha256.clone(),
                         backup_location: v5_backup.display().to_string(),
                         started_at: v5_started_at.to_rfc3339(),
                         finished_at: v5_started_at.to_rfc3339(),
                         result: "migrated".into(),
-                        operator_identity,
+                        operator_identity: operator_identity.clone(),
                         verification: CanonicalDocument::from_serializable(&json!({
                             "integrity": "ok",
                             "source_schema_version": 5,
@@ -1374,7 +1413,13 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                             "diagnostic_execution_bindings_synthesized": false,
                         }))?,
                     };
-                    let store = Store::upgrade_v5_to_v6(&config.database_path, &v5_receipt)?;
+                    Store::upgrade_v5_to_v6(&config.database_path, &v5_receipt)?;
+                    let (store, v6_backup, v6_artifact) = upgrade_v6_to_current(
+                        &config.database_path,
+                        &backup_directory,
+                        &binary_digest,
+                        &operator_identity,
+                    )?;
                     store.validate()?;
                     print_value(
                         &json!({
@@ -1387,6 +1432,8 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                             "v4_backup_digest": v4_artifact.sha256,
                             "v5_backup": v5_backup,
                             "v5_backup_digest": v5_artifact.sha256,
+                            "v6_backup": v6_backup,
+                            "v6_backup_digest": v6_artifact.sha256,
                             "historical_provider_intake": "explicit_gap_only",
                             "historical_diagnostic_artifacts": "no_durable_commitments",
                             "historical_runtime_records": "no_durable_commitments",
@@ -1445,13 +1492,13 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                         migrations: CanonicalDocument::from_serializable(&[
                             "schema_v5_to_v6_runtime_ledger",
                         ])?,
-                        binary_digest,
+                        binary_digest: binary_digest.clone(),
                         backup_digest: v5_artifact.sha256.clone(),
                         backup_location: v5_backup.display().to_string(),
                         started_at: v5_started_at.to_rfc3339(),
                         finished_at: v5_started_at.to_rfc3339(),
                         result: "migrated".into(),
-                        operator_identity,
+                        operator_identity: operator_identity.clone(),
                         verification: CanonicalDocument::from_serializable(&json!({
                             "integrity": "ok",
                             "source_schema_version": 5,
@@ -1462,7 +1509,13 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                             "diagnostic_execution_bindings_synthesized": false,
                         }))?,
                     };
-                    let store = Store::upgrade_v5_to_v6(&config.database_path, &v5_receipt)?;
+                    Store::upgrade_v5_to_v6(&config.database_path, &v5_receipt)?;
+                    let (store, v6_backup, v6_artifact) = upgrade_v6_to_current(
+                        &config.database_path,
+                        &backup_directory,
+                        &binary_digest,
+                        &operator_identity,
+                    )?;
                     store.validate()?;
                     print_value(
                         &json!({
@@ -1473,6 +1526,8 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                             "backup_digest": artifact.sha256,
                             "v5_backup": v5_backup,
                             "v5_backup_digest": v5_artifact.sha256,
+                            "v6_backup": v6_backup,
+                            "v6_backup_digest": v6_artifact.sha256,
                             "historical_diagnostic_artifacts": "no_durable_commitments",
                             "historical_runtime_records": "no_durable_commitments",
                         }),
@@ -1494,13 +1549,13 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                         migrations: CanonicalDocument::from_serializable(&[
                             "schema_v5_to_v6_runtime_ledger",
                         ])?,
-                        binary_digest,
+                        binary_digest: binary_digest.clone(),
                         backup_digest: artifact.sha256.clone(),
                         backup_location: backup.display().to_string(),
                         started_at: started_at.to_rfc3339(),
                         finished_at: started_at.to_rfc3339(),
                         result: "migrated".into(),
-                        operator_identity,
+                        operator_identity: operator_identity.clone(),
                         verification: CanonicalDocument::from_serializable(&json!({
                             "integrity": "ok",
                             "source_schema_version": 5,
@@ -1511,7 +1566,13 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                             "diagnostic_execution_bindings_synthesized": false,
                         }))?,
                     };
-                    let store = Store::upgrade_v5_to_v6(&config.database_path, &receipt)?;
+                    Store::upgrade_v5_to_v6(&config.database_path, &receipt)?;
+                    let (store, v6_backup, v6_artifact) = upgrade_v6_to_current(
+                        &config.database_path,
+                        &backup_directory,
+                        &binary_digest,
+                        &operator_identity,
+                    )?;
                     store.validate()?;
                     print_value(
                         &json!({
@@ -1520,7 +1581,29 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                             "schema_version": nq_store::SCHEMA_VERSION,
                             "backup": backup,
                             "backup_digest": artifact.sha256,
+                            "v6_backup": v6_backup,
+                            "v6_backup_digest": v6_artifact.sha256,
                             "historical_runtime_records": "no_durable_commitments",
+                        }),
+                        json_output,
+                    )
+                }
+                6 => {
+                    let (store, backup, artifact) = upgrade_v6_to_current(
+                        &config.database_path,
+                        &backup_directory,
+                        &binary_digest,
+                        &operator_identity,
+                    )?;
+                    store.validate()?;
+                    print_value(
+                        &json!({
+                            "result": "migrated",
+                            "from_schema_version": 6,
+                            "schema_version": nq_store::SCHEMA_VERSION,
+                            "backup": backup,
+                            "backup_digest": artifact.sha256,
+                            "historical_dependency_binding": "legacy_unbound",
                         }),
                         json_output,
                     )

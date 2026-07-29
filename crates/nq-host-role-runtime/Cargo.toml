@@ -1,0 +1,25 @@
+[package]
+name = "nq-host-role-runtime"
+description = "Restart-safe host-role runtime ledger bridge for NQ"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+ed25519-dalek.workspace = true
+hex.workspace = true
+nq-host-role-contract = { path = "../nq-host-role-contract" }
+nq-protocol = { path = "../nq-protocol" }
+nq-store = { path = "../nq-store" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

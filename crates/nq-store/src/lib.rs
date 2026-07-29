@@ -6,17 +6,25 @@
 //! evidence. Durable facts are append-only. The two mutable tables are explicitly
 //! rebuildable pointers to the latest finding and status events.
 //!
-//! The custody arena precursor is deliberately store-private:
+//! The physical custody arena remains deliberately store-private:
 //!
 //! ```compile_fail
 //! use nq_store::custody_arena::CustodyArena;
 //! ```
 //!
-//! No product code references this module today. The privacy proof prevents a
-//! downstream arbitrary-byte seal API, but also means the cycle-free
-//! NQ-core/store validation bridge remains unimplemented and unqualified.
+//! Product code can use the exported governed-custody facade only to reserve,
+//! seal, reopen, and index exact opaque bytes. That facade cannot launch a
+//! provider, parse intake, establish evaluator occurrence, construct a
+//! diagnostic binding, or assign semantic standing.
 
 mod custody_arena;
+mod governed_custody;
+
+pub use governed_custody::{
+    CustodiedAcquisition, GOVERNED_CUSTODY_CLOSURE_SCHEMA, GovernedAcquisitionCustodyInput,
+    GovernedCustody, GovernedCustodyCommitment, GovernedCustodyReservation, GovernedCustodyState,
+    GovernedDerivationCustodyClaim,
+};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
@@ -26,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use chrono::{SecondsFormat, Utc};
-use nq_protocol::Sha256Digest;
+use nq_protocol::{Sha256Digest, sha256_bytes};
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
@@ -43,6 +51,8 @@ const SCHEMA_V3_TO_V4_PROVIDER: &str = include_str!("schema_v3_to_v4_provider.sq
 const SCHEMA_V4_TO_V5_DIAGNOSTIC_ARTIFACTS: &str =
     include_str!("schema_v4_to_v5_diagnostic_artifacts.sql");
 const SCHEMA_V5_TO_V6_RUNTIME_LEDGER: &str = include_str!("schema_v5_to_v6_runtime_ledger.sql");
+const SCHEMA_V6_TO_V7_RUNTIME_DEPENDENCIES: &str =
+    include_str!("schema_v6_to_v7_runtime_dependencies.sql");
 const APPLICATION_ID: i64 = 1_313_951_303;
 
 const SCHEMA_METADATA_V4: &str = r"CREATE TABLE schema_metadata (
@@ -90,6 +100,21 @@ const SCHEMA_METADATA_V6: &str = r"CREATE TABLE schema_metadata (
 const SCHEMA_METADATA_V6_TRIGGERS: &str = "CREATE TRIGGER immutable_schema_metadata_update BEFORE UPDATE ON schema_metadata BEGIN SELECT RAISE(ABORT, 'append-only table'); END;\n\
      CREATE TRIGGER immutable_schema_metadata_delete BEFORE DELETE ON schema_metadata BEGIN SELECT RAISE(ABORT, 'append-only table'); END;";
 
+const SCHEMA_METADATA_V7: &str = r"CREATE TABLE schema_metadata (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    product TEXT NOT NULL CHECK (product = 'nq-ng'),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 7),
+    -- Digest of the exact schema.sql artifact compiled into the writing binary.
+    -- Rejects stale provisional-candidate databases at startup; it is NOT a
+    -- tamper attestation of the live SQLite schema (which the structural
+    -- fingerprint checks separately).
+    schema_artifact_digest TEXT NOT NULL CHECK (length(schema_artifact_digest) = 71 AND substr(schema_artifact_digest, 1, 7) = 'sha256:'),
+    initialized_at TEXT NOT NULL
+) STRICT;";
+
+const SCHEMA_METADATA_V7_TRIGGERS: &str = "CREATE TRIGGER immutable_schema_metadata_update BEFORE UPDATE ON schema_metadata BEGIN SELECT RAISE(ABORT, 'append-only table'); END;\n\
+     CREATE TRIGGER immutable_schema_metadata_delete BEFORE DELETE ON schema_metadata BEGIN SELECT RAISE(ABORT, 'append-only table'); END;";
+
 /// Exact schema-artifact digest of the qualified v0.1.0 store. It is retained
 /// only to validate an explicit v3-to-v4 upgrade source; normal opening never
 /// interprets v3 bytes as current storage.
@@ -105,6 +130,11 @@ pub const SCHEMA_V4_ARTIFACT_DIGEST: &str =
 /// retained only to validate an explicit v5-to-v6 upgrade source.
 pub const SCHEMA_V5_ARTIFACT_DIGEST: &str =
     "sha256:91455172d1bed3b5e67ae25b7122015fc3d1197ab9b676511a938d4eb658e94b";
+
+/// Exact schema-artifact digest of the qualified schema-v6 runtime-ledger
+/// store. It is retained only to validate an explicit v6-to-v7 upgrade source.
+pub const SCHEMA_V6_ARTIFACT_DIGEST: &str =
+    "sha256:3785e935c296963ec20ec1b6ba17f87499fab6280df39b3e9619f5062a3ba915";
 
 /// Schema tag bound into every admission-context digest preimage. Bump only when
 /// the constituent set or its canonicalization changes.
@@ -124,8 +154,13 @@ pub const PROVIDER_INTAKE_ACK_SCHEMA: &str = "nq.provider_intake_ack.v1";
 /// Canonical root preimage for one globally sequenced runtime record.
 pub const RUNTIME_LEDGER_ROOT_SCHEMA: &str = "nq.runtime_ledger_root.v1";
 
-/// Canonical identity preimage for one atomic runtime-record append.
-pub const RUNTIME_LEDGER_BATCH_SCHEMA: &str = "nq.runtime_ledger_batch.v1";
+/// Canonical identity preimage for one dependency-bound atomic runtime-record
+/// append.
+pub const RUNTIME_LEDGER_BATCH_SCHEMA: &str = "nq.runtime_ledger_batch.v2";
+
+const LEGACY_RUNTIME_LEDGER_BATCH_SCHEMA: &str = "nq.runtime_ledger_batch.v1";
+const RUNTIME_DEPENDENCY_GENERATION_CUSTODY_SCHEMA: &str =
+    "nq.host_role_runtime_dependency_generation_custody.v1";
 
 /// Closed host-role record vocabulary ratified for the runtime ledger.
 ///
@@ -197,9 +232,53 @@ static EXPECTED_SCHEMA_V5_FINGERPRINT: LazyLock<Result<String, String>> = LazyLo
         .map_err(|error| error.to_string())?;
     schema_fingerprint(&connection).map_err(|error| error.to_string())
 });
+static EXPECTED_SCHEMA_V6_FINGERPRINT: LazyLock<Result<String, String>> = LazyLock::new(|| {
+    let mut connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    connection
+        .execute_batch(SCHEMA_V5)
+        .map_err(|error| error.to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute_batch(
+            "DROP TRIGGER immutable_schema_metadata_update;
+             DROP TRIGGER immutable_schema_metadata_delete;
+             ALTER TABLE schema_metadata RENAME TO schema_metadata_v5;",
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute_batch(SCHEMA_METADATA_V6)
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "INSERT INTO schema_metadata (
+                singleton, product, schema_version, schema_artifact_digest, initialized_at
+             )
+             SELECT singleton, product, 6, ?1, initialized_at
+             FROM schema_metadata_v5",
+            [SCHEMA_V6_ARTIFACT_DIGEST],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute("DROP TABLE schema_metadata_v5", [])
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute_batch(SCHEMA_METADATA_V6_TRIGGERS)
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute_batch(SCHEMA_V5_TO_V6_RUNTIME_LEDGER)
+        .map_err(|error| error.to_string())?;
+    transaction
+        .pragma_update(None, "user_version", 6)
+        .map_err(|error| error.to_string())?;
+    let fingerprint = schema_fingerprint(&transaction).map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(fingerprint)
+});
 
 /// The only schema version understood by this crate.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// Hard ceiling for one page returned through the public read model helpers.
 pub const MAX_PUBLIC_QUERY_ROWS: u32 = 1_000;
@@ -302,12 +381,25 @@ pub struct RuntimeRecordInput {
     pub committed_at: String,
 }
 
+/// Exact dependency-generation custody already authenticated by the host-role
+/// runtime and bound into one new runtime-ledger checkpoint.
+///
+/// The store verifies canonical byte identity and structural correspondence.
+/// It does not authenticate signatures or assign semantic standing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeCheckpointDependencyInput {
+    pub dependency_generation_id: Sha256Digest,
+    pub trust_anchor_id: Sha256Digest,
+    pub canonical_custody: CanonicalDocument,
+}
+
 /// One atomic, idempotent append of one or more runtime records.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeRecordBatchInput {
     pub checkpoint_id: String,
     pub expected_predecessor_checkpoint_id: Option<String>,
     pub expected_predecessor_ledger_root: Option<Sha256Digest>,
+    pub dependency: RuntimeCheckpointDependencyInput,
     pub records: Vec<RuntimeRecordInput>,
 }
 
@@ -338,6 +430,40 @@ pub struct RuntimeLedgerCheckpoint {
 pub struct RuntimeRecordAppendReceipt {
     pub disposition: RuntimeRecordAppendDisposition,
     pub checkpoint: RuntimeLedgerCheckpoint,
+}
+
+/// Immutable dependency provenance bound to one runtime checkpoint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RuntimeCheckpointDependencyBinding {
+    /// Schema-v6 history predates authenticated checkpoint dependency binding.
+    LegacyUnbound { source_schema_version: u32 },
+    /// Exact authenticated dependency generation and its retained commitment.
+    Authenticated {
+        dependency_generation_id: Sha256Digest,
+        trust_anchor_id: Sha256Digest,
+        canonical_bytes_sha256: Sha256Digest,
+        canonical_bytes_length: u64,
+    },
+}
+
+/// Current materialization state of one committed dependency closure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RuntimeDependencyGenerationByteState {
+    VerifiedAvailable {
+        canonical_custody: CanonicalDocument,
+    },
+    CommittedUnavailable,
+    Corrupt {
+        reason: String,
+    },
+}
+
+/// Orthogonal checkpoint binding and dependency-byte access result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeCheckpointDependencyAccess {
+    pub checkpoint_id: String,
+    pub binding: RuntimeCheckpointDependencyBinding,
+    pub byte_state: Option<RuntimeDependencyGenerationByteState>,
 }
 
 /// One exactly reopened canonical runtime record.
@@ -850,6 +976,17 @@ fn provider_intake_digests(
         replay_digest,
         intake_digest: sha256_digest(&full_bytes),
     })
+}
+
+/// Derive the exact record identity the store will assign to this provider
+/// intake.
+///
+/// This is an identity calculation only. It does not admit the intake,
+/// establish provider occurrence, validate correspondence with canonical
+/// `ProviderIntakeRecordV1` bytes, or authorize persistence.
+pub fn provider_intake_record_id(intake: &ProviderIntakeInput) -> Result<Sha256Digest, StoreError> {
+    Sha256Digest::parse(provider_intake_digests(intake)?.intake_digest)
+        .map_err(|_| StoreError::Invariant("derived provider intake digest is malformed".into()))
 }
 
 /// Derive the local provider's semantic identity from NQ-owned admission facts.
@@ -2107,6 +2244,27 @@ impl Store {
         Ok(store)
     }
 
+    /// Open the exact qualified schema-v6 store read-only for the separately
+    /// authorized v6-to-v7 dependency-binding migration.
+    pub fn open_v6_upgrade_source_read_only(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        if !path.is_file() || std::fs::metadata(path)?.len() == 0 {
+            return Err(StoreError::NotInitialized(path.to_path_buf()));
+        }
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        connection.pragma_update(None, "query_only", "ON")?;
+        let store = Self {
+            connection,
+            path: Some(path.to_path_buf()),
+        };
+        validate_v6_upgrade_source_connection(&store.connection)?;
+        Ok(store)
+    }
+
     /// Checkpoint a writable backup copy and leave it in rollback-journal mode
     /// before archive inventory and sealing.
     pub fn prepare_archive_copy(&self) -> Result<(), StoreError> {
@@ -2880,6 +3038,54 @@ impl Store {
         Ok(receipt)
     }
 
+    /// Establish the immutable dependency-admission trust root for this store.
+    ///
+    /// This is a bootstrap operation, separate from checkpoint append. Exact
+    /// replay with the same identity is harmless; selecting another identity
+    /// or attempting late establishment after dependency generations exist
+    /// refuses.
+    pub fn establish_runtime_dependency_trust_root(
+        &mut self,
+        trust_anchor_id: &Sha256Digest,
+    ) -> Result<(), StoreError> {
+        let transaction = self.immediate_transaction()?;
+        let existing = runtime_dependency_trust_root_on_connection(&transaction)?;
+        match existing {
+            Some(existing) if existing == *trust_anchor_id => {}
+            Some(existing) => {
+                return Err(StoreError::ReplayConflict(format!(
+                    "runtime dependency trust root differs: expected {existing}, observed {trust_anchor_id}"
+                )));
+            }
+            None => {
+                let generation_count: i64 = transaction.query_row(
+                    "SELECT COUNT(*) FROM runtime_dependency_generation_commitments",
+                    [],
+                    |row| row.get(0),
+                )?;
+                if generation_count != 0 {
+                    return Err(StoreError::Integrity(
+                        "runtime dependency trust root was absent after dependency generations were committed"
+                            .into(),
+                    ));
+                }
+                transaction.execute(
+                    "INSERT INTO runtime_dependency_trust_roots (
+                        singleton, trust_anchor_id, established_at
+                     ) VALUES (1, ?1, ?2)",
+                    params![trust_anchor_id.as_str(), now_utc()],
+                )?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Return the immutable dependency-admission trust root, if established.
+    pub fn runtime_dependency_trust_root(&self) -> Result<Option<Sha256Digest>, StoreError> {
+        runtime_dependency_trust_root_on_connection(&self.connection)
+    }
+
     /// Reopen one exact runtime record by its immutable identity.
     pub fn runtime_record(&self, record_id: &str) -> Result<Option<RuntimeRecordRow>, StoreError> {
         runtime_record_by_id_on_connection(&self.connection, record_id)
@@ -2888,6 +3094,18 @@ impl Store {
     /// Return the immutable latest checkpoint, or `None` for an empty ledger.
     pub fn runtime_ledger_checkpoint(&self) -> Result<Option<RuntimeLedgerCheckpoint>, StoreError> {
         runtime_ledger_checkpoint_on_connection(&self.connection)
+    }
+
+    /// Reopen the exact dependency provenance bound to one checkpoint.
+    ///
+    /// Missing exact bytes remain committed-unavailable and corrupt bytes are
+    /// reported as corrupt. Neither state is filled from a caller's current
+    /// dependency generation.
+    pub fn runtime_checkpoint_dependency(
+        &self,
+        checkpoint_id: &str,
+    ) -> Result<Option<RuntimeCheckpointDependencyAccess>, StoreError> {
+        runtime_checkpoint_dependency_on_connection(&self.connection, checkpoint_id)
     }
 
     /// Read one bounded page pinned to the supplied immutable checkpoint.
@@ -4756,6 +4974,47 @@ impl Store {
         result
     }
 
+    /// Create and verify the mandatory pre-upgrade backup of the exact
+    /// qualified schema-v6 store.
+    pub fn backup_v6_verified(
+        source: impl AsRef<Path>,
+        destination: impl AsRef<Path>,
+    ) -> Result<BackupArtifact, StoreError> {
+        let source_store = Self::open_v6_upgrade_source_read_only(source)?;
+        let destination = destination.as_ref();
+        if destination.exists() {
+            return Err(StoreError::Invariant(format!(
+                "backup destination already exists: {}",
+                destination.display()
+            )));
+        }
+        drop(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(destination)?,
+        );
+        let result = (|| {
+            let mut target =
+                Connection::open_with_flags(destination, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+            {
+                let backup = rusqlite::backup::Backup::new(&source_store.connection, &mut target)?;
+                backup.run_to_completion(64, std::time::Duration::from_millis(10), None)?;
+            }
+            drop(target);
+            drop(Self::open_v6_upgrade_source_read_only(destination)?);
+            Ok(BackupArtifact {
+                path: destination.to_path_buf(),
+                sha256: sha256_file(destination)?,
+                size_bytes: std::fs::metadata(destination)?.len(),
+            })
+        })();
+        if result.is_err() {
+            remove_database_artifact(destination);
+        }
+        result
+    }
+
     /// Explicitly migrate the exact qualified v0.1.0 schema-v3 store to v4.
     ///
     /// The caller must first create the verified backup named in `receipt`.
@@ -5038,7 +5297,7 @@ impl Store {
     pub fn upgrade_v5_to_v6(
         path: impl AsRef<Path>,
         receipt: &UpgradeReceiptInput,
-    ) -> Result<Self, StoreError> {
+    ) -> Result<(), StoreError> {
         let path = path.as_ref();
         validate_v5_to_v6_receipt(receipt)?;
         let backup_path = Path::new(&receipt.backup_location);
@@ -5107,13 +5366,171 @@ impl Store {
                 "INSERT INTO schema_metadata (
                     singleton, product, schema_version, schema_artifact_digest, initialized_at
                  )
-                 SELECT singleton, product, 6, ?1, initialized_at
+                SELECT singleton, product, 6, ?1, initialized_at
                  FROM schema_metadata_v5",
-                [schema_artifact_digest()],
+                [SCHEMA_V6_ARTIFACT_DIGEST],
             )?;
             transaction.execute("DROP TABLE schema_metadata_v5", [])?;
             transaction.execute_batch(SCHEMA_METADATA_V6_TRIGGERS)?;
             transaction.execute_batch(SCHEMA_V5_TO_V6_RUNTIME_LEDGER)?;
+            transaction.pragma_update(None, "user_version", 6)?;
+
+            let expected = EXPECTED_SCHEMA_V6_FINGERPRINT.as_ref().map_err(|error| {
+                StoreError::Integrity(format!(
+                    "compiled schema-v6 cannot be fingerprinted after migration: {error}"
+                ))
+            })?;
+            let actual = schema_fingerprint(&transaction)?;
+            if &actual != expected {
+                return Err(StoreError::Integrity(format!(
+                    "migrated v6 schema fingerprint {actual} differs from exact v6 {expected}"
+                )));
+            }
+            validate_stored_digests(&transaction)?;
+            validate_upgrade_receipts(&transaction)?;
+            validate_all_admission_context_digests(&transaction)?;
+            validate_local_provider_admissions(&transaction)?;
+            validate_provider_intake_invariants(&transaction)?;
+            validate_refusal_invariants(&transaction)?;
+            validate_run_results(&transaction)?;
+            validate_evaluation_refusal_invariants(&transaction)?;
+            validate_diagnostic_artifact_invariants(&transaction)?;
+            validate_runtime_record_ledger(&transaction)?;
+            validate_status_sequence_lower_bound(&transaction)?;
+            validate_projection_invariants(&transaction)?;
+            let mut committed_receipt = receipt.clone();
+            committed_receipt.finished_at = now_utc();
+            insert_upgrade_receipt(&transaction, &committed_receipt)?;
+            validate_upgrade_receipts(&transaction)?;
+            transaction.commit()?;
+        }
+        validate_v6_upgrade_source_connection(&store.connection)?;
+        Ok(())
+    }
+
+    /// Explicitly migrate the exact qualified schema-v6 store to schema v7.
+    ///
+    /// Existing runtime checkpoints are classified as `legacy_unbound` and
+    /// retain their exact schema-v6 batch identities. The migration does not
+    /// synthesize a dependency generation, trust anchor, or authenticated
+    /// provenance for historical checkpoints.
+    #[allow(clippy::too_many_lines)]
+    pub fn upgrade_v6_to_v7(
+        path: impl AsRef<Path>,
+        receipt: &UpgradeReceiptInput,
+    ) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        validate_v6_to_v7_receipt(receipt)?;
+        let backup_path = Path::new(&receipt.backup_location);
+        if !backup_path.is_file() || sha256_file(backup_path)? != receipt.backup_digest {
+            return Err(StoreError::Invariant(
+                "v6-to-v7 migration requires the exact verified backup named by its receipt".into(),
+            ));
+        }
+        let source_metadata = std::fs::metadata(path)?;
+        let backup_metadata = std::fs::metadata(backup_path)?;
+        if std::fs::canonicalize(path)? == std::fs::canonicalize(backup_path)?
+            || (source_metadata.dev(), source_metadata.ino())
+                == (backup_metadata.dev(), backup_metadata.ino())
+        {
+            return Err(StoreError::Invariant(
+                "v6-to-v7 migration backup must be distinct from the source database".into(),
+            ));
+        }
+        let backup_store = Self::open_v6_upgrade_source_read_only(backup_path)?;
+        let backup_logical_digest = v6_logical_state_digest(&backup_store.connection)?;
+        let source_store = Self::open_v6_upgrade_source_read_only(path)?;
+        let source_logical_digest = v6_logical_state_digest(&source_store.connection)?;
+        if source_logical_digest != backup_logical_digest {
+            return Err(StoreError::Invariant(format!(
+                "v6-to-v7 migration backup logical state {backup_logical_digest} does not match source {source_logical_digest}"
+            )));
+        }
+        drop(source_store);
+        drop(backup_store);
+
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        configure_connection(&connection, false)?;
+        let mut store = Self {
+            connection,
+            path: Some(path.to_path_buf()),
+        };
+        validate_v6_upgrade_source_connection(&store.connection)?;
+        {
+            let transaction = store.immediate_transaction()?;
+            validate_v6_upgrade_source_connection(&transaction)?;
+            if sha256_file(backup_path)? != receipt.backup_digest {
+                return Err(StoreError::Invariant(
+                    "v6-to-v7 migration backup changed after preflight validation".into(),
+                ));
+            }
+            let locked_backup = Self::open_v6_upgrade_source_read_only(backup_path)?;
+            let locked_backup_digest = v6_logical_state_digest(&locked_backup.connection)?;
+            let locked_source_digest = v6_logical_state_digest(&transaction)?;
+            if locked_source_digest != locked_backup_digest {
+                return Err(StoreError::Invariant(format!(
+                    "v6-to-v7 migration backup logical state {locked_backup_digest} does not match locked source {locked_source_digest}"
+                )));
+            }
+            drop(locked_backup);
+
+            let legacy_frontier = runtime_ledger_checkpoint_on_connection(&transaction)?;
+            let legacy_count = legacy_frontier.as_ref().map_or(Ok(0_i64), |checkpoint| {
+                i64::try_from(checkpoint.checkpoint_sequence).map_err(|_| {
+                    StoreError::Integrity(
+                        "schema-v6 checkpoint sequence exceeds migration capacity".into(),
+                    )
+                })
+            })?;
+            transaction.execute_batch(
+                "DROP TRIGGER immutable_schema_metadata_update;
+                 DROP TRIGGER immutable_schema_metadata_delete;
+                 ALTER TABLE schema_metadata RENAME TO schema_metadata_v6;",
+            )?;
+            transaction.execute_batch(SCHEMA_METADATA_V7)?;
+            transaction.execute(
+                "INSERT INTO schema_metadata (
+                    singleton, product, schema_version, schema_artifact_digest, initialized_at
+                 )
+                 SELECT singleton, product, 7, ?1, initialized_at
+                 FROM schema_metadata_v6",
+                [schema_artifact_digest()],
+            )?;
+            transaction.execute("DROP TABLE schema_metadata_v6", [])?;
+            transaction.execute_batch(SCHEMA_METADATA_V7_TRIGGERS)?;
+            transaction.execute_batch(SCHEMA_V6_TO_V7_RUNTIME_DEPENDENCIES)?;
+            let classified_at = now_utc();
+            transaction.execute(
+                "INSERT INTO runtime_dependency_binding_migration_boundaries (
+                    singleton, source_schema_version, source_schema_artifact_digest,
+                    legacy_checkpoint_count, legacy_last_checkpoint_id,
+                    legacy_last_checkpoint_root, classified_at
+                 ) VALUES (1, 6, ?1, ?2, ?3, ?4, ?5)",
+                params![
+                    SCHEMA_V6_ARTIFACT_DIGEST,
+                    legacy_count,
+                    legacy_frontier
+                        .as_ref()
+                        .map(|checkpoint| checkpoint.checkpoint_id.as_str()),
+                    legacy_frontier
+                        .as_ref()
+                        .map(|checkpoint| checkpoint.checkpoint_ledger_root.as_str()),
+                    classified_at,
+                ],
+            )?;
+            transaction.execute(
+                "INSERT INTO runtime_checkpoint_dependency_bindings (
+                    checkpoint_id, binding_state, dependency_generation_id,
+                    trust_anchor_id, canonical_bytes_sha256, source_schema_version
+                 )
+                 SELECT checkpoint_id, 'legacy_unbound', NULL, NULL, NULL, 6
+                 FROM runtime_record_checkpoints
+                 ORDER BY checkpoint_sequence",
+                [],
+            )?;
             transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
 
             let expected = EXPECTED_SCHEMA_FINGERPRINT.as_ref().map_err(|error| {
@@ -5124,7 +5541,7 @@ impl Store {
             let actual = schema_fingerprint(&transaction)?;
             if &actual != expected {
                 return Err(StoreError::Integrity(format!(
-                    "migrated v6 schema fingerprint {actual} differs from fresh v6 {expected}"
+                    "migrated v7 schema fingerprint {actual} differs from fresh v7 {expected}"
                 )));
             }
             validate_stored_digests(&transaction)?;
@@ -5979,6 +6396,7 @@ fn insert_upgrade_receipt(
         (3, 4) => validate_v3_to_v4_receipt(receipt)?,
         (4, 5) => validate_v4_to_v5_receipt(receipt)?,
         (5, 6) => validate_v5_to_v6_receipt(receipt)?,
+        (6, 7) => validate_v6_to_v7_receipt(receipt)?,
         _ => {}
     }
     transaction.execute(
@@ -6134,6 +6552,45 @@ fn validate_v5_to_v6_receipt(receipt: &UpgradeReceiptInput) -> Result<(), StoreE
     Ok(())
 }
 
+fn validate_v6_to_v7_receipt(receipt: &UpgradeReceiptInput) -> Result<(), StoreError> {
+    if receipt.from_schema_version != 6 || receipt.to_schema_version != 7 {
+        return Err(StoreError::Invariant(
+            "v6-to-v7 migration receipt names the wrong version transition".into(),
+        ));
+    }
+    validate_digest("binary_digest", &receipt.binary_digest)?;
+    validate_digest("backup_digest", &receipt.backup_digest)?;
+    validate_upgrade_receipt_times(receipt)?;
+    let expected_migrations =
+        CanonicalDocument::from_serializable(&["schema_v6_to_v7_runtime_dependencies"])?;
+    if receipt.migrations != expected_migrations {
+        return Err(StoreError::Invariant(
+            "v6-to-v7 migration receipt does not name the exact migration vocabulary".into(),
+        ));
+    }
+    if receipt.result != "migrated" {
+        return Err(StoreError::Invariant(
+            "v6-to-v7 migration receipt result must be exactly migrated".into(),
+        ));
+    }
+    let expected_verification = CanonicalDocument::from_serializable(&serde_json::json!({
+        "integrity": "ok",
+        "source_schema_version": 6,
+        "source_schema_artifact_digest": SCHEMA_V6_ARTIFACT_DIGEST,
+        "backup_reopened": true,
+        "historical_dependency_binding": "legacy_unbound",
+        "dependency_generations_synthesized": false,
+        "trust_anchors_synthesized": false,
+    }))?;
+    if receipt.verification != expected_verification {
+        return Err(StoreError::Invariant(
+            "v6-to-v7 migration receipt verification does not match the exact closed vocabulary"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_upgrade_receipts(connection: &Connection) -> Result<(), StoreError> {
     let mut statement = connection.prepare(
         "SELECT receipt_id, from_schema_version, to_schema_version,
@@ -6189,6 +6646,8 @@ fn validate_upgrade_receipts(connection: &Connection) -> Result<(), StoreError> 
             (4, 5) => validate_v4_to_v5_receipt(&receipt)
                 .map_err(|error| StoreError::Integrity(format!("{receipt_id}: {error}")))?,
             (5, 6) => validate_v5_to_v6_receipt(&receipt)
+                .map_err(|error| StoreError::Integrity(format!("{receipt_id}: {error}")))?,
+            (6, 7) => validate_v6_to_v7_receipt(&receipt)
                 .map_err(|error| StoreError::Integrity(format!("{receipt_id}: {error}")))?,
             _ => {}
         }
@@ -6335,11 +6794,38 @@ fn canonical_document_schema(document: &CanonicalDocument) -> Result<String, Sto
         })
 }
 
-fn runtime_record_batch_digest(
+/// Derive the exact batch identity used by the append-only runtime ledger.
+///
+/// This does not append, reserve capacity, validate a runtime graph, or grant
+/// invocation authority.
+pub fn runtime_record_batch_digest(
     batch: &RuntimeRecordBatchInput,
 ) -> Result<Sha256Digest, StoreError> {
-    let records = batch
-        .records
+    validate_runtime_checkpoint_dependency(&batch.dependency)?;
+    runtime_record_batch_digest_v2(
+        &batch.checkpoint_id,
+        batch.expected_predecessor_checkpoint_id.as_deref(),
+        batch.expected_predecessor_ledger_root.as_ref(),
+        &batch.dependency.dependency_generation_id,
+        &batch.dependency.trust_anchor_id,
+        batch.dependency.canonical_custody.digest(),
+        batch.dependency.canonical_custody.as_bytes().len(),
+        &batch.records,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn runtime_record_batch_digest_v2(
+    checkpoint_id: &str,
+    predecessor_checkpoint_id: Option<&str>,
+    predecessor_ledger_root: Option<&Sha256Digest>,
+    dependency_generation_id: &Sha256Digest,
+    trust_anchor_id: &Sha256Digest,
+    dependency_custody_digest: &str,
+    dependency_custody_length: usize,
+    records: &[RuntimeRecordInput],
+) -> Result<Sha256Digest, StoreError> {
+    let records = records
         .iter()
         .map(|record| {
             serde_json::json!({
@@ -6353,16 +6839,123 @@ fn runtime_record_batch_digest(
         .collect::<Vec<_>>();
     let preimage = CanonicalDocument::from_serializable(&serde_json::json!({
         "schema": RUNTIME_LEDGER_BATCH_SCHEMA,
-        "checkpoint_id": batch.checkpoint_id,
-        "expected_predecessor_checkpoint_id": batch.expected_predecessor_checkpoint_id,
-        "expected_predecessor_ledger_root": batch
-            .expected_predecessor_ledger_root
-            .as_ref()
-            .map(Sha256Digest::as_str),
+        "checkpoint_id": checkpoint_id,
+        "expected_predecessor_checkpoint_id": predecessor_checkpoint_id,
+        "expected_predecessor_ledger_root": predecessor_ledger_root.map(Sha256Digest::as_str),
+        "dependency": {
+            "dependency_generation_id": dependency_generation_id,
+            "trust_anchor_id": trust_anchor_id,
+            "canonical_bytes_sha256": dependency_custody_digest,
+            "canonical_bytes_length": dependency_custody_length,
+        },
         "records": records,
     }))?;
     Sha256Digest::parse(preimage.digest().to_owned())
         .map_err(|error| StoreError::Invariant(error.to_string()))
+}
+
+fn legacy_runtime_record_batch_digest(
+    checkpoint_id: &str,
+    predecessor_checkpoint_id: Option<&str>,
+    predecessor_ledger_root: Option<&Sha256Digest>,
+    records: &[RuntimeRecordInput],
+) -> Result<Sha256Digest, StoreError> {
+    let records = records
+        .iter()
+        .map(|record| {
+            serde_json::json!({
+                "record_id": record.record_id,
+                "record_schema": record.record_schema,
+                "canonical_bytes_sha256": record.canonical_bytes.digest(),
+                "canonical_bytes_length": record.canonical_bytes.as_bytes().len(),
+                "committed_at": record.committed_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    let preimage = CanonicalDocument::from_serializable(&serde_json::json!({
+        "schema": LEGACY_RUNTIME_LEDGER_BATCH_SCHEMA,
+        "checkpoint_id": checkpoint_id,
+        "expected_predecessor_checkpoint_id": predecessor_checkpoint_id,
+        "expected_predecessor_ledger_root": predecessor_ledger_root.map(Sha256Digest::as_str),
+        "records": records,
+    }))?;
+    Sha256Digest::parse(preimage.digest().to_owned())
+        .map_err(|error| StoreError::Invariant(error.to_string()))
+}
+
+fn validate_runtime_checkpoint_dependency(
+    dependency: &RuntimeCheckpointDependencyInput,
+) -> Result<(), StoreError> {
+    let value: Value = serde_json::from_slice(dependency.canonical_custody.as_bytes())
+        .map_err(|error| StoreError::CanonicalJson(error.to_string()))?;
+    let object = value.as_object().ok_or_else(|| {
+        StoreError::Invariant("runtime dependency custody must be a canonical object".into())
+    })?;
+    if object.get("schema").and_then(Value::as_str)
+        != Some(RUNTIME_DEPENDENCY_GENERATION_CUSTODY_SCHEMA)
+    {
+        return Err(StoreError::Invariant(
+            "runtime dependency custody uses an unsupported schema".into(),
+        ));
+    }
+    if object.get("generation_id").and_then(Value::as_str)
+        != Some(dependency.dependency_generation_id.as_str())
+    {
+        return Err(StoreError::Invariant(
+            "runtime dependency custody generation identity differs from its checkpoint binding"
+                .into(),
+        ));
+    }
+    let generation_hex = object
+        .get("generation_canonical_bytes")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            StoreError::Invariant("runtime dependency custody lacks exact generation bytes".into())
+        })?;
+    let generation_bytes = hex::decode(generation_hex).map_err(|_| {
+        StoreError::Invariant(
+            "runtime dependency custody generation bytes are not canonical hexadecimal".into(),
+        )
+    })?;
+    if hex::encode(&generation_bytes) != generation_hex
+        || sha256_bytes(&generation_bytes) != dependency.dependency_generation_id
+    {
+        return Err(StoreError::Invariant(
+            "runtime dependency generation bytes differ from their identity".into(),
+        ));
+    }
+    let generation = CanonicalDocument::from_canonical_bytes(generation_bytes)?;
+    let generation_value: Value = serde_json::from_slice(generation.as_bytes())
+        .map_err(|error| StoreError::CanonicalJson(error.to_string()))?;
+    if generation_value
+        .get("trust_anchor_id")
+        .and_then(Value::as_str)
+        != Some(dependency.trust_anchor_id.as_str())
+    {
+        return Err(StoreError::Invariant(
+            "runtime dependency generation names another trust anchor".into(),
+        ));
+    }
+    let anchor_hex = object
+        .get("trust_anchor_canonical_bytes")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            StoreError::Invariant("runtime dependency custody lacks trust-anchor bytes".into())
+        })?;
+    let anchor_bytes = hex::decode(anchor_hex).map_err(|_| {
+        StoreError::Invariant(
+            "runtime dependency trust-anchor bytes are not canonical hexadecimal".into(),
+        )
+    })?;
+    if hex::encode(&anchor_bytes) != anchor_hex
+        || sha256_bytes(&anchor_bytes) != dependency.trust_anchor_id
+    {
+        return Err(StoreError::Invariant(
+            "runtime dependency trust-anchor bytes differ from their identity".into(),
+        ));
+    }
+    let _ = CanonicalDocument::from_canonical_bytes(anchor_bytes)?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6420,6 +7013,7 @@ fn validate_runtime_record_input(record: &RuntimeRecordInput) -> Result<(), Stor
 }
 
 fn validate_runtime_record_batch(batch: &RuntimeRecordBatchInput) -> Result<(), StoreError> {
+    validate_runtime_checkpoint_dependency(&batch.dependency)?;
     Sha256Digest::parse(batch.checkpoint_id.clone()).map_err(|error| {
         StoreError::Invariant(format!(
             "runtime checkpoint_id is not a SHA-256 identity: {error}"
@@ -6537,6 +7131,182 @@ fn runtime_checkpoint_by_id_on_connection(
             StoreError::Integrity(format!("runtime checkpoint root is invalid: {error}"))
         })?,
         committed_at,
+    }))
+}
+
+#[allow(clippy::too_many_lines)]
+fn runtime_checkpoint_dependency_on_connection(
+    connection: &Connection,
+    checkpoint_id: &str,
+) -> Result<Option<RuntimeCheckpointDependencyAccess>, StoreError> {
+    let row = connection
+        .query_row(
+            "SELECT binding_state, dependency_generation_id, trust_anchor_id,
+                    canonical_bytes_sha256, source_schema_version
+             FROM runtime_checkpoint_dependency_bindings
+             WHERE checkpoint_id = ?1",
+            [checkpoint_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((state, generation, anchor, digest, source_version)) = row else {
+        return Ok(None);
+    };
+    if state == "legacy_unbound" {
+        let source_schema_version = source_version
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| {
+                StoreError::Integrity(format!(
+                    "legacy checkpoint {checkpoint_id} lacks its source schema version"
+                ))
+            })?;
+        if generation.is_some() || anchor.is_some() || digest.is_some() {
+            return Err(StoreError::Integrity(format!(
+                "legacy checkpoint {checkpoint_id} invents dependency provenance"
+            )));
+        }
+        return Ok(Some(RuntimeCheckpointDependencyAccess {
+            checkpoint_id: checkpoint_id.to_owned(),
+            binding: RuntimeCheckpointDependencyBinding::LegacyUnbound {
+                source_schema_version,
+            },
+            byte_state: None,
+        }));
+    }
+    if state != "authenticated" || source_version.is_some() {
+        return Err(StoreError::Integrity(format!(
+            "checkpoint {checkpoint_id} has invalid dependency binding state"
+        )));
+    }
+    let dependency_generation_id = Sha256Digest::parse(generation.ok_or_else(|| {
+        StoreError::Integrity(format!(
+            "checkpoint {checkpoint_id} lacks dependency generation identity"
+        ))
+    })?)
+    .map_err(|error| StoreError::Integrity(error.to_string()))?;
+    let trust_anchor_id = Sha256Digest::parse(anchor.ok_or_else(|| {
+        StoreError::Integrity(format!(
+            "checkpoint {checkpoint_id} lacks dependency trust-anchor identity"
+        ))
+    })?)
+    .map_err(|error| StoreError::Integrity(error.to_string()))?;
+    let trust_root = runtime_dependency_trust_root_on_connection(connection)?.ok_or_else(|| {
+        StoreError::Integrity(format!(
+            "authenticated checkpoint {checkpoint_id} lacks a bootstrap trust root"
+        ))
+    })?;
+    if trust_anchor_id != trust_root {
+        return Err(StoreError::Integrity(format!(
+            "checkpoint {checkpoint_id} selected non-bootstrap trust root {trust_anchor_id}; expected {trust_root}"
+        )));
+    }
+    let canonical_bytes_sha256 = Sha256Digest::parse(digest.ok_or_else(|| {
+        StoreError::Integrity(format!(
+            "checkpoint {checkpoint_id} lacks dependency custody digest"
+        ))
+    })?)
+    .map_err(|error| StoreError::Integrity(error.to_string()))?;
+    let commitment = connection
+        .query_row(
+            "SELECT trust_anchor_id, custody_schema, canonical_bytes_sha256,
+                    canonical_bytes_length
+             FROM runtime_dependency_generation_commitments
+             WHERE dependency_generation_id = ?1",
+            [dependency_generation_id.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((committed_anchor, schema, committed_digest, committed_length)) = commitment else {
+        return Err(StoreError::Integrity(format!(
+            "checkpoint {checkpoint_id} references a missing dependency commitment"
+        )));
+    };
+    if committed_anchor != trust_anchor_id.as_str()
+        || schema != RUNTIME_DEPENDENCY_GENERATION_CUSTODY_SCHEMA
+        || committed_digest != canonical_bytes_sha256.as_str()
+        || committed_length <= 0
+    {
+        return Err(StoreError::Integrity(format!(
+            "checkpoint {checkpoint_id} dependency binding differs from its commitment"
+        )));
+    }
+    let payload = connection
+        .query_row(
+            "SELECT canonical_bytes
+             FROM runtime_dependency_generation_payloads
+             WHERE dependency_generation_id = ?1",
+            [dependency_generation_id.as_str()],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()?;
+    let byte_state = match payload {
+        None => RuntimeDependencyGenerationByteState::CommittedUnavailable,
+        Some(bytes) => {
+            let actual_length = i64::try_from(bytes.len()).map_err(|_| {
+                StoreError::Integrity("runtime dependency custody length overflowed".into())
+            })?;
+            if actual_length != committed_length {
+                RuntimeDependencyGenerationByteState::Corrupt {
+                    reason: format!(
+                        "stored byte length {actual_length} differs from committed {committed_length}"
+                    ),
+                }
+            } else if sha256_bytes(&bytes) != canonical_bytes_sha256 {
+                RuntimeDependencyGenerationByteState::Corrupt {
+                    reason: "stored byte digest differs from committed custody".into(),
+                }
+            } else {
+                match CanonicalDocument::from_canonical_bytes(bytes) {
+                    Ok(canonical_custody) => {
+                        let input = RuntimeCheckpointDependencyInput {
+                            dependency_generation_id: dependency_generation_id.clone(),
+                            trust_anchor_id: trust_anchor_id.clone(),
+                            canonical_custody,
+                        };
+                        match validate_runtime_checkpoint_dependency(&input) {
+                            Ok(()) => RuntimeDependencyGenerationByteState::VerifiedAvailable {
+                                canonical_custody: input.canonical_custody,
+                            },
+                            Err(error) => RuntimeDependencyGenerationByteState::Corrupt {
+                                reason: error.to_string(),
+                            },
+                        }
+                    }
+                    Err(error) => RuntimeDependencyGenerationByteState::Corrupt {
+                        reason: error.to_string(),
+                    },
+                }
+            }
+        }
+    };
+    Ok(Some(RuntimeCheckpointDependencyAccess {
+        checkpoint_id: checkpoint_id.to_owned(),
+        binding: RuntimeCheckpointDependencyBinding::Authenticated {
+            dependency_generation_id,
+            trust_anchor_id,
+            canonical_bytes_sha256,
+            canonical_bytes_length: u64::try_from(committed_length).map_err(|_| {
+                StoreError::Integrity(format!(
+                    "checkpoint {checkpoint_id} has invalid dependency custody length"
+                ))
+            })?,
+        },
+        byte_state: Some(byte_state),
     }))
 }
 
@@ -6818,6 +7588,144 @@ fn runtime_record_page_on_connection(
     })
 }
 
+fn require_runtime_dependency_trust_root(
+    transaction: &Transaction<'_>,
+    dependency: &RuntimeCheckpointDependencyInput,
+) -> Result<(), StoreError> {
+    let trust_root =
+        runtime_dependency_trust_root_on_connection(transaction)?.ok_or_else(|| {
+            StoreError::Invariant(
+                "runtime dependency trust root must be established before checkpoint append".into(),
+            )
+        })?;
+    if trust_root != dependency.trust_anchor_id {
+        return Err(StoreError::ReplayConflict(format!(
+            "runtime dependency generation uses trust anchor {}, but store bootstrap root is {trust_root}",
+            dependency.trust_anchor_id
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_runtime_dependency_generation(
+    transaction: &Transaction<'_>,
+    dependency: &RuntimeCheckpointDependencyInput,
+) -> Result<(), StoreError> {
+    validate_runtime_checkpoint_dependency(dependency)?;
+    require_runtime_dependency_trust_root(transaction, dependency)?;
+    let existing = transaction
+        .query_row(
+            "SELECT trust_anchor_id, custody_schema, canonical_bytes_sha256,
+                    canonical_bytes_length
+             FROM runtime_dependency_generation_commitments
+             WHERE dependency_generation_id = ?1",
+            [dependency.dependency_generation_id.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    let length = i64::try_from(dependency.canonical_custody.as_bytes().len())
+        .map_err(|_| StoreError::Invariant("runtime dependency closure is too large".into()))?;
+    match existing {
+        None => {
+            transaction.execute(
+                "INSERT INTO runtime_dependency_generation_commitments (
+                    dependency_generation_id, trust_anchor_id, custody_schema,
+                    canonical_bytes_sha256, canonical_bytes_length, committed_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    dependency.dependency_generation_id.as_str(),
+                    dependency.trust_anchor_id.as_str(),
+                    RUNTIME_DEPENDENCY_GENERATION_CUSTODY_SCHEMA,
+                    dependency.canonical_custody.digest(),
+                    length,
+                    now_utc(),
+                ],
+            )?;
+            transaction.execute(
+                "INSERT INTO runtime_dependency_generation_payloads (
+                    dependency_generation_id, canonical_bytes
+                 ) VALUES (?1, ?2)",
+                params![
+                    dependency.dependency_generation_id.as_str(),
+                    dependency.canonical_custody.as_bytes(),
+                ],
+            )?;
+        }
+        Some((trust_anchor_id, schema, bytes_digest, bytes_length)) => {
+            if trust_anchor_id != dependency.trust_anchor_id.as_str()
+                || schema != RUNTIME_DEPENDENCY_GENERATION_CUSTODY_SCHEMA
+                || bytes_digest != dependency.canonical_custody.digest()
+                || bytes_length != length
+            {
+                return Err(StoreError::ReplayConflict(format!(
+                    "runtime dependency generation {} was reused for substituted custody",
+                    dependency.dependency_generation_id
+                )));
+            }
+            let payload = transaction
+                .query_row(
+                    "SELECT canonical_bytes
+                     FROM runtime_dependency_generation_payloads
+                     WHERE dependency_generation_id = ?1",
+                    [dependency.dependency_generation_id.as_str()],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()?;
+            match payload {
+                None => {
+                    transaction.execute(
+                        "INSERT INTO runtime_dependency_generation_payloads (
+                            dependency_generation_id, canonical_bytes
+                         ) VALUES (?1, ?2)",
+                        params![
+                            dependency.dependency_generation_id.as_str(),
+                            dependency.canonical_custody.as_bytes(),
+                        ],
+                    )?;
+                }
+                Some(bytes) if bytes == dependency.canonical_custody.as_bytes() => {}
+                Some(_) => {
+                    return Err(StoreError::ReplayConflict(format!(
+                        "runtime dependency generation {} has corrupt or substituted bytes",
+                        dependency.dependency_generation_id
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn runtime_dependency_trust_root_on_connection(
+    connection: &Connection,
+) -> Result<Option<Sha256Digest>, StoreError> {
+    let value = connection
+        .query_row(
+            "SELECT trust_anchor_id
+             FROM runtime_dependency_trust_roots
+             WHERE singleton = 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    value
+        .map(|value| {
+            Sha256Digest::parse(value).map_err(|_| {
+                StoreError::Integrity(
+                    "runtime dependency trust root is not a canonical SHA-256 digest".into(),
+                )
+            })
+        })
+        .transpose()
+}
+
 #[allow(clippy::too_many_lines)]
 fn append_runtime_records_in_transaction(
     transaction: &Transaction<'_>,
@@ -6829,6 +7737,27 @@ fn append_runtime_records_in_transaction(
     if let Some(existing) =
         runtime_checkpoint_by_id_on_connection(transaction, &batch.checkpoint_id)?
     {
+        let dependency_access =
+            runtime_checkpoint_dependency_on_connection(transaction, &batch.checkpoint_id)?;
+        let dependency_matches = matches!(
+            dependency_access,
+            Some(RuntimeCheckpointDependencyAccess {
+                binding: RuntimeCheckpointDependencyBinding::Authenticated {
+                    dependency_generation_id,
+                    trust_anchor_id,
+                    canonical_bytes_sha256,
+                    canonical_bytes_length: _,
+                },
+                byte_state: Some(RuntimeDependencyGenerationByteState::VerifiedAvailable {
+                    canonical_custody,
+                }),
+                ..
+            }) if dependency_generation_id == batch.dependency.dependency_generation_id
+                && trust_anchor_id == batch.dependency.trust_anchor_id
+                && canonical_bytes_sha256.as_str()
+                    == batch.dependency.canonical_custody.digest()
+                && canonical_custody == batch.dependency.canonical_custody
+        );
         if existing.batch_digest != batch_digest
             || existing.predecessor_checkpoint_id != batch.expected_predecessor_checkpoint_id
             || existing.predecessor_ledger_root != batch.expected_predecessor_ledger_root
@@ -6836,6 +7765,7 @@ fn append_runtime_records_in_transaction(
                 != u64::try_from(batch.records.len()).map_err(|_| {
                     StoreError::Invariant("runtime-record batch size overflowed".into())
                 })?
+            || !dependency_matches
         {
             return Err(StoreError::ReplayConflict(format!(
                 "runtime checkpoint {} was reused for a different batch",
@@ -6872,6 +7802,7 @@ fn append_runtime_records_in_transaction(
         });
     }
 
+    ensure_runtime_dependency_generation(transaction, &batch.dependency)?;
     let predecessor = runtime_ledger_checkpoint_on_connection(transaction)?;
     let actual_predecessor_checkpoint_id = predecessor
         .as_ref()
@@ -6971,6 +7902,18 @@ fn append_runtime_records_in_transaction(
             checkpoint_committed_at,
         ],
     )?;
+    transaction.execute(
+        "INSERT INTO runtime_checkpoint_dependency_bindings (
+            checkpoint_id, binding_state, dependency_generation_id,
+            trust_anchor_id, canonical_bytes_sha256, source_schema_version
+         ) VALUES (?1, 'authenticated', ?2, ?3, ?4, NULL)",
+        params![
+            batch.checkpoint_id,
+            batch.dependency.dependency_generation_id.as_str(),
+            batch.dependency.trust_anchor_id.as_str(),
+            batch.dependency.canonical_custody.digest(),
+        ],
+    )?;
     for (sequence, record, prior_id, prior_root, root) in prepared {
         transaction.execute(
             "INSERT INTO runtime_record_ledger (
@@ -7029,6 +7972,12 @@ fn append_runtime_records_in_transaction(
 
 #[allow(clippy::too_many_lines)]
 fn validate_runtime_record_ledger(connection: &Connection) -> Result<(), StoreError> {
+    let schema_version = pragma_i64(connection, "user_version")?;
+    if !matches!(schema_version, 6 | 7) {
+        return Err(StoreError::Integrity(format!(
+            "runtime ledger validator does not support schema {schema_version}"
+        )));
+    }
     let mut expected_sequence = 1_u64;
     let mut predecessor_record_id: Option<String> = None;
     let mut predecessor_root: Option<Sha256Digest> = None;
@@ -7134,14 +8083,75 @@ fn validate_runtime_record_ledger(connection: &Connection) -> Result<(), StoreEr
                 committed_at: record.committed_at,
             });
         }
-        let batch = RuntimeRecordBatchInput {
-            checkpoint_id: checkpoint.checkpoint_id.clone(),
-            expected_predecessor_checkpoint_id: checkpoint.predecessor_checkpoint_id.clone(),
-            expected_predecessor_ledger_root: checkpoint.predecessor_ledger_root.clone(),
-            records,
-        };
-        let expected_batch_digest = runtime_record_batch_digest(&batch)
-            .map_err(|error| StoreError::Integrity(error.to_string()))?;
+        let expected_batch_digest = if schema_version == 6 {
+            legacy_runtime_record_batch_digest(
+                &checkpoint.checkpoint_id,
+                checkpoint.predecessor_checkpoint_id.as_deref(),
+                checkpoint.predecessor_ledger_root.as_ref(),
+                &records,
+            )
+        } else {
+            let dependency = runtime_checkpoint_dependency_on_connection(
+                connection,
+                &checkpoint.checkpoint_id,
+            )?
+            .ok_or_else(|| {
+                StoreError::Integrity(format!(
+                    "runtime checkpoint {} lacks dependency provenance",
+                    checkpoint.checkpoint_id
+                ))
+            })?;
+            match dependency.binding {
+                RuntimeCheckpointDependencyBinding::LegacyUnbound {
+                    source_schema_version: 6,
+                } => legacy_runtime_record_batch_digest(
+                    &checkpoint.checkpoint_id,
+                    checkpoint.predecessor_checkpoint_id.as_deref(),
+                    checkpoint.predecessor_ledger_root.as_ref(),
+                    &records,
+                ),
+                RuntimeCheckpointDependencyBinding::LegacyUnbound {
+                    source_schema_version,
+                } => Err(StoreError::Integrity(format!(
+                    "runtime checkpoint {} claims unsupported legacy schema {source_schema_version}",
+                    checkpoint.checkpoint_id
+                ))),
+                RuntimeCheckpointDependencyBinding::Authenticated {
+                    dependency_generation_id,
+                    trust_anchor_id,
+                    canonical_bytes_sha256,
+                    canonical_bytes_length,
+                } => runtime_record_batch_digest_v2(
+                    &checkpoint.checkpoint_id,
+                    checkpoint.predecessor_checkpoint_id.as_deref(),
+                    checkpoint.predecessor_ledger_root.as_ref(),
+                    &dependency_generation_id,
+                    &trust_anchor_id,
+                    canonical_bytes_sha256.as_str(),
+                    usize::try_from(canonical_bytes_length).map_err(|_| {
+                        StoreError::Integrity(format!(
+                            "runtime checkpoint {} dependency custody length overflowed",
+                            checkpoint.checkpoint_id
+                        ))
+                    })?,
+                    &records,
+                ),
+            }
+        }
+        .map_err(|error| {
+            if schema_version == 6 {
+                StoreError::Integrity(format!(
+                    "schema-v6 runtime checkpoint {} is invalid: {error}",
+                    checkpoint.checkpoint_id
+                ))
+            } else {
+                error
+            }
+        })
+        .map_err(|error| match error {
+            StoreError::Integrity(_) => error,
+            other => StoreError::Integrity(other.to_string()),
+        })?;
         if checkpoint.batch_digest != expected_batch_digest {
             return Err(StoreError::Integrity(format!(
                 "runtime checkpoint {} has invalid batch digest",
@@ -7183,6 +8193,172 @@ fn validate_runtime_record_ledger(connection: &Connection) -> Result<(), StoreEr
         return Err(StoreError::Integrity(
             "runtime checkpoint frontier does not cover the complete record ledger".into(),
         ));
+    }
+    if schema_version == 7 {
+        validate_runtime_dependency_binding_boundary(connection)?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn validate_runtime_dependency_binding_boundary(connection: &Connection) -> Result<(), StoreError> {
+    let checkpoint_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM runtime_record_checkpoints",
+        [],
+        |row| row.get(0),
+    )?;
+    let binding_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM runtime_checkpoint_dependency_bindings",
+        [],
+        |row| row.get(0),
+    )?;
+    if binding_count != checkpoint_count {
+        return Err(StoreError::Integrity(format!(
+            "runtime dependency binding count {binding_count} differs from checkpoint count {checkpoint_count}"
+        )));
+    }
+    let trust_root = runtime_dependency_trust_root_on_connection(connection)?;
+    let authenticated_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM runtime_checkpoint_dependency_bindings
+         WHERE binding_state = 'authenticated'",
+        [],
+        |row| row.get(0),
+    )?;
+    if authenticated_count != 0 && trust_root.is_none() {
+        return Err(StoreError::Integrity(
+            "authenticated runtime dependency checkpoints lack a bootstrap trust root".into(),
+        ));
+    }
+    if let Some(trust_root) = trust_root {
+        let mismatched_generations: i64 = connection.query_row(
+            "SELECT COUNT(*)
+             FROM runtime_dependency_generation_commitments
+             WHERE trust_anchor_id <> ?1",
+            [trust_root.as_str()],
+            |row| row.get(0),
+        )?;
+        let mismatched_bindings: i64 = connection.query_row(
+            "SELECT COUNT(*)
+             FROM runtime_checkpoint_dependency_bindings
+             WHERE binding_state = 'authenticated'
+               AND trust_anchor_id <> ?1",
+            [trust_root.as_str()],
+            |row| row.get(0),
+        )?;
+        if mismatched_generations != 0 || mismatched_bindings != 0 {
+            return Err(StoreError::Integrity(
+                "runtime dependency generation or checkpoint selected a non-bootstrap trust root"
+                    .into(),
+            ));
+        }
+    }
+    let legacy_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM runtime_checkpoint_dependency_bindings
+         WHERE binding_state = 'legacy_unbound'",
+        [],
+        |row| row.get(0),
+    )?;
+    let boundary = connection
+        .query_row(
+            "SELECT source_schema_version, source_schema_artifact_digest,
+                    legacy_checkpoint_count, legacy_last_checkpoint_id,
+                    legacy_last_checkpoint_root, classified_at
+             FROM runtime_dependency_binding_migration_boundaries
+             WHERE singleton = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    match boundary {
+        None if legacy_count == 0 => {}
+        None => {
+            return Err(StoreError::Integrity(
+                "legacy-unbound runtime checkpoints lack a schema-v6 migration boundary".into(),
+            ));
+        }
+        Some((source_version, source_digest, count, last_id, last_root, classified_at)) => {
+            if source_version != 6
+                || source_digest != SCHEMA_V6_ARTIFACT_DIGEST
+                || count != legacy_count
+                || count < 0
+                || chrono::DateTime::parse_from_rfc3339(&classified_at).is_err()
+            {
+                return Err(StoreError::Integrity(
+                    "runtime dependency migration boundary is invalid".into(),
+                ));
+            }
+            let nonprefix_legacy: i64 = connection.query_row(
+                "SELECT COUNT(*)
+                 FROM runtime_checkpoint_dependency_bindings AS binding
+                 JOIN runtime_record_checkpoints AS checkpoint
+                   ON checkpoint.checkpoint_id = binding.checkpoint_id
+                 WHERE binding.binding_state = 'legacy_unbound'
+                   AND checkpoint.checkpoint_sequence > ?1",
+                [count],
+                |row| row.get(0),
+            )?;
+            let prefix_authenticated: i64 = connection.query_row(
+                "SELECT COUNT(*)
+                 FROM runtime_checkpoint_dependency_bindings AS binding
+                 JOIN runtime_record_checkpoints AS checkpoint
+                   ON checkpoint.checkpoint_id = binding.checkpoint_id
+                 WHERE binding.binding_state = 'authenticated'
+                   AND checkpoint.checkpoint_sequence <= ?1",
+                [count],
+                |row| row.get(0),
+            )?;
+            if nonprefix_legacy != 0 || prefix_authenticated != 0 {
+                return Err(StoreError::Integrity(
+                    "schema-v6 legacy dependency bindings are not one exact checkpoint prefix"
+                        .into(),
+                ));
+            }
+            if count == 0 {
+                if last_id.is_some() || last_root.is_some() {
+                    return Err(StoreError::Integrity(
+                        "empty schema-v6 boundary invents a legacy frontier".into(),
+                    ));
+                }
+            } else {
+                let observed = connection
+                    .query_row(
+                        "SELECT checkpoint_id, checkpoint_ledger_root
+                         FROM runtime_record_checkpoints
+                         WHERE checkpoint_sequence = ?1",
+                        [count],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .optional()?;
+                if observed != last_id.zip(last_root) {
+                    return Err(StoreError::Integrity(
+                        "schema-v6 dependency boundary frontier was substituted".into(),
+                    ));
+                }
+            }
+        }
+    }
+    let unreferenced_commitments: i64 = connection.query_row(
+        "SELECT COUNT(*)
+         FROM runtime_dependency_generation_commitments AS generation
+         LEFT JOIN runtime_checkpoint_dependency_bindings AS binding
+           ON binding.dependency_generation_id = generation.dependency_generation_id
+         WHERE binding.checkpoint_id IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    if unreferenced_commitments != 0 {
+        return Err(StoreError::Integrity(format!(
+            "{unreferenced_commitments} runtime dependency commitments are not bound to checkpoints"
+        )));
     }
     Ok(())
 }
@@ -8621,6 +9797,72 @@ fn validate_v5_upgrade_source_connection(connection: &Connection) -> Result<(), 
     validate_projection_invariants(connection)
 }
 
+fn validate_v6_upgrade_source_connection(connection: &Connection) -> Result<(), StoreError> {
+    let version = pragma_i64(connection, "user_version")?;
+    if version != 6 {
+        return Err(StoreError::SchemaVersionMismatch {
+            found: version,
+            supported: 6,
+        });
+    }
+    let application_id = pragma_i64(connection, "application_id")?;
+    if application_id != APPLICATION_ID {
+        return Err(StoreError::ApplicationIdMismatch {
+            found: application_id,
+            expected: APPLICATION_ID,
+        });
+    }
+    let metadata: (i64, String) = connection.query_row(
+        "SELECT schema_version, schema_artifact_digest
+         FROM schema_metadata WHERE singleton = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if metadata.0 != 6 || metadata.1 != SCHEMA_V6_ARTIFACT_DIGEST {
+        return Err(StoreError::Integrity(
+            "schema-v6 metadata does not identify the exact qualified schema artifact".into(),
+        ));
+    }
+    let quick_check: String =
+        connection.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+    if quick_check != "ok" {
+        return Err(StoreError::Integrity(quick_check));
+    }
+    let foreign_key_failures: i64 =
+        connection.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })?;
+    if foreign_key_failures != 0 {
+        return Err(StoreError::Integrity(format!(
+            "{foreign_key_failures} schema-v6 foreign-key violations"
+        )));
+    }
+    let expected = EXPECTED_SCHEMA_V6_FINGERPRINT.as_ref().map_err(|error| {
+        StoreError::Integrity(format!(
+            "compiled v6 schema cannot be fingerprinted: {error}"
+        ))
+    })?;
+    let actual = schema_fingerprint(connection)?;
+    if &actual != expected {
+        return Err(StoreError::Integrity(format!(
+            "schema-v6 definition fingerprint {actual} differs from exact qualified v6 {expected}"
+        )));
+    }
+    validate_stored_digests(connection)?;
+    validate_upgrade_receipts(connection)?;
+    validate_all_admission_context_digests(connection)?;
+    validate_local_provider_admissions(connection)?;
+    validate_provider_intake_invariants(connection)?;
+    validate_refusal_invariants(connection)?;
+    validate_run_results(connection)?;
+    validate_evaluation_refusal_invariants(connection)?;
+    validate_diagnostic_artifact_invariants(connection)?;
+    validate_runtime_record_ledger(connection)?;
+    validate_admitted_report_associations_connection(connection)?;
+    validate_status_sequence_lower_bound(connection)?;
+    validate_projection_invariants(connection)
+}
+
 fn validate_admitted_report_associations_connection(
     connection: &Connection,
 ) -> Result<(), StoreError> {
@@ -8711,6 +9953,10 @@ fn v4_logical_state_digest(connection: &Connection) -> Result<String, StoreError
 
 fn v5_logical_state_digest(connection: &Connection) -> Result<String, StoreError> {
     logical_state_digest(connection, b"nq.schema_v5.logical_state.v1\0")
+}
+
+fn v6_logical_state_digest(connection: &Connection) -> Result<String, StoreError> {
+    logical_state_digest(connection, b"nq.schema_v6.logical_state.v1\0")
 }
 
 fn logical_state_digest(connection: &Connection, domain: &[u8]) -> Result<String, StoreError> {
@@ -8828,6 +10074,11 @@ fn validate_required_objects(connection: &Connection) -> Result<(), StoreError> 
         "legacy_references",
         "upgrade_receipts",
         "runtime_record_checkpoints",
+        "runtime_dependency_trust_roots",
+        "runtime_dependency_generation_commitments",
+        "runtime_dependency_generation_payloads",
+        "runtime_checkpoint_dependency_bindings",
+        "runtime_dependency_binding_migration_boundaries",
         "runtime_record_ledger",
         "runtime_record_lookup",
         "local_diagnostic_artifact_provider_attempt_bindings",
@@ -12413,6 +13664,31 @@ mod tests {
         }
     }
 
+    fn exact_v6_to_v7_receipt(backup: &BackupArtifact) -> UpgradeReceiptInput {
+        UpgradeReceiptInput {
+            receipt_id: "upgrade-v6-v7-runtime-dependencies".to_owned(),
+            from_schema_version: 6,
+            to_schema_version: 7,
+            migrations: document(json!(["schema_v6_to_v7_runtime_dependencies"])),
+            binary_digest: digest("migration-binary-v7"),
+            backup_digest: backup.sha256.clone(),
+            backup_location: backup.path.to_string_lossy().into_owned(),
+            started_at: "2026-07-01T12:00:00Z".to_owned(),
+            finished_at: "2026-07-01T12:00:01Z".to_owned(),
+            result: "migrated".to_owned(),
+            operator_identity: document(json!({"uid": 991})),
+            verification: document(json!({
+                "integrity": "ok",
+                "source_schema_version": 6,
+                "source_schema_artifact_digest": SCHEMA_V6_ARTIFACT_DIGEST,
+                "backup_reopened": true,
+                "historical_dependency_binding": "legacy_unbound",
+                "dependency_generations_synthesized": false,
+                "trust_anchors_synthesized": false,
+            })),
+        }
+    }
+
     fn runtime_record(label: &str, schema: &str, committed_at: &str) -> RuntimeRecordInput {
         RuntimeRecordInput {
             record_id: digest(&format!("runtime-record-{label}")),
@@ -12425,13 +13701,132 @@ mod tests {
         }
     }
 
+    fn runtime_dependency(label: &str) -> RuntimeCheckpointDependencyInput {
+        let anchor = document(json!({
+            "schema": "nq.test_dependency_anchor.v1",
+            "label": label,
+        }));
+        let trust_anchor_id =
+            Sha256Digest::parse(anchor.digest().to_owned()).expect("test anchor digest");
+        let generation = document(json!({
+            "schema": "nq.test_runtime_dependency_generation.v1",
+            "label": label,
+            "trust_anchor_id": trust_anchor_id,
+        }));
+        let dependency_generation_id =
+            Sha256Digest::parse(generation.digest().to_owned()).expect("test generation digest");
+        let canonical_custody = document(json!({
+            "schema": RUNTIME_DEPENDENCY_GENERATION_CUSTODY_SCHEMA,
+            "generation_id": dependency_generation_id,
+            "generation_canonical_bytes": hex::encode(generation.as_bytes()),
+            "identity_catalog_canonical_bytes": "",
+            "external_dependency_canonical_bytes": "",
+            "authority_admission_canonical_bytes": "",
+            "trust_anchor_canonical_bytes": hex::encode(anchor.as_bytes()),
+            "admission_receipt_set_canonical_bytes": "",
+        }));
+        RuntimeCheckpointDependencyInput {
+            dependency_generation_id,
+            trust_anchor_id,
+            canonical_custody,
+        }
+    }
+
     fn initial_runtime_batch(records: Vec<RuntimeRecordInput>) -> RuntimeRecordBatchInput {
         RuntimeRecordBatchInput {
             checkpoint_id: digest("runtime-checkpoint-initial"),
             expected_predecessor_checkpoint_id: None,
             expected_predecessor_ledger_root: None,
+            dependency: runtime_dependency("default"),
             records,
         }
+    }
+
+    fn establish_runtime_root(store: &mut Store, dependency: &RuntimeCheckpointDependencyInput) {
+        store
+            .establish_runtime_dependency_trust_root(&dependency.trust_anchor_id)
+            .expect("runtime dependency bootstrap trust root");
+    }
+
+    fn next_runtime_batch(
+        label: &str,
+        predecessor: &RuntimeLedgerCheckpoint,
+        dependency: RuntimeCheckpointDependencyInput,
+    ) -> RuntimeRecordBatchInput {
+        RuntimeRecordBatchInput {
+            checkpoint_id: digest(&format!("runtime-checkpoint-{label}")),
+            expected_predecessor_checkpoint_id: Some(predecessor.checkpoint_id.clone()),
+            expected_predecessor_ledger_root: Some(predecessor.checkpoint_ledger_root.clone()),
+            dependency,
+            records: vec![runtime_record(
+                label,
+                "nq.provider_intake.v1",
+                "2026-07-29T12:00:10Z",
+            )],
+        }
+    }
+
+    fn insert_exact_v6_runtime_checkpoint(connection: &Connection) -> RuntimeLedgerCheckpoint {
+        let checkpoint_id = digest("schema-v6-legacy-checkpoint");
+        let record = runtime_record(
+            "schema-v6-legacy",
+            "nq.provider_intake.v1",
+            "2026-07-29T11:59:59Z",
+        );
+        let ledger_root =
+            runtime_record_root(1, &record, &checkpoint_id, None, None).expect("v6 ledger root");
+        let batch_digest = legacy_runtime_record_batch_digest(
+            &checkpoint_id,
+            None,
+            None,
+            std::slice::from_ref(&record),
+        )
+        .expect("v6 batch digest");
+        connection
+            .execute(
+                "INSERT INTO runtime_record_checkpoints (
+                    checkpoint_id, batch_digest, first_record_sequence,
+                    last_record_sequence, record_count, predecessor_checkpoint_id,
+                    predecessor_ledger_root, checkpoint_ledger_root, committed_at
+                 ) VALUES (?1, ?2, 1, 1, 1, NULL, NULL, ?3, ?4)",
+                params![
+                    checkpoint_id,
+                    batch_digest.as_str(),
+                    ledger_root.as_str(),
+                    "2026-07-29T12:00:00Z",
+                ],
+            )
+            .expect("insert exact v6 checkpoint");
+        connection
+            .execute(
+                "INSERT INTO runtime_record_ledger (
+                    record_sequence, record_id, record_schema, canonical_bytes,
+                    canonical_bytes_sha256, checkpoint_id, predecessor_record_id,
+                    predecessor_ledger_root, ledger_root, committed_at
+                 ) VALUES (1, ?1, ?2, ?3, ?4, ?5, NULL, NULL, ?6, ?7)",
+                params![
+                    record.record_id,
+                    record.record_schema,
+                    record.canonical_bytes.as_bytes(),
+                    record.canonical_bytes.digest(),
+                    checkpoint_id,
+                    ledger_root.as_str(),
+                    record.committed_at,
+                ],
+            )
+            .expect("insert exact v6 record");
+        connection
+            .execute(
+                "INSERT INTO runtime_record_lookup (
+                    record_id, record_sequence, record_schema, ledger_root
+                 ) VALUES (?1, 1, ?2, ?3)",
+                params![record.record_id, record.record_schema, ledger_root.as_str()],
+            )
+            .expect("insert exact v6 lookup");
+        validate_v6_upgrade_source_connection(connection).expect("exact v6 history validates");
+        runtime_ledger_checkpoint_on_connection(connection)
+            .expect("v6 frontier")
+            .expect("v6 checkpoint")
     }
 
     fn configured_store() -> (Store, String) {
@@ -17517,6 +18912,54 @@ mod tests {
     }
 
     #[test]
+    fn runtime_checkpoint_cannot_select_or_replace_the_store_bootstrap_root() {
+        let mut store = Store::initialize_in_memory().expect("store initializes");
+        let batch = initial_runtime_batch(vec![runtime_record(
+            "root-required",
+            "nq.provider_intake.v1",
+            "2026-07-29T12:00:00Z",
+        )]);
+        assert!(matches!(
+            store.append_runtime_records(&batch),
+            Err(StoreError::Invariant(message))
+                if message.contains("trust root must be established")
+        ));
+        assert!(
+            store
+                .runtime_ledger_checkpoint()
+                .expect("empty frontier")
+                .is_none()
+        );
+        establish_runtime_root(&mut store, &batch.dependency);
+        assert_eq!(
+            store
+                .runtime_dependency_trust_root()
+                .expect("bootstrap root"),
+            Some(batch.dependency.trust_anchor_id.clone())
+        );
+        store
+            .append_runtime_records(&batch)
+            .expect("checkpoint under bootstrap root");
+
+        let replacement = runtime_dependency("replacement-root");
+        assert_ne!(
+            replacement.trust_anchor_id,
+            batch.dependency.trust_anchor_id
+        );
+        assert!(matches!(
+            store.establish_runtime_dependency_trust_root(&replacement.trust_anchor_id),
+            Err(StoreError::ReplayConflict(message))
+                if message.contains("trust root differs")
+        ));
+        assert_eq!(
+            store
+                .runtime_dependency_trust_root()
+                .expect("unchanged bootstrap root"),
+            Some(batch.dependency.trust_anchor_id)
+        );
+    }
+
+    #[test]
     fn runtime_ledger_is_globally_sequenced_replayable_and_snapshot_pinned() {
         let mut store = Store::initialize_in_memory().expect("store initializes");
         let batch = initial_runtime_batch(vec![
@@ -17531,6 +18974,7 @@ mod tests {
                 "2026-07-29T12:00:01Z",
             ),
         ]);
+        establish_runtime_root(&mut store, &batch.dependency);
         let committed = store
             .append_runtime_records(&batch)
             .expect("runtime batch commits");
@@ -17579,6 +19023,326 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_dependency_closure_is_deduplicated_and_exactly_reopened() {
+        let mut store = Store::initialize_in_memory().expect("store initializes");
+        let first = initial_runtime_batch(vec![runtime_record(
+            "dependency-dedupe-first",
+            "nq.provider_intake.v1",
+            "2026-07-29T12:00:00Z",
+        )]);
+        establish_runtime_root(&mut store, &first.dependency);
+        let first_receipt = store
+            .append_runtime_records(&first)
+            .expect("first dependency-bound checkpoint");
+        let second = next_runtime_batch(
+            "dependency-dedupe-second",
+            &first_receipt.checkpoint,
+            first.dependency.clone(),
+        );
+        let second_receipt = store
+            .append_runtime_records(&second)
+            .expect("second dependency-bound checkpoint");
+
+        let counts: (i64, i64, i64) = store
+            .connection
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM runtime_dependency_generation_commitments),
+                    (SELECT COUNT(*) FROM runtime_dependency_generation_payloads),
+                    (SELECT COUNT(*) FROM runtime_checkpoint_dependency_bindings)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("dependency custody counts");
+        assert_eq!(counts, (1, 1, 2));
+        for checkpoint in [&first_receipt.checkpoint, &second_receipt.checkpoint] {
+            let access = store
+                .runtime_checkpoint_dependency(&checkpoint.checkpoint_id)
+                .expect("dependency access")
+                .expect("dependency binding");
+            assert!(matches!(
+                access.binding,
+                RuntimeCheckpointDependencyBinding::Authenticated {
+                    dependency_generation_id,
+                    trust_anchor_id,
+                    canonical_bytes_sha256,
+                    canonical_bytes_length,
+                } if dependency_generation_id == first.dependency.dependency_generation_id
+                    && trust_anchor_id == first.dependency.trust_anchor_id
+                    && canonical_bytes_sha256.as_str()
+                        == first.dependency.canonical_custody.digest()
+                    && canonical_bytes_length
+                        == u64::try_from(first.dependency.canonical_custody.as_bytes().len())
+                            .expect("dependency length")
+            ));
+            assert!(matches!(
+                access.byte_state,
+                Some(RuntimeDependencyGenerationByteState::VerifiedAvailable {
+                    canonical_custody,
+                }) if canonical_custody == first.dependency.canonical_custody
+            ));
+        }
+        store.validate().expect("deduplicated history validates");
+    }
+
+    #[test]
+    fn checkpoint_dependency_bytes_preserve_unavailable_and_corrupt_states() {
+        let mut unavailable = Store::initialize_in_memory().expect("unavailable store");
+        let unavailable_batch = initial_runtime_batch(vec![runtime_record(
+            "dependency-unavailable",
+            "nq.provider_intake.v1",
+            "2026-07-29T12:00:00Z",
+        )]);
+        establish_runtime_root(&mut unavailable, &unavailable_batch.dependency);
+        let unavailable_receipt = unavailable
+            .append_runtime_records(&unavailable_batch)
+            .expect("dependency-bound checkpoint");
+        let delete_trigger: String = unavailable
+            .connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                 WHERE type = 'trigger'
+                   AND name = 'immutable_runtime_dependency_generation_payloads_delete'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("payload delete trigger");
+        unavailable
+            .connection
+            .execute_batch("DROP TRIGGER immutable_runtime_dependency_generation_payloads_delete;")
+            .expect("drop payload delete trigger");
+        unavailable
+            .connection
+            .execute(
+                "DELETE FROM runtime_dependency_generation_payloads
+                 WHERE dependency_generation_id = ?1",
+                [unavailable_batch
+                    .dependency
+                    .dependency_generation_id
+                    .as_str()],
+            )
+            .expect("remove exact dependency bytes");
+        unavailable
+            .connection
+            .execute_batch(&delete_trigger)
+            .expect("restore payload delete trigger");
+        unavailable
+            .validate()
+            .expect("committed-unavailable dependency remains valid custody");
+        assert!(matches!(
+            unavailable
+                .runtime_checkpoint_dependency(&unavailable_receipt.checkpoint.checkpoint_id)
+                .expect("unavailable access")
+                .expect("unavailable binding")
+                .byte_state,
+            Some(RuntimeDependencyGenerationByteState::CommittedUnavailable)
+        ));
+
+        let mut corrupt = Store::initialize_in_memory().expect("corrupt store");
+        let corrupt_batch = initial_runtime_batch(vec![runtime_record(
+            "dependency-corrupt",
+            "nq.provider_intake.v1",
+            "2026-07-29T12:00:00Z",
+        )]);
+        establish_runtime_root(&mut corrupt, &corrupt_batch.dependency);
+        let corrupt_receipt = corrupt
+            .append_runtime_records(&corrupt_batch)
+            .expect("dependency-bound checkpoint");
+        let update_trigger: String = corrupt
+            .connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                 WHERE type = 'trigger'
+                   AND name = 'immutable_runtime_dependency_generation_payloads_update'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("payload update trigger");
+        let original = corrupt_batch
+            .dependency
+            .canonical_custody
+            .as_bytes()
+            .to_vec();
+        let mut substituted_value: Value =
+            serde_json::from_slice(&original).expect("canonical dependency JSON");
+        let generation_hex = substituted_value["generation_canonical_bytes"]
+            .as_str()
+            .expect("generation hex")
+            .to_owned();
+        let replacement_head = if generation_hex.starts_with('0') {
+            "1"
+        } else {
+            "0"
+        };
+        substituted_value["generation_canonical_bytes"] =
+            Value::String(format!("{replacement_head}{}", &generation_hex[1..]));
+        let substituted = document(substituted_value);
+        assert_eq!(substituted.as_bytes().len(), original.len());
+        assert_ne!(substituted.as_bytes(), original);
+        corrupt
+            .connection
+            .execute_batch("DROP TRIGGER immutable_runtime_dependency_generation_payloads_update;")
+            .expect("drop payload update trigger");
+        corrupt
+            .connection
+            .execute(
+                "UPDATE runtime_dependency_generation_payloads
+                 SET canonical_bytes = ?1
+                 WHERE dependency_generation_id = ?2",
+                params![
+                    substituted.as_bytes(),
+                    corrupt_batch.dependency.dependency_generation_id.as_str(),
+                ],
+            )
+            .expect("substitute dependency payload");
+        corrupt
+            .connection
+            .execute_batch(&update_trigger)
+            .expect("restore payload update trigger");
+        corrupt
+            .validate()
+            .expect("corrupt bytes remain an explicit access state");
+        assert!(matches!(
+            corrupt
+                .runtime_checkpoint_dependency(&corrupt_receipt.checkpoint.checkpoint_id)
+                .expect("corrupt access")
+                .expect("corrupt binding")
+                .byte_state,
+            Some(RuntimeDependencyGenerationByteState::Corrupt { .. })
+        ));
+    }
+
+    #[test]
+    fn missing_dependency_commitment_and_new_anchor_binding_substitution_fail_closed() {
+        let mut missing = Store::initialize_in_memory().expect("missing store");
+        let missing_batch = initial_runtime_batch(vec![runtime_record(
+            "dependency-missing",
+            "nq.provider_intake.v1",
+            "2026-07-29T12:00:00Z",
+        )]);
+        establish_runtime_root(&mut missing, &missing_batch.dependency);
+        let missing_receipt = missing
+            .append_runtime_records(&missing_batch)
+            .expect("dependency-bound checkpoint");
+        let delete_trigger: String = missing
+            .connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                 WHERE type = 'trigger'
+                   AND name = 'immutable_runtime_dependency_generation_commitments_delete'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("commitment delete trigger");
+        missing
+            .connection
+            .execute_batch(
+                "DROP TRIGGER immutable_runtime_dependency_generation_commitments_delete;
+                 PRAGMA foreign_keys = OFF;",
+            )
+            .expect("permit hostile commitment deletion");
+        missing
+            .connection
+            .execute(
+                "DELETE FROM runtime_dependency_generation_commitments
+                 WHERE dependency_generation_id = ?1",
+                [missing_batch.dependency.dependency_generation_id.as_str()],
+            )
+            .expect("remove dependency commitment");
+        missing
+            .connection
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("restore foreign keys");
+        missing
+            .connection
+            .execute_batch(&delete_trigger)
+            .expect("restore commitment delete trigger");
+        assert!(matches!(
+            missing.runtime_checkpoint_dependency(&missing_receipt.checkpoint.checkpoint_id),
+            Err(StoreError::Integrity(message))
+                if message.contains("missing dependency commitment")
+        ));
+        assert!(missing.validate().is_err());
+
+        let mut substituted = Store::initialize_in_memory().expect("substitution store");
+        let first = initial_runtime_batch(vec![runtime_record(
+            "anchor-substitution-first",
+            "nq.provider_intake.v1",
+            "2026-07-29T12:00:00Z",
+        )]);
+        establish_runtime_root(&mut substituted, &first.dependency);
+        let first_receipt = substituted
+            .append_runtime_records(&first)
+            .expect("first dependency generation");
+        let new_anchor = runtime_dependency("new-anchor");
+        assert_ne!(new_anchor.trust_anchor_id, first.dependency.trust_anchor_id);
+        let second = next_runtime_batch(
+            "anchor-substitution-second",
+            &first_receipt.checkpoint,
+            new_anchor.clone(),
+        );
+        assert!(matches!(
+            substituted.append_runtime_records(&second),
+            Err(StoreError::ReplayConflict(message))
+                if message.contains("store bootstrap root")
+        ));
+        assert_eq!(
+            substituted
+                .runtime_ledger_checkpoint()
+                .expect("frontier after rejected anchor"),
+            Some(first_receipt.checkpoint.clone())
+        );
+        let binding_trigger: String = substituted
+            .connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                 WHERE type = 'trigger'
+                   AND name = 'immutable_runtime_checkpoint_dependency_bindings_update'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("binding update trigger");
+        substituted
+            .connection
+            .execute_batch(
+                "DROP TRIGGER immutable_runtime_checkpoint_dependency_bindings_update;
+                 PRAGMA foreign_keys = OFF;",
+            )
+            .expect("drop binding update trigger");
+        substituted
+            .connection
+            .execute(
+                "UPDATE runtime_checkpoint_dependency_bindings
+                 SET trust_anchor_id = ?1
+                 WHERE checkpoint_id = ?2",
+                params![
+                    new_anchor.trust_anchor_id.as_str(),
+                    first_receipt.checkpoint.checkpoint_id,
+                ],
+            )
+            .expect("substitute new anchor binding into g1");
+        substituted
+            .connection
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("restore foreign keys");
+        substituted
+            .connection
+            .execute_batch(&binding_trigger)
+            .expect("restore binding update trigger");
+        assert!(matches!(
+            substituted.runtime_checkpoint_dependency(
+                &first_receipt.checkpoint.checkpoint_id
+            ),
+            Err(StoreError::Integrity(message))
+                if message.contains("selected non-bootstrap trust root")
+        ));
+        assert!(matches!(
+            substituted.validate(),
+            Err(StoreError::Integrity(_))
+        ));
+    }
+
+    #[test]
     fn runtime_ledger_refuses_schema_and_identity_collisions_atomically() {
         let mut store = Store::initialize_in_memory().expect("store initializes");
         let first = initial_runtime_batch(vec![runtime_record(
@@ -17586,6 +19350,7 @@ mod tests {
             "nq.diagnostic_invocation_request.v1",
             "2026-07-29T12:00:00Z",
         )]);
+        establish_runtime_root(&mut store, &first.dependency);
         let committed = store
             .append_runtime_records(&first)
             .expect("first runtime batch");
@@ -17607,6 +19372,7 @@ mod tests {
             expected_predecessor_ledger_root: Some(
                 committed.checkpoint.checkpoint_ledger_root.clone(),
             ),
+            dependency: first.dependency.clone(),
             records: first.records.clone(),
         };
         assert!(matches!(
@@ -17620,6 +19386,7 @@ mod tests {
             expected_predecessor_ledger_root: Some(
                 committed.checkpoint.checkpoint_ledger_root.clone(),
             ),
+            dependency: first.dependency.clone(),
             records: vec![runtime_record(
                 "unsupported",
                 "nq.unratified_runtime_plugin.v1",
@@ -17644,6 +19411,7 @@ mod tests {
             expected_predecessor_ledger_root: Some(
                 committed.checkpoint.checkpoint_ledger_root.clone(),
             ),
+            dependency: first.dependency.clone(),
             records: vec![
                 runtime_record("role", "nq.role_manifest.v1", "2026-07-29T12:00:03Z"),
                 runtime_record(
@@ -17692,6 +19460,7 @@ mod tests {
             "nq.role_manifest.v1",
             "2026-07-29T12:00:00Z",
         )]);
+        establish_runtime_root(&mut store, &batch.dependency);
         let receipt = store
             .append_runtime_records(&batch)
             .expect("runtime batch commits");
@@ -17741,6 +19510,7 @@ mod tests {
             "nq.diagnostic_invocation_request.v1",
             "2026-07-29T12:00:00Z",
         )]);
+        establish_runtime_root(&mut store, &batch.dependency);
         store
             .append_runtime_records(&batch)
             .expect("runtime batch commits");
@@ -17789,11 +19559,18 @@ mod tests {
             "nq.provider_intake.v1",
             "2026-07-29T12:00:00Z",
         )]);
+        establish_runtime_root(&mut store, &batch.dependency);
         let receipt = store
             .append_runtime_records(&batch)
             .expect("runtime batch commits");
         store.backup_verified(&backup).expect("verified backup");
         let reopened = Store::open_read_only(&backup).expect("backup reopens read-only");
+        assert_eq!(
+            reopened
+                .runtime_dependency_trust_root()
+                .expect("backup bootstrap root"),
+            Some(batch.dependency.trust_anchor_id.clone())
+        );
         assert_eq!(
             reopened
                 .runtime_ledger_checkpoint()
@@ -17809,6 +19586,28 @@ mod tests {
                 .canonical_bytes,
             batch.records[0].canonical_bytes
         );
+        let dependency = reopened
+            .runtime_checkpoint_dependency(&receipt.checkpoint.checkpoint_id)
+            .expect("backup dependency access")
+            .expect("backup dependency binding");
+        assert!(matches!(
+            dependency.binding,
+            RuntimeCheckpointDependencyBinding::Authenticated {
+                dependency_generation_id,
+                trust_anchor_id,
+                canonical_bytes_sha256,
+                ..
+            } if dependency_generation_id == batch.dependency.dependency_generation_id
+                && trust_anchor_id == batch.dependency.trust_anchor_id
+                && canonical_bytes_sha256.as_str()
+                    == batch.dependency.canonical_custody.digest()
+        ));
+        assert!(matches!(
+            dependency.byte_state,
+            Some(RuntimeDependencyGenerationByteState::VerifiedAvailable {
+                canonical_custody,
+            }) if canonical_custody == batch.dependency.canonical_custody
+        ));
         drop(reopened);
 
         let mut read_only = Store::open_read_only(&source).expect("source opens read-only");
@@ -17818,6 +19617,7 @@ mod tests {
             expected_predecessor_ledger_root: Some(
                 receipt.checkpoint.checkpoint_ledger_root.clone(),
             ),
+            dependency: batch.dependency.clone(),
             records: vec![runtime_record(
                 "read-only",
                 "nq.role_manifest.v1",
@@ -17838,7 +19638,7 @@ mod tests {
         write_empty_exact_v5(&source);
         let backup = Store::backup_v5_verified(&source, &backup_path).expect("verified v5 backup");
         let receipt = exact_v5_to_v6_receipt(&backup);
-        let migrated = Store::upgrade_v5_to_v6(&source, &receipt).expect("exact v5 upgrades to v6");
+        Store::upgrade_v5_to_v6(&source, &receipt).expect("exact v5 upgrades to v6");
         assert_eq!(
             Store::database_schema_version(&source).expect("source version"),
             6
@@ -17847,6 +19647,8 @@ mod tests {
             Store::database_schema_version(&backup_path).expect("backup version"),
             5
         );
+        let migrated =
+            Store::open_v6_upgrade_source_read_only(&source).expect("schema-v6 source reopens");
         assert!(
             migrated
                 .runtime_ledger_checkpoint()
@@ -17865,7 +19667,98 @@ mod tests {
             )
             .expect("migration counts");
         assert_eq!(counts, (0, 0, 0));
-        migrated.validate().expect("migrated v6 validates");
+        validate_v6_upgrade_source_connection(&migrated.connection).expect("migrated v6 validates");
+    }
+
+    #[test]
+    fn exact_v6_upgrade_preserves_legacy_checkpoint_as_unbound_prefix() {
+        let directory = tempdir().expect("temporary directory");
+        let source = directory.path().join("source-v6.db");
+        let v5_backup_path = directory.path().join("backup-v5.db");
+        let v6_backup_path = directory.path().join("backup-v6.db");
+        write_empty_exact_v5(&source);
+        let v5_backup =
+            Store::backup_v5_verified(&source, &v5_backup_path).expect("verified v5 backup");
+        Store::upgrade_v5_to_v6(&source, &exact_v5_to_v6_receipt(&v5_backup))
+            .expect("exact v5 upgrades to v6");
+        let connection = Connection::open(&source).expect("open writable exact v6");
+        configure_connection(&connection, false).expect("configure exact v6");
+        let legacy_checkpoint = insert_exact_v6_runtime_checkpoint(&connection);
+        drop(connection);
+
+        let v6_backup =
+            Store::backup_v6_verified(&source, &v6_backup_path).expect("verified v6 backup");
+        let mut migrated = Store::upgrade_v6_to_v7(&source, &exact_v6_to_v7_receipt(&v6_backup))
+            .expect("exact v6 upgrades to v7");
+        assert_eq!(
+            Store::database_schema_version(&source).expect("source version"),
+            7
+        );
+        assert_eq!(
+            Store::database_schema_version(&v6_backup_path).expect("backup version"),
+            6
+        );
+        let legacy_access = migrated
+            .runtime_checkpoint_dependency(&legacy_checkpoint.checkpoint_id)
+            .expect("legacy dependency access")
+            .expect("legacy dependency binding");
+        assert_eq!(
+            legacy_access.binding,
+            RuntimeCheckpointDependencyBinding::LegacyUnbound {
+                source_schema_version: 6,
+            }
+        );
+        assert_eq!(legacy_access.byte_state, None);
+        let counts: (i64, i64, i64, i64, i64) = migrated
+            .connection
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM runtime_dependency_trust_roots),
+                    (SELECT COUNT(*) FROM runtime_dependency_generation_commitments),
+                    (SELECT COUNT(*) FROM runtime_dependency_generation_payloads),
+                    (SELECT COUNT(*) FROM runtime_checkpoint_dependency_bindings
+                     WHERE binding_state = 'legacy_unbound'),
+                    (SELECT legacy_checkpoint_count
+                     FROM runtime_dependency_binding_migration_boundaries
+                     WHERE singleton = 1)",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("v7 migration counts");
+        assert_eq!(
+            counts,
+            (0, 0, 0, 1, 1),
+            "migration must classify history without inventing dependencies"
+        );
+
+        let current = next_runtime_batch(
+            "post-v6-migration",
+            &legacy_checkpoint,
+            runtime_dependency("post-v6-migration"),
+        );
+        establish_runtime_root(&mut migrated, &current.dependency);
+        let current_receipt = migrated
+            .append_runtime_records(&current)
+            .expect("new v7 checkpoint after legacy prefix");
+        assert!(matches!(
+            migrated
+                .runtime_checkpoint_dependency(&current_receipt.checkpoint.checkpoint_id)
+                .expect("current dependency access")
+                .expect("current dependency binding")
+                .binding,
+            RuntimeCheckpointDependencyBinding::Authenticated { .. }
+        ));
+        migrated
+            .validate()
+            .expect("mixed legacy/v7 history validates");
     }
 
     #[test]

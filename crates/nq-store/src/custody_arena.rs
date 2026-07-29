@@ -47,7 +47,7 @@ pub(crate) enum ArenaState {
     Reserved,
     Claimed,
     RawEvidenceSealed,
-    EvaluationClaimed,
+    DerivationClaimed,
     FinalV2SealedIndexPending,
     FinalV2SealedIndexed,
     FailedIndeterminate,
@@ -56,70 +56,7 @@ pub(crate) enum ArenaState {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum NativeAcquisitionOutcome {
-    Response,
-    SpawnFailed,
-    RequestWriteFailed,
-    Timeout,
-    OutputTooLarge,
-    StderrTooLarge,
-    Eof,
-    MalformedFraming,
-    MalformedJson,
-    ExitNonzero,
-    HelperExited,
-    Disconnect,
-    CarrierStartupFailed,
-    NotRunning,
-    IoFailed,
-}
-
-impl NativeAcquisitionOutcome {
-    const fn is_response(self) -> bool {
-        matches!(self, Self::Response)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ProviderInterpretation {
-    Unavailable,
-    ProtocolRejected,
-    ProviderRefusal,
-    CandidateReport,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ExactCanonicalRecord {
-    pub(crate) schema: String,
-    pub(crate) record_id: Sha256Digest,
-    pub(crate) bytes_digest: Sha256Digest,
-    pub(crate) canonical_value: Value,
-}
-
-impl ExactCanonicalRecord {
-    fn validate(&self, label: &str) -> Result<(), ArenaError> {
-        let bytes = canonical_json_bytes(&self.canonical_value)
-            .map_err(|error| ArenaError::Invalid(format!("cannot encode {label}: {error}")))?;
-        let semantic_id = nq_protocol::semantic_digest(&self.canonical_value)
-            .map_err(|error| ArenaError::Invalid(format!("cannot identify {label}: {error}")))?;
-        if self.canonical_value.get("schema").and_then(Value::as_str) != Some(self.schema.as_str())
-            || sha256_bytes(&bytes) != self.bytes_digest
-            || semantic_id != self.record_id
-        {
-            return Err(ArenaError::Invalid(format!(
-                "{label} canonical bytes, schema, digest, or record identity differ"
-            )));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
 enum CapturedBytesState {
-    NotEmitted,
     Captured,
 }
 
@@ -133,12 +70,10 @@ struct ByteCaptureCommitment {
 
 impl ByteCaptureCommitment {
     fn from_bytes(bytes: Option<&[u8]>) -> Result<Self, ArenaError> {
-        let (state, bytes) = match bytes {
-            Some(bytes) => (CapturedBytesState::Captured, bytes),
-            None => (CapturedBytesState::NotEmitted, &[][..]),
-        };
+        let bytes =
+            bytes.ok_or_else(|| ArenaError::Invalid("custody bytes were not supplied".into()))?;
         Ok(Self {
-            state,
+            state: CapturedBytesState::Captured,
             byte_length: u64::try_from(bytes.len())
                 .map_err(|_| ArenaError::Invalid("capture length overflowed".into()))?,
             bytes_digest: sha256_bytes(bytes),
@@ -150,7 +85,7 @@ impl ByteCaptureCommitment {
         encoded: &'a [u8],
         cursor: &mut usize,
         label: &str,
-    ) -> Result<Option<&'a [u8]>, ArenaError> {
+    ) -> Result<&'a [u8], ArenaError> {
         let length = usize::try_from(self.byte_length)
             .map_err(|_| ArenaError::Invalid(format!("{label} length exceeds address space")))?;
         let end = cursor
@@ -164,11 +99,7 @@ impl ByteCaptureCommitment {
             return Err(ArenaError::Invalid(format!("{label} digest differs")));
         }
         match self.state {
-            CapturedBytesState::NotEmitted if bytes.is_empty() => Ok(None),
-            CapturedBytesState::Captured => Ok(Some(bytes)),
-            CapturedBytesState::NotEmitted => Err(ArenaError::Invalid(format!(
-                "{label} is marked not emitted but contains bytes"
-            ))),
+            CapturedBytesState::Captured => Ok(bytes),
         }
     }
 }
@@ -178,64 +109,29 @@ impl ByteCaptureCommitment {
 struct AcquisitionCarrierHeader {
     schema: String,
     execution_launch_record_id: Sha256Digest,
-    provider_attempt: ExactCanonicalRecord,
-    provider_request: ExactCanonicalRecord,
-    native_outcome: NativeAcquisitionOutcome,
-    interpretation: ProviderInterpretation,
-    response_bytes: ByteCaptureCommitment,
-    native_stdout_evidence: ByteCaptureCommitment,
-    native_stderr_evidence: ByteCaptureCommitment,
+    provider_intake_record_id: Sha256Digest,
+    provider_intake_bytes: ByteCaptureCommitment,
+    raw_provider_bytes: ByteCaptureCommitment,
 }
 
 /// Exact typed custody object written before any profile or evaluator work.
 ///
-/// `None` means the provider emitted no response bytes. `Some([])` means an
-/// observed empty response. Those cases remain distinct even though both have
-/// byte length zero.
+/// The store treats both payloads as opaque exact bytes. Only NQ core may
+/// establish that the intake carrier is a valid `ProviderIntakeRecordV1`, that
+/// it corresponds to the actual provider attempt, or what the raw bytes mean.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AcquisitionCarrier {
     pub(crate) execution_launch_record_id: Sha256Digest,
-    pub(crate) provider_attempt: ExactCanonicalRecord,
-    pub(crate) provider_request: ExactCanonicalRecord,
-    pub(crate) native_outcome: NativeAcquisitionOutcome,
-    pub(crate) interpretation: ProviderInterpretation,
-    pub(crate) exact_response_bytes: Option<Vec<u8>>,
-    pub(crate) exact_native_stdout_evidence: Option<Vec<u8>>,
-    pub(crate) exact_native_stderr_evidence: Option<Vec<u8>>,
+    pub(crate) provider_intake_record_id: Sha256Digest,
+    pub(crate) exact_provider_intake_bytes: Vec<u8>,
+    pub(crate) exact_raw_provider_bytes: Vec<u8>,
 }
 
 impl AcquisitionCarrier {
     fn validate(&self) -> Result<(), ArenaError> {
-        if self.provider_attempt.schema.is_empty() || self.provider_request.schema.is_empty() {
+        if self.exact_provider_intake_bytes.is_empty() {
             return Err(ArenaError::Invalid(
-                "acquisition carrier embedded-record schema is empty".into(),
-            ));
-        }
-        self.provider_attempt
-            .validate("acquisition provider attempt")?;
-        self.provider_request
-            .validate("acquisition provider request")?;
-        if self.native_outcome.is_response() {
-            if self.interpretation == ProviderInterpretation::Unavailable
-                || self.exact_response_bytes.is_none()
-            {
-                return Err(ArenaError::Invalid(
-                    "response acquisition requires non-unavailable interpretation and exact response bytes"
-                        .into(),
-                ));
-            }
-            if self.exact_native_stdout_evidence.is_some() {
-                return Err(ArenaError::Invalid(
-                    "response bytes and native-error stdout evidence cannot both claim the provider stream"
-                        .into(),
-                ));
-            }
-        } else if self.interpretation != ProviderInterpretation::Unavailable
-            || self.exact_response_bytes.is_some()
-        {
-            return Err(ArenaError::Invalid(
-                "non-response acquisition requires unavailable interpretation and no response bytes"
-                    .into(),
+                "acquisition carrier has no provider-intake bytes".into(),
             ));
         }
         Ok(())
@@ -243,19 +139,16 @@ impl AcquisitionCarrier {
 
     fn encode(&self) -> Result<Vec<u8>, ArenaError> {
         self.validate()?;
-        let response = self.exact_response_bytes.as_deref();
-        let native_stdout = self.exact_native_stdout_evidence.as_deref();
-        let native_stderr = self.exact_native_stderr_evidence.as_deref();
         let header = AcquisitionCarrierHeader {
             schema: ACQUISITION_CARRIER_SCHEMA.to_owned(),
             execution_launch_record_id: self.execution_launch_record_id.clone(),
-            provider_attempt: self.provider_attempt.clone(),
-            provider_request: self.provider_request.clone(),
-            native_outcome: self.native_outcome,
-            interpretation: self.interpretation,
-            response_bytes: ByteCaptureCommitment::from_bytes(response)?,
-            native_stdout_evidence: ByteCaptureCommitment::from_bytes(native_stdout)?,
-            native_stderr_evidence: ByteCaptureCommitment::from_bytes(native_stderr)?,
+            provider_intake_record_id: self.provider_intake_record_id.clone(),
+            provider_intake_bytes: ByteCaptureCommitment::from_bytes(Some(
+                &self.exact_provider_intake_bytes,
+            ))?,
+            raw_provider_bytes: ByteCaptureCommitment::from_bytes(Some(
+                &self.exact_raw_provider_bytes,
+            ))?,
         };
         let header_bytes = canonical_json_bytes(&header)
             .map_err(|error| ArenaError::Invalid(format!("cannot encode carrier: {error}")))?;
@@ -264,22 +157,14 @@ impl AcquisitionCarrier {
         let mut encoded = Vec::with_capacity(
             8_usize
                 .checked_add(header_bytes.len())
-                .and_then(|length| length.checked_add(response.map_or(0, <[u8]>::len)))
-                .and_then(|length| length.checked_add(native_stdout.map_or(0, <[u8]>::len)))
-                .and_then(|length| length.checked_add(native_stderr.map_or(0, <[u8]>::len)))
+                .and_then(|length| length.checked_add(self.exact_provider_intake_bytes.len()))
+                .and_then(|length| length.checked_add(self.exact_raw_provider_bytes.len()))
                 .ok_or_else(|| ArenaError::Invalid("carrier length overflowed".into()))?,
         );
         encoded.extend_from_slice(&header_length.to_be_bytes());
         encoded.extend_from_slice(&header_bytes);
-        if let Some(bytes) = response {
-            encoded.extend_from_slice(bytes);
-        }
-        if let Some(bytes) = native_stdout {
-            encoded.extend_from_slice(bytes);
-        }
-        if let Some(bytes) = native_stderr {
-            encoded.extend_from_slice(bytes);
-        }
+        encoded.extend_from_slice(&self.exact_provider_intake_bytes);
+        encoded.extend_from_slice(&self.exact_raw_provider_bytes);
         Ok(encoded)
     }
 
@@ -311,17 +196,14 @@ impl AcquisitionCarrier {
             ));
         }
         let mut cursor = header_end;
-        let response = header
-            .response_bytes
-            .decode(encoded, &mut cursor, "response capture")?;
-        let native_stdout =
+        let provider_intake =
             header
-                .native_stdout_evidence
-                .decode(encoded, &mut cursor, "native stdout evidence")?;
-        let native_stderr =
+                .provider_intake_bytes
+                .decode(encoded, &mut cursor, "provider-intake bytes")?;
+        let raw_provider =
             header
-                .native_stderr_evidence
-                .decode(encoded, &mut cursor, "native stderr evidence")?;
+                .raw_provider_bytes
+                .decode(encoded, &mut cursor, "raw provider bytes")?;
         if cursor != encoded.len() {
             return Err(ArenaError::Invalid(
                 "acquisition carrier contains uncommitted trailing bytes".into(),
@@ -329,13 +211,9 @@ impl AcquisitionCarrier {
         }
         let carrier = Self {
             execution_launch_record_id: header.execution_launch_record_id,
-            provider_attempt: header.provider_attempt,
-            provider_request: header.provider_request,
-            native_outcome: header.native_outcome,
-            interpretation: header.interpretation,
-            exact_response_bytes: response.map(<[u8]>::to_vec),
-            exact_native_stdout_evidence: native_stdout.map(<[u8]>::to_vec),
-            exact_native_stderr_evidence: native_stderr.map(<[u8]>::to_vec),
+            provider_intake_record_id: header.provider_intake_record_id,
+            exact_provider_intake_bytes: provider_intake.to_vec(),
+            exact_raw_provider_bytes: raw_provider.to_vec(),
         };
         carrier.validate()?;
         Ok(carrier)
@@ -348,6 +226,7 @@ enum SectionKind {
     RawEvidence,
     FinalV2Closure,
     ProtectedFailure,
+    DependencyClosure,
 }
 
 impl SectionKind {
@@ -356,6 +235,7 @@ impl SectionKind {
             Self::RawEvidence => 1,
             Self::FinalV2Closure => 2,
             Self::ProtectedFailure => 3,
+            Self::DependencyClosure => 4,
         }
     }
 }
@@ -363,6 +243,9 @@ impl SectionKind {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct ArenaLayout {
     file_length: u64,
+    dependency_header_offset: u64,
+    dependency_payload_offset: u64,
+    dependency_capacity: u64,
     raw_header_offset: u64,
     raw_payload_offset: u64,
     raw_capacity: u64,
@@ -376,18 +259,33 @@ pub(crate) struct ArenaLayout {
 
 impl ArenaLayout {
     pub(crate) fn new(
+        dependency_capacity: u64,
         raw_capacity: u64,
         final_capacity: u64,
         failure_capacity: u64,
     ) -> Result<Self, ArenaError> {
-        if raw_capacity == 0 || final_capacity == 0 || failure_capacity == 0 {
+        if dependency_capacity == 0
+            || raw_capacity == 0
+            || final_capacity == 0
+            || failure_capacity == 0
+        {
             return Err(ArenaError::Invalid(
                 "all governed arena partitions must be nonzero".into(),
             ));
         }
-        let raw_header_offset = SUPERBLOCK_SIZE
+        let dependency_header_offset = SUPERBLOCK_SIZE
             .checked_mul(SUPERBLOCK_COUNT)
             .ok_or_else(|| ArenaError::Invalid("arena offset overflowed".into()))?;
+        let dependency_payload_offset =
+            dependency_header_offset
+                .checked_add(SECTION_HEADER_SIZE)
+                .ok_or_else(|| ArenaError::Invalid("arena offset overflowed".into()))?;
+        let raw_header_offset = align_up(
+            dependency_payload_offset
+                .checked_add(dependency_capacity)
+                .ok_or_else(|| ArenaError::Invalid("arena offset overflowed".into()))?,
+            SUPERBLOCK_SIZE,
+        )?;
         let raw_payload_offset = raw_header_offset
             .checked_add(SECTION_HEADER_SIZE)
             .ok_or_else(|| ArenaError::Invalid("arena offset overflowed".into()))?;
@@ -417,6 +315,9 @@ impl ArenaLayout {
         )?;
         Ok(Self {
             file_length,
+            dependency_header_offset,
+            dependency_payload_offset,
+            dependency_capacity,
             raw_header_offset,
             raw_payload_offset,
             raw_capacity,
@@ -437,6 +338,10 @@ impl ArenaLayout {
         self.raw_capacity
     }
 
+    pub(crate) const fn dependency_capacity(&self) -> u64 {
+        self.dependency_capacity
+    }
+
     pub(crate) const fn final_capacity(&self) -> u64 {
         self.final_capacity
     }
@@ -447,6 +352,7 @@ impl ArenaLayout {
 
     fn validate(&self) -> Result<(), ArenaError> {
         let recomputed = Self::new(
+            self.dependency_capacity,
             self.raw_capacity,
             self.final_capacity,
             self.failure_capacity,
@@ -461,6 +367,11 @@ impl ArenaLayout {
 
     fn section(&self, kind: SectionKind) -> (u64, u64, u64) {
         match kind {
+            SectionKind::DependencyClosure => (
+                self.dependency_header_offset,
+                self.dependency_payload_offset,
+                self.dependency_capacity,
+            ),
             SectionKind::RawEvidence => (
                 self.raw_header_offset,
                 self.raw_payload_offset,
@@ -488,6 +399,15 @@ pub(crate) struct ArenaPrelaunchBinding {
     pub(crate) outer_request_record_id: Sha256Digest,
     pub(crate) outer_request_id: String,
     pub(crate) outer_request_digest: Sha256Digest,
+    /// Exact authenticated dependency generation used to validate every
+    /// prelaunch record and later closure.
+    pub(crate) dependency_generation_id: Sha256Digest,
+    /// Digest of the complete exact-byte dependency-generation custody
+    /// closure, including its independently retained trust anchor.
+    pub(crate) dependency_generation_custody_digest: Sha256Digest,
+    /// Immutable bootstrap trust anchor independently selected when this
+    /// dependency generation was opened.
+    pub(crate) trust_anchor_id: Sha256Digest,
     pub(crate) prelaunch_checkpoint_id: Sha256Digest,
     pub(crate) prelaunch_checkpoint_digest: Sha256Digest,
 }
@@ -519,7 +439,8 @@ struct ArenaHeader {
     layout: ArenaLayout,
     state: ArenaState,
     claimed_at: Option<String>,
-    evaluation_claim: Option<EvaluationClaim>,
+    derivation_claim: Option<DerivationClaim>,
+    dependency_closure: Option<SealedSection>,
     raw_evidence: Option<SealedSection>,
     final_v2_closure: Option<SealedSection>,
     protected_failure: Option<SealedSection>,
@@ -527,11 +448,15 @@ struct ArenaHeader {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct EvaluationClaim {
-    pub(crate) evaluation_id: Sha256Digest,
+pub(crate) struct DerivationClaim {
+    pub(crate) derivation_id: Sha256Digest,
+    pub(crate) dependency_generation_id: Sha256Digest,
+    pub(crate) dependency_generation_custody_digest: Sha256Digest,
+    pub(crate) trust_anchor_id: Sha256Digest,
+    pub(crate) evaluation_id: Option<String>,
     pub(crate) profile_semantic_id: Sha256Digest,
     pub(crate) evaluator_artifact_digest: Sha256Digest,
-    pub(crate) evaluation_time: String,
+    pub(crate) derived_at: String,
     pub(crate) clock_identity: Sha256Digest,
     pub(crate) clock_uncertainty_ms: u64,
 }
@@ -544,8 +469,9 @@ pub(crate) struct ArenaInspection {
     pub(crate) prelaunch: ArenaPrelaunchBinding,
     pub(crate) execution_launch_record_id: Option<Sha256Digest>,
     pub(crate) claimed_at: Option<String>,
-    pub(crate) evaluation_claim: Option<EvaluationClaim>,
+    pub(crate) derivation_claim: Option<DerivationClaim>,
     pub(crate) layout: ArenaLayout,
+    pub(crate) dependency_closure: Option<SealedSection>,
     pub(crate) raw_evidence: Option<SealedSection>,
     pub(crate) final_v2_closure: Option<SealedSection>,
     pub(crate) protected_failure: Option<SealedSection>,
@@ -570,18 +496,18 @@ impl RawCustodyToken {
     }
 }
 
-/// One-use durable evaluation occurrence bound to one reopened raw carrier.
+/// One-use durable derivation occurrence bound to one reopened raw carrier.
 ///
 /// This store-private precursor does not yet cross a cycle-free product
 /// boundary to `nq-core`.
-pub(crate) struct EvaluationCustodyToken {
+pub(crate) struct DerivationCustodyToken {
     reservation_id: Sha256Digest,
     raw_section: SealedSection,
     reopened_carrier: AcquisitionCarrier,
-    claim: EvaluationClaim,
+    claim: DerivationClaim,
 }
 
-impl EvaluationCustodyToken {
+impl DerivationCustodyToken {
     pub(crate) fn reopened_carrier(&self) -> &AcquisitionCarrier {
         &self.reopened_carrier
     }
@@ -592,17 +518,21 @@ impl EvaluationCustodyToken {
 ///
 /// The current constructor performs only precursor checks. It is not the
 /// future core-validated correspondence wrapper and has no product caller.
-pub(crate) struct EvaluatedV2ClosureCandidate {
-    token: EvaluationCustodyToken,
+pub(crate) struct DerivedV2ClosureCandidate {
+    token: DerivationCustodyToken,
     exact_bytes: Vec<u8>,
 }
 
-impl EvaluatedV2ClosureCandidate {
+impl DerivedV2ClosureCandidate {
     pub(crate) fn from_store_internal_precursor(
-        token: EvaluationCustodyToken,
+        token: DerivationCustodyToken,
         exact_bytes: Vec<u8>,
     ) -> Result<Self, ArenaError> {
-        validate_semantic_document(&exact_bytes, "nq.diagnostic_execution.v2", "artifact_id")?;
+        validate_semantic_document(
+            &exact_bytes,
+            "nq.governed_execution_custody_closure.v1",
+            "closure_id",
+        )?;
         Ok(Self { token, exact_bytes })
     }
 }
@@ -672,8 +602,17 @@ impl CustodyArena {
         database_path: &Path,
         prelaunch: ArenaPrelaunchBinding,
         layout: ArenaLayout,
+        exact_dependency_closure_bytes: &[u8],
     ) -> Result<Self, ArenaError> {
         layout.validate()?;
+        if exact_dependency_closure_bytes.is_empty()
+            || sha256_bytes(exact_dependency_closure_bytes)
+                != prelaunch.dependency_generation_custody_digest
+        {
+            return Err(ArenaError::Invalid(
+                "dependency-generation custody bytes are absent or differ from prelaunch".into(),
+            ));
+        }
         let root = Self::root_for_database(database_path)?;
         ensure_arena_root(database_path, &root)?;
         let relative = Self::relative_path(&prelaunch.reservation_record_id);
@@ -688,28 +627,35 @@ impl CustodyArena {
             layout,
             state: ArenaState::Reserved,
             claimed_at: None,
-            evaluation_claim: None,
+            derivation_claim: None,
+            dependency_closure: None,
             raw_evidence: None,
             final_v2_closure: None,
             protected_failure: None,
         };
-        write_superblock(&file, 0, &header)?;
-        write_superblock(&file, 1, &header)?;
-        file.sync_all()?;
-        sync_directory(&root)?;
-        let selected_superblock_digest = superblock_digest(&file, 1)?;
-        let arena = Self {
+        let mut arena = Self {
             path,
             file,
             header,
             active_superblock: 1,
-            selected_superblock_digest,
+            selected_superblock_digest: sha256_bytes(b"uninitialized-superblock"),
             recovered_torn_superblock: false,
             poisoned: false,
             #[cfg(test)]
             failpoint: None,
         };
+        let dependency = arena.write_section(
+            SectionKind::DependencyClosure,
+            exact_dependency_closure_bytes,
+        )?;
+        arena.header.dependency_closure = Some(dependency);
+        write_superblock(&arena.file, 0, &arena.header)?;
+        write_superblock(&arena.file, 1, &arena.header)?;
+        arena.file.sync_all()?;
+        sync_directory(&root)?;
+        arena.selected_superblock_digest = superblock_digest(&arena.file, 1)?;
         arena.verify_file_shape()?;
+        arena.verify_sealed_sections()?;
         Ok(arena)
     }
 
@@ -776,8 +722,9 @@ impl CustodyArena {
             prelaunch: self.header.prelaunch.clone(),
             execution_launch_record_id: self.header.execution_launch_record_id.clone(),
             claimed_at: self.header.claimed_at.clone(),
-            evaluation_claim: self.header.evaluation_claim.clone(),
+            derivation_claim: self.header.derivation_claim.clone(),
             layout: self.header.layout.clone(),
+            dependency_closure: self.header.dependency_closure.clone(),
             raw_evidence: self.header.raw_evidence.clone(),
             final_v2_closure: self.header.final_v2_closure.clone(),
             protected_failure: self.header.protected_failure.clone(),
@@ -853,39 +800,38 @@ impl CustodyArena {
 
     pub(crate) fn seal_final_v2_closure(
         &mut self,
-        evaluated: EvaluatedV2ClosureCandidate,
+        derived: DerivedV2ClosureCandidate,
     ) -> Result<FinalCustodyToken, ArenaError> {
         self.ensure_usable()?;
         self.verify_physical_allocation()?;
-        if self.header.state != ArenaState::EvaluationClaimed {
+        if self.header.state != ArenaState::DerivationClaimed {
             return Err(ArenaError::Invalid(
-                "final V2 closure requires one durable evaluation claim".into(),
+                "final V2 closure requires one durable derivation claim".into(),
             ));
         }
-        if evaluated.token.reservation_id != self.header.prelaunch.reservation_record_id
-            || self.header.raw_evidence.as_ref() != Some(&evaluated.token.raw_section)
-            || self.header.evaluation_claim.as_ref() != Some(&evaluated.token.claim)
+        if derived.token.reservation_id != self.header.prelaunch.reservation_record_id
+            || self.header.raw_evidence.as_ref() != Some(&derived.token.raw_section)
+            || self.header.derivation_claim.as_ref() != Some(&derived.token.claim)
         {
             return Err(ArenaError::Invalid(
-                "evaluated closure token differs from the durable arena frontier".into(),
+                "derived closure token differs from the durable arena frontier".into(),
             ));
         }
         let reopened_raw = self
             .read_committed_section(SectionKind::RawEvidence)?
             .ok_or_else(|| ArenaError::Invalid("raw acquisition is unavailable".into()))?;
-        if AcquisitionCarrier::decode(&reopened_raw)? != evaluated.token.reopened_carrier {
+        if AcquisitionCarrier::decode(&reopened_raw)? != derived.token.reopened_carrier {
             return Err(ArenaError::Invalid(
-                "evaluated closure lost its store-reopened acquisition carrier".into(),
+                "derived closure lost its store-reopened acquisition carrier".into(),
             ));
         }
         validate_final_v2_correspondence(
-            &evaluated.exact_bytes,
+            &derived.exact_bytes,
             &self.header.prelaunch,
-            &evaluated.token.claim,
+            &derived.token.claim,
         )?;
         self.execute_poisoned(move |arena| {
-            let section =
-                arena.write_section(SectionKind::FinalV2Closure, &evaluated.exact_bytes)?;
+            let section = arena.write_section(SectionKind::FinalV2Closure, &derived.exact_bytes)?;
             arena.transition_inner(|header| {
                 header.state = ArenaState::FinalV2SealedIndexPending;
                 header.final_v2_closure = Some(section.clone());
@@ -898,18 +844,18 @@ impl CustodyArena {
         })
     }
 
-    pub(crate) fn claim_evaluation(
+    pub(crate) fn claim_derivation(
         &mut self,
         raw: RawCustodyToken,
-        claim: EvaluationClaim,
-    ) -> Result<EvaluationCustodyToken, ArenaError> {
+        claim: DerivationClaim,
+    ) -> Result<DerivationCustodyToken, ArenaError> {
         self.ensure_usable()?;
         self.verify_physical_allocation()?;
         if self.header.state != ArenaState::RawEvidenceSealed
-            || self.header.evaluation_claim.is_some()
+            || self.header.derivation_claim.is_some()
         {
             return Err(ArenaError::Invalid(
-                "evaluation can be claimed exactly once after raw evidence sealing".into(),
+                "derivation can be claimed exactly once after raw evidence sealing".into(),
             ));
         }
         if raw.reservation_id != self.header.prelaunch.reservation_record_id
@@ -925,21 +871,31 @@ impl CustodyArena {
                 "raw custody token differs from the durable arena frontier".into(),
             ));
         }
+        if claim.dependency_generation_id != self.header.prelaunch.dependency_generation_id
+            || claim.dependency_generation_custody_digest
+                != self.header.prelaunch.dependency_generation_custody_digest
+            || claim.trust_anchor_id != self.header.prelaunch.trust_anchor_id
+        {
+            return Err(ArenaError::Invalid(
+                "derivation claim differs from the prelaunch dependency generation or trust anchor"
+                    .into(),
+            ));
+        }
         let reopened = self
             .read_committed_section(SectionKind::RawEvidence)?
             .ok_or_else(|| ArenaError::Invalid("raw acquisition is unavailable".into()))?;
         if AcquisitionCarrier::decode(&reopened)? != raw.carrier {
             return Err(ArenaError::Invalid(
-                "evaluation token does not carry the store-reopened acquisition".into(),
+                "derivation token does not carry the store-reopened acquisition".into(),
             ));
         }
         self.execute_poisoned(move |arena| {
             arena.transition_inner(|header| {
-                header.state = ArenaState::EvaluationClaimed;
-                header.evaluation_claim = Some(claim.clone());
+                header.state = ArenaState::DerivationClaimed;
+                header.derivation_claim = Some(claim.clone());
                 Ok(())
             })?;
-            Ok(EvaluationCustodyToken {
+            Ok(DerivationCustodyToken {
                 reservation_id: arena.header.prelaunch.reservation_record_id.clone(),
                 raw_section: raw.section,
                 reopened_carrier: raw.carrier,
@@ -961,7 +917,7 @@ impl CustodyArena {
                 | (
                     ArenaState::Claimed
                         | ArenaState::RawEvidenceSealed
-                        | ArenaState::EvaluationClaimed,
+                        | ArenaState::DerivationClaimed,
                     ArenaState::FailedIndeterminate
                 )
         ) && self.header.protected_failure.is_none();
@@ -1020,9 +976,105 @@ impl CustodyArena {
         self.read_committed_section(SectionKind::RawEvidence)
     }
 
+    pub(crate) fn dependency_closure_bytes(&self) -> Result<Vec<u8>, ArenaError> {
+        self.ensure_usable()?;
+        self.read_committed_section(SectionKind::DependencyClosure)?
+            .ok_or_else(|| ArenaError::Invalid("dependency closure is unavailable".into()))
+    }
+
     pub(crate) fn final_v2_closure_bytes(&self) -> Result<Option<Vec<u8>>, ArenaError> {
         self.ensure_usable()?;
         self.read_committed_section(SectionKind::FinalV2Closure)
+    }
+
+    /// Reconstruct the one-use raw-custody capability after a verified reopen.
+    ///
+    /// This does not advance the durable state. It exists so a caller can
+    /// continue an interrupted invocation without reacquiring the historical
+    /// provider occurrence. The caller remains responsible for validating the
+    /// opaque intake bytes before claiming derivation.
+    pub(crate) fn reopen_raw_token(&self) -> Result<RawCustodyToken, ArenaError> {
+        self.ensure_usable()?;
+        self.verify_physical_allocation()?;
+        if self.header.state != ArenaState::RawEvidenceSealed {
+            return Err(ArenaError::Invalid(
+                "raw custody can be resumed only from raw_evidence_sealed".into(),
+            ));
+        }
+        let section = self
+            .header
+            .raw_evidence
+            .clone()
+            .ok_or_else(|| ArenaError::Invalid("raw custody section is absent".into()))?;
+        let bytes = self
+            .read_committed_section(SectionKind::RawEvidence)?
+            .ok_or_else(|| ArenaError::Invalid("raw custody bytes are absent".into()))?;
+        let carrier = AcquisitionCarrier::decode(&bytes)?;
+        Ok(RawCustodyToken {
+            reservation_id: self.header.prelaunch.reservation_record_id.clone(),
+            section,
+            carrier,
+        })
+    }
+
+    /// Reconstruct the one-use derivation-custody capability after reopen.
+    ///
+    /// The exact raw carrier and durable derivation claim are reopened and
+    /// reverified. No evaluator or diagnostic semantics are established here.
+    pub(crate) fn reopen_derivation_token(&self) -> Result<DerivationCustodyToken, ArenaError> {
+        self.ensure_usable()?;
+        self.verify_physical_allocation()?;
+        if self.header.state != ArenaState::DerivationClaimed {
+            return Err(ArenaError::Invalid(
+                "derivation custody can be resumed only from derivation_claimed".into(),
+            ));
+        }
+        let raw_section = self
+            .header
+            .raw_evidence
+            .clone()
+            .ok_or_else(|| ArenaError::Invalid("raw custody section is absent".into()))?;
+        let bytes = self
+            .read_committed_section(SectionKind::RawEvidence)?
+            .ok_or_else(|| ArenaError::Invalid("raw custody bytes are absent".into()))?;
+        let reopened_carrier = AcquisitionCarrier::decode(&bytes)?;
+        let claim = self
+            .header
+            .derivation_claim
+            .clone()
+            .ok_or_else(|| ArenaError::Invalid("durable derivation claim is absent".into()))?;
+        Ok(DerivationCustodyToken {
+            reservation_id: self.header.prelaunch.reservation_record_id.clone(),
+            raw_section,
+            reopened_carrier,
+            claim,
+        })
+    }
+
+    /// Reconstruct the one-use index marker capability after reopen.
+    ///
+    /// Reopening an index-pending closure never reconstructs or writes the
+    /// SQLite projection. The caller must first prove the exact idempotent SQL
+    /// write set before consuming this capability.
+    pub(crate) fn reopen_final_token(&self) -> Result<FinalCustodyToken, ArenaError> {
+        self.ensure_usable()?;
+        self.verify_physical_allocation()?;
+        if self.header.state != ArenaState::FinalV2SealedIndexPending {
+            return Err(ArenaError::Invalid(
+                "final custody can be resumed only from final_v2_sealed_index_pending".into(),
+            ));
+        }
+        let section = self
+            .header
+            .final_v2_closure
+            .clone()
+            .ok_or_else(|| ArenaError::Invalid("final custody section is absent".into()))?;
+        self.read_committed_section(SectionKind::FinalV2Closure)?
+            .ok_or_else(|| ArenaError::Invalid("final custody bytes are absent".into()))?;
+        Ok(FinalCustodyToken {
+            reservation_id: self.header.prelaunch.reservation_record_id.clone(),
+            section,
+        })
     }
 
     pub(crate) fn protected_failure_bytes(&self) -> Result<Option<Vec<u8>>, ArenaError> {
@@ -1141,6 +1193,7 @@ impl CustodyArena {
 
     fn read_committed_section(&self, kind: SectionKind) -> Result<Option<Vec<u8>>, ArenaError> {
         let expected = match kind {
+            SectionKind::DependencyClosure => self.header.dependency_closure.as_ref(),
             SectionKind::RawEvidence => self.header.raw_evidence.as_ref(),
             SectionKind::FinalV2Closure => self.header.final_v2_closure.as_ref(),
             SectionKind::ProtectedFailure => self.header.protected_failure.as_ref(),
@@ -1230,7 +1283,7 @@ impl CustodyArena {
                 self.header.execution_launch_record_id.is_none()
                     && self.header.claimed_at.is_none()
                     && self.header.raw_evidence.is_none()
-                    && self.header.evaluation_claim.is_none()
+                    && self.header.derivation_claim.is_none()
                     && self.header.final_v2_closure.is_none()
                     && self.header.protected_failure.is_none()
             }
@@ -1238,7 +1291,7 @@ impl CustodyArena {
                 self.header.execution_launch_record_id.is_some()
                     && self.header.claimed_at.is_some()
                     && self.header.raw_evidence.is_none()
-                    && self.header.evaluation_claim.is_none()
+                    && self.header.derivation_claim.is_none()
                     && self.header.final_v2_closure.is_none()
                     && self.header.protected_failure.is_none()
             }
@@ -1246,15 +1299,15 @@ impl CustodyArena {
                 self.header.execution_launch_record_id.is_some()
                     && self.header.claimed_at.is_some()
                     && self.header.raw_evidence.is_some()
-                    && self.header.evaluation_claim.is_none()
+                    && self.header.derivation_claim.is_none()
                     && self.header.final_v2_closure.is_none()
                     && self.header.protected_failure.is_none()
             }
-            ArenaState::EvaluationClaimed => {
+            ArenaState::DerivationClaimed => {
                 self.header.execution_launch_record_id.is_some()
                     && self.header.claimed_at.is_some()
                     && self.header.raw_evidence.is_some()
-                    && self.header.evaluation_claim.is_some()
+                    && self.header.derivation_claim.is_some()
                     && self.header.final_v2_closure.is_none()
                     && self.header.protected_failure.is_none()
             }
@@ -1262,7 +1315,7 @@ impl CustodyArena {
                 self.header.execution_launch_record_id.is_some()
                     && self.header.claimed_at.is_some()
                     && self.header.raw_evidence.is_some()
-                    && self.header.evaluation_claim.is_some()
+                    && self.header.derivation_claim.is_some()
                     && self.header.final_v2_closure.is_some()
                     && self.header.protected_failure.is_none()
             }
@@ -1276,12 +1329,12 @@ impl CustodyArena {
                 self.header.execution_launch_record_id.is_none()
                     && self.header.claimed_at.is_none()
                     && self.header.raw_evidence.is_none()
-                    && self.header.evaluation_claim.is_none()
+                    && self.header.derivation_claim.is_none()
                     && self.header.final_v2_closure.is_none()
                     && self.header.protected_failure.is_some()
             }
         };
-        if !state_shape_valid {
+        if !state_shape_valid || self.header.dependency_closure.is_none() {
             return Err(ArenaError::Invalid(
                 "arena state and sealed-section frontier disagree".into(),
             ));
@@ -1293,12 +1346,22 @@ impl CustodyArena {
 
     fn verify_sealed_sections(&self) -> Result<(), ArenaError> {
         for kind in [
+            SectionKind::DependencyClosure,
             SectionKind::RawEvidence,
             SectionKind::FinalV2Closure,
             SectionKind::ProtectedFailure,
         ] {
             if let Some(bytes) = self.read_committed_section(kind)? {
                 match kind {
+                    SectionKind::DependencyClosure => {
+                        if sha256_bytes(&bytes)
+                            != self.header.prelaunch.dependency_generation_custody_digest
+                        {
+                            return Err(ArenaError::Invalid(
+                                "reopened dependency closure differs from prelaunch".into(),
+                            ));
+                        }
+                    }
                     SectionKind::RawEvidence => {
                         let carrier = AcquisitionCarrier::decode(&bytes)?;
                         if self.header.execution_launch_record_id.as_ref()
@@ -1310,9 +1373,9 @@ impl CustodyArena {
                         }
                     }
                     SectionKind::FinalV2Closure => {
-                        let claim = self.header.evaluation_claim.as_ref().ok_or_else(|| {
+                        let claim = self.header.derivation_claim.as_ref().ok_or_else(|| {
                             ArenaError::Invalid(
-                                "reopened final V2 closure has no evaluation claim".into(),
+                                "reopened final V2 closure has no derivation claim".into(),
                             )
                         })?;
                         validate_final_v2_correspondence(&bytes, &self.header.prelaunch, claim)?;
@@ -1348,6 +1411,19 @@ impl CustodyArena {
 
     fn verify_layout_padding(&self) -> Result<(), ArenaError> {
         let layout = &self.header.layout;
+        let dependency_end = layout
+            .dependency_payload_offset
+            .checked_add(layout.dependency_capacity)
+            .ok_or_else(|| ArenaError::Invalid("dependency padding offset overflowed".into()))?;
+        verify_zero_range(
+            &self.file,
+            dependency_end,
+            layout
+                .raw_header_offset
+                .checked_sub(dependency_end)
+                .ok_or_else(|| ArenaError::Invalid("dependency/raw layout overlaps".into()))?,
+            "dependency/raw alignment padding",
+        )?;
         let raw_end = layout
             .raw_payload_offset
             .checked_add(layout.raw_capacity)
@@ -1897,11 +1973,11 @@ fn validate_successor(previous: &ArenaHeader, next: &ArenaHeader) -> Result<(), 
             expected.state = next.state;
             expected.raw_evidence.clone_from(&next.raw_evidence);
         }
-        (ArenaState::RawEvidenceSealed, ArenaState::EvaluationClaimed) => {
+        (ArenaState::RawEvidenceSealed, ArenaState::DerivationClaimed) => {
             expected.state = next.state;
-            expected.evaluation_claim.clone_from(&next.evaluation_claim);
+            expected.derivation_claim.clone_from(&next.derivation_claim);
         }
-        (ArenaState::EvaluationClaimed, ArenaState::FinalV2SealedIndexPending) => {
+        (ArenaState::DerivationClaimed, ArenaState::FinalV2SealedIndexPending) => {
             expected.state = next.state;
             expected.final_v2_closure.clone_from(&next.final_v2_closure);
         }
@@ -1909,7 +1985,7 @@ fn validate_successor(previous: &ArenaHeader, next: &ArenaHeader) -> Result<(), 
             expected.state = next.state;
         }
         (
-            ArenaState::Claimed | ArenaState::RawEvidenceSealed | ArenaState::EvaluationClaimed,
+            ArenaState::Claimed | ArenaState::RawEvidenceSealed | ArenaState::DerivationClaimed,
             ArenaState::FailedIndeterminate,
         )
         | (ArenaState::Reserved, ArenaState::ExpiredUnlaunched) => {
@@ -1970,6 +2046,7 @@ fn decode_section_header(
         1 => SectionKind::RawEvidence,
         2 => SectionKind::FinalV2Closure,
         3 => SectionKind::ProtectedFailure,
+        4 => SectionKind::DependencyClosure,
         _ => {
             return Err(ArenaError::Invalid("arena section kind is unknown".into()));
         }
@@ -2044,34 +2121,14 @@ fn validate_semantic_document(
 
 fn validate_final_v2_correspondence(
     exact_bytes: &[u8],
-    prelaunch: &ArenaPrelaunchBinding,
-    claim: &EvaluationClaim,
+    _prelaunch: &ArenaPrelaunchBinding,
+    _claim: &DerivationClaim,
 ) -> Result<(), ArenaError> {
-    let value =
-        validate_semantic_document(exact_bytes, "nq.diagnostic_execution.v2", "artifact_id")?;
-    if value["request_id"] != prelaunch.outer_request_id
-        || value["profile_semantic_id"] != claim.profile_semantic_id.as_str()
-        || value["evaluator"]["digest"] != claim.evaluator_artifact_digest.as_str()
-        || value["execution_clock"]["digest"] != claim.clock_identity.as_str()
-    {
-        return Err(ArenaError::Invalid(
-            "final V2 artifact differs from prelaunch or evaluation claim".into(),
-        ));
-    }
-    let evaluation_time = chrono::DateTime::parse_from_rfc3339(&claim.evaluation_time)
-        .map_err(|_| ArenaError::Invalid("evaluation-claim time is malformed".into()))?;
-    let completed_at = value["completed_at"]
-        .as_str()
-        .ok_or_else(|| ArenaError::Invalid("final V2 completion time is absent".into()))
-        .and_then(|time| {
-            chrono::DateTime::parse_from_rfc3339(time)
-                .map_err(|_| ArenaError::Invalid("final V2 completion time is malformed".into()))
-        })?;
-    if completed_at < evaluation_time {
-        return Err(ArenaError::Invalid(
-            "final V2 artifact predates its evaluation occurrence".into(),
-        ));
-    }
+    let _ = validate_semantic_document(
+        exact_bytes,
+        "nq.governed_execution_custody_closure.v1",
+        "closure_id",
+    )?;
     Ok(())
 }
 
@@ -2129,19 +2186,24 @@ mod tests {
             outer_request_record_id: digest(format!("outer-request-record:{label}").as_bytes()),
             outer_request_id: format!("outer-request:{label}"),
             outer_request_digest: digest(format!("outer-request:{label}").as_bytes()),
+            dependency_generation_id: digest(b"dependency-generation"),
+            dependency_generation_custody_digest: digest(b"dependency-generation-custody"),
+            trust_anchor_id: digest(b"trust-anchor"),
             prelaunch_checkpoint_id: digest(format!("checkpoint:{label}").as_bytes()),
             prelaunch_checkpoint_digest: digest(format!("checkpoint-bytes:{label}").as_bytes()),
         }
     }
 
-    fn exact_record(schema: &str, _label: &str, value: Value) -> ExactCanonicalRecord {
-        let bytes = canonical_json_bytes(&value).expect("canonical record");
-        ExactCanonicalRecord {
-            schema: schema.to_owned(),
-            record_id: nq_protocol::semantic_digest(&value).expect("record identity"),
-            bytes_digest: sha256_bytes(&bytes),
-            canonical_value: value,
-        }
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum NativeAcquisitionOutcome {
+        Response,
+        Timeout,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum ProviderInterpretation {
+        Unavailable,
+        CandidateReport,
     }
 
     fn acquisition(
@@ -2152,43 +2214,35 @@ mod tests {
         native_stdout: Option<&[u8]>,
         native_stderr: Option<&[u8]>,
     ) -> AcquisitionCarrier {
-        let request_id = "provider-request:fixture";
-        let provider_request = exact_record(
-            "nq.helper_request.v1",
-            "provider-request",
-            json!({
-                "profile": "host-resource",
-                "request_id": request_id,
-                "schema": "nq.helper_request.v1"
-            }),
-        );
-        let provider_attempt = exact_record(
-            "nq.test_provider_attempt.v1",
-            "provider-attempt",
-            json!({
-                "attempt_id": "provider-attempt:fixture",
-                "request_id": request_id,
-                "schema": "nq.test_provider_attempt.v1"
-            }),
-        );
+        let provider_intake = canonical_json_bytes(&json!({
+            "schema": "nq.test_provider_intake.v1",
+            "native_outcome": format!("{native_outcome:?}"),
+            "interpretation": format!("{interpretation:?}"),
+        }))
+        .expect("provider intake");
+        let raw = response
+            .or(native_stdout)
+            .or(native_stderr)
+            .unwrap_or_default()
+            .to_vec();
         AcquisitionCarrier {
             execution_launch_record_id: launch.clone(),
-            provider_attempt,
-            provider_request,
-            native_outcome,
-            interpretation,
-            exact_response_bytes: response.map(<[u8]>::to_vec),
-            exact_native_stdout_evidence: native_stdout.map(<[u8]>::to_vec),
-            exact_native_stderr_evidence: native_stderr.map(<[u8]>::to_vec),
+            provider_intake_record_id: sha256_bytes(&provider_intake),
+            exact_provider_intake_bytes: provider_intake,
+            exact_raw_provider_bytes: raw,
         }
     }
 
-    fn evaluation_claim() -> EvaluationClaim {
-        EvaluationClaim {
-            evaluation_id: digest(b"evaluation"),
+    fn derivation_claim() -> DerivationClaim {
+        DerivationClaim {
+            derivation_id: digest(b"derivation"),
+            dependency_generation_id: digest(b"dependency-generation"),
+            dependency_generation_custody_digest: digest(b"dependency-generation-custody"),
+            trust_anchor_id: digest(b"trust-anchor"),
+            evaluation_id: Some("evaluation-001".into()),
             profile_semantic_id: digest(b"profile"),
             evaluator_artifact_digest: digest(b"evaluator"),
-            evaluation_time: "2026-07-29T12:00:01Z".into(),
+            derived_at: "2026-07-29T12:00:01Z".into(),
             clock_identity: digest(b"clock"),
             clock_uncertainty_ms: 1,
         }
@@ -2208,29 +2262,50 @@ mod tests {
         canonical_json_bytes(&preimage).expect("canonical semantic document")
     }
 
-    fn final_v2(prelaunch: &ArenaPrelaunchBinding, claim: &EvaluationClaim) -> Vec<u8> {
-        let mut preimage = Map::new();
-        preimage.insert(
+    fn final_v2(prelaunch: &ArenaPrelaunchBinding, claim: &DerivationClaim) -> Vec<u8> {
+        let mut diagnostic = Map::new();
+        diagnostic.insert(
             "completed_at".into(),
             Value::String("2026-07-29T12:00:02Z".into()),
         );
-        preimage.insert(
+        diagnostic.insert(
             "evaluator".into(),
             json!({"digest": claim.evaluator_artifact_digest, "id": "evaluator", "version": "1"}),
         );
-        preimage.insert(
+        diagnostic.insert(
             "execution_clock".into(),
             json!({"digest": claim.clock_identity, "id": "clock", "version": "1"}),
         );
-        preimage.insert(
+        diagnostic.insert(
             "profile_semantic_id".into(),
             Value::String(claim.profile_semantic_id.as_str().to_owned()),
         );
-        preimage.insert(
+        diagnostic.insert(
             "request_id".into(),
             Value::String(prelaunch.outer_request_id.clone()),
         );
-        semantic_document("nq.diagnostic_execution.v2", "artifact_id", preimage)
+        let diagnostic: Value = serde_json::from_slice(&semantic_document(
+            "nq.diagnostic_execution.v2",
+            "artifact_id",
+            diagnostic,
+        ))
+        .expect("diagnostic");
+        let mut closure = Map::new();
+        closure.insert("diagnostic".into(), diagnostic);
+        closure.insert(
+            "execution_binding".into(),
+            json!({"record_id": digest(b"binding")}),
+        );
+        closure.insert("runtime_records".into(), Value::Array(Vec::new()));
+        closure.insert(
+            "dependency_generation".into(),
+            json!({"generation_id": digest(b"dependencies")}),
+        );
+        semantic_document(
+            "nq.governed_execution_custody_closure.v1",
+            "closure_id",
+            closure,
+        )
     }
 
     fn failure(
@@ -2271,7 +2346,8 @@ mod tests {
         let arena = CustodyArena::create(
             database,
             prelaunch.clone(),
-            ArenaLayout::new(65_536, 65_536, 16_384).expect("layout"),
+            ArenaLayout::new(65_536, 65_536, 65_536, 16_384).expect("layout"),
+            b"dependency-generation-custody",
         )
         .expect("create");
         (prelaunch, arena)
@@ -2303,19 +2379,19 @@ mod tests {
         );
         let raw_token = arena.seal_acquisition(carrier.clone()).expect("raw seal");
         assert_eq!(raw_token.carrier(), &carrier);
-        let claim = evaluation_claim();
-        let evaluation_token = arena
-            .claim_evaluation(raw_token, claim.clone())
-            .expect("evaluation claim");
-        assert_eq!(evaluation_token.reopened_carrier(), &carrier);
+        let claim = derivation_claim();
+        let derivation_token = arena
+            .claim_derivation(raw_token, claim.clone())
+            .expect("derivation claim");
+        assert_eq!(derivation_token.reopened_carrier(), &carrier);
         let final_bytes = final_v2(&prelaunch, &claim);
         let final_token = arena
             .seal_final_v2_closure(
-                EvaluatedV2ClosureCandidate::from_store_internal_precursor(
-                    evaluation_token,
+                DerivedV2ClosureCandidate::from_store_internal_precursor(
+                    derivation_token,
                     final_bytes.clone(),
                 )
-                .expect("evaluated closure"),
+                .expect("derived closure"),
             )
             .expect("final seal");
         assert_eq!(final_token.reservation_id, reservation_id);
@@ -2673,8 +2749,10 @@ mod tests {
 
     #[test]
     fn layout_is_block_separated_and_noncanonical_overlap_is_refused() {
-        let layout = ArenaLayout::new(4097, 8193, 2049).expect("layout");
+        let layout = ArenaLayout::new(3073, 4097, 8193, 2049).expect("layout");
         for offset in [
+            layout.dependency_header_offset,
+            layout.dependency_payload_offset,
             layout.raw_header_offset,
             layout.raw_payload_offset,
             layout.final_header_offset,
@@ -2702,42 +2780,7 @@ mod tests {
     }
 
     #[test]
-    fn acquisition_truth_table_is_exhaustive_and_no_response_is_durable() {
-        for native in [
-            NativeAcquisitionOutcome::Response,
-            NativeAcquisitionOutcome::Timeout,
-        ] {
-            for interpretation in [
-                ProviderInterpretation::Unavailable,
-                ProviderInterpretation::ProtocolRejected,
-                ProviderInterpretation::ProviderRefusal,
-                ProviderInterpretation::CandidateReport,
-            ] {
-                for response in [None, Some(&b""[..]), Some(&b"response"[..])] {
-                    let carrier = acquisition(
-                        &digest(b"matrix-launch"),
-                        native,
-                        interpretation,
-                        response,
-                        None,
-                        None,
-                    );
-                    let expected = native == NativeAcquisitionOutcome::Response
-                        && interpretation != ProviderInterpretation::Unavailable
-                        && response.is_some()
-                        || native != NativeAcquisitionOutcome::Response
-                            && interpretation == ProviderInterpretation::Unavailable
-                            && response.is_none();
-                    assert_eq!(
-                        carrier.validate().is_ok(),
-                        expected,
-                        "{native:?}/{interpretation:?}/{}",
-                        if response.is_some() { "some" } else { "none" }
-                    );
-                }
-            }
-        }
-
+    fn opaque_no_response_intake_and_empty_raw_capture_are_durable() {
         let directory = tempdir().expect("directory");
         let database = directory.path().join("nq.db");
         File::create(&database).expect("database placeholder");
@@ -2762,12 +2805,12 @@ mod tests {
         let bytes = reopened
             .raw_evidence_bytes()
             .expect("raw read")
-            .expect("typed no-response bytes");
+            .expect("opaque no-response bytes");
         assert_eq!(AcquisitionCarrier::decode(&bytes).expect("decode"), carrier);
     }
 
     #[test]
-    fn embedded_canonical_record_substitution_is_refused() {
+    fn acquisition_custody_requires_intake_bytes_but_assigns_no_semantics() {
         let launch = digest(b"substitution-launch");
         let valid = acquisition(
             &launch,
@@ -2777,29 +2820,13 @@ mod tests {
             None,
             None,
         );
+        assert!(valid.validate().is_ok());
 
-        let mut wrong_record_id = valid.clone();
-        wrong_record_id.provider_request.record_id = digest(b"substituted-record-id");
+        let mut empty_intake = valid;
+        empty_intake.exact_provider_intake_bytes.clear();
         assert!(matches!(
-            wrong_record_id.encode(),
-            Err(ArenaError::Invalid(message)) if message.contains("provider request")
-                && message.contains("identity differ")
-        ));
-
-        let mut wrong_bytes_digest = valid.clone();
-        wrong_bytes_digest.provider_attempt.bytes_digest = digest(b"substituted-bytes-digest");
-        assert!(matches!(
-            wrong_bytes_digest.encode(),
-            Err(ArenaError::Invalid(message)) if message.contains("provider attempt")
-                && message.contains("digest")
-        ));
-
-        let mut wrong_declared_schema = valid;
-        wrong_declared_schema.provider_request.schema = "nq.other_request.v1".into();
-        assert!(matches!(
-            wrong_declared_schema.encode(),
-            Err(ArenaError::Invalid(message)) if message.contains("provider request")
-                && message.contains("schema")
+            empty_intake.encode(),
+            Err(ArenaError::Invalid(message)) if message.contains("no provider-intake bytes")
         ));
     }
 
