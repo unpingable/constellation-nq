@@ -4,9 +4,9 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use nq_core::config::{NqConfig, WatcherConfig};
+use nq_core::config::NqConfig;
 use tokio::task::JoinSet;
-use tracing::{error, info, warn};
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 /// Resident nq-ng service.
@@ -22,10 +22,6 @@ pub struct Nqd {
     /// primary local surface.
     #[arg(long)]
     pub console_address: Option<String>,
-    /// Collect every configured instance once, then exit. Intended for install
-    /// drills and black-box tests, not normal service operation.
-    #[arg(long)]
-    pub once: bool,
 }
 
 /// Start the daemon and persist until shutdown.
@@ -60,10 +56,6 @@ pub async fn run(options: Nqd) -> Result<()> {
         &serde_json::json!({"pid": std::process::id()}),
     )?;
     drop(store);
-
-    if options.once {
-        return collect_once(config).await;
-    }
 
     let unix_listener = crate::api::bind_unix(&config.socket_path)?;
     // Fail closed on the host-local surface: bind an INET listener only when an
@@ -131,73 +123,6 @@ pub async fn run(options: Nqd) -> Result<()> {
     Ok(())
 }
 
-async fn collect_once(config: NqConfig) -> Result<()> {
-    let mut tasks = JoinSet::new();
-    for watcher in config.watchers.clone() {
-        let config = config.clone();
-        tasks.spawn(async move { collect_one(config, watcher).await });
-    }
-    let mut failures = 0;
-    while let Some(result) = tasks.join_next().await {
-        match result {
-            Ok(Ok(outcome)) if outcome.has_admitted_usable_report() => {
-                let governed_result = canonical_result_document(&outcome)?;
-                info!(
-                    instance = %outcome.instance_id(),
-                    governed_result = %governed_result,
-                    "collection admitted"
-                );
-            }
-            Ok(Ok(outcome)) => {
-                failures += 1;
-                let governed_result = canonical_result_document(&outcome)?;
-                warn!(
-                    instance = %outcome.instance_id(),
-                    governed_result = %governed_result,
-                    "collection did not admit a report"
-                );
-            }
-            Ok(Err(error)) => {
-                failures += 1;
-                error!(%error, "collection failed before a run record could be returned");
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-    if failures == 0 {
-        Ok(())
-    } else {
-        anyhow::bail!("{failures} instance collection(s) did not admit a report")
-    }
-}
-
-/// Render the exact versioned result document for structured daemon logs.
-///
-/// Debug formatting is a Rust implementation detail and is neither stable nor
-/// independently reopenable. Log the same canonical serialization consumed by
-/// the store and public surfaces so dependent testimony is never replaced by a
-/// presentation-only projection.
-fn canonical_result_document(value: &nq_core::CollectionOutcome) -> Result<String> {
-    let frame = crate::transport::CollectionOutcomeFrame::encode(value)
-        .context("cannot encode and reopen governed collection result for daemon log")?;
-    let body = frame
-        .wire()
-        .strip_suffix(b"\n")
-        .context("checked collection-result frame lacks its terminal newline")?;
-    String::from_utf8(body.to_vec()).context("canonical governed result is not UTF-8")
-}
-
-async fn collect_one(
-    config: NqConfig,
-    watcher: WatcherConfig,
-) -> Result<nq_core::CollectionOutcome> {
-    Ok(tokio::task::spawn_blocking(move || {
-        let mut engine = nq_core::CollectionEngine::open(&config)?;
-        engine.collect(&watcher)
-    })
-    .await??)
-}
-
 fn validate_catalog(config: &NqConfig) -> Result<()> {
     Ok(nq_core::engine::validate_compiled_config(config)?)
 }
@@ -212,12 +137,8 @@ fn initialize_tracing() {
 
 #[cfg(test)]
 mod tests {
-    use clap::CommandFactory;
-    use nq_core::engine::{CollectionOutcome, GovernedRefusal};
-    use nq_protocol::{InstanceId, Refusal, RefusalBoundary, RefusalCode};
-    use serde_json::json;
-
     use super::*;
+    use clap::CommandFactory;
 
     #[test]
     fn daemon_cli_is_well_formed() {
@@ -231,6 +152,14 @@ mod tests {
         assert!(
             parsed.console_address.is_none(),
             "the loopback console must be off unless explicitly configured"
+        );
+    }
+
+    #[test]
+    fn daemon_has_no_diagnostic_invocation_flag() {
+        assert!(
+            Nqd::try_parse_from(["nqd", "--config=/etc/nq/nq.toml", "--once"]).is_err(),
+            "resident startup must not turn configuration possession into invocation authority"
         );
     }
 
@@ -255,22 +184,36 @@ mod tests {
                 "resident NQ must not own Nightshift recurrence token {forbidden}"
             );
         }
-        assert!(
-            daemon.contains("if options.once {")
-                && daemon.contains("return collect_once(config).await;"),
-            "the only daemon collection path must remain explicitly gated by --once"
-        );
-        assert_eq!(
-            daemon.matches("collect_one(config, watcher)").count(),
-            1,
-            "daemon startup or restart must not add another provider invocation path"
-        );
+        for forbidden in [
+            "CollectionEngine",
+            "collect_once",
+            "collect_one",
+            "diagnostic_execute",
+        ] {
+            assert!(
+                !daemon.contains(forbidden),
+                "resident startup must not contain diagnostic invocation path {forbidden}"
+            );
+        }
 
         let api = production(include_str!("api.rs"));
         for forbidden in ["CollectionEngine", "diagnostic_execute", "collect_one"] {
             assert!(
                 !api.contains(forbidden),
                 "the resident read API must not invoke diagnostics through {forbidden}"
+            );
+        }
+
+        let cli = production(include_str!("cli.rs"));
+        for forbidden in [
+            "Command::Collect",
+            "DiagnosticsCommand::Execute",
+            ".collect(&watcher)",
+            ".diagnostic_execute",
+        ] {
+            assert!(
+                !cli.contains(forbidden),
+                "shipped CLI must not bypass the governed runtime through {forbidden}"
             );
         }
 
@@ -303,12 +246,7 @@ mod tests {
             );
         }
 
-        for source in [
-            daemon,
-            api,
-            production(include_str!("cli.rs")),
-            production(include_str!("archive.rs")),
-        ] {
+        for source in [daemon, api, cli, production(include_str!("archive.rs"))] {
             for (left, right) in [("\"sched", "uler\""), ("\"notific", "ation\"")] {
                 let forbidden = format!("{left}{right}");
                 assert!(
@@ -317,61 +255,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn daemon_result_document_preserves_same_code_refusal_payloads() {
-        let outcome = |run_id: &str, refusal_id: &str, retriable, details| {
-            CollectionOutcome::rejected(
-                "daemon-transport".to_owned(),
-                run_id.to_owned(),
-                GovernedRefusal::helper(
-                    refusal_id.to_owned(),
-                    Refusal {
-                        responsible_instance_id: InstanceId::new("daemon-transport")
-                            .expect("instance token"),
-                        boundary: RefusalBoundary::Collection,
-                        code: RefusalCode::CollectionFailed,
-                        message: "backend collection failed".to_owned(),
-                        retriable,
-                        details,
-                    },
-                ),
-            )
-        };
-        let transient = outcome(
-            "run-transient",
-            "refusal-transient",
-            true,
-            json!({"attempt": 1, "errno": "EAGAIN"}),
-        );
-        let permanent = outcome(
-            "run-permanent",
-            "refusal-permanent",
-            false,
-            json!({"device": "nvme0", "errno": "ENODEV"}),
-        );
-        let transient_value = serde_json::to_value(&transient).expect("transient serializes");
-        let permanent_value = serde_json::to_value(&permanent).expect("permanent serializes");
-        assert_ne!(
-            transient_value["result"]["refusal"]["refusal_id"],
-            permanent_value["result"]["refusal"]["refusal_id"]
-        );
-
-        let transient_log = canonical_result_document(&transient).expect("canonical log document");
-        let permanent_log = canonical_result_document(&permanent).expect("canonical log document");
-        assert_eq!(
-            transient_log.into_bytes(),
-            nq_protocol::canonical_json_bytes(&transient).expect("canonical transient")
-        );
-        assert_eq!(
-            permanent_log.into_bytes(),
-            nq_protocol::canonical_json_bytes(&permanent).expect("canonical permanent")
-        );
-        assert_ne!(
-            nq_protocol::canonical_json_bytes(&transient).expect("canonical transient"),
-            nq_protocol::canonical_json_bytes(&permanent).expect("canonical permanent")
-        );
     }
 
     /// Default packaged startup must expose no host-local INET listener: the

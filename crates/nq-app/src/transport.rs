@@ -1,15 +1,14 @@
-//! Exact application-level transport boundaries for governed result objects.
+//! Test-only exact transport checks for the retired raw collection surface.
+//!
+//! The shipped application no longer exposes raw collection or daemon
+//! invocation. These checks retain the serialization/refusal qualification
+//! that guarded the former surface without keeping that surface reachable in
+//! production.
 
 use anyhow::{Result, bail};
 use nq_core::{CollectionOutcome, decode_collection_outcome_ndjson};
 
-/// A stored collection result plus the one-record canonical NDJSON frame that
-/// was independently reopened before it crossed an application boundary.
-///
-/// The helper protocol has its own request/response DTOs. This carrier is the
-/// product-level result protocol used by the structured collection CLI and by
-/// the daemon's governed-result log field; neither surface serializes the Rust
-/// value independently.
+/// One canonical collection-result frame reopened before use.
 #[derive(Debug)]
 pub(crate) struct CollectionOutcomeFrame {
     wire: Vec<u8>,
@@ -17,13 +16,7 @@ pub(crate) struct CollectionOutcomeFrame {
 }
 
 impl CollectionOutcomeFrame {
-    /// Canonically encode and strictly reopen one exact collection result.
-    ///
-    /// The body is bounded by the same limit as its canonical persisted
-    /// document, plus the required terminal LF. Reopening rejects duplicate,
-    /// omitted, unknown, noncanonical, or semantically inconsistent fields
-    /// before the bytes are exposed to a caller.
-    pub(crate) fn encode(outcome: &CollectionOutcome) -> Result<Self> {
+    fn encode(outcome: &CollectionOutcome) -> Result<Self> {
         outcome.validate()?;
         let wire = nq_protocol::encode_ndjson(outcome)?;
         let max_frame_bytes = nq_store::MAX_STORED_JSON_BYTES
@@ -36,19 +29,12 @@ impl CollectionOutcomeFrame {
         Ok(Self { wire, reopened })
     }
 
-    /// Exact canonical one-record NDJSON bytes.
-    pub(crate) fn wire(&self) -> &[u8] {
+    fn wire(&self) -> &[u8] {
         &self.wire
     }
 
-    /// Typed result obtained by strict decoding of [`Self::wire`].
-    pub(crate) fn reopened(&self) -> &CollectionOutcome {
+    fn reopened(&self) -> &CollectionOutcome {
         &self.reopened
-    }
-
-    /// Consume the checked frame for an outward byte stream.
-    pub(crate) fn into_wire(self) -> Vec<u8> {
-        self.wire
     }
 }
 

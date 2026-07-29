@@ -71,8 +71,6 @@ pub enum Command {
         #[command(subcommand)]
         command: WatcherCommand,
     },
-    /// Run one explicitly requested collection (never triggered by a read).
-    Collect(InstanceArg),
     /// Execute and emit one immutable bounded diagnostic artifact.
     Diagnostics {
         /// Diagnostic-execution workflow.
@@ -198,8 +196,6 @@ pub struct InstanceArg {
 /// Bounded diagnostic-execution operations.
 #[derive(Debug, Subcommand)]
 pub enum DiagnosticsCommand {
-    /// Collect, evaluate, and emit one exact supported diagnostic artifact.
-    Execute(InstanceArg),
     /// Inspect one immutable artifact commitment without changing it.
     Inspect {
         /// Exact contract-owned artifact identity.
@@ -366,11 +362,8 @@ pub async fn run(options: Nq) -> Result<()> {
         Command::Watcher { command } => {
             watcher_command(&options.config, command, options.json).await
         }
-        Command::Collect(instance) => {
-            collect_command(&options.config, &instance.instance_id, options.json).await
-        }
         Command::Diagnostics { command } => {
-            diagnostics_command(&options.config, command, options.json).await
+            diagnostics_command(&options.config, command, options.json)
         }
         Command::Doctor => doctor(&options.config, options.json),
         Command::Backup(arguments) => backup(&options.config, &arguments.destination, options.json),
@@ -556,35 +549,12 @@ async fn watcher_command(
     }
 }
 
-async fn collect_command(config_path: &Path, instance_id: &str, json_output: bool) -> Result<()> {
-    let config = NqConfig::load(config_path)?;
-    let watcher = config
-        .watcher(instance_id)
-        .with_context(|| format!("unknown instance {instance_id}"))?
-        .clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let mut engine = nq_core::CollectionEngine::open(&config)?;
-        engine.collect(&watcher)
-    })
-    .await??;
-    let successful = result.has_admitted_usable_report();
-    print_collection_outcome(&result, json_output)?;
-    if successful {
-        Ok(())
-    } else {
-        bail!("collection did not produce a complete or partial admitted report")
-    }
-}
-
-async fn diagnostics_command(
+fn diagnostics_command(
     config_path: &Path,
     command: DiagnosticsCommand,
     json_output: bool,
 ) -> Result<()> {
     match command {
-        DiagnosticsCommand::Execute(instance) => {
-            diagnostic_execute(config_path, &instance.instance_id).await
-        }
         DiagnosticsCommand::Inspect { artifact_id } => {
             diagnostic_inspect(config_path, &artifact_id, json_output)
         }
@@ -594,23 +564,6 @@ async fn diagnostics_command(
             import_id,
         } => diagnostic_import(config_path, &artifact, import_id.as_deref(), json_output),
     }
-}
-
-async fn diagnostic_execute(config_path: &Path, instance_id: &str) -> Result<()> {
-    let config = NqConfig::load(config_path)?;
-    let watcher = config
-        .watcher(instance_id)
-        .with_context(|| format!("unknown instance {instance_id}"))?
-        .clone();
-    let artifact = tokio::task::spawn_blocking(move || {
-        let mut engine = nq_core::CollectionEngine::open(&config)?;
-        engine.diagnostic_execute(&watcher)
-    })
-    .await??;
-    std::io::stdout()
-        .lock()
-        .write_all(&artifact.canonical_bytes()?)?;
-    Ok(())
 }
 
 fn diagnostic_inspect(config_path: &Path, artifact_id: &str, json_output: bool) -> Result<()> {
@@ -921,25 +874,6 @@ fn diagnostic_artifact_access_value(
             "this read grants no reliance, authorization, or action"
         ],
     }))
-}
-
-fn collection_outcome_output(
-    outcome: &nq_core::CollectionOutcome,
-    json_output: bool,
-) -> Result<Vec<u8>> {
-    let frame = crate::transport::CollectionOutcomeFrame::encode(outcome)?;
-    if json_output {
-        return Ok(frame.into_wire());
-    }
-    let mut rendered = serde_json::to_vec_pretty(frame.reopened())?;
-    rendered.push(b'\n');
-    Ok(rendered)
-}
-
-fn print_collection_outcome(outcome: &nq_core::CollectionOutcome, json_output: bool) -> Result<()> {
-    let bytes = collection_outcome_output(outcome, json_output)?;
-    std::io::stdout().lock().write_all(&bytes)?;
-    Ok(())
 }
 
 fn doctor(config_path: &Path, json_output: bool) -> Result<()> {
@@ -2000,22 +1934,21 @@ helper_runtime_dir = "/run/nq/helpers"
     fn command_tree_exposes_required_operator_workflows() {
         use clap::CommandFactory;
         Nq::command().debug_assert();
+        assert!(
+            Nq::try_parse_from(["nq", "collect", "host-local"]).is_err(),
+            "raw collection must not remain a shipped operator workflow"
+        );
     }
 
     #[test]
-    fn diagnostic_execute_has_one_explicit_bounded_instance() {
-        let options = Nq::try_parse_from(["nq", "diagnostics", "execute", "host-local"])
-            .expect("bounded diagnostic command parses");
-        let Command::Diagnostics {
-            command: DiagnosticsCommand::Execute(instance),
-        } = options.command
-        else {
-            panic!("diagnostic execute command expected");
-        };
-        assert_eq!(instance.instance_id, "host-local");
+    fn ungoverned_diagnostic_execution_is_not_a_shipped_command() {
         assert!(
-            Nq::try_parse_from(["nq", "diagnostics", "execute", "host-a", "host-b"]).is_err(),
-            "one invocation cannot silently broaden to multiple subjects"
+            Nq::try_parse_from(["nq", "diagnostics", "execute", "host-local"]).is_err(),
+            "configuration possession must not expose the former unbound execution path"
+        );
+        assert!(
+            Nq::try_parse_from(["nq", "diagnostics", "run", "host-local"]).is_err(),
+            "no governed request carrier is ratified yet, so the CLI must not invent one"
         );
     }
 
@@ -2264,25 +2197,6 @@ helper_runtime_dir = "{}"
     fn canonical_config_diff_ignores_toml_formatting_by_construction() {
         let bytes = canonical_json_bytes(&json!({"b": 1, "a": 2})).unwrap();
         assert_eq!(bytes, br#"{"a":2,"b":1}"#);
-    }
-
-    #[test]
-    fn structured_collection_cli_emits_exact_reopenable_v2_ndjson() {
-        let outcome = nq_core::CollectionOutcome::admitted(
-            "cli.protocol".to_owned(),
-            "run-cli-protocol".to_owned(),
-            "report-cli-protocol".to_owned(),
-            "complete".to_owned(),
-            nq_protocol::sha256_bytes(b"cli-protocol-report").into_string(),
-            Vec::new(),
-        );
-
-        let bytes = collection_outcome_output(&outcome, true)
-            .expect("structured CLI output crosses the exact result boundary");
-        let reopened = nq_core::decode_collection_outcome_ndjson(&bytes, bytes.len())
-            .expect("structured CLI result strictly reopens");
-        assert_eq!(reopened, outcome);
-        assert_eq!(bytes.last(), Some(&b'\n'));
     }
 
     #[test]

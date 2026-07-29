@@ -5,4 +5,5 @@ pub mod archive;
 pub mod cli;
 pub mod daemon;
 mod ownership;
+#[cfg(test)]
 mod transport;

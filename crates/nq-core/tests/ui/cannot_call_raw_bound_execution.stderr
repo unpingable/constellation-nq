@@ -1,0 +1,11 @@
+error[E0599]: no function or associated item named `diagnostic_execute_bound` found for struct `CollectionEngine` in the current scope
+ --> tests/ui/cannot_call_raw_bound_execution.rs:8:31
+  |
+8 |     let _ = CollectionEngine::diagnostic_execute_bound(engine, watcher);
+  |                               ^^^^^^^^^^^^^^^^^^^^^^^^ function or associated item not found in `CollectionEngine`
+  |
+note: if you're trying to build a new `CollectionEngine`, consider using `CollectionEngine::open` which returns `Result<CollectionEngine, EngineError>`
+ --> src/engine.rs
+  |
+  |     pub fn open(config: &NqConfig) -> Result<Self, EngineError> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

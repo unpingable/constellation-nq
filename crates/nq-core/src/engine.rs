@@ -137,6 +137,14 @@ pub enum EngineError {
     AcquisitionFailed(Box<AcquisitionFailure>),
 }
 
+#[cfg(test)]
+#[path = "engine_checkpoint_commit_tests.rs"]
+mod checkpoint_commit_tests;
+
+#[cfg(test)]
+#[path = "engine_invocation_serialization_tests.rs"]
+mod invocation_serialization_tests;
+
 /// Result of an operator watcher test/admission workflow.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
@@ -1746,24 +1754,24 @@ pub struct CollectionEngine {
 /// exact activation snapshot and later records the full
 /// `nq.execution_identity_binding.v2` companion.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DiagnosticProductionIdentityV2 {
+struct DiagnosticProductionIdentityV2 {
     /// Enrolled logical NQ node identity.
-    pub node_id: String,
+    node_id: String,
     /// Catalog-resolved subject identity.
-    pub subject_id: String,
+    subject_id: String,
     /// Catalog-resolved vantage generation.
-    pub vantage: SemanticIdentityV1,
+    vantage: SemanticIdentityV1,
     /// Exact active static-profile-cohort generation.
-    pub cohort: SemanticIdentityV1,
+    cohort: SemanticIdentityV1,
 }
 
 /// Exact live inputs available when the engine has sealed a V2 artifact but
 /// has not yet committed its production binding.
-pub struct DiagnosticBindingSource<'a> {
+struct DiagnosticBindingSource<'a> {
     /// Exact V2 artifact whose bytes and identity will be committed.
-    pub artifact: &'a DiagnosticExecutionV2,
+    artifact: &'a DiagnosticExecutionV2,
     /// Exact child provider-intake record retained by NQ.
-    pub provider_intake: &'a ProviderIntakeRecordV1,
+    provider_intake: &'a ProviderIntakeRecordV1,
 }
 
 /// Host-role callback that constructs the additive production identity
@@ -1771,7 +1779,7 @@ pub struct DiagnosticBindingSource<'a> {
 ///
 /// Implementations must return the complete runtime-ledger batch and linkage
 /// input. The store commits it atomically with the local artifact origin.
-pub trait DiagnosticExecutionBindingFactory {
+trait DiagnosticExecutionBindingFactory {
     /// Construct and validate the exact production binding.
     ///
     /// # Errors
@@ -1793,6 +1801,7 @@ struct DiagnosticInvocationContext<'a> {
 
 #[derive(Debug)]
 struct CollectionExecution {
+    #[cfg_attr(not(test), allow(dead_code))]
     outcome: CollectionOutcome,
     diagnostic: Option<SupportedDiagnosticExecution>,
     diagnostic_artifact_id: Option<Sha256Digest>,
@@ -2665,7 +2674,8 @@ impl CollectionEngine {
     ///
     /// Returns only local engine/storage failures. Expected helper, protocol,
     /// and admission outcomes are retained and returned as `CollectionOutcome`.
-    pub fn collect(&mut self, watcher: &WatcherConfig) -> Result<CollectionOutcome, EngineError> {
+    #[cfg(test)]
+    fn collect(&mut self, watcher: &WatcherConfig) -> Result<CollectionOutcome, EngineError> {
         self.collect_internal(watcher, None)
             .map(|execution| execution.outcome)
     }
@@ -2688,7 +2698,8 @@ impl CollectionEngine {
     /// Returns when the profile does not have exactly one compiled detector,
     /// collection fails locally, admission creates no run, or the completed
     /// collection cannot emit exact v2 input accounting.
-    pub fn diagnostic_execute(
+    #[cfg(test)]
+    fn diagnostic_execute(
         &mut self,
         watcher: &WatcherConfig,
     ) -> Result<SupportedDiagnosticExecution, EngineError> {
@@ -2696,46 +2707,6 @@ impl CollectionEngine {
             request_id: None,
             production: None,
             binding_factory: None,
-        };
-        let execution = self.collect_internal(watcher, Some(&invocation))?;
-        execution.diagnostic.ok_or_else(|| {
-            EngineError::DiagnosticUnsupported(format!(
-                "collection for {} produced no admitted determinate diagnostic execution; inspect the retained collection outcome",
-                watcher.instance_id
-            ))
-        })
-    }
-
-    /// Execute one bounded diagnostic under an outer request and exact
-    /// catalog-resolved production identity surface.
-    ///
-    /// This is the engine entry point for the resident host-role runtime. It
-    /// still does not authenticate, authorize, schedule, or grant reliance;
-    /// those caller-owned decisions must already be durably recorded.
-    ///
-    /// # Errors
-    ///
-    /// Returns for an invalid production identity carrier or under the same
-    /// collection/emission failures as [`Self::diagnostic_execute`].
-    pub fn diagnostic_execute_bound(
-        &mut self,
-        watcher: &WatcherConfig,
-        request_id: DiagnosticRequestId,
-        production: DiagnosticProductionIdentityV2,
-        binding_factory: &dyn DiagnosticExecutionBindingFactory,
-    ) -> Result<SupportedDiagnosticExecution, EngineError> {
-        require_outer_diagnostic_request_id(&request_id)?;
-        validate_diagnostic_production_identity(&production)?;
-        if production.subject_id != watcher.subject {
-            return Err(EngineError::Invariant(
-                "production diagnostic subject differs from the bounded provider-request subject; no identity correspondence was supplied"
-                    .to_owned(),
-            ));
-        }
-        let invocation = DiagnosticInvocationContext {
-            request_id: Some(request_id),
-            production: Some(production),
-            binding_factory: Some(binding_factory),
         };
         let execution = self.collect_internal(watcher, Some(&invocation))?;
         execution.diagnostic.ok_or_else(|| {
@@ -13229,60 +13200,6 @@ sys.stdout.write("\n")
             outcome.result,
             CollectionResult::AdmissionRefused { .. }
         ));
-    }
-
-    #[test]
-    fn bound_execution_refuses_unmapped_subject_identity_before_acquisition() {
-        struct UnusedBindingFactory;
-
-        impl DiagnosticExecutionBindingFactory for UnusedBindingFactory {
-            fn build_execution_binding(
-                &self,
-                _source: DiagnosticBindingSource<'_>,
-            ) -> Result<DiagnosticArtifactExecutionBindingInput, EngineError> {
-                panic!("subject mismatch must refuse before provider acquisition or binding")
-            }
-        }
-
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let (config, watcher, _lock) = binding_recovery_fixture(directory.path());
-        Store::initialize(&config.database_path).expect("initialize store");
-        let identity = EvaluatorRuntimeIdentity::for_test(
-            Sha256Digest::parse(format!("sha256:{}", "a".repeat(64))).expect("digest"),
-        );
-        let mut engine =
-            CollectionEngine::open_with_evaluator_identity(&config, Ok(identity)).expect("engine");
-        let semantic = |id: &str| SemanticIdentityV1 {
-            id: id.to_owned(),
-            version: "1".to_owned(),
-            digest: nq_protocol::sha256_bytes(id.as_bytes()),
-        };
-        let error = engine
-            .diagnostic_execute_bound(
-                &watcher,
-                DiagnosticRequestId("outer-request-unmapped-subject".to_owned()),
-                DiagnosticProductionIdentityV2 {
-                    node_id: "node:test".to_owned(),
-                    subject_id: "different-subject".to_owned(),
-                    vantage: semantic("host-local"),
-                    cohort: semantic("host-cohort"),
-                },
-                &UnusedBindingFactory,
-            )
-            .expect_err("unmapped subject identity must fail closed");
-        assert!(matches!(
-            error,
-            EngineError::Invariant(message)
-                if message.contains("no identity correspondence was supplied")
-        ));
-        assert!(
-            engine
-                .store
-                .watcher_run_outcomes_bounded(10, None)
-                .expect("run history")
-                .is_empty(),
-            "the refused identity substitution performs no provider acquisition"
-        );
     }
 
     #[test]

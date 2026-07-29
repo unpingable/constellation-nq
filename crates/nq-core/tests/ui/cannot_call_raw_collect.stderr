@@ -1,0 +1,19 @@
+error[E0599]: `CollectionEngine` is not an iterator
+ --> tests/ui/cannot_call_raw_collect.rs:8:31
+  |
+8 |     let _ = CollectionEngine::collect(engine, watcher);
+  |                               ^^^^^^^ `CollectionEngine` is not an iterator
+  |
+ ::: src/engine.rs
+  |
+  | pub struct CollectionEngine {
+  | --------------------------- doesn't satisfy `CollectionEngine: Iterator`
+  |
+note: if you're trying to build a new `CollectionEngine`, consider using `CollectionEngine::open` which returns `Result<CollectionEngine, EngineError>`
+ --> src/engine.rs
+  |
+  |     pub fn open(config: &NqConfig) -> Result<Self, EngineError> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = note: the following trait bounds were not satisfied:
+          `CollectionEngine: Iterator`
+          which is required by `&mut CollectionEngine: Iterator`

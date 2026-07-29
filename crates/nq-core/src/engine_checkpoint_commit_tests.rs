@@ -4,8 +4,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use nq_core::config::NqConfig;
-use nq_core::engine::{
+use crate::config::NqConfig;
+use crate::engine::{
     CollectionEngine, CollectionResult, GovernedRefusalOrigin, append_profile_descriptor,
     checkpoint_contract_digest, validate_compiled_config,
 };
@@ -289,7 +289,7 @@ fn only_committed_admitted_reports_advance_the_next_request_checkpoint() {
     assert_checkpoint_sequence(&log);
 
     let store = Store::open(&database).expect("reopen test store");
-    let manager = nq_core::AdmissionManager;
+    let manager = crate::AdmissionManager;
     let lock = manager
         .load(&config.admissions_dir.join("checkpoint.primary.json"))
         .expect("active lock");

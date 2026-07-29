@@ -1,0 +1,5 @@
+error[E0432]: unresolved import `nq_core::DiagnosticExecutionBindingFactory`
+ --> tests/ui/cannot_implement_raw_binding_factory.rs:4:5
+  |
+4 | use nq_core::DiagnosticExecutionBindingFactory;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `DiagnosticExecutionBindingFactory` in the root
