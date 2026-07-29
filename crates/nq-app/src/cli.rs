@@ -842,11 +842,13 @@ fn diagnostic_artifact_access_value(
             run_id,
             evaluation_id,
             completed_at,
+            execution_binding_record_id,
         } => json!({
             "kind": "local_execution",
             "run_id": run_id,
             "evaluation_id": evaluation_id,
             "completed_at": completed_at,
+            "execution_binding_record_id": execution_binding_record_id,
         }),
         DiagnosticArtifactOrigin::Imported {
             import_id,
@@ -1389,18 +1391,18 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                     let v4_receipt = UpgradeReceiptInput {
                         receipt_id: uuid::Uuid::new_v4().to_string(),
                         from_schema_version: 4,
-                        to_schema_version: u32::try_from(nq_store::SCHEMA_VERSION)?,
+                        to_schema_version: 5,
                         migrations: CanonicalDocument::from_serializable(&[
                             "schema_v4_to_v5_diagnostic_artifacts",
                         ])?,
-                        binary_digest,
+                        binary_digest: binary_digest.clone(),
                         backup_digest: v4_artifact.sha256.clone(),
                         backup_location: v4_backup.display().to_string(),
                         started_at: v4_started_at.to_rfc3339(),
                         // The store owns the durable terminal timestamp.
                         finished_at: v4_started_at.to_rfc3339(),
                         result: "migrated".into(),
-                        operator_identity,
+                        operator_identity: operator_identity.clone(),
                         verification: CanonicalDocument::from_serializable(&json!({
                             "integrity": "ok",
                             "source_schema_version": 4,
@@ -1410,7 +1412,43 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                             "diagnostic_artifacts_synthesized": false,
                         }))?,
                     };
-                    let store = Store::upgrade_v4_to_v5(&config.database_path, &v4_receipt)?;
+                    Store::upgrade_v4_to_v5(&config.database_path, &v4_receipt)?;
+
+                    let v5_started_at = chrono::Utc::now();
+                    let v5_temporary_backup =
+                        backup_directory.join(format!(".nq-upgrade-{}.db", uuid::Uuid::new_v4()));
+                    let v5_artifact =
+                        Store::backup_v5_verified(&config.database_path, &v5_temporary_backup)?;
+                    let v5_backup = finalize_upgrade_backup(
+                        &v5_temporary_backup,
+                        &backup_directory,
+                        &v5_artifact.sha256,
+                    )?;
+                    let v5_receipt = UpgradeReceiptInput {
+                        receipt_id: uuid::Uuid::new_v4().to_string(),
+                        from_schema_version: 5,
+                        to_schema_version: 6,
+                        migrations: CanonicalDocument::from_serializable(&[
+                            "schema_v5_to_v6_runtime_ledger",
+                        ])?,
+                        binary_digest,
+                        backup_digest: v5_artifact.sha256.clone(),
+                        backup_location: v5_backup.display().to_string(),
+                        started_at: v5_started_at.to_rfc3339(),
+                        finished_at: v5_started_at.to_rfc3339(),
+                        result: "migrated".into(),
+                        operator_identity,
+                        verification: CanonicalDocument::from_serializable(&json!({
+                            "integrity": "ok",
+                            "source_schema_version": 5,
+                            "source_schema_artifact_digest": nq_store::SCHEMA_V5_ARTIFACT_DIGEST,
+                            "backup_reopened": true,
+                            "historical_runtime_records": "no_durable_commitments",
+                            "runtime_records_synthesized": false,
+                            "diagnostic_execution_bindings_synthesized": false,
+                        }))?,
+                    };
+                    let store = Store::upgrade_v5_to_v6(&config.database_path, &v5_receipt)?;
                     store.validate()?;
                     print_value(
                         &json!({
@@ -1421,8 +1459,11 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                             "v3_backup_digest": v3_artifact.sha256,
                             "v4_backup": v4_backup,
                             "v4_backup_digest": v4_artifact.sha256,
+                            "v5_backup": v5_backup,
+                            "v5_backup_digest": v5_artifact.sha256,
                             "historical_provider_intake": "explicit_gap_only",
                             "historical_diagnostic_artifacts": "no_durable_commitments",
+                            "historical_runtime_records": "no_durable_commitments",
                         }),
                         json_output,
                     )
@@ -1438,18 +1479,18 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                     let receipt = UpgradeReceiptInput {
                         receipt_id: uuid::Uuid::new_v4().to_string(),
                         from_schema_version: 4,
-                        to_schema_version: u32::try_from(nq_store::SCHEMA_VERSION)?,
+                        to_schema_version: 5,
                         migrations: CanonicalDocument::from_serializable(&[
                             "schema_v4_to_v5_diagnostic_artifacts",
                         ])?,
-                        binary_digest,
+                        binary_digest: binary_digest.clone(),
                         backup_digest: artifact.sha256.clone(),
                         backup_location: backup.display().to_string(),
                         started_at: started_at.to_rfc3339(),
                         // The store owns the durable terminal timestamp.
                         finished_at: started_at.to_rfc3339(),
                         result: "migrated".into(),
-                        operator_identity,
+                        operator_identity: operator_identity.clone(),
                         verification: CanonicalDocument::from_serializable(&json!({
                             "integrity": "ok",
                             "source_schema_version": 4,
@@ -1459,7 +1500,43 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                             "diagnostic_artifacts_synthesized": false,
                         }))?,
                     };
-                    let store = Store::upgrade_v4_to_v5(&config.database_path, &receipt)?;
+                    Store::upgrade_v4_to_v5(&config.database_path, &receipt)?;
+
+                    let v5_started_at = chrono::Utc::now();
+                    let v5_temporary_backup =
+                        backup_directory.join(format!(".nq-upgrade-{}.db", uuid::Uuid::new_v4()));
+                    let v5_artifact =
+                        Store::backup_v5_verified(&config.database_path, &v5_temporary_backup)?;
+                    let v5_backup = finalize_upgrade_backup(
+                        &v5_temporary_backup,
+                        &backup_directory,
+                        &v5_artifact.sha256,
+                    )?;
+                    let v5_receipt = UpgradeReceiptInput {
+                        receipt_id: uuid::Uuid::new_v4().to_string(),
+                        from_schema_version: 5,
+                        to_schema_version: 6,
+                        migrations: CanonicalDocument::from_serializable(&[
+                            "schema_v5_to_v6_runtime_ledger",
+                        ])?,
+                        binary_digest,
+                        backup_digest: v5_artifact.sha256.clone(),
+                        backup_location: v5_backup.display().to_string(),
+                        started_at: v5_started_at.to_rfc3339(),
+                        finished_at: v5_started_at.to_rfc3339(),
+                        result: "migrated".into(),
+                        operator_identity,
+                        verification: CanonicalDocument::from_serializable(&json!({
+                            "integrity": "ok",
+                            "source_schema_version": 5,
+                            "source_schema_artifact_digest": nq_store::SCHEMA_V5_ARTIFACT_DIGEST,
+                            "backup_reopened": true,
+                            "historical_runtime_records": "no_durable_commitments",
+                            "runtime_records_synthesized": false,
+                            "diagnostic_execution_bindings_synthesized": false,
+                        }))?,
+                    };
+                    let store = Store::upgrade_v5_to_v6(&config.database_path, &v5_receipt)?;
                     store.validate()?;
                     print_value(
                         &json!({
@@ -1468,7 +1545,56 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                             "schema_version": nq_store::SCHEMA_VERSION,
                             "backup": backup,
                             "backup_digest": artifact.sha256,
+                            "v5_backup": v5_backup,
+                            "v5_backup_digest": v5_artifact.sha256,
                             "historical_diagnostic_artifacts": "no_durable_commitments",
+                            "historical_runtime_records": "no_durable_commitments",
+                        }),
+                        json_output,
+                    )
+                }
+                5 => {
+                    let artifact =
+                        Store::backup_v5_verified(&config.database_path, &temporary_backup)?;
+                    let backup = finalize_upgrade_backup(
+                        &temporary_backup,
+                        &backup_directory,
+                        &artifact.sha256,
+                    )?;
+                    let receipt = UpgradeReceiptInput {
+                        receipt_id: uuid::Uuid::new_v4().to_string(),
+                        from_schema_version: 5,
+                        to_schema_version: 6,
+                        migrations: CanonicalDocument::from_serializable(&[
+                            "schema_v5_to_v6_runtime_ledger",
+                        ])?,
+                        binary_digest,
+                        backup_digest: artifact.sha256.clone(),
+                        backup_location: backup.display().to_string(),
+                        started_at: started_at.to_rfc3339(),
+                        finished_at: started_at.to_rfc3339(),
+                        result: "migrated".into(),
+                        operator_identity,
+                        verification: CanonicalDocument::from_serializable(&json!({
+                            "integrity": "ok",
+                            "source_schema_version": 5,
+                            "source_schema_artifact_digest": nq_store::SCHEMA_V5_ARTIFACT_DIGEST,
+                            "backup_reopened": true,
+                            "historical_runtime_records": "no_durable_commitments",
+                            "runtime_records_synthesized": false,
+                            "diagnostic_execution_bindings_synthesized": false,
+                        }))?,
+                    };
+                    let store = Store::upgrade_v5_to_v6(&config.database_path, &receipt)?;
+                    store.validate()?;
+                    print_value(
+                        &json!({
+                            "result": "migrated",
+                            "from_schema_version": 5,
+                            "schema_version": nq_store::SCHEMA_VERSION,
+                            "backup": backup,
+                            "backup_digest": artifact.sha256,
+                            "historical_runtime_records": "no_durable_commitments",
                         }),
                         json_output,
                     )

@@ -1030,9 +1030,16 @@ fn exact_v3_upgrade_accepts_typed_empty_history_and_refuses_semantic_or_schema_d
         nq_store::Store::database_schema_version(&v4_backup).expect("inspect v4 backup"),
         4
     );
+    let v5_backup = PathBuf::from(upgraded["v5_backup"].as_str().unwrap());
+    let v5_backup_digest = upgraded["v5_backup_digest"].as_str().unwrap();
+    assert_eq!(sha256_file(&v5_backup), v5_backup_digest);
+    assert_eq!(
+        nq_store::Store::database_schema_version(&v5_backup).expect("inspect v5 backup"),
+        5
+    );
 
-    let store = nq_store::Store::open(&database).expect("open migrated v4 store");
-    store.validate().expect("validate migrated v4 store");
+    let store = nq_store::Store::open(&database).expect("open migrated v6 store");
+    store.validate().expect("validate migrated v6 store");
     assert!(
         store
             .provider_intakes_bounded(10, None)
@@ -1047,7 +1054,7 @@ fn exact_v3_upgrade_accepts_typed_empty_history_and_refuses_semantic_or_schema_d
     drop(store);
 
     let receipts = read_only_upgrade_receipts(&database);
-    assert_eq!(receipts.len(), 2, "v3 to v5 requires two exact receipts");
+    assert_eq!(receipts.len(), 3, "v3 to v6 requires three exact receipts");
     let receipt = &receipts[0];
     assert_eq!(receipt.from_version, 3);
     assert_eq!(receipt.to_version, 4);
@@ -1063,7 +1070,7 @@ fn exact_v3_upgrade_accepts_typed_empty_history_and_refuses_semantic_or_schema_d
     assert_eq!(verification["acknowledgments_synthesized"], false);
     let receipt = &receipts[1];
     assert_eq!(receipt.from_version, 4);
-    assert_eq!(receipt.to_version, nq_store::SCHEMA_VERSION);
+    assert_eq!(receipt.to_version, 5);
     assert_eq!(receipt.result, "migrated");
     assert_eq!(receipt.backup_digest, v4_backup_digest);
     assert_eq!(receipt.backup_location, v4_backup.display().to_string());
@@ -1073,6 +1080,22 @@ fn exact_v3_upgrade_accepts_typed_empty_history_and_refuses_semantic_or_schema_d
     );
     let verification: Value = serde_json::from_str(&receipt.verification_json).unwrap();
     assert_eq!(verification["diagnostic_artifacts_synthesized"], false);
+    let receipt = &receipts[2];
+    assert_eq!(receipt.from_version, 5);
+    assert_eq!(receipt.to_version, nq_store::SCHEMA_VERSION);
+    assert_eq!(receipt.result, "migrated");
+    assert_eq!(receipt.backup_digest, v5_backup_digest);
+    assert_eq!(receipt.backup_location, v5_backup.display().to_string());
+    assert_eq!(
+        serde_json::from_str::<Value>(&receipt.migrations_json).unwrap(),
+        serde_json::json!(["schema_v5_to_v6_runtime_ledger"])
+    );
+    let verification: Value = serde_json::from_str(&receipt.verification_json).unwrap();
+    assert_eq!(verification["runtime_records_synthesized"], false);
+    assert_eq!(
+        verification["diagnostic_execution_bindings_synthesized"],
+        false
+    );
 
     let semantic_invalid = root.join("semantic-invalid-v3.db");
     write_exact_v3_database(&semantic_invalid, true);
