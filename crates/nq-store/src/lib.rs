@@ -26,9 +26,11 @@ use thiserror::Error;
 const SCHEMA: &str = include_str!("schema.sql");
 const SCHEMA_V3: &str = include_str!("schema_v3.sql");
 const SCHEMA_V4: &str = include_str!("schema_v4.sql");
+const SCHEMA_V5: &str = include_str!("schema_v5.sql");
 const SCHEMA_V3_TO_V4_PROVIDER: &str = include_str!("schema_v3_to_v4_provider.sql");
 const SCHEMA_V4_TO_V5_DIAGNOSTIC_ARTIFACTS: &str =
     include_str!("schema_v4_to_v5_diagnostic_artifacts.sql");
+const SCHEMA_V5_TO_V6_RUNTIME_LEDGER: &str = include_str!("schema_v5_to_v6_runtime_ledger.sql");
 const APPLICATION_ID: i64 = 1_313_951_303;
 
 const SCHEMA_METADATA_V4: &str = r"CREATE TABLE schema_metadata (
@@ -61,6 +63,21 @@ const SCHEMA_METADATA_V5: &str = r"CREATE TABLE schema_metadata (
 const SCHEMA_METADATA_V5_TRIGGERS: &str = "CREATE TRIGGER immutable_schema_metadata_update BEFORE UPDATE ON schema_metadata BEGIN SELECT RAISE(ABORT, 'append-only table'); END;\n\
      CREATE TRIGGER immutable_schema_metadata_delete BEFORE DELETE ON schema_metadata BEGIN SELECT RAISE(ABORT, 'append-only table'); END;";
 
+const SCHEMA_METADATA_V6: &str = r"CREATE TABLE schema_metadata (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    product TEXT NOT NULL CHECK (product = 'nq-ng'),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 6),
+    -- Digest of the exact schema.sql artifact compiled into the writing binary.
+    -- Rejects stale provisional-candidate databases at startup; it is NOT a
+    -- tamper attestation of the live SQLite schema (which the structural
+    -- fingerprint checks separately).
+    schema_artifact_digest TEXT NOT NULL CHECK (length(schema_artifact_digest) = 71 AND substr(schema_artifact_digest, 1, 7) = 'sha256:'),
+    initialized_at TEXT NOT NULL
+) STRICT;";
+
+const SCHEMA_METADATA_V6_TRIGGERS: &str = "CREATE TRIGGER immutable_schema_metadata_update BEFORE UPDATE ON schema_metadata BEGIN SELECT RAISE(ABORT, 'append-only table'); END;\n\
+     CREATE TRIGGER immutable_schema_metadata_delete BEFORE DELETE ON schema_metadata BEGIN SELECT RAISE(ABORT, 'append-only table'); END;";
+
 /// Exact schema-artifact digest of the qualified v0.1.0 store. It is retained
 /// only to validate an explicit v3-to-v4 upgrade source; normal opening never
 /// interprets v3 bytes as current storage.
@@ -71,6 +88,11 @@ pub const SCHEMA_V3_ARTIFACT_DIGEST: &str =
 /// retained only to validate an explicit v4-to-v5 upgrade source.
 pub const SCHEMA_V4_ARTIFACT_DIGEST: &str =
     "sha256:649b514a7cacddf4dbd55dad587947edd8499e9dc1ee6785370654075951cfa1";
+
+/// Exact schema-artifact digest of the qualified schema-v5 store. It is
+/// retained only to validate an explicit v5-to-v6 upgrade source.
+pub const SCHEMA_V5_ARTIFACT_DIGEST: &str =
+    "sha256:91455172d1bed3b5e67ae25b7122015fc3d1197ab9b676511a938d4eb658e94b";
 
 /// Schema tag bound into every admission-context digest preimage. Bump only when
 /// the constituent set or its canonicalization changes.
@@ -86,6 +108,49 @@ pub const PROVIDER_INTAKE_SCHEMA: &str = "nq.provider_intake.v1";
 
 /// First exact durable-processing acknowledgment representation.
 pub const PROVIDER_INTAKE_ACK_SCHEMA: &str = "nq.provider_intake_ack.v1";
+
+/// Canonical root preimage for one globally sequenced runtime record.
+pub const RUNTIME_LEDGER_ROOT_SCHEMA: &str = "nq.runtime_ledger_root.v1";
+
+/// Canonical identity preimage for one atomic runtime-record append.
+pub const RUNTIME_LEDGER_BATCH_SCHEMA: &str = "nq.runtime_ledger_batch.v1";
+
+/// Closed host-role record vocabulary ratified for the runtime ledger.
+///
+/// Presence in this list permits exact custody only. It does not establish
+/// semantic validity, applicability, standing, reliance, or authority.
+pub const SUPPORTED_RUNTIME_RECORD_SCHEMAS: &[&str] = &[
+    "nightshift.artifact_custody_receipt.v1",
+    "nq.artifact_delivery_attempt.v1",
+    "nq.artifact_delivery_record.v1",
+    "nq.authenticated_artifact_envelope.v1",
+    "nq.buffer_delivery_policy.v1",
+    "nq.custody_reservation.v1",
+    "nq.decommission_cut.v1",
+    "nq.decommission_ledger_snapshot.v1",
+    "nq.diagnostic_invocation_request.v1",
+    "nq.execution_identity_binding.v2",
+    "nq.execution_launch.v1",
+    "nq.host_role_lifecycle_event.v1",
+    "nq.host_role_relation.v1",
+    "nq.inspector_read_receipt.v1",
+    "nq.inspector_result_set.v1",
+    "nq.inspector_snapshot.v1",
+    "nq.invocation_decision.v1",
+    "nq.node_enrollment.v1",
+    "nq.node_key_lifecycle_event.v1",
+    "nq.operation_authorization.v1",
+    "nq.restore_activation_proof.v1",
+    "nq.role_manifest.v1",
+    "nq.runtime_activation.v1",
+    "nq.static_profile_cohort_manifest.v1",
+    "nq.witness_attachment.v1",
+    "nq.witness_lifecycle_event.v1",
+];
+
+/// Closed external canonical record classes that the runtime ledger may retain
+/// for exact cross-system correspondence.
+pub const SUPPORTED_EXTERNAL_RUNTIME_RECORD_SCHEMAS: &[&str] = &["nq.provider_intake.v1"];
 
 /// Closed derivation law for the admitted local helper provider's semantics.
 pub const LOCAL_PROVIDER_SEMANTIC_SCHEMA: &str = "nq.local_provider_semantics.v1";
@@ -113,9 +178,16 @@ static EXPECTED_SCHEMA_V4_FINGERPRINT: LazyLock<Result<String, String>> = LazyLo
         .map_err(|error| error.to_string())?;
     schema_fingerprint(&connection).map_err(|error| error.to_string())
 });
+static EXPECTED_SCHEMA_V5_FINGERPRINT: LazyLock<Result<String, String>> = LazyLock::new(|| {
+    let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    connection
+        .execute_batch(SCHEMA_V5)
+        .map_err(|error| error.to_string())?;
+    schema_fingerprint(&connection).map_err(|error| error.to_string())
+});
 
 /// The only schema version understood by this crate.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Hard ceiling for one page returned through the public read model helpers.
 pub const MAX_PUBLIC_QUERY_ROWS: u32 = 1_000;
@@ -209,6 +281,135 @@ impl CanonicalDocument {
     }
 }
 
+/// One canonical record to append to the host-role runtime ledger.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeRecordInput {
+    pub record_id: String,
+    pub record_schema: String,
+    pub canonical_bytes: CanonicalDocument,
+    pub committed_at: String,
+}
+
+/// One atomic, idempotent append of one or more runtime records.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeRecordBatchInput {
+    pub checkpoint_id: String,
+    pub expected_predecessor_checkpoint_id: Option<String>,
+    pub expected_predecessor_ledger_root: Option<Sha256Digest>,
+    pub records: Vec<RuntimeRecordInput>,
+}
+
+/// Whether one exact runtime-record batch was newly committed or replayed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeRecordAppendDisposition {
+    Committed,
+    Replayed,
+}
+
+/// Immutable checkpoint at the end of one atomic runtime-record append.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeLedgerCheckpoint {
+    pub checkpoint_sequence: u64,
+    pub checkpoint_id: String,
+    pub batch_digest: Sha256Digest,
+    pub first_record_sequence: u64,
+    pub last_record_sequence: u64,
+    pub record_count: u64,
+    pub predecessor_checkpoint_id: Option<String>,
+    pub predecessor_ledger_root: Option<Sha256Digest>,
+    pub checkpoint_ledger_root: Sha256Digest,
+    pub committed_at: String,
+}
+
+/// Receipt for one exact runtime-record append.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeRecordAppendReceipt {
+    pub disposition: RuntimeRecordAppendDisposition,
+    pub checkpoint: RuntimeLedgerCheckpoint,
+}
+
+/// One exactly reopened canonical runtime record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeRecordRow {
+    pub record_sequence: u64,
+    pub record_id: String,
+    pub record_schema: String,
+    pub canonical_bytes: CanonicalDocument,
+    pub canonical_bytes_sha256: Sha256Digest,
+    pub checkpoint_id: String,
+    pub predecessor_record_id: Option<String>,
+    pub predecessor_ledger_root: Option<Sha256Digest>,
+    pub ledger_root: Sha256Digest,
+    pub committed_at: String,
+}
+
+/// One page pinned to an immutable checkpoint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeRecordPage {
+    pub checkpoint: Option<RuntimeLedgerCheckpoint>,
+    pub after_record_sequence: u64,
+    pub records: Vec<RuntimeRecordRow>,
+    pub next_after_record_sequence: Option<u64>,
+    pub complete: bool,
+}
+
+/// Integrity state of the disposable runtime-record lookup projection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeRecordLookupStatus {
+    pub ledger_records: u64,
+    pub lookup_records: u64,
+    pub missing_records: u64,
+    pub extra_records: u64,
+    pub mismatched_records: u64,
+}
+
+impl RuntimeRecordLookupStatus {
+    #[must_use]
+    pub fn is_current(&self) -> bool {
+        self.ledger_records == self.lookup_records
+            && self.missing_records == 0
+            && self.extra_records == 0
+            && self.mismatched_records == 0
+    }
+}
+
+/// One exact provider-attempt record used by a production V2 execution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiagnosticArtifactProviderAttemptBindingInput {
+    pub provider_attempt_record_id: String,
+    pub intake_id: String,
+}
+
+/// Production companion closure for one local V2 artifact.
+///
+/// The runtime records are appended in the same transaction as the artifact
+/// commitment and linkage. Earlier request/decision/launch records may already
+/// exist; the terminal binding record is normally part of `runtime_records`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiagnosticArtifactExecutionBindingInput {
+    pub runtime_records: RuntimeRecordBatchInput,
+    pub execution_binding_record_id: String,
+    pub outer_request_record_id: String,
+    pub invocation_decision_record_id: String,
+    pub execution_launch_record_id: String,
+    pub outer_request_id: String,
+    pub provider_attempts: Vec<DiagnosticArtifactProviderAttemptBindingInput>,
+}
+
+/// Reopened exact production companion closure for a local V2 artifact.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiagnosticArtifactExecutionBinding {
+    pub execution_binding: RuntimeRecordRow,
+    pub outer_request: RuntimeRecordRow,
+    pub invocation_decision: RuntimeRecordRow,
+    pub execution_launch: RuntimeRecordRow,
+    pub outer_request_id: String,
+    pub provider_attempts: Vec<(
+        RuntimeRecordRow,
+        DiagnosticArtifactProviderAttemptBindingInput,
+    )>,
+}
+
 /// Exact local origin for a diagnostic artifact committed atomically with one
 /// collection.
 ///
@@ -220,6 +421,9 @@ pub struct DiagnosticArtifactLocalOriginInput {
     pub run_id: String,
     pub evaluation_id: Option<String>,
     pub completed_at: String,
+    /// Absent only for explicitly historical/pre-production local artifacts.
+    /// A production host-role path must supply the complete V2 companion.
+    pub execution_binding: Option<DiagnosticArtifactExecutionBindingInput>,
 }
 
 /// Opaque canonical diagnostic artifact to commit with one local collection.
@@ -268,6 +472,7 @@ pub enum DiagnosticArtifactOrigin {
         run_id: String,
         evaluation_id: Option<String>,
         completed_at: String,
+        execution_binding_record_id: Option<String>,
     },
     Imported {
         import_id: String,
@@ -1869,6 +2074,27 @@ impl Store {
         Ok(store)
     }
 
+    /// Open the exact qualified schema-v5 store read-only for the separately
+    /// authorized v5-to-v6 runtime-ledger migration.
+    pub fn open_v5_upgrade_source_read_only(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        if !path.is_file() || std::fs::metadata(path)?.len() == 0 {
+            return Err(StoreError::NotInitialized(path.to_path_buf()));
+        }
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        connection.pragma_update(None, "query_only", "ON")?;
+        let store = Self {
+            connection,
+            path: Some(path.to_path_buf()),
+        };
+        validate_v5_upgrade_source_connection(&store.connection)?;
+        Ok(store)
+    }
+
     /// Checkpoint a writable backup copy and leave it in rollback-journal mode
     /// before archive inventory and sealing.
     pub fn prepare_archive_copy(&self) -> Result<(), StoreError> {
@@ -2002,6 +2228,7 @@ impl Store {
         validate_run_results(&self.connection)?;
         validate_evaluation_refusal_invariants(&self.connection)?;
         validate_diagnostic_artifact_invariants(&self.connection)?;
+        validate_runtime_record_ledger(&self.connection)?;
         self.validate_admitted_report_associations()?;
         validate_status_sequence_lower_bound(&self.connection)?;
         validate_projection_invariants(&self.connection)
@@ -2624,6 +2851,142 @@ impl Store {
         run_id: &str,
     ) -> Result<Option<Sha256Digest>, StoreError> {
         diagnostic_artifact_id_for_run_on_connection(&self.connection, run_id)
+    }
+
+    /// Atomically append one exact runtime-record batch.
+    ///
+    /// Repeating the same checkpoint identity and exact batch is idempotent.
+    /// Reusing either a checkpoint or record identity for different bytes is a
+    /// collision, never an update.
+    pub fn append_runtime_records(
+        &mut self,
+        batch: &RuntimeRecordBatchInput,
+    ) -> Result<RuntimeRecordAppendReceipt, StoreError> {
+        let transaction = self.immediate_transaction()?;
+        let receipt = append_runtime_records_in_transaction(&transaction, batch)?;
+        transaction.commit()?;
+        Ok(receipt)
+    }
+
+    /// Reopen one exact runtime record by its immutable identity.
+    pub fn runtime_record(&self, record_id: &str) -> Result<Option<RuntimeRecordRow>, StoreError> {
+        runtime_record_by_id_on_connection(&self.connection, record_id)
+    }
+
+    /// Return the immutable latest checkpoint, or `None` for an empty ledger.
+    pub fn runtime_ledger_checkpoint(&self) -> Result<Option<RuntimeLedgerCheckpoint>, StoreError> {
+        runtime_ledger_checkpoint_on_connection(&self.connection)
+    }
+
+    /// Read one bounded page pinned to the supplied immutable checkpoint.
+    ///
+    /// Passing `None` is valid only for an empty ledger. Callers can retain the
+    /// returned checkpoint across pages so later appends never bleed into the
+    /// original snapshot.
+    pub fn runtime_record_page(
+        &self,
+        checkpoint: Option<&RuntimeLedgerCheckpoint>,
+        after_record_sequence: u64,
+        limit: u32,
+    ) -> Result<RuntimeRecordPage, StoreError> {
+        runtime_record_page_on_connection(
+            &self.connection,
+            checkpoint,
+            after_record_sequence,
+            limit,
+        )
+    }
+
+    /// Inspect the disposable runtime-record lookup projection.
+    pub fn runtime_record_lookup_status(&self) -> Result<RuntimeRecordLookupStatus, StoreError> {
+        runtime_record_lookup_status_on_connection(&self.connection)
+    }
+
+    /// Rebuild the disposable runtime-record lookup projection from the
+    /// canonical append-only ledger.
+    pub fn rebuild_runtime_record_lookup(
+        &mut self,
+    ) -> Result<RuntimeRecordLookupStatus, StoreError> {
+        let transaction = self.immediate_transaction()?;
+        transaction.execute("DELETE FROM runtime_record_lookup", [])?;
+        transaction.execute(
+            "INSERT INTO runtime_record_lookup (
+                record_id, record_sequence, record_schema, ledger_root
+             )
+             SELECT record_id, record_sequence, record_schema, ledger_root
+             FROM runtime_record_ledger ORDER BY record_sequence",
+            [],
+        )?;
+        let status = runtime_record_lookup_status_on_connection(&transaction)?;
+        if !status.is_current() {
+            return Err(StoreError::Integrity(
+                "rebuilt runtime-record lookup does not match canonical ledger".into(),
+            ));
+        }
+        transaction.commit()?;
+        Ok(status)
+    }
+
+    /// Enumerate exact runtime records of one schema using the verified
+    /// disposable lookup projection.
+    pub fn runtime_records_by_schema_bounded(
+        &self,
+        record_schema: &str,
+        checkpoint: &RuntimeLedgerCheckpoint,
+        after_record_sequence: u64,
+        limit: u32,
+    ) -> Result<Vec<RuntimeRecordRow>, StoreError> {
+        validate_bounded_identity("runtime record_schema", record_schema)?;
+        validate_public_limit(limit)?;
+        validate_runtime_checkpoint_identity(&self.connection, checkpoint)?;
+        let lookup_status = runtime_record_lookup_status_on_connection(&self.connection)?;
+        if !lookup_status.is_current() {
+            return Err(StoreError::Integrity(
+                "runtime-record lookup is stale; rebuild it before schema lookup".into(),
+            ));
+        }
+        let after_sequence = i64::try_from(after_record_sequence)
+            .map_err(|_| StoreError::Invariant("runtime-record cursor overflowed".into()))?;
+        let through_sequence = i64::try_from(checkpoint.last_record_sequence)
+            .map_err(|_| StoreError::Integrity("runtime checkpoint sequence overflowed".into()))?;
+        let mut statement = self.connection.prepare(
+            "SELECT ledger.record_id
+             FROM runtime_record_lookup AS lookup
+             JOIN runtime_record_ledger AS ledger
+               ON ledger.record_sequence = lookup.record_sequence
+              AND ledger.record_id = lookup.record_id
+              AND ledger.record_schema = lookup.record_schema
+              AND ledger.ledger_root = lookup.ledger_root
+             WHERE lookup.record_schema = ?1
+               AND lookup.record_sequence > ?2
+               AND lookup.record_sequence <= ?3
+             ORDER BY lookup.record_sequence
+             LIMIT ?4",
+        )?;
+        let ids = statement
+            .query_map(
+                params![record_schema, after_sequence, through_sequence, limit],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        ids.into_iter()
+            .map(|record_id| {
+                runtime_record_by_id_on_connection(&self.connection, &record_id)?.ok_or_else(|| {
+                    StoreError::Integrity(format!(
+                        "runtime-record lookup lost canonical record {record_id}"
+                    ))
+                })
+            })
+            .collect()
+    }
+
+    /// Resolve the exact production execution binding attached to one local
+    /// diagnostic artifact. Historical/pre-production artifacts return `None`.
+    pub fn diagnostic_artifact_execution_binding(
+        &self,
+        artifact_id: &Sha256Digest,
+    ) -> Result<Option<DiagnosticArtifactExecutionBinding>, StoreError> {
+        diagnostic_artifact_execution_binding_on_connection(&self.connection, artifact_id)
     }
 
     /// Reopen the exact canonical collection result bound to one completed run.
@@ -4340,6 +4703,47 @@ impl Store {
         result
     }
 
+    /// Create and verify the mandatory pre-upgrade backup of the exact
+    /// qualified schema-v5 store.
+    pub fn backup_v5_verified(
+        source: impl AsRef<Path>,
+        destination: impl AsRef<Path>,
+    ) -> Result<BackupArtifact, StoreError> {
+        let source_store = Self::open_v5_upgrade_source_read_only(source)?;
+        let destination = destination.as_ref();
+        if destination.exists() {
+            return Err(StoreError::Invariant(format!(
+                "backup destination already exists: {}",
+                destination.display()
+            )));
+        }
+        drop(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(destination)?,
+        );
+        let result = (|| {
+            let mut target =
+                Connection::open_with_flags(destination, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+            {
+                let backup = rusqlite::backup::Backup::new(&source_store.connection, &mut target)?;
+                backup.run_to_completion(64, std::time::Duration::from_millis(10), None)?;
+            }
+            drop(target);
+            drop(Self::open_v5_upgrade_source_read_only(destination)?);
+            Ok(BackupArtifact {
+                path: destination.to_path_buf(),
+                sha256: sha256_file(destination)?,
+                size_bytes: std::fs::metadata(destination)?.len(),
+            })
+        })();
+        if result.is_err() {
+            remove_database_artifact(destination);
+        }
+        result
+    }
+
     /// Explicitly migrate the exact qualified v0.1.0 schema-v3 store to v4.
     ///
     /// The caller must first create the verified backup named in `receipt`.
@@ -4503,7 +4907,7 @@ impl Store {
     pub fn upgrade_v4_to_v5(
         path: impl AsRef<Path>,
         receipt: &UpgradeReceiptInput,
-    ) -> Result<Self, StoreError> {
+    ) -> Result<(), StoreError> {
         let path = path.as_ref();
         validate_v4_to_v5_receipt(receipt)?;
         let backup_path = Path::new(&receipt.backup_location);
@@ -4574,22 +4978,22 @@ impl Store {
                  )
                  SELECT singleton, product, 5, ?1, initialized_at
                  FROM schema_metadata_v4",
-                [schema_artifact_digest()],
+                [SCHEMA_V5_ARTIFACT_DIGEST],
             )?;
             transaction.execute("DROP TABLE schema_metadata_v4", [])?;
             transaction.execute_batch(SCHEMA_METADATA_V5_TRIGGERS)?;
             transaction.execute_batch(SCHEMA_V4_TO_V5_DIAGNOSTIC_ARTIFACTS)?;
-            transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            transaction.pragma_update(None, "user_version", 5)?;
 
-            let expected = EXPECTED_SCHEMA_FINGERPRINT.as_ref().map_err(|error| {
+            let expected = EXPECTED_SCHEMA_V5_FINGERPRINT.as_ref().map_err(|error| {
                 StoreError::Integrity(format!(
-                    "compiled schema cannot be fingerprinted after migration: {error}"
+                    "compiled v5 schema cannot be fingerprinted after migration: {error}"
                 ))
             })?;
             let actual = schema_fingerprint(&transaction)?;
             if &actual != expected {
                 return Err(StoreError::Integrity(format!(
-                    "migrated v5 schema fingerprint {actual} differs from fresh v5 {expected}"
+                    "migrated v5 schema fingerprint {actual} differs from exact v5 {expected}"
                 )));
             }
             validate_stored_digests(&transaction)?;
@@ -4601,6 +5005,126 @@ impl Store {
             validate_run_results(&transaction)?;
             validate_evaluation_refusal_invariants(&transaction)?;
             validate_diagnostic_artifact_invariants(&transaction)?;
+            validate_status_sequence_lower_bound(&transaction)?;
+            validate_projection_invariants(&transaction)?;
+            let mut committed_receipt = receipt.clone();
+            committed_receipt.finished_at = now_utc();
+            insert_upgrade_receipt(&transaction, &committed_receipt)?;
+            validate_upgrade_receipts(&transaction)?;
+            transaction.commit()?;
+        }
+        validate_v5_upgrade_source_connection(&store.connection)?;
+        Ok(())
+    }
+
+    /// Explicitly migrate the exact qualified schema-v5 store to schema v6.
+    ///
+    /// Existing diagnostic artifacts retain an explicit null production
+    /// execution binding. No runtime record, checkpoint, or V2 production
+    /// closure is synthesized from pre-v6 history.
+    #[allow(clippy::too_many_lines)]
+    pub fn upgrade_v5_to_v6(
+        path: impl AsRef<Path>,
+        receipt: &UpgradeReceiptInput,
+    ) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        validate_v5_to_v6_receipt(receipt)?;
+        let backup_path = Path::new(&receipt.backup_location);
+        if !backup_path.is_file() || sha256_file(backup_path)? != receipt.backup_digest {
+            return Err(StoreError::Invariant(
+                "v5-to-v6 migration requires the exact verified backup named by its receipt".into(),
+            ));
+        }
+        let source_metadata = std::fs::metadata(path)?;
+        let backup_metadata = std::fs::metadata(backup_path)?;
+        if std::fs::canonicalize(path)? == std::fs::canonicalize(backup_path)?
+            || (source_metadata.dev(), source_metadata.ino())
+                == (backup_metadata.dev(), backup_metadata.ino())
+        {
+            return Err(StoreError::Invariant(
+                "v5-to-v6 migration backup must be distinct from the source database".into(),
+            ));
+        }
+        let backup_store = Self::open_v5_upgrade_source_read_only(backup_path)?;
+        let backup_logical_digest = v5_logical_state_digest(&backup_store.connection)?;
+        let source_store = Self::open_v5_upgrade_source_read_only(path)?;
+        let source_logical_digest = v5_logical_state_digest(&source_store.connection)?;
+        if source_logical_digest != backup_logical_digest {
+            return Err(StoreError::Invariant(format!(
+                "v5-to-v6 migration backup logical state {backup_logical_digest} does not match source {source_logical_digest}"
+            )));
+        }
+        drop(source_store);
+        drop(backup_store);
+
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        configure_connection(&connection, false)?;
+        let mut store = Self {
+            connection,
+            path: Some(path.to_path_buf()),
+        };
+        validate_v5_upgrade_source_connection(&store.connection)?;
+        {
+            let transaction = store.immediate_transaction()?;
+            validate_v5_upgrade_source_connection(&transaction)?;
+            if sha256_file(backup_path)? != receipt.backup_digest {
+                return Err(StoreError::Invariant(
+                    "v5-to-v6 migration backup changed after preflight validation".into(),
+                ));
+            }
+            let locked_backup = Self::open_v5_upgrade_source_read_only(backup_path)?;
+            let locked_backup_digest = v5_logical_state_digest(&locked_backup.connection)?;
+            let locked_source_digest = v5_logical_state_digest(&transaction)?;
+            if locked_source_digest != locked_backup_digest {
+                return Err(StoreError::Invariant(format!(
+                    "v5-to-v6 migration backup logical state {locked_backup_digest} does not match locked source {locked_source_digest}"
+                )));
+            }
+            drop(locked_backup);
+
+            transaction.execute_batch(
+                "DROP TRIGGER immutable_schema_metadata_update;
+                 DROP TRIGGER immutable_schema_metadata_delete;
+                 ALTER TABLE schema_metadata RENAME TO schema_metadata_v5;",
+            )?;
+            transaction.execute_batch(SCHEMA_METADATA_V6)?;
+            transaction.execute(
+                "INSERT INTO schema_metadata (
+                    singleton, product, schema_version, schema_artifact_digest, initialized_at
+                 )
+                 SELECT singleton, product, 6, ?1, initialized_at
+                 FROM schema_metadata_v5",
+                [schema_artifact_digest()],
+            )?;
+            transaction.execute("DROP TABLE schema_metadata_v5", [])?;
+            transaction.execute_batch(SCHEMA_METADATA_V6_TRIGGERS)?;
+            transaction.execute_batch(SCHEMA_V5_TO_V6_RUNTIME_LEDGER)?;
+            transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+
+            let expected = EXPECTED_SCHEMA_FINGERPRINT.as_ref().map_err(|error| {
+                StoreError::Integrity(format!(
+                    "compiled schema cannot be fingerprinted after migration: {error}"
+                ))
+            })?;
+            let actual = schema_fingerprint(&transaction)?;
+            if &actual != expected {
+                return Err(StoreError::Integrity(format!(
+                    "migrated v6 schema fingerprint {actual} differs from fresh v6 {expected}"
+                )));
+            }
+            validate_stored_digests(&transaction)?;
+            validate_upgrade_receipts(&transaction)?;
+            validate_all_admission_context_digests(&transaction)?;
+            validate_local_provider_admissions(&transaction)?;
+            validate_provider_intake_invariants(&transaction)?;
+            validate_refusal_invariants(&transaction)?;
+            validate_run_results(&transaction)?;
+            validate_evaluation_refusal_invariants(&transaction)?;
+            validate_diagnostic_artifact_invariants(&transaction)?;
+            validate_runtime_record_ledger(&transaction)?;
             validate_status_sequence_lower_bound(&transaction)?;
             validate_projection_invariants(&transaction)?;
             let mut committed_receipt = receipt.clone();
@@ -5402,6 +5926,7 @@ fn insert_upgrade_receipt(
     match (receipt.from_schema_version, receipt.to_schema_version) {
         (3, 4) => validate_v3_to_v4_receipt(receipt)?,
         (4, 5) => validate_v4_to_v5_receipt(receipt)?,
+        (5, 6) => validate_v5_to_v6_receipt(receipt)?,
         _ => {}
     }
     transaction.execute(
@@ -5518,6 +6043,45 @@ fn validate_v4_to_v5_receipt(receipt: &UpgradeReceiptInput) -> Result<(), StoreE
     Ok(())
 }
 
+fn validate_v5_to_v6_receipt(receipt: &UpgradeReceiptInput) -> Result<(), StoreError> {
+    if receipt.from_schema_version != 5 || receipt.to_schema_version != 6 {
+        return Err(StoreError::Invariant(
+            "v5-to-v6 migration receipt names the wrong version transition".into(),
+        ));
+    }
+    validate_digest("binary_digest", &receipt.binary_digest)?;
+    validate_digest("backup_digest", &receipt.backup_digest)?;
+    validate_upgrade_receipt_times(receipt)?;
+    let expected_migrations =
+        CanonicalDocument::from_serializable(&["schema_v5_to_v6_runtime_ledger"])?;
+    if receipt.migrations != expected_migrations {
+        return Err(StoreError::Invariant(
+            "v5-to-v6 migration receipt does not name the exact migration vocabulary".into(),
+        ));
+    }
+    if receipt.result != "migrated" {
+        return Err(StoreError::Invariant(
+            "v5-to-v6 migration receipt result must be exactly migrated".into(),
+        ));
+    }
+    let expected_verification = CanonicalDocument::from_serializable(&serde_json::json!({
+        "integrity": "ok",
+        "source_schema_version": 5,
+        "source_schema_artifact_digest": SCHEMA_V5_ARTIFACT_DIGEST,
+        "backup_reopened": true,
+        "historical_runtime_records": "no_durable_commitments",
+        "runtime_records_synthesized": false,
+        "diagnostic_execution_bindings_synthesized": false,
+    }))?;
+    if receipt.verification != expected_verification {
+        return Err(StoreError::Invariant(
+            "v5-to-v6 migration receipt verification does not match the exact closed vocabulary"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_upgrade_receipts(connection: &Connection) -> Result<(), StoreError> {
     let mut statement = connection.prepare(
         "SELECT receipt_id, from_schema_version, to_schema_version,
@@ -5571,6 +6135,8 @@ fn validate_upgrade_receipts(connection: &Connection) -> Result<(), StoreError> 
             (3, 4) => validate_v3_to_v4_receipt(&receipt)
                 .map_err(|error| StoreError::Integrity(format!("{receipt_id}: {error}")))?,
             (4, 5) => validate_v4_to_v5_receipt(&receipt)
+                .map_err(|error| StoreError::Integrity(format!("{receipt_id}: {error}")))?,
+            (5, 6) => validate_v5_to_v6_receipt(&receipt)
                 .map_err(|error| StoreError::Integrity(format!("{receipt_id}: {error}")))?,
             _ => {}
         }
@@ -5717,6 +6283,1147 @@ fn canonical_document_schema(document: &CanonicalDocument) -> Result<String, Sto
         })
 }
 
+fn runtime_record_batch_digest(
+    batch: &RuntimeRecordBatchInput,
+) -> Result<Sha256Digest, StoreError> {
+    let records = batch
+        .records
+        .iter()
+        .map(|record| {
+            serde_json::json!({
+                "record_id": record.record_id,
+                "record_schema": record.record_schema,
+                "canonical_bytes_sha256": record.canonical_bytes.digest(),
+                "canonical_bytes_length": record.canonical_bytes.as_bytes().len(),
+                "committed_at": record.committed_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    let preimage = CanonicalDocument::from_serializable(&serde_json::json!({
+        "schema": RUNTIME_LEDGER_BATCH_SCHEMA,
+        "checkpoint_id": batch.checkpoint_id,
+        "expected_predecessor_checkpoint_id": batch.expected_predecessor_checkpoint_id,
+        "expected_predecessor_ledger_root": batch
+            .expected_predecessor_ledger_root
+            .as_ref()
+            .map(Sha256Digest::as_str),
+        "records": records,
+    }))?;
+    Sha256Digest::parse(preimage.digest().to_owned())
+        .map_err(|error| StoreError::Invariant(error.to_string()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn runtime_record_root(
+    record_sequence: u64,
+    record: &RuntimeRecordInput,
+    checkpoint_id: &str,
+    predecessor_record_id: Option<&str>,
+    predecessor_ledger_root: Option<&Sha256Digest>,
+) -> Result<Sha256Digest, StoreError> {
+    let preimage = CanonicalDocument::from_serializable(&serde_json::json!({
+        "schema": RUNTIME_LEDGER_ROOT_SCHEMA,
+        "record_sequence": record_sequence,
+        "record_id": record.record_id,
+        "record_schema": record.record_schema,
+        "canonical_bytes_sha256": record.canonical_bytes.digest(),
+        "canonical_bytes_length": record.canonical_bytes.as_bytes().len(),
+        "checkpoint_id": checkpoint_id,
+        "predecessor_record_id": predecessor_record_id,
+        "predecessor_ledger_root": predecessor_ledger_root.map(Sha256Digest::as_str),
+        "committed_at": record.committed_at,
+    }))?;
+    Sha256Digest::parse(preimage.digest().to_owned())
+        .map_err(|error| StoreError::Invariant(error.to_string()))
+}
+
+fn validate_runtime_record_input(record: &RuntimeRecordInput) -> Result<(), StoreError> {
+    Sha256Digest::parse(record.record_id.clone()).map_err(|error| {
+        StoreError::Invariant(format!(
+            "runtime record_id is not a SHA-256 identity: {error}"
+        ))
+    })?;
+    validate_bounded_identity("runtime record_schema", &record.record_schema)?;
+    if !SUPPORTED_RUNTIME_RECORD_SCHEMAS.contains(&record.record_schema.as_str())
+        && !SUPPORTED_EXTERNAL_RUNTIME_RECORD_SCHEMAS.contains(&record.record_schema.as_str())
+    {
+        return Err(StoreError::Invariant(format!(
+            "runtime record {} uses unsupported schema {}",
+            record.record_id, record.record_schema
+        )));
+    }
+    if canonical_document_schema(&record.canonical_bytes)? != record.record_schema {
+        return Err(StoreError::Invariant(format!(
+            "runtime record {} schema disagrees with its canonical bytes",
+            record.record_id
+        )));
+    }
+    if chrono::DateTime::parse_from_rfc3339(&record.committed_at).is_err() {
+        return Err(StoreError::Invariant(format!(
+            "runtime record {} committed_at is not RFC 3339",
+            record.record_id
+        )));
+    }
+    Ok(())
+}
+
+fn validate_runtime_record_batch(batch: &RuntimeRecordBatchInput) -> Result<(), StoreError> {
+    Sha256Digest::parse(batch.checkpoint_id.clone()).map_err(|error| {
+        StoreError::Invariant(format!(
+            "runtime checkpoint_id is not a SHA-256 identity: {error}"
+        ))
+    })?;
+    if batch.records.is_empty() {
+        return Err(StoreError::Invariant(
+            "runtime-record append requires at least one record".into(),
+        ));
+    }
+    if batch.records.len() > usize::try_from(MAX_PUBLIC_QUERY_ROWS).unwrap_or(1_000) {
+        return Err(StoreError::Invariant(format!(
+            "runtime-record append exceeds {MAX_PUBLIC_QUERY_ROWS} records"
+        )));
+    }
+    if batch.expected_predecessor_checkpoint_id.is_some()
+        != batch.expected_predecessor_ledger_root.is_some()
+    {
+        return Err(StoreError::Invariant(
+            "runtime-record append predecessor checkpoint and root must be both present or both absent"
+                .into(),
+        ));
+    }
+    if let Some(predecessor_id) = &batch.expected_predecessor_checkpoint_id {
+        Sha256Digest::parse(predecessor_id.clone()).map_err(|error| {
+            StoreError::Invariant(format!(
+                "runtime predecessor checkpoint identity is invalid: {error}"
+            ))
+        })?;
+    }
+    let mut record_ids = BTreeSet::new();
+    for record in &batch.records {
+        validate_runtime_record_input(record)?;
+        if !record_ids.insert(record.record_id.as_str()) {
+            return Err(StoreError::Invariant(format!(
+                "runtime-record batch repeats identity {}",
+                record.record_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn runtime_checkpoint_by_id_on_connection(
+    connection: &Connection,
+    checkpoint_id: &str,
+) -> Result<Option<RuntimeLedgerCheckpoint>, StoreError> {
+    let row = connection
+        .query_row(
+            "SELECT checkpoint_sequence, checkpoint_id, batch_digest,
+                    first_record_sequence, last_record_sequence, record_count,
+                    predecessor_checkpoint_id, predecessor_ledger_root,
+                    checkpoint_ledger_root, committed_at
+             FROM runtime_record_checkpoints WHERE checkpoint_id = ?1",
+            [checkpoint_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        checkpoint_sequence,
+        checkpoint_id,
+        batch_digest,
+        first_record_sequence,
+        last_record_sequence,
+        record_count,
+        predecessor_checkpoint_id,
+        predecessor_ledger_root,
+        checkpoint_ledger_root,
+        committed_at,
+    )) = row
+    else {
+        return Ok(None);
+    };
+    let positive = |label: &str, value: i64| {
+        u64::try_from(value).map_err(|_| {
+            StoreError::Integrity(format!(
+                "runtime checkpoint {checkpoint_id} has invalid {label}"
+            ))
+        })
+    };
+    Ok(Some(RuntimeLedgerCheckpoint {
+        checkpoint_sequence: positive("checkpoint_sequence", checkpoint_sequence)?,
+        checkpoint_id: checkpoint_id.clone(),
+        batch_digest: Sha256Digest::parse(batch_digest).map_err(|error| {
+            StoreError::Integrity(format!(
+                "runtime checkpoint batch digest is invalid: {error}"
+            ))
+        })?,
+        first_record_sequence: positive("first_record_sequence", first_record_sequence)?,
+        last_record_sequence: positive("last_record_sequence", last_record_sequence)?,
+        record_count: positive("record_count", record_count)?,
+        predecessor_checkpoint_id,
+        predecessor_ledger_root: predecessor_ledger_root
+            .map(Sha256Digest::parse)
+            .transpose()
+            .map_err(|error| {
+                StoreError::Integrity(format!(
+                    "runtime checkpoint predecessor root is invalid: {error}"
+                ))
+            })?,
+        checkpoint_ledger_root: Sha256Digest::parse(checkpoint_ledger_root).map_err(|error| {
+            StoreError::Integrity(format!("runtime checkpoint root is invalid: {error}"))
+        })?,
+        committed_at,
+    }))
+}
+
+fn runtime_ledger_checkpoint_on_connection(
+    connection: &Connection,
+) -> Result<Option<RuntimeLedgerCheckpoint>, StoreError> {
+    let checkpoint_id = connection
+        .query_row(
+            "SELECT checkpoint_id FROM runtime_record_checkpoints
+             ORDER BY checkpoint_sequence DESC LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    checkpoint_id
+        .map(|checkpoint_id| {
+            runtime_checkpoint_by_id_on_connection(connection, &checkpoint_id)?.ok_or_else(|| {
+                StoreError::Integrity(format!("runtime checkpoint index lost {checkpoint_id}"))
+            })
+        })
+        .transpose()
+}
+
+fn runtime_record_by_id_on_connection(
+    connection: &Connection,
+    record_id: &str,
+) -> Result<Option<RuntimeRecordRow>, StoreError> {
+    let row = connection
+        .query_row(
+            "SELECT record_sequence, record_id, record_schema, canonical_bytes,
+                    canonical_bytes_sha256, checkpoint_id,
+                    predecessor_record_id, predecessor_ledger_root,
+                    ledger_root, committed_at
+             FROM runtime_record_ledger WHERE record_id = ?1",
+            [record_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        record_sequence,
+        record_id,
+        record_schema,
+        canonical_bytes,
+        canonical_bytes_sha256,
+        checkpoint_id,
+        predecessor_record_id,
+        predecessor_ledger_root,
+        ledger_root,
+        committed_at,
+    )) = row
+    else {
+        return Ok(None);
+    };
+    let record_sequence = u64::try_from(record_sequence).map_err(|_| {
+        StoreError::Integrity(format!("runtime record {record_id} has invalid sequence"))
+    })?;
+    let canonical_bytes =
+        CanonicalDocument::from_canonical_bytes(canonical_bytes).map_err(|error| {
+            StoreError::Integrity(format!(
+                "runtime record {record_id} bytes are not canonical: {error}"
+            ))
+        })?;
+    if canonical_bytes.digest() != canonical_bytes_sha256 {
+        return Err(StoreError::Integrity(format!(
+            "runtime record {record_id} byte digest disagrees with exact bytes"
+        )));
+    }
+    if canonical_document_schema(&canonical_bytes)
+        .map_err(|error| StoreError::Integrity(error.to_string()))?
+        != record_schema
+    {
+        return Err(StoreError::Integrity(format!(
+            "runtime record {record_id} schema disagrees with exact bytes"
+        )));
+    }
+    if chrono::DateTime::parse_from_rfc3339(&committed_at).is_err() {
+        return Err(StoreError::Integrity(format!(
+            "runtime record {record_id} has invalid committed_at"
+        )));
+    }
+    Ok(Some(RuntimeRecordRow {
+        record_sequence,
+        record_id,
+        record_schema,
+        canonical_bytes,
+        canonical_bytes_sha256: Sha256Digest::parse(canonical_bytes_sha256).map_err(|error| {
+            StoreError::Integrity(format!(
+                "runtime record canonical-byte digest is invalid: {error}"
+            ))
+        })?,
+        checkpoint_id,
+        predecessor_record_id,
+        predecessor_ledger_root: predecessor_ledger_root
+            .map(Sha256Digest::parse)
+            .transpose()
+            .map_err(|error| {
+                StoreError::Integrity(format!(
+                    "runtime record predecessor root is invalid: {error}"
+                ))
+            })?,
+        ledger_root: Sha256Digest::parse(ledger_root).map_err(|error| {
+            StoreError::Integrity(format!("runtime record root is invalid: {error}"))
+        })?,
+        committed_at,
+    }))
+}
+
+fn runtime_record_by_sequence_on_connection(
+    connection: &Connection,
+    sequence: u64,
+) -> Result<Option<RuntimeRecordRow>, StoreError> {
+    let sequence = i64::try_from(sequence)
+        .map_err(|_| StoreError::Invariant("runtime record sequence overflowed".into()))?;
+    let record_id = connection
+        .query_row(
+            "SELECT record_id FROM runtime_record_ledger WHERE record_sequence = ?1",
+            [sequence],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    record_id
+        .map(|record_id| {
+            runtime_record_by_id_on_connection(connection, &record_id)?.ok_or_else(|| {
+                StoreError::Integrity(format!("runtime record index lost {record_id}"))
+            })
+        })
+        .transpose()
+}
+
+fn runtime_record_lookup_status_on_connection(
+    connection: &Connection,
+) -> Result<RuntimeRecordLookupStatus, StoreError> {
+    let (ledger_records, lookup_records, missing_records, extra_records, mismatched_records) =
+        connection.query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM runtime_record_ledger),
+                (SELECT COUNT(*) FROM runtime_record_lookup),
+                (SELECT COUNT(*) FROM runtime_record_ledger AS ledger
+                 WHERE NOT EXISTS (
+                    SELECT 1 FROM runtime_record_lookup AS lookup
+                    WHERE lookup.record_id = ledger.record_id
+                 )),
+                (SELECT COUNT(*) FROM runtime_record_lookup AS lookup
+                 WHERE NOT EXISTS (
+                    SELECT 1 FROM runtime_record_ledger AS ledger
+                    WHERE ledger.record_id = lookup.record_id
+                 )),
+                (SELECT COUNT(*)
+                 FROM runtime_record_lookup AS lookup
+                 JOIN runtime_record_ledger AS ledger
+                   ON ledger.record_id = lookup.record_id
+                 WHERE lookup.record_sequence <> ledger.record_sequence
+                    OR lookup.record_schema <> ledger.record_schema
+                    OR lookup.ledger_root <> ledger.ledger_root)",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )?;
+    let count = |label: &str, value: i64| {
+        u64::try_from(value)
+            .map_err(|_| StoreError::Integrity(format!("negative runtime lookup {label}")))
+    };
+    Ok(RuntimeRecordLookupStatus {
+        ledger_records: count("ledger count", ledger_records)?,
+        lookup_records: count("lookup count", lookup_records)?,
+        missing_records: count("missing count", missing_records)?,
+        extra_records: count("extra count", extra_records)?,
+        mismatched_records: count("mismatch count", mismatched_records)?,
+    })
+}
+
+fn validate_runtime_checkpoint_identity(
+    connection: &Connection,
+    checkpoint: &RuntimeLedgerCheckpoint,
+) -> Result<(), StoreError> {
+    let stored = runtime_checkpoint_by_id_on_connection(connection, &checkpoint.checkpoint_id)?
+        .ok_or_else(|| {
+            StoreError::Invariant(format!(
+                "runtime checkpoint {} is not retained",
+                checkpoint.checkpoint_id
+            ))
+        })?;
+    if &stored != checkpoint {
+        return Err(StoreError::Invariant(format!(
+            "runtime checkpoint {} differs from retained identity",
+            checkpoint.checkpoint_id
+        )));
+    }
+    Ok(())
+}
+
+fn runtime_record_page_on_connection(
+    connection: &Connection,
+    checkpoint: Option<&RuntimeLedgerCheckpoint>,
+    after_record_sequence: u64,
+    limit: u32,
+) -> Result<RuntimeRecordPage, StoreError> {
+    validate_public_limit(limit)?;
+    let Some(checkpoint) = checkpoint else {
+        if runtime_ledger_checkpoint_on_connection(connection)?.is_some()
+            || after_record_sequence != 0
+        {
+            return Err(StoreError::Invariant(
+                "an empty runtime snapshot cannot page a nonempty ledger or nonzero cursor".into(),
+            ));
+        }
+        return Ok(RuntimeRecordPage {
+            checkpoint: None,
+            after_record_sequence,
+            records: Vec::new(),
+            next_after_record_sequence: None,
+            complete: true,
+        });
+    };
+    validate_runtime_checkpoint_identity(connection, checkpoint)?;
+    if after_record_sequence > checkpoint.last_record_sequence {
+        return Err(StoreError::Invariant(
+            "runtime-record cursor is beyond the pinned checkpoint".into(),
+        ));
+    }
+    let after = i64::try_from(after_record_sequence)
+        .map_err(|_| StoreError::Invariant("runtime-record cursor overflowed".into()))?;
+    let through = i64::try_from(checkpoint.last_record_sequence)
+        .map_err(|_| StoreError::Integrity("runtime checkpoint sequence overflowed".into()))?;
+    let fetch_limit = i64::from(limit) + 1;
+    let mut statement = connection.prepare(
+        "SELECT record_id FROM runtime_record_ledger
+         WHERE record_sequence > ?1 AND record_sequence <= ?2
+         ORDER BY record_sequence LIMIT ?3",
+    )?;
+    let mut ids = statement
+        .query_map(params![after, through, fetch_limit], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let complete = ids.len() <= usize::try_from(limit).unwrap_or(usize::MAX);
+    if !complete {
+        ids.pop();
+    }
+    let records = ids
+        .into_iter()
+        .map(|record_id| {
+            runtime_record_by_id_on_connection(connection, &record_id)?.ok_or_else(|| {
+                StoreError::Integrity(format!("runtime record page lost {record_id}"))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let next_after_record_sequence = if complete {
+        None
+    } else {
+        records.last().map(|record| record.record_sequence)
+    };
+    Ok(RuntimeRecordPage {
+        checkpoint: Some(checkpoint.clone()),
+        after_record_sequence,
+        records,
+        next_after_record_sequence,
+        complete,
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn append_runtime_records_in_transaction(
+    transaction: &Transaction<'_>,
+    batch: &RuntimeRecordBatchInput,
+) -> Result<RuntimeRecordAppendReceipt, StoreError> {
+    validate_runtime_record_batch(batch)?;
+    validate_runtime_record_ledger(transaction)?;
+    let batch_digest = runtime_record_batch_digest(batch)?;
+    if let Some(existing) =
+        runtime_checkpoint_by_id_on_connection(transaction, &batch.checkpoint_id)?
+    {
+        if existing.batch_digest != batch_digest
+            || existing.predecessor_checkpoint_id != batch.expected_predecessor_checkpoint_id
+            || existing.predecessor_ledger_root != batch.expected_predecessor_ledger_root
+            || existing.record_count
+                != u64::try_from(batch.records.len()).map_err(|_| {
+                    StoreError::Invariant("runtime-record batch size overflowed".into())
+                })?
+        {
+            return Err(StoreError::ReplayConflict(format!(
+                "runtime checkpoint {} was reused for a different batch",
+                batch.checkpoint_id
+            )));
+        }
+        for (offset, expected) in batch.records.iter().enumerate() {
+            let sequence = existing.first_record_sequence
+                + u64::try_from(offset).map_err(|_| {
+                    StoreError::Invariant("runtime-record replay offset overflowed".into())
+                })?;
+            let actual = runtime_record_by_sequence_on_connection(transaction, sequence)?
+                .ok_or_else(|| {
+                    StoreError::Integrity(format!(
+                        "runtime checkpoint {} lost record sequence {sequence}",
+                        batch.checkpoint_id
+                    ))
+                })?;
+            if actual.record_id != expected.record_id
+                || actual.record_schema != expected.record_schema
+                || actual.canonical_bytes != expected.canonical_bytes
+                || actual.committed_at != expected.committed_at
+                || actual.checkpoint_id != batch.checkpoint_id
+            {
+                return Err(StoreError::ReplayConflict(format!(
+                    "runtime checkpoint {} exact replay differs at sequence {sequence}",
+                    batch.checkpoint_id
+                )));
+            }
+        }
+        return Ok(RuntimeRecordAppendReceipt {
+            disposition: RuntimeRecordAppendDisposition::Replayed,
+            checkpoint: existing,
+        });
+    }
+
+    let predecessor = runtime_ledger_checkpoint_on_connection(transaction)?;
+    let actual_predecessor_checkpoint_id = predecessor
+        .as_ref()
+        .map(|value| value.checkpoint_id.clone());
+    let actual_predecessor_ledger_root = predecessor
+        .as_ref()
+        .map(|value| value.checkpoint_ledger_root.clone());
+    if actual_predecessor_checkpoint_id != batch.expected_predecessor_checkpoint_id
+        || actual_predecessor_ledger_root != batch.expected_predecessor_ledger_root
+    {
+        return Err(StoreError::ReplayConflict(
+            "runtime-record append predecessor differs from the declared ledger frontier".into(),
+        ));
+    }
+    for record in &batch.records {
+        if let Some(existing) = runtime_record_by_id_on_connection(transaction, &record.record_id)?
+        {
+            return Err(StoreError::ReplayConflict(format!(
+                "runtime record identity {} already belongs to checkpoint {}",
+                existing.record_id, existing.checkpoint_id
+            )));
+        }
+    }
+
+    let first_sequence = predecessor
+        .as_ref()
+        .map_or(1, |value| value.last_record_sequence.saturating_add(1));
+    let record_count = u64::try_from(batch.records.len())
+        .map_err(|_| StoreError::Invariant("runtime-record batch size overflowed".into()))?;
+    let last_sequence = first_sequence
+        .checked_add(record_count - 1)
+        .ok_or_else(|| StoreError::Invariant("runtime-record sequence overflowed".into()))?;
+    let mut predecessor_record_id = predecessor
+        .as_ref()
+        .map(|value| {
+            runtime_record_by_sequence_on_connection(transaction, value.last_record_sequence)?
+                .map(|record| record.record_id)
+                .ok_or_else(|| {
+                    StoreError::Integrity(
+                        "runtime ledger frontier lost its predecessor record".into(),
+                    )
+                })
+        })
+        .transpose()?;
+    let mut predecessor_root = actual_predecessor_ledger_root.clone();
+    let mut prepared = Vec::with_capacity(batch.records.len());
+    for (offset, record) in batch.records.iter().enumerate() {
+        let sequence = first_sequence
+            .checked_add(
+                u64::try_from(offset).map_err(|_| {
+                    StoreError::Invariant("runtime-record offset overflowed".into())
+                })?,
+            )
+            .ok_or_else(|| StoreError::Invariant("runtime-record sequence overflowed".into()))?;
+        let root = runtime_record_root(
+            sequence,
+            record,
+            &batch.checkpoint_id,
+            predecessor_record_id.as_deref(),
+            predecessor_root.as_ref(),
+        )?;
+        prepared.push((
+            sequence,
+            record,
+            predecessor_record_id.clone(),
+            predecessor_root.clone(),
+            root.clone(),
+        ));
+        predecessor_record_id = Some(record.record_id.clone());
+        predecessor_root = Some(root);
+    }
+    let checkpoint_root = predecessor_root.ok_or_else(|| {
+        StoreError::Invariant("runtime-record batch produced no checkpoint root".into())
+    })?;
+    let checkpoint_committed_at = now_utc();
+    transaction.execute(
+        "INSERT INTO runtime_record_checkpoints (
+            checkpoint_id, batch_digest, first_record_sequence,
+            last_record_sequence, record_count, predecessor_checkpoint_id,
+            predecessor_ledger_root, checkpoint_ledger_root, committed_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            batch.checkpoint_id,
+            batch_digest.as_str(),
+            i64::try_from(first_sequence)
+                .map_err(|_| StoreError::Invariant("runtime first sequence overflowed".into()))?,
+            i64::try_from(last_sequence)
+                .map_err(|_| StoreError::Invariant("runtime last sequence overflowed".into()))?,
+            i64::try_from(record_count)
+                .map_err(|_| StoreError::Invariant("runtime record count overflowed".into()))?,
+            batch.expected_predecessor_checkpoint_id,
+            batch
+                .expected_predecessor_ledger_root
+                .as_ref()
+                .map(Sha256Digest::as_str),
+            checkpoint_root.as_str(),
+            checkpoint_committed_at,
+        ],
+    )?;
+    for (sequence, record, prior_id, prior_root, root) in prepared {
+        transaction.execute(
+            "INSERT INTO runtime_record_ledger (
+                record_sequence, record_id, record_schema, canonical_bytes,
+                canonical_bytes_sha256, checkpoint_id, predecessor_record_id,
+                predecessor_ledger_root, ledger_root, committed_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                i64::try_from(sequence).map_err(|_| StoreError::Invariant(
+                    "runtime record sequence overflowed".into()
+                ))?,
+                record.record_id,
+                record.record_schema,
+                record.canonical_bytes.as_bytes(),
+                record.canonical_bytes.digest(),
+                batch.checkpoint_id,
+                prior_id,
+                prior_root.as_ref().map(Sha256Digest::as_str),
+                root.as_str(),
+                record.committed_at,
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO runtime_record_lookup (
+                record_id, record_sequence, record_schema, ledger_root
+             ) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                record.record_id,
+                i64::try_from(sequence).map_err(|_| StoreError::Invariant(
+                    "runtime lookup sequence overflowed".into()
+                ))?,
+                record.record_schema,
+                root.as_str(),
+            ],
+        )?;
+    }
+    validate_runtime_record_ledger(transaction)?;
+    let lookup_status = runtime_record_lookup_status_on_connection(transaction)?;
+    if !lookup_status.is_current() {
+        return Err(StoreError::Integrity(
+            "runtime-record append produced a stale lookup projection".into(),
+        ));
+    }
+    let checkpoint = runtime_checkpoint_by_id_on_connection(transaction, &batch.checkpoint_id)?
+        .ok_or_else(|| {
+            StoreError::Integrity(format!(
+                "runtime-record append lost checkpoint {}",
+                batch.checkpoint_id
+            ))
+        })?;
+    Ok(RuntimeRecordAppendReceipt {
+        disposition: RuntimeRecordAppendDisposition::Committed,
+        checkpoint,
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn validate_runtime_record_ledger(connection: &Connection) -> Result<(), StoreError> {
+    let mut expected_sequence = 1_u64;
+    let mut predecessor_record_id: Option<String> = None;
+    let mut predecessor_root: Option<Sha256Digest> = None;
+    let mut statement = connection
+        .prepare("SELECT record_id FROM runtime_record_ledger ORDER BY record_sequence")?;
+    let record_ids = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for record_id in record_ids {
+        let record =
+            runtime_record_by_id_on_connection(connection, &record_id)?.ok_or_else(|| {
+                StoreError::Integrity(format!("runtime ledger lost record {record_id}"))
+            })?;
+        if record.record_sequence != expected_sequence
+            || record.predecessor_record_id != predecessor_record_id
+            || record.predecessor_ledger_root != predecessor_root
+        {
+            return Err(StoreError::Integrity(format!(
+                "runtime record {} breaks global sequence or predecessor chain",
+                record.record_id
+            )));
+        }
+        Sha256Digest::parse(record.record_id.clone()).map_err(|error| {
+            StoreError::Integrity(format!("runtime record identity is invalid: {error}"))
+        })?;
+        let input = RuntimeRecordInput {
+            record_id: record.record_id.clone(),
+            record_schema: record.record_schema.clone(),
+            canonical_bytes: record.canonical_bytes.clone(),
+            committed_at: record.committed_at.clone(),
+        };
+        validate_runtime_record_input(&input)
+            .map_err(|error| StoreError::Integrity(error.to_string()))?;
+        let expected_root = runtime_record_root(
+            record.record_sequence,
+            &input,
+            &record.checkpoint_id,
+            record.predecessor_record_id.as_deref(),
+            record.predecessor_ledger_root.as_ref(),
+        )
+        .map_err(|error| StoreError::Integrity(error.to_string()))?;
+        if record.ledger_root != expected_root {
+            return Err(StoreError::Integrity(format!(
+                "runtime record {} has invalid ledger root",
+                record.record_id
+            )));
+        }
+        predecessor_record_id = Some(record.record_id);
+        predecessor_root = Some(record.ledger_root);
+        expected_sequence = expected_sequence
+            .checked_add(1)
+            .ok_or_else(|| StoreError::Integrity("runtime sequence overflowed".into()))?;
+    }
+
+    let mut expected_checkpoint_sequence = 1_u64;
+    let mut expected_first_record_sequence = 1_u64;
+    let mut predecessor_checkpoint_id: Option<String> = None;
+    let mut predecessor_checkpoint_root: Option<Sha256Digest> = None;
+    let mut statement = connection.prepare(
+        "SELECT checkpoint_id FROM runtime_record_checkpoints
+         ORDER BY checkpoint_sequence",
+    )?;
+    let checkpoint_ids = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for checkpoint_id in checkpoint_ids {
+        let checkpoint = runtime_checkpoint_by_id_on_connection(connection, &checkpoint_id)?
+            .ok_or_else(|| {
+                StoreError::Integrity(format!("runtime ledger lost checkpoint {checkpoint_id}"))
+            })?;
+        if checkpoint.checkpoint_sequence != expected_checkpoint_sequence
+            || checkpoint.first_record_sequence != expected_first_record_sequence
+            || checkpoint.predecessor_checkpoint_id != predecessor_checkpoint_id
+            || checkpoint.predecessor_ledger_root != predecessor_checkpoint_root
+        {
+            return Err(StoreError::Integrity(format!(
+                "runtime checkpoint {} breaks checkpoint sequence or predecessor chain",
+                checkpoint.checkpoint_id
+            )));
+        }
+        Sha256Digest::parse(checkpoint.checkpoint_id.clone()).map_err(|error| {
+            StoreError::Integrity(format!("runtime checkpoint identity is invalid: {error}"))
+        })?;
+        let mut records = Vec::new();
+        for sequence in checkpoint.first_record_sequence..=checkpoint.last_record_sequence {
+            let record = runtime_record_by_sequence_on_connection(connection, sequence)?
+                .ok_or_else(|| {
+                    StoreError::Integrity(format!(
+                        "runtime checkpoint {} lost record sequence {sequence}",
+                        checkpoint.checkpoint_id
+                    ))
+                })?;
+            if record.checkpoint_id != checkpoint.checkpoint_id {
+                return Err(StoreError::Integrity(format!(
+                    "runtime checkpoint {} contains a record bound elsewhere",
+                    checkpoint.checkpoint_id
+                )));
+            }
+            records.push(RuntimeRecordInput {
+                record_id: record.record_id,
+                record_schema: record.record_schema,
+                canonical_bytes: record.canonical_bytes,
+                committed_at: record.committed_at,
+            });
+        }
+        let batch = RuntimeRecordBatchInput {
+            checkpoint_id: checkpoint.checkpoint_id.clone(),
+            expected_predecessor_checkpoint_id: checkpoint.predecessor_checkpoint_id.clone(),
+            expected_predecessor_ledger_root: checkpoint.predecessor_ledger_root.clone(),
+            records,
+        };
+        let expected_batch_digest = runtime_record_batch_digest(&batch)
+            .map_err(|error| StoreError::Integrity(error.to_string()))?;
+        if checkpoint.batch_digest != expected_batch_digest {
+            return Err(StoreError::Integrity(format!(
+                "runtime checkpoint {} has invalid batch digest",
+                checkpoint.checkpoint_id
+            )));
+        }
+        let last_record =
+            runtime_record_by_sequence_on_connection(connection, checkpoint.last_record_sequence)?
+                .ok_or_else(|| {
+                    StoreError::Integrity(format!(
+                        "runtime checkpoint {} lost its final record",
+                        checkpoint.checkpoint_id
+                    ))
+                })?;
+        if checkpoint.checkpoint_ledger_root != last_record.ledger_root {
+            return Err(StoreError::Integrity(format!(
+                "runtime checkpoint {} root differs from its final record",
+                checkpoint.checkpoint_id
+            )));
+        }
+        if chrono::DateTime::parse_from_rfc3339(&checkpoint.committed_at).is_err() {
+            return Err(StoreError::Integrity(format!(
+                "runtime checkpoint {} has invalid committed_at",
+                checkpoint.checkpoint_id
+            )));
+        }
+        predecessor_checkpoint_id = Some(checkpoint.checkpoint_id);
+        predecessor_checkpoint_root = Some(checkpoint.checkpoint_ledger_root);
+        expected_first_record_sequence = checkpoint
+            .last_record_sequence
+            .checked_add(1)
+            .ok_or_else(|| StoreError::Integrity("runtime checkpoint overflowed".into()))?;
+        expected_checkpoint_sequence =
+            expected_checkpoint_sequence.checked_add(1).ok_or_else(|| {
+                StoreError::Integrity("runtime checkpoint sequence overflowed".into())
+            })?;
+    }
+    if expected_first_record_sequence != expected_sequence {
+        return Err(StoreError::Integrity(
+            "runtime checkpoint frontier does not cover the complete record ledger".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn runtime_record_reference_matches(value: &Value, record: &RuntimeRecordRow) -> bool {
+    value.as_object().is_some_and(|object| {
+        object.len() == 3
+            && object.get("schema").and_then(Value::as_str) == Some(record.record_schema.as_str())
+            && object.get("record_id").and_then(Value::as_str) == Some(record.record_id.as_str())
+            && object.get("bytes_digest").and_then(Value::as_str)
+                == Some(record.canonical_bytes_sha256.as_str())
+    })
+}
+
+fn diagnostic_artifact_execution_binding_on_connection(
+    connection: &Connection,
+    artifact_id: &Sha256Digest,
+) -> Result<Option<DiagnosticArtifactExecutionBinding>, StoreError> {
+    let linkage = connection
+        .query_row(
+            "SELECT execution_binding_record_id, outer_request_record_id,
+                    invocation_decision_record_id, execution_launch_record_id,
+                    outer_request_id
+             FROM local_diagnostic_artifact_origins WHERE artifact_id = ?1",
+            [artifact_id.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        execution_binding_record_id,
+        outer_request_record_id,
+        invocation_decision_record_id,
+        execution_launch_record_id,
+        outer_request_id,
+    )) = linkage
+    else {
+        return Ok(None);
+    };
+    let linkage = match (
+        execution_binding_record_id,
+        outer_request_record_id,
+        invocation_decision_record_id,
+        execution_launch_record_id,
+        outer_request_id,
+    ) {
+        (None, None, None, None, None) => return Ok(None),
+        (Some(binding), Some(request), Some(decision), Some(launch), Some(request_id)) => {
+            (binding, request, decision, launch, request_id)
+        }
+        _ => {
+            return Err(StoreError::Integrity(format!(
+                "diagnostic artifact {artifact_id} has a partial production execution binding"
+            )));
+        }
+    };
+    let exact_record = |record_id: &str| {
+        runtime_record_by_id_on_connection(connection, record_id)?.ok_or_else(|| {
+            StoreError::Integrity(format!(
+                "diagnostic artifact {artifact_id} binding lost runtime record {record_id}"
+            ))
+        })
+    };
+    let execution_binding = exact_record(&linkage.0)?;
+    let outer_request = exact_record(&linkage.1)?;
+    let invocation_decision = exact_record(&linkage.2)?;
+    let execution_launch = exact_record(&linkage.3)?;
+    let mut statement = connection.prepare(
+        "SELECT provider_attempt_record_id, intake_id
+         FROM local_diagnostic_artifact_provider_attempt_bindings
+         WHERE artifact_id = ?1 ORDER BY ordinal",
+    )?;
+    let attempt_links = statement
+        .query_map([artifact_id.as_str()], |row| {
+            Ok(DiagnosticArtifactProviderAttemptBindingInput {
+                provider_attempt_record_id: row.get(0)?,
+                intake_id: row.get(1)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let provider_attempts = attempt_links
+        .into_iter()
+        .map(|attempt| {
+            let record = exact_record(&attempt.provider_attempt_record_id)?;
+            Ok((record, attempt))
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    let resolved = DiagnosticArtifactExecutionBinding {
+        execution_binding,
+        outer_request,
+        invocation_decision,
+        execution_launch,
+        outer_request_id: linkage.4,
+        provider_attempts,
+    };
+    validate_resolved_diagnostic_artifact_execution_binding(connection, artifact_id, &resolved)?;
+    Ok(Some(resolved))
+}
+
+fn validate_diagnostic_artifact_execution_binding(
+    connection: &Connection,
+    artifact_id: &Sha256Digest,
+    input: &DiagnosticArtifactExecutionBindingInput,
+) -> Result<(), StoreError> {
+    let resolved = diagnostic_artifact_execution_binding_on_connection(connection, artifact_id)?
+        .ok_or_else(|| {
+            StoreError::Integrity(format!(
+                "diagnostic artifact {artifact_id} lost its production execution binding"
+            ))
+        })?;
+    if resolved.execution_binding.record_id != input.execution_binding_record_id
+        || resolved.outer_request.record_id != input.outer_request_record_id
+        || resolved.invocation_decision.record_id != input.invocation_decision_record_id
+        || resolved.execution_launch.record_id != input.execution_launch_record_id
+        || resolved.outer_request_id != input.outer_request_id
+        || resolved
+            .provider_attempts
+            .iter()
+            .map(|(_, attempt)| attempt)
+            .ne(input.provider_attempts.iter())
+    {
+        return Err(StoreError::Integrity(format!(
+            "diagnostic artifact {artifact_id} production binding differs after persistence"
+        )));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn validate_resolved_diagnostic_artifact_execution_binding(
+    connection: &Connection,
+    artifact_id: &Sha256Digest,
+    binding: &DiagnosticArtifactExecutionBinding,
+) -> Result<(), StoreError> {
+    if binding.execution_binding.record_schema != "nq.execution_identity_binding.v2"
+        || binding.outer_request.record_schema != "nq.diagnostic_invocation_request.v1"
+        || binding.invocation_decision.record_schema != "nq.invocation_decision.v1"
+        || binding.execution_launch.record_schema != "nq.execution_launch.v1"
+    {
+        return Err(StoreError::Integrity(format!(
+            "diagnostic artifact {artifact_id} production binding uses an incompatible record schema"
+        )));
+    }
+    if binding.provider_attempts.is_empty()
+        || binding
+            .provider_attempts
+            .iter()
+            .any(|(record, _)| record.record_schema != "nq.provider_intake.v1")
+    {
+        return Err(StoreError::Integrity(format!(
+            "diagnostic artifact {artifact_id} requires exact provider-intake record links"
+        )));
+    }
+    let binding_value: Value = serde_json::from_slice(
+        binding.execution_binding.canonical_bytes.as_bytes(),
+    )
+    .map_err(|error| {
+        StoreError::Integrity(format!(
+            "diagnostic artifact {artifact_id} binding cannot decode: {error}"
+        ))
+    })?;
+    if binding_value.get("binding_id").and_then(Value::as_str)
+        != Some(binding.execution_binding.record_id.as_str())
+        || !binding_value
+            .get("outer_request")
+            .is_some_and(|value| runtime_record_reference_matches(value, &binding.outer_request))
+        || !binding_value
+            .get("invocation_decision")
+            .is_some_and(|value| {
+                runtime_record_reference_matches(value, &binding.invocation_decision)
+            })
+        || !binding_value
+            .get("execution_launch")
+            .is_some_and(|value| runtime_record_reference_matches(value, &binding.execution_launch))
+    {
+        return Err(StoreError::Integrity(format!(
+            "diagnostic artifact {artifact_id} binding record references differ from exact linked records"
+        )));
+    }
+    let request_value: Value = serde_json::from_slice(
+        binding.outer_request.canonical_bytes.as_bytes(),
+    )
+    .map_err(|error| {
+        StoreError::Integrity(format!(
+            "diagnostic artifact {artifact_id} outer request cannot decode: {error}"
+        ))
+    })?;
+    if request_value.get("request_id").and_then(Value::as_str)
+        != Some(binding.outer_request_id.as_str())
+    {
+        return Err(StoreError::Integrity(format!(
+            "diagnostic artifact {artifact_id} outer request identity differs from linkage"
+        )));
+    }
+    let launch_value: Value = serde_json::from_slice(
+        binding.execution_launch.canonical_bytes.as_bytes(),
+    )
+    .map_err(|error| {
+        StoreError::Integrity(format!(
+            "diagnostic artifact {artifact_id} launch cannot decode: {error}"
+        ))
+    })?;
+    if !launch_value
+        .get("outer_request")
+        .is_some_and(|value| runtime_record_reference_matches(value, &binding.outer_request))
+        || !launch_value
+            .get("invocation_decision")
+            .is_some_and(|value| {
+                runtime_record_reference_matches(value, &binding.invocation_decision)
+            })
+    {
+        return Err(StoreError::Integrity(format!(
+            "diagnostic artifact {artifact_id} launch does not bind its exact request and decision"
+        )));
+    }
+    let diagnostic = binding_value
+        .get("diagnostic")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            StoreError::Integrity(format!(
+                "diagnostic artifact {artifact_id} binding has no diagnostic identity"
+            ))
+        })?;
+    let commitment = connection.query_row(
+        "SELECT canonical_bytes_sha256 FROM diagnostic_artifact_commitments
+         WHERE artifact_id = ?1",
+        [artifact_id.as_str()],
+        |row| row.get::<_, String>(0),
+    )?;
+    if diagnostic.get("schema").and_then(Value::as_str) != Some("nq.diagnostic_execution.v2")
+        || diagnostic.get("request_id").and_then(Value::as_str)
+            != Some(binding.outer_request_id.as_str())
+        || diagnostic.get("artifact_id").and_then(Value::as_str) != Some(artifact_id.as_str())
+        || diagnostic.get("file_bytes_digest").and_then(Value::as_str) != Some(commitment.as_str())
+    {
+        return Err(StoreError::Integrity(format!(
+            "diagnostic artifact {artifact_id} binding does not identify its exact V2 bytes and outer request"
+        )));
+    }
+    let provider_references = binding_value
+        .get("provider_attempts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            StoreError::Integrity(format!(
+                "diagnostic artifact {artifact_id} binding has no provider-attempt list"
+            ))
+        })?;
+    if provider_references.len() != binding.provider_attempts.len()
+        || provider_references
+            .iter()
+            .zip(&binding.provider_attempts)
+            .any(|(reference, (record, _))| !runtime_record_reference_matches(reference, record))
+    {
+        return Err(StoreError::Integrity(format!(
+            "diagnostic artifact {artifact_id} binding provider attempts differ from exact links"
+        )));
+    }
+    for (record, attempt) in &binding.provider_attempts {
+        let (intake_digest, child_request_id): (String, String) = connection
+            .query_row(
+                "SELECT intake_digest, request_id FROM provider_intake_attempts
+                 WHERE intake_id = ?1",
+                [&attempt.intake_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|error| {
+                StoreError::Integrity(format!(
+                    "diagnostic artifact {artifact_id} provider attempt {} is not retained: {error}",
+                    attempt.intake_id
+                ))
+            })?;
+        if record.record_id != intake_digest {
+            return Err(StoreError::Integrity(format!(
+                "diagnostic artifact {artifact_id} provider record identity is not intake digest {}",
+                attempt.intake_id
+            )));
+        }
+        if child_request_id == binding.outer_request_id {
+            return Err(StoreError::Integrity(format!(
+                "diagnostic artifact {artifact_id} collapses outer and child request identity"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_diagnostic_artifact_document(
     artifact_id: &Sha256Digest,
     contract_schema: &str,
@@ -5794,10 +7501,17 @@ fn validate_local_diagnostic_artifact_provenance(
     artifact: &DiagnosticArtifactCommitInput,
     run: &RunInput,
 ) -> Result<(), StoreError> {
+    let request_id = artifact
+        .local_origin
+        .execution_binding
+        .as_ref()
+        .map_or(run.request_id.as_str(), |binding| {
+            binding.outer_request_id.as_str()
+        });
     validate_local_diagnostic_artifact_provenance_fields(
         &artifact.canonical_bytes,
         &run.run_id,
-        &run.request_id,
+        request_id,
         &run.profile_id,
         &run.profile_version,
         &run.profile_digest,
@@ -5938,6 +7652,15 @@ fn insert_local_diagnostic_artifact_rows(
     transaction: &Transaction<'_>,
     artifact: &DiagnosticArtifactCommitInput,
 ) -> Result<(), StoreError> {
+    if let Some(binding) = &artifact.local_origin.execution_binding {
+        let receipt = append_runtime_records_in_transaction(transaction, &binding.runtime_records)?;
+        if receipt.disposition != RuntimeRecordAppendDisposition::Committed {
+            return Err(StoreError::ReplayConflict(
+                "a production artifact binding must be committed atomically with its runtime records"
+                    .into(),
+            ));
+        }
+    }
     let committed_at = now_utc();
     insert_diagnostic_artifact_commitment(
         transaction,
@@ -5948,15 +7671,70 @@ fn insert_local_diagnostic_artifact_rows(
     )?;
     transaction.execute(
         "INSERT INTO local_diagnostic_artifact_origins (
-            artifact_id, run_id, evaluation_id, completed_at
-         ) VALUES (?1, ?2, ?3, ?4)",
+            artifact_id, run_id, evaluation_id, completed_at,
+            execution_binding_record_id, outer_request_record_id,
+            invocation_decision_record_id, execution_launch_record_id,
+            outer_request_id
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             artifact.artifact_id.as_str(),
             artifact.local_origin.run_id,
             artifact.local_origin.evaluation_id,
             artifact.local_origin.completed_at,
+            artifact
+                .local_origin
+                .execution_binding
+                .as_ref()
+                .map(|binding| binding.execution_binding_record_id.as_str()),
+            artifact
+                .local_origin
+                .execution_binding
+                .as_ref()
+                .map(|binding| binding.outer_request_record_id.as_str()),
+            artifact
+                .local_origin
+                .execution_binding
+                .as_ref()
+                .map(|binding| binding.invocation_decision_record_id.as_str()),
+            artifact
+                .local_origin
+                .execution_binding
+                .as_ref()
+                .map(|binding| binding.execution_launch_record_id.as_str()),
+            artifact
+                .local_origin
+                .execution_binding
+                .as_ref()
+                .map(|binding| binding.outer_request_id.as_str()),
         ],
     )?;
+    if let Some(binding) = &artifact.local_origin.execution_binding {
+        if binding.provider_attempts.is_empty() {
+            return Err(StoreError::Invariant(
+                "production diagnostic binding requires at least one provider attempt".into(),
+            ));
+        }
+        for (ordinal, attempt) in binding.provider_attempts.iter().enumerate() {
+            transaction.execute(
+                "INSERT INTO local_diagnostic_artifact_provider_attempt_bindings (
+                    artifact_id, ordinal, provider_attempt_record_id, intake_id
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    artifact.artifact_id.as_str(),
+                    i64::try_from(ordinal).map_err(|_| StoreError::Invariant(
+                        "provider-attempt ordinal overflowed".into()
+                    ))?,
+                    attempt.provider_attempt_record_id,
+                    attempt.intake_id,
+                ],
+            )?;
+        }
+        validate_diagnostic_artifact_execution_binding(
+            transaction,
+            &artifact.artifact_id,
+            binding,
+        )?;
+    }
     Ok(())
 }
 
@@ -6012,7 +7790,8 @@ fn diagnostic_artifact_commitment_on_connection(
     })?;
     let local_origin = connection
         .query_row(
-            "SELECT run_id, evaluation_id, completed_at
+            "SELECT run_id, evaluation_id, completed_at,
+                    execution_binding_record_id
              FROM local_diagnostic_artifact_origins
              WHERE artifact_id = ?1",
             [stored_id.as_str()],
@@ -6021,6 +7800,7 @@ fn diagnostic_artifact_commitment_on_connection(
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             },
         )
@@ -6034,7 +7814,7 @@ fn diagnostic_artifact_commitment_on_connection(
         )
         .optional()?;
     let origin = match (local_origin, imported_origin) {
-        (Some((run_id, evaluation_id, completed_at)), None) => {
+        (Some((run_id, evaluation_id, completed_at, execution_binding_record_id)), None) => {
             let completed = chrono::DateTime::parse_from_rfc3339(&completed_at).map_err(|_| {
                 StoreError::Integrity(format!(
                     "local diagnostic artifact {stored_id} has invalid completed_at"
@@ -6051,6 +7831,7 @@ fn diagnostic_artifact_commitment_on_connection(
                 run_id,
                 evaluation_id,
                 completed_at,
+                execution_binding_record_id,
             }
         }
         (None, Some((import_id, imported_at))) => {
@@ -6353,6 +8134,7 @@ fn validate_local_diagnostic_artifact_provenance_history(
         let DiagnosticArtifactOrigin::Local {
             run_id,
             completed_at,
+            execution_binding_record_id,
             ..
         } = &commitment.origin
         else {
@@ -6392,10 +8174,26 @@ fn validate_local_diagnostic_artifact_provenance_history(
                     "local diagnostic artifact {artifact_id} names missing run {run_id}"
                 ))
             })?;
+        let production_binding =
+            diagnostic_artifact_execution_binding_on_connection(connection, &artifact_id)?;
+        if execution_binding_record_id.as_ref()
+            != production_binding
+                .as_ref()
+                .map(|binding| &binding.execution_binding.record_id)
+        {
+            return Err(StoreError::Integrity(format!(
+                "local diagnostic artifact {artifact_id} binding origin disagrees with exact linkage"
+            )));
+        }
+        let expected_request_id = production_binding
+            .as_ref()
+            .map_or(run_binding.0.as_str(), |binding| {
+                binding.outer_request_id.as_str()
+            });
         validate_local_diagnostic_artifact_provenance_fields(
             &document,
             run_id,
-            &run_binding.0,
+            expected_request_id,
             &run_binding.1,
             &run_binding.2,
             &run_binding.3,
@@ -6701,6 +8499,76 @@ fn validate_v4_upgrade_source_connection(connection: &Connection) -> Result<(), 
     validate_projection_invariants(connection)
 }
 
+fn validate_v5_upgrade_source_connection(connection: &Connection) -> Result<(), StoreError> {
+    let version = pragma_i64(connection, "user_version")?;
+    if version != 5 {
+        return Err(StoreError::SchemaVersionMismatch {
+            found: version,
+            supported: 5,
+        });
+    }
+    let application_id = pragma_i64(connection, "application_id")?;
+    if application_id != APPLICATION_ID {
+        return Err(StoreError::ApplicationIdMismatch {
+            found: application_id,
+            expected: APPLICATION_ID,
+        });
+    }
+    let metadata: (i64, String) = connection.query_row(
+        "SELECT schema_version, schema_artifact_digest
+         FROM schema_metadata WHERE singleton = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if metadata.0 != 5 || metadata.1 != SCHEMA_V5_ARTIFACT_DIGEST {
+        return Err(StoreError::Integrity(
+            "schema-v5 metadata does not identify the exact qualified schema artifact".into(),
+        ));
+    }
+    if sha256_digest(SCHEMA_V5.as_bytes()) != SCHEMA_V5_ARTIFACT_DIGEST {
+        return Err(StoreError::Integrity(
+            "compiled schema_v5.sql does not match its pinned digest".into(),
+        ));
+    }
+    let quick_check: String =
+        connection.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+    if quick_check != "ok" {
+        return Err(StoreError::Integrity(quick_check));
+    }
+    let foreign_key_failures: i64 =
+        connection.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })?;
+    if foreign_key_failures != 0 {
+        return Err(StoreError::Integrity(format!(
+            "{foreign_key_failures} schema-v5 foreign-key violations"
+        )));
+    }
+    let expected = EXPECTED_SCHEMA_V5_FINGERPRINT.as_ref().map_err(|error| {
+        StoreError::Integrity(format!(
+            "compiled v5 schema cannot be fingerprinted: {error}"
+        ))
+    })?;
+    let actual = schema_fingerprint(connection)?;
+    if &actual != expected {
+        return Err(StoreError::Integrity(format!(
+            "schema-v5 definition fingerprint {actual} differs from exact qualified v5 {expected}"
+        )));
+    }
+    validate_stored_digests(connection)?;
+    validate_upgrade_receipts(connection)?;
+    validate_all_admission_context_digests(connection)?;
+    validate_local_provider_admissions(connection)?;
+    validate_provider_intake_invariants(connection)?;
+    validate_refusal_invariants(connection)?;
+    validate_run_results(connection)?;
+    validate_evaluation_refusal_invariants(connection)?;
+    validate_diagnostic_artifact_invariants(connection)?;
+    validate_admitted_report_associations_connection(connection)?;
+    validate_status_sequence_lower_bound(connection)?;
+    validate_projection_invariants(connection)
+}
+
 fn validate_admitted_report_associations_connection(
     connection: &Connection,
 ) -> Result<(), StoreError> {
@@ -6787,6 +8655,10 @@ fn v3_logical_state_digest(connection: &Connection) -> Result<String, StoreError
 
 fn v4_logical_state_digest(connection: &Connection) -> Result<String, StoreError> {
     logical_state_digest(connection, b"nq.schema_v4.logical_state.v1\0")
+}
+
+fn v5_logical_state_digest(connection: &Connection) -> Result<String, StoreError> {
+    logical_state_digest(connection, b"nq.schema_v5.logical_state.v1\0")
 }
 
 fn logical_state_digest(connection: &Connection, domain: &[u8]) -> Result<String, StoreError> {
@@ -6889,6 +8761,11 @@ fn validate_required_objects(connection: &Connection) -> Result<(), StoreError> 
         "evaluation_runs",
         "evaluation_watermarks",
         "refusals",
+        "diagnostic_artifact_commitments",
+        "diagnostic_artifact_payloads",
+        "local_diagnostic_artifact_origins",
+        "diagnostic_artifact_import_events",
+        "imported_diagnostic_artifact_origins",
         "finding_events",
         "finding_evidence",
         "finding_current",
@@ -6898,6 +8775,10 @@ fn validate_required_objects(connection: &Connection) -> Result<(), StoreError> 
         "genesis_records",
         "legacy_references",
         "upgrade_receipts",
+        "runtime_record_checkpoints",
+        "runtime_record_ledger",
+        "runtime_record_lookup",
+        "local_diagnostic_artifact_provider_attempt_bindings",
         "status_events",
         "provider_intake_acknowledgments",
         "status_current",
@@ -10390,6 +12271,22 @@ mod tests {
             .expect("record exact schema-v4 identity");
     }
 
+    fn write_empty_exact_v5(path: &Path) {
+        let connection = Connection::open(path).expect("open exact schema-v5 fixture");
+        connection
+            .execute_batch(SCHEMA_V5)
+            .expect("install exact schema-v5 definition");
+        connection
+            .execute(
+                "INSERT INTO schema_metadata (
+                    singleton, product, schema_version,
+                    schema_artifact_digest, initialized_at
+                 ) VALUES (1, 'nq-ng', 5, ?1, ?2)",
+                params![SCHEMA_V5_ARTIFACT_DIGEST, TIME],
+            )
+            .expect("record exact schema-v5 identity");
+    }
+
     fn exact_v3_to_v4_receipt(backup: &BackupArtifact) -> UpgradeReceiptInput {
         UpgradeReceiptInput {
             receipt_id: "upgrade-v3-v4-provider".to_owned(),
@@ -10436,6 +12333,52 @@ mod tests {
                 "historical_diagnostic_artifacts": "no_durable_commitments",
                 "diagnostic_artifacts_synthesized": false,
             })),
+        }
+    }
+
+    fn exact_v5_to_v6_receipt(backup: &BackupArtifact) -> UpgradeReceiptInput {
+        UpgradeReceiptInput {
+            receipt_id: "upgrade-v5-v6-runtime-ledger".to_owned(),
+            from_schema_version: 5,
+            to_schema_version: 6,
+            migrations: document(json!(["schema_v5_to_v6_runtime_ledger"])),
+            binary_digest: digest("migration-binary-v6"),
+            backup_digest: backup.sha256.clone(),
+            backup_location: backup.path.to_string_lossy().into_owned(),
+            started_at: "2026-07-28T12:00:00Z".to_owned(),
+            finished_at: "2026-07-28T12:00:01Z".to_owned(),
+            result: "migrated".to_owned(),
+            operator_identity: document(json!({"uid": 991})),
+            verification: document(json!({
+                "integrity": "ok",
+                "source_schema_version": 5,
+                "source_schema_artifact_digest": SCHEMA_V5_ARTIFACT_DIGEST,
+                "backup_reopened": true,
+                "historical_runtime_records": "no_durable_commitments",
+                "runtime_records_synthesized": false,
+                "diagnostic_execution_bindings_synthesized": false,
+            })),
+        }
+    }
+
+    fn runtime_record(label: &str, schema: &str, committed_at: &str) -> RuntimeRecordInput {
+        RuntimeRecordInput {
+            record_id: digest(&format!("runtime-record-{label}")),
+            record_schema: schema.to_owned(),
+            canonical_bytes: document(json!({
+                "schema": schema,
+                "fixture": label,
+            })),
+            committed_at: committed_at.to_owned(),
+        }
+    }
+
+    fn initial_runtime_batch(records: Vec<RuntimeRecordInput>) -> RuntimeRecordBatchInput {
+        RuntimeRecordBatchInput {
+            checkpoint_id: digest("runtime-checkpoint-initial"),
+            expected_predecessor_checkpoint_id: None,
+            expected_predecessor_ledger_root: None,
+            records,
         }
     }
 
@@ -10927,6 +12870,7 @@ mod tests {
                 run_id: collection.run.run_id.clone(),
                 evaluation_id: None,
                 completed_at: TIME.to_owned(),
+                execution_binding: None,
             },
         }
     }
@@ -11260,6 +13204,7 @@ mod tests {
                         run_id: run_id.clone(),
                         evaluation_id: Some(artifact_evaluation_id.to_owned()),
                         completed_at: TIME.to_owned(),
+                        execution_binding: None,
                     },
                 }),
                 status: StatusEventInput {
@@ -15185,6 +17130,7 @@ mod tests {
                 run_id,
                 evaluation_id: None,
                 completed_at,
+                ..
             } if run_id == collection.run.run_id && completed_at == TIME
         ));
         assert!(matches!(
@@ -15379,6 +17325,7 @@ mod tests {
                 run_id: origin_run,
                 evaluation_id,
                 completed_at,
+                ..
             } if origin_run == run_id
                 && evaluation_id.as_deref() == Some(expected_evaluation)
                 && completed_at == TIME
@@ -15518,6 +17465,358 @@ mod tests {
     }
 
     #[test]
+    fn runtime_ledger_is_globally_sequenced_replayable_and_snapshot_pinned() {
+        let mut store = Store::initialize_in_memory().expect("store initializes");
+        let batch = initial_runtime_batch(vec![
+            runtime_record(
+                "request",
+                "nq.diagnostic_invocation_request.v1",
+                "2026-07-29T12:00:00Z",
+            ),
+            runtime_record(
+                "decision",
+                "nq.invocation_decision.v1",
+                "2026-07-29T12:00:01Z",
+            ),
+        ]);
+        let committed = store
+            .append_runtime_records(&batch)
+            .expect("runtime batch commits");
+        assert_eq!(
+            committed.disposition,
+            RuntimeRecordAppendDisposition::Committed
+        );
+        assert_eq!(committed.checkpoint.first_record_sequence, 1);
+        assert_eq!(committed.checkpoint.last_record_sequence, 2);
+        assert_eq!(committed.checkpoint.record_count, 2);
+
+        let replayed = store
+            .append_runtime_records(&batch)
+            .expect("exact runtime batch replays");
+        assert_eq!(
+            replayed.disposition,
+            RuntimeRecordAppendDisposition::Replayed
+        );
+        assert_eq!(replayed.checkpoint, committed.checkpoint);
+
+        let first_page = store
+            .runtime_record_page(Some(&committed.checkpoint), 0, 1)
+            .expect("first pinned page");
+        assert!(!first_page.complete);
+        assert_eq!(first_page.records.len(), 1);
+        assert_eq!(first_page.next_after_record_sequence, Some(1));
+        let second_page = store
+            .runtime_record_page(
+                Some(&committed.checkpoint),
+                first_page.next_after_record_sequence.unwrap(),
+                1,
+            )
+            .expect("second pinned page");
+        assert!(second_page.complete);
+        assert_eq!(second_page.records.len(), 1);
+        assert_eq!(second_page.records[0].record_sequence, 2);
+        assert_eq!(
+            store
+                .runtime_record(&batch.records[0].record_id)
+                .expect("exact lookup")
+                .expect("record retained")
+                .canonical_bytes,
+            batch.records[0].canonical_bytes
+        );
+        store.validate().expect("runtime history validates");
+    }
+
+    #[test]
+    fn runtime_ledger_refuses_schema_and_identity_collisions_atomically() {
+        let mut store = Store::initialize_in_memory().expect("store initializes");
+        let first = initial_runtime_batch(vec![runtime_record(
+            "request",
+            "nq.diagnostic_invocation_request.v1",
+            "2026-07-29T12:00:00Z",
+        )]);
+        let committed = store
+            .append_runtime_records(&first)
+            .expect("first runtime batch");
+
+        let mut checkpoint_collision = first.clone();
+        checkpoint_collision.records[0] = runtime_record(
+            "other-request",
+            "nq.diagnostic_invocation_request.v1",
+            "2026-07-29T12:00:00Z",
+        );
+        assert!(matches!(
+            store.append_runtime_records(&checkpoint_collision),
+            Err(StoreError::ReplayConflict(_))
+        ));
+
+        let record_collision = RuntimeRecordBatchInput {
+            checkpoint_id: digest("runtime-checkpoint-collision"),
+            expected_predecessor_checkpoint_id: Some(committed.checkpoint.checkpoint_id.clone()),
+            expected_predecessor_ledger_root: Some(
+                committed.checkpoint.checkpoint_ledger_root.clone(),
+            ),
+            records: first.records.clone(),
+        };
+        assert!(matches!(
+            store.append_runtime_records(&record_collision),
+            Err(StoreError::ReplayConflict(_))
+        ));
+
+        let unsupported = RuntimeRecordBatchInput {
+            checkpoint_id: digest("runtime-checkpoint-unsupported"),
+            expected_predecessor_checkpoint_id: Some(committed.checkpoint.checkpoint_id.clone()),
+            expected_predecessor_ledger_root: Some(
+                committed.checkpoint.checkpoint_ledger_root.clone(),
+            ),
+            records: vec![runtime_record(
+                "unsupported",
+                "nq.unratified_runtime_plugin.v1",
+                "2026-07-29T12:00:02Z",
+            )],
+        };
+        assert!(matches!(
+            store.append_runtime_records(&unsupported),
+            Err(StoreError::Invariant(message)) if message.contains("unsupported schema")
+        ));
+        assert_eq!(
+            store
+                .runtime_ledger_checkpoint()
+                .expect("checkpoint reads")
+                .expect("checkpoint remains"),
+            committed.checkpoint
+        );
+
+        let second = RuntimeRecordBatchInput {
+            checkpoint_id: digest("runtime-checkpoint-second"),
+            expected_predecessor_checkpoint_id: Some(committed.checkpoint.checkpoint_id.clone()),
+            expected_predecessor_ledger_root: Some(
+                committed.checkpoint.checkpoint_ledger_root.clone(),
+            ),
+            records: vec![
+                runtime_record("role", "nq.role_manifest.v1", "2026-07-29T12:00:03Z"),
+                runtime_record(
+                    "cohort",
+                    "nq.static_profile_cohort_manifest.v1",
+                    "2026-07-29T12:00:04Z",
+                ),
+            ],
+        };
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_second_runtime_record
+                 BEFORE INSERT ON runtime_record_ledger
+                 WHEN NEW.record_sequence = 3
+                 BEGIN SELECT RAISE(ABORT, 'injected runtime append failure'); END;",
+            )
+            .expect("install failure trigger");
+        assert!(matches!(
+            store.append_runtime_records(&second),
+            Err(StoreError::Sqlite(_))
+        ));
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_second_runtime_record;")
+            .expect("remove failure trigger");
+        let counts: (i64, i64) = store
+            .connection
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM runtime_record_ledger),
+                    (SELECT COUNT(*) FROM runtime_record_checkpoints)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("runtime counts");
+        assert_eq!(counts, (1, 1), "failed batch must roll back completely");
+        store.validate().expect("history remains valid");
+    }
+
+    #[test]
+    fn runtime_lookup_is_disposable_detectable_and_rebuildable() {
+        let mut store = Store::initialize_in_memory().expect("store initializes");
+        let batch = initial_runtime_batch(vec![runtime_record(
+            "role",
+            "nq.role_manifest.v1",
+            "2026-07-29T12:00:00Z",
+        )]);
+        let receipt = store
+            .append_runtime_records(&batch)
+            .expect("runtime batch commits");
+        store
+            .connection
+            .execute("DELETE FROM runtime_record_lookup", [])
+            .expect("delete disposable lookup");
+        let stale = store.runtime_record_lookup_status().expect("lookup status");
+        assert_eq!(stale.missing_records, 1);
+        assert!(!stale.is_current());
+        assert!(matches!(
+            store.runtime_records_by_schema_bounded(
+                "nq.role_manifest.v1",
+                &receipt.checkpoint,
+                0,
+                10,
+            ),
+            Err(StoreError::Integrity(message)) if message.contains("lookup is stale")
+        ));
+        let rebuilt = store
+            .rebuild_runtime_record_lookup()
+            .expect("lookup rebuilds");
+        assert!(rebuilt.is_current());
+        assert_eq!(
+            store
+                .runtime_records_by_schema_bounded(
+                    "nq.role_manifest.v1",
+                    &receipt.checkpoint,
+                    0,
+                    10,
+                )
+                .expect("schema lookup"),
+            vec![
+                store
+                    .runtime_record(&batch.records[0].record_id)
+                    .expect("lookup")
+                    .expect("record")
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_ledger_detects_root_or_canonical_byte_substitution() {
+        let mut store = Store::initialize_in_memory().expect("store initializes");
+        let batch = initial_runtime_batch(vec![runtime_record(
+            "request",
+            "nq.diagnostic_invocation_request.v1",
+            "2026-07-29T12:00:00Z",
+        )]);
+        store
+            .append_runtime_records(&batch)
+            .expect("runtime batch commits");
+        let trigger: String = store
+            .connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                 WHERE type = 'trigger'
+                   AND name = 'immutable_runtime_record_ledger_update'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("capture append-only trigger");
+        store
+            .connection
+            .execute_batch("DROP TRIGGER immutable_runtime_record_ledger_update;")
+            .expect("drop trigger for hostile substitution");
+        store
+            .connection
+            .execute(
+                "UPDATE runtime_record_ledger SET ledger_root = ?1
+                 WHERE record_id = ?2",
+                params![digest("substituted-root"), batch.records[0].record_id],
+            )
+            .expect("substitute root below typed API");
+        store
+            .connection
+            .execute_batch(&trigger)
+            .expect("restore append-only trigger");
+        assert!(matches!(
+            store.validate(),
+            Err(StoreError::Integrity(message))
+                if message.contains("invalid ledger root")
+                    || message.contains("root differs")
+        ));
+    }
+
+    #[test]
+    fn runtime_history_survives_verified_backup_and_read_only_refuses_append() {
+        let directory = tempdir().expect("temporary directory");
+        let source = directory.path().join("runtime.db");
+        let backup = directory.path().join("runtime-backup.db");
+        let mut store = Store::initialize(&source).expect("initialize file store");
+        let batch = initial_runtime_batch(vec![runtime_record(
+            "provider-intake",
+            "nq.provider_intake.v1",
+            "2026-07-29T12:00:00Z",
+        )]);
+        let receipt = store
+            .append_runtime_records(&batch)
+            .expect("runtime batch commits");
+        store.backup_verified(&backup).expect("verified backup");
+        let reopened = Store::open_read_only(&backup).expect("backup reopens read-only");
+        assert_eq!(
+            reopened
+                .runtime_ledger_checkpoint()
+                .expect("backup checkpoint")
+                .expect("checkpoint retained"),
+            receipt.checkpoint
+        );
+        assert_eq!(
+            reopened
+                .runtime_record(&batch.records[0].record_id)
+                .expect("backup record")
+                .expect("record retained")
+                .canonical_bytes,
+            batch.records[0].canonical_bytes
+        );
+        drop(reopened);
+
+        let mut read_only = Store::open_read_only(&source).expect("source opens read-only");
+        let second = RuntimeRecordBatchInput {
+            checkpoint_id: digest("runtime-checkpoint-read-only"),
+            expected_predecessor_checkpoint_id: Some(receipt.checkpoint.checkpoint_id.clone()),
+            expected_predecessor_ledger_root: Some(
+                receipt.checkpoint.checkpoint_ledger_root.clone(),
+            ),
+            records: vec![runtime_record(
+                "read-only",
+                "nq.role_manifest.v1",
+                "2026-07-29T12:00:01Z",
+            )],
+        };
+        assert!(matches!(
+            read_only.append_runtime_records(&second),
+            Err(StoreError::Sqlite(_))
+        ));
+    }
+
+    #[test]
+    fn exact_v5_upgrade_adds_empty_runtime_ledger_without_synthesis() {
+        let directory = tempdir().expect("temporary directory");
+        let source = directory.path().join("source-v5.db");
+        let backup_path = directory.path().join("backup-v5.db");
+        write_empty_exact_v5(&source);
+        let backup = Store::backup_v5_verified(&source, &backup_path).expect("verified v5 backup");
+        let receipt = exact_v5_to_v6_receipt(&backup);
+        let migrated = Store::upgrade_v5_to_v6(&source, &receipt).expect("exact v5 upgrades to v6");
+        assert_eq!(
+            Store::database_schema_version(&source).expect("source version"),
+            6
+        );
+        assert_eq!(
+            Store::database_schema_version(&backup_path).expect("backup version"),
+            5
+        );
+        assert!(
+            migrated
+                .runtime_ledger_checkpoint()
+                .expect("empty checkpoint")
+                .is_none()
+        );
+        let counts: (i64, i64, i64) = migrated
+            .connection
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM runtime_record_ledger),
+                    (SELECT COUNT(*) FROM runtime_record_checkpoints),
+                    (SELECT COUNT(*) FROM local_diagnostic_artifact_provider_attempt_bindings)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("migration counts");
+        assert_eq!(counts, (0, 0, 0));
+        migrated.validate().expect("migrated v6 validates");
+    }
+
+    #[test]
     fn exact_v4_upgrade_adds_empty_artifact_custody_without_synthesis() {
         let directory = tempdir().expect("temporary directory");
         let source = directory.path().join("source-v4.db");
@@ -15525,7 +17824,7 @@ mod tests {
         write_empty_exact_v4(&source);
         let backup = Store::backup_v4_verified(&source, &backup_path).expect("verified v4 backup");
         let receipt = exact_v4_to_v5_receipt(&backup);
-        let migrated = Store::upgrade_v4_to_v5(&source, &receipt).expect("exact v4 upgrades to v5");
+        Store::upgrade_v4_to_v5(&source, &receipt).expect("exact v4 upgrades to v5");
         assert_eq!(
             Store::database_schema_version(&source).expect("source version"),
             5
@@ -15534,6 +17833,8 @@ mod tests {
             Store::database_schema_version(&backup_path).expect("backup version"),
             4
         );
+        let migrated =
+            Store::open_v5_upgrade_source_read_only(&source).expect("migrated v5 reopens");
         let commitment_count: i64 = migrated
             .connection
             .query_row(
@@ -15546,6 +17847,6 @@ mod tests {
             commitment_count, 0,
             "migration synthesized artifacts from schema-v4 absence"
         );
-        migrated.validate().expect("migrated v5 validates");
+        validate_v5_upgrade_source_connection(&migrated.connection).expect("migrated v5 validates");
     }
 }
