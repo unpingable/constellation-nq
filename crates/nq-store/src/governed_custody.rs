@@ -22,10 +22,10 @@ use crate::custody_arena::{
     acquisition_carrier_capacity_bound,
 };
 use crate::{
-    DiagnosticArtifactByteState, DiagnosticArtifactLookup, DiagnosticArtifactOrigin,
-    MAX_PUBLIC_QUERY_ROWS, RuntimeCheckpointDependencyBinding,
+    CanonicalDocument, DiagnosticArtifactByteState, DiagnosticArtifactLookup,
+    DiagnosticArtifactOrigin, MAX_PUBLIC_QUERY_ROWS, RuntimeCheckpointDependencyBinding,
     RuntimeDependencyGenerationByteState, RuntimeLedgerCheckpoint, RuntimeRecordRow, Store,
-    StoreError, diagnostic_artifact_execution_binding_on_connection,
+    StoreError, canonical_document_schema, diagnostic_artifact_execution_binding_on_connection,
     diagnostic_artifact_on_connection, runtime_checkpoint_by_id_on_connection,
     runtime_checkpoint_dependency_on_connection, runtime_record_by_id_on_connection,
     validate_diagnostic_artifact_invariants, validate_provider_intake_invariants,
@@ -42,6 +42,485 @@ pub const GOVERNED_CUSTODY_CLOSURE_SCHEMA: &str = "nq.governed_execution_custody
 /// from executable identity and represents clock qualification without a
 /// numeric sentinel.
 pub const GOVERNED_CUSTODY_CLOSURE_V2_SCHEMA: &str = "nq.governed_execution_custody_closure.v2";
+
+const MAX_GOVERNED_CLOSURE_TEXT_BYTES: usize = 256;
+
+/// One exact immutable runtime-record reference retained by a governed closure.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GovernedClosureRecordReference {
+    pub schema: String,
+    pub record_id: Sha256Digest,
+    pub bytes_digest: Sha256Digest,
+}
+
+impl TryFrom<&RuntimeRecordRow> for GovernedClosureRecordReference {
+    type Error = StoreError;
+
+    fn try_from(value: &RuntimeRecordRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            schema: value.record_schema.clone(),
+            record_id: Sha256Digest::parse(value.record_id.clone()).map_err(|error| {
+                StoreError::Integrity(format!(
+                    "runtime record {} has invalid semantic identity: {error}",
+                    value.record_id
+                ))
+            })?,
+            bytes_digest: value.canonical_bytes_sha256.clone(),
+        })
+    }
+}
+
+/// Exact checkpoint identity and complete ordered membership retained by a
+/// governed closure.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct GovernedClosureCheckpointInput {
+    pub checkpoint_id: Sha256Digest,
+    pub batch_digest: Sha256Digest,
+    pub runtime_records: Vec<GovernedClosureRecordReference>,
+}
+
+/// Exact prelaunch records and checkpoint frontiers retained by a governed
+/// closure.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct GovernedClosurePrelaunchInput {
+    pub outer_request: GovernedClosureRecordReference,
+    pub invocation_decision: GovernedClosureRecordReference,
+    pub reservation_checkpoint: GovernedClosureCheckpointInput,
+    pub launch_checkpoint: GovernedClosureCheckpointInput,
+}
+
+/// Exact provider occurrence retained by a governed closure.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct GovernedClosureAcquisitionInput {
+    pub execution_launch_record_id: Sha256Digest,
+    pub provider_intake: GovernedClosureRecordReference,
+    pub intake_id: String,
+    pub raw_provider_bytes_digest: Sha256Digest,
+}
+
+/// Exact derivation-custody correspondence retained by a V2 closure.
+///
+/// These are storage identities. Their presence does not establish that the
+/// evaluator ran or that its diagnostic conclusion is valid.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct GovernedClosureDerivationInput {
+    pub derivation_id: Sha256Digest,
+    pub dependency_generation_id: Sha256Digest,
+    pub dependency_generation_custody_digest: Sha256Digest,
+    pub trust_anchor_id: Sha256Digest,
+    pub evaluation_id: Option<String>,
+    pub profile_semantic_id: Sha256Digest,
+    pub evaluator_semantic_digest: Sha256Digest,
+    pub evaluator_artifact_digest: Sha256Digest,
+    pub derived_at: String,
+    pub clock_identity: Sha256Digest,
+    pub clock_qualification_digest: Sha256Digest,
+}
+
+/// Exact local SQL origin retained by a governed closure.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct GovernedClosureLocalOriginInput {
+    pub run_id: String,
+    pub evaluation_id: Option<String>,
+    pub completed_at: String,
+}
+
+/// Exact authenticated dependency generation retained by a governed closure.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct GovernedClosureDependencyGenerationInput {
+    pub checkpoint_id: Sha256Digest,
+    pub checkpoint_digest: Sha256Digest,
+    pub generation_id: Sha256Digest,
+    pub trust_anchor_id: Sha256Digest,
+    pub custody_bytes_digest: Sha256Digest,
+}
+
+/// Complete storage-only input for one exact V2 custody closure.
+///
+/// NQ core remains responsible for validating the diagnostic and every native
+/// semantic correspondence before asking Store to encode this carrier.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GovernedExecutionCustodyClosureV2Input {
+    pub reservation: GovernedClosureRecordReference,
+    pub prelaunch: GovernedClosurePrelaunchInput,
+    pub acquisition: GovernedClosureAcquisitionInput,
+    pub derivation: GovernedClosureDerivationInput,
+    pub diagnostic: CanonicalDocument,
+    /// Exact pre-effect diagnostic component bound from the custody
+    /// reservation. This governs encoding but is not duplicated into the
+    /// closure schema.
+    pub diagnostic_artifact_capacity_bytes: u64,
+    pub local_origin: GovernedClosureLocalOriginInput,
+    pub execution_binding: GovernedClosureRecordReference,
+    pub runtime_records: Vec<GovernedClosureRecordReference>,
+    pub dependency_generation: GovernedClosureDependencyGenerationInput,
+}
+
+/// Planned immutable inputs used to size one V2 closure before physical
+/// reservation or provider effect.
+///
+/// The runtime supplies the exact record references and checkpoint membership
+/// it has already encoded for its planned atomic appends. This function does
+/// not inspect mutable Store state or establish that those appends occurred.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GovernedExecutionCustodyClosureV2CapacityInput {
+    pub reservation: GovernedClosureRecordReference,
+    pub prelaunch: GovernedClosurePrelaunchInput,
+    pub execution_launch_record_id: Sha256Digest,
+    pub dependency_generation_id: Sha256Digest,
+    pub dependency_generation_custody_digest: Sha256Digest,
+    pub trust_anchor_id: Sha256Digest,
+    pub diagnostic_artifact_capacity_bytes: u64,
+}
+
+/// Separate diagnostic and final-carrier bounds for one planned V2 closure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GovernedExecutionCustodyClosureV2Capacity {
+    pub diagnostic_artifact_capacity_bytes: u64,
+    pub final_closure_capacity_bytes: u64,
+}
+
+/// Encode a conservative final-carrier bound from exact planned prelaunch
+/// membership without consulting Store state.
+///
+/// This is a sizing result, not proof that the planned checkpoints committed
+/// or that a diagnostic execution is semantically valid.
+pub fn governed_execution_custody_closure_v2_capacity_bound(
+    input: &GovernedExecutionCustodyClosureV2CapacityInput,
+) -> Result<GovernedExecutionCustodyClosureV2Capacity, StoreError> {
+    if input.diagnostic_artifact_capacity_bytes == 0 {
+        return Err(StoreError::Invariant(
+            "maximum diagnostic canonical length must be positive".into(),
+        ));
+    }
+    validate_governed_closure_v2_prelaunch(
+        &input.reservation,
+        &input.prelaunch,
+        &input.execution_launch_record_id,
+    )?;
+    let final_closure_capacity_bytes = governed_closure_v2_capacity_bound_from_exact_prelaunch(
+        input.reservation.clone(),
+        input.prelaunch.clone(),
+        input.execution_launch_record_id.clone(),
+        &input.dependency_generation_id,
+        &input.dependency_generation_custody_digest,
+        &input.trust_anchor_id,
+        input.diagnostic_artifact_capacity_bytes,
+    )?;
+    Ok(GovernedExecutionCustodyClosureV2Capacity {
+        diagnostic_artifact_capacity_bytes: input.diagnostic_artifact_capacity_bytes,
+        final_closure_capacity_bytes,
+    })
+}
+
+#[derive(Serialize)]
+struct GovernedExecutionCustodyClosureV2Preimage {
+    schema: &'static str,
+    reservation: GovernedClosureRecordReference,
+    prelaunch: GovernedClosurePrelaunchInput,
+    acquisition: GovernedClosureAcquisitionInput,
+    derivation: GovernedClosureDerivationInput,
+    diagnostic: Value,
+    local_origin: GovernedClosureLocalOriginInput,
+    execution_binding: GovernedClosureRecordReference,
+    runtime_records: Vec<GovernedClosureRecordReference>,
+    dependency_generation: GovernedClosureDependencyGenerationInput,
+}
+
+#[derive(Serialize)]
+struct GovernedExecutionCustodyClosureV2Document {
+    schema: &'static str,
+    closure_id: Sha256Digest,
+    reservation: GovernedClosureRecordReference,
+    prelaunch: GovernedClosurePrelaunchInput,
+    acquisition: GovernedClosureAcquisitionInput,
+    derivation: GovernedClosureDerivationInput,
+    diagnostic: Value,
+    local_origin: GovernedClosureLocalOriginInput,
+    execution_binding: GovernedClosureRecordReference,
+    runtime_records: Vec<GovernedClosureRecordReference>,
+    dependency_generation: GovernedClosureDependencyGenerationInput,
+}
+
+/// Exact canonical V2 custody closure produced by the Store-owned encoder.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GovernedExecutionCustodyClosureV2 {
+    closure_id: Sha256Digest,
+    canonical_bytes: CanonicalDocument,
+}
+
+impl GovernedExecutionCustodyClosureV2 {
+    /// Build one exact storage carrier and derive its semantic self-identity.
+    ///
+    /// This checks only closed storage shape and correspondence. It does not
+    /// validate or assign diagnostic standing.
+    pub fn build(input: GovernedExecutionCustodyClosureV2Input) -> Result<Self, StoreError> {
+        validate_governed_closure_v2_input(&input)?;
+        let diagnostic: Value =
+            serde_json::from_slice(input.diagnostic.as_bytes()).map_err(|error| {
+                StoreError::CanonicalJson(format!(
+                    "governed V2 diagnostic cannot be decoded: {error}"
+                ))
+            })?;
+        let preimage = GovernedExecutionCustodyClosureV2Preimage {
+            schema: GOVERNED_CUSTODY_CLOSURE_V2_SCHEMA,
+            reservation: input.reservation,
+            prelaunch: input.prelaunch,
+            acquisition: input.acquisition,
+            derivation: input.derivation,
+            diagnostic,
+            local_origin: input.local_origin,
+            execution_binding: input.execution_binding,
+            runtime_records: input.runtime_records,
+            dependency_generation: input.dependency_generation,
+        };
+        let closure_id = semantic_digest(&preimage).map_err(|error| {
+            StoreError::Invariant(format!(
+                "governed V2 closure identity cannot be derived: {error}"
+            ))
+        })?;
+        let document = GovernedExecutionCustodyClosureV2Document {
+            schema: preimage.schema,
+            closure_id: closure_id.clone(),
+            reservation: preimage.reservation,
+            prelaunch: preimage.prelaunch,
+            acquisition: preimage.acquisition,
+            derivation: preimage.derivation,
+            diagnostic: preimage.diagnostic,
+            local_origin: preimage.local_origin,
+            execution_binding: preimage.execution_binding,
+            runtime_records: preimage.runtime_records,
+            dependency_generation: preimage.dependency_generation,
+        };
+        let canonical_bytes = CanonicalDocument::from_serializable(&document)?;
+        Ok(Self {
+            closure_id,
+            canonical_bytes,
+        })
+    }
+
+    #[must_use]
+    pub const fn closure_id(&self) -> &Sha256Digest {
+        &self.closure_id
+    }
+
+    #[must_use]
+    pub const fn canonical_bytes(&self) -> &CanonicalDocument {
+        &self.canonical_bytes
+    }
+
+    #[must_use]
+    pub fn into_canonical_bytes(self) -> CanonicalDocument {
+        self.canonical_bytes
+    }
+}
+
+fn validate_governed_closure_v2_text(label: &str, value: &str) -> Result<(), StoreError> {
+    if value.is_empty()
+        || value.len() > MAX_GOVERNED_CLOSURE_TEXT_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err(StoreError::Invariant(format!(
+            "governed V2 closure {label} must contain 1..=256 non-control bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_governed_closure_v2_prelaunch(
+    reservation: &GovernedClosureRecordReference,
+    prelaunch: &GovernedClosurePrelaunchInput,
+    execution_launch_record_id: &Sha256Digest,
+) -> Result<(), StoreError> {
+    for (label, reference, schema) in [
+        ("reservation", reservation, "nq.custody_reservation.v1"),
+        (
+            "outer request",
+            &prelaunch.outer_request,
+            "nq.diagnostic_invocation_request.v1",
+        ),
+        (
+            "invocation decision",
+            &prelaunch.invocation_decision,
+            "nq.invocation_decision.v1",
+        ),
+    ] {
+        if reference.schema != schema {
+            return Err(StoreError::Invariant(format!(
+                "governed V2 closure {label} has incompatible schema"
+            )));
+        }
+    }
+    if prelaunch.reservation_checkpoint.runtime_records.is_empty()
+        || prelaunch.launch_checkpoint.runtime_records.is_empty()
+    {
+        return Err(StoreError::Invariant(
+            "governed V2 closure prelaunch checkpoint is empty".into(),
+        ));
+    }
+    let unique_exact = |records: &[GovernedClosureRecordReference],
+                        expected: &GovernedClosureRecordReference| {
+        records.iter().filter(|record| *record == expected).count() == 1
+    };
+    let unique_schema = |records: &[GovernedClosureRecordReference], schema: &str| {
+        records
+            .iter()
+            .filter(|record| record.schema == schema)
+            .count()
+            == 1
+    };
+    if !unique_exact(
+        &prelaunch.reservation_checkpoint.runtime_records,
+        reservation,
+    ) || !unique_exact(
+        &prelaunch.reservation_checkpoint.runtime_records,
+        &prelaunch.outer_request,
+    ) || !unique_exact(
+        &prelaunch.reservation_checkpoint.runtime_records,
+        &prelaunch.invocation_decision,
+    ) || !unique_schema(
+        &prelaunch.reservation_checkpoint.runtime_records,
+        "nq.custody_reservation.v1",
+    ) || !unique_schema(
+        &prelaunch.reservation_checkpoint.runtime_records,
+        "nq.diagnostic_invocation_request.v1",
+    ) || !unique_schema(
+        &prelaunch.reservation_checkpoint.runtime_records,
+        "nq.invocation_decision.v1",
+    ) {
+        return Err(StoreError::Invariant(
+            "governed V2 closure omits or duplicates an exact prelaunch storage reference".into(),
+        ));
+    }
+    let launch_records = prelaunch
+        .launch_checkpoint
+        .runtime_records
+        .iter()
+        .filter(|record| record.schema == "nq.execution_launch.v1")
+        .collect::<Vec<_>>();
+    let [launch] = launch_records.as_slice() else {
+        return Err(StoreError::Invariant(
+            "governed V2 closure requires exactly one execution launch".into(),
+        ));
+    };
+    let deadline_count = prelaunch
+        .launch_checkpoint
+        .runtime_records
+        .iter()
+        .filter(|record| record.schema == "nq.deadline_evaluation.v1")
+        .count();
+    if !matches!(
+        (
+            prelaunch.launch_checkpoint.runtime_records.len(),
+            deadline_count
+        ),
+        (1, 0) | (2, 1)
+    ) {
+        return Err(StoreError::Invariant(
+            "governed V2 closure launch checkpoint requires one legacy launch or one deadline-plus-launch pair"
+                .into(),
+        ));
+    }
+    if launch.record_id != *execution_launch_record_id {
+        return Err(StoreError::Invariant(
+            "governed V2 closure execution launch identity does not join exactly".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_governed_closure_v2_input(
+    input: &GovernedExecutionCustodyClosureV2Input,
+) -> Result<(), StoreError> {
+    validate_governed_closure_v2_prelaunch(
+        &input.reservation,
+        &input.prelaunch,
+        &input.acquisition.execution_launch_record_id,
+    )?;
+    for (label, reference, schema) in [
+        (
+            "provider intake",
+            &input.acquisition.provider_intake,
+            "nq.provider_intake.v1",
+        ),
+        (
+            "execution binding",
+            &input.execution_binding,
+            "nq.execution_identity_binding.v2",
+        ),
+    ] {
+        if reference.schema != schema {
+            return Err(StoreError::Invariant(format!(
+                "governed V2 closure {label} has incompatible schema"
+            )));
+        }
+    }
+    for (label, value) in [
+        ("intake identity", input.acquisition.intake_id.as_str()),
+        ("derivation time", input.derivation.derived_at.as_str()),
+        ("run identity", input.local_origin.run_id.as_str()),
+        ("completion time", input.local_origin.completed_at.as_str()),
+    ] {
+        validate_governed_closure_v2_text(label, value)?;
+    }
+    if let Some(evaluation_id) = &input.derivation.evaluation_id {
+        validate_governed_closure_v2_text("derivation evaluation identity", evaluation_id)?;
+    }
+    if let Some(evaluation_id) = &input.local_origin.evaluation_id {
+        validate_governed_closure_v2_text("local evaluation identity", evaluation_id)?;
+    }
+    let diagnostic_schema = canonical_document_schema(&input.diagnostic)?;
+    if diagnostic_schema != "nq.diagnostic_execution.v2" {
+        return Err(StoreError::Invariant(
+            "governed V2 closure requires exact diagnostic_execution.v2 bytes".into(),
+        ));
+    }
+    let diagnostic_length = u64::try_from(input.diagnostic.as_bytes().len()).map_err(|_| {
+        StoreError::Invariant("governed V2 diagnostic length exceeds address space".into())
+    })?;
+    if input.diagnostic_artifact_capacity_bytes == 0
+        || diagnostic_length > input.diagnostic_artifact_capacity_bytes
+    {
+        return Err(StoreError::Invariant(
+            "governed V2 diagnostic exceeds its pre-effect component bound".into(),
+        ));
+    }
+    if input.runtime_records.is_empty() {
+        return Err(StoreError::Invariant(
+            "governed V2 closure terminal write set is empty".into(),
+        ));
+    }
+    let unique_exact = |records: &[GovernedClosureRecordReference],
+                        expected: &GovernedClosureRecordReference| {
+        records.iter().filter(|record| *record == expected).count() == 1
+    };
+    if !unique_exact(&input.runtime_records, &input.execution_binding)
+        || !unique_exact(&input.runtime_records, &input.acquisition.provider_intake)
+    {
+        return Err(StoreError::Invariant(
+            "governed V2 closure omits or duplicates an exact storage reference".into(),
+        ));
+    }
+    if input.runtime_records.len() != 2 {
+        return Err(StoreError::Invariant(
+            "governed V2 closure terminal write set must contain exactly provider intake and execution binding"
+                .into(),
+        ));
+    }
+    if input.derivation.dependency_generation_id != input.dependency_generation.generation_id
+        || input.derivation.dependency_generation_custody_digest
+            != input.dependency_generation.custody_bytes_digest
+        || input.derivation.trust_anchor_id != input.dependency_generation.trust_anchor_id
+        || input.derivation.evaluation_id != input.local_origin.evaluation_id
+        || input.derivation.derived_at != input.local_origin.completed_at
+    {
+        return Err(StoreError::Invariant(
+            "governed V2 closure storage identities do not join exactly".into(),
+        ));
+    }
+    Ok(())
+}
 
 /// Canonical store-owned terminal carrier for one launched occurrence that
 /// cannot reach a complete V2 closure.
@@ -80,6 +559,15 @@ pub struct GovernedCustodyReservation {
     pub prelaunch_checkpoint_digest: Sha256Digest,
     pub dependency_closure_capacity_bytes: u64,
     pub raw_capacity_bytes: u64,
+    /// Pre-effect maximum canonical diagnostic bytes used to size this
+    /// occurrence.
+    ///
+    /// This remains separate from the larger final-closure carrier partition:
+    /// callers must account for both the artifact and its storage envelope.
+    /// The exact custody-reservation record binds this policy value; the arena
+    /// stores only that record's digest and does not independently reinterpret
+    /// the sizing policy.
+    pub diagnostic_artifact_capacity_bytes: u64,
     pub final_capacity_bytes: u64,
     pub protected_failure_capacity_bytes: u64,
 }
@@ -101,6 +589,11 @@ impl GovernedCustodyReservation {
     }
 
     fn layout(&self) -> Result<ArenaLayout, StoreError> {
+        if self.diagnostic_artifact_capacity_bytes == 0 {
+            return Err(StoreError::Invariant(
+                "governed custody diagnostic artifact capacity must be positive".into(),
+            ));
+        }
         ArenaLayout::new(
             self.dependency_closure_capacity_bytes,
             self.raw_capacity_bytes,
@@ -941,6 +1434,14 @@ impl GovernedCustody {
         &mut self,
         exact_closure_bytes: Vec<u8>,
     ) -> Result<GovernedCustodyCommitment, StoreError> {
+        let embedded_diagnostic_bytes =
+            governed_closure_embedded_diagnostic_length(&exact_closure_bytes)?;
+        if embedded_diagnostic_bytes > self.reservation.diagnostic_artifact_capacity_bytes {
+            return Err(StoreError::Invariant(format!(
+                "governed V2 diagnostic requires {embedded_diagnostic_bytes} bytes but its pre-effect component bound is {}",
+                self.reservation.diagnostic_artifact_capacity_bytes
+            )));
+        }
         let derivation = self
             .arena
             .reopen_derivation_token()
@@ -1298,6 +1799,194 @@ impl Store {
         ))
     }
 
+    /// Reopen exact committed prelaunch membership and verify that the
+    /// preselected diagnostic and final-closure partitions satisfy the pure
+    /// V2 encoder bound.
+    ///
+    /// This check is intended after the reservation and launch checkpoints
+    /// commit but before provider effect. It verifies storage capacity only.
+    #[allow(clippy::too_many_lines)]
+    pub fn verify_governed_execution_custody_closure_v2_capacity(
+        &self,
+        reservation: &GovernedCustodyReservation,
+        launch_checkpoint_id: &Sha256Digest,
+    ) -> Result<GovernedExecutionCustodyClosureV2Capacity, StoreError> {
+        let database_path = self.path().ok_or_else(|| {
+            StoreError::Invariant(
+                "governed capacity verification requires a filesystem-backed store".into(),
+            )
+        })?;
+        let _arena = GovernedCustody::open(database_path, reservation.clone())?;
+        let snapshot = self.connection.unchecked_transaction()?;
+        validate_runtime_record_ledger(&snapshot)?;
+        let reservation_checkpoint = runtime_checkpoint_by_id_on_connection(
+            &snapshot,
+            reservation.prelaunch_checkpoint_id.as_str(),
+        )?
+        .ok_or_else(|| {
+            projection_integrity(
+                &reservation.reservation_record_id,
+                "reservation checkpoint is absent during capacity verification",
+            )
+        })?;
+        let reservation_records = checkpoint_runtime_records(
+            &snapshot,
+            &reservation.reservation_record_id,
+            &reservation_checkpoint,
+        )?;
+        let reservation_record = unique_checkpoint_record_by_schema(
+            &reservation.reservation_record_id,
+            &reservation_records,
+            "nq.custody_reservation.v1",
+            "custody reservation",
+        )?;
+        let outer_request_record = unique_checkpoint_record_by_schema(
+            &reservation.reservation_record_id,
+            &reservation_records,
+            "nq.diagnostic_invocation_request.v1",
+            "outer request",
+        )?;
+        let invocation_decision_record = unique_checkpoint_record_by_schema(
+            &reservation.reservation_record_id,
+            &reservation_records,
+            "nq.invocation_decision.v1",
+            "invocation decision",
+        )?;
+        if reservation_checkpoint.batch_digest != reservation.prelaunch_checkpoint_digest
+            || reservation_checkpoint.checkpoint_id != reservation.prelaunch_checkpoint_id.as_str()
+            || reservation_record.record_id != reservation.reservation_record_id.as_str()
+            || reservation_record.canonical_bytes_sha256 != reservation.reservation_manifest_digest
+            || outer_request_record.record_id != reservation.outer_request_record_id.as_str()
+            || outer_request_record.canonical_bytes_sha256 != reservation.outer_request_digest
+        {
+            return Err(projection_integrity(
+                &reservation.reservation_record_id,
+                "reservation checkpoint differs from exact physical reservation input",
+            ));
+        }
+        let (diagnostic_capacity, final_capacity) =
+            governed_reservation_capacity_components(reservation_record)?;
+        if diagnostic_capacity != reservation.diagnostic_artifact_capacity_bytes
+            || final_capacity != reservation.final_capacity_bytes
+        {
+            return Err(projection_integrity(
+                &reservation.reservation_record_id,
+                "caller capacity differs from the exact custody reservation record",
+            ));
+        }
+
+        let launch_checkpoint =
+            runtime_checkpoint_by_id_on_connection(&snapshot, launch_checkpoint_id.as_str())?
+                .ok_or_else(|| {
+                    projection_integrity(
+                        &reservation.reservation_record_id,
+                        "launch checkpoint is absent during capacity verification",
+                    )
+                })?;
+        if launch_checkpoint.predecessor_checkpoint_id.as_deref()
+            != Some(reservation_checkpoint.checkpoint_id.as_str())
+        {
+            return Err(projection_integrity(
+                &reservation.reservation_record_id,
+                "launch checkpoint does not immediately follow reservation checkpoint",
+            ));
+        }
+        let launch_records = checkpoint_runtime_records(
+            &snapshot,
+            &reservation.reservation_record_id,
+            &launch_checkpoint,
+        )?;
+        let launch_record = unique_checkpoint_record_by_schema(
+            &reservation.reservation_record_id,
+            &launch_records,
+            "nq.execution_launch.v1",
+            "execution launch",
+        )?;
+        let deadline_records = launch_records
+            .iter()
+            .filter(|record| record.record_schema == "nq.deadline_evaluation.v1")
+            .collect::<Vec<_>>();
+        match deadline_records.as_slice() {
+            [] if launch_records.len() == 1 => {}
+            [deadline] if launch_records.len() == 2 => verify_native_launch_checkpoint(
+                &reservation.reservation_record_id,
+                deadline,
+                launch_record,
+                &reservation_records,
+                outer_request_record,
+                invocation_decision_record,
+                reservation_record,
+            )?,
+            _ => {
+                return Err(projection_integrity(
+                    &reservation.reservation_record_id,
+                    "capacity verification requires one legacy launch or one exact deadline-plus-launch pair",
+                ));
+            }
+        }
+        verify_capacity_checkpoint_dependency(
+            &snapshot,
+            &reservation.reservation_record_id,
+            &reservation_checkpoint.checkpoint_id,
+            reservation,
+        )?;
+        verify_capacity_checkpoint_dependency(
+            &snapshot,
+            &reservation.reservation_record_id,
+            &launch_checkpoint.checkpoint_id,
+            reservation,
+        )?;
+        let capacity = governed_execution_custody_closure_v2_capacity_bound(
+            &GovernedExecutionCustodyClosureV2CapacityInput {
+                reservation: reservation_record.try_into()?,
+                prelaunch: GovernedClosurePrelaunchInput {
+                    outer_request: outer_request_record.try_into()?,
+                    invocation_decision: invocation_decision_record.try_into()?,
+                    reservation_checkpoint: GovernedClosureCheckpointInput {
+                        checkpoint_id: reservation.prelaunch_checkpoint_id.clone(),
+                        batch_digest: reservation_checkpoint.batch_digest,
+                        runtime_records: reservation_records
+                            .iter()
+                            .map(GovernedClosureRecordReference::try_from)
+                            .collect::<Result<Vec<_>, _>>()?,
+                    },
+                    launch_checkpoint: GovernedClosureCheckpointInput {
+                        checkpoint_id: launch_checkpoint_id.clone(),
+                        batch_digest: launch_checkpoint.batch_digest,
+                        runtime_records: launch_records
+                            .iter()
+                            .map(GovernedClosureRecordReference::try_from)
+                            .collect::<Result<Vec<_>, _>>()?,
+                    },
+                },
+                execution_launch_record_id: Sha256Digest::parse(launch_record.record_id.clone())
+                    .map_err(|error| {
+                        projection_integrity(
+                            &reservation.reservation_record_id,
+                            format!("execution launch identity is invalid: {error}"),
+                        )
+                    })?,
+                dependency_generation_id: reservation.dependency_generation_id.clone(),
+                dependency_generation_custody_digest: reservation
+                    .dependency_generation_custody_digest
+                    .clone(),
+                trust_anchor_id: reservation.trust_anchor_id.clone(),
+                diagnostic_artifact_capacity_bytes: diagnostic_capacity,
+            },
+        )?;
+        if capacity.final_closure_capacity_bytes > final_capacity {
+            return Err(projection_integrity(
+                &reservation.reservation_record_id,
+                format!(
+                    "final closure requires {} bytes but exact reservation provides {final_capacity}",
+                    capacity.final_closure_capacity_bytes
+                ),
+            ));
+        }
+        drop(snapshot);
+        Ok(capacity)
+    }
+
     /// Verify that one sealed physical closure corresponds exactly to the
     /// already-committed SQL artifact, local origin, execution binding,
     /// provider occurrence, runtime-record batch, and dependency generation,
@@ -1395,6 +2084,18 @@ impl Store {
             return Err(projection_integrity(
                 reservation_record_id,
                 "reservation reference differs from the arena prelaunch binding",
+            ));
+        }
+        let (diagnostic_capacity, final_capacity) =
+            governed_reservation_capacity_components(&reservation_record)?;
+        let embedded_diagnostic_length =
+            governed_closure_embedded_diagnostic_length(&exact_closure_bytes)?;
+        if final_capacity != inspection.layout.final_capacity()
+            || embedded_diagnostic_length > diagnostic_capacity
+        {
+            return Err(projection_integrity(
+                reservation_record_id,
+                "diagnostic or final closure capacity differs from exact reservation custody",
             ));
         }
         let outer_request_record = exact_runtime_record(
@@ -1989,6 +2690,223 @@ fn checkpoint_has_unique_exact_record(
         && records.iter().any(|record| record == expected)
 }
 
+fn unique_checkpoint_record_by_schema<'a>(
+    reservation_record_id: &Sha256Digest,
+    records: &'a [RuntimeRecordRow],
+    schema: &str,
+    label: &str,
+) -> Result<&'a RuntimeRecordRow, StoreError> {
+    let matches = records
+        .iter()
+        .filter(|record| record.record_schema == schema)
+        .collect::<Vec<_>>();
+    let [record] = matches.as_slice() else {
+        return Err(projection_integrity(
+            reservation_record_id,
+            format!("checkpoint requires exactly one {label}"),
+        ));
+    };
+    Ok(record)
+}
+
+fn verify_capacity_checkpoint_dependency(
+    connection: &rusqlite::Connection,
+    reservation_record_id: &Sha256Digest,
+    checkpoint_id: &str,
+    reservation: &GovernedCustodyReservation,
+) -> Result<(), StoreError> {
+    let access = runtime_checkpoint_dependency_on_connection(connection, checkpoint_id)?
+        .ok_or_else(|| {
+            projection_integrity(
+                reservation_record_id,
+                format!("checkpoint {checkpoint_id} has no dependency binding"),
+            )
+        })?;
+    let RuntimeCheckpointDependencyBinding::Authenticated {
+        dependency_generation_id,
+        trust_anchor_id,
+        canonical_bytes_sha256,
+        ..
+    } = access.binding
+    else {
+        return Err(projection_integrity(
+            reservation_record_id,
+            format!("checkpoint {checkpoint_id} has only a legacy dependency binding"),
+        ));
+    };
+    let Some(RuntimeDependencyGenerationByteState::VerifiedAvailable { canonical_custody }) =
+        access.byte_state
+    else {
+        return Err(projection_integrity(
+            reservation_record_id,
+            format!("checkpoint {checkpoint_id} dependency bytes are unavailable or corrupt"),
+        ));
+    };
+    if dependency_generation_id != reservation.dependency_generation_id
+        || trust_anchor_id != reservation.trust_anchor_id
+        || canonical_bytes_sha256 != reservation.dependency_generation_custody_digest
+        || sha256_bytes(canonical_custody.as_bytes())
+            != reservation.dependency_generation_custody_digest
+    {
+        return Err(projection_integrity(
+            reservation_record_id,
+            format!("checkpoint {checkpoint_id} dependency identity differs from reservation"),
+        ));
+    }
+    Ok(())
+}
+
+fn governed_closure_v2_capacity_bound_from_exact_prelaunch(
+    reservation_reference: GovernedClosureRecordReference,
+    prelaunch: GovernedClosurePrelaunchInput,
+    execution_launch_record_id: Sha256Digest,
+    dependency_generation_id: &Sha256Digest,
+    dependency_generation_custody_digest: &Sha256Digest,
+    trust_anchor_id: &Sha256Digest,
+    maximum_diagnostic_canonical_bytes: u64,
+) -> Result<u64, StoreError> {
+    let digest = sha256_bytes(b"governed V2 fixed-width capacity placeholder");
+    let other_digest = sha256_bytes(b"governed V2 distinct evaluator artifact placeholder");
+    // A quote has the largest JSON expansion among non-control one-byte
+    // characters admitted by the bounded identity law.
+    let maximum_text = "\"".repeat(MAX_GOVERNED_CLOSURE_TEXT_BYTES);
+    let provider_intake = GovernedClosureRecordReference {
+        schema: "nq.provider_intake.v1".into(),
+        record_id: digest.clone(),
+        bytes_digest: digest.clone(),
+    };
+    let execution_binding = GovernedClosureRecordReference {
+        schema: "nq.execution_identity_binding.v2".into(),
+        record_id: digest.clone(),
+        bytes_digest: digest.clone(),
+    };
+    let document = GovernedExecutionCustodyClosureV2Document {
+        schema: GOVERNED_CUSTODY_CLOSURE_V2_SCHEMA,
+        closure_id: digest.clone(),
+        reservation: reservation_reference,
+        prelaunch,
+        acquisition: GovernedClosureAcquisitionInput {
+            execution_launch_record_id,
+            provider_intake: provider_intake.clone(),
+            intake_id: maximum_text.clone(),
+            raw_provider_bytes_digest: digest.clone(),
+        },
+        derivation: GovernedClosureDerivationInput {
+            derivation_id: digest.clone(),
+            dependency_generation_id: dependency_generation_id.clone(),
+            dependency_generation_custody_digest: dependency_generation_custody_digest.clone(),
+            trust_anchor_id: trust_anchor_id.clone(),
+            evaluation_id: Some(maximum_text.clone()),
+            profile_semantic_id: digest.clone(),
+            evaluator_semantic_digest: digest.clone(),
+            evaluator_artifact_digest: other_digest,
+            derived_at: maximum_text.clone(),
+            clock_identity: digest.clone(),
+            clock_qualification_digest: digest.clone(),
+        },
+        diagnostic: Value::Null,
+        local_origin: GovernedClosureLocalOriginInput {
+            run_id: maximum_text.clone(),
+            evaluation_id: Some(maximum_text.clone()),
+            completed_at: maximum_text,
+        },
+        execution_binding: execution_binding.clone(),
+        runtime_records: vec![provider_intake, execution_binding],
+        dependency_generation: GovernedClosureDependencyGenerationInput {
+            checkpoint_id: digest.clone(),
+            checkpoint_digest: digest.clone(),
+            generation_id: dependency_generation_id.clone(),
+            trust_anchor_id: trust_anchor_id.clone(),
+            custody_bytes_digest: dependency_generation_custody_digest.clone(),
+        },
+    };
+    let template = canonical_json_bytes(&document).map_err(|error| {
+        StoreError::Invariant(format!(
+            "governed V2 capacity template cannot be encoded: {error}"
+        ))
+    })?;
+    let template_length = u64::try_from(template.len())
+        .map_err(|_| StoreError::Invariant("governed V2 template length overflowed".into()))?;
+    template_length
+        .checked_sub(u64::try_from(b"null".len()).expect("fixed null length"))
+        .and_then(|length| length.checked_add(maximum_diagnostic_canonical_bytes))
+        .ok_or_else(|| StoreError::Invariant("governed V2 capacity bound overflowed".into()))
+}
+
+fn governed_closure_embedded_diagnostic_length(
+    exact_closure_bytes: &[u8],
+) -> Result<u64, StoreError> {
+    let closure: Value = serde_json::from_slice(exact_closure_bytes).map_err(|error| {
+        StoreError::Invariant(format!(
+            "governed closure cannot be decoded for diagnostic capacity: {error}"
+        ))
+    })?;
+    let diagnostic = closure.get("diagnostic").ok_or_else(|| {
+        StoreError::Invariant(
+            "governed closure has no diagnostic for component-capacity verification".into(),
+        )
+    })?;
+    let exact_diagnostic = canonical_json_bytes(diagnostic).map_err(|error| {
+        StoreError::Invariant(format!(
+            "governed closure diagnostic cannot be canonically sized: {error}"
+        ))
+    })?;
+    u64::try_from(exact_diagnostic.len())
+        .map_err(|_| StoreError::Invariant("governed diagnostic length overflowed".into()))
+}
+
+fn governed_reservation_capacity_components(
+    reservation_record: &RuntimeRecordRow,
+) -> Result<(u64, u64), StoreError> {
+    let value: Value = serde_json::from_slice(reservation_record.canonical_bytes.as_bytes())
+        .map_err(|error| {
+            StoreError::Integrity(format!(
+                "custody reservation {} cannot be decoded: {error}",
+                reservation_record.record_id
+            ))
+        })?;
+    let components = value
+        .get("component_bounds")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            StoreError::Integrity(format!(
+                "custody reservation {} has no component bounds",
+                reservation_record.record_id
+            ))
+        })?;
+    let component = |name: &str| {
+        components.get(name).and_then(Value::as_u64).ok_or_else(|| {
+            StoreError::Integrity(format!(
+                "custody reservation {} has no exact {name} component",
+                reservation_record.record_id
+            ))
+        })
+    };
+    let diagnostic = component("diagnostic_artifact_bytes")?;
+    let raw = component("raw_evidence_bytes")?;
+    let dependency = component("dependency_closure_bytes")?;
+    let reserved = value
+        .get("reserved_bytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            StoreError::Integrity(format!(
+                "custody reservation {} has no exact reserved_bytes",
+                reservation_record.record_id
+            ))
+        })?;
+    let final_capacity = reserved
+        .checked_sub(raw)
+        .and_then(|remaining| remaining.checked_sub(dependency))
+        .filter(|capacity| *capacity > 0)
+        .ok_or_else(|| {
+            StoreError::Integrity(format!(
+                "custody reservation {} cannot derive a positive final partition",
+                reservation_record.record_id
+            ))
+        })?;
+    Ok((diagnostic, final_capacity))
+}
+
 #[allow(clippy::too_many_lines)] // The native deadline/launch join is intentionally explicit.
 fn verify_native_launch_checkpoint(
     reservation_record_id: &Sha256Digest,
@@ -2250,7 +3168,7 @@ fn custody_error(error: impl std::fmt::Display) -> StoreError {
 #[cfg(test)]
 mod tests {
     use nq_protocol::{canonical_json_bytes, semantic_digest, sha256_bytes};
-    use serde_json::{Map, Value};
+    use serde_json::{Map, Value, json};
     use tempfile::tempdir;
 
     use super::*;
@@ -2274,9 +3192,425 @@ mod tests {
             prelaunch_checkpoint_digest: digest("prelaunch-checkpoint-bytes"),
             dependency_closure_capacity_bytes: 4_096,
             raw_capacity_bytes: 4_096,
+            diagnostic_artifact_capacity_bytes: 4_096,
             final_capacity_bytes: 4_096,
             protected_failure_capacity_bytes: 4_096,
         }
+    }
+
+    fn governed_reference(label: &str, schema: &str) -> GovernedClosureRecordReference {
+        GovernedClosureRecordReference {
+            schema: schema.to_owned(),
+            record_id: digest(&format!("{label}-record")),
+            bytes_digest: digest(&format!("{label}-bytes")),
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn governed_v2_builder_fixture(
+        label: &str,
+        use_maximum_text: bool,
+    ) -> (
+        GovernedCustodyReservation,
+        GovernedExecutionCustodyClosureV2Input,
+        Vec<u8>,
+    ) {
+        let dependency_bytes = format!("exact dependency closure {label}").into_bytes();
+        let mut reservation = reservation(&dependency_bytes);
+        reservation.reservation_record_id = digest(&format!("{label}-reservation"));
+        reservation.reservation_manifest_digest = digest(&format!("{label}-reservation-manifest"));
+        reservation.outer_request_record_id = digest(&format!("{label}-outer-request"));
+        reservation.outer_request_digest = digest(&format!("{label}-outer-request-bytes"));
+        reservation.dependency_generation_id = digest(&format!("{label}-dependency-generation"));
+        reservation.dependency_generation_custody_digest = sha256_bytes(&dependency_bytes);
+        reservation.trust_anchor_id = digest(&format!("{label}-trust-anchor"));
+        reservation.prelaunch_checkpoint_id = digest(&format!("{label}-reservation-checkpoint"));
+        reservation.prelaunch_checkpoint_digest =
+            digest(&format!("{label}-reservation-checkpoint-bytes"));
+
+        let reservation_reference = GovernedClosureRecordReference {
+            schema: "nq.custody_reservation.v1".into(),
+            record_id: reservation.reservation_record_id.clone(),
+            bytes_digest: reservation.reservation_manifest_digest.clone(),
+        };
+        let outer_request = GovernedClosureRecordReference {
+            schema: "nq.diagnostic_invocation_request.v1".into(),
+            record_id: reservation.outer_request_record_id.clone(),
+            bytes_digest: reservation.outer_request_digest.clone(),
+        };
+        let invocation_decision =
+            governed_reference(&format!("{label}-decision"), "nq.invocation_decision.v1");
+        let execution_launch =
+            governed_reference(&format!("{label}-launch"), "nq.execution_launch.v1");
+        let provider_intake =
+            governed_reference(&format!("{label}-provider"), "nq.provider_intake.v1");
+        let execution_binding = governed_reference(
+            &format!("{label}-binding"),
+            "nq.execution_identity_binding.v2",
+        );
+        let text = if use_maximum_text {
+            "\"".repeat(MAX_GOVERNED_CLOSURE_TEXT_BYTES)
+        } else {
+            format!("{label}-bounded")
+        };
+        let diagnostic = CanonicalDocument::from_serializable(&json!({
+            "schema": "nq.diagnostic_execution.v2",
+            "fixture": label,
+            "padding": "diagnostic-payload",
+        }))
+        .expect("canonical diagnostic");
+        let diagnostic_artifact_capacity_bytes =
+            u64::try_from(diagnostic.as_bytes().len()).expect("bounded canonical diagnostic");
+        let input = GovernedExecutionCustodyClosureV2Input {
+            reservation: reservation_reference.clone(),
+            prelaunch: GovernedClosurePrelaunchInput {
+                outer_request: outer_request.clone(),
+                invocation_decision: invocation_decision.clone(),
+                reservation_checkpoint: GovernedClosureCheckpointInput {
+                    checkpoint_id: reservation.prelaunch_checkpoint_id.clone(),
+                    batch_digest: reservation.prelaunch_checkpoint_digest.clone(),
+                    runtime_records: vec![
+                        outer_request,
+                        invocation_decision,
+                        reservation_reference,
+                    ],
+                },
+                launch_checkpoint: GovernedClosureCheckpointInput {
+                    checkpoint_id: digest(&format!("{label}-launch-checkpoint")),
+                    batch_digest: digest(&format!("{label}-launch-checkpoint-bytes")),
+                    runtime_records: vec![execution_launch.clone()],
+                },
+            },
+            acquisition: GovernedClosureAcquisitionInput {
+                execution_launch_record_id: execution_launch.record_id,
+                provider_intake: provider_intake.clone(),
+                intake_id: text.clone(),
+                raw_provider_bytes_digest: digest(&format!("{label}-raw-provider")),
+            },
+            derivation: GovernedClosureDerivationInput {
+                derivation_id: digest(&format!("{label}-derivation")),
+                dependency_generation_id: reservation.dependency_generation_id.clone(),
+                dependency_generation_custody_digest: reservation
+                    .dependency_generation_custody_digest
+                    .clone(),
+                trust_anchor_id: reservation.trust_anchor_id.clone(),
+                evaluation_id: Some(text.clone()),
+                profile_semantic_id: digest(&format!("{label}-profile-semantic")),
+                evaluator_semantic_digest: digest(&format!("{label}-evaluator-semantic")),
+                evaluator_artifact_digest: digest(&format!("{label}-evaluator-artifact")),
+                derived_at: text.clone(),
+                clock_identity: digest(&format!("{label}-clock")),
+                clock_qualification_digest: digest(&format!("{label}-clock-qualification")),
+            },
+            diagnostic,
+            diagnostic_artifact_capacity_bytes,
+            local_origin: GovernedClosureLocalOriginInput {
+                run_id: text.clone(),
+                evaluation_id: Some(text.clone()),
+                completed_at: text,
+            },
+            execution_binding: execution_binding.clone(),
+            runtime_records: vec![provider_intake, execution_binding],
+            dependency_generation: GovernedClosureDependencyGenerationInput {
+                checkpoint_id: digest(&format!("{label}-final-checkpoint")),
+                checkpoint_digest: digest(&format!("{label}-final-checkpoint-bytes")),
+                generation_id: reservation.dependency_generation_id.clone(),
+                trust_anchor_id: reservation.trust_anchor_id.clone(),
+                custody_bytes_digest: reservation.dependency_generation_custody_digest.clone(),
+            },
+        };
+        (reservation, input, dependency_bytes)
+    }
+
+    #[test]
+    fn governed_v2_builder_derives_one_canonical_self_identity() {
+        let (_, input, _) = governed_v2_builder_fixture("builder", false);
+        let built =
+            GovernedExecutionCustodyClosureV2::build(input.clone()).expect("typed V2 closure");
+        let replay = GovernedExecutionCustodyClosureV2::build(input).expect("deterministic replay");
+        assert_eq!(built, replay);
+        assert_eq!(
+            built.canonical_bytes().digest(),
+            sha256_bytes(built.canonical_bytes().as_bytes()).as_str()
+        );
+
+        let value: Value =
+            serde_json::from_slice(built.canonical_bytes().as_bytes()).expect("closure JSON");
+        assert_eq!(value["schema"], GOVERNED_CUSTODY_CLOSURE_V2_SCHEMA);
+        assert!(value["derivation"].get("clock_uncertainty_ms").is_none());
+        assert!(
+            value["derivation"]
+                .get("evaluator_semantic_digest")
+                .is_some()
+        );
+        assert!(
+            value["derivation"]
+                .get("evaluator_artifact_digest")
+                .is_some()
+        );
+        let mut preimage = value.as_object().expect("closure object").clone();
+        preimage.remove("closure_id");
+        assert_eq!(
+            semantic_digest(&preimage).expect("closure self identity"),
+            *built.closure_id()
+        );
+        assert_eq!(
+            value["closure_id"],
+            Value::String(built.closure_id().to_string())
+        );
+    }
+
+    #[test]
+    fn governed_v2_builder_rejects_storage_shape_and_join_substitution() {
+        let (_, original, _) = governed_v2_builder_fixture("hostile-builder", false);
+
+        let mut equal_evaluator_digests = original.clone();
+        equal_evaluator_digests.derivation.evaluator_artifact_digest = equal_evaluator_digests
+            .derivation
+            .evaluator_semantic_digest
+            .clone();
+        GovernedExecutionCustodyClosureV2::build(equal_evaluator_digests)
+            .expect("structural separation does not require unequal values");
+
+        let mut unicode_boundary = original.clone();
+        unicode_boundary.local_origin.run_id = "é".repeat(MAX_GOVERNED_CLOSURE_TEXT_BYTES / 2);
+        GovernedExecutionCustodyClosureV2::build(unicode_boundary)
+            .expect("maximum non-control UTF-8 identity remains admissible");
+
+        let mut oversized_text = original.clone();
+        oversized_text.local_origin.run_id = "x".repeat(MAX_GOVERNED_CLOSURE_TEXT_BYTES + 1);
+        assert!(matches!(
+            GovernedExecutionCustodyClosureV2::build(oversized_text),
+            Err(StoreError::Invariant(message)) if message.contains("1..=256")
+        ));
+
+        let mut duplicate_reservation_schema = original.clone();
+        duplicate_reservation_schema
+            .prelaunch
+            .reservation_checkpoint
+            .runtime_records
+            .push(governed_reference(
+                "duplicate-reservation",
+                "nq.custody_reservation.v1",
+            ));
+        assert!(matches!(
+            GovernedExecutionCustodyClosureV2::build(duplicate_reservation_schema),
+            Err(StoreError::Invariant(message)) if message.contains("omits or duplicates")
+        ));
+
+        let mut extraneous_launch = original.clone();
+        extraneous_launch
+            .prelaunch
+            .launch_checkpoint
+            .runtime_records
+            .push(governed_reference(
+                "extraneous-launch-member",
+                "nq.host_role_lifecycle_event.v1",
+            ));
+        assert!(matches!(
+            GovernedExecutionCustodyClosureV2::build(extraneous_launch),
+            Err(StoreError::Invariant(message)) if message.contains("deadline-plus-launch")
+        ));
+
+        let mut extra_terminal = original.clone();
+        extra_terminal.runtime_records.push(governed_reference(
+            "extra-terminal",
+            "nq.host_role_lifecycle_event.v1",
+        ));
+        assert!(matches!(
+            GovernedExecutionCustodyClosureV2::build(extra_terminal),
+            Err(StoreError::Invariant(message)) if message.contains("terminal write set")
+        ));
+
+        let mut dependency_substitution = original.clone();
+        dependency_substitution.dependency_generation.generation_id =
+            digest("substituted-generation");
+        assert!(matches!(
+            GovernedExecutionCustodyClosureV2::build(dependency_substitution),
+            Err(StoreError::Invariant(message)) if message.contains("do not join")
+        ));
+
+        let mut evaluation_substitution = original.clone();
+        evaluation_substitution.local_origin.evaluation_id =
+            Some("different-evaluation".to_owned());
+        assert!(matches!(
+            GovernedExecutionCustodyClosureV2::build(evaluation_substitution),
+            Err(StoreError::Invariant(message)) if message.contains("do not join")
+        ));
+
+        let mut wrong_contract = original;
+        wrong_contract.diagnostic = CanonicalDocument::from_serializable(&json!({
+            "schema": "nq.diagnostic_execution.v1",
+        }))
+        .expect("wrong canonical contract");
+        assert!(matches!(
+            GovernedExecutionCustodyClosureV2::build(wrong_contract),
+            Err(StoreError::Invariant(message)) if message.contains("diagnostic_execution.v2")
+        ));
+
+        let (_, mut undersized_diagnostic, _) =
+            governed_v2_builder_fixture("undersized-diagnostic", false);
+        undersized_diagnostic.diagnostic_artifact_capacity_bytes =
+            u64::try_from(undersized_diagnostic.diagnostic.as_bytes().len())
+                .expect("diagnostic length")
+                - 1;
+        assert!(matches!(
+            GovernedExecutionCustodyClosureV2::build(undersized_diagnostic),
+            Err(StoreError::Invariant(message)) if message.contains("component bound")
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn governed_v2_capacity_bound_is_exact_and_bound_minus_one_refuses() {
+        let (mut reservation, input, dependency_bytes) =
+            governed_v2_builder_fixture("capacity", true);
+        let maximum_diagnostic_canonical_bytes =
+            u64::try_from(input.diagnostic.as_bytes().len()).expect("diagnostic length");
+        reservation.diagnostic_artifact_capacity_bytes = maximum_diagnostic_canonical_bytes;
+        let capacity = governed_execution_custody_closure_v2_capacity_bound(
+            &GovernedExecutionCustodyClosureV2CapacityInput {
+                reservation: input.reservation.clone(),
+                prelaunch: input.prelaunch.clone(),
+                execution_launch_record_id: input.acquisition.execution_launch_record_id.clone(),
+                dependency_generation_id: reservation.dependency_generation_id.clone(),
+                dependency_generation_custody_digest: reservation
+                    .dependency_generation_custody_digest
+                    .clone(),
+                trust_anchor_id: reservation.trust_anchor_id.clone(),
+                diagnostic_artifact_capacity_bytes: maximum_diagnostic_canonical_bytes,
+            },
+        )
+        .expect("capacity bound");
+        assert_eq!(
+            capacity.diagnostic_artifact_capacity_bytes,
+            maximum_diagnostic_canonical_bytes
+        );
+        let bound = capacity.final_closure_capacity_bytes;
+        let closure =
+            GovernedExecutionCustodyClosureV2::build(input.clone()).expect("maximal closure");
+        assert_eq!(
+            u64::try_from(closure.canonical_bytes().as_bytes().len()).expect("closure length"),
+            bound
+        );
+
+        reservation.final_capacity_bytes = bound;
+        let directory = tempdir().expect("exact-capacity directory");
+        let database = directory.path().join("nq.db");
+        create_database_placeholder(&database);
+        let mut exact =
+            GovernedCustody::reserve(&database, reservation.clone(), dependency_bytes.as_slice())
+                .expect("exact-capacity reservation");
+        exact
+            .claim_launch(
+                input.acquisition.execution_launch_record_id.clone(),
+                "2026-07-29T22:29:00Z".into(),
+            )
+            .expect("claim exact launch");
+        exact
+            .seal_acquisition(GovernedAcquisitionCustodyInput {
+                execution_launch_record_id: input.acquisition.execution_launch_record_id.clone(),
+                provider_intake_record_id: input.acquisition.provider_intake.record_id.clone(),
+                exact_provider_intake_bytes: b"provider".to_vec(),
+                exact_raw_provider_bytes: b"raw".to_vec(),
+            })
+            .expect("seal exact acquisition");
+        exact
+            .claim_derivation(GovernedDerivationCustodyClaim {
+                derivation_id: input.derivation.derivation_id.clone(),
+                dependency_generation_id: input.derivation.dependency_generation_id.clone(),
+                dependency_generation_custody_digest: input
+                    .derivation
+                    .dependency_generation_custody_digest
+                    .clone(),
+                trust_anchor_id: input.derivation.trust_anchor_id.clone(),
+                // The physical capacity test does not assert the later
+                // semantic projection join; keep the arena header compact.
+                evaluation_id: Some("capacity-evaluation".into()),
+                profile_semantic_id: input.derivation.profile_semantic_id.clone(),
+                evaluator_identity_digest: input.derivation.evaluator_semantic_digest.clone(),
+                evaluator_artifact_digest: input.derivation.evaluator_artifact_digest.clone(),
+                derived_at: "2026-07-29T22:30:00Z".into(),
+                clock_identity: input.derivation.clock_identity.clone(),
+                clock_qualification_digest: input.derivation.clock_qualification_digest.clone(),
+            })
+            .expect("claim exact derivation");
+        let commitment = exact
+            .seal_final_closure(closure.canonical_bytes().as_bytes().to_vec())
+            .expect("exact bound accepts closure");
+        assert_eq!(commitment.byte_length, bound);
+
+        let mut short_reservation = reservation.clone();
+        let short_input = input;
+        let short_dependency_bytes = dependency_bytes;
+        let short_closure = closure;
+        assert_eq!(
+            u64::try_from(short_closure.canonical_bytes().as_bytes().len())
+                .expect("short closure length"),
+            bound
+        );
+        short_reservation.final_capacity_bytes = bound - 1;
+        let short_database = directory.path().join("nq-short.db");
+        create_database_placeholder(&short_database);
+        let mut short = GovernedCustody::reserve(
+            &short_database,
+            short_reservation.clone(),
+            short_dependency_bytes.as_slice(),
+        )
+        .expect("short reservation");
+        short
+            .claim_launch(
+                short_input.acquisition.execution_launch_record_id.clone(),
+                "2026-07-29T22:29:00Z".into(),
+            )
+            .expect("claim short launch");
+        short
+            .seal_acquisition(GovernedAcquisitionCustodyInput {
+                execution_launch_record_id: short_input
+                    .acquisition
+                    .execution_launch_record_id
+                    .clone(),
+                provider_intake_record_id: short_input
+                    .acquisition
+                    .provider_intake
+                    .record_id
+                    .clone(),
+                exact_provider_intake_bytes: b"provider".to_vec(),
+                exact_raw_provider_bytes: b"raw".to_vec(),
+            })
+            .expect("seal short acquisition");
+        short
+            .claim_derivation(GovernedDerivationCustodyClaim {
+                derivation_id: short_input.derivation.derivation_id.clone(),
+                dependency_generation_id: short_input.derivation.dependency_generation_id.clone(),
+                dependency_generation_custody_digest: short_input
+                    .derivation
+                    .dependency_generation_custody_digest
+                    .clone(),
+                trust_anchor_id: short_input.derivation.trust_anchor_id.clone(),
+                evaluation_id: Some("capacity-evaluation".into()),
+                profile_semantic_id: short_input.derivation.profile_semantic_id.clone(),
+                evaluator_identity_digest: short_input.derivation.evaluator_semantic_digest.clone(),
+                evaluator_artifact_digest: short_input.derivation.evaluator_artifact_digest.clone(),
+                derived_at: "2026-07-29T22:30:00Z".into(),
+                clock_identity: short_input.derivation.clock_identity.clone(),
+                clock_qualification_digest: short_input
+                    .derivation
+                    .clock_qualification_digest
+                    .clone(),
+            })
+            .expect("claim short derivation");
+        assert!(matches!(
+            short.seal_final_closure(short_closure.canonical_bytes().as_bytes().to_vec()),
+            Err(StoreError::Invariant(message)) if message.contains("capacity is")
+        ));
+        drop(short);
+        let short =
+            GovernedCustody::open(&short_database, short_reservation).expect("reopen short arena");
+        assert_eq!(
+            short.state().expect("short state"),
+            GovernedCustodyState::DerivationClaimed
+        );
     }
 
     fn create_database_placeholder(path: &Path) {

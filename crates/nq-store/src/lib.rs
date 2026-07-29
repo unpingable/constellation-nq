@@ -22,10 +22,15 @@ mod governed_custody;
 
 pub use governed_custody::{
     CustodiedAcquisition, GOVERNED_CUSTODY_CLOSURE_SCHEMA, GOVERNED_CUSTODY_CLOSURE_V2_SCHEMA,
-    GOVERNED_PROTECTED_TERMINAL_SCHEMA, GovernedAcquisitionCustodyInput, GovernedCustody,
-    GovernedCustodyCommitment, GovernedCustodyInspection, GovernedCustodyInventoryEntry,
-    GovernedCustodyRecoveryClass, GovernedCustodyReservation,
+    GOVERNED_PROTECTED_TERMINAL_SCHEMA, GovernedAcquisitionCustodyInput,
+    GovernedClosureAcquisitionInput, GovernedClosureCheckpointInput,
+    GovernedClosureDependencyGenerationInput, GovernedClosureDerivationInput,
+    GovernedClosureLocalOriginInput, GovernedClosurePrelaunchInput, GovernedClosureRecordReference,
+    GovernedCustody, GovernedCustodyCommitment, GovernedCustodyInspection,
+    GovernedCustodyInventoryEntry, GovernedCustodyRecoveryClass, GovernedCustodyReservation,
     GovernedCustodyReservationLedgerBinding, GovernedCustodyState, GovernedDerivationCustodyClaim,
+    GovernedExecutionCustodyClosureV2, GovernedExecutionCustodyClosureV2Capacity,
+    GovernedExecutionCustodyClosureV2CapacityInput, GovernedExecutionCustodyClosureV2Input,
     GovernedProjectionVerification, GovernedProjectionVerificationDisposition,
     GovernedProtectedFailure, GovernedProtectedFailureAccess, GovernedProtectedTerminal,
     GovernedProtectedTerminalClass, GovernedProtectedTerminalDeadlineCompliance,
@@ -33,6 +38,7 @@ pub use governed_custody::{
     GovernedProtectedTerminalInput, GovernedProtectedTerminalReason,
     GovernedProtectedTerminalRequest, GovernedProtectedTerminalReservation,
     GovernedProtectedTerminalization, governed_acquisition_capacity_bound,
+    governed_execution_custody_closure_v2_capacity_bound,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -563,9 +569,11 @@ pub struct DiagnosticArtifactExecutionBinding {
 /// Exact local origin for a diagnostic artifact committed atomically with one
 /// collection.
 ///
-/// An admitted/evaluated artifact names its exact evaluation. A run-bearing
-/// non-success artifact has no evaluation and retains `None`; the absence is
-/// semantic and must never be filled from a later evaluation.
+/// An admitted detector artifact names its exact evaluation. An admitted
+/// run-level production V2 artifact and a run-bearing non-success artifact have
+/// no evaluation and retain `None`; the absence is semantic and must never be
+/// filled from a later evaluation. The run-level admitted form additionally
+/// requires its exact production execution binding.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DiagnosticArtifactLocalOriginInput {
     pub run_id: String,
@@ -3606,6 +3614,60 @@ impl Store {
             &CollectionReceipt,
         ) -> Result<AdmittedCollectionCompletion<T>, E>,
     {
+        self.commit_admitted_collection_inner(
+            collection,
+            build,
+            AdmittedDiagnosticOriginMode::DetectorEvaluation,
+        )
+    }
+
+    /// Atomically append an admitted run and one run-level production V2
+    /// diagnostic without fabricating a detector evaluation.
+    ///
+    /// The completion type has no evaluation field. Its mandatory artifact
+    /// must carry `evaluation_id = None` and one exact production execution
+    /// binding committed in the same transaction. Existing detector-oriented
+    /// callers remain governed by [`Self::commit_admitted_collection`].
+    pub fn commit_admitted_run_level_diagnostic<T, E, F>(
+        &mut self,
+        collection: &CollectionInput,
+        build: F,
+    ) -> Result<ProviderIntakeCommit<T>, E>
+    where
+        E: From<StoreError>,
+        F: FnOnce(
+            &AdmittedCollectionView<'_, '_>,
+            &CollectionReceipt,
+        ) -> Result<AdmittedRunLevelDiagnosticCompletion<T>, E>,
+    {
+        self.commit_admitted_collection_inner(
+            collection,
+            |view, receipt| {
+                let completion = build(view, receipt)?;
+                Ok(AdmittedCollectionCompletion {
+                    value: completion.value,
+                    evaluations: Vec::new(),
+                    diagnostic_artifact: Some(completion.diagnostic_artifact),
+                    status: completion.status,
+                })
+            },
+            AdmittedDiagnosticOriginMode::RunLevelProduction,
+        )
+    }
+
+    fn commit_admitted_collection_inner<T, E, F>(
+        &mut self,
+        collection: &CollectionInput,
+        build: F,
+        diagnostic_origin_mode: AdmittedDiagnosticOriginMode,
+    ) -> Result<ProviderIntakeCommit<T>, E>
+    where
+        E: From<StoreError>,
+        F: FnOnce(
+            &AdmittedCollectionView<'_, '_>,
+            &CollectionReceipt,
+        ) -> Result<AdmittedCollectionCompletion<T>, E>,
+    {
         validate_collection(collection).map_err(E::from)?;
         if !is_admitted_collection(collection) {
             return Err(E::from(StoreError::Invariant(
@@ -3621,6 +3683,10 @@ impl Store {
         {
             let receipt = collection_receipt_for_run(&transaction, &acknowledgment.run_id)
                 .map_err(E::from)?;
+            if diagnostic_origin_mode == AdmittedDiagnosticOriginMode::RunLevelProduction {
+                validate_admitted_run_level_diagnostic_replay(&transaction, &acknowledgment.run_id)
+                    .map_err(E::from)?;
+            }
             return Ok(ProviderIntakeCommit::Replayed {
                 receipt,
                 acknowledgment,
@@ -3645,8 +3711,18 @@ impl Store {
                 .map_err(E::from)?;
         }
         if let Some(artifact) = &completion.diagnostic_artifact {
-            insert_local_diagnostic_artifact(&transaction, collection, &completion, artifact)
-                .map_err(E::from)?;
+            insert_local_diagnostic_artifact(
+                &transaction,
+                collection,
+                &completion,
+                artifact,
+                diagnostic_origin_mode,
+            )
+            .map_err(E::from)?;
+        } else if diagnostic_origin_mode == AdmittedDiagnosticOriginMode::RunLevelProduction {
+            return Err(E::from(StoreError::Invariant(
+                "run-level admitted diagnostic completion requires one exact artifact".into(),
+            )));
         }
         insert_status_event(
             &transaction,
@@ -4380,6 +4456,24 @@ pub struct AdmittedCollectionCompletion<T> {
     pub evaluations: Vec<EvaluationCommitInput>,
     pub diagnostic_artifact: Option<DiagnosticArtifactCommitInput>,
     pub status: StatusEventInput,
+}
+
+/// A run-level admitted diagnostic completion with no detector evaluations.
+///
+/// The mandatory artifact must identify the admitted run directly and carry
+/// an exact production execution binding. This type cannot be used to smuggle
+/// detector results around the legacy evaluation laws.
+#[derive(Clone, Debug)]
+pub struct AdmittedRunLevelDiagnosticCompletion<T> {
+    pub value: T,
+    pub diagnostic_artifact: DiagnosticArtifactCommitInput,
+    pub status: StatusEventInput,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AdmittedDiagnosticOriginMode {
+    DetectorEvaluation,
+    RunLevelProduction,
 }
 
 /// Required profile identity for every detector evaluation, independent of
@@ -8829,41 +8923,160 @@ fn insert_local_diagnostic_artifact<T>(
     collection: &CollectionInput,
     completion: &AdmittedCollectionCompletion<T>,
     artifact: &DiagnosticArtifactCommitInput,
+    origin_mode: AdmittedDiagnosticOriginMode,
 ) -> Result<(), StoreError> {
     if artifact.local_origin.run_id != collection.run.run_id {
         return Err(StoreError::Invariant(
             "local diagnostic artifact run differs from its admitted collection".into(),
         ));
     }
-    validate_local_diagnostic_artifact_provenance(artifact, &collection.run)?;
-    let evaluation_id = artifact
-        .local_origin
-        .evaluation_id
-        .as_deref()
-        .ok_or_else(|| {
-            StoreError::Invariant(
-                "admitted diagnostic artifact requires an exact evaluation origin".into(),
-            )
-        })?;
-    let matching_evaluations = completion
-        .evaluations
-        .iter()
-        .filter(|input| input.evaluation.evaluation_id == evaluation_id)
-        .collect::<Vec<_>>();
-    let [evaluation] = matching_evaluations.as_slice() else {
-        return Err(StoreError::Invariant(
-            "local diagnostic artifact requires exactly one evaluation in the same completion"
-                .into(),
-        ));
-    };
-    if evaluation.evaluation.trigger_run_id.as_deref()
-        != Some(artifact.local_origin.run_id.as_str())
+    if matches!(
+        origin_mode,
+        AdmittedDiagnosticOriginMode::RunLevelProduction
+    ) && artifact.local_origin.execution_binding.is_none()
     {
         return Err(StoreError::Invariant(
-            "local diagnostic artifact evaluation is not triggered by its bound run".into(),
+            "admitted run-level diagnostic requires an exact production binding".into(),
         ));
     }
+    validate_local_diagnostic_artifact_provenance(artifact, &collection.run)?;
+    match origin_mode {
+        AdmittedDiagnosticOriginMode::DetectorEvaluation => {
+            let evaluation_id =
+                artifact
+                    .local_origin
+                    .evaluation_id
+                    .as_deref()
+                    .ok_or_else(|| {
+                        StoreError::Invariant(
+                            "admitted detector diagnostic requires an exact evaluation origin"
+                                .into(),
+                        )
+                    })?;
+            let matching_evaluations = completion
+                .evaluations
+                .iter()
+                .filter(|input| input.evaluation.evaluation_id == evaluation_id)
+                .collect::<Vec<_>>();
+            let [evaluation] = matching_evaluations.as_slice() else {
+                return Err(StoreError::Invariant(
+                    "local diagnostic artifact requires exactly one evaluation in the same completion"
+                        .into(),
+                ));
+            };
+            if evaluation.evaluation.trigger_run_id.as_deref()
+                != Some(artifact.local_origin.run_id.as_str())
+            {
+                return Err(StoreError::Invariant(
+                    "local diagnostic artifact evaluation is not triggered by its bound run".into(),
+                ));
+            }
+        }
+        AdmittedDiagnosticOriginMode::RunLevelProduction => {
+            let binding = artifact
+                .local_origin
+                .execution_binding
+                .as_ref()
+                .ok_or_else(|| {
+                    StoreError::Invariant(
+                        "admitted run-level diagnostic requires an exact production binding".into(),
+                    )
+                })?;
+            let current_provider_record_id = provider_intake_record_id(&collection.intake)?;
+            let exact_current_attempts = binding
+                .provider_attempts
+                .iter()
+                .filter(|attempt| {
+                    attempt.intake_id == collection.intake.intake_id
+                        && attempt.provider_attempt_record_id == current_provider_record_id.as_str()
+                })
+                .count();
+            if !completion.evaluations.is_empty()
+                || artifact.local_origin.evaluation_id.is_some()
+                || artifact.contract_schema != "nq.diagnostic_execution.v2"
+                || binding.provider_attempts.len() != 1
+                || exact_current_attempts != 1
+            {
+                return Err(StoreError::Invariant(
+                    "admitted run-level diagnostic requires zero evaluations, no evaluation origin, exactly the current provider attempt, exact production binding, and V2 contract"
+                        .into(),
+                ));
+            }
+        }
+    }
     insert_local_diagnostic_artifact_rows(transaction, artifact)
+}
+
+fn validate_admitted_run_level_diagnostic_replay(
+    connection: &Connection,
+    run_id: &str,
+) -> Result<(), StoreError> {
+    validate_diagnostic_artifact_invariants(connection)?;
+    let evaluation_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM evaluation_runs WHERE trigger_run_id = ?1",
+        [run_id],
+        |row| row.get(0),
+    )?;
+    let mut statement = connection.prepare(
+        "SELECT local.artifact_id
+         FROM local_diagnostic_artifact_origins AS local
+         JOIN diagnostic_artifact_commitments AS commitment
+           ON commitment.artifact_id = local.artifact_id
+         WHERE local.run_id = ?1
+           AND local.evaluation_id IS NULL
+           AND commitment.contract_schema = 'nq.diagnostic_execution.v2'
+           AND local.execution_binding_record_id IS NOT NULL
+           AND local.outer_request_record_id IS NOT NULL
+           AND local.invocation_decision_record_id IS NOT NULL
+           AND local.execution_launch_record_id IS NOT NULL
+           AND local.outer_request_id IS NOT NULL",
+    )?;
+    let artifact_ids = statement
+        .query_map([run_id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let [artifact_id] = artifact_ids.as_slice() else {
+        return Err(StoreError::ReplayConflict(format!(
+            "existing admitted run {run_id} is not one exact run-level V2 diagnostic"
+        )));
+    };
+    if evaluation_count != 0 {
+        return Err(StoreError::ReplayConflict(format!(
+            "existing admitted run {run_id} has detector evaluations"
+        )));
+    }
+    let artifact_id = Sha256Digest::parse(artifact_id.clone()).map_err(|error| {
+        StoreError::Integrity(format!(
+            "existing run-level diagnostic has invalid artifact identity: {error}"
+        ))
+    })?;
+    if diagnostic_artifact_execution_binding_on_connection(connection, &artifact_id)?.is_none() {
+        return Err(StoreError::ReplayConflict(format!(
+            "existing admitted run {run_id} has no exact production execution binding"
+        )));
+    }
+    let current_provider_attempts: i64 = connection.query_row(
+        "SELECT COUNT(*)
+         FROM local_diagnostic_artifact_provider_attempt_bindings AS binding
+         JOIN local_watcher_provider_intakes AS local
+           ON local.intake_id = binding.intake_id
+         WHERE binding.artifact_id = ?1
+           AND local.run_id = ?2",
+        params![artifact_id.as_str(), run_id],
+        |row| row.get(0),
+    )?;
+    let all_provider_attempts: i64 = connection.query_row(
+        "SELECT COUNT(*)
+         FROM local_diagnostic_artifact_provider_attempt_bindings
+         WHERE artifact_id = ?1",
+        [artifact_id.as_str()],
+        |row| row.get(0),
+    )?;
+    if current_provider_attempts != 1 || all_provider_attempts != 1 {
+        return Err(StoreError::ReplayConflict(format!(
+            "existing admitted run {run_id} is not bound to exactly its current provider attempt"
+        )));
+    }
+    Ok(())
 }
 
 fn validate_run_only_diagnostic_artifact(
@@ -9322,11 +9535,33 @@ fn validate_local_diagnostic_artifact_origin_modes(
             "local diagnostic artifact {artifact_id} run/evaluation linkage disagrees"
         )));
     }
-    let invalid_run_only_local: Option<String> = connection
-        .query_row(
-            "SELECT local.artifact_id
+    // Schema v7 is the first format that can retain the exact production
+    // binding required by an admitted run-level V2 artifact. During the
+    // qualified v4→v5→v6 migration path this validator must retain the older
+    // rule rather than preparing references to columns that do not yet exist.
+    let admitted_run_level_requirement = if pragma_i64(connection, "user_version")? >= 7 {
+        "AND (
+             NOT EXISTS (
+                 SELECT 1 FROM raw_submissions AS submission
+                 WHERE submission.run_id = local.run_id
+                   AND submission.admission_outcome = 'admitted'
+             )
+          OR commitment.contract_schema <> 'nq.diagnostic_execution.v2'
+          OR local.execution_binding_record_id IS NULL
+          OR local.outer_request_record_id IS NULL
+          OR local.invocation_decision_record_id IS NULL
+          OR local.execution_launch_record_id IS NULL
+          OR local.outer_request_id IS NULL
+         )"
+    } else {
+        ""
+    };
+    let invalid_run_only_query = format!(
+        "SELECT local.artifact_id
              FROM local_diagnostic_artifact_origins AS local
              JOIN watcher_runs AS run ON run.run_id = local.run_id
+             JOIN diagnostic_artifact_commitments AS commitment
+               ON commitment.artifact_id = local.artifact_id
              WHERE local.evaluation_id IS NULL
                AND (
                     EXISTS (
@@ -9340,6 +9575,7 @@ fn validate_local_diagnostic_artifact_origin_modes(
                         WHERE submission.run_id = local.run_id
                           AND submission.admission_outcome = 'rejected'
                     )
+                    {admitted_run_level_requirement}
                  )
                  OR NOT EXISTS (
                         SELECT 1 FROM status_events AS status
@@ -9352,14 +9588,14 @@ fn validate_local_diagnostic_artifact_origin_modes(
                         WHERE acknowledgment.run_id = local.run_id
                     )
                )
-             ORDER BY local.artifact_id LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
+             ORDER BY local.artifact_id LIMIT 1"
+    );
+    let invalid_run_only_local: Option<String> = connection
+        .query_row(&invalid_run_only_query, [], |row| row.get(0))
         .optional()?;
     if let Some(artifact_id) = invalid_run_only_local {
         return Err(StoreError::Integrity(format!(
-            "run-only diagnostic artifact {artifact_id} is not bound to one canonical non-success run"
+            "run-level diagnostic artifact {artifact_id} is not bound to one canonical non-success run or one exact admitted production execution"
         )));
     }
     Ok(())
@@ -13793,6 +14029,7 @@ mod tests {
     #[derive(Clone, Copy)]
     enum GovernedProjectionFixtureMode {
         Complete,
+        InsufficientCommittedCapacity,
         LegacyV1Complete,
         FullTopologyNativeLaunch,
         DuplicateOuterRequestInReservation,
@@ -13822,6 +14059,7 @@ mod tests {
         directory: tempfile::TempDir,
         reservation: GovernedCustodyReservation,
         reservation_record_id: Sha256Digest,
+        launch_checkpoint_id: Sha256Digest,
         diagnostic_artifact_id: Sha256Digest,
         exact_closure_bytes: Vec<u8>,
     }
@@ -13847,6 +14085,216 @@ mod tests {
         })
     }
 
+    fn admitted_run_level_collection(
+        store: &mut Store,
+        suffix: &str,
+        profile_digest: &str,
+    ) -> CollectionInput {
+        let run = bound_fixture_run(store, "fixture-a", suffix, profile_digest);
+        fixture_collection(
+            store,
+            run,
+            Some(SubmissionInput {
+                submission_id: format!("submission-{suffix}"),
+                raw_bytes: format!("admitted-{suffix}\n").into_bytes(),
+                received_at: TIME.to_owned(),
+                protocol_outcome: "valid_report".to_owned(),
+                disposition: SubmissionDisposition::Admitted(report(
+                    "fixture-a",
+                    suffix,
+                    profile_digest,
+                    document(json!({"run_level": suffix})),
+                )),
+            }),
+        )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn admitted_run_level_artifact(
+        store: &mut Store,
+        collection: &CollectionInput,
+        provider_intake: &ProviderIntakeInput,
+        suffix: &str,
+    ) -> DiagnosticArtifactCommitInput {
+        let dependency = runtime_dependency(&format!("run-level-{suffix}"));
+        establish_runtime_root(store, &dependency);
+        let outer_request_id = format!("outer-request-{suffix}");
+        let outer_request = governed_runtime_record(
+            typed_digest(&format!("run-level-outer-request-{suffix}")),
+            "nq.diagnostic_invocation_request.v1",
+            json!({
+                "schema": "nq.diagnostic_invocation_request.v1",
+                "request_id": outer_request_id,
+            }),
+        );
+        let invocation_decision = governed_runtime_record(
+            typed_digest(&format!("run-level-decision-{suffix}")),
+            "nq.invocation_decision.v1",
+            json!({
+                "schema": "nq.invocation_decision.v1",
+                "decision": "accepted",
+            }),
+        );
+        let reservation_batch = RuntimeRecordBatchInput {
+            checkpoint_id: typed_digest(&format!("run-level-reservation-checkpoint-{suffix}"))
+                .into_string(),
+            expected_predecessor_checkpoint_id: None,
+            expected_predecessor_ledger_root: None,
+            dependency: dependency.clone(),
+            records: vec![outer_request.clone(), invocation_decision.clone()],
+        };
+        let reservation_receipt = store
+            .append_runtime_records(&reservation_batch)
+            .expect("run-level reservation records");
+        let execution_launch = governed_runtime_record(
+            typed_digest(&format!("run-level-launch-{suffix}")),
+            "nq.execution_launch.v1",
+            json!({
+                "schema": "nq.execution_launch.v1",
+                "status": "launched",
+                "outer_request": governed_record_reference(&outer_request),
+                "invocation_decision": governed_record_reference(&invocation_decision),
+            }),
+        );
+        let launch_batch = RuntimeRecordBatchInput {
+            checkpoint_id: typed_digest(&format!("run-level-launch-checkpoint-{suffix}"))
+                .into_string(),
+            expected_predecessor_checkpoint_id: Some(
+                reservation_receipt.checkpoint.checkpoint_id.clone(),
+            ),
+            expected_predecessor_ledger_root: Some(
+                reservation_receipt
+                    .checkpoint
+                    .checkpoint_ledger_root
+                    .clone(),
+            ),
+            dependency: dependency.clone(),
+            records: vec![execution_launch.clone()],
+        };
+        let launch_receipt = store
+            .append_runtime_records(&launch_batch)
+            .expect("run-level launch record");
+        let provider_record_id =
+            provider_intake_record_id(provider_intake).expect("provider record identity");
+        let provider_record = governed_runtime_record(
+            provider_record_id,
+            "nq.provider_intake.v1",
+            json!({
+                "schema": "nq.provider_intake.v1",
+                "intake_id": provider_intake.intake_id,
+                "request_id": provider_intake.request_id,
+            }),
+        );
+        let artifact_id = typed_digest(&format!("run-level-artifact-{suffix}"));
+        let diagnostic = document(json!({
+            "schema": "nq.diagnostic_execution.v2",
+            "artifact_id": artifact_id,
+            "run_id": collection.run.run_id,
+            "request_id": outer_request_id,
+            "profile": {
+                "id": collection.run.profile_id,
+                "version": collection.run.profile_version,
+                "digest": collection.run.profile_digest,
+            },
+            "completed_at": TIME,
+            "disposition": "established",
+        }));
+        let binding_id = typed_digest(&format!("run-level-binding-{suffix}"));
+        let binding_record = governed_runtime_record(
+            binding_id.clone(),
+            "nq.execution_identity_binding.v2",
+            json!({
+                "schema": "nq.execution_identity_binding.v2",
+                "binding_id": binding_id,
+                "outer_request": governed_record_reference(&outer_request),
+                "invocation_decision": governed_record_reference(&invocation_decision),
+                "execution_launch": governed_record_reference(&execution_launch),
+                "diagnostic": {
+                    "schema": "nq.diagnostic_execution.v2",
+                    "request_id": outer_request_id,
+                    "artifact_id": artifact_id,
+                    "file_bytes_digest": diagnostic.digest(),
+                },
+                "provider_attempts": [governed_record_reference(&provider_record)],
+            }),
+        );
+        DiagnosticArtifactCommitInput {
+            artifact_id,
+            contract_schema: "nq.diagnostic_execution.v2".into(),
+            canonical_bytes: diagnostic,
+            local_origin: DiagnosticArtifactLocalOriginInput {
+                run_id: collection.run.run_id.clone(),
+                evaluation_id: None,
+                completed_at: TIME.into(),
+                execution_binding: Some(DiagnosticArtifactExecutionBindingInput {
+                    runtime_records: RuntimeRecordBatchInput {
+                        checkpoint_id: typed_digest(&format!(
+                            "run-level-final-checkpoint-{suffix}"
+                        ))
+                        .into_string(),
+                        expected_predecessor_checkpoint_id: Some(
+                            launch_receipt.checkpoint.checkpoint_id,
+                        ),
+                        expected_predecessor_ledger_root: Some(
+                            launch_receipt.checkpoint.checkpoint_ledger_root,
+                        ),
+                        dependency,
+                        records: vec![provider_record.clone(), binding_record.clone()],
+                    },
+                    execution_binding_record_id: binding_record.record_id,
+                    outer_request_record_id: outer_request.record_id,
+                    invocation_decision_record_id: invocation_decision.record_id,
+                    execution_launch_record_id: execution_launch.record_id,
+                    outer_request_id,
+                    provider_attempts: vec![DiagnosticArtifactProviderAttemptBindingInput {
+                        provider_attempt_record_id: provider_record.record_id,
+                        intake_id: provider_intake.intake_id.clone(),
+                    }],
+                }),
+            },
+        }
+    }
+
+    fn admitted_run_level_completion(
+        collection: &CollectionInput,
+        artifact: DiagnosticArtifactCommitInput,
+        receipt: &CollectionReceipt,
+    ) -> AdmittedRunLevelDiagnosticCompletion<()> {
+        let report = match &collection
+            .submission
+            .as_ref()
+            .expect("admitted submission")
+            .disposition
+        {
+            SubmissionDisposition::Admitted(report) => report,
+            SubmissionDisposition::Rejected { .. } => panic!("admitted fixture"),
+        };
+        AdmittedRunLevelDiagnosticCompletion {
+            value: (),
+            diagnostic_artifact: artifact,
+            status: StatusEventInput {
+                status_event_id: format!("status-{}", collection.run.run_id),
+                component_kind: "instance".into(),
+                component_id: collection.run.instance_id.clone(),
+                state: "healthy".into(),
+                code: "report_complete".into(),
+                detail: document(json!({
+                    "schema": "nq.collection_outcome.v2",
+                    "instance_id": collection.run.instance_id,
+                    "run_id": collection.run.run_id,
+                    "result": {
+                        "outcome": "admitted",
+                        "report_id": report.report_id,
+                        "report_status": report.report_status,
+                        "semantic_digest": receipt.semantic_digest,
+                        "evaluations": [],
+                    },
+                })),
+                observed_at: TIME.into(),
+            },
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     fn governed_projection_fixture(
         mode: GovernedProjectionFixtureMode,
@@ -13865,6 +14313,18 @@ mod tests {
         let profile_digest = append_fixture_descriptor(&mut store);
         let collection =
             rejected_fixture_collection(&mut store, "fixture-a", "governed", &profile_digest);
+        let final_capacity_bytes = if matches!(
+            mode,
+            GovernedProjectionFixtureMode::InsufficientCommittedCapacity
+        ) {
+            65_536
+        } else {
+            131_072
+        };
+        let reserved_bytes = 65_536_u64
+            .checked_add(65_536)
+            .and_then(|subtotal| subtotal.checked_add(final_capacity_bytes))
+            .expect("fixture reservation capacity");
 
         let dependency = runtime_dependency("governed-projection");
         establish_runtime_root(&mut store, &dependency);
@@ -13891,6 +14351,12 @@ mod tests {
             json!({
                 "schema": "nq.custody_reservation.v1",
                 "reservation": "governed-projection",
+                "component_bounds": {
+                    "diagnostic_artifact_bytes": 65_536,
+                    "raw_evidence_bytes": 65_536,
+                    "dependency_closure_bytes": 65_536,
+                },
+                "reserved_bytes": reserved_bytes,
             }),
         );
         let role_manifest = governed_runtime_record(
@@ -14107,7 +14573,8 @@ mod tests {
             prelaunch_checkpoint_digest: reservation_batch_digest.clone(),
             dependency_closure_capacity_bytes: 65_536,
             raw_capacity_bytes: 65_536,
-            final_capacity_bytes: 65_536,
+            diagnostic_artifact_capacity_bytes: 65_536,
+            final_capacity_bytes,
             protected_failure_capacity_bytes: 16_384,
         };
         let mut custody = store
@@ -14621,6 +15088,10 @@ mod tests {
             store,
             directory,
             reservation_record_id: reservation.reservation_record_id.clone(),
+            launch_checkpoint_id: Sha256Digest::parse(
+                launch_receipt.checkpoint.checkpoint_id.clone(),
+            )
+            .expect("launch checkpoint identity"),
             reservation,
             diagnostic_artifact_id,
             exact_closure_bytes,
@@ -14649,6 +15120,189 @@ mod tests {
     }
 
     #[test]
+    fn admitted_run_level_diagnostic_commits_reopens_and_replays_exactly() {
+        let directory = tempdir().expect("run-level directory");
+        let database = directory.path().join("nq.db");
+        let mut store = Store::initialize(&database).expect("run-level store");
+        let profile_digest = append_fixture_descriptor(&mut store);
+        let collection =
+            admitted_run_level_collection(&mut store, "run-level-positive", &profile_digest);
+        let artifact = admitted_run_level_artifact(
+            &mut store,
+            &collection,
+            &collection.intake,
+            "run-level-positive",
+        );
+        let committed = store
+            .commit_admitted_run_level_diagnostic(&collection, |_view, receipt| {
+                Ok::<_, StoreError>(admitted_run_level_completion(
+                    &collection,
+                    artifact.clone(),
+                    receipt,
+                ))
+            })
+            .expect("run-level diagnostic commits");
+        assert!(matches!(committed, ProviderIntakeCommit::Committed { .. }));
+        let admitted = store
+            .admitted_collection_for_run(&collection.run.run_id)
+            .expect("admitted run query")
+            .expect("admitted run");
+        assert_eq!(admitted.evaluations, 0);
+        let DiagnosticArtifactLookup::Found(access) = store
+            .diagnostic_artifact(&artifact.artifact_id, &["nq.diagnostic_execution.v2"])
+            .expect("run-level artifact")
+        else {
+            panic!("run-level artifact missing");
+        };
+        assert!(matches!(
+            access.commitment.origin,
+            DiagnosticArtifactOrigin::Local {
+                evaluation_id: None,
+                execution_binding_record_id: Some(_),
+                ..
+            }
+        ));
+        assert!(
+            store
+                .diagnostic_artifact_execution_binding(&artifact.artifact_id)
+                .expect("exact production binding")
+                .is_some()
+        );
+        store.validate().expect("run-level store validates");
+        drop(store);
+
+        let mut reopened = Store::open(&database).expect("run-level store reopens");
+        reopened
+            .validate()
+            .expect("reopened run-level store validates");
+        let replay = reopened
+            .commit_admitted_run_level_diagnostic(&collection, |_view, receipt| {
+                Ok::<_, StoreError>(admitted_run_level_completion(
+                    &collection,
+                    artifact,
+                    receipt,
+                ))
+            })
+            .expect("exact run-level replay");
+        assert!(matches!(replay, ProviderIntakeCommit::Replayed { .. }));
+    }
+
+    #[test]
+    fn admitted_run_level_path_preserves_detector_law_and_rolls_back_hostiles() {
+        for mutation in ["legacy_api", "missing_binding", "evaluation_origin"] {
+            let (mut store, profile_digest) = configured_store();
+            let suffix = format!("run-level-{mutation}");
+            let collection = admitted_run_level_collection(&mut store, &suffix, &profile_digest);
+            let mut artifact =
+                admitted_run_level_artifact(&mut store, &collection, &collection.intake, &suffix);
+            if mutation == "missing_binding" {
+                artifact.local_origin.execution_binding = None;
+            } else if mutation == "evaluation_origin" {
+                artifact.local_origin.evaluation_id = Some("fabricated-evaluation".into());
+            }
+            let artifact_id = artifact.artifact_id.clone();
+            let result = if mutation == "legacy_api" {
+                store.commit_admitted_collection(&collection, |_view, receipt| {
+                    let completion =
+                        admitted_run_level_completion(&collection, artifact.clone(), receipt);
+                    Ok::<_, StoreError>(AdmittedCollectionCompletion {
+                        value: (),
+                        evaluations: Vec::new(),
+                        diagnostic_artifact: Some(completion.diagnostic_artifact),
+                        status: completion.status,
+                    })
+                })
+            } else {
+                store.commit_admitted_run_level_diagnostic(&collection, |_view, receipt| {
+                    Ok::<_, StoreError>(admitted_run_level_completion(
+                        &collection,
+                        artifact.clone(),
+                        receipt,
+                    ))
+                })
+            };
+            let expected_refusal = match (&result, mutation) {
+                (Err(StoreError::Invariant(message)), "legacy_api") => {
+                    message.contains("admitted detector diagnostic")
+                }
+                (Err(StoreError::Invariant(message)), "missing_binding") => {
+                    message.contains("run-level diagnostic requires")
+                }
+                (Err(StoreError::Invariant(message)), "evaluation_origin") => {
+                    message.contains("provenance")
+                        || message.contains("run-level diagnostic requires")
+                }
+                _ => false,
+            };
+            assert!(expected_refusal, "unexpected hostile result: {result:?}");
+            assert!(
+                store
+                    .admitted_collection_for_run(&collection.run.run_id)
+                    .expect("rolled-back run query")
+                    .is_none()
+            );
+            assert!(matches!(
+                store
+                    .diagnostic_artifact(&artifact_id, &["nq.diagnostic_execution.v2"])
+                    .expect("rolled-back artifact query"),
+                DiagnosticArtifactLookup::NotFound
+            ));
+            store.validate().expect("hostile rollback validates");
+        }
+    }
+
+    #[test]
+    fn admitted_run_level_path_rejects_swapped_intake_and_incomplete_replay() {
+        let (mut store, profile_digest) = configured_store();
+        let prior = admitted_run_level_collection(&mut store, "run-level-prior", &profile_digest);
+        commit_admitted_fixture(&mut store, prior.clone()).expect("prior admitted run");
+
+        let replay = store.commit_admitted_run_level_diagnostic(
+            &prior,
+            |_view, _receipt| -> Result<AdmittedRunLevelDiagnosticCompletion<()>, StoreError> {
+                panic!("replay must not invoke completion builder")
+            },
+        );
+        assert!(
+            matches!(
+                replay,
+                Err(StoreError::ReplayConflict(ref message))
+                if message.contains("not one exact run-level V2 diagnostic")
+            ),
+            "unexpected incomplete replay result: {replay:?}"
+        );
+
+        let current =
+            admitted_run_level_collection(&mut store, "run-level-current", &profile_digest);
+        let swapped =
+            admitted_run_level_artifact(&mut store, &current, &prior.intake, "run-level-current");
+        assert!(matches!(
+            store.commit_admitted_run_level_diagnostic(&current, |_view, receipt| {
+                Ok::<_, StoreError>(admitted_run_level_completion(
+                    &current,
+                    swapped.clone(),
+                    receipt,
+                ))
+            }),
+            Err(StoreError::Invariant(message)) if message.contains("current provider attempt")
+        ));
+        assert!(
+            store
+                .admitted_collection_for_run(&current.run.run_id)
+                .expect("swapped run query")
+                .is_none()
+        );
+        assert!(matches!(
+            store
+                .diagnostic_artifact(&swapped.artifact_id, &["nq.diagnostic_execution.v2"])
+                .expect("swapped artifact query"),
+            DiagnosticArtifactLookup::NotFound
+        ));
+
+        store.validate().expect("replay refusal leaves store valid");
+    }
+
+    #[test]
     fn governed_projection_verification_is_reservation_only_and_idempotent() {
         let fixture = governed_projection_fixture(GovernedProjectionFixtureMode::Complete);
         let first = fixture
@@ -14670,6 +15324,44 @@ mod tests {
         );
         assert_eq!(second.closure_id, first.closure_id);
         assert_eq!(second.runtime_checkpoint_id, first.runtime_checkpoint_id);
+    }
+
+    #[test]
+    fn governed_v2_committed_capacity_is_verified_before_effect() {
+        let sufficient = governed_projection_fixture(GovernedProjectionFixtureMode::Complete);
+        let capacity = sufficient
+            .store
+            .verify_governed_execution_custody_closure_v2_capacity(
+                &sufficient.reservation,
+                &sufficient.launch_checkpoint_id,
+            )
+            .expect("exact committed capacity is sufficient");
+        assert_eq!(
+            capacity.diagnostic_artifact_capacity_bytes,
+            sufficient.reservation.diagnostic_artifact_capacity_bytes
+        );
+        assert!(
+            capacity.final_closure_capacity_bytes <= sufficient.reservation.final_capacity_bytes
+        );
+
+        let insufficient = governed_projection_fixture(
+            GovernedProjectionFixtureMode::InsufficientCommittedCapacity,
+        );
+        let refusal = insufficient
+            .store
+            .verify_governed_execution_custody_closure_v2_capacity(
+                &insufficient.reservation,
+                &insufficient.launch_checkpoint_id,
+            );
+        assert!(
+            matches!(
+                refusal,
+                Err(StoreError::Invariant(ref message) | StoreError::Integrity(ref message))
+                    if message.contains("final closure requires")
+                        && message.contains("exact reservation provides")
+            ),
+            "unexpected insufficient-capacity result: {refusal:?}"
+        );
     }
 
     #[test]
