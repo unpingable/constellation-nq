@@ -1,12 +1,10 @@
-//! Resident scheduler, local API, and helper supervisor entry point.
+//! Resident read surface and explicitly bounded one-shot entry point.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use nq_core::config::{NqConfig, WatcherConfig};
-use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -61,14 +59,6 @@ pub async fn run(options: Nqd) -> Result<()> {
         "starting",
         &serde_json::json!({"pid": std::process::id()}),
     )?;
-    nq_core::engine::record_component_status(
-        &mut store,
-        "scheduler",
-        "independent",
-        "unknown",
-        "loading_instances",
-        &serde_json::json!({"instance_count": config.watchers.len()}),
-    )?;
     drop(store);
 
     if options.once {
@@ -94,14 +84,6 @@ pub async fn run(options: Nqd) -> Result<()> {
         "listeners_ready",
         &serde_json::json!({"pid": std::process::id()}),
     )?;
-    nq_core::engine::record_component_status(
-        &mut ready_store,
-        "scheduler",
-        "independent",
-        "healthy",
-        "instances_loaded",
-        &serde_json::json!({"instance_count": config.watchers.len()}),
-    )?;
     drop(ready_store);
     let mut services = JoinSet::new();
     let database_path = config.database_path.clone();
@@ -117,19 +99,10 @@ pub async fn run(options: Nqd) -> Result<()> {
         info!("no loopback console; Unix socket API only");
     }
 
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    for watcher in config.watchers.clone() {
-        let config = config.clone();
-        let shutdown = shutdown_rx.clone();
-        services.spawn(async move { schedule_instance(config, watcher, shutdown).await });
-    }
-    for watcher in config.watchers.clone() {
-        let config = config.clone();
-        let shutdown = shutdown_rx.clone();
-        services.spawn(async move { sweep_freshness(config, watcher, shutdown).await });
-    }
-
-    info!(instances = config.watchers.len(), "nqd started");
+    info!(
+        instances = config.watchers.len(),
+        "nqd started without recurrence; bounded diagnostics require an explicit request"
+    );
     tokio::select! {
         signal = tokio::signal::ctrl_c() => {
             signal.context("cannot listen for shutdown signal")?;
@@ -144,7 +117,6 @@ pub async fn run(options: Nqd) -> Result<()> {
             }
         }
     }
-    let _ = shutdown_tx.send(true);
     services.abort_all();
     while services.join_next().await.is_some() {}
     let mut stopped_store = nq_store::Store::open(&config.database_path)?;
@@ -199,84 +171,6 @@ async fn collect_once(config: NqConfig) -> Result<()> {
     }
 }
 
-async fn schedule_instance(
-    config: NqConfig,
-    watcher: WatcherConfig,
-    mut shutdown: watch::Receiver<bool>,
-) -> Result<()> {
-    let jitter_cap = watcher.schedule.jitter_seconds;
-    let jitter = if jitter_cap == 0 {
-        0
-    } else {
-        rand::random::<u64>() % (jitter_cap + 1)
-    };
-    if jitter != 0 {
-        tokio::select! {
-            () = tokio::time::sleep(Duration::from_secs(jitter)) => {}
-            changed = shutdown.changed() => {
-                changed?;
-                return Ok(());
-            }
-        }
-    }
-
-    let mut engine =
-        tokio::task::spawn_blocking(move || nq_core::CollectionEngine::open(&config)).await??;
-    let mut backoff = watcher.schedule.retry_backoff_seconds;
-    loop {
-        if *shutdown.borrow() {
-            return Ok(());
-        }
-        let collection_watcher = watcher.clone();
-        let (returned_engine, outcome) = tokio::task::spawn_blocking(move || {
-            let outcome = engine.collect(&collection_watcher);
-            (engine, outcome)
-        })
-        .await?;
-        engine = returned_engine;
-        let delay = match outcome {
-            Ok(outcome) if outcome.is_success() => {
-                backoff = watcher.schedule.retry_backoff_seconds;
-                let governed_result = canonical_result_document(&outcome)?;
-                info!(
-                    instance = %watcher.instance_id,
-                    governed_result = %governed_result,
-                    "collection admitted and evaluated"
-                );
-                watcher.schedule.interval_seconds
-            }
-            Ok(outcome) => {
-                let governed_result = canonical_result_document(&outcome)?;
-                warn!(
-                    instance = %watcher.instance_id,
-                    governed_result = %governed_result,
-                    "collection retained without admitted report"
-                );
-                let delay = backoff.max(1);
-                backoff = backoff
-                    .saturating_mul(2)
-                    .min(watcher.schedule.max_retry_backoff_seconds.max(1));
-                delay
-            }
-            Err(error) => {
-                error!(instance = %watcher.instance_id, %error, "collection engine error");
-                let delay = backoff.max(1);
-                backoff = backoff
-                    .saturating_mul(2)
-                    .min(watcher.schedule.max_retry_backoff_seconds.max(1));
-                delay
-            }
-        };
-        let (returned_engine, shutdown_requested) =
-            wait_with_binding_watch(engine, &watcher, Duration::from_secs(delay), &mut shutdown)
-                .await?;
-        engine = returned_engine;
-        if shutdown_requested {
-            return Ok(());
-        }
-    }
-}
-
 /// Render the exact versioned result document for structured daemon logs.
 ///
 /// Debug formatting is a Rust implementation detail and is neither stable nor
@@ -293,42 +187,6 @@ fn canonical_result_document(value: &nq_core::CollectionOutcome) -> Result<Strin
     String::from_utf8(body.to_vec()).context("canonical governed result is not UTF-8")
 }
 
-async fn wait_with_binding_watch(
-    mut engine: nq_core::CollectionEngine,
-    watcher: &WatcherConfig,
-    delay: Duration,
-    shutdown: &mut watch::Receiver<bool>,
-) -> Result<(nq_core::CollectionEngine, bool)> {
-    let end = tokio::time::Instant::now() + delay;
-    loop {
-        let now = tokio::time::Instant::now();
-        if now >= end {
-            return Ok((engine, false));
-        }
-        let slice = (end - now).min(Duration::from_millis(250));
-        tokio::select! {
-            () = tokio::time::sleep(slice) => {}
-            changed = shutdown.changed() => {
-                changed?;
-                return Ok((engine, true));
-            }
-        }
-        let check_watcher = watcher.clone();
-        let (returned_engine, quiesced) = tokio::task::spawn_blocking(move || {
-            let result = engine.quiesce_if_binding_changed(&check_watcher);
-            (engine, result)
-        })
-        .await?;
-        engine = returned_engine;
-        if quiesced? {
-            warn!(
-                instance = %watcher.instance_id,
-                "persistent helper quiesced after admission binding changed"
-            );
-        }
-    }
-}
-
 async fn collect_one(
     config: NqConfig,
     watcher: WatcherConfig,
@@ -338,41 +196,6 @@ async fn collect_one(
         engine.collect(&watcher)
     })
     .await??)
-}
-
-async fn sweep_freshness(
-    config: NqConfig,
-    watcher: WatcherConfig,
-    mut shutdown: watch::Receiver<bool>,
-) -> Result<()> {
-    let profile = nq_profiles::resolve_profile(&watcher.profile.id, watcher.profile.version)
-        .context("freshness sweep profile is not compiled")?;
-    let reliance = profile.descriptor().freshness.reliance_seconds;
-    let interval = (reliance / 2).clamp(1, 60);
-    loop {
-        tokio::select! {
-            () = tokio::time::sleep(Duration::from_secs(interval)) => {}
-            changed = shutdown.changed() => {
-                changed?;
-                return Ok(());
-            }
-        }
-        let sweep_config = config.clone();
-        let sweep_watcher = watcher.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            let mut engine = nq_core::CollectionEngine::open(&sweep_config)?;
-            engine.freshness_sweep(&sweep_watcher)
-        })
-        .await?;
-        match result {
-            Ok(count) => tracing::debug!(
-                instance = %watcher.instance_id,
-                evaluations = count,
-                "freshness sweep committed"
-            ),
-            Err(error) => warn!(instance = %watcher.instance_id, %error, "freshness sweep failed"),
-        }
-    }
 }
 
 fn validate_catalog(config: &NqConfig) -> Result<()> {
@@ -409,6 +232,25 @@ mod tests {
             parsed.console_address.is_none(),
             "the loopback console must be off unless explicitly configured"
         );
+    }
+
+    #[test]
+    fn resident_daemon_contains_no_recurrence_or_freshness_loop() {
+        let source = include_str!("daemon.rs");
+        for (left, right) in [
+            ("schedule_", "instance"),
+            ("sweep_", "freshness"),
+            ("tokio::time::", "sleep"),
+            ("retry_backoff_", "seconds"),
+            ("interval_", "seconds"),
+            ("jitter_", "seconds"),
+        ] {
+            let forbidden = format!("{left}{right}");
+            assert!(
+                !source.contains(&forbidden),
+                "resident NQ must not own Nightshift recurrence token {forbidden}"
+            );
+        }
     }
 
     #[test]
