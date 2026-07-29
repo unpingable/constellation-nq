@@ -17,8 +17,11 @@ mod schema;
 
 pub use assets::{
     CONTRACT_SOURCE_COMMIT, CONTRACT_SOURCE_PATH, CONTRACT_SOURCE_TREE,
-    CORRECTED_SPECIMEN_IDENTITY, CORRECTED_SPECIMEN_SHA256, ContractPackageManifest,
-    ContractSource, SchemaAsset, verified_corrected_specimen, verified_package_manifest,
+    CORRECTED_SPECIMEN_IDENTITY, CORRECTED_SPECIMEN_SHA256, ContentAddressedSource,
+    ContractExtensionManifest, ContractPackageManifest, ContractSource,
+    NATIVE_CORRESPONDENCE_EXTENSION_IDENTITY, NATIVE_CORRESPONDENCE_SOURCE_SHA256, SchemaAsset,
+    verified_corrected_specimen, verified_native_correspondence_manifest,
+    verified_package_manifest,
 };
 pub use graph::{
     ExecutionBindingSourceCorpus, ExternalRecordCatalog, RuntimeRecordSet, ValidationContext,
@@ -30,13 +33,14 @@ pub use identity::{
 };
 pub use record::{
     ArtifactCustodyReceipt, ArtifactDeliveryAttempt, ArtifactDeliveryRecord,
-    AuthenticatedArtifactEnvelope, BufferDeliveryPolicy, CustodyReservation, DecommissionCut,
-    DecommissionLedgerSnapshot, DiagnosticInvocationRequest, ExecutionIdentityBindingV2,
-    ExecutionLaunch, HostRoleLifecycleEvent, HostRoleRelation, InspectorReadReceipt,
-    InspectorResultSet, InspectorSnapshot, InvocationDecision, NodeEnrollment,
-    NodeKeyLifecycleEvent, OperationAuthorization, RestoreActivationProof, RoleManifest,
-    RuntimeActivation, RuntimeRecord, RuntimeSchema, StaticProfileCohortManifest,
-    ValidatedRuntimeRecord, WitnessAttachment, WitnessLifecycleEvent,
+    AuthenticatedArtifactEnvelope, BufferDeliveryPolicy, CustodyReservation, DeadlineEvaluation,
+    DecommissionCut, DecommissionLedgerSnapshot, DiagnosticInvocationRequest,
+    ExecutionIdentityBindingV2, ExecutionLaunch, HostRoleLifecycleEvent, HostRoleRelation,
+    InspectorReadReceipt, InspectorResultSet, InspectorSnapshot, InvocationDecision,
+    NativeClockQualification, NativeProfileQualification, NodeEnrollment, NodeKeyLifecycleEvent,
+    OperationAuthorization, RestoreActivationProof, RoleManifest, RuntimeActivation, RuntimeRecord,
+    RuntimeSchema, StaticProfileCohortManifest, ValidatedRuntimeRecord, WitnessAttachment,
+    WitnessLifecycleEvent,
 };
 
 use thiserror::Error;
@@ -220,6 +224,20 @@ pub enum ContractError {
     /// Launch deadline and execution budget disagreed.
     #[error("launch deadline does not equal its exact execution budget")]
     LaunchDeadlineSubstitution,
+    /// A production descriptor commitment was collapsed into a distinct native
+    /// semantic or artifact identity.
+    #[error("production and native correspondence identities must remain distinct")]
+    CorrespondenceIdentityCollapse,
+    /// Native profile qualification carrier violated its closed semantic law.
+    #[error("native profile qualification is malformed")]
+    InvalidNativeProfileQualification,
+    /// Native clock qualification carrier violated its closed semantic law.
+    #[error("native clock qualification is malformed")]
+    InvalidNativeClockQualification,
+    /// Deadline decision or derived realtime/BOOTTIME values differed from the
+    /// exact bracket, request bounds, or execution budget.
+    #[error("deadline evaluation does not match its exact deterministic inputs")]
+    DeadlineEvaluationMismatch,
     /// V2 production binding was not fully resolved.
     #[error("execution identity binding is not resolved")]
     BindingNotResolved,

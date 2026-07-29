@@ -15,6 +15,8 @@ pub const CONTRACT_SOURCE_TREE: &str = "b88a7a9ad380ed770d936f54f6da7eef1a9a15fe
 pub const CONTRACT_SOURCE_PATH: &str = "audits/nq-host-role-runtime-contract-v1";
 
 const MANIFEST_BYTES: &[u8] = include_bytes!("../assets/manifest.json");
+const NATIVE_CORRESPONDENCE_MANIFEST_BYTES: &[u8] =
+    include_bytes!("../assets/native-correspondence-manifest.v1.json");
 const CORRECTED_SPECIMEN_BYTES: &[u8] =
     include_bytes!("../assets/host-role-runtime-records.v1.json");
 
@@ -24,6 +26,12 @@ pub const CORRECTED_SPECIMEN_IDENTITY: &str =
 /// SHA-256 of the exact corrected specimen bytes embedded by this package.
 pub const CORRECTED_SPECIMEN_SHA256: &str =
     "sha256:263f9ccf4a0de93762188b49701f3da88a87e1d49e6c2a86f6104ba92261d774";
+/// Identity of the additive native-correspondence contract surface.
+pub const NATIVE_CORRESPONDENCE_EXTENSION_IDENTITY: &str = "nq.native_correspondence_carriers.v1";
+/// Content identity of the exact campaign design record from which the
+/// additive correspondence carriers were implemented.
+pub const NATIVE_CORRESPONDENCE_SOURCE_SHA256: &str =
+    "sha256:c2240ce831a45b0cc6f9dec2819a4def100196c0db2e4084155935a71dcc094a";
 
 /// Package provenance record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,13 +47,26 @@ pub struct ContractSource {
     pub path: String,
 }
 
-/// One exact source schema asset.
+/// Content-addressed source record for an additive contract extension.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContentAddressedSource {
+    /// Repository identity.
+    pub repository: String,
+    /// Repository-relative source path.
+    pub path: String,
+    /// SHA-256 of the exact source-record bytes.
+    pub sha256: Sha256Digest,
+}
+
+/// One exact schema asset under the provenance rules of its containing
+/// manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SchemaAsset {
     /// Contract schema identity.
     pub schema: String,
-    /// Path at the immutable source commit.
+    /// Source or embedded path identified by the containing manifest.
     pub source_path: String,
     /// SHA-256 of exact source bytes.
     pub sha256: Sha256Digest,
@@ -61,13 +82,35 @@ pub struct ContractPackageManifest {
     pub contract_source: ContractSource,
     /// Digest definition.
     pub digest_basis: String,
-    /// Exact schema assets supported by this crate.
+    /// Exact frozen 3A schema assets supported by this crate.
     pub assets: Vec<SchemaAsset>,
     /// Authority boundaries retained by the package.
     pub nonclaims: Vec<String>,
 }
 
-/// Parses and verifies the embedded package manifest.
+/// Embedded manifest for additive, content-addressed contract schemas.
+///
+/// It is separate from [`ContractPackageManifest`] so schemas added during
+/// Campaign 3B cannot be misrepresented as bytes from the frozen 3A decision
+/// commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContractExtensionManifest {
+    /// Closed extension-manifest schema.
+    pub schema: String,
+    /// Stable extension identity.
+    pub extension_identity: String,
+    /// Exact content-addressed campaign source.
+    pub source_record: ContentAddressedSource,
+    /// Digest definition.
+    pub digest_basis: String,
+    /// Exact additive schemas supported by this crate.
+    pub assets: Vec<SchemaAsset>,
+    /// Authority and correspondence boundaries retained by the extension.
+    pub nonclaims: Vec<String>,
+}
+
+/// Parses and verifies the embedded frozen-3A package manifest.
 ///
 /// # Errors
 ///
@@ -114,7 +157,10 @@ pub fn verified_package_manifest() -> Result<ContractPackageManifest> {
     if seen.len() != expected.len() {
         return Err(ContractError::MissingSchemaAssets);
     }
-    for schema in RuntimeSchema::ALL {
+    for schema in RuntimeSchema::ALL
+        .into_iter()
+        .filter(|schema| !schema.is_native_correspondence())
+    {
         if !seen.contains(schema.as_str()) {
             return Err(ContractError::MissingSchemaAsset(
                 schema.as_str().to_owned(),
@@ -127,6 +173,70 @@ pub fn verified_package_manifest() -> Result<ContractPackageManifest> {
                 "schema digest binding is not live-engine correspondence",
                 "contract possession grants no invocation or administrative authority",
                 "the package owns no recurrence, posture, reliance, or action",
+            ]
+    {
+        return Err(ContractError::AssetManifestSubstitution);
+    }
+    Ok(manifest)
+}
+
+/// Parses and verifies the additive native-correspondence schema manifest.
+///
+/// # Errors
+///
+/// Refuses source-record substitution, unknown/missing/duplicate assets,
+/// malformed digests, or changed nonclaim boundaries.
+pub fn verified_native_correspondence_manifest() -> Result<ContractExtensionManifest> {
+    let manifest: ContractExtensionManifest =
+        serde_json::from_slice(NATIVE_CORRESPONDENCE_MANIFEST_BYTES)?;
+    if manifest.schema != "nq.host_role_contract_extension_package.v1"
+        || manifest.extension_identity != NATIVE_CORRESPONDENCE_EXTENSION_IDENTITY
+        || manifest.source_record.repository != "skunkworks"
+        || manifest.source_record.path
+            != "audits/nq-host-role-runtime-seam-v1/records/native-profile-clock-correspondence-design.md"
+        || manifest.source_record.sha256.as_str() != NATIVE_CORRESPONDENCE_SOURCE_SHA256
+        || manifest.digest_basis != "sha256 of exact embedded schema bytes"
+    {
+        return Err(ContractError::AssetManifestSubstitution);
+    }
+
+    let expected = expected_native_correspondence_assets();
+    let mut seen = BTreeSet::new();
+    for asset in &manifest.assets {
+        if !seen.insert(asset.schema.as_str()) {
+            return Err(ContractError::DuplicateSchemaAsset(asset.schema.clone()));
+        }
+        let expected_digest = expected
+            .get(asset.schema.as_str())
+            .ok_or_else(|| ContractError::UnknownSchemaAsset(asset.schema.clone()))?;
+        if &asset.sha256 != expected_digest {
+            return Err(ContractError::SchemaAssetDigestMismatch(
+                asset.schema.clone(),
+            ));
+        }
+        let expected_path = format!("schemas/{}.schema.json", asset.schema);
+        if asset.source_path != expected_path {
+            return Err(ContractError::SchemaAssetPathMismatch(asset.schema.clone()));
+        }
+        let embedded = embedded_schema_bytes(&asset.schema)
+            .ok_or_else(|| ContractError::MissingSchemaAsset(asset.schema.clone()))?;
+        if sha256_bytes(embedded) != asset.sha256 {
+            return Err(ContractError::SchemaAssetDigestMismatch(
+                asset.schema.clone(),
+            ));
+        }
+    }
+    if seen.len() != expected.len()
+        || RuntimeSchema::ALL
+            .into_iter()
+            .filter(|schema| schema.is_native_correspondence())
+            .any(|schema| !seen.contains(schema.as_str()))
+        || manifest.nonclaims
+            != [
+                "correspondence carriers do not equate production and native identities",
+                "clock qualification establishes no finite UTC accuracy or cross-host coherence",
+                "deadline evaluation grants no invocation, reliance, authorization, or action",
+                "schema validation is not live-engine correspondence",
             ]
     {
         return Err(ContractError::AssetManifestSubstitution);
@@ -187,6 +297,11 @@ pub(crate) fn embedded_schema_bytes(schema: &str) -> Option<&'static [u8]> {
         "nq.operation_authorization.v1" => asset!("nq.operation_authorization.v1"),
         "nq.custody_reservation.v1" => asset!("nq.custody_reservation.v1"),
         "nq.execution_launch.v1" => asset!("nq.execution_launch.v1"),
+        "nq.native_profile_qualification.v1" => {
+            asset!("nq.native_profile_qualification.v1")
+        }
+        "nq.native_clock_qualification.v1" => asset!("nq.native_clock_qualification.v1"),
+        "nq.deadline_evaluation.v1" => asset!("nq.deadline_evaluation.v1"),
         "nq.execution_identity_binding.v2" => asset!("nq.execution_identity_binding.v2"),
         "nq.authenticated_artifact_envelope.v1" => {
             asset!("nq.authenticated_artifact_envelope.v1")
@@ -205,6 +320,31 @@ pub(crate) fn embedded_schema_bytes(schema: &str) -> Option<&'static [u8]> {
         "nq.decommission_cut.v1" => asset!("nq.decommission_cut.v1"),
         _ => return None,
     })
+}
+
+fn expected_native_correspondence_assets() -> BTreeMap<&'static str, Sha256Digest> {
+    [
+        (
+            "nq.native_profile_qualification.v1",
+            "sha256:0b68fc97e82e57f40ef315ed352bd36d2ed1fef818553125345f8c299c565fc5",
+        ),
+        (
+            "nq.native_clock_qualification.v1",
+            "sha256:e68c3ab69104ba71557c71b6cfa336aa3b645e155a2de8bf01f59c79bcd83c9e",
+        ),
+        (
+            "nq.deadline_evaluation.v1",
+            "sha256:c4a01a920d38860e5e85bc55bc66637005d0eb4f50740e3ebb92bb3977fdf5f8",
+        ),
+    ]
+    .into_iter()
+    .map(|(schema, digest)| {
+        (
+            schema,
+            Sha256Digest::parse(digest).expect("embedded schema digest is valid"),
+        )
+    })
+    .collect()
 }
 
 #[allow(clippy::too_many_lines)] // Exact immutable asset table is clearer as one closed list.

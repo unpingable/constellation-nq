@@ -70,6 +70,12 @@ pub enum RuntimeSchema {
     CustodyReservationV1,
     /// `nq.execution_launch.v1`.
     ExecutionLaunchV1,
+    /// `nq.native_profile_qualification.v1`.
+    NativeProfileQualificationV1,
+    /// `nq.native_clock_qualification.v1`.
+    NativeClockQualificationV1,
+    /// `nq.deadline_evaluation.v1`.
+    DeadlineEvaluationV1,
     /// `nq.execution_identity_binding.v2`.
     ExecutionIdentityBindingV2,
     /// `nq.authenticated_artifact_envelope.v1`.
@@ -94,7 +100,7 @@ pub enum RuntimeSchema {
 
 impl RuntimeSchema {
     /// Every supported record schema.
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 29] = [
         Self::RoleManifestV1,
         Self::BufferDeliveryPolicyV1,
         Self::StaticProfileCohortManifestV1,
@@ -111,6 +117,9 @@ impl RuntimeSchema {
         Self::OperationAuthorizationV1,
         Self::CustodyReservationV1,
         Self::ExecutionLaunchV1,
+        Self::NativeProfileQualificationV1,
+        Self::NativeClockQualificationV1,
+        Self::DeadlineEvaluationV1,
         Self::ExecutionIdentityBindingV2,
         Self::AuthenticatedArtifactEnvelopeV1,
         Self::ArtifactDeliveryAttemptV1,
@@ -143,6 +152,9 @@ impl RuntimeSchema {
             Self::OperationAuthorizationV1 => "nq.operation_authorization.v1",
             Self::CustodyReservationV1 => "nq.custody_reservation.v1",
             Self::ExecutionLaunchV1 => "nq.execution_launch.v1",
+            Self::NativeProfileQualificationV1 => "nq.native_profile_qualification.v1",
+            Self::NativeClockQualificationV1 => "nq.native_clock_qualification.v1",
+            Self::DeadlineEvaluationV1 => "nq.deadline_evaluation.v1",
             Self::ExecutionIdentityBindingV2 => "nq.execution_identity_binding.v2",
             Self::AuthenticatedArtifactEnvelopeV1 => "nq.authenticated_artifact_envelope.v1",
             Self::ArtifactDeliveryAttemptV1 => "nq.artifact_delivery_attempt.v1",
@@ -168,6 +180,18 @@ impl RuntimeSchema {
             .ok_or_else(|| ContractError::UnknownRuntimeSchema(value.to_owned()))
     }
 
+    /// Whether this schema belongs to the additive native-correspondence
+    /// extension rather than the frozen 3A source package.
+    #[must_use]
+    pub const fn is_native_correspondence(self) -> bool {
+        matches!(
+            self,
+            Self::NativeProfileQualificationV1
+                | Self::NativeClockQualificationV1
+                | Self::DeadlineEvaluationV1
+        )
+    }
+
     /// Returns the immutable-record identity field.
     #[must_use]
     pub const fn record_id_field(self) -> &'static str {
@@ -183,6 +207,10 @@ impl RuntimeSchema {
             Self::OperationAuthorizationV1 => "authorization_id",
             Self::CustodyReservationV1 => "reservation_id",
             Self::ExecutionLaunchV1 => "launch_id",
+            Self::NativeProfileQualificationV1 | Self::NativeClockQualificationV1 => {
+                "qualification_id"
+            }
+            Self::DeadlineEvaluationV1 => "evaluation_id",
             Self::ExecutionIdentityBindingV2 => "binding_id",
             Self::AuthenticatedArtifactEnvelopeV1 => "envelope_id",
             Self::ArtifactDeliveryAttemptV1 => "attempt_record_id",
@@ -491,6 +519,53 @@ impl RuntimeSchema {
                 "status",
                 "nonclaims",
             ],
+            Self::NativeProfileQualificationV1 => &[
+                "schema",
+                "qualification_id",
+                "namespace",
+                "cohort",
+                "cohort_generation",
+                "cohort_semantics_digest",
+                "production_profile",
+                "production_question",
+                "production_build",
+                "native_profile",
+                "native_evaluator",
+                "qualification_evidence",
+                "nonclaims",
+            ],
+            Self::NativeClockQualificationV1 => &[
+                "schema",
+                "qualification_id",
+                "namespace",
+                "cohort",
+                "cohort_generation",
+                "cohort_semantics_digest",
+                "production_clock",
+                "production_build",
+                "platform",
+                "absolute_time",
+                "boottime",
+                "wall_to_monotonic_bridge",
+                "runner_watchdog",
+                "qualification_evidence",
+                "nonclaims",
+            ],
+            Self::DeadlineEvaluationV1 => &[
+                "schema",
+                "evaluation_id",
+                "namespace",
+                "outer_request",
+                "activation",
+                "clock_qualification",
+                "clock",
+                "request_bounds",
+                "bracket_policy",
+                "sample",
+                "derived",
+                "decision",
+                "nonclaims",
+            ],
             Self::ExecutionIdentityBindingV2 => &[
                 "schema",
                 "binding_id",
@@ -792,6 +867,9 @@ carrier_types!(
     (OperationAuthorization, OperationAuthorization),
     (CustodyReservation, CustodyReservation),
     (ExecutionLaunch, ExecutionLaunch),
+    (NativeProfileQualification, NativeProfileQualification),
+    (NativeClockQualification, NativeClockQualification),
+    (DeadlineEvaluation, DeadlineEvaluation),
     (ExecutionIdentityBindingV2, ExecutionIdentityBindingV2),
     (AuthenticatedArtifactEnvelope, AuthenticatedArtifactEnvelope),
     (ArtifactDeliveryAttempt, ArtifactDeliveryAttempt),
@@ -848,6 +926,15 @@ impl RuntimeRecord {
                 Self::CustodyReservation(CustodyReservation(record))
             }
             RuntimeSchema::ExecutionLaunchV1 => Self::ExecutionLaunch(ExecutionLaunch(record)),
+            RuntimeSchema::NativeProfileQualificationV1 => {
+                Self::NativeProfileQualification(NativeProfileQualification(record))
+            }
+            RuntimeSchema::NativeClockQualificationV1 => {
+                Self::NativeClockQualification(NativeClockQualification(record))
+            }
+            RuntimeSchema::DeadlineEvaluationV1 => {
+                Self::DeadlineEvaluation(DeadlineEvaluation(record))
+            }
             RuntimeSchema::ExecutionIdentityBindingV2 => {
                 Self::ExecutionIdentityBindingV2(ExecutionIdentityBindingV2(record))
             }
@@ -897,6 +984,9 @@ impl RuntimeRecord {
             Self::OperationAuthorization(value) => &value.0,
             Self::CustodyReservation(value) => &value.0,
             Self::ExecutionLaunch(value) => &value.0,
+            Self::NativeProfileQualification(value) => &value.0,
+            Self::NativeClockQualification(value) => &value.0,
+            Self::DeadlineEvaluation(value) => &value.0,
             Self::ExecutionIdentityBindingV2(value) => &value.0,
             Self::AuthenticatedArtifactEnvelope(value) => &value.0,
             Self::ArtifactDeliveryAttempt(value) => &value.0,
@@ -1194,6 +1284,11 @@ fn validate_local_semantics(schema: RuntimeSchema, object: &Map<String, Value>) 
         RuntimeSchema::OperationAuthorizationV1 => validate_authorization(object),
         RuntimeSchema::CustodyReservationV1 => validate_reservation(object),
         RuntimeSchema::ExecutionLaunchV1 => validate_launch(object),
+        RuntimeSchema::NativeProfileQualificationV1 => {
+            validate_native_profile_qualification(object)
+        }
+        RuntimeSchema::NativeClockQualificationV1 => validate_native_clock_qualification(object),
+        RuntimeSchema::DeadlineEvaluationV1 => validate_deadline_evaluation(object),
         RuntimeSchema::ExecutionIdentityBindingV2 => validate_binding(object),
         RuntimeSchema::AuthenticatedArtifactEnvelopeV1 => validate_envelope(object),
         RuntimeSchema::ArtifactDeliveryAttemptV1 => validate_attempt(object),
@@ -1765,6 +1860,240 @@ fn validate_launch(launch: &Map<String, Value>) -> Result<()> {
         return Err(ContractError::LaunchDeadlineSubstitution);
     }
     Ok(())
+}
+
+fn validate_native_profile_qualification(qualification: &Map<String, Value>) -> Result<()> {
+    identity(qualification, "cohort")?.require_kind(
+        IdentityKind::StaticCohort,
+        "native_profile_qualification.cohort",
+    )?;
+    let production_profile = identity(qualification, "production_profile")?;
+    production_profile.require_kind(
+        IdentityKind::DiagnosticProfile,
+        "native_profile_qualification.production_profile",
+    )?;
+    identity(qualification, "production_question")?.require_kind(
+        IdentityKind::DiagnosticQuestion,
+        "native_profile_qualification.production_question",
+    )?;
+    let _: Sha256Digest = serde_json::from_value(qualification["cohort_semantics_digest"].clone())?;
+    let production_build = identity(qualification, "production_build")?;
+    production_build.require_kind(
+        IdentityKind::Build,
+        "native_profile_qualification.production_build",
+    )?;
+    let native_profile = object(qualification, "native_profile")?;
+    let native_evaluator = object(qualification, "native_evaluator")?;
+    let descriptor_digest: Sha256Digest =
+        serde_json::from_value(native_profile["descriptor_digest"].clone())?;
+    let evaluator_artifact_digest: Sha256Digest =
+        serde_json::from_value(native_evaluator["artifact_digest"].clone())?;
+    if production_profile.descriptor_digest == descriptor_digest
+        || production_build.descriptor_digest == evaluator_artifact_digest
+    {
+        return Err(ContractError::CorrespondenceIdentityCollapse);
+    }
+    if text(native_profile, "descriptor_schema")? != "nq.profile_descriptor.v1"
+        || text(native_profile, "semantic_identity_schema")? != "nq.profile_semantic_id.v1"
+        || text(native_profile, "helper_protocol_version")? != "nq.helper.v1"
+        || unsigned(native_profile, "profile_version")? == 0
+        || unsigned(
+            object(native_profile, "detector_closure")?,
+            "detector_count",
+        )? > MAX_SAFE_INTEGER
+        || array(qualification, "qualification_evidence")?.is_empty()
+        || !required_nonclaims(
+            qualification,
+            &[
+                "relates production and native identities but does not equate them",
+                "does not establish invocation, reliance, authorization, or action",
+            ],
+        )?
+    {
+        return Err(ContractError::InvalidNativeProfileQualification);
+    }
+    verify_identity_without(
+        qualification,
+        "qualification_id",
+        "native_profile_qualification.qualification_id",
+    )
+}
+
+fn validate_native_clock_qualification(qualification: &Map<String, Value>) -> Result<()> {
+    identity(qualification, "cohort")?.require_kind(
+        IdentityKind::StaticCohort,
+        "native_clock_qualification.cohort",
+    )?;
+    let _: Sha256Digest = serde_json::from_value(qualification["cohort_semantics_digest"].clone())?;
+    let production_clock = identity(qualification, "production_clock")?;
+    production_clock.require_kind(
+        IdentityKind::Clock,
+        "native_clock_qualification.production_clock",
+    )?;
+    identity(qualification, "production_build")?.require_kind(
+        IdentityKind::Build,
+        "native_clock_qualification.production_build",
+    )?;
+    identity(qualification, "platform")?.require_kind(
+        IdentityKind::Platform,
+        "native_clock_qualification.platform",
+    )?;
+    let absolute_time = object(qualification, "absolute_time")?;
+    let boottime = object(qualification, "boottime")?;
+    let bridge = object(qualification, "wall_to_monotonic_bridge")?;
+    let watchdog = object(qualification, "runner_watchdog")?;
+    let absolute_identity: Sha256Digest =
+        serde_json::from_value(absolute_time["semantic_identity_digest"].clone())?;
+    let boottime_identity: Sha256Digest =
+        serde_json::from_value(boottime["semantic_identity_digest"].clone())?;
+    let bridge_identity: Sha256Digest =
+        serde_json::from_value(bridge["semantic_identity_digest"].clone())?;
+    if [&absolute_identity, &boottime_identity, &bridge_identity]
+        .contains(&&production_clock.descriptor_digest)
+        || absolute_identity == boottime_identity
+        || absolute_identity == bridge_identity
+        || boottime_identity == bridge_identity
+    {
+        return Err(ContractError::CorrespondenceIdentityCollapse);
+    }
+    if text(absolute_time, "clock_id")? != "CLOCK_REALTIME"
+        || text(absolute_time, "epoch")? != "unix"
+        || text(absolute_time, "unit")? != "nanosecond"
+        || text(object(absolute_time, "accuracy_qualification")?, "status")? != "unqualified"
+        || text(boottime, "clock_id")? != "CLOCK_BOOTTIME"
+        || text(boottime, "unit")? != "nanosecond"
+        || text(boottime, "suspend_semantics")? != "includes_suspended_time"
+        || text(watchdog, "relation_to_governed_deadline")? != "auxiliary_non_equivalent"
+        || array(qualification, "qualification_evidence")?.is_empty()
+        || !required_nonclaims(
+            qualification,
+            &[
+                "UTC accuracy remains unqualified",
+                "does not establish cross-host clock coherence",
+                "runner watchdog is not the governed deadline",
+            ],
+        )?
+    {
+        return Err(ContractError::InvalidNativeClockQualification);
+    }
+    verify_identity_without(
+        qualification,
+        "qualification_id",
+        "native_clock_qualification.qualification_id",
+    )
+}
+
+fn validate_deadline_evaluation(evaluation: &Map<String, Value>) -> Result<()> {
+    identity(evaluation, "clock")?
+        .require_kind(IdentityKind::Clock, "deadline_evaluation.clock")?;
+    identity(object(evaluation, "bracket_policy")?, "policy")?
+        .require_kind(IdentityKind::Policy, "deadline_evaluation.bracket_policy")?;
+    let bounds = object(evaluation, "request_bounds")?;
+    let policy = object(evaluation, "bracket_policy")?;
+    let sample = object(evaluation, "sample")?;
+    let derived = object(evaluation, "derived")?;
+    let decision = object(evaluation, "decision")?;
+
+    let not_before = Timestamp::parse(text(bounds, "not_before")?)?.instant();
+    let request_deadline = Timestamp::parse(text(bounds, "deadline")?)?.instant();
+    let realtime_before = Timestamp::parse(text(sample, "realtime_before")?)?.instant();
+    let realtime_after = Timestamp::parse(text(sample, "realtime_after")?)?.instant();
+    let launched_at = Timestamp::parse(text(derived, "launched_at")?)?.instant();
+    let attempt_deadline = Timestamp::parse(text(derived, "attempt_deadline")?)?.instant();
+    let maximum_execution_ms = unsigned(bounds, "maximum_execution_ms")?;
+    let maximum_execution_ms_i64 = i64::try_from(maximum_execution_ms)
+        .map_err(|_| ContractError::DeadlineEvaluationMismatch)?;
+
+    let signed_bracket_ns = realtime_after
+        .signed_duration_since(realtime_before)
+        .num_nanoseconds()
+        .ok_or(ContractError::DeadlineEvaluationMismatch)?;
+    let expected_bracket_ns = u64::try_from(signed_bracket_ns).unwrap_or(0);
+    let expected_attempt_deadline = realtime_after
+        .checked_add_signed(chrono::Duration::milliseconds(maximum_execution_ms_i64))
+        .ok_or(ContractError::DeadlineEvaluationMismatch)?;
+    let expected_boottime_expiry_ns = decimal_u64(sample, "boottime_at_ns")?
+        .checked_add(
+            maximum_execution_ms
+                .checked_mul(1_000_000)
+                .ok_or(ContractError::DeadlineEvaluationMismatch)?,
+        )
+        .ok_or(ContractError::DeadlineEvaluationMismatch)?;
+    if unsigned(sample, "bracket_width_ns")? != expected_bracket_ns
+        || launched_at != realtime_after
+        || attempt_deadline != expected_attempt_deadline
+        || decimal_u64(derived, "boottime_expiry_ns")? != expected_boottime_expiry_ns
+    {
+        return Err(ContractError::DeadlineEvaluationMismatch);
+    }
+
+    let mut expected_violations = Vec::new();
+    if signed_bracket_ns < 0 {
+        expected_violations.push("realtime_bracket_reversed");
+    }
+    if request_deadline <= not_before {
+        expected_violations.push("invalid_request_window");
+    }
+    if expected_bracket_ns > unsigned(policy, "maximum_width_ns")? {
+        expected_violations.push("bracket_too_wide");
+    }
+    if realtime_after < not_before {
+        expected_violations.push("before_not_before");
+    }
+    if realtime_after >= request_deadline {
+        expected_violations.push("request_deadline_exhausted");
+    }
+    if expected_attempt_deadline > request_deadline {
+        expected_violations.push("execution_budget_exceeds_request_deadline");
+    }
+    let actual_violations = array(decision, "violations")?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or(ContractError::DeadlineEvaluationMismatch)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let expected_state = if expected_violations.is_empty() {
+        "accepted"
+    } else {
+        "refused"
+    };
+    if text(decision, "state")? != expected_state
+        || actual_violations != expected_violations
+        || !required_nonclaims(
+            evaluation,
+            &[
+                "does not reference or authorize an execution launch",
+                "does not establish source-evidence freshness or Nightshift currentness",
+                "does not grant reliance, authorization, or action",
+            ],
+        )?
+    {
+        return Err(ContractError::DeadlineEvaluationMismatch);
+    }
+    verify_identity_without(
+        evaluation,
+        "evaluation_id",
+        "deadline_evaluation.evaluation_id",
+    )
+}
+
+fn required_nonclaims(object: &Map<String, Value>, required: &[&str]) -> Result<bool> {
+    let actual = array(object, "nonclaims")?;
+    Ok(required
+        .iter()
+        .all(|required| actual.iter().any(|value| value.as_str() == Some(required))))
+}
+
+fn decimal_u64(object: &Map<String, Value>, field: &'static str) -> Result<u64> {
+    let value = text(object, field)?;
+    if value != "0" && value.starts_with('0') {
+        return Err(ContractError::DeadlineEvaluationMismatch);
+    }
+    value
+        .parse()
+        .map_err(|_| ContractError::DeadlineEvaluationMismatch)
 }
 
 fn validate_binding(binding: &Map<String, Value>) -> Result<()> {

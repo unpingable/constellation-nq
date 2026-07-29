@@ -21,6 +21,7 @@ pub(crate) fn validate(schema: RuntimeSchema, value: &Value) -> Result<()> {
     .map_err(|detail| ContractError::SchemaValidation { schema, detail })
 }
 
+#[allow(clippy::too_many_lines)] // Closed dispatch keeps schema/cache identity visibly paired.
 fn schema_value(schema: &str) -> Result<&'static Value> {
     macro_rules! cached {
         ($slot:ident, $schema:expr) => {{
@@ -78,6 +79,21 @@ fn schema_value(schema: &str) -> Result<&'static Value> {
             cached!(RESERVATION, "nq.custody_reservation.v1")
         }
         "nq.execution_launch.v1" => cached!(LAUNCH, "nq.execution_launch.v1"),
+        "nq.native_profile_qualification.v1" => {
+            cached!(
+                NATIVE_PROFILE_QUALIFICATION,
+                "nq.native_profile_qualification.v1"
+            )
+        }
+        "nq.native_clock_qualification.v1" => {
+            cached!(
+                NATIVE_CLOCK_QUALIFICATION,
+                "nq.native_clock_qualification.v1"
+            )
+        }
+        "nq.deadline_evaluation.v1" => {
+            cached!(DEADLINE_EVALUATION, "nq.deadline_evaluation.v1")
+        }
         "nq.execution_identity_binding.v2" => {
             cached!(BINDING, "nq.execution_identity_binding.v2")
         }
@@ -398,6 +414,12 @@ fn known_pattern_matches(pattern: &str, text: &str) -> bool {
                 && text.bytes().all(|byte| byte.is_ascii_digit())
                 && !text.is_empty()
         }
+        "^(0|[1-9][0-9]*)$" => {
+            text == "0"
+                || (!text.starts_with('0')
+                    && text.bytes().all(|byte| byte.is_ascii_digit())
+                    && !text.is_empty())
+        }
         "^[A-Za-z0-9._:/@+-]+$" => {
             !text.is_empty()
                 && text.bytes().all(|byte| {
@@ -497,7 +519,11 @@ mod tests {
                 known_pattern_matches(pattern, "a")
                     || matches!(
                         pattern,
-                        "^sha256:[0-9a-f]{64}$" | "^[1-9][0-9]*$" | "^(|/.*)$" | "^/"
+                        "^sha256:[0-9a-f]{64}$"
+                            | "^[1-9][0-9]*$"
+                            | "^(0|[1-9][0-9]*)$"
+                            | "^(|/.*)$"
+                            | "^/"
                     ),
                 "{path}: unsupported regex pattern {pattern}"
             );

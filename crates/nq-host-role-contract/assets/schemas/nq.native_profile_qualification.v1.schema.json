@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.native_profile_qualification.v1.schema.json",
+  "title": "nq.native_profile_qualification.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "qualification_id",
+    "namespace",
+    "cohort",
+    "cohort_generation",
+    "cohort_semantics_digest",
+    "production_profile",
+    "production_question",
+    "production_build",
+    "native_profile",
+    "native_evaluator",
+    "qualification_evidence",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.native_profile_qualification.v1"
+    },
+    "qualification_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "namespace": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/namespaceSnapshot"
+    },
+    "cohort": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/staticCohortIdentityReference"
+    },
+    "cohort_generation": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/generation"
+    },
+    "cohort_semantics_digest": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "production_profile": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/diagnosticProfileIdentityReference"
+    },
+    "production_question": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/diagnosticQuestionIdentityReference"
+    },
+    "production_build": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/buildIdentityReference"
+    },
+    "native_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "descriptor_schema",
+        "profile_id",
+        "profile_version",
+        "descriptor_digest",
+        "semantic_identity_schema",
+        "semantic_identity_digest",
+        "evaluator_source_digest",
+        "helper_protocol_version",
+        "detector_closure"
+      ],
+      "properties": {
+        "descriptor_schema": {
+          "const": "nq.profile_descriptor.v1"
+        },
+        "profile_id": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        },
+        "profile_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "descriptor_digest": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "semantic_identity_schema": {
+          "const": "nq.profile_semantic_id.v1"
+        },
+        "semantic_identity_digest": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "evaluator_source_digest": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "helper_protocol_version": {
+          "const": "nq.helper.v1"
+        },
+        "detector_closure": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema",
+            "identity_digest",
+            "detector_count"
+          ],
+          "properties": {
+            "schema": {
+              "const": "nq.detector_closure.v1"
+            },
+            "identity_digest": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+            },
+            "detector_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          }
+        }
+      }
+    },
+    "native_evaluator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_digest",
+        "artifact_identity_method",
+        "target_triple"
+      ],
+      "properties": {
+        "artifact_digest": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "artifact_identity_method": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        },
+        "target_triple": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        }
+      }
+    },
+    "qualification_evidence": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+      }
+    },
+    "nonclaims": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nonclaims"
+    }
+  }
+}

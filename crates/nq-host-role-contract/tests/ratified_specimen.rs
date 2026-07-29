@@ -190,7 +190,14 @@ fn relink_value(
 #[test]
 fn all_ratified_schema_assets_are_embedded_and_all_carriers_parse() {
     let manifest = verified_package_manifest().expect("exact pinned schema assets");
-    assert_eq!(manifest.assets.len(), RuntimeSchema::ALL.len() + 1);
+    assert_eq!(
+        manifest.assets.len(),
+        RuntimeSchema::ALL
+            .iter()
+            .filter(|schema| !schema.is_native_correspondence())
+            .count()
+            + 1
+    );
 
     let (values, _, _) = specimen();
     let observed = values
@@ -201,6 +208,7 @@ fn all_ratified_schema_assets_are_embedded_and_all_carriers_parse() {
         observed,
         RuntimeSchema::ALL
             .iter()
+            .filter(|schema| !schema.is_native_correspondence())
             .map(|schema| schema.as_str())
             .collect()
     );
@@ -211,6 +219,22 @@ fn complete_ratified_specimen_passes_closed_graph_validation() {
     let (_, records, context) = specimen();
     assert_eq!(records.len(), 50);
     records.validate(&context).expect("ratified closed graph");
+}
+
+#[test]
+fn frozen_generic_external_prechecks_validate_but_cannot_mint_native_correspondence() {
+    let (values, records, context) = specimen();
+    records
+        .validate(&context)
+        .expect("generic external prechecks remain valid");
+    let launch =
+        ValidatedRuntimeRecord::validate_value(values["execution_launch"].clone()).expect("launch");
+    assert!(matches!(
+        records.select_launch_correspondence(&launch.exact_reference()),
+        Err(ContractError::InvocationJoin(
+            "launch correspondence requires exactly one applicable profile qualifier"
+        ))
+    ));
 }
 
 #[test]

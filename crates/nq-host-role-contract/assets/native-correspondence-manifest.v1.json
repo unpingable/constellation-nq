@@ -1,0 +1,33 @@
+{
+  "schema": "nq.host_role_contract_extension_package.v1",
+  "extension_identity": "nq.native_correspondence_carriers.v1",
+  "source_record": {
+    "repository": "skunkworks",
+    "path": "audits/nq-host-role-runtime-seam-v1/records/native-profile-clock-correspondence-design.md",
+    "sha256": "sha256:c2240ce831a45b0cc6f9dec2819a4def100196c0db2e4084155935a71dcc094a"
+  },
+  "digest_basis": "sha256 of exact embedded schema bytes",
+  "assets": [
+    {
+      "schema": "nq.native_profile_qualification.v1",
+      "source_path": "schemas/nq.native_profile_qualification.v1.schema.json",
+      "sha256": "sha256:0b68fc97e82e57f40ef315ed352bd36d2ed1fef818553125345f8c299c565fc5"
+    },
+    {
+      "schema": "nq.native_clock_qualification.v1",
+      "source_path": "schemas/nq.native_clock_qualification.v1.schema.json",
+      "sha256": "sha256:e68c3ab69104ba71557c71b6cfa336aa3b645e155a2de8bf01f59c79bcd83c9e"
+    },
+    {
+      "schema": "nq.deadline_evaluation.v1",
+      "source_path": "schemas/nq.deadline_evaluation.v1.schema.json",
+      "sha256": "sha256:c4a01a920d38860e5e85bc55bc66637005d0eb4f50740e3ebb92bb3977fdf5f8"
+    }
+  ],
+  "nonclaims": [
+    "correspondence carriers do not equate production and native identities",
+    "clock qualification establishes no finite UTC accuracy or cross-host coherence",
+    "deadline evaluation grants no invocation, reliance, authorization, or action",
+    "schema validation is not live-engine correspondence"
+  ]
+}

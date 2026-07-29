@@ -173,6 +173,82 @@ pub struct RuntimeRecordSet {
     records: BTreeMap<Sha256Digest, ValidatedRuntimeRecord>,
 }
 
+/// Opaque exact-record selection earned by one launch-correspondence query.
+///
+/// The private fields prevent callers from constructing a policy result by
+/// assembling plausible references. Accessors expose only the immutable
+/// records and production question needed by nq-core to reopen the exact
+/// correspondence closure. This is evidence selection, not invocation,
+/// reliance, authorization, recurrence, or action authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchCorrespondenceSelection {
+    launch: RecordRef,
+    outer_request: RecordRef,
+    activation: RecordRef,
+    cohort_manifest: RecordRef,
+    native_profile_qualification: RecordRef,
+    production_question: IdentityRef,
+    native_clock_qualification: RecordRef,
+    deadline_evaluation: RecordRef,
+    cohort_semantics_digest: Sha256Digest,
+}
+
+impl LaunchCorrespondenceSelection {
+    /// Returns the exact launch that selected this closure.
+    #[must_use]
+    pub const fn launch(&self) -> &RecordRef {
+        &self.launch
+    }
+
+    /// Returns the exact bounded outer request.
+    #[must_use]
+    pub const fn outer_request(&self) -> &RecordRef {
+        &self.outer_request
+    }
+
+    /// Returns the exact topology activation used by the launch.
+    #[must_use]
+    pub const fn activation(&self) -> &RecordRef {
+        &self.activation
+    }
+
+    /// Returns the exact static-cohort manifest.
+    #[must_use]
+    pub const fn cohort_manifest(&self) -> &RecordRef {
+        &self.cohort_manifest
+    }
+
+    /// Returns the exact native-profile qualification selected by the cohort.
+    #[must_use]
+    pub const fn native_profile_qualification(&self) -> &RecordRef {
+        &self.native_profile_qualification
+    }
+
+    /// Returns the exact bounded production question named by that qualifier.
+    #[must_use]
+    pub const fn production_question(&self) -> &IdentityRef {
+        &self.production_question
+    }
+
+    /// Returns the exact native-clock qualification selected by the cohort.
+    #[must_use]
+    pub const fn native_clock_qualification(&self) -> &RecordRef {
+        &self.native_clock_qualification
+    }
+
+    /// Returns the exact accepted deadline evaluation used by the launch.
+    #[must_use]
+    pub const fn deadline_evaluation(&self) -> &RecordRef {
+        &self.deadline_evaluation
+    }
+
+    /// Returns the canonical non-cyclic cohort-semantics commitment.
+    #[must_use]
+    pub const fn cohort_semantics_digest(&self) -> &Sha256Digest {
+        &self.cohort_semantics_digest
+    }
+}
+
 impl RuntimeRecordSet {
     /// Creates an empty record graph.
     #[must_use]
@@ -227,6 +303,508 @@ impl RuntimeRecordSet {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
+    }
+
+    /// Selects the unique typed native correspondence closure for one launch.
+    ///
+    /// Callers first validate the closed record graph with [`Self::validate`].
+    /// This query then reopens only the exact launch-local records needed by
+    /// nq-core. It does not consult a mutable current generation, infer a
+    /// question from a profile, accept an unreferenced qualifier, or
+    /// reinterpret native observations.
+    ///
+    /// The cohort points to each qualifier by an exact [`RecordRef`]. To avoid
+    /// an impossible circular Merkle commitment, each qualifier points back
+    /// with the exact cohort identity and generation plus a canonical
+    /// `cohort_semantics_digest`. That digest covers `namespace`, `cohort`,
+    /// `generation`, `effective_interval`, `members`, `compatible_builds`,
+    /// `protocol_store_compatibility`, and `nonclaims`. It deliberately
+    /// excludes the record-envelope fields `schema` and `manifest_id`, and the
+    /// cyclic `qualification_records` field.
+    ///
+    /// # Errors
+    ///
+    /// Refuses missing, substituted, duplicate, unreferenced, incompatible, or
+    /// stale-generation qualifiers; a profile or question outside the exact
+    /// cohort; a clock not qualified for the exact subject-platform relation;
+    /// and any deadline evaluation that does not reproduce the exact request
+    /// bounds and accepted launch values.
+    #[allow(clippy::too_many_lines)]
+    pub fn select_launch_correspondence(
+        &self,
+        launch_reference: &RecordRef,
+    ) -> Result<LaunchCorrespondenceSelection> {
+        let launch = self.exact_record(
+            launch_reference,
+            RuntimeSchema::ExecutionLaunchV1,
+            "launch correspondence launch absent or substituted",
+        )?;
+        let launch_value = launch.record().as_value();
+        let request_reference: RecordRef =
+            serde_json::from_value(launch_value["outer_request"].clone())?;
+        let request = self.exact_record(
+            &request_reference,
+            RuntimeSchema::DiagnosticInvocationRequestV1,
+            "launch correspondence request absent or substituted",
+        )?;
+        let request_value = request.record().as_value();
+        let activation_reference: RecordRef =
+            serde_json::from_value(launch_value["activation_snapshot"].clone())?;
+        let activation = self.exact_record(
+            &activation_reference,
+            RuntimeSchema::RuntimeActivationV1,
+            "launch correspondence activation absent or substituted",
+        )?;
+        let activation_value = activation.record().as_value();
+        let cohort_reference: RecordRef =
+            serde_json::from_value(activation_value["cohort_manifest"].clone())?;
+        let cohort = self.exact_record(
+            &cohort_reference,
+            RuntimeSchema::StaticProfileCohortManifestV1,
+            "launch correspondence cohort absent or substituted",
+        )?;
+        let cohort_value = cohort.record().as_value();
+
+        if activation_value["cohort_generation"] != cohort_value["generation"]
+            || activation_value["static_profile_cohort"] != cohort_value["cohort"]
+            || request_value["expected_binding"]["activation"]
+                != Value::from(activation_reference.clone())
+            || request_value["expected_binding"]["cohort_manifest"]
+                != Value::from(cohort_reference.clone())
+            || request_value["expected_binding"]["cohort_generation"] != cohort_value["generation"]
+        {
+            return Err(ContractError::InvocationJoin(
+                "launch correspondence cohort generation or request binding",
+            ));
+        }
+
+        let launch_profile: IdentityRef = serde_json::from_value(launch_value["profile"].clone())?;
+        let request_profile: IdentityRef =
+            serde_json::from_value(request_value["profile"].clone())?;
+        if launch_profile != request_profile
+            || identity_occurrences(cohort_value, &["members", "profiles"], &launch_profile)? != 1
+        {
+            return Err(ContractError::InvocationJoin(
+                "launch correspondence profile outside exact cohort",
+            ));
+        }
+
+        let cohort_identity: IdentityRef = serde_json::from_value(cohort_value["cohort"].clone())?;
+        let cohort_generation =
+            cohort_value["generation"]
+                .as_str()
+                .ok_or(ContractError::InvocationJoin(
+                    "launch correspondence cohort generation",
+                ))?;
+        let cohort_semantics_digest = static_cohort_semantics_digest(cohort_value)?;
+        let qualification_references = cohort_value["qualification_records"]
+            .as_array()
+            .ok_or(ContractError::InvocationJoin(
+                "launch correspondence qualification set",
+            ))?
+            .iter()
+            .cloned()
+            .map(serde_json::from_value::<RecordRef>)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let qualification_set = qualification_references
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+
+        self.reject_unreferenced_launch_qualifiers(
+            &qualification_set,
+            &cohort_identity,
+            cohort_generation,
+        )?;
+
+        let mut profile_candidates = Vec::new();
+        let mut clock_candidates = Vec::new();
+        let subject_platform = self.launch_subject_platform(activation_value, request_value)?;
+        let launch_clock: IdentityRef = serde_json::from_value(launch_value["clock"].clone())?;
+        let request_clock: IdentityRef =
+            serde_json::from_value(request_value["time_bounds"]["clock"].clone())?;
+        if launch_clock != request_clock {
+            return Err(ContractError::InvocationJoin(
+                "launch correspondence clock substituted request",
+            ));
+        }
+
+        for reference in &qualification_references {
+            match reference.schema.as_str() {
+                "nq.native_profile_qualification.v1" => {
+                    let qualification = self.exact_record(
+                        reference,
+                        RuntimeSchema::NativeProfileQualificationV1,
+                        "launch correspondence profile qualifier absent or substituted",
+                    )?;
+                    let value = qualification.record().as_value();
+                    require_qualifier_cohort(
+                        value,
+                        cohort_value,
+                        &cohort_identity,
+                        cohort_generation,
+                        &cohort_semantics_digest,
+                        "launch correspondence profile qualifier cohort",
+                    )?;
+                    let production_build: IdentityRef =
+                        serde_json::from_value(value["production_build"].clone())?;
+                    if identity_occurrences(
+                        cohort_value,
+                        &["compatible_builds"],
+                        &production_build,
+                    )? != 1
+                    {
+                        return Err(ContractError::InvocationJoin(
+                            "launch correspondence profile qualifier build",
+                        ));
+                    }
+                    let production_profile: IdentityRef =
+                        serde_json::from_value(value["production_profile"].clone())?;
+                    let production_question: IdentityRef =
+                        serde_json::from_value(value["production_question"].clone())?;
+                    if identity_occurrences(
+                        cohort_value,
+                        &["members", "profiles"],
+                        &production_profile,
+                    )? != 1
+                        || identity_occurrences(
+                            cohort_value,
+                            &["members", "questions"],
+                            &production_question,
+                        )? != 1
+                    {
+                        return Err(ContractError::InvocationJoin(
+                            "launch correspondence profile or question outside cohort",
+                        ));
+                    }
+                    if production_profile == launch_profile {
+                        profile_candidates
+                            .push((qualification.exact_reference(), production_question));
+                    }
+                }
+                "nq.native_clock_qualification.v1" => {
+                    let qualification = self.exact_record(
+                        reference,
+                        RuntimeSchema::NativeClockQualificationV1,
+                        "launch correspondence clock qualifier absent or substituted",
+                    )?;
+                    let value = qualification.record().as_value();
+                    require_qualifier_cohort(
+                        value,
+                        cohort_value,
+                        &cohort_identity,
+                        cohort_generation,
+                        &cohort_semantics_digest,
+                        "launch correspondence clock qualifier cohort",
+                    )?;
+                    let production_build: IdentityRef =
+                        serde_json::from_value(value["production_build"].clone())?;
+                    if identity_occurrences(
+                        cohort_value,
+                        &["compatible_builds"],
+                        &production_build,
+                    )? != 1
+                    {
+                        return Err(ContractError::InvocationJoin(
+                            "launch correspondence clock qualifier build",
+                        ));
+                    }
+                    let production_clock: IdentityRef =
+                        serde_json::from_value(value["production_clock"].clone())?;
+                    let platform: IdentityRef = serde_json::from_value(value["platform"].clone())?;
+                    if production_clock == launch_clock && platform == subject_platform {
+                        clock_candidates.push(qualification.exact_reference());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let [(profile_qualification, production_question)] = profile_candidates.as_slice() else {
+            return Err(ContractError::InvocationJoin(
+                "launch correspondence requires exactly one applicable profile qualifier",
+            ));
+        };
+        let [clock_qualification] = clock_candidates.as_slice() else {
+            return Err(ContractError::InvocationJoin(
+                "launch correspondence requires exactly one applicable clock qualifier",
+            ));
+        };
+
+        let deadline_reference: RecordRef =
+            serde_json::from_value(launch_value["prelaunch_checks"]["deadline"].clone())?;
+        let deadline = self.exact_record(
+            &deadline_reference,
+            RuntimeSchema::DeadlineEvaluationV1,
+            "launch correspondence deadline absent or substituted",
+        )?;
+        let deadline_value = deadline.record().as_value();
+        if deadline_value["outer_request"] != Value::from(request_reference.clone())
+            || deadline_value["activation"] != Value::from(activation_reference.clone())
+            || deadline_value["clock_qualification"] != Value::from(clock_qualification.clone())
+            || deadline_value["clock"] != request_value["time_bounds"]["clock"]
+            || deadline_value["request_bounds"]["not_before"]
+                != request_value["time_bounds"]["not_before"]
+            || deadline_value["request_bounds"]["deadline"]
+                != request_value["time_bounds"]["deadline"]
+            || deadline_value["request_bounds"]["maximum_execution_ms"]
+                != request_value["time_bounds"]["maximum_execution_ms"]
+            || deadline_value["decision"]["state"] != "accepted"
+            || deadline_value["decision"]["violations"]
+                .as_array()
+                .is_none_or(|violations| !violations.is_empty())
+            || deadline_value["derived"]["launched_at"] != launch_value["launched_at"]
+            || deadline_value["derived"]["attempt_deadline"] != launch_value["attempt_deadline"]
+            || launch_value["maximum_execution_ms"]
+                != request_value["time_bounds"]["maximum_execution_ms"]
+        {
+            return Err(ContractError::InvocationJoin(
+                "launch correspondence deadline does not reproduce exact launch",
+            ));
+        }
+
+        Ok(LaunchCorrespondenceSelection {
+            launch: launch.exact_reference(),
+            outer_request: request_reference,
+            activation: activation_reference,
+            cohort_manifest: cohort_reference,
+            native_profile_qualification: profile_qualification.clone(),
+            production_question: production_question.clone(),
+            native_clock_qualification: clock_qualification.clone(),
+            deadline_evaluation: deadline.exact_reference(),
+            cohort_semantics_digest,
+        })
+    }
+
+    /// Requires one exact launch to sit on unique, state-continuous node,
+    /// witness, and key lifecycle prefixes at its recorded launch instant.
+    ///
+    /// This is the launch-time lifecycle query needed by a native execution
+    /// engine after [`Self::validate`] has admitted the complete immutable
+    /// graph. It never consults a mutable "current" row. Later lifecycle
+    /// events remain history and cannot reinterpret the returned launch-time
+    /// judgment.
+    ///
+    /// In addition to exact predecessor closure, this requires:
+    ///
+    /// - one bootstrap-rooted host chain whose applicable head is `active`
+    ///   and produced the launch activation;
+    /// - one activation-rooted chain for each selected witness attachment,
+    ///   with an `active` applicable head that produced the launch activation;
+    /// - one activation-rooted chain for each node key generation, with no
+    ///   overlapping active-key interval and the launch activation's exact key
+    ///   as the sole active key at launch; and
+    /// - no draining or terminal decommission cut effective at or before the
+    ///   launch.
+    ///
+    /// This proves only lifecycle applicability for the recorded occurrence.
+    /// It grants no invocation, reliance, recurrence, or operational
+    /// authority.
+    ///
+    /// # Errors
+    ///
+    /// Refuses an unresolved or substituted launch, disconnected roots,
+    /// incomplete predecessor closure, forks, resurrection, ambiguous active
+    /// keys, inactive witnesses or keys, or an effective decommission fence.
+    #[allow(clippy::too_many_lines)]
+    pub fn require_effective_launch_lifecycle(&self, launch_reference: &RecordRef) -> Result<()> {
+        let launch = self
+            .get(&launch_reference.record_id)
+            .ok_or(ContractError::LifecycleJoin("execution launch absent"))?;
+        require_schema(launch, RuntimeSchema::ExecutionLaunchV1)?;
+        if launch.exact_reference() != *launch_reference {
+            return Err(ContractError::LifecycleJoin(
+                "execution launch reference substitution",
+            ));
+        }
+        let launch_value = launch.record().as_value();
+        let activation = self.resolve_field(launch_value, "activation_snapshot")?;
+        require_schema(activation, RuntimeSchema::RuntimeActivationV1)?;
+        let activation_reference = activation.exact_reference();
+        let activation_value = activation.record().as_value();
+        let node = &activation_value["node"];
+        let launched_at = timestamp(launch_value, "launched_at")?;
+
+        let host_events = self
+            .by_schema(RuntimeSchema::HostRoleLifecycleEventV1)
+            .filter(|record| record.record().as_value()["node"] == *node)
+            .collect::<Vec<_>>();
+        let host_chain = exact_lifecycle_chain(
+            host_events,
+            host_lifecycle_predecessor,
+            "host lifecycle root",
+            "host lifecycle disconnected predecessor",
+            "host lifecycle fork",
+        )?;
+        let host_root = host_chain
+            .first()
+            .ok_or(ContractError::LifecycleJoin("host lifecycle root"))?;
+        if host_root.record().as_value()["operation"] != "bootstrap"
+            || host_root.record().as_value()["from_state"] != "unbootstrapped"
+        {
+            return Err(ContractError::LifecycleJoin("host lifecycle root"));
+        }
+        let host_head = applicable_chain_head(&host_chain, launched_at).ok_or(
+            ContractError::LifecycleJoin("host lifecycle absent at launch"),
+        )?;
+        if host_head.record().as_value()["to_state"] != "active"
+            || !record_array_contains(
+                host_head.record().as_value(),
+                "result_records",
+                &activation_reference,
+            )?
+        {
+            return Err(ContractError::LifecycleJoin(
+                "host lifecycle inactive or activation-substituted at launch",
+            ));
+        }
+
+        for cut in self.by_schema(RuntimeSchema::DecommissionCutV1) {
+            let value = cut.record().as_value();
+            if value["node"] == *node && timestamp(value, "effective_at")? <= launched_at {
+                return Err(ContractError::LifecycleJoin(
+                    "decommission fence effective at launch",
+                ));
+            }
+        }
+
+        let selected = launch_value["selected_witness_attachments"]
+            .as_array()
+            .ok_or(ContractError::LifecycleJoin(
+                "launch witness selection absent",
+            ))?;
+        for selected_reference in selected {
+            let selected_reference: RecordRef = serde_json::from_value(selected_reference.clone())?;
+            let attachment =
+                self.get(&selected_reference.record_id)
+                    .ok_or(ContractError::LifecycleJoin(
+                        "selected witness attachment absent",
+                    ))?;
+            require_schema(attachment, RuntimeSchema::WitnessAttachmentV1)?;
+            if attachment.exact_reference() != selected_reference
+                || attachment.record().as_value()["node"] != *node
+            {
+                return Err(ContractError::LifecycleJoin(
+                    "selected witness attachment substitution",
+                ));
+            }
+            let witness_events = self
+                .by_schema(RuntimeSchema::WitnessLifecycleEventV1)
+                .filter(|event| {
+                    serde_json::from_value::<RecordRef>(
+                        event.record().as_value()["attachment"].clone(),
+                    )
+                    .is_ok_and(|reference| reference == selected_reference)
+                })
+                .collect::<Vec<_>>();
+            let witness_chain = exact_lifecycle_chain(
+                witness_events,
+                nullable_lifecycle_predecessor,
+                "witness lifecycle root",
+                "witness lifecycle disconnected predecessor",
+                "witness lifecycle fork",
+            )?;
+            let witness_root = witness_chain
+                .first()
+                .ok_or(ContractError::LifecycleJoin("witness lifecycle root"))?;
+            if witness_root.record().as_value()["operation"] != "activate"
+                || witness_root.record().as_value()["from_state"] != "admitted_inactive"
+            {
+                return Err(ContractError::LifecycleJoin("witness lifecycle root"));
+            }
+            let witness_head = applicable_chain_head(&witness_chain, launched_at).ok_or(
+                ContractError::LifecycleJoin("witness lifecycle absent at launch"),
+            )?;
+            if witness_head.record().as_value()["to_state"] != "active"
+                || !record_array_contains(
+                    witness_head.record().as_value(),
+                    "result_records",
+                    &activation_reference,
+                )?
+            {
+                return Err(ContractError::LifecycleJoin(
+                    "witness inactive or activation-substituted at launch",
+                ));
+            }
+        }
+
+        let activation_key: IdentityRef =
+            serde_json::from_value(activation_value["active_key"].clone())?;
+        let mut key_events = BTreeMap::<IdentityRef, Vec<&ValidatedRuntimeRecord>>::new();
+        for event in self.by_schema(RuntimeSchema::NodeKeyLifecycleEventV1) {
+            let value = event.record().as_value();
+            if value["node"] != *node {
+                continue;
+            }
+            let key: IdentityRef = serde_json::from_value(value["key"].clone())?;
+            key_events.entry(key).or_default().push(event);
+        }
+
+        let mut active_intervals = Vec::new();
+        let mut launch_active_keys = Vec::new();
+        let mut activation_key_head = None;
+        for (key, events) in key_events {
+            let chain = exact_lifecycle_chain(
+                events,
+                nullable_lifecycle_predecessor,
+                "key lifecycle root",
+                "key lifecycle disconnected predecessor",
+                "key lifecycle fork",
+            )?;
+            let root = chain
+                .first()
+                .ok_or(ContractError::LifecycleJoin("key lifecycle root"))?;
+            if root.record().as_value()["operation"] != "activate"
+                || root.record().as_value()["from_state"] != "pending"
+            {
+                return Err(ContractError::LifecycleJoin("key lifecycle root"));
+            }
+            let start = timestamp(root.record().as_value(), "occurred_at")?;
+            let end = chain
+                .get(1)
+                .map(|record| timestamp(record.record().as_value(), "occurred_at"))
+                .transpose()?;
+            if chain.len() > 2 {
+                return Err(ContractError::LifecycleJoin("key lifecycle resurrection"));
+            }
+            active_intervals.push((key.clone(), start, end));
+            if start <= launched_at && end.is_none_or(|terminal| launched_at < terminal) {
+                launch_active_keys.push(key.clone());
+            }
+            if key == activation_key {
+                activation_key_head = applicable_chain_head(&chain, launched_at);
+            }
+        }
+
+        for (index, (left_key, left_start, left_end)) in active_intervals.iter().enumerate() {
+            for (right_key, right_start, right_end) in &active_intervals[index + 1..] {
+                if left_key != right_key
+                    && left_end.is_none_or(|end| *right_start < end)
+                    && right_end.is_none_or(|end| *left_start < end)
+                {
+                    return Err(ContractError::LifecycleJoin(
+                        "node has overlapping active key generations",
+                    ));
+                }
+            }
+        }
+        if launch_active_keys.as_slice() != [activation_key.clone()] {
+            return Err(ContractError::LifecycleJoin(
+                "activation key is not uniquely active at launch",
+            ));
+        }
+        let activation_key_head = activation_key_head.ok_or(ContractError::LifecycleJoin(
+            "activation key lifecycle absent at launch",
+        ))?;
+        if activation_key_head.record().as_value()["to_state"] != "active"
+            || activation_key_head.record().as_value()["resulting_activation"]
+                != Value::from(activation_reference)
+        {
+            return Err(ContractError::LifecycleJoin(
+                "activation key inactive or activation-substituted at launch",
+            ));
+        }
+        Ok(())
     }
 
     /// Validates exact identity/reference closure, graph acyclicity, and the
@@ -799,7 +1377,79 @@ impl RuntimeRecordSet {
             }
         }
 
+        self.validate_lifecycle_chain_closure()?;
         self.validate_restore_and_decommission()
+    }
+
+    fn validate_lifecycle_chain_closure(&self) -> Result<()> {
+        let mut hosts = BTreeMap::<IdentityRef, Vec<&ValidatedRuntimeRecord>>::new();
+        for event in self.by_schema(RuntimeSchema::HostRoleLifecycleEventV1) {
+            let node: IdentityRef =
+                serde_json::from_value(event.record().as_value()["node"].clone())?;
+            hosts.entry(node).or_default().push(event);
+        }
+        for events in hosts.into_values() {
+            let chain = exact_lifecycle_chain(
+                events,
+                host_lifecycle_predecessor,
+                "host lifecycle root",
+                "host lifecycle disconnected predecessor",
+                "host lifecycle fork",
+            )?;
+            if chain
+                .first()
+                .is_none_or(|root| root.record().as_value()["operation"] != "bootstrap")
+            {
+                return Err(ContractError::LifecycleJoin("host lifecycle root"));
+            }
+        }
+
+        let mut witnesses = BTreeMap::<RecordRef, Vec<&ValidatedRuntimeRecord>>::new();
+        for event in self.by_schema(RuntimeSchema::WitnessLifecycleEventV1) {
+            let attachment: RecordRef =
+                serde_json::from_value(event.record().as_value()["attachment"].clone())?;
+            witnesses.entry(attachment).or_default().push(event);
+        }
+        for events in witnesses.into_values() {
+            let chain = exact_lifecycle_chain(
+                events,
+                nullable_lifecycle_predecessor,
+                "witness lifecycle root",
+                "witness lifecycle disconnected predecessor",
+                "witness lifecycle fork",
+            )?;
+            if chain
+                .first()
+                .is_none_or(|root| root.record().as_value()["operation"] != "activate")
+            {
+                return Err(ContractError::LifecycleJoin("witness lifecycle root"));
+            }
+        }
+
+        let mut keys = BTreeMap::<(IdentityRef, IdentityRef), Vec<&ValidatedRuntimeRecord>>::new();
+        for event in self.by_schema(RuntimeSchema::NodeKeyLifecycleEventV1) {
+            let value = event.record().as_value();
+            let node: IdentityRef = serde_json::from_value(value["node"].clone())?;
+            let key: IdentityRef = serde_json::from_value(value["key"].clone())?;
+            keys.entry((node, key)).or_default().push(event);
+        }
+        for events in keys.into_values() {
+            let chain = exact_lifecycle_chain(
+                events,
+                nullable_lifecycle_predecessor,
+                "key lifecycle root",
+                "key lifecycle disconnected predecessor",
+                "key lifecycle fork",
+            )?;
+            if chain
+                .first()
+                .is_none_or(|root| root.record().as_value()["operation"] != "activate")
+                || chain.len() > 2
+            {
+                return Err(ContractError::LifecycleJoin("key lifecycle root"));
+            }
+        }
+        Ok(())
     }
 
     fn validate_restore_and_decommission(&self) -> Result<()> {
@@ -2108,6 +2758,68 @@ impl RuntimeRecordSet {
         Ok(())
     }
 
+    fn exact_record(
+        &self,
+        reference: &RecordRef,
+        schema: RuntimeSchema,
+        error: &'static str,
+    ) -> Result<&ValidatedRuntimeRecord> {
+        let record = self
+            .records
+            .get(&reference.record_id)
+            .ok_or(ContractError::InvocationJoin(error))?;
+        if record.exact_reference() != *reference || record.schema() != schema {
+            return Err(ContractError::InvocationJoin(error));
+        }
+        Ok(record)
+    }
+
+    fn reject_unreferenced_launch_qualifiers(
+        &self,
+        referenced: &BTreeSet<RecordRef>,
+        cohort: &IdentityRef,
+        generation: &str,
+    ) -> Result<()> {
+        for record in self.records().filter(|record| {
+            matches!(
+                record.schema(),
+                RuntimeSchema::NativeProfileQualificationV1
+                    | RuntimeSchema::NativeClockQualificationV1
+            )
+        }) {
+            let value = record.record().as_value();
+            let candidate_cohort: IdentityRef = serde_json::from_value(value["cohort"].clone())?;
+            if candidate_cohort == *cohort
+                && value["cohort_generation"] == generation
+                && !referenced.contains(&record.exact_reference())
+            {
+                return Err(ContractError::InvocationJoin(
+                    "launch correspondence qualifier claims cohort without exact cohort reference",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn launch_subject_platform(&self, activation: &Value, request: &Value) -> Result<IdentityRef> {
+        let relation_reference: RecordRef =
+            serde_json::from_value(activation["relations"]["subject_platform"].clone())?;
+        let relation = self.exact_record(
+            &relation_reference,
+            RuntimeSchema::HostRoleRelationV1,
+            "launch correspondence subject-platform relation absent or substituted",
+        )?;
+        let value = relation.record().as_value();
+        if value["relation_kind"] != "subject_platform"
+            || value["left"] != request["target"]["subject"]
+        {
+            return Err(ContractError::InvocationJoin(
+                "launch correspondence subject-platform relation",
+            ));
+        }
+        serde_json::from_value(value["right"].clone()).map_err(ContractError::from)
+    }
+
     fn by_schema(&self, schema: RuntimeSchema) -> impl Iterator<Item = &ValidatedRuntimeRecord> {
         self.records()
             .filter(move |record| record.schema() == schema)
@@ -2137,6 +2849,85 @@ impl RuntimeRecordSet {
         }
         Ok(target)
     }
+}
+
+/// Computes the non-cyclic semantic body committed by native qualifiers.
+///
+/// The domain separator is not a cohort field. The body includes every
+/// verdict-relevant cohort field and excludes only the record envelope
+/// (`schema`, `manifest_id`) plus `qualification_records`, whose exact
+/// qualifier references would otherwise create a circular byte commitment.
+fn static_cohort_semantics_digest(cohort: &Value) -> Result<Sha256Digest> {
+    let object = cohort.as_object().ok_or(ContractError::InvocationJoin(
+        "launch correspondence cohort semantic body",
+    ))?;
+    let mut body = Map::new();
+    body.insert(
+        "semantic_schema".to_owned(),
+        Value::String("nq.static_profile_cohort_semantics.v1".to_owned()),
+    );
+    for field in [
+        "namespace",
+        "cohort",
+        "generation",
+        "effective_interval",
+        "members",
+        "compatible_builds",
+        "protocol_store_compatibility",
+        "nonclaims",
+    ] {
+        body.insert(
+            field.to_owned(),
+            object
+                .get(field)
+                .cloned()
+                .ok_or(ContractError::InvocationJoin(
+                    "launch correspondence cohort semantic field absent",
+                ))?,
+        );
+    }
+    semantic_digest(&Value::Object(body)).map_err(ContractError::from)
+}
+
+fn require_qualifier_cohort(
+    qualification: &Value,
+    cohort_value: &Value,
+    cohort: &IdentityRef,
+    generation: &str,
+    semantics_digest: &Sha256Digest,
+    error: &'static str,
+) -> Result<()> {
+    let claimed_cohort: IdentityRef = serde_json::from_value(qualification["cohort"].clone())?;
+    let claimed_digest: Sha256Digest =
+        serde_json::from_value(qualification["cohort_semantics_digest"].clone())?;
+    if claimed_cohort != *cohort
+        || qualification["cohort_generation"] != generation
+        || claimed_digest != *semantics_digest
+        || qualification["namespace"] != cohort_value["namespace"]
+    {
+        return Err(ContractError::InvocationJoin(error));
+    }
+    Ok(())
+}
+
+fn identity_occurrences(root: &Value, path: &[&str], expected: &IdentityRef) -> Result<usize> {
+    let mut current = root;
+    for segment in path {
+        current = current.get(*segment).ok_or(ContractError::InvocationJoin(
+            "launch correspondence identity set absent",
+        ))?;
+    }
+    let entries = current.as_array().ok_or(ContractError::InvocationJoin(
+        "launch correspondence identity set malformed",
+    ))?;
+    entries
+        .iter()
+        .map(|value| {
+            serde_json::from_value::<IdentityRef>(value.clone())
+                .map(|identity| usize::from(identity == *expected))
+                .map_err(ContractError::from)
+        })
+        .sum()
 }
 
 fn administrative_authority_field(schema: RuntimeSchema) -> Option<&'static str> {
@@ -2643,6 +3434,123 @@ fn validate_identity_descriptor(
     Ok(())
 }
 
+fn host_lifecycle_predecessor(record: &ValidatedRuntimeRecord) -> Result<Option<RecordRef>> {
+    let predecessors = record.record().as_value()["predecessor_events"]
+        .as_array()
+        .ok_or(ContractError::LifecycleJoin(
+            "host lifecycle predecessor set",
+        ))?;
+    match predecessors.as_slice() {
+        [] => Ok(None),
+        [predecessor] => Ok(Some(serde_json::from_value(predecessor.clone())?)),
+        _ => Err(ContractError::LifecycleJoin(
+            "host lifecycle predecessor multiplicity",
+        )),
+    }
+}
+
+fn nullable_lifecycle_predecessor(record: &ValidatedRuntimeRecord) -> Result<Option<RecordRef>> {
+    let value = &record.record().as_value()["predecessor_event"];
+    if value.is_null() {
+        Ok(None)
+    } else {
+        Ok(Some(serde_json::from_value(value.clone())?))
+    }
+}
+
+fn exact_lifecycle_chain<'a, F>(
+    records: Vec<&'a ValidatedRuntimeRecord>,
+    predecessor: F,
+    root_error: &'static str,
+    disconnected_error: &'static str,
+    fork_error: &'static str,
+) -> Result<Vec<&'a ValidatedRuntimeRecord>>
+where
+    F: Fn(&ValidatedRuntimeRecord) -> Result<Option<RecordRef>>,
+{
+    if records.is_empty() {
+        return Err(ContractError::LifecycleJoin(root_error));
+    }
+    let by_id = records
+        .iter()
+        .map(|record| (record.record_id().clone(), *record))
+        .collect::<BTreeMap<_, _>>();
+    let mut roots = Vec::new();
+    let mut successors = BTreeMap::<Sha256Digest, Sha256Digest>::new();
+    for record in records {
+        let Some(predecessor) = predecessor(record)? else {
+            roots.push(record.record_id().clone());
+            continue;
+        };
+        let predecessor_record = by_id
+            .get(&predecessor.record_id)
+            .ok_or(ContractError::LifecycleJoin(disconnected_error))?;
+        if predecessor_record.exact_reference() != predecessor
+            || predecessor_record.schema() != record.schema()
+            || predecessor_record.record().as_value()["to_state"]
+                != record.record().as_value()["from_state"]
+            || timestamp(predecessor_record.record().as_value(), "occurred_at")?
+                >= timestamp(record.record().as_value(), "occurred_at")?
+        {
+            return Err(ContractError::LifecycleJoin(disconnected_error));
+        }
+        if successors
+            .insert(predecessor.record_id, record.record_id().clone())
+            .is_some()
+        {
+            return Err(ContractError::LifecycleJoin(fork_error));
+        }
+    }
+    let [root] = roots.as_slice() else {
+        return Err(ContractError::LifecycleJoin(root_error));
+    };
+    let mut chain = Vec::with_capacity(by_id.len());
+    let mut visited = BTreeSet::new();
+    let mut current = root.clone();
+    loop {
+        if !visited.insert(current.clone()) {
+            return Err(ContractError::LifecycleJoin(disconnected_error));
+        }
+        let record = by_id
+            .get(&current)
+            .ok_or(ContractError::LifecycleJoin(disconnected_error))?;
+        chain.push(*record);
+        let Some(successor) = successors.get(&current) else {
+            break;
+        };
+        current.clone_from(successor);
+    }
+    if visited.len() != by_id.len() {
+        return Err(ContractError::LifecycleJoin(disconnected_error));
+    }
+    Ok(chain)
+}
+
+fn applicable_chain_head<'a>(
+    chain: &[&'a ValidatedRuntimeRecord],
+    at: chrono::DateTime<chrono::FixedOffset>,
+) -> Option<&'a ValidatedRuntimeRecord> {
+    chain
+        .iter()
+        .rev()
+        .find(|record| {
+            timestamp(record.record().as_value(), "occurred_at")
+                .is_ok_and(|occurred_at| occurred_at <= at)
+        })
+        .copied()
+}
+
+fn record_array_contains(
+    value: &Value,
+    field: &'static str,
+    reference: &RecordRef,
+) -> Result<bool> {
+    let items = value[field]
+        .as_array()
+        .ok_or(ContractError::LifecycleJoin("lifecycle result-record set"))?;
+    Ok(items.contains(&Value::from(reference.clone())))
+}
+
 fn require_reference_equal(
     source: &Value,
     field: &'static str,
@@ -2803,7 +3711,7 @@ mod tests {
     use super::{
         CONTRACT_SPECIMEN_IDENTITY_DESCRIPTOR_SCHEMA, ExecutionBindingSourceCorpus,
         PRODUCTION_IDENTITY_DESCRIPTOR_SCHEMA, RuntimeRecordSet, collect_carriers,
-        expected_administrative_shape,
+        expected_administrative_shape, static_cohort_semantics_digest,
     };
     use crate::{
         ContractError, ExternalRecordCatalog, IdentityCatalog, IdentityRef, RecordRef, Token,
@@ -2812,6 +3720,41 @@ mod tests {
 
     const RECORDS: &str = include_str!("../assets/host-role-runtime-records.v1.json");
     type DescriptorSources = Vec<(RecordRef, Vec<u8>)>;
+
+    #[test]
+    fn cohort_semantics_digest_covers_every_noncyclic_verdict_field() {
+        let cohort = fixture_values()["cohort_manifest"].clone();
+        let baseline = static_cohort_semantics_digest(&cohort).expect("baseline semantics");
+        let verdict_fields = [
+            "namespace",
+            "cohort",
+            "generation",
+            "effective_interval",
+            "members",
+            "compatible_builds",
+            "protocol_store_compatibility",
+            "nonclaims",
+        ];
+        for field in verdict_fields {
+            let mut changed = cohort.clone();
+            changed[field] = json!({"hostile_replacement": field});
+            assert_ne!(
+                static_cohort_semantics_digest(&changed).expect("changed semantics"),
+                baseline,
+                "{field} must remain load-bearing"
+            );
+        }
+
+        for excluded in ["schema", "manifest_id", "qualification_records"] {
+            let mut changed = cohort.clone();
+            changed[excluded] = json!({"excluded_envelope_or_cycle": excluded});
+            assert_eq!(
+                static_cohort_semantics_digest(&changed).expect("excluded field"),
+                baseline,
+                "{excluded} is deliberately outside the non-cyclic semantic body"
+            );
+        }
+    }
 
     #[test]
     fn every_ratified_administrative_operation_has_one_exact_shape_law() {
@@ -2925,6 +3868,67 @@ mod tests {
         records
             .validate_with_execution_binding_sources(&context, &sources)
             .expect("derived 3B successor has exact graph and source correspondence");
+    }
+
+    #[test]
+    fn exact_launch_lifecycle_query_uses_unique_historical_prefixes() {
+        let (values, records, context, sources) = source_complete_successor();
+        records
+            .validate_with_execution_binding_sources(&context, &sources)
+            .expect("source-complete graph");
+        let launch = ValidatedRuntimeRecord::validate_value(values["execution_launch"].clone())
+            .expect("execution launch");
+        records
+            .require_effective_launch_lifecycle(&launch.exact_reference())
+            .expect("unique active node, witness, and key prefixes at launch");
+    }
+
+    #[test]
+    fn disconnected_witness_root_cannot_mint_launch_activity() {
+        let (mut values, _) = source_complete_successor_values();
+        let mut disconnected = values["witness_event"].clone();
+        disconnected["event_id"] =
+            json!("sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        disconnected["occurred_at"] = json!("2026-07-28T22:00:31Z");
+        values.insert("disconnected_witness_root".to_owned(), disconnected);
+        let values: BTreeMap<String, Value> = source_qualification_slice(&values)
+            .into_iter()
+            .chain(std::iter::once((
+                "disconnected_witness_root".to_owned(),
+                values["disconnected_witness_root"].clone(),
+            )))
+            .collect();
+        let launch = ValidatedRuntimeRecord::validate_value(values["execution_launch"].clone())
+            .expect("execution launch");
+        let records = record_set(values);
+        assert!(matches!(
+            records.require_effective_launch_lifecycle(&launch.exact_reference()),
+            Err(ContractError::LifecycleJoin("witness lifecycle root"))
+        ));
+    }
+
+    #[test]
+    fn disconnected_key_root_cannot_mint_launch_authority() {
+        let (mut values, _) = source_complete_successor_values();
+        let mut disconnected = values["key_event"].clone();
+        disconnected["event_id"] =
+            json!("sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+        disconnected["occurred_at"] = json!("2026-07-28T22:00:01Z");
+        values.insert("disconnected_key_root".to_owned(), disconnected);
+        let values: BTreeMap<String, Value> = source_qualification_slice(&values)
+            .into_iter()
+            .chain(std::iter::once((
+                "disconnected_key_root".to_owned(),
+                values["disconnected_key_root"].clone(),
+            )))
+            .collect();
+        let launch = ValidatedRuntimeRecord::validate_value(values["execution_launch"].clone())
+            .expect("execution launch");
+        let records = record_set(values);
+        assert!(matches!(
+            records.require_effective_launch_lifecycle(&launch.exact_reference()),
+            Err(ContractError::LifecycleJoin("key lifecycle root"))
+        ));
     }
 
     #[test]

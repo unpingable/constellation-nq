@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.native_clock_qualification.v1.schema.json",
+  "title": "nq.native_clock_qualification.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "qualification_id",
+    "namespace",
+    "cohort",
+    "cohort_generation",
+    "cohort_semantics_digest",
+    "production_clock",
+    "production_build",
+    "platform",
+    "absolute_time",
+    "boottime",
+    "wall_to_monotonic_bridge",
+    "runner_watchdog",
+    "qualification_evidence",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.native_clock_qualification.v1"
+    },
+    "qualification_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "namespace": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/namespaceSnapshot"
+    },
+    "cohort": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/staticCohortIdentityReference"
+    },
+    "cohort_generation": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/generation"
+    },
+    "cohort_semantics_digest": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "production_clock": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/clockIdentityReference"
+    },
+    "production_build": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/buildIdentityReference"
+    },
+    "platform": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/platformIdentityReference"
+    },
+    "absolute_time": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "semantic_identity_digest",
+        "observation_method",
+        "clock_id",
+        "epoch",
+        "unit",
+        "accuracy_qualification"
+      ],
+      "properties": {
+        "semantic_identity_digest": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "observation_method": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        },
+        "clock_id": {
+          "const": "CLOCK_REALTIME"
+        },
+        "epoch": {
+          "const": "unix"
+        },
+        "unit": {
+          "const": "nanosecond"
+        },
+        "accuracy_qualification": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "const": "unqualified"
+            }
+          }
+        }
+      }
+    },
+    "boottime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "semantic_identity_digest",
+        "observation_method",
+        "clock_id",
+        "boot_epoch_binding_method",
+        "unit",
+        "suspend_semantics"
+      ],
+      "properties": {
+        "semantic_identity_digest": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "observation_method": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        },
+        "clock_id": {
+          "const": "CLOCK_BOOTTIME"
+        },
+        "boot_epoch_binding_method": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        },
+        "unit": {
+          "const": "nanosecond"
+        },
+        "suspend_semantics": {
+          "const": "includes_suspended_time"
+        }
+      }
+    },
+    "wall_to_monotonic_bridge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "semantic_identity_digest",
+        "method"
+      ],
+      "properties": {
+        "semantic_identity_digest": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "method": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        }
+      }
+    },
+    "runner_watchdog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "relation_to_governed_deadline"
+      ],
+      "properties": {
+        "method": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        },
+        "relation_to_governed_deadline": {
+          "const": "auxiliary_non_equivalent"
+        }
+      }
+    },
+    "qualification_evidence": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+      }
+    },
+    "nonclaims": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nonclaims"
+    }
+  }
+}
