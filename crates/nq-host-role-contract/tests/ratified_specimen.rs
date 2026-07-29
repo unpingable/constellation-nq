@@ -7,7 +7,7 @@ use nq_host_role_contract::{
     RecordRef, RuntimeRecordSet, RuntimeSchema, ValidatedRuntimeRecord, ValidationContext,
     verified_package_manifest,
 };
-use nq_protocol::{Sha256Digest, canonical_json_bytes};
+use nq_protocol::{Sha256Digest, canonical_json_bytes, semantic_digest, sha256_bytes};
 use serde_json::{Value, json};
 
 const RECORDS: &str = include_str!("../assets/host-role-runtime-records.v1.json");
@@ -118,6 +118,71 @@ fn graph_from(values: &[Value]) -> (RuntimeRecordSet, ValidationContext) {
             external_records,
         },
     )
+}
+
+fn relinked_graph(mut values: BTreeMap<String, Value>) -> (RuntimeRecordSet, ValidationContext) {
+    for _ in 0..=values.len() {
+        let references = values
+            .values()
+            .map(|value| {
+                let schema =
+                    RuntimeSchema::parse(value["schema"].as_str().expect("fixture record schema"))
+                        .expect("supported fixture schema");
+                let record_id = value[schema.record_id_field()]
+                    .as_str()
+                    .expect("fixture record identity")
+                    .to_owned();
+                let bytes = canonical_json_bytes(value).expect("canonical fixture value");
+                (
+                    record_id,
+                    (schema.as_str().to_owned(), sha256_bytes(&bytes).to_string()),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut changed = false;
+        for value in values.values_mut() {
+            relink_value(value, &references, &mut changed);
+        }
+        if !changed {
+            let all = values.values().cloned().collect::<Vec<_>>();
+            return graph_from(&all);
+        }
+    }
+    panic!("record-reference digest propagation did not converge");
+}
+
+fn relink_value(
+    value: &mut Value,
+    references: &BTreeMap<String, (String, String)>,
+    changed: &mut bool,
+) {
+    match value {
+        Value::Object(object) => {
+            let keys = object.keys().map(String::as_str).collect::<BTreeSet<_>>();
+            if keys == BTreeSet::from(["schema", "record_id", "bytes_digest"]) {
+                if let Some((schema, digest)) = object
+                    .get("record_id")
+                    .and_then(Value::as_str)
+                    .and_then(|id| references.get(id))
+                    && (object["schema"] != *schema || object["bytes_digest"] != *digest)
+                {
+                    object.insert("schema".to_owned(), Value::String(schema.clone()));
+                    object.insert("bytes_digest".to_owned(), Value::String(digest.clone()));
+                    *changed = true;
+                }
+                return;
+            }
+            for child in object.values_mut() {
+                relink_value(child, references, changed);
+            }
+        }
+        Value::Array(array) => {
+            for child in array {
+                relink_value(child, references, changed);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
 }
 
 #[test]
@@ -282,9 +347,74 @@ fn host_lifecycle_forks_are_refused_without_reinterpreting_the_predecessor() {
 
     let (records, context) = graph_from(&[bootstrap, enroll, fork]);
     let error = records.validate(&context).expect_err("lifecycle fork");
+    assert!(
+        matches!(
+            error,
+            ContractError::LifecycleJoin("host lifecycle fork")
+                | ContractError::AuthorizationJoin(
+                    "grant consumer set differs from authorized record set"
+                )
+                | ContractError::UnresolvedRecordReference(_)
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn schema_execution_rejects_null_authorization_binding_and_bad_interval() {
+    let (values, _, _) = specimen();
+    let mut authorization = values["invocation_authorization"].clone();
+    authorization["binding"] = Value::Null;
     assert!(matches!(
-        error,
-        ContractError::LifecycleJoin("host lifecycle fork")
+        ValidatedRuntimeRecord::validate_value(authorization),
+        Err(ContractError::ExpectedObject("authorization.binding")
+            | ContractError::SchemaValidation { .. })
+    ));
+
+    let mut role = values["role_manifest"].clone();
+    role["effective_interval"]["effective_until"] = json!("2026-07-28T21:59:59Z");
+    assert!(matches!(
+        ValidatedRuntimeRecord::validate_value(role),
+        Err(ContractError::InvalidEffectiveInterval)
+    ));
+}
+
+#[test]
+fn quarantined_restore_cannot_be_relabelled_as_completion() {
+    let (mut values, _, _) = specimen();
+    let authorization = values
+        .get_mut("restore_authorization")
+        .expect("restore authorization");
+    authorization["operation"] = json!("complete_restore");
+    authorization["binding"]["from_state"] = json!("recovery_quarantined");
+    authorization["binding"]["to_state"] = json!("enrolled_inactive");
+    let mut snapshot = authorization["binding"]
+        .as_object()
+        .expect("binding")
+        .clone();
+    snapshot.remove("input_snapshot_digest");
+    snapshot.insert("operation".to_owned(), authorization["operation"].clone());
+    authorization["binding"]["input_snapshot_digest"] =
+        serde_json::to_value(semantic_digest(&Value::Object(snapshot)).expect("snapshot digest"))
+            .expect("digest value");
+    let (records, context) = relinked_graph(values);
+    assert!(matches!(
+        records.validate(&context),
+        Err(ContractError::AuthorizationJoin(
+            "administrative operation did not close its exact record shape"
+                | "restore proof cannot complete from quarantine"
+        ))
+    ));
+}
+
+#[test]
+fn acknowledged_delivery_requires_receipt_evidence_at_schema_boundary() {
+    let (values, _, _) = specimen();
+    let mut delivery = values["delivery"].clone();
+    delivery["receiver_custody_receipt"] = Value::Null;
+    assert!(matches!(
+        ValidatedRuntimeRecord::validate_value(delivery),
+        Err(ContractError::SchemaValidation { .. })
     ));
 }
 

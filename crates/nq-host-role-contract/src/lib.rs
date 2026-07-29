@@ -13,6 +13,7 @@ mod assets;
 mod graph;
 mod identity;
 mod record;
+mod schema;
 
 pub use assets::{
     CONTRACT_SOURCE_COMMIT, CONTRACT_SOURCE_PATH, CONTRACT_SOURCE_TREE, ContractPackageManifest,
@@ -294,6 +295,14 @@ pub enum ContractError {
     /// Embedded manifest omitted one supported schema.
     #[error("missing schema asset {0}")]
     MissingSchemaAsset(String),
+    /// Exact embedded JSON Schema rejected a carrier.
+    #[error("embedded schema validation failed for {schema:?}: {detail}")]
+    SchemaValidation {
+        /// Carrier schema.
+        schema: RuntimeSchema,
+        /// Exact bounded failure location and constraint.
+        detail: String,
+    },
     /// Record identity was reused by different exact bytes.
     #[error("immutable record identity reused with different exact bytes")]
     DuplicateRecordIdentity,
@@ -315,6 +324,9 @@ pub enum ContractError {
     /// Request/decision/reservation/launch binding differed.
     #[error("bounded invocation chain substituted an exact dependency: {0}")]
     InvocationJoin(&'static str),
+    /// Administrative or diagnostic authorization did not close over its exact use.
+    #[error("operation authorization does not close over its exact consumer set: {0}")]
+    AuthorizationJoin(&'static str),
     /// Delivery dependency or state chain differed.
     #[error("delivery dependency chain mismatch: {0}")]
     DeliveryJoin(&'static str),

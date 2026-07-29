@@ -713,6 +713,7 @@ impl StrictRecord {
 
         validate_common_value(&value)?;
         validate_local_semantics(schema, object)?;
+        crate::schema::validate(schema, &value)?;
         Ok(Self {
             schema,
             value,

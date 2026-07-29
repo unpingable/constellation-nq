@@ -125,7 +125,7 @@ pub fn verified_package_manifest() -> Result<ContractPackageManifest> {
     Ok(manifest)
 }
 
-fn embedded_schema_bytes(schema: &str) -> Option<&'static [u8]> {
+pub(crate) fn embedded_schema_bytes(schema: &str) -> Option<&'static [u8]> {
     macro_rules! asset {
         ($name:literal) => {
             include_bytes!(concat!("../assets/schemas/", $name, ".schema.json")).as_slice()
