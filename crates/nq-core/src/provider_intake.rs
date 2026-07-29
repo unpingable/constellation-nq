@@ -19,11 +19,13 @@ use crate::admission::{
 };
 use crate::config::ResourceLimits;
 use crate::engine::{
-    ProtocolRejection, RunHardLimits, RunResourceOutcomeSchema, RunResourceOutcomeV1,
-    protocol_rejection,
+    JsonErrorCategory, ProtocolCanonicalizationFailure, ProtocolRejection,
+    ProtocolRejectionBoundary, ProtocolRejectionCode, ProtocolRejectionFailure,
+    ProtocolValidationFailure, RunHardLimits, RunResourceOutcomeSchema, RunResourceOutcomeV1,
+    StructuredJsonError, protocol_rejection,
 };
 use crate::identity::ExecutionIdentity;
-use crate::runner::{AcquisitionOutcome, RunCapture};
+use crate::runner::{AcquisitionOutcome, MAX_ACQUISITION_DETAIL_BYTES, RunCapture};
 
 /// Exact schema of an independently derived provider identity record.
 pub const PROVIDER_IDENTITY_SCHEMA: &str = "nq.provider_identity.v1";
@@ -33,6 +35,9 @@ pub const PROVIDER_INTAKE_SCHEMA: &str = "nq.provider_intake.v1";
 pub const PROVIDER_INTAKE_CONTEXT_SCHEMA: &str = "nq.provider_intake_context.v1";
 /// Semantic contract implemented by the first, local-helper provider.
 pub const LOCAL_HELPER_PROVIDER_SEMANTICS_SCHEMA: &str = nq_store::LOCAL_PROVIDER_SEMANTIC_SCHEMA;
+
+const MAX_JCS_STRING_BYTES_PER_INPUT_BYTE: usize = 6;
+const MAX_SAFE_JCS_INTEGER: u64 = 9_007_199_254_740_991;
 
 /// Closed provider-identity schema.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -677,6 +682,289 @@ impl ProviderIntakeRecordV1 {
     }
 }
 
+#[allow(clippy::struct_field_names)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ProviderIntakeCapacityBound {
+    pub canonical_record_bytes: u64,
+    pub raw_capture_bytes: u64,
+    pub stderr_hex_bytes: u64,
+    pub native_detail_bytes: u64,
+    pub interpretation_bytes: u64,
+}
+
+fn capacity_error(detail: impl Into<String>) -> ProviderIntakeError {
+    ProviderIntakeError::Capacity(detail.into())
+}
+
+fn checked_capacity_add(
+    left: usize,
+    right: usize,
+    label: &str,
+) -> Result<usize, ProviderIntakeError> {
+    left.checked_add(right)
+        .ok_or_else(|| capacity_error(format!("{label} addition overflowed")))
+}
+
+fn checked_capacity_multiply(
+    left: usize,
+    right: usize,
+    label: &str,
+) -> Result<usize, ProviderIntakeError> {
+    left.checked_mul(right)
+        .ok_or_else(|| capacity_error(format!("{label} multiplication overflowed")))
+}
+
+fn protocol_rejection_static_bound(
+    responsible_instance_id: &str,
+) -> Result<usize, ProviderIntakeError> {
+    let structured = || StructuredJsonError {
+        category: JsonErrorCategory::Data,
+        line: usize::try_from(MAX_SAFE_JCS_INTEGER).unwrap_or(usize::MAX),
+        column: usize::try_from(MAX_SAFE_JCS_INTEGER).unwrap_or(usize::MAX),
+        diagnostic: String::new(),
+    };
+    let canonical_serialization = || ProtocolCanonicalizationFailure::Serialization {
+        error: structured(),
+    };
+    let field = "report.observations[].observation_ordinal".to_owned();
+    let maximum_count = usize::try_from(MAX_SAFE_JCS_INTEGER).unwrap_or(usize::MAX);
+    let failures = vec![
+        ProtocolRejectionFailure::FrameTooLarge {
+            limit: maximum_count,
+            actual: maximum_count,
+        },
+        ProtocolRejectionFailure::InvalidFraming,
+        ProtocolRejectionFailure::InvalidJson {
+            error: structured(),
+        },
+        ProtocolRejectionFailure::Validation {
+            error: ProtocolValidationFailure::InvalidSchema {
+                document: "response".to_owned(),
+                expected: nq_protocol::HELPER_RESPONSE_SCHEMA.to_owned(),
+                actual: String::new(),
+            },
+        },
+        ProtocolRejectionFailure::Validation {
+            error: ProtocolValidationFailure::InvalidProtocolVersion {
+                expected: nq_protocol::HELPER_PROTOCOL_VERSION.to_owned(),
+                actual: String::new(),
+            },
+        },
+        ProtocolRejectionFailure::Validation {
+            error: ProtocolValidationFailure::InvalidField {
+                field: field.clone(),
+                reason: String::new(),
+            },
+        },
+        ProtocolRejectionFailure::Validation {
+            error: ProtocolValidationFailure::BoundExceeded {
+                field: field.clone(),
+                limit: maximum_count,
+                actual: maximum_count,
+            },
+        },
+        ProtocolRejectionFailure::Validation {
+            error: ProtocolValidationFailure::Duplicate {
+                field: field.clone(),
+                value: String::new(),
+            },
+        },
+        ProtocolRejectionFailure::Validation {
+            error: ProtocolValidationFailure::EchoMismatch {
+                field: field.clone(),
+            },
+        },
+        ProtocolRejectionFailure::Validation {
+            error: ProtocolValidationFailure::CapabilityEscape {
+                capability: nq_protocol::Capability::new("capacity-bound")
+                    .expect("fixed capability is valid"),
+            },
+        },
+        ProtocolRejectionFailure::Validation {
+            error: ProtocolValidationFailure::Canonicalization {
+                field,
+                source: canonical_serialization(),
+            },
+        },
+        ProtocolRejectionFailure::Canonicalization {
+            error: canonical_serialization(),
+        },
+        ProtocolRejectionFailure::Canonicalization {
+            error: ProtocolCanonicalizationFailure::UnsafeInteger {
+                value: String::new(),
+            },
+        },
+    ];
+    failures
+        .into_iter()
+        .map(|failure| {
+            nq_protocol::canonical_json_bytes(&ProviderResponseInterpretationV1::ProtocolRejected {
+                rejection: ProtocolRejection {
+                    responsible_instance_id: responsible_instance_id.to_owned(),
+                    boundary: ProtocolRejectionBoundary::Response,
+                    code: ProtocolRejectionCode::InvalidResponse,
+                    failure,
+                },
+            })
+            .map(|bytes| bytes.len())
+            .map_err(|error| capacity_error(error.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|lengths| lengths.into_iter().max().unwrap_or(0))
+}
+
+/// Compute a conservative pre-effect maximum for the exact canonical
+/// `ProviderIntakeRecordV1` that this request/provider pair can produce.
+///
+/// The exact request and independently verified provider identity form the
+/// fixed portion. The variable portion includes the full response bound, the
+/// worst RFC 8785 string escaping of one raw-derived rejection field, the
+/// runner's separately enforced dynamic-detail bound, and exact stderr hex
+/// expansion. The raw response bytes themselves remain a separate custody
+/// payload and are reported independently.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(crate) fn provider_intake_capacity_bound(
+    request: &HelperRequest,
+    provider: &VerifiedProvider,
+    limits: &ResourceLimits,
+    intake_id: &str,
+    attempt_id: &str,
+    run_id: &str,
+    origin_carrier: &str,
+    checkpoint_contract_digest: &Sha256Digest,
+) -> Result<ProviderIntakeCapacityBound, ProviderIntakeError> {
+    if request.bounds.max_response_bytes as usize != limits.max_response_bytes {
+        return Err(capacity_error(
+            "request and runner response bounds do not correspond exactly",
+        ));
+    }
+
+    let maximum_count = usize::try_from(MAX_SAFE_JCS_INTEGER).unwrap_or(usize::MAX);
+    let digest = nq_protocol::sha256_bytes(b"provider-intake-capacity-bound");
+    let idempotency_key = nq_store::provider_idempotency_key(
+        provider.identity().provider_admission_id.as_str(),
+        attempt_id,
+    )
+    .map_err(|error| capacity_error(error.to_string()))?;
+    let maximum_time = DateTime::<Utc>::MAX_UTC;
+    let unavailable = ProviderResponseInterpretationV1::NotAvailable;
+    let specimen = ProviderIntakeRecordV1 {
+        schema: ProviderIntakeSchema::V1,
+        intake_id: intake_id.to_owned(),
+        attempt_id: attempt_id.to_owned(),
+        idempotency_key,
+        run_id: run_id.to_owned(),
+        request_id: request.request_id.to_string(),
+        request: request.clone(),
+        provider: provider.identity().clone(),
+        origin_carrier: origin_carrier.to_owned(),
+        deadline_at: maximum_time,
+        request_digest: digest.clone(),
+        context_digest: digest.clone(),
+        checkpoint_contract_digest: checkpoint_contract_digest.clone(),
+        started_at: maximum_time,
+        finished_at: maximum_time,
+        received_at: maximum_time,
+        native_outcome: RunResourceOutcomeV1 {
+            schema: RunResourceOutcomeSchema::V1,
+            duration_ms: MAX_SAFE_JCS_INTEGER,
+            exit_code: Some(i32::MIN),
+            hard_limits: RunHardLimits {
+                address_space_bytes_per_process: MAX_SAFE_JCS_INTEGER,
+                cpu_seconds_per_process: MAX_SAFE_JCS_INTEGER,
+                processes_per_execution_uid: MAX_SAFE_JCS_INTEGER,
+                open_files_per_process: MAX_SAFE_JCS_INTEGER,
+                file_bytes_per_regular_file: MAX_SAFE_JCS_INTEGER,
+                core_bytes: MAX_SAFE_JCS_INTEGER,
+            },
+            stdout_bytes_retained: maximum_count,
+            stderr_bytes_retained: maximum_count,
+            stderr_hex: String::new(),
+            outcome: AcquisitionOutcome::IoFailed {
+                message: String::new(),
+            },
+        },
+        raw_length: maximum_count,
+        raw_sha256: digest,
+        provider_sequence: None,
+        interpretation: unavailable.clone(),
+    };
+    let fixed_record_bytes = nq_protocol::canonical_json_bytes(&specimen)
+        .map_err(|error| capacity_error(error.to_string()))?
+        .len();
+    let unavailable_bytes = nq_protocol::canonical_json_bytes(&unavailable)
+        .map_err(|error| capacity_error(error.to_string()))?
+        .len();
+
+    let validated_shell_bytes = nq_protocol::canonical_json_bytes(&serde_json::json!({
+        "response": null,
+        "state": "validated",
+    }))
+    .map_err(|error| capacity_error(error.to_string()))?
+    .len()
+    .checked_sub("null".len())
+    .ok_or_else(|| capacity_error("validated interpretation shell underflowed"))?;
+    let validated_bytes = checked_capacity_add(
+        validated_shell_bytes,
+        limits.max_response_bytes,
+        "validated response representation",
+    )?;
+
+    let rejection_static_bytes = protocol_rejection_static_bound(request.instance_id.as_str())?;
+    let rejection_raw_bytes = checked_capacity_multiply(
+        limits.max_response_bytes,
+        MAX_JCS_STRING_BYTES_PER_INPUT_BYTE,
+        "protocol rejection raw-derived field",
+    )?;
+    let rejection_detail_bytes = checked_capacity_multiply(
+        MAX_ACQUISITION_DETAIL_BYTES,
+        MAX_JCS_STRING_BYTES_PER_INPUT_BYTE,
+        "protocol rejection bounded detail",
+    )?;
+    let rejected_bytes = checked_capacity_add(
+        checked_capacity_add(
+            rejection_static_bytes,
+            rejection_raw_bytes,
+            "protocol rejection representation",
+        )?,
+        rejection_detail_bytes,
+        "protocol rejection representation",
+    )?;
+    let interpretation_bytes = unavailable_bytes.max(validated_bytes).max(rejected_bytes);
+
+    let stderr_hex_bytes = checked_capacity_multiply(
+        limits.max_stderr_bytes,
+        2,
+        "stderr hexadecimal representation",
+    )?;
+    let native_detail_bytes = checked_capacity_multiply(
+        MAX_ACQUISITION_DETAIL_BYTES,
+        MAX_JCS_STRING_BYTES_PER_INPUT_BYTE,
+        "native acquisition detail representation",
+    )?;
+    let without_unavailable = fixed_record_bytes
+        .checked_sub(unavailable_bytes)
+        .ok_or_else(|| capacity_error("provider-intake fixed representation underflowed"))?;
+    let canonical_record_bytes = [interpretation_bytes, stderr_hex_bytes, native_detail_bytes]
+        .into_iter()
+        .try_fold(without_unavailable, |total, addition| {
+            checked_capacity_add(total, addition, "provider-intake representation")
+        })?;
+
+    Ok(ProviderIntakeCapacityBound {
+        canonical_record_bytes: u64::try_from(canonical_record_bytes)
+            .map_err(|_| capacity_error("provider-intake bound exceeds u64"))?,
+        raw_capture_bytes: u64::try_from(limits.max_response_bytes)
+            .map_err(|_| capacity_error("raw response bound exceeds u64"))?,
+        stderr_hex_bytes: u64::try_from(stderr_hex_bytes)
+            .map_err(|_| capacity_error("stderr representation bound exceeds u64"))?,
+        native_detail_bytes: u64::try_from(native_detail_bytes)
+            .map_err(|_| capacity_error("native detail bound exceeds u64"))?,
+        interpretation_bytes: u64::try_from(interpretation_bytes)
+            .map_err(|_| capacity_error("interpretation bound exceeds u64"))?,
+    })
+}
+
 /// One sealed runtime intake: immutable typed metadata plus exact raw custody.
 /// This type has no `Deserialize`; decoding its record cannot manufacture the
 /// raw-byte association or a live provider authorization.
@@ -1061,6 +1349,9 @@ pub enum ProviderIntakeError {
     /// A canonical identity could not be derived.
     #[error("provider intake canonicalization failed: {0}")]
     Canonical(String),
+    /// A pre-effect canonical custody maximum could not be represented.
+    #[error("provider intake capacity bound failed: {0}")]
+    Capacity(String),
     /// Cross-field intake invariants did not hold.
     #[error("provider intake invariant failed: {0}")]
     Invariant(String),
@@ -1287,6 +1578,157 @@ mod tests {
             )
             .expect("canonical resource outcome"),
         }
+    }
+
+    fn fixture_capacity_bound(
+        request: &HelperRequest,
+        provider: &VerifiedProvider,
+        limits: &ResourceLimits,
+    ) -> Result<ProviderIntakeCapacityBound, ProviderIntakeError> {
+        provider_intake_capacity_bound(
+            request,
+            provider,
+            limits,
+            "intake-capacity-fixture",
+            "attempt-capacity-fixture",
+            "run-capacity-fixture",
+            "stdio",
+            &nq_protocol::sha256_bytes(b"capacity checkpoint contract"),
+        )
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn conservative_capacity_covers_raw_stderr_native_and_interpretation_surfaces() {
+        let request = request();
+        let mut limits = ResourceLimits {
+            max_response_bytes: request.bounds.max_response_bytes as usize,
+            ..ResourceLimits::default()
+        };
+        let provider = verified_provider();
+        let bound = fixture_capacity_bound(&request, &provider, &limits)
+            .expect("live request/provider shape has a finite bound");
+        assert_eq!(
+            bound.raw_capture_bytes,
+            u64::try_from(limits.max_response_bytes).expect("raw bound")
+        );
+        assert_eq!(
+            bound.stderr_hex_bytes,
+            u64::try_from(limits.max_stderr_bytes * 2).expect("stderr hex bound")
+        );
+        assert_eq!(
+            bound.native_detail_bytes,
+            u64::try_from(MAX_ACQUISITION_DETAIL_BYTES * MAX_JCS_STRING_BYTES_PER_INPUT_BYTE)
+                .expect("native detail bound")
+        );
+
+        let response = HelperResponse::report(
+            &request,
+            candidate_report(
+                &request,
+                "capacity-valid-response",
+                nq_protocol::sha256_bytes(b"capacity valid response"),
+                Vec::new(),
+            ),
+        );
+        let valid_raw = nq_protocol::encode_ndjson(&response).expect("valid response frame");
+        let valid = ProviderIntakeV1::from_capture(
+            attempt(request.clone(), "capacity-valid"),
+            capture(valid_raw.clone(), AcquisitionOutcome::Response),
+            &limits,
+        )
+        .expect("valid response intake");
+        let valid_record_bytes = nq_protocol::canonical_json_bytes(valid.record())
+            .expect("canonical valid intake")
+            .len();
+        assert!(
+            u64::try_from(valid_record_bytes).expect("valid intake length")
+                <= bound.canonical_record_bytes
+        );
+
+        let rejected_raw = br#"{"schema":"hostile","value":"\u0000"}"#.to_vec();
+        let rejected = ProviderIntakeV1::from_capture(
+            attempt(request.clone(), "capacity-rejected"),
+            capture(rejected_raw, AcquisitionOutcome::Response),
+            &limits,
+        )
+        .expect("protocol rejection intake");
+        assert!(matches!(
+            rejected.record().interpretation,
+            ProviderResponseInterpretationV1::ProtocolRejected { .. }
+        ));
+        let rejected_record_bytes = nq_protocol::canonical_json_bytes(rejected.record())
+            .expect("canonical rejected intake")
+            .len();
+        assert!(
+            u64::try_from(rejected_record_bytes).expect("rejected intake length")
+                <= bound.canonical_record_bytes
+        );
+
+        limits.max_stderr_bytes = 257;
+        let bound =
+            fixture_capacity_bound(&request, &provider, &limits).expect("stderr-adjusted bound");
+        let started_at = DateTime::parse_from_rfc3339("2026-07-20T12:00:00.000Z")
+            .expect("start time")
+            .with_timezone(&Utc);
+        let raw = vec![b'x'; limits.max_response_bytes];
+        let failed = ProviderIntakeV1::from_capture(
+            attempt(request, "capacity-native-failure"),
+            RunCapture {
+                started_at,
+                finished_at: started_at + Duration::milliseconds(1),
+                duration_ms: 1,
+                exit_code: None,
+                stdout: raw.clone(),
+                stderr: vec![0xff; limits.max_stderr_bytes],
+                outcome: AcquisitionOutcome::IoFailed {
+                    message: "\0".repeat(MAX_ACQUISITION_DETAIL_BYTES),
+                },
+            },
+            &limits,
+        )
+        .expect("bounded native failure intake");
+        let failed_record_bytes = nq_protocol::canonical_json_bytes(failed.record())
+            .expect("canonical failure intake")
+            .len();
+        assert!(
+            u64::try_from(failed_record_bytes).expect("failure intake length")
+                <= bound.canonical_record_bytes
+        );
+        let exact_carrier = nq_store::governed_acquisition_capacity_bound(
+            u64::try_from(failed_record_bytes).expect("record length"),
+            u64::try_from(raw.len()).expect("raw length"),
+        )
+        .expect("exact acquisition carrier");
+        let conservative_carrier = nq_store::governed_acquisition_capacity_bound(
+            bound.canonical_record_bytes,
+            bound.raw_capture_bytes,
+        )
+        .expect("conservative acquisition carrier");
+        assert!(exact_carrier <= conservative_carrier);
+    }
+
+    #[test]
+    fn capacity_bound_rejects_mismatch_and_checked_arithmetic_overflow() {
+        let request = request();
+        let provider = verified_provider();
+        let mismatched = ResourceLimits::default();
+        assert!(matches!(
+            fixture_capacity_bound(&request, &provider, &mismatched),
+            Err(ProviderIntakeError::Capacity(message))
+                if message.contains("do not correspond")
+        ));
+
+        let overflow = ResourceLimits {
+            max_response_bytes: request.bounds.max_response_bytes as usize,
+            max_stderr_bytes: usize::MAX,
+            ..ResourceLimits::default()
+        };
+        assert!(matches!(
+            fixture_capacity_bound(&request, &provider, &overflow),
+            Err(ProviderIntakeError::Capacity(message))
+                if message.contains("overflowed")
+        ));
     }
 
     #[test]

@@ -24,7 +24,8 @@ pub use assets::{
     verified_package_manifest,
 };
 pub use graph::{
-    ExecutionBindingSourceCorpus, ExternalRecordCatalog, RuntimeRecordSet, ValidationContext,
+    ExecutionBindingSourceCorpus, ExternalRecordCatalog, LaunchCorrespondenceSelection,
+    RuntimeRecordSet, ValidationContext,
 };
 pub use identity::{
     CatalogSnapshot, EffectiveInterval, Generation, IdentityCatalog, IdentityId, IdentityKey,

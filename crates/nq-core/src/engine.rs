@@ -9,12 +9,13 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
-#[cfg(test)]
 use nq_host_role_contract::{
-    IdentityKind, IdentityRef, RecordRef, RuntimeSchema, ValidatedRuntimeRecord,
+    IdentityKind, IdentityRef, LaunchCorrespondenceSelection, RecordRef, RuntimeSchema,
+    ValidatedRuntimeRecord,
 };
-#[cfg(test)]
-use nq_host_role_runtime::PreparedGovernedInvocation;
+use nq_host_role_runtime::{
+    ExternalDependencyAvailability, PreparedGovernedInvocation, RuntimeDependencies,
+};
 use nq_profiles::{
     DetectorInput, DetectorReport, DetectorState, EVALUATOR_SOURCE_DIGEST, EvidenceWatermark,
     ProfileModule, ProfileSemanticId, ReportInput as ProfileReportInput, ScopeGrant,
@@ -70,7 +71,8 @@ use crate::evaluator_identity::EvaluatorRuntimeIdentity;
 use crate::identity::{ExecutionIdentity, VerifiedLaunch};
 use crate::provider_intake::{
     ProviderAttempt, ProviderIntakeContextV1, ProviderIntakeError, ProviderIntakeRecordV1,
-    ProviderIntakeV1, ProviderResponseInterpretationV1, VerifiedProvider, interpret_response,
+    ProviderIntakeV1, ProviderKind, ProviderResponseInterpretationV1, VerifiedProvider,
+    interpret_response, provider_intake_capacity_bound,
 };
 use crate::public::{
     ComponentKind, ComponentStatus, ComponentStatusDetailV2, ComponentStatusDetailV3,
@@ -1887,26 +1889,60 @@ fn validate_diagnostic_production_identity(
     Ok(())
 }
 
-#[cfg(test)]
-fn governed_refusal(code: GovernedExecutionRefusalCode, detail: impl Into<String>) -> EngineError {
-    EngineError::GovernedExecutionRefused {
+#[allow(dead_code)]
+#[derive(Debug, Eq, PartialEq)]
+enum NativeGovernedPreEffectRefusalCode {
+    PreparedClosureInvalid,
+    OuterRequestSubstitution,
+    ProductionIdentitySubstitution,
+    TopologyNotActive,
+    NodeLifecycleAuthorityUnavailable,
+    WitnessLifecycleContinuityUnavailable,
+    ProfileIncompatible,
+    WitnessBindingMismatch,
+    ProviderAdmissionMismatch,
+    WatcherResolutionFailed,
+    ActiveAdmissionMismatch,
+    ProviderIdentityMismatch,
+    AccessSurfaceNotEmpty,
+    NativeBindingMismatch,
+    ProductionDescriptorCorrespondenceUnavailable,
+    NativeProfileCorrespondenceUnavailable,
+    NativeClockCorrespondenceUnavailable,
+    NativeCustodyCorrespondenceUnavailable,
+    NativeFinalCustodyCorrespondenceUnavailable,
+    DeadlineExpired,
+    LaunchQualificationFailed,
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+struct NativeGovernedPreEffectRefusal {
+    code: NativeGovernedPreEffectRefusalCode,
+    detail: String,
+}
+
+fn native_governed_refusal(
+    code: NativeGovernedPreEffectRefusalCode,
+    detail: impl Into<String>,
+) -> NativeGovernedPreEffectRefusal {
+    NativeGovernedPreEffectRefusal {
         code,
         detail: detail.into(),
     }
 }
 
-#[cfg(test)]
-fn governed_record<'a>(
+fn native_governed_record<'a>(
     prepared: &'a PreparedGovernedInvocation,
     reference: &RecordRef,
     expected_schema: RuntimeSchema,
-) -> Result<&'a ValidatedRuntimeRecord, EngineError> {
+) -> Result<&'a ValidatedRuntimeRecord, NativeGovernedPreEffectRefusal> {
     let record = prepared
         .prelaunch_records()
         .get(&reference.record_id)
         .ok_or_else(|| {
-            governed_refusal(
-                GovernedExecutionRefusalCode::PrelaunchRecordSubstitution,
+            native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::PreparedClosureInvalid,
                 format!(
                     "prepared invocation is missing {} {}",
                     expected_schema.as_str(),
@@ -1915,8 +1951,8 @@ fn governed_record<'a>(
             )
         })?;
     if record.schema() != expected_schema || record.exact_reference() != *reference {
-        return Err(governed_refusal(
-            GovernedExecutionRefusalCode::PrelaunchRecordSubstitution,
+        return Err(native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::PreparedClosureInvalid,
             format!(
                 "prepared invocation substituted exact {} {}",
                 expected_schema.as_str(),
@@ -1927,63 +1963,423 @@ fn governed_record<'a>(
     Ok(record)
 }
 
-#[cfg(test)]
-fn identity_ref_matches_semantic(
-    identity: &IdentityRef,
-    kind: IdentityKind,
-    expected: &SemanticIdentityV1,
-) -> bool {
-    identity.kind == kind
-        && identity.id.as_str() == expected.id
-        && identity.version.as_str() == expected.version
-        && identity.descriptor_digest == expected.digest
-}
-
-#[cfg(test)]
-fn native_execution_clock_identity() -> Result<SemanticIdentityV1, EngineError> {
-    semantic_identity(
-        "nq.local_linux_realtime",
-        "1",
-        &json!({
-            "schema": "nq.local_linux_realtime.v1",
-            "source": "CLOCK_REALTIME through chrono::Utc",
-            "relationship": "NQ bounds the local helper invocation; admitted source times must fall inside that interval",
-        }),
-    )
-}
-
-#[cfg(test)]
-fn validate_governed_clock_window(
+fn validate_governed_occurrence_window(
     request_clock: &IdentityRef,
     launch_clock: &IdentityRef,
     not_before: DateTime<Utc>,
     request_deadline: DateTime<Utc>,
     launched_at: DateTime<Utc>,
     attempt_deadline: DateTime<Utc>,
-    acquisition_boundary: DateTime<Utc>,
-) -> Result<(), EngineError> {
-    let native_clock = native_execution_clock_identity()?;
+) -> Result<(), NativeGovernedPreEffectRefusal> {
     if request_clock != launch_clock
-        || !identity_ref_matches_semantic(request_clock, IdentityKind::Clock, &native_clock)
+        || request_clock.kind != IdentityKind::Clock
         || not_before > launched_at
-        || launched_at > acquisition_boundary
-        || acquisition_boundary >= attempt_deadline
+        || launched_at >= attempt_deadline
         || attempt_deadline > request_deadline
     {
-        return Err(governed_refusal(
-            GovernedExecutionRefusalCode::ClockOrOccurrenceIncompatible,
-            "request and launch lack an applicable exact bridge to NQ's acquisition clock/window",
+        return Err(native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::DeadlineExpired,
+            "request and launch lack one exact production clock and ordered occurrence window",
         ));
     }
     Ok(())
 }
 
-#[cfg(test)]
+fn validate_native_profile_correspondence(
+    production_profile: &IdentityRef,
+    provider_admission: &RecordRef,
+    active_lock: &AdmissionLock,
+    compiled_profile: &'static dyn ProfileModule,
+) -> Result<(), NativeGovernedPreEffectRefusal> {
+    let compiled = compiled_profile.descriptor();
+    let compiled_digest = compiled.digest().map_err(|error| {
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeProfileCorrespondenceUnavailable,
+            error.to_string(),
+        )
+    })?;
+    if provider_admission.schema.as_str() != nq_store::LOCAL_PROVIDER_ADMISSION_SCHEMA
+        || production_profile.kind != IdentityKind::DiagnosticProfile
+        || production_profile.id.as_str() != active_lock.profile.id
+        || production_profile.version.as_str() != active_lock.profile.version.to_string()
+        || active_lock.profile.id != compiled.profile.id
+        || active_lock.profile.version != compiled.profile.version
+        || active_lock.profile.digest != compiled_digest.as_str()
+    {
+        return Err(native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeProfileCorrespondenceUnavailable,
+            "production profile Q, exact provider admission R, active R.profile, and compiled native profile S do not preserve one explicit id/version mapping with S's independent native descriptor digest",
+        ));
+    }
+    Ok(())
+}
+
+fn require_typed_profile_qualification(
+    prepared: &PreparedGovernedInvocation,
+    production_profile: &IdentityRef,
+    compiled_profile: &'static dyn ProfileModule,
+    evaluator: &EvaluatorRuntimeIdentity,
+) -> Result<LaunchCorrespondenceSelection, NativeGovernedPreEffectRefusal> {
+    let selection = prepared
+        .prelaunch_records()
+        .select_launch_correspondence(prepared.execution_launch())
+        .map_err(|error| {
+            native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::NativeProfileCorrespondenceUnavailable,
+                format!("typed launch correspondence refused: {error}"),
+            )
+        })?;
+    let qualifier = native_governed_record(
+        prepared,
+        selection.native_profile_qualification(),
+        RuntimeSchema::NativeProfileQualificationV1,
+    )?;
+    let value = qualifier.record().as_value();
+    let compiled = compiled_profile.descriptor();
+    let descriptor_digest = compiled.digest().map_err(|error| {
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeProfileCorrespondenceUnavailable,
+            error.to_string(),
+        )
+    })?;
+    let semantic = profile_semantic_id(compiled).map_err(|error| {
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeProfileCorrespondenceUnavailable,
+            error.to_string(),
+        )
+    })?;
+    let empty_detector_closure = nq_store::detector_suite_identity_digest(Vec::<String>::new())
+        .map_err(|error| {
+            native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::NativeProfileCorrespondenceUnavailable,
+                error.to_string(),
+            )
+        })?;
+    let expected_profile = serde_json::to_value(production_profile).map_err(|error| {
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeProfileCorrespondenceUnavailable,
+            error.to_string(),
+        )
+    })?;
+    let evaluator_source =
+        Sha256Digest::parse(EVALUATOR_SOURCE_DIGEST.to_owned()).map_err(|error| {
+            native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::NativeProfileCorrespondenceUnavailable,
+                error.to_string(),
+            )
+        })?;
+    if value["production_profile"] != expected_profile
+        || selection.production_question().kind != IdentityKind::DiagnosticQuestion
+        || value["production_question"]
+            != serde_json::to_value(selection.production_question()).map_err(|error| {
+                native_governed_refusal(
+                    NativeGovernedPreEffectRefusalCode::NativeProfileCorrespondenceUnavailable,
+                    error.to_string(),
+                )
+            })?
+        || value["native_profile"]["descriptor_schema"] != nq_profiles::PROFILE_DESCRIPTOR_SCHEMA
+        || value["native_profile"]["profile_id"] != compiled.profile.id
+        || value["native_profile"]["profile_version"] != u64::from(compiled.profile.version)
+        || value["native_profile"]["descriptor_digest"] != descriptor_digest.as_str()
+        || value["native_profile"]["semantic_identity_schema"]
+            != nq_profiles::PROFILE_SEMANTIC_ID_SCHEMA
+        || value["native_profile"]["semantic_identity_digest"] != semantic.as_str()
+        || value["native_profile"]["evaluator_source_digest"] != evaluator_source.as_str()
+        || value["native_profile"]["helper_protocol_version"]
+            != nq_protocol::HELPER_PROTOCOL_VERSION
+        || value["native_profile"]["detector_closure"]["schema"] != "nq.detector_closure.v1"
+        || value["native_profile"]["detector_closure"]["identity_digest"]
+            != empty_detector_closure.as_str()
+        || value["native_profile"]["detector_closure"]["detector_count"] != 0
+        || !compiled_profile.detectors().is_empty()
+        || value["native_evaluator"]["artifact_digest"] != evaluator.artifact_digest().as_str()
+        || value["native_evaluator"]["artifact_identity_method"]
+            != evaluator.artifact_identity_method()
+        || value["native_evaluator"]["target_triple"] != evaluator.target_triple()
+    {
+        return Err(native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeProfileCorrespondenceUnavailable,
+            "selected typed qualifier does not preserve the exact production question/profile, compiled zero-detector native profile semantics, or independently observed evaluator artifact",
+        ));
+    }
+    Ok(selection)
+}
+
+fn require_native_clock_correspondence(
+    prepared: &PreparedGovernedInvocation,
+    selection: &LaunchCorrespondenceSelection,
+    production_clock: &IdentityRef,
+) -> Result<StdDuration, NativeGovernedPreEffectRefusal> {
+    let qualifier = native_governed_record(
+        prepared,
+        selection.native_clock_qualification(),
+        RuntimeSchema::NativeClockQualificationV1,
+    )?;
+    let deadline = native_governed_record(
+        prepared,
+        selection.deadline_evaluation(),
+        RuntimeSchema::DeadlineEvaluationV1,
+    )?;
+    let provenance = prepared.native_deadline().ok_or_else(|| {
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeClockCorrespondenceUnavailable,
+            "generic or caller-supplied deadline records cannot acquire native clock provenance",
+        )
+    })?;
+    let qualifier_value = qualifier.record().as_value();
+    let deadline_value = deadline.record().as_value();
+    if provenance.clock_qualification() != selection.native_clock_qualification()
+        || provenance.evaluation() != selection.deadline_evaluation()
+        || qualifier_value["production_clock"]
+            != serde_json::to_value(production_clock).map_err(|error| {
+                native_governed_refusal(
+                    NativeGovernedPreEffectRefusalCode::NativeClockCorrespondenceUnavailable,
+                    error.to_string(),
+                )
+            })?
+        || qualifier_value["absolute_time"]["observation_method"]
+            != "clock_gettime-clock-realtime-v1"
+        || qualifier_value["absolute_time"]["clock_id"] != "CLOCK_REALTIME"
+        || qualifier_value["absolute_time"]["epoch"] != "unix"
+        || qualifier_value["absolute_time"]["unit"] != "nanosecond"
+        || qualifier_value["absolute_time"]["accuracy_qualification"]["status"] != "unqualified"
+        || qualifier_value["boottime"]["observation_method"] != "clock_gettime-clock-boottime-v1"
+        || qualifier_value["boottime"]["clock_id"] != "CLOCK_BOOTTIME"
+        || qualifier_value["boottime"]["boot_epoch_binding_method"] != "linux-boot-id-v1"
+        || qualifier_value["boottime"]["unit"] != "nanosecond"
+        || qualifier_value["boottime"]["suspend_semantics"] != "includes_suspended_time"
+        || qualifier_value["wall_to_monotonic_bridge"]["method"] != "realtime-boottime-bracket-v1"
+        || qualifier_value["runner_watchdog"]["method"] != "std-instant-v1"
+        || qualifier_value["runner_watchdog"]["relation_to_governed_deadline"]
+            != "auxiliary_non_equivalent"
+        || deadline_value["clock_qualification"]
+            != serde_json::to_value(selection.native_clock_qualification()).map_err(|error| {
+                native_governed_refusal(
+                    NativeGovernedPreEffectRefusalCode::NativeClockCorrespondenceUnavailable,
+                    error.to_string(),
+                )
+            })?
+        || deadline_value["decision"]["state"] != "accepted"
+        || !deadline_value["decision"]["violations"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+        || deadline_value["sample"]["boot_epoch"] != provenance.boot_epoch().as_str()
+        || deadline_value["sample"]["boottime_at_ns"].as_str()
+            != Some(&provenance.boottime_observed_ns().to_string())
+        || deadline_value["derived"]["boottime_expiry_ns"].as_str()
+            != Some(&provenance.boottime_expiry_ns().to_string())
+    {
+        return Err(native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeClockCorrespondenceUnavailable,
+            "selected typed clock/deadline carrier does not match the runtime-owned CLOCK_REALTIME/CLOCK_BOOTTIME/boot-id occurrence",
+        ));
+    }
+
+    let boot_bytes = fs::read("/proc/sys/kernel/random/boot_id").map_err(|error| {
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeClockCorrespondenceUnavailable,
+            format!("current Linux boot identity cannot be read: {error}"),
+        )
+    })?;
+    if nq_protocol::sha256_bytes(&boot_bytes) != *provenance.boot_epoch() {
+        return Err(native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeClockCorrespondenceUnavailable,
+            "current Linux boot epoch differs from the runtime-owned launch epoch",
+        ));
+    }
+    let observed = boottime_ns().map_err(|error| {
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeClockCorrespondenceUnavailable,
+            error.to_string(),
+        )
+    })?;
+    if observed < provenance.boottime_observed_ns() || observed >= provenance.boottime_expiry_ns() {
+        return Err(native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::DeadlineExpired,
+            "the exact runtime-owned CLOCK_BOOTTIME launch window is not currently open",
+        ));
+    }
+    Ok(StdDuration::from_nanos(
+        provenance.boottime_expiry_ns() - observed,
+    ))
+}
+
+fn require_effective_node_and_key_authority(
+    prepared: &PreparedGovernedInvocation,
+) -> Result<(), NativeGovernedPreEffectRefusal> {
+    prepared
+        .prelaunch_records()
+        .require_effective_launch_lifecycle(prepared.execution_launch())
+        .map_err(|error| {
+            native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::NodeLifecycleAuthorityUnavailable,
+                format!(
+                    "launch lacks one unique effective node/key/witness lifecycle prefix: {error}"
+                ),
+            )
+        })
+}
+
+fn require_native_custody_correspondence(
+    prepared: &PreparedGovernedInvocation,
+    watcher: &WatcherConfig,
+    request: &HelperRequest,
+    provider: &VerifiedProvider,
+    attempt: &NativeGovernedProviderAttemptPlan,
+) -> Result<(), NativeGovernedPreEffectRefusal> {
+    let reservation = prepared.custody_reservation_spec();
+    let dependency_bytes =
+        u64::try_from(prepared.dependency_custody_bytes().len()).map_err(|_| {
+            native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::NativeCustodyCorrespondenceUnavailable,
+                "exact dependency closure length exceeds native u64 capacity",
+            )
+        })?;
+    let provider_intake_bound = provider_intake_capacity_bound(
+        request,
+        provider,
+        &watcher.resources,
+        &attempt.intake_id,
+        &attempt.attempt_id,
+        &attempt.run_id,
+        &attempt.origin_carrier,
+        &attempt.checkpoint_contract_digest,
+    )
+    .map_err(|error| {
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeCustodyCorrespondenceUnavailable,
+            error.to_string(),
+        )
+    })?;
+    let acquisition_bound = nq_store::governed_acquisition_capacity_bound(
+        provider_intake_bound.canonical_record_bytes,
+        provider_intake_bound.raw_capture_bytes,
+    )
+    .map_err(|error| {
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeCustodyCorrespondenceUnavailable,
+            error.to_string(),
+        )
+    })?;
+    require_native_acquisition_partition_capacity(
+        reservation.dependency_closure_capacity_bytes,
+        reservation.raw_capacity_bytes,
+        dependency_bytes,
+        acquisition_bound,
+    )?;
+
+    Err(native_governed_refusal(
+        NativeGovernedPreEffectRefusalCode::NativeFinalCustodyCorrespondenceUnavailable,
+        format!(
+            "exact dependency closure ({dependency_bytes} <= {}) and conservative provider-intake acquisition carrier ({acquisition_bound} <= {}) fit their reserved partitions, but no ratified V2 terminal mapping yet bounds the final derivation/diagnostic/index closure within the reserved final partition ({} bytes); core refuses before acquisition rather than guessing",
+            reservation.dependency_closure_capacity_bytes,
+            reservation.raw_capacity_bytes,
+            reservation.final_capacity_bytes,
+        ),
+    ))
+}
+
+#[derive(Debug)]
+struct NativeGovernedProviderAttemptPlan {
+    intake_id: String,
+    attempt_id: String,
+    run_id: String,
+    origin_carrier: String,
+    checkpoint_contract_digest: Sha256Digest,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn native_governed_provider_attempt_plan(
+    prepared: &PreparedGovernedInvocation,
+    watcher: &WatcherConfig,
+    active_lock: &AdmissionLock,
+    admission_verification: &crate::admission::AdmissionVerification,
+    profile_digest: &str,
+    request: &HelperRequest,
+    provider: &VerifiedProvider,
+) -> Result<NativeGovernedProviderAttemptPlan, NativeGovernedPreEffectRefusal> {
+    let occurrence_id = |kind: &str| {
+        nq_protocol::semantic_digest(&json!({
+            "schema": "nq.governed_native_provider_occurrence.v1",
+            "kind": kind,
+            "outer_request_id": prepared.request_id(),
+            "execution_launch": prepared.execution_launch(),
+            "native_request_id": request.request_id,
+            "provider_admission_id": provider.identity().provider_admission_id,
+        }))
+        .map(Sha256Digest::into_string)
+        .map_err(|error| {
+            native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::NativeCustodyCorrespondenceUnavailable,
+                error.to_string(),
+            )
+        })
+    };
+    let checkpoint_contract_digest = checkpoint_contract_digest(
+        watcher,
+        active_lock,
+        &admission_verification.binding_digest,
+        profile_digest,
+    )
+    .and_then(|digest| {
+        Sha256Digest::parse(digest).map_err(|error| EngineError::Invariant(error.to_string()))
+    })
+    .map_err(|error| {
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeCustodyCorrespondenceUnavailable,
+            error.to_string(),
+        )
+    })?;
+    let plan = NativeGovernedProviderAttemptPlan {
+        intake_id: occurrence_id("provider_intake")?,
+        attempt_id: occurrence_id("provider_attempt")?,
+        run_id: occurrence_id("watcher_run")?,
+        origin_carrier: carrier_name(watcher.carrier).to_owned(),
+        checkpoint_contract_digest,
+    };
+    if plan.intake_id == plan.attempt_id
+        || plan.intake_id == plan.run_id
+        || plan.attempt_id == plan.run_id
+        || plan.attempt_id == request.request_id.as_str()
+    {
+        return Err(native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeCustodyCorrespondenceUnavailable,
+            "derived native provider occurrence identities are not pairwise distinct",
+        ));
+    }
+    Ok(plan)
+}
+
+fn require_native_acquisition_partition_capacity(
+    dependency_capacity_bytes: u64,
+    raw_capacity_bytes: u64,
+    dependency_bytes: u64,
+    acquisition_bytes: u64,
+) -> Result<(), NativeGovernedPreEffectRefusal> {
+    if dependency_bytes > dependency_capacity_bytes {
+        return Err(native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeCustodyCorrespondenceUnavailable,
+            format!(
+                "exact dependency closure requires {dependency_bytes} bytes but the reservation permits {dependency_capacity_bytes}"
+            ),
+        ));
+    }
+    if acquisition_bytes > raw_capacity_bytes {
+        return Err(native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeCustodyCorrespondenceUnavailable,
+            format!(
+                "conservative native provider-intake acquisition carrier requires {acquisition_bytes} bytes but the reservation permits {raw_capacity_bytes}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_exact_provider_admission(
     provider_admission_ref: &RecordRef,
     provider_admission: &nq_store::LocalProviderAdmissionRow,
     actual_provider_admission_id: &Sha256Digest,
-) -> Result<(), EngineError> {
+) -> Result<(), NativeGovernedPreEffectRefusal> {
     if actual_provider_admission_id.as_str() != provider_admission.provider_admission_id
         || provider_admission.contract_digest != provider_admission.provider_admission_id
         || nq_protocol::sha256_bytes(&provider_admission.contract_json).as_str()
@@ -1992,250 +2388,498 @@ fn validate_exact_provider_admission(
         || provider_admission_ref.record_id.as_str() != provider_admission.provider_admission_id
         || provider_admission_ref.bytes_digest.as_str() != provider_admission.contract_digest
     {
-        return Err(governed_refusal(
-            GovernedExecutionRefusalCode::ProviderAdmissionMismatch,
+        return Err(native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::ProviderAdmissionMismatch,
             "selected witness does not name the exact NQ-derived local-provider admission",
         ));
     }
     Ok(())
 }
 
-/// Apply the native NQ side of the governed-execution correspondence seam.
-///
-/// The host-role contract proves graph shape. This check separately binds that
-/// graph to the exact compiled profile, NQ clock, selected witness, and
-/// NQ-derived local-provider admission that would be used for the invocation.
-///
-/// This test-only precursor has no positive product path. It deliberately
-/// refuses after carrier matching because the ratified provider/build
-/// descriptor join is absent. It also does not yet close watcher instance,
-/// scope, capability, privilege, namespace, resource, command, and absolute
-/// deadline semantics; terminal custody must exist before any such refusal can
-/// consume a launched occurrence.
-#[allow(clippy::too_many_lines)]
-#[cfg(test)]
 #[allow(dead_code)]
-fn validate_governed_native_prelaunch(
-    prepared: &PreparedGovernedInvocation,
-    watcher: &WatcherConfig,
+struct NativeGovernedPreEffectCandidate {
+    watcher: WatcherConfig,
     profile: &'static dyn ProfileModule,
-    profile_digest: &str,
-    provider: &VerifiedProvider,
-    provider_admission: &nq_store::LocalProviderAdmissionRow,
-) -> Result<(), EngineError> {
-    let request = governed_record(
-        prepared,
-        prepared.outer_request(),
-        RuntimeSchema::DiagnosticInvocationRequestV1,
-    )?;
-    let launch = governed_record(
-        prepared,
-        prepared.execution_launch(),
-        RuntimeSchema::ExecutionLaunchV1,
-    )?;
-    let request_value = request.record().as_value();
-    let launch_value = launch.record().as_value();
-    if request_value["request_id"].as_str() != Some(prepared.request_id())
-        || launch_value["outer_request"]
-            != serde_json::to_value(prepared.outer_request())
-                .map_err(|error| EngineError::Canonical(error.to_string()))?
-    {
-        return Err(governed_refusal(
-            GovernedExecutionRefusalCode::OuterRequestSubstitution,
-            "outer request identity or exact launch occurrence differs from the consumed token",
-        ));
-    }
+    active_lock: AdmissionLock,
+    admission_verification: crate::admission::AdmissionVerification,
+    verified_launch: VerifiedLaunch,
+    verified_provider: VerifiedProvider,
+    provider_admission: nq_store::LocalProviderAdmissionRow,
+    selected_witness: RecordRef,
+    launch_correspondence: LaunchCorrespondenceSelection,
+    native_request: HelperRequest,
+    provider_attempt: NativeGovernedProviderAttemptPlan,
+    absolute_deadline: DateTime<Utc>,
+    remaining_budget: StdDuration,
+}
 
-    let production = prepared.production_identity();
-    let request_node: IdentityRef = serde_json::from_value(request_value["target"]["node"].clone())
-        .map_err(|error| {
-            governed_refusal(
-                GovernedExecutionRefusalCode::ProductionIdentitySubstitution,
-                error.to_string(),
-            )
-        })?;
-    let request_subject: IdentityRef =
-        serde_json::from_value(request_value["target"]["subject"].clone()).map_err(|error| {
-            governed_refusal(
-                GovernedExecutionRefusalCode::ProductionIdentitySubstitution,
-                error.to_string(),
-            )
-        })?;
-    let request_vantage: IdentityRef =
-        serde_json::from_value(request_value["target"]["vantage"].clone()).map_err(|error| {
-            governed_refusal(
-                GovernedExecutionRefusalCode::ProductionIdentitySubstitution,
-                error.to_string(),
-            )
-        })?;
-    if &request_node != production.node()
-        || &request_subject != production.subject()
-        || &request_vantage != production.vantage()
-        || watcher.subject != production.subject().id.as_str()
-    {
-        return Err(governed_refusal(
-            GovernedExecutionRefusalCode::ProductionIdentitySubstitution,
-            "request, watcher, and prepared node/subject/vantage do not identify one occurrence",
-        ));
-    }
+/// Private one-use carrier for the first native governed execution half.
+///
+/// This value is deliberately neither cloneable nor serializable. It owns the
+/// opaque runtime token and the retained executable descriptors, but it has no
+/// method that can spawn the provider. A later effectful half must consume it,
+/// recheck the absolute deadline, and terminalize every claimed occurrence.
+///
+/// No such half is wired here. In addition to the explicit profile/clock
+/// correspondence refusals below, `nq.conformance/v1` has zero detectors while
+/// the current V2 producer assumes exactly one. That is a separate later-slice
+/// blocker, not a reason to fabricate a diagnostic result in this seam.
+#[allow(dead_code)]
+struct NativeGovernedExecutionPlan {
+    prepared: PreparedGovernedInvocation,
+    candidate: NativeGovernedPreEffectCandidate,
+}
 
-    let requested_profile: IdentityRef = serde_json::from_value(request_value["profile"].clone())
-        .map_err(|error| {
-        governed_refusal(
-            GovernedExecutionRefusalCode::ProfileIncompatible,
-            error.to_string(),
+/// Total result of attempting to construct the private pre-effect plan.
+///
+/// Refusal retains the opaque prepared occurrence so a future finalizer can
+/// commit the exact refusal instead of stranding or rerunning the launch.
+#[allow(dead_code)]
+enum NativeGovernedPreEffectOutcome {
+    Ready(Box<NativeGovernedExecutionPlan>),
+    Refused {
+        prepared: Box<PreparedGovernedInvocation>,
+        refusal: NativeGovernedPreEffectRefusal,
+    },
+}
+
+fn native_timestamp(
+    value: &Value,
+    field: &str,
+) -> Result<DateTime<Utc>, NativeGovernedPreEffectRefusal> {
+    let encoded = value[field].as_str().ok_or_else(|| {
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::PreparedClosureInvalid,
+            format!("{field} is absent from the governed prelaunch"),
         )
     })?;
-    let expected_profile = SemanticIdentityV1 {
-        id: watcher.profile.id.clone(),
-        version: watcher.profile.version.to_string(),
-        digest: Sha256Digest::parse(profile_digest.to_owned())
-            .map_err(|error| EngineError::Token(error.to_string()))?,
-    };
-    if !identity_ref_matches_semantic(
-        &requested_profile,
-        IdentityKind::DiagnosticProfile,
-        &expected_profile,
-    ) || profile.descriptor().profile.id != watcher.profile.id
-        || profile.descriptor().profile.version != watcher.profile.version
-    {
-        return Err(governed_refusal(
-            GovernedExecutionRefusalCode::ProfileIncompatible,
-            "outer request profile is not the exact compiled NQ profile selected by the watcher",
+    DateTime::parse_from_rfc3339(encoded)
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|error| {
+            native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::PreparedClosureInvalid,
+                format!("{field} is not an RFC 3339 instant: {error}"),
+            )
+        })
+}
+
+fn validate_prepared_dependency_custody(
+    prepared: &PreparedGovernedInvocation,
+) -> Result<(), NativeGovernedPreEffectRefusal> {
+    let exact_dependency_bytes = prepared
+        .dependencies()
+        .custody()
+        .canonical_closure_bytes()
+        .map_err(|error| {
+            native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::PreparedClosureInvalid,
+                error.to_string(),
+            )
+        })?;
+    if exact_dependency_bytes != prepared.dependency_custody_bytes() {
+        return Err(native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::PreparedClosureInvalid,
+            "prepared dependency-generation bytes differ from the authenticated dependency object",
         ));
     }
+    Ok(())
+}
 
-    let request_clock: IdentityRef =
-        serde_json::from_value(request_value["time_bounds"]["clock"].clone()).map_err(|error| {
-            governed_refusal(
-                GovernedExecutionRefusalCode::ClockOrOccurrenceIncompatible,
-                error.to_string(),
-            )
-        })?;
-    let launch_clock: IdentityRef =
-        serde_json::from_value(launch_value["clock"].clone()).map_err(|error| {
-            governed_refusal(
-                GovernedExecutionRefusalCode::ClockOrOccurrenceIncompatible,
-                error.to_string(),
-            )
-        })?;
-    let not_before = parse_timestamp(
-        request_value["time_bounds"]["not_before"]
-            .as_str()
-            .ok_or_else(|| {
-                governed_refusal(
-                    GovernedExecutionRefusalCode::ClockOrOccurrenceIncompatible,
-                    "outer request has no not-before instant",
-                )
-            })?,
-    )?;
-    let request_deadline = parse_timestamp(
-        request_value["time_bounds"]["deadline"]
-            .as_str()
-            .ok_or_else(|| {
-                governed_refusal(
-                    GovernedExecutionRefusalCode::ClockOrOccurrenceIncompatible,
-                    "outer request has no deadline",
-                )
-            })?,
-    )?;
-    let launched_at = parse_timestamp(launch_value["launched_at"].as_str().ok_or_else(|| {
-        governed_refusal(
-            GovernedExecutionRefusalCode::ClockOrOccurrenceIncompatible,
-            "execution launch has no launch instant",
-        )
-    })?)?;
-    let attempt_deadline =
-        parse_timestamp(launch_value["attempt_deadline"].as_str().ok_or_else(|| {
-            governed_refusal(
-                GovernedExecutionRefusalCode::ClockOrOccurrenceIncompatible,
-                "execution launch has no attempt deadline",
-            )
-        })?)?;
-    validate_governed_clock_window(
-        &request_clock,
-        &launch_clock,
-        not_before,
-        request_deadline,
-        launched_at,
-        attempt_deadline,
-        Utc::now(),
-    )?;
-
-    let selected = launch_value["selected_witness_attachments"]
+fn selected_governed_witness<'a>(
+    prepared: &'a PreparedGovernedInvocation,
+    launch: &ValidatedRuntimeRecord,
+) -> Result<(RecordRef, &'a ValidatedRuntimeRecord), NativeGovernedPreEffectRefusal> {
+    let selected = launch.record().as_value()["selected_witness_attachments"]
         .as_array()
         .ok_or_else(|| {
-            governed_refusal(
-                GovernedExecutionRefusalCode::WitnessBindingMismatch,
+            native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::WitnessBindingMismatch,
                 "execution launch has no closed witness selection",
             )
         })?;
     let [selected] = selected.as_slice() else {
-        return Err(governed_refusal(
-            GovernedExecutionRefusalCode::WitnessBindingMismatch,
-            "governed v2 execution requires exactly one selected witness",
+        return Err(native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::WitnessBindingMismatch,
+            "conformance execution requires exactly one selected witness",
         ));
     };
     let selected: RecordRef = serde_json::from_value(selected.clone()).map_err(|error| {
-        governed_refusal(
-            GovernedExecutionRefusalCode::WitnessBindingMismatch,
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::WitnessBindingMismatch,
             error.to_string(),
         )
     })?;
-    let witness = governed_record(prepared, &selected, RuntimeSchema::WitnessAttachmentV1)?;
-    let witness_value = witness.record().as_value();
-    if witness_value["node"]
-        != serde_json::to_value(production.node())
-            .map_err(|error| EngineError::Canonical(error.to_string()))?
-        || !witness_value["supported_profiles"]
-            .as_array()
-            .is_some_and(|profiles| profiles.contains(&request_value["profile"]))
-    {
-        return Err(governed_refusal(
-            GovernedExecutionRefusalCode::WitnessBindingMismatch,
-            "selected witness does not bind the prepared node and exact requested profile",
+    let witness = native_governed_record(prepared, &selected, RuntimeSchema::WitnessAttachmentV1)?;
+    Ok((selected, witness))
+}
+
+fn conformance_attachment_has_zero_access(
+    witness: &Value,
+) -> Result<(), NativeGovernedPreEffectRefusal> {
+    for field in ["privileges", "namespaces", "resources"] {
+        if !witness[field].as_array().is_some_and(Vec::is_empty) {
+            return Err(native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::AccessSurfaceNotEmpty,
+                format!("nq.conformance/v1 selected witness declares nonempty {field}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn exact_conformance_native_request(
+    watcher: &WatcherConfig,
+    profile: &'static dyn ProfileModule,
+    child_request_id: RequestId,
+    expires_at_ns: u64,
+) -> Result<HelperRequest, NativeGovernedPreEffectRefusal> {
+    let descriptor = profile.descriptor();
+    let profile_digest = descriptor.digest().map_err(|error| {
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::ProfileIncompatible,
+            error.to_string(),
+        )
+    })?;
+    let request = HelperRequest {
+        schema: nq_protocol::HELPER_REQUEST_SCHEMA.to_owned(),
+        protocol_version: nq_protocol::HELPER_PROTOCOL_VERSION.to_owned(),
+        request_id: child_request_id,
+        instance_id: InstanceId::new(watcher.instance_id.clone()).map_err(|error| {
+            native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::NativeBindingMismatch,
+                error.to_string(),
+            )
+        })?,
+        profile: ProfileBinding {
+            id: ProfileId::new(descriptor.profile.id.clone()).map_err(|error| {
+                native_governed_refusal(
+                    NativeGovernedPreEffectRefusalCode::ProfileIncompatible,
+                    error.to_string(),
+                )
+            })?,
+            version: ProfileVersion::new(descriptor.profile.version.to_string()).map_err(
+                |error| {
+                    native_governed_refusal(
+                        NativeGovernedPreEffectRefusalCode::ProfileIncompatible,
+                        error.to_string(),
+                    )
+                },
+            )?,
+            digest: Sha256Digest::parse(profile_digest.as_str().to_owned()).map_err(|error| {
+                native_governed_refusal(
+                    NativeGovernedPreEffectRefusalCode::ProfileIncompatible,
+                    error.to_string(),
+                )
+            })?,
+        },
+        binding: SubjectBinding {
+            subject: SubjectId::new(watcher.subject.clone()).map_err(|error| {
+                native_governed_refusal(
+                    NativeGovernedPreEffectRefusalCode::NativeBindingMismatch,
+                    error.to_string(),
+                )
+            })?,
+            scope: ScopeBinding {
+                kind: ScopeKind::new(watcher.scope.kind.clone()).map_err(|error| {
+                    native_governed_refusal(
+                        NativeGovernedPreEffectRefusalCode::NativeBindingMismatch,
+                        error.to_string(),
+                    )
+                })?,
+                value: watcher.scope.value.clone(),
+            },
+            vantage: VantageBinding {
+                kind: VantageKind::new(watcher.vantage.kind.clone()).map_err(|error| {
+                    native_governed_refusal(
+                        NativeGovernedPreEffectRefusalCode::NativeBindingMismatch,
+                        error.to_string(),
+                    )
+                })?,
+                value: watcher.vantage.value.clone(),
+            },
+        },
+        granted_capabilities: Vec::new(),
+        checkpoint: None,
+        deadline: MonotonicDeadline {
+            clock: MonotonicClock::LinuxBoottime,
+            expires_at_ns,
+        },
+        bounds: CollectionBounds {
+            max_response_bytes: u32::try_from(watcher.resources.max_response_bytes)
+                .unwrap_or(u32::MAX),
+            max_observations: u32::try_from(watcher.resources.max_observations)
+                .unwrap_or(u32::MAX)
+                .min(descriptor.limits.max_observations),
+            max_payload_bytes: descriptor.limits.max_payload_bytes,
+            max_coverage_entries: descriptor.limits.max_coverage_declarations,
+            max_report_errors: 128,
+            max_checkpoint_bytes: 65_536,
+        },
+    };
+    nq_protocol::validate_request(&request).map_err(|error| {
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeBindingMismatch,
+            error.to_string(),
+        )
+    })?;
+    let context = ValidationContext::from_request(&request, Utc::now(), Duration::seconds(60));
+    profile.validate_binding(&context).map_err(|refusal| {
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeBindingMismatch,
+            format!(
+                "native conformance subject/scope/nonce/vantage refused at {:?}/{:?}: {}",
+                refusal.boundary, refusal.code, refusal.message
+            ),
+        )
+    })?;
+    Ok(request)
+}
+
+fn native_child_request_id(
+    outer_request_id: &str,
+    execution_launch: &RecordRef,
+) -> Result<RequestId, NativeGovernedPreEffectRefusal> {
+    let digest = nq_protocol::semantic_digest(&json!({
+        "schema": "nq.governed_native_child_request.v1",
+        "outer_request_id": outer_request_id,
+        "execution_launch": execution_launch,
+    }))
+    .map_err(|error| {
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeBindingMismatch,
+            error.to_string(),
+        )
+    })?;
+    let suffix = digest.as_str().strip_prefix("sha256:").ok_or_else(|| {
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeBindingMismatch,
+            "derived child-request digest lacks its algorithm qualifier",
+        )
+    })?;
+    let child = RequestId::new(format!("nq-provider-{suffix}")).map_err(|error| {
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeBindingMismatch,
+            error.to_string(),
+        )
+    })?;
+    if child.as_str() == outer_request_id {
+        return Err(native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeBindingMismatch,
+            "native provider request identity collapsed into the outer diagnostic request identity",
         ));
     }
+    Ok(child)
+}
 
-    let provider_admission_ref: RecordRef =
-        serde_json::from_value(witness_value["provider_admission"].clone()).map_err(|error| {
-            governed_refusal(
-                GovernedExecutionRefusalCode::ProviderAdmissionMismatch,
-                error.to_string(),
-            )
-        })?;
-    validate_exact_provider_admission(
-        &provider_admission_ref,
-        provider_admission,
-        &provider.identity().provider_admission_id,
+const PRODUCTION_IDENTITY_DESCRIPTOR_SCHEMA: &str = "nq.production_identity_descriptor.v1";
+
+fn validate_descriptor_catalog_uniqueness(
+    identities: &[IdentityRef],
+    expected: &IdentityRef,
+    slot: &str,
+) -> Result<(), NativeGovernedPreEffectRefusal> {
+    let aliases = identities
+        .iter()
+        .filter(|identity| identity.descriptor_digest == expected.descriptor_digest)
+        .collect::<Vec<_>>();
+    if aliases.as_slice() != [expected] {
+        return Err(native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::ProductionDescriptorCorrespondenceUnavailable,
+            format!(
+                "{slot} descriptor digest resolves to {} production identity keys rather than one exact key",
+                aliases.len()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_production_identity_descriptor_bytes(
+    expected: &IdentityRef,
+    bytes: &[u8],
+    slot: &str,
+) -> Result<(), NativeGovernedPreEffectRefusal> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|error| {
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::ProductionDescriptorCorrespondenceUnavailable,
+            format!("{slot} descriptor is not JSON: {error}"),
+        )
+    })?;
+    let canonical = nq_protocol::canonical_json_bytes(&value).map_err(|error| {
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::ProductionDescriptorCorrespondenceUnavailable,
+            format!("{slot} descriptor cannot be canonicalized: {error}"),
+        )
+    })?;
+    let object = value.as_object().ok_or_else(|| {
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::ProductionDescriptorCorrespondenceUnavailable,
+            format!("{slot} descriptor is not an object"),
+        )
+    })?;
+    let keys = object.keys().map(String::as_str).collect::<BTreeSet<_>>();
+    let expected_kind = serde_json::to_value(expected.kind).map_err(|error| {
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::ProductionDescriptorCorrespondenceUnavailable,
+            format!("{slot} kind cannot be represented: {error}"),
+        )
+    })?;
+    if canonical != bytes
+        || nq_protocol::sha256_bytes(bytes) != expected.descriptor_digest
+        || keys != BTreeSet::from(["schema", "kind", "id", "version"])
+        || value["schema"] != PRODUCTION_IDENTITY_DESCRIPTOR_SCHEMA
+        || value["kind"] != expected_kind
+        || value["id"].as_str() != Some(expected.id.as_str())
+        || value["version"].as_str() != Some(expected.version.as_str())
+    {
+        return Err(native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::ProductionDescriptorCorrespondenceUnavailable,
+            format!("{slot} descriptor preimage is absent, aliased, or substituted"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_authenticated_production_descriptor(
+    dependencies: &RuntimeDependencies,
+    expected: &IdentityRef,
+    slot: &str,
+) -> Result<(), NativeGovernedPreEffectRefusal> {
+    validate_descriptor_catalog_uniqueness(
+        &dependencies.catalog_snapshot().identities,
+        expected,
+        slot,
     )?;
-    let declared_provider: IdentityRef = serde_json::from_value(witness_value["provider"].clone())
-        .map_err(|error| {
-            governed_refusal(
-                GovernedExecutionRefusalCode::ProviderAdmissionMismatch,
+    let sources = dependencies
+        .external_dependency_snapshot()
+        .dependencies
+        .iter()
+        .filter(|dependency| {
+            dependency.reference.schema.as_str() == PRODUCTION_IDENTITY_DESCRIPTOR_SCHEMA
+                && dependency.reference.bytes_digest == expected.descriptor_digest
+        })
+        .collect::<Vec<_>>();
+    let [source] = sources.as_slice() else {
+        return Err(native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::ProductionDescriptorCorrespondenceUnavailable,
+            format!(
+                "{slot} descriptor digest resolves to {} authenticated exact-byte sources rather than one",
+                sources.len()
+            ),
+        ));
+    };
+    if !matches!(
+        source.availability,
+        ExternalDependencyAvailability::Online | ExternalDependencyAvailability::ArchivedRetrieved
+    ) {
+        return Err(native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::ProductionDescriptorCorrespondenceUnavailable,
+            format!("{slot} descriptor bytes are committed but unavailable"),
+        ));
+    }
+    let encoded = source.exact_bytes_hex.as_deref().ok_or_else(|| {
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::ProductionDescriptorCorrespondenceUnavailable,
+            format!("{slot} authenticated descriptor has no exact bytes"),
+        )
+    })?;
+    let bytes = hex::decode(encoded).map_err(|error| {
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::ProductionDescriptorCorrespondenceUnavailable,
+            format!("{slot} descriptor bytes are not canonical hexadecimal: {error}"),
+        )
+    })?;
+    if hex::encode(&bytes) != encoded
+        || nq_protocol::sha256_bytes(&bytes) != source.reference.bytes_digest
+    {
+        return Err(native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::ProductionDescriptorCorrespondenceUnavailable,
+            format!("{slot} authenticated descriptor bytes were substituted"),
+        ));
+    }
+    validate_production_identity_descriptor_bytes(expected, &bytes, slot)
+}
+
+fn validate_production_activation_seam(
+    prepared: &PreparedGovernedInvocation,
+    launch: &ValidatedRuntimeRecord,
+    selected_witness: &RecordRef,
+    witness: &ValidatedRuntimeRecord,
+    subject: &IdentityRef,
+    vantage: &IdentityRef,
+) -> Result<(), NativeGovernedPreEffectRefusal> {
+    let launch_value = launch.record().as_value();
+    let activation_ref: RecordRef =
+        serde_json::from_value(launch_value["activation_snapshot"].clone()).map_err(|error| {
+            native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::ProductionIdentitySubstitution,
                 error.to_string(),
             )
         })?;
-    let declared_build: IdentityRef =
-        serde_json::from_value(witness_value["provider_build"].clone()).map_err(|error| {
-            governed_refusal(
-                GovernedExecutionRefusalCode::ProviderAdmissionMismatch,
-                error.to_string(),
-            )
-        })?;
-    Err(governed_refusal(
-        GovernedExecutionRefusalCode::ProviderAdmissionMismatch,
-        format!(
-            "exact provider-admission carrier {} matches NQ, but no ratified descriptor join maps attachment provider {}@{} and build {}@{} to native provider semantic identity {} and artifact {}",
-            provider_admission.provider_admission_id,
-            declared_provider.id,
-            declared_provider.version,
-            declared_build.id,
-            declared_build.version,
-            provider.identity().provider_semantic_id,
-            provider.identity().artifact_digest,
-        ),
-    ))
+    let activation = native_governed_record(
+        prepared,
+        &activation_ref,
+        RuntimeSchema::RuntimeActivationV1,
+    )?;
+    let activation_value = activation.record().as_value();
+    let relations = activation_value["relations"].as_object().ok_or_else(|| {
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::ProductionIdentitySubstitution,
+            "active production binding has no closed relation set",
+        )
+    })?;
+    for (field, expected) in [("node_subject", subject), ("node_vantage", vantage)] {
+        let relation_ref: RecordRef =
+            serde_json::from_value(relations.get(field).cloned().ok_or_else(|| {
+                native_governed_refusal(
+                    NativeGovernedPreEffectRefusalCode::ProductionIdentitySubstitution,
+                    format!("active production binding lacks {field}"),
+                )
+            })?)
+            .map_err(|error| {
+                native_governed_refusal(
+                    NativeGovernedPreEffectRefusalCode::ProductionIdentitySubstitution,
+                    error.to_string(),
+                )
+            })?;
+        let relation =
+            native_governed_record(prepared, &relation_ref, RuntimeSchema::HostRoleRelationV1)?;
+        if relation.record().as_value()["left"] != activation_value["node"]
+            || relation.record().as_value()["right"]
+                != serde_json::to_value(expected).map_err(|error| {
+                    native_governed_refusal(
+                        NativeGovernedPreEffectRefusalCode::ProductionIdentitySubstitution,
+                        error.to_string(),
+                    )
+                })?
+        {
+            return Err(native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::ProductionIdentitySubstitution,
+                format!("request target differs from exact active {field} relation"),
+            ));
+        }
+    }
+    let witness_value = witness.record().as_value();
+    let selected_witness_value = serde_json::to_value(selected_witness).map_err(|error| {
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::WitnessBindingMismatch,
+            error.to_string(),
+        )
+    })?;
+    if !activation_value["witness_attachments"]
+        .as_array()
+        .is_some_and(|attachments| attachments.contains(&selected_witness_value))
+        || witness_value["node"] != activation_value["node"]
+        || witness_value["role_manifest"] != activation_value["role_manifest"]
+    {
+        return Err(native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::WitnessBindingMismatch,
+            "selected witness is outside the exact active node/role topology",
+        ));
+    }
+    validate_authenticated_production_descriptor(prepared.dependencies(), subject, "subject")?;
+    validate_authenticated_production_descriptor(prepared.dependencies(), vantage, "vantage")
 }
 
 #[derive(Clone)]
@@ -2842,6 +3486,444 @@ impl CollectionEngine {
             &provider_admission,
         )
         .map_err(EngineError::from)
+    }
+
+    fn resolve_governed_conformance_watcher(
+        &self,
+        provider_admission_ref: &RecordRef,
+    ) -> Result<
+        (
+            WatcherConfig,
+            AdmissionLock,
+            nq_store::LocalProviderAdmissionRow,
+        ),
+        NativeGovernedPreEffectRefusal,
+    > {
+        let mut matching = Vec::new();
+        for watcher in &self.config.watchers {
+            let Some(lock) = self.authoritative_active_lock(watcher).map_err(|error| {
+                native_governed_refusal(
+                    NativeGovernedPreEffectRefusalCode::WatcherResolutionFailed,
+                    error.to_string(),
+                )
+            })?
+            else {
+                continue;
+            };
+            let Some(provider_admission) = self
+                .store
+                .provider_admission_for_source(&lock.admission_id)
+                .map_err(|error| {
+                    native_governed_refusal(
+                        NativeGovernedPreEffectRefusalCode::ProviderAdmissionMismatch,
+                        error.to_string(),
+                    )
+                })?
+            else {
+                continue;
+            };
+            if provider_admission_ref.schema.as_str() == nq_store::LOCAL_PROVIDER_ADMISSION_SCHEMA
+                && provider_admission_ref.record_id.as_str()
+                    == provider_admission.provider_admission_id
+                && provider_admission_ref.bytes_digest.as_str()
+                    == provider_admission.contract_digest
+            {
+                matching.push((watcher.clone(), lock, provider_admission));
+            }
+        }
+        let [matching] = matching.as_mut_slice() else {
+            return Err(native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::WatcherResolutionFailed,
+                format!(
+                    "selected provider admission {} resolves to {} active configured watchers",
+                    provider_admission_ref.record_id,
+                    matching.len()
+                ),
+            ));
+        };
+        Ok((matching.0.clone(), matching.1.clone(), matching.2.clone()))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn check_native_governed_pre_effects(
+        &self,
+        prepared: &PreparedGovernedInvocation,
+    ) -> Result<NativeGovernedPreEffectCandidate, NativeGovernedPreEffectRefusal> {
+        // `PreparedGovernedInvocation` is an opaque, non-deserializable token
+        // issued only after the runtime validates the complete graph against
+        // every checkpoint's historical dependency generation. Core must not
+        // revalidate that historical graph under only the current generation.
+        // It independently rechecks the exact selected native seam below.
+        validate_prepared_dependency_custody(prepared)?;
+        let request = native_governed_record(
+            prepared,
+            prepared.outer_request(),
+            RuntimeSchema::DiagnosticInvocationRequestV1,
+        )?;
+        let launch = native_governed_record(
+            prepared,
+            prepared.execution_launch(),
+            RuntimeSchema::ExecutionLaunchV1,
+        )?;
+        let request_value = request.record().as_value();
+        let launch_value = launch.record().as_value();
+        if request_value["request_id"].as_str() != Some(prepared.request_id())
+            || launch_value["outer_request"]
+                != serde_json::to_value(prepared.outer_request()).map_err(|error| {
+                    native_governed_refusal(
+                        NativeGovernedPreEffectRefusalCode::OuterRequestSubstitution,
+                        error.to_string(),
+                    )
+                })?
+        {
+            return Err(native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::OuterRequestSubstitution,
+                "outer request identity or exact launch occurrence differs from the opaque prepared token",
+            ));
+        }
+
+        let production = prepared.production_identity();
+        let request_node: IdentityRef =
+            serde_json::from_value(request_value["target"]["node"].clone()).map_err(|error| {
+                native_governed_refusal(
+                    NativeGovernedPreEffectRefusalCode::ProductionIdentitySubstitution,
+                    error.to_string(),
+                )
+            })?;
+        let request_subject: IdentityRef = serde_json::from_value(
+            request_value["target"]["subject"].clone(),
+        )
+        .map_err(|error| {
+            native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::ProductionIdentitySubstitution,
+                error.to_string(),
+            )
+        })?;
+        let request_vantage: IdentityRef = serde_json::from_value(
+            request_value["target"]["vantage"].clone(),
+        )
+        .map_err(|error| {
+            native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::ProductionIdentitySubstitution,
+                error.to_string(),
+            )
+        })?;
+        if &request_node != production.node()
+            || &request_subject != production.subject()
+            || &request_vantage != production.vantage()
+        {
+            return Err(native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::ProductionIdentitySubstitution,
+                "request and opaque prepared token do not bind one node/subject/vantage occurrence",
+            ));
+        }
+
+        let (selected_witness, witness) = selected_governed_witness(prepared, launch)?;
+        let witness_value = witness.record().as_value();
+        if witness_value["node"]
+            != serde_json::to_value(production.node()).map_err(|error| {
+                native_governed_refusal(
+                    NativeGovernedPreEffectRefusalCode::WitnessBindingMismatch,
+                    error.to_string(),
+                )
+            })?
+        {
+            return Err(native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::WitnessBindingMismatch,
+                "selected witness is not attached to the prepared node",
+            ));
+        }
+        validate_production_activation_seam(
+            prepared,
+            launch,
+            &selected_witness,
+            witness,
+            &request_subject,
+            &request_vantage,
+        )?;
+        require_effective_node_and_key_authority(prepared)?;
+
+        let launched_at = native_timestamp(launch_value, "launched_at")?;
+
+        let requested_profile: IdentityRef =
+            serde_json::from_value(request_value["profile"].clone()).map_err(|error| {
+                native_governed_refusal(
+                    NativeGovernedPreEffectRefusalCode::ProfileIncompatible,
+                    error.to_string(),
+                )
+            })?;
+        let profile: &'static dyn ProfileModule = &nq_profiles::conformance::MODULE;
+        let profile_digest = profile.descriptor().digest().map_err(|error| {
+            native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::ProfileIncompatible,
+                error.to_string(),
+            )
+        })?;
+        if requested_profile.kind != IdentityKind::DiagnosticProfile
+            || launch_value["profile"] != request_value["profile"]
+            || witness_value["supported_profiles"]
+                .as_array()
+                .is_none_or(|profiles: &Vec<Value>| {
+                    profiles.len() != 1 || profiles[0] != request_value["profile"]
+                })
+        {
+            return Err(native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::ProfileIncompatible,
+                "request, launch, selected witness, and compiled nq.conformance/v1 do not name one exact profile",
+            ));
+        }
+        validate_authenticated_production_descriptor(
+            prepared.dependencies(),
+            &requested_profile,
+            "diagnostic_profile",
+        )?;
+        conformance_attachment_has_zero_access(witness_value)?;
+
+        let declared_provider: IdentityRef =
+            serde_json::from_value(witness_value["provider"].clone()).map_err(|error| {
+                native_governed_refusal(
+                    NativeGovernedPreEffectRefusalCode::ProviderIdentityMismatch,
+                    error.to_string(),
+                )
+            })?;
+        let declared_build: IdentityRef =
+            serde_json::from_value(witness_value["provider_build"].clone()).map_err(|error| {
+                native_governed_refusal(
+                    NativeGovernedPreEffectRefusalCode::ProviderIdentityMismatch,
+                    error.to_string(),
+                )
+            })?;
+        validate_authenticated_production_descriptor(
+            prepared.dependencies(),
+            &declared_provider,
+            "provider",
+        )?;
+        validate_authenticated_production_descriptor(
+            prepared.dependencies(),
+            &declared_build,
+            "provider_build",
+        )?;
+
+        let provider_admission_ref: RecordRef = serde_json::from_value(
+            witness_value["provider_admission"].clone(),
+        )
+        .map_err(|error| {
+            native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::ProviderAdmissionMismatch,
+                error.to_string(),
+            )
+        })?;
+        let (watcher, active_lock, provider_admission) =
+            self.resolve_governed_conformance_watcher(&provider_admission_ref)?;
+        if watcher.profile.id != nq_profiles::conformance::PROFILE_ID
+            || watcher.profile.version != nq_profiles::conformance::PROFILE_VERSION
+            || watcher.carrier != Carrier::Stdio
+            || watcher.checkpoint_policy != CheckpointPolicy::Disabled
+            || !watcher.capability_ceiling.is_empty()
+            || !active_lock.granted_capabilities.is_empty()
+            || !profile.descriptor().capabilities.is_empty()
+        {
+            return Err(native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::AccessSurfaceNotEmpty,
+                "resolved conformance watcher/profile/lock has a mismatched profile, subject, carrier, checkpoint, or nonempty capability surface",
+            ));
+        }
+        validate_native_profile_correspondence(
+            &requested_profile,
+            &provider_admission_ref,
+            &active_lock,
+            profile,
+        )?;
+        let evaluator = self.require_evaluator_identity().map_err(|error| {
+            native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::NativeProfileCorrespondenceUnavailable,
+                error.to_string(),
+            )
+        })?;
+        let launch_correspondence =
+            require_typed_profile_qualification(prepared, &requested_profile, profile, evaluator)?;
+
+        let maximum_execution_ms =
+            launch_value["maximum_execution_ms"]
+                .as_u64()
+                .ok_or_else(|| {
+                    native_governed_refusal(
+                        NativeGovernedPreEffectRefusalCode::DeadlineExpired,
+                        "launch maximum execution budget is absent",
+                    )
+                })?;
+        if maximum_execution_ms > watcher.invocation.deadline_ms {
+            return Err(native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::DeadlineExpired,
+                "outer launch execution budget broadens the exact admitted watcher maximum",
+            ));
+        }
+        let request_clock: IdentityRef = serde_json::from_value(
+            request_value["time_bounds"]["clock"].clone(),
+        )
+        .map_err(|error| {
+            native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::DeadlineExpired,
+                error.to_string(),
+            )
+        })?;
+        let launch_clock: IdentityRef = serde_json::from_value(launch_value["clock"].clone())
+            .map_err(|error| {
+                native_governed_refusal(
+                    NativeGovernedPreEffectRefusalCode::DeadlineExpired,
+                    error.to_string(),
+                )
+            })?;
+        validate_authenticated_production_descriptor(
+            prepared.dependencies(),
+            &request_clock,
+            "clock",
+        )?;
+        let remaining_budget =
+            require_native_clock_correspondence(prepared, &launch_correspondence, &request_clock)?;
+        let not_before = native_timestamp(&request_value["time_bounds"], "not_before")?;
+        let request_deadline = native_timestamp(&request_value["time_bounds"], "deadline")?;
+        let attempt_deadline = native_timestamp(launch_value, "attempt_deadline")?;
+        validate_governed_occurrence_window(
+            &request_clock,
+            &launch_clock,
+            not_before,
+            request_deadline,
+            launched_at,
+            attempt_deadline,
+        )?;
+        if remaining_budget > StdDuration::from_millis(maximum_execution_ms) {
+            return Err(native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::DeadlineExpired,
+                "runtime-owned remaining CLOCK_BOOTTIME window exceeds the exact launch maximum",
+            ));
+        }
+
+        let verified_launch =
+            VerifiedLaunch::open_expected(&watcher.command, &active_lock.execution).map_err(
+                |error| {
+                    native_governed_refusal(
+                        NativeGovernedPreEffectRefusalCode::LaunchQualificationFailed,
+                        error.to_string(),
+                    )
+                },
+            )?;
+        let admission_verification = self
+            .admission
+            .verify_opened_execution(
+                &watcher,
+                &active_lock,
+                profile_digest.as_str(),
+                nq_protocol::HELPER_PROTOCOL_VERSION,
+                verified_launch.identity(),
+            )
+            .map_err(|error| {
+                native_governed_refusal(
+                    NativeGovernedPreEffectRefusalCode::ActiveAdmissionMismatch,
+                    error.to_string(),
+                )
+            })?;
+        let verified_provider = self
+            .verified_local_provider(
+                profile,
+                &active_lock,
+                &admission_verification,
+                verified_launch.identity(),
+            )
+            .map_err(|error| {
+                native_governed_refusal(
+                    NativeGovernedPreEffectRefusalCode::ProviderIdentityMismatch,
+                    error.to_string(),
+                )
+            })?;
+        validate_exact_provider_admission(
+            &provider_admission_ref,
+            &provider_admission,
+            &verified_provider.identity().provider_admission_id,
+        )?;
+        let provider_identity = verified_provider.identity();
+        if declared_provider.kind != IdentityKind::Provider
+            || declared_build.kind != IdentityKind::Build
+            || provider_identity.kind != ProviderKind::LocalHelper
+        {
+            return Err(native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::ProviderIdentityMismatch,
+                "attachment provider/build kinds or NQ's independently derived provider kind are incompatible",
+            ));
+        }
+
+        let child_request_id =
+            native_child_request_id(prepared.request_id(), prepared.execution_launch())?;
+        let native_request = exact_conformance_native_request(
+            &watcher,
+            profile,
+            child_request_id,
+            prepared
+                .native_deadline()
+                .ok_or_else(|| {
+                    native_governed_refusal(
+                        NativeGovernedPreEffectRefusalCode::NativeClockCorrespondenceUnavailable,
+                        "runtime-owned native deadline provenance disappeared after qualification",
+                    )
+                })?
+                .boottime_expiry_ns(),
+        )?;
+        let provider_attempt = native_governed_provider_attempt_plan(
+            prepared,
+            &watcher,
+            &active_lock,
+            &admission_verification,
+            profile_digest.as_str(),
+            &native_request,
+            &verified_provider,
+        )?;
+        require_native_custody_correspondence(
+            prepared,
+            &watcher,
+            &native_request,
+            &verified_provider,
+            &provider_attempt,
+        )?;
+        Ok(NativeGovernedPreEffectCandidate {
+            watcher,
+            profile,
+            active_lock,
+            admission_verification,
+            verified_launch,
+            verified_provider,
+            provider_admission,
+            selected_witness,
+            launch_correspondence,
+            native_request,
+            provider_attempt,
+            absolute_deadline: attempt_deadline,
+            remaining_budget,
+        })
+    }
+
+    /// Private ownership transition from an opaque runtime occurrence into the
+    /// pre-effect execution plan.
+    ///
+    /// Every check borrows the token first. Only the positive branch moves it
+    /// into an execution plan; the negative branch retains it for exact
+    /// terminal refusal custody. This method exposes no provider-spawn path.
+    #[allow(dead_code)]
+    fn plan_native_governed_conformance(
+        &self,
+        prepared: PreparedGovernedInvocation,
+    ) -> NativeGovernedPreEffectOutcome {
+        match self.check_native_governed_pre_effects(&prepared) {
+            Ok(candidate) => {
+                NativeGovernedPreEffectOutcome::Ready(Box::new(NativeGovernedExecutionPlan {
+                    prepared,
+                    candidate,
+                }))
+            }
+            Err(refusal) => NativeGovernedPreEffectOutcome::Refused {
+                prepared: Box::new(prepared),
+                refusal,
+            },
+        }
     }
 
     /// Verify a historical admitted report (read-only; no re-evaluation).
@@ -7576,7 +8658,7 @@ fn structured_json_error(error: &serde_json::Error) -> StructuredJsonError {
         category,
         line: error.line(),
         column: error.column(),
-        diagnostic: error.to_string(),
+        diagnostic: crate::runner::bounded_acquisition_detail(error.to_string()),
     }
 }
 
@@ -7615,7 +8697,7 @@ fn protocol_validation_failure(error: nq_protocol::ValidationError) -> ProtocolV
         nq_protocol::ValidationError::InvalidField { field, reason } => {
             ProtocolValidationFailure::InvalidField {
                 field: field.to_owned(),
-                reason,
+                reason: crate::runner::bounded_acquisition_detail(reason),
             }
         }
         nq_protocol::ValidationError::BoundExceeded {
@@ -13611,32 +14693,36 @@ sys.stdout.write("\n")
     }
 
     #[test]
-    fn governed_clock_window_requires_one_exact_native_occurrence() {
-        let native_clock = native_execution_clock_identity().expect("native clock identity");
+    fn governed_occurrence_window_requires_one_exact_production_clock() {
+        let clock_descriptor = json!({
+            "schema": PRODUCTION_IDENTITY_DESCRIPTOR_SCHEMA,
+            "kind": "clock",
+            "id": "lab/clock-realtime",
+            "version": "1",
+        });
+        let clock_descriptor_bytes = nq_protocol::canonical_json_bytes(&clock_descriptor)
+            .expect("production clock descriptor");
         let clock = IdentityRef {
             kind: IdentityKind::Clock,
-            id: nq_host_role_contract::IdentityId::parse(native_clock.id.clone())
+            id: nq_host_role_contract::IdentityId::parse("lab/clock-realtime")
                 .expect("clock identity"),
-            version: nq_host_role_contract::IdentityVersion::parse(native_clock.version.clone())
-                .expect("clock version"),
-            descriptor_digest: native_clock.digest,
+            version: nq_host_role_contract::IdentityVersion::parse("1").expect("clock version"),
+            descriptor_digest: nq_protocol::sha256_bytes(&clock_descriptor_bytes),
         };
         let not_before = parse_timestamp("2026-07-29T12:00:00.000Z").expect("not before");
         let launched_at = parse_timestamp("2026-07-29T12:00:01.000Z").expect("launch");
-        let acquisition = parse_timestamp("2026-07-29T12:00:02.000Z").expect("acquisition");
         let attempt_deadline =
             parse_timestamp("2026-07-29T12:00:03.000Z").expect("attempt deadline");
         let request_deadline =
             parse_timestamp("2026-07-29T12:00:04.000Z").expect("request deadline");
 
-        validate_governed_clock_window(
+        validate_governed_occurrence_window(
             &clock,
             &clock,
             not_before,
             request_deadline,
             launched_at,
             attempt_deadline,
-            acquisition,
         )
         .expect("one exact clock and ordered occurrence passes");
 
@@ -13644,35 +14730,307 @@ sys.stdout.write("\n")
         substituted_clock.descriptor_digest =
             nq_protocol::sha256_bytes(b"substituted-governed-clock");
         assert!(matches!(
-            validate_governed_clock_window(
+            validate_governed_occurrence_window(
                 &clock,
                 &substituted_clock,
                 not_before,
                 request_deadline,
                 launched_at,
                 attempt_deadline,
-                acquisition,
             ),
-            Err(EngineError::GovernedExecutionRefused {
-                code: GovernedExecutionRefusalCode::ClockOrOccurrenceIncompatible,
+            Err(NativeGovernedPreEffectRefusal {
+                code: NativeGovernedPreEffectRefusalCode::DeadlineExpired,
                 ..
             })
         ));
         assert!(matches!(
-            validate_governed_clock_window(
+            validate_governed_occurrence_window(
                 &clock,
                 &clock,
                 not_before,
                 request_deadline,
-                launched_at,
+                launched_at + Duration::seconds(2),
                 attempt_deadline,
-                launched_at - Duration::milliseconds(1),
             ),
-            Err(EngineError::GovernedExecutionRefused {
-                code: GovernedExecutionRefusalCode::ClockOrOccurrenceIncompatible,
+            Err(NativeGovernedPreEffectRefusal {
+                code: NativeGovernedPreEffectRefusalCode::DeadlineExpired,
                 ..
             })
         ));
+        let unordered = validate_governed_occurrence_window(
+            &clock,
+            &clock,
+            not_before,
+            request_deadline,
+            launched_at,
+            launched_at,
+        )
+        .expect_err("an empty launch interval refuses");
+        assert_eq!(
+            unordered.code,
+            NativeGovernedPreEffectRefusalCode::DeadlineExpired
+        );
+        assert!(unordered.detail.contains("production clock"));
+    }
+
+    #[test]
+    fn conformance_pre_effect_access_surface_is_exactly_empty() {
+        let empty = json!({
+            "privileges": [],
+            "namespaces": [],
+            "resources": [],
+        });
+        conformance_attachment_has_zero_access(&empty)
+            .expect("empty conformance access declarations pass");
+        for field in ["privileges", "namespaces", "resources"] {
+            let mut hostile = empty.clone();
+            hostile[field] = if field == "resources" {
+                json!([{"kind": "socket", "identity": "unexpected"}])
+            } else {
+                json!(["unexpected"])
+            };
+            let refusal = conformance_attachment_has_zero_access(&hostile)
+                .expect_err("every declared access surface refuses");
+            assert_eq!(
+                refusal.code,
+                NativeGovernedPreEffectRefusalCode::AccessSurfaceNotEmpty
+            );
+            assert!(refusal.detail.contains(field));
+        }
+    }
+
+    #[test]
+    fn native_acquisition_partition_accepts_exact_capacity_and_refuses_bound_minus_one() {
+        let dependency_bytes = 4_096;
+        let acquisition_bytes = 8_192;
+        require_native_acquisition_partition_capacity(
+            dependency_bytes,
+            acquisition_bytes,
+            dependency_bytes,
+            acquisition_bytes,
+        )
+        .expect("exact partition capacities pass");
+
+        let raw_refusal = require_native_acquisition_partition_capacity(
+            dependency_bytes,
+            acquisition_bytes - 1,
+            dependency_bytes,
+            acquisition_bytes,
+        )
+        .expect_err("raw capacity bound minus one refuses");
+        assert_eq!(
+            raw_refusal.code,
+            NativeGovernedPreEffectRefusalCode::NativeCustodyCorrespondenceUnavailable
+        );
+        assert!(raw_refusal.detail.contains("provider-intake acquisition"));
+
+        let dependency_refusal = require_native_acquisition_partition_capacity(
+            dependency_bytes - 1,
+            acquisition_bytes,
+            dependency_bytes,
+            acquisition_bytes,
+        )
+        .expect_err("dependency capacity bound minus one refuses");
+        assert_eq!(
+            dependency_refusal.code,
+            NativeGovernedPreEffectRefusalCode::NativeCustodyCorrespondenceUnavailable
+        );
+        assert!(dependency_refusal.detail.contains("dependency closure"));
+    }
+
+    #[test]
+    fn production_descriptor_identity_does_not_collapse_into_native_binding() {
+        let descriptor = json!({
+            "schema": PRODUCTION_IDENTITY_DESCRIPTOR_SCHEMA,
+            "kind": "subject",
+            "id": "lab/host-a",
+            "version": "1",
+        });
+        let bytes =
+            nq_protocol::canonical_json_bytes(&descriptor).expect("canonical identity descriptor");
+        let identity = IdentityRef {
+            kind: IdentityKind::Subject,
+            id: nq_host_role_contract::IdentityId::parse("lab/host-a").expect("production subject"),
+            version: nq_host_role_contract::IdentityVersion::parse("1")
+                .expect("descriptor version"),
+            descriptor_digest: nq_protocol::sha256_bytes(&bytes),
+        };
+        validate_descriptor_catalog_uniqueness(
+            std::slice::from_ref(&identity),
+            &identity,
+            "subject",
+        )
+        .expect("one exact production key");
+        validate_production_identity_descriptor_bytes(&identity, &bytes, "subject")
+            .expect("exact descriptor preimage");
+
+        let alias = IdentityRef {
+            id: nq_host_role_contract::IdentityId::parse("lab/host-b").expect("hostile alias key"),
+            ..identity.clone()
+        };
+        let refusal = validate_descriptor_catalog_uniqueness(
+            &[identity.clone(), alias],
+            &identity,
+            "subject",
+        )
+        .expect_err("one descriptor digest cannot identify two production keys");
+        assert_eq!(
+            refusal.code,
+            NativeGovernedPreEffectRefusalCode::ProductionDescriptorCorrespondenceUnavailable
+        );
+        assert!(refusal.detail.contains("2 production identity keys"));
+
+        let mut substituted = descriptor;
+        substituted["id"] = json!("lab/host-b");
+        let substituted_bytes =
+            nq_protocol::canonical_json_bytes(&substituted).expect("hostile descriptor");
+        assert_eq!(
+            validate_production_identity_descriptor_bytes(
+                &identity,
+                &substituted_bytes,
+                "subject",
+            )
+            .expect_err("descriptor substitution refuses")
+            .code,
+            NativeGovernedPreEffectRefusalCode::ProductionDescriptorCorrespondenceUnavailable
+        );
+
+        // Production identity and native helper bindings are deliberately
+        // representation-different. Their correspondence is the authenticated
+        // activation -> attachment -> provider-admission relation, not string
+        // equality.
+        assert_ne!(identity.id.as_str(), "conformance:recovery");
+    }
+
+    #[test]
+    fn native_profile_mapping_preserves_distinct_descriptor_layers() {
+        let directory = tempfile::tempdir().expect("profile correspondence fixture");
+        let (_config, _watcher, active_lock) = binding_recovery_fixture(directory.path());
+        let profile_descriptor = json!({
+            "schema": PRODUCTION_IDENTITY_DESCRIPTOR_SCHEMA,
+            "kind": "diagnostic_profile",
+            "id": "nq.conformance",
+            "version": "1",
+        });
+        let profile_bytes = nq_protocol::canonical_json_bytes(&profile_descriptor)
+            .expect("production profile descriptor");
+        let production_profile = IdentityRef {
+            kind: IdentityKind::DiagnosticProfile,
+            id: nq_host_role_contract::IdentityId::parse("nq.conformance")
+                .expect("production profile"),
+            version: nq_host_role_contract::IdentityVersion::parse("1").expect("profile version"),
+            descriptor_digest: nq_protocol::sha256_bytes(&profile_bytes),
+        };
+        let admission_digest = nq_protocol::sha256_bytes(b"local-provider-admission");
+        let provider_admission = RecordRef {
+            schema: nq_host_role_contract::Token::parse(nq_store::LOCAL_PROVIDER_ADMISSION_SCHEMA)
+                .expect("provider admission schema"),
+            record_id: admission_digest.clone(),
+            bytes_digest: admission_digest,
+        };
+        let compiled: &'static dyn ProfileModule = &nq_profiles::conformance::MODULE;
+        validate_native_profile_correspondence(
+            &production_profile,
+            &provider_admission,
+            &active_lock,
+            compiled,
+        )
+        .expect("Q -> exact R.profile -> compiled S id/version mapping");
+        assert_ne!(
+            production_profile.descriptor_digest.as_str(),
+            compiled
+                .descriptor()
+                .digest()
+                .expect("native compiled descriptor digest")
+                .as_str(),
+            "production descriptor identity remains distinct from native profile identity"
+        );
+        let mut hostile_profile = production_profile.clone();
+        hostile_profile.id =
+            nq_host_role_contract::IdentityId::parse("nq.other").expect("hostile profile");
+        assert_eq!(
+            validate_native_profile_correspondence(
+                &hostile_profile,
+                &provider_admission,
+                &active_lock,
+                compiled,
+            )
+            .expect_err("different production profile key refuses")
+            .code,
+            NativeGovernedPreEffectRefusalCode::NativeProfileCorrespondenceUnavailable
+        );
+    }
+
+    #[test]
+    fn conformance_pre_effect_request_binds_subject_scope_nonce_and_local_vantage() {
+        let directory = tempfile::tempdir().expect("conformance request fixture");
+        let (_config, watcher, _lock) = binding_recovery_fixture(directory.path());
+        let profile: &'static dyn ProfileModule = &nq_profiles::conformance::MODULE;
+        let outer_request_id = "outer-request-native-conformance";
+        let launch_digest = nq_protocol::sha256_bytes(b"governed-native-launch");
+        let execution_launch = RecordRef {
+            schema: nq_host_role_contract::Token::parse(RuntimeSchema::ExecutionLaunchV1.as_str())
+                .expect("execution launch schema"),
+            record_id: launch_digest.clone(),
+            bytes_digest: launch_digest,
+        };
+        let child_request_id = native_child_request_id(outer_request_id, &execution_launch)
+            .expect("derived child request identity");
+        assert_ne!(child_request_id.as_str(), outer_request_id);
+        assert_eq!(
+            child_request_id,
+            native_child_request_id(outer_request_id, &execution_launch)
+                .expect("deterministic child request identity")
+        );
+        let request = exact_conformance_native_request(
+            &watcher,
+            profile,
+            child_request_id.clone(),
+            42_000_000_000,
+        )
+        .expect("exact conformance request");
+        assert_eq!(request.request_id, child_request_id);
+        assert_eq!(request.binding.subject.as_str(), "conformance:recovery");
+        assert_eq!(request.binding.scope.kind.as_str(), "fixture");
+        assert_eq!(
+            request.binding.scope.value,
+            json!({"id": "recovery", "nonce": "test"})
+        );
+        assert_eq!(request.binding.vantage.kind.as_str(), "local");
+        assert_eq!(request.binding.vantage.value, json!({}));
+        assert!(request.granted_capabilities.is_empty());
+        assert!(request.checkpoint.is_none());
+
+        let mut nonce_substitution = watcher.clone();
+        nonce_substitution.scope.value = json!({"id": "recovery", "nonce": ""});
+        let refusal = exact_conformance_native_request(
+            &nonce_substitution,
+            profile,
+            native_child_request_id(outer_request_id, &execution_launch)
+                .expect("derived child request identity"),
+            42_000_000_000,
+        )
+        .expect_err("empty nonce refuses before any provider effect");
+        assert_eq!(
+            refusal.code,
+            NativeGovernedPreEffectRefusalCode::NativeBindingMismatch
+        );
+        assert!(refusal.detail.contains("subject/scope/nonce/vantage"));
+
+        let mut vantage_substitution = watcher;
+        vantage_substitution.vantage.value = json!({"namespace": "host"});
+        assert_eq!(
+            exact_conformance_native_request(
+                &vantage_substitution,
+                profile,
+                native_child_request_id(outer_request_id, &execution_launch)
+                    .expect("derived child request identity"),
+                42_000_000_000,
+            )
+            .expect_err("nonempty local vantage refuses")
+            .code,
+            NativeGovernedPreEffectRefusalCode::NativeBindingMismatch
+        );
     }
 
     #[test]
@@ -13713,8 +15071,8 @@ sys.stdout.write("\n")
                 &row,
                 &nq_protocol::sha256_bytes(b"other-provider-admission"),
             ),
-            Err(EngineError::GovernedExecutionRefused {
-                code: GovernedExecutionRefusalCode::ProviderAdmissionMismatch,
+            Err(NativeGovernedPreEffectRefusal {
+                code: NativeGovernedPreEffectRefusalCode::ProviderAdmissionMismatch,
                 ..
             })
         ));
@@ -13722,8 +15080,8 @@ sys.stdout.write("\n")
         substituted_reference.record_id = nq_protocol::sha256_bytes(b"substituted-provider-record");
         assert!(matches!(
             validate_exact_provider_admission(&substituted_reference, &row, &provider_admission_id,),
-            Err(EngineError::GovernedExecutionRefused {
-                code: GovernedExecutionRefusalCode::ProviderAdmissionMismatch,
+            Err(NativeGovernedPreEffectRefusal {
+                code: NativeGovernedPreEffectRefusalCode::ProviderAdmissionMismatch,
                 ..
             })
         ));

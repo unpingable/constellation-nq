@@ -130,6 +130,61 @@ pub enum AcquisitionOutcome {
     },
 }
 
+/// Maximum UTF-8 bytes retained for one runner-generated native error detail.
+///
+/// Provider stdout and stderr have independent exact custody bounds.  These
+/// details originate in operating-system or parser display strings, whose
+/// upstream types provide no serialized-size contract.  Bounding them at the
+/// runner boundary makes the live provider-intake carrier conservatively
+/// sizeable before a helper is started.
+pub(crate) const MAX_ACQUISITION_DETAIL_BYTES: usize = 4_096;
+
+const TRUNCATED_DETAIL_SUFFIX: &str = "[truncated]";
+
+pub(crate) fn bounded_acquisition_detail(mut detail: String) -> String {
+    if detail.len() <= MAX_ACQUISITION_DETAIL_BYTES {
+        return detail;
+    }
+    let mut end = MAX_ACQUISITION_DETAIL_BYTES - TRUNCATED_DETAIL_SUFFIX.len();
+    while !detail.is_char_boundary(end) {
+        end -= 1;
+    }
+    detail.truncate(end);
+    detail.push_str(TRUNCATED_DETAIL_SUFFIX);
+    detail
+}
+
+fn bound_acquisition_outcome(outcome: AcquisitionOutcome) -> AcquisitionOutcome {
+    match outcome {
+        AcquisitionOutcome::SpawnFailed { message } => AcquisitionOutcome::SpawnFailed {
+            message: bounded_acquisition_detail(message),
+        },
+        AcquisitionOutcome::RequestWriteFailed { message } => {
+            AcquisitionOutcome::RequestWriteFailed {
+                message: bounded_acquisition_detail(message),
+            }
+        }
+        AcquisitionOutcome::MalformedFraming { message } => AcquisitionOutcome::MalformedFraming {
+            message: bounded_acquisition_detail(message),
+        },
+        AcquisitionOutcome::MalformedJson { message } => AcquisitionOutcome::MalformedJson {
+            message: bounded_acquisition_detail(message),
+        },
+        AcquisitionOutcome::Disconnect { message } => AcquisitionOutcome::Disconnect {
+            message: bounded_acquisition_detail(message),
+        },
+        AcquisitionOutcome::CarrierStartupFailed { message } => {
+            AcquisitionOutcome::CarrierStartupFailed {
+                message: bounded_acquisition_detail(message),
+            }
+        }
+        AcquisitionOutcome::IoFailed { message } => AcquisitionOutcome::IoFailed {
+            message: bounded_acquisition_detail(message),
+        },
+        bounded => bounded,
+    }
+}
+
 /// Compatibility alias used by callers that focus on failed acquisition.
 pub type AcquisitionFailure = AcquisitionOutcome;
 
@@ -491,7 +546,7 @@ fn capture(
         exit_code,
         stdout,
         stderr,
-        outcome,
+        outcome: bound_acquisition_outcome(outcome),
     }
 }
 
@@ -514,6 +569,23 @@ mod tests {
             allow_same_identity_in_debug: true,
             working_directory: PathBuf::from("/tmp"),
         }
+    }
+
+    #[test]
+    fn native_error_details_are_bounded_before_capture_leaves_the_runner() {
+        let oversized = "∑".repeat(MAX_ACQUISITION_DETAIL_BYTES);
+        let bounded =
+            bound_acquisition_outcome(AcquisitionOutcome::IoFailed { message: oversized });
+        let AcquisitionOutcome::IoFailed { message } = bounded else {
+            panic!("same outcome class");
+        };
+        assert!(message.len() <= MAX_ACQUISITION_DETAIL_BYTES);
+        assert!(
+            message.len() >= MAX_ACQUISITION_DETAIL_BYTES - "∑".len(),
+            "only the final partial UTF-8 scalar may be omitted"
+        );
+        assert!(message.ends_with(TRUNCATED_DETAIL_SUFFIX));
+        assert!(message.is_char_boundary(message.len()));
     }
 
     fn limits(bytes: usize) -> ResourceLimits {
