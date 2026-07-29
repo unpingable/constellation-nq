@@ -22,7 +22,8 @@ use nq_protocol::{
 use nq_store::{
     AdmissionIdentity, AdmissionInput, AdmittedCollectionCompletion, BindingEventInput,
     BindingMaterializationInput, CanonicalDocument, CollectionInput, CoverageInput,
-    DiagnosticArtifactByteState, DiagnosticArtifactCommitInput, DiagnosticArtifactLocalOriginInput,
+    DiagnosticArtifactByteState, DiagnosticArtifactCommitInput,
+    DiagnosticArtifactExecutionBindingInput, DiagnosticArtifactLocalOriginInput,
     DiagnosticArtifactLookup, DiagnosticArtifactOrigin, DiagnosticArtifactSchemaSupport,
     EvaluationCommitInput, EvaluationInput, EvaluationProfileBinding, EvidenceSnapshot,
     FindingEventInput, FindingEvidenceInput, FindingSnapshotRow, GenesisInput, ObservationInput,
@@ -1734,6 +1735,58 @@ pub struct CollectionEngine {
     evaluator_identity: Result<EvaluatorRuntimeIdentity, String>,
 }
 
+/// Catalog-resolved production identity surface for one V2 execution.
+///
+/// This carrier does not establish that the referenced topology is active or
+/// authorized. The host-role runtime supplies it only after committing the
+/// exact activation snapshot and later records the full
+/// `nq.execution_identity_binding.v2` companion.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiagnosticProductionIdentityV2 {
+    /// Enrolled logical NQ node identity.
+    pub node_id: String,
+    /// Catalog-resolved subject identity.
+    pub subject_id: String,
+    /// Catalog-resolved vantage generation.
+    pub vantage: SemanticIdentityV1,
+    /// Exact active static-profile-cohort generation.
+    pub cohort: SemanticIdentityV1,
+}
+
+/// Exact live inputs available when the engine has sealed a V2 artifact but
+/// has not yet committed its production binding.
+pub struct DiagnosticBindingSource<'a> {
+    /// Exact V2 artifact whose bytes and identity will be committed.
+    pub artifact: &'a DiagnosticExecutionV2,
+    /// Exact child provider-intake record retained by NQ.
+    pub provider_intake: &'a ProviderIntakeRecordV1,
+}
+
+/// Host-role callback that constructs the additive production identity
+/// companion without changing NQ's diagnostic artifact.
+///
+/// Implementations must return the complete runtime-ledger batch and linkage
+/// input. The store commits it atomically with the local artifact origin.
+pub trait DiagnosticExecutionBindingFactory {
+    /// Construct and validate the exact production binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed engine error when any required reference cannot be
+    /// resolved or the resulting closure would be incomplete.
+    fn build_execution_binding(
+        &self,
+        source: DiagnosticBindingSource<'_>,
+    ) -> Result<DiagnosticArtifactExecutionBindingInput, EngineError>;
+}
+
+#[derive(Clone)]
+struct DiagnosticInvocationContext<'a> {
+    request_id: Option<DiagnosticRequestId>,
+    production: Option<DiagnosticProductionIdentityV2>,
+    binding_factory: Option<&'a dyn DiagnosticExecutionBindingFactory>,
+}
+
 #[derive(Debug)]
 struct CollectionExecution {
     outcome: CollectionOutcome,
@@ -1757,6 +1810,62 @@ const INITIAL_DIAGNOSTIC_DETECTOR_ID: &str = "nq.host.load_pressure";
 const INITIAL_DIAGNOSTIC_DETECTOR_VERSION: u32 = 1;
 const INITIAL_DIAGNOSTIC_DETECTOR_DIGEST: &str =
     "sha256:7de797da3d9d3a6ae8e21e5d77b95095453336cd38f606ffb3eb29ff6a32e2cf";
+
+fn require_outer_diagnostic_request_id(
+    request_id: &DiagnosticRequestId,
+) -> Result<(), EngineError> {
+    let value = request_id.as_str();
+    if value.is_empty()
+        || value.len() > 255
+        || value
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+    {
+        return Err(EngineError::Invariant(
+            "outer diagnostic request identity is empty, oversized, or contains whitespace"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_diagnostic_production_identity(
+    production: &DiagnosticProductionIdentityV2,
+) -> Result<(), EngineError> {
+    for (field, value) in [
+        ("node_id", production.node_id.as_str()),
+        ("subject_id", production.subject_id.as_str()),
+    ] {
+        if value.is_empty()
+            || value.len() > 255
+            || value
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+        {
+            return Err(EngineError::Invariant(format!(
+                "production diagnostic {field} is empty, oversized, or contains whitespace"
+            )));
+        }
+    }
+    for (field, identity) in [
+        ("vantage", &production.vantage),
+        ("cohort", &production.cohort),
+    ] {
+        if identity.id.is_empty()
+            || identity.version.is_empty()
+            || identity
+                .id
+                .bytes()
+                .chain(identity.version.bytes())
+                .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+        {
+            return Err(EngineError::Invariant(format!(
+                "production diagnostic {field} identity is malformed"
+            )));
+        }
+    }
+    Ok(())
+}
 
 #[derive(Clone)]
 struct DiagnosticEmissionBase {
@@ -2553,7 +2662,7 @@ impl CollectionEngine {
     /// Returns only local engine/storage failures. Expected helper, protocol,
     /// and admission outcomes are retained and returned as `CollectionOutcome`.
     pub fn collect(&mut self, watcher: &WatcherConfig) -> Result<CollectionOutcome, EngineError> {
-        self.collect_internal(watcher, false)
+        self.collect_internal(watcher, None)
             .map(|execution| execution.outcome)
     }
 
@@ -2579,7 +2688,52 @@ impl CollectionEngine {
         &mut self,
         watcher: &WatcherConfig,
     ) -> Result<SupportedDiagnosticExecution, EngineError> {
-        let execution = self.collect_internal(watcher, true)?;
+        let invocation = DiagnosticInvocationContext {
+            request_id: None,
+            production: None,
+            binding_factory: None,
+        };
+        let execution = self.collect_internal(watcher, Some(&invocation))?;
+        execution.diagnostic.ok_or_else(|| {
+            EngineError::DiagnosticUnsupported(format!(
+                "collection for {} produced no admitted determinate diagnostic execution; inspect the retained collection outcome",
+                watcher.instance_id
+            ))
+        })
+    }
+
+    /// Execute one bounded diagnostic under an outer request and exact
+    /// catalog-resolved production identity surface.
+    ///
+    /// This is the engine entry point for the resident host-role runtime. It
+    /// still does not authenticate, authorize, schedule, or grant reliance;
+    /// those caller-owned decisions must already be durably recorded.
+    ///
+    /// # Errors
+    ///
+    /// Returns for an invalid production identity carrier or under the same
+    /// collection/emission failures as [`Self::diagnostic_execute`].
+    pub fn diagnostic_execute_bound(
+        &mut self,
+        watcher: &WatcherConfig,
+        request_id: DiagnosticRequestId,
+        production: DiagnosticProductionIdentityV2,
+        binding_factory: &dyn DiagnosticExecutionBindingFactory,
+    ) -> Result<SupportedDiagnosticExecution, EngineError> {
+        require_outer_diagnostic_request_id(&request_id)?;
+        validate_diagnostic_production_identity(&production)?;
+        if production.subject_id != watcher.subject {
+            return Err(EngineError::Invariant(
+                "production diagnostic subject differs from the bounded provider-request subject; no identity correspondence was supplied"
+                    .to_owned(),
+            ));
+        }
+        let invocation = DiagnosticInvocationContext {
+            request_id: Some(request_id),
+            production: Some(production),
+            binding_factory: Some(binding_factory),
+        };
+        let execution = self.collect_internal(watcher, Some(&invocation))?;
         execution.diagnostic.ok_or_else(|| {
             EngineError::DiagnosticUnsupported(format!(
                 "collection for {} produced no admitted determinate diagnostic execution; inspect the retained collection outcome",
@@ -2592,8 +2746,15 @@ impl CollectionEngine {
     fn collect_internal(
         &mut self,
         watcher: &WatcherConfig,
-        emit_diagnostic: bool,
+        diagnostic_invocation: Option<&DiagnosticInvocationContext<'_>>,
     ) -> Result<CollectionExecution, EngineError> {
+        let emit_diagnostic = diagnostic_invocation.is_some();
+        let diagnostic_request_id =
+            diagnostic_invocation.and_then(|context| context.request_id.as_ref());
+        let diagnostic_production =
+            diagnostic_invocation.and_then(|context| context.production.as_ref());
+        let diagnostic_binding_factory =
+            diagnostic_invocation.and_then(|context| context.binding_factory);
         let _guard =
             InstanceGuard::acquire(&self.config.database_path, &watcher.instance_id, "collect")?;
         // Fail closed before any persistence: a collection stamps evaluator
@@ -2603,10 +2764,15 @@ impl CollectionEngine {
         self.require_evaluator_identity()?;
         self.reconcile_pending_binding(watcher)?;
         let profile = resolve(watcher)?;
-        let diagnostic_node_id = emit_diagnostic
-            .then(|| self.store.sole_genesis_id())
-            .transpose()?
-            .map(|genesis_id| format!("nq-store-genesis:{genesis_id}"));
+        let diagnostic_node_id =
+            match diagnostic_invocation.and_then(|context| context.production.as_ref()) {
+                Some(production) => Some(production.node_id.clone()),
+                None if emit_diagnostic => Some(format!(
+                    "nq-store-genesis:{}",
+                    self.store.sole_genesis_id()?
+                )),
+                None => None,
+            };
         let descriptor_digest = profile
             .descriptor()
             .digest()
@@ -2782,7 +2948,9 @@ impl CollectionEngine {
                         watcher,
                         profile,
                         &provider_identity,
+                        diagnostic_request_id,
                         &request,
+                        diagnostic_production,
                         &run_id,
                         &intake_input.intake_id,
                         submission
@@ -2801,6 +2969,8 @@ impl CollectionEngine {
                 submission,
                 outcome,
                 diagnostic.as_ref(),
+                diagnostic_binding_factory,
+                Some(intake.record()),
             );
         }
 
@@ -2836,7 +3006,9 @@ impl CollectionEngine {
                             watcher,
                             profile,
                             &provider_identity,
+                            diagnostic_request_id,
                             &request,
+                            diagnostic_production,
                             &run_id,
                             &intake_input.intake_id,
                             Some(submission.raw_bytes.as_slice()),
@@ -2853,6 +3025,8 @@ impl CollectionEngine {
                     Some(submission),
                     outcome,
                     diagnostic.as_ref(),
+                    diagnostic_binding_factory,
+                    Some(intake.record()),
                 );
             }
             ProviderResponseInterpretationV1::Validated { response } => response,
@@ -2884,7 +3058,9 @@ impl CollectionEngine {
                             watcher,
                             profile,
                             &provider_identity,
+                            diagnostic_request_id,
                             &request,
+                            diagnostic_production,
                             &run_id,
                             &intake_input.intake_id,
                             Some(submission.raw_bytes.as_slice()),
@@ -2901,6 +3077,8 @@ impl CollectionEngine {
                     Some(submission),
                     outcome,
                     diagnostic.as_ref(),
+                    diagnostic_binding_factory,
+                    Some(intake.record()),
                 )
             }
             ResponseOutcome::Report { report } => {
@@ -2938,7 +3116,9 @@ impl CollectionEngine {
                                     watcher,
                                     profile,
                                     &provider_identity,
+                                    diagnostic_request_id,
                                     &request,
+                                    diagnostic_production,
                                     &run_id,
                                     &intake_input.intake_id,
                                     Some(submission.raw_bytes.as_slice()),
@@ -2955,6 +3135,8 @@ impl CollectionEngine {
                             Some(submission),
                             outcome,
                             diagnostic.as_ref(),
+                            diagnostic_binding_factory,
+                            Some(intake.record()),
                         );
                     }
                 };
@@ -2996,7 +3178,9 @@ impl CollectionEngine {
                                     watcher,
                                     profile,
                                     &provider_identity,
+                                    diagnostic_request_id,
                                     &request,
+                                    diagnostic_production,
                                     &run_id,
                                     &intake_input.intake_id,
                                     Some(submission.raw_bytes.as_slice()),
@@ -3013,6 +3197,8 @@ impl CollectionEngine {
                             Some(submission),
                             outcome,
                             diagnostic.as_ref(),
+                            diagnostic_binding_factory,
+                            Some(intake.record()),
                         )
                     }
                     Ok(validated) => {
@@ -3035,7 +3221,9 @@ impl CollectionEngine {
                                     watcher,
                                     profile,
                                     &provider_identity,
+                                    diagnostic_request_id,
                                     &request,
+                                    diagnostic_production,
                                     &run_id,
                                     &report_id,
                                     &intake_input.intake_id,
@@ -3107,6 +3295,17 @@ impl CollectionEngine {
                                                     EngineError::Canonical(error.to_string())
                                                 })?,
                                             )?;
+                                        let execution_binding =
+                                            diagnostic_binding_factory
+                                                .map(|factory| {
+                                                    factory.build_execution_binding(
+                                                        DiagnosticBindingSource {
+                                                            artifact: &artifact,
+                                                            provider_intake: intake.record(),
+                                                        },
+                                                    )
+                                                })
+                                                .transpose()?;
                                         (
                                             Some(artifact_id.clone()),
                                             Some(DiagnosticArtifactCommitInput {
@@ -3126,6 +3325,7 @@ impl CollectionEngine {
                                                         completed_at: timestamp(
                                                             artifact.completed_at,
                                                         ),
+                                                        execution_binding,
                                                     },
                                             }),
                                         )
@@ -3766,6 +3966,7 @@ impl CollectionEngine {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)] // Keep the atomic collection/binding commit frontier explicit.
     fn commit_non_success_collection(
         &mut self,
         watcher: &WatcherConfig,
@@ -3774,6 +3975,8 @@ impl CollectionEngine {
         submission: Option<SubmissionInput>,
         outcome: CollectionOutcome,
         diagnostic: Option<&DiagnosticExecutionV2>,
+        binding_factory: Option<&dyn DiagnosticExecutionBindingFactory>,
+        provider_intake: Option<&ProviderIntakeRecordV1>,
     ) -> Result<CollectionExecution, EngineError> {
         let run_id = outcome.run_id.as_deref().ok_or_else(|| {
             EngineError::Invariant("non-success collection outcome has no run identity".into())
@@ -3788,6 +3991,21 @@ impl CollectionEngine {
         let result = RunResultStatusInput {
             run_id: run_id.to_owned(),
             status: instance_status_event(watcher, &outcome)?,
+        };
+        let execution_binding = match (diagnostic, binding_factory, provider_intake) {
+            (Some(artifact), Some(factory), Some(provider_intake)) => {
+                Some(factory.build_execution_binding(DiagnosticBindingSource {
+                    artifact,
+                    provider_intake,
+                })?)
+            }
+            (_, None, _) => None,
+            _ => {
+                return Err(EngineError::Invariant(
+                    "production binding factory, V2 artifact, and provider intake must be supplied together"
+                        .to_owned(),
+                ));
+            }
         };
         let artifact_commit = diagnostic
             .map(|artifact| {
@@ -3804,6 +4022,7 @@ impl CollectionEngine {
                         run_id: run_id.to_owned(),
                         evaluation_id: None,
                         completed_at: timestamp(artifact.completed_at),
+                        execution_binding,
                     },
                 })
             })
@@ -4001,6 +4220,7 @@ pub fn validate_diagnostic_artifact_history(
                         run_id,
                         evaluation_id,
                         completed_at,
+                        execution_binding_record_id,
                     } = &commitment.origin
                     {
                         let SupportedDiagnosticExecution::V2(local_v2_artifact) = &artifact else {
@@ -4028,18 +4248,47 @@ pub fn validate_diagnostic_artifact_history(
                                 commitment.artifact_id
                             ))
                         })?;
-                        if artifact.request_id().as_str() != run.request_id
-                            || artifact.profile().id != run.profile_id
+                        let production_binding =
+                            store.diagnostic_artifact_execution_binding(&commitment.artifact_id)?;
+                        if execution_binding_record_id.as_deref()
+                            != production_binding
+                                .as_ref()
+                                .map(|binding| binding.execution_binding.record_id.as_str())
+                        {
+                            return Err(EngineError::Invariant(format!(
+                                "local diagnostic artifact {} production-binding origin differs from its exact runtime-ledger linkage",
+                                commitment.artifact_id
+                            )));
+                        }
+                        if artifact.profile().id != run.profile_id
                             || artifact.profile().version != run.profile_version
                             || artifact.profile().digest.as_str() != run.profile_digest
                         {
                             return Err(EngineError::Invariant(format!(
-                                "local diagnostic artifact {} substitutes its request or profile origin",
+                                "local diagnostic artifact {} substitutes its profile origin",
                                 commitment.artifact_id
                             )));
                         }
-                        let local_v2_context =
-                            validate_local_v2_provider_correspondence(store, &artifact, &run)?;
+                        match &production_binding {
+                            Some(binding) => validate_production_v2_execution_binding(
+                                store,
+                                local_v2_artifact,
+                                binding,
+                            )?,
+                            None if artifact.request_id().as_str() != run.request_id => {
+                                return Err(EngineError::Invariant(format!(
+                                    "pre-production local diagnostic artifact {} substitutes its child provider request origin",
+                                    commitment.artifact_id
+                                )));
+                            }
+                            None => {}
+                        }
+                        let local_v2_context = validate_local_v2_provider_correspondence(
+                            store,
+                            &artifact,
+                            &run,
+                            production_binding.as_ref(),
+                        )?;
                         if let Some(evaluation_id) = evaluation_id {
                             let admitted =
                                 store.admitted_collection_for_run(run_id)?.ok_or_else(|| {
@@ -4152,6 +4401,381 @@ pub fn validate_diagnostic_artifact_history(
     }
 }
 
+fn runtime_record_value(
+    record: &nq_store::RuntimeRecordRow,
+    purpose: &str,
+) -> Result<Value, EngineError> {
+    serde_json::from_slice(record.canonical_bytes.as_bytes()).map_err(|error| {
+        EngineError::Invariant(format!(
+            "{purpose} runtime record {} cannot decode: {error}",
+            record.record_id
+        ))
+    })
+}
+
+fn required_object_field<'a>(
+    value: &'a Value,
+    field: &str,
+    purpose: &str,
+) -> Result<&'a serde_json::Map<String, Value>, EngineError> {
+    value.get(field).and_then(Value::as_object).ok_or_else(|| {
+        EngineError::Invariant(format!("{purpose} has no required object field {field}"))
+    })
+}
+
+fn required_string_field<'a>(
+    value: &'a Value,
+    field: &str,
+    purpose: &str,
+) -> Result<&'a str, EngineError> {
+    value.get(field).and_then(Value::as_str).ok_or_else(|| {
+        EngineError::Invariant(format!("{purpose} has no required string field {field}"))
+    })
+}
+
+fn runtime_reference_matches(reference: &Value, record: &nq_store::RuntimeRecordRow) -> bool {
+    reference.as_object().is_some_and(|object| {
+        object.get("schema").and_then(Value::as_str) == Some(record.record_schema.as_str())
+            && object.get("record_id").and_then(Value::as_str) == Some(record.record_id.as_str())
+            && object.get("bytes_digest").and_then(Value::as_str)
+                == Some(record.canonical_bytes_sha256.as_str())
+    })
+}
+
+fn reopen_runtime_reference(
+    store: &Store,
+    reference: &Value,
+    purpose: &str,
+) -> Result<nq_store::RuntimeRecordRow, EngineError> {
+    let record_id = required_string_field(reference, "record_id", purpose)?;
+    let record = store.runtime_record(record_id)?.ok_or_else(|| {
+        EngineError::Invariant(format!(
+            "{purpose} references missing immutable runtime record {record_id}"
+        ))
+    })?;
+    if !runtime_reference_matches(reference, &record) {
+        return Err(EngineError::Invariant(format!(
+            "{purpose} substitutes the schema or exact bytes of runtime record {record_id}"
+        )));
+    }
+    Ok(record)
+}
+
+fn contract_identity_matches(
+    value: &Value,
+    expected_kind: &str,
+    identity: &SemanticIdentityV1,
+) -> bool {
+    value.as_object().is_some_and(|object| {
+        object.get("kind").and_then(Value::as_str) == Some(expected_kind)
+            && object.get("id").and_then(Value::as_str) == Some(identity.id.as_str())
+            && object.get("version").and_then(Value::as_str) == Some(identity.version.as_str())
+            && object.get("descriptor_digest").and_then(Value::as_str)
+                == Some(identity.digest.as_str())
+    })
+}
+
+fn contract_identities_equal(left: &Value, right: &Value) -> bool {
+    left.is_object()
+        && right.is_object()
+        && ["kind", "id", "version", "descriptor_digest"]
+            .into_iter()
+            .all(|field| {
+                left.get(field)
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| right.get(field).and_then(Value::as_str) == Some(value))
+            })
+}
+
+fn resolved_binding_identity<'a>(
+    binding_value: &'a Value,
+    name: &str,
+    artifact_id: &str,
+) -> Result<&'a Value, EngineError> {
+    required_object_field(
+        binding_value,
+        "resolved_references",
+        "production execution binding",
+    )?
+    .get(name)
+    .and_then(|resolved| resolved.get("identity"))
+    .ok_or_else(|| {
+        EngineError::Invariant(format!(
+            "production diagnostic artifact {artifact_id} binding has no resolved {name} identity"
+        ))
+    })
+}
+
+fn validate_historical_topology_relation(
+    store: &Store,
+    artifact_id: &str,
+    activation_relations: &serde_json::Map<String, Value>,
+    binding_relations: &serde_json::Map<String, Value>,
+    relation: (&str, &str),
+    expected_left: &Value,
+    expected_right: &Value,
+) -> Result<(), EngineError> {
+    let (field, relation_kind) = relation;
+    let activation_reference = activation_relations.get(field).ok_or_else(|| {
+        EngineError::Invariant(format!(
+            "production diagnostic artifact {artifact_id} activation has no {field} relation"
+        ))
+    })?;
+    let binding_reference = binding_relations.get(field).ok_or_else(|| {
+        EngineError::Invariant(format!(
+            "production diagnostic artifact {artifact_id} binding has no {field} source relation"
+        ))
+    })?;
+    if activation_reference != binding_reference {
+        return Err(EngineError::Invariant(format!(
+            "production diagnostic artifact {artifact_id} substitutes its {field} relation between activation and binding"
+        )));
+    }
+    let relation = reopen_runtime_reference(
+        store,
+        activation_reference,
+        "production execution topology relation",
+    )?;
+    let relation_value = runtime_record_value(&relation, "production execution topology relation")?;
+    if relation.record_schema != "nq.host_role_relation.v1"
+        || relation_value.get("relation_id").and_then(Value::as_str)
+            != Some(relation.record_id.as_str())
+        || relation_value.get("relation_kind").and_then(Value::as_str) != Some(relation_kind)
+        || !relation_value
+            .get("left")
+            .is_some_and(|left| contract_identities_equal(left, expected_left))
+        || !relation_value
+            .get("right")
+            .is_some_and(|right| contract_identities_equal(right, expected_right))
+    {
+        return Err(EngineError::Invariant(format!(
+            "production diagnostic artifact {artifact_id} {field} relation does not recover its exact {relation_kind} endpoints"
+        )));
+    }
+    Ok(())
+}
+
+/// Verify the exact historical production companion for a local V2 artifact.
+///
+/// This deliberately follows only immutable record references named by the
+/// execution binding. It never consults a current role, cohort, enrollment, or
+/// topology projection, so later rehome, retirement, or generation changes
+/// cannot reinterpret the execution.
+#[allow(clippy::too_many_lines)]
+fn validate_production_v2_execution_binding(
+    store: &Store,
+    artifact: &DiagnosticExecutionV2,
+    binding: &nq_store::DiagnosticArtifactExecutionBinding,
+) -> Result<(), EngineError> {
+    let artifact_id = artifact.artifact_id.0.as_str();
+    let binding_value =
+        runtime_record_value(&binding.execution_binding, "production execution binding")?;
+    let request_value = runtime_record_value(&binding.outer_request, "outer diagnostic request")?;
+    let decision_value = runtime_record_value(&binding.invocation_decision, "invocation decision")?;
+    let launch_value = runtime_record_value(&binding.execution_launch, "execution launch")?;
+
+    if binding.execution_binding.record_schema != "nq.execution_identity_binding.v2"
+        || binding.outer_request.record_schema != "nq.diagnostic_invocation_request.v1"
+        || binding.invocation_decision.record_schema != "nq.invocation_decision.v1"
+        || binding.execution_launch.record_schema != "nq.execution_launch.v1"
+        || binding_value.get("binding_id").and_then(Value::as_str)
+            != Some(binding.execution_binding.record_id.as_str())
+        || binding_value.get("binding_result").and_then(Value::as_str) != Some("resolved")
+        || decision_value.get("decision").and_then(Value::as_str) != Some("accepted")
+        || launch_value.get("status").and_then(Value::as_str) != Some("launched")
+    {
+        return Err(EngineError::Invariant(format!(
+            "production diagnostic artifact {artifact_id} is linked to a non-resolved, non-accepted, or non-launched invocation"
+        )));
+    }
+    for (reference, record, purpose) in [
+        (
+            binding_value.get("outer_request"),
+            &binding.outer_request,
+            "outer request",
+        ),
+        (
+            binding_value.get("invocation_decision"),
+            &binding.invocation_decision,
+            "invocation decision",
+        ),
+        (
+            binding_value.get("execution_launch"),
+            &binding.execution_launch,
+            "execution launch",
+        ),
+        (
+            decision_value.get("request"),
+            &binding.outer_request,
+            "decision request",
+        ),
+        (
+            launch_value.get("outer_request"),
+            &binding.outer_request,
+            "launch request",
+        ),
+        (
+            launch_value.get("invocation_decision"),
+            &binding.invocation_decision,
+            "launch decision",
+        ),
+    ] {
+        if !reference.is_some_and(|reference| runtime_reference_matches(reference, record)) {
+            return Err(EngineError::Invariant(format!(
+                "production diagnostic artifact {artifact_id} substitutes its exact {purpose} linkage"
+            )));
+        }
+    }
+    let request_id =
+        required_string_field(&request_value, "request_id", "outer diagnostic request")?;
+    let request_digest =
+        required_string_field(&request_value, "request_digest", "outer diagnostic request")?;
+    if request_id != binding.outer_request_id
+        || artifact.request_id.as_str() != binding.outer_request_id
+        || request_digest != binding.outer_request.record_id
+        || decision_value.get("request_digest").and_then(Value::as_str)
+            != Some(binding.outer_request.record_id.as_str())
+    {
+        return Err(EngineError::Invariant(format!(
+            "production diagnostic artifact {artifact_id} substitutes its exact outer request identity"
+        )));
+    }
+
+    let node = resolved_binding_identity(&binding_value, "node", artifact_id)?;
+    let subject = resolved_binding_identity(&binding_value, "subject", artifact_id)?;
+    let vantage = resolved_binding_identity(&binding_value, "vantage", artifact_id)?;
+    let cohort = resolved_binding_identity(&binding_value, "static_profile_cohort", artifact_id)?;
+    let profile = resolved_binding_identity(&binding_value, "diagnostic_profile", artifact_id)?;
+    let role = resolved_binding_identity(&binding_value, "role", artifact_id)?;
+    let platform = resolved_binding_identity(&binding_value, "platform", artifact_id)?;
+    if node.get("kind").and_then(Value::as_str) != Some("nq_node")
+        || node.get("id").and_then(Value::as_str) != Some(artifact.producer.node_id.as_str())
+        || subject.get("kind").and_then(Value::as_str) != Some("subject")
+        || subject.get("id").and_then(Value::as_str) != Some(artifact.subject.id.as_str())
+        || !contract_identity_matches(vantage, "vantage", &artifact.vantage)
+        || !contract_identity_matches(cohort, "static_cohort", &artifact.producer.cohort)
+        || !contract_identity_matches(profile, "diagnostic_profile", &artifact.profile)
+    {
+        return Err(EngineError::Invariant(format!(
+            "production diagnostic artifact {artifact_id} substitutes its resolved node, subject, vantage, cohort, or profile identity"
+        )));
+    }
+
+    let target =
+        required_object_field(&request_value, "target", "outer diagnostic request target")?;
+    for (field, expected) in [("node", node), ("subject", subject), ("vantage", vantage)] {
+        let actual = target.get(field).ok_or_else(|| {
+            EngineError::Invariant(format!(
+                "production diagnostic artifact {artifact_id} outer request has no target {field}"
+            ))
+        })?;
+        if !contract_identities_equal(actual, expected) {
+            return Err(EngineError::Invariant(format!(
+                "production diagnostic artifact {artifact_id} outer request target {field} differs from its resolved execution binding"
+            )));
+        }
+    }
+    let requested_profile = request_value.get("profile").ok_or_else(|| {
+        EngineError::Invariant(format!(
+            "production diagnostic artifact {artifact_id} outer request has no profile"
+        ))
+    })?;
+    if !contract_identities_equal(requested_profile, profile) {
+        return Err(EngineError::Invariant(format!(
+            "production diagnostic artifact {artifact_id} outer request profile differs from its resolved execution binding"
+        )));
+    }
+
+    let activation_reference = binding_value.get("activation").ok_or_else(|| {
+        EngineError::Invariant(format!(
+            "production diagnostic artifact {artifact_id} binding has no activation reference"
+        ))
+    })?;
+    let activation = reopen_runtime_reference(
+        store,
+        activation_reference,
+        "production execution activation",
+    )?;
+    if activation.record_schema != "nq.runtime_activation.v1" {
+        return Err(EngineError::Invariant(format!(
+            "production diagnostic artifact {artifact_id} uses an incompatible activation record"
+        )));
+    }
+    let activation_value = runtime_record_value(&activation, "production execution activation")?;
+    for (field, expected) in [
+        ("node", node),
+        ("static_profile_cohort", cohort),
+        ("role", role),
+    ] {
+        let actual = activation_value.get(field).ok_or_else(|| {
+            EngineError::Invariant(format!(
+                "production diagnostic artifact {artifact_id} activation has no {field} identity"
+            ))
+        })?;
+        if !contract_identities_equal(actual, expected) {
+            return Err(EngineError::Invariant(format!(
+                "production diagnostic artifact {artifact_id} activation {field} differs from its resolved historical binding"
+            )));
+        }
+    }
+    let activation_relations = required_object_field(
+        &activation_value,
+        "relations",
+        "production execution activation",
+    )?;
+    let binding_relations = required_object_field(
+        &binding_value,
+        "source_relations",
+        "production execution binding",
+    )?;
+    validate_historical_topology_relation(
+        store,
+        artifact_id,
+        activation_relations,
+        binding_relations,
+        ("node_subject", "node_subject"),
+        node,
+        subject,
+    )?;
+    validate_historical_topology_relation(
+        store,
+        artifact_id,
+        activation_relations,
+        binding_relations,
+        ("subject_platform", "subject_platform"),
+        subject,
+        platform,
+    )?;
+    validate_historical_topology_relation(
+        store,
+        artifact_id,
+        activation_relations,
+        binding_relations,
+        ("node_vantage", "node_vantage"),
+        node,
+        vantage,
+    )?;
+    validate_historical_topology_relation(
+        store,
+        artifact_id,
+        activation_relations,
+        binding_relations,
+        ("node_role", "node_role"),
+        node,
+        role,
+    )?;
+    validate_historical_topology_relation(
+        store,
+        artifact_id,
+        activation_relations,
+        binding_relations,
+        ("node_static_profile_cohort", "node_static_profile_cohort"),
+        node,
+        cohort,
+    )?;
+    Ok(())
+}
+
 struct LocalV2HistoryContext {
     provider_intake: ProviderIntakeRecordV1,
     capture_policy: SemanticIdentityV1,
@@ -4165,6 +4789,7 @@ fn validate_local_v2_provider_correspondence(
     store: &Store,
     artifact: &SupportedDiagnosticExecution,
     run: &nq_store::WatcherRunOutcomeRow,
+    production_binding: Option<&nq_store::DiagnosticArtifactExecutionBinding>,
 ) -> Result<LocalV2HistoryContext, EngineError> {
     let SupportedDiagnosticExecution::V2(artifact) = artifact else {
         return Err(EngineError::DiagnosticUnsupported(
@@ -4202,7 +4827,6 @@ fn validate_local_v2_provider_correspondence(
         ))
     })?;
     if intake.run_id != run_id
-        || intake.request_id != artifact.request_id.as_str()
         || intake.profile_id != artifact.profile.id
         || intake.profile_version != artifact.profile.version
         || intake.profile_digest != artifact.profile.digest.as_str()
@@ -4221,6 +4845,37 @@ fn validate_local_v2_provider_correspondence(
             ))
         })?;
     let provider_intake = ProviderIntakeRecordV1::reopen_store_row(&intake, &raw)?;
+    match production_binding {
+        None if intake.request_id != artifact.request_id.as_str() => {
+            return Err(EngineError::Invariant(format!(
+                "pre-production local v2 diagnostic artifact {} substitutes its child provider request identity",
+                artifact.artifact_id.0
+            )));
+        }
+        Some(binding) => {
+            if intake.request_id == artifact.request_id.as_str()
+                || binding.provider_attempts.len() != 1
+                || binding.provider_attempts[0].1.intake_id != provider_intake.intake_id
+            {
+                return Err(EngineError::Invariant(format!(
+                    "production local v2 diagnostic artifact {} collapses or substitutes its outer request and exact child provider attempt",
+                    artifact.artifact_id.0
+                )));
+            }
+            let provider_record = &binding.provider_attempts[0].0;
+            let exact_provider_document = CanonicalDocument::from_serializable(&provider_intake)?;
+            if provider_record.record_id != intake.intake_digest
+                || provider_record.record_schema != "nq.provider_intake.v1"
+                || provider_record.canonical_bytes != exact_provider_document
+            {
+                return Err(EngineError::Invariant(format!(
+                    "production local v2 diagnostic artifact {} substitutes its exact provider-intake runtime record",
+                    artifact.artifact_id.0
+                )));
+            }
+        }
+        None => {}
+    }
     let request = &provider_intake.request;
     let request_subject = request.binding.subject.to_string();
     let scope = ScopeConfig {
@@ -4401,13 +5056,13 @@ fn validate_local_v2_provider_correspondence(
         }),
     )?;
     let mut substitutions = Vec::new();
-    if artifact.producer.node_id != node_id {
+    if production_binding.is_none() && artifact.producer.node_id != node_id {
         substitutions.push("producer.node_id");
     }
     if artifact.producer.build != historical_surface.build {
         substitutions.push("producer.build");
     }
-    if artifact.producer.cohort != historical_surface.cohort {
+    if production_binding.is_none() && artifact.producer.cohort != historical_surface.cohort {
         substitutions.push("producer.cohort");
     }
     if artifact.question != expected_question {
@@ -4416,7 +5071,7 @@ fn validate_local_v2_provider_correspondence(
     if artifact.subject.scope != expected_scope {
         substitutions.push("subject.scope");
     }
-    if artifact.vantage != expected_vantage {
+    if production_binding.is_none() && artifact.vantage != expected_vantage {
         substitutions.push("vantage");
     }
     if artifact.state_model != expected_state_model {
@@ -5905,7 +6560,9 @@ fn prepare_diagnostic_emission_base(
     watcher: &WatcherConfig,
     profile: &'static dyn ProfileModule,
     provider: &crate::provider_intake::ProviderIdentityV1,
-    request: &HelperRequest,
+    outer_request_id: Option<&DiagnosticRequestId>,
+    provider_request: &HelperRequest,
+    production: Option<&DiagnosticProductionIdentityV2>,
     run_id: &str,
     capture: &RunCapture,
     evaluator: &EvaluatorRuntimeIdentity,
@@ -6063,17 +6720,35 @@ fn prepare_diagnostic_emission_base(
             "cardinality": "exactly_one_newly_admitted_report_with_no_prior_matching_history",
         }),
     )?;
+    let (subject_id, vantage, cohort) = match production {
+        Some(production) => {
+            validate_diagnostic_production_identity(production)?;
+            if production.node_id != node_id {
+                return Err(EngineError::Invariant(
+                    "production diagnostic node differs from its execution node".to_owned(),
+                ));
+            }
+            (
+                production.subject_id.clone(),
+                production.vantage.clone(),
+                production.cohort.clone(),
+            )
+        }
+        None => (watcher.subject.clone(), vantage, historical_surface.cohort),
+    };
     Ok(DiagnosticEmissionBase {
         producer: DiagnosticProducerV1 {
             node_id: node_id.to_owned(),
             build: historical_surface.build,
-            cohort: historical_surface.cohort,
+            cohort,
         },
-        request_id: DiagnosticRequestId(request.request_id.to_string()),
+        request_id: outer_request_id
+            .cloned()
+            .unwrap_or_else(|| DiagnosticRequestId(provider_request.request_id.to_string())),
         run_id: DiagnosticRunId(run_id.to_owned()),
         question,
         subject: DiagnosticSubjectV1 {
-            id: watcher.subject.clone(),
+            id: subject_id,
             scope,
         },
         profile: profile_identity,
@@ -6115,7 +6790,9 @@ fn prepare_non_success_diagnostic(
     watcher: &WatcherConfig,
     profile: &'static dyn ProfileModule,
     provider: &crate::provider_intake::ProviderIdentityV1,
-    request: &HelperRequest,
+    outer_request_id: Option<&DiagnosticRequestId>,
+    provider_request: &HelperRequest,
+    production: Option<&DiagnosticProductionIdentityV2>,
     run_id: &str,
     provider_intake_id: &str,
     raw: Option<&[u8]>,
@@ -6129,7 +6806,16 @@ fn prepare_non_success_diagnostic(
         ));
     }
     let base = prepare_diagnostic_emission_base(
-        node_id, watcher, profile, provider, request, run_id, capture, evaluator,
+        node_id,
+        watcher,
+        profile,
+        provider,
+        outer_request_id,
+        provider_request,
+        production,
+        run_id,
+        capture,
+        evaluator,
     )?;
     let expected = vec![ExpectedInputV1 {
         expectation_id: "expected:current_provider_report".to_owned(),
@@ -6288,7 +6974,9 @@ fn prepare_diagnostic_emission(
     watcher: &WatcherConfig,
     profile: &'static dyn ProfileModule,
     provider: &crate::provider_intake::ProviderIdentityV1,
-    request: &HelperRequest,
+    outer_request_id: Option<&DiagnosticRequestId>,
+    provider_request: &HelperRequest,
+    production: Option<&DiagnosticProductionIdentityV2>,
     run_id: &str,
     report_id: &str,
     input_id: &str,
@@ -6299,7 +6987,16 @@ fn prepare_diagnostic_emission(
     evaluator: &EvaluatorRuntimeIdentity,
 ) -> Result<DiagnosticEmissionContext, EngineError> {
     let base = prepare_diagnostic_emission_base(
-        node_id, watcher, profile, provider, request, run_id, capture, evaluator,
+        node_id,
+        watcher,
+        profile,
+        provider,
+        outer_request_id,
+        provider_request,
+        production,
+        run_id,
+        capture,
+        evaluator,
     )?;
     let normalized_document = canonical(normalized)?;
     let projected_artifact_placeholder = ProjectedArtifactId(nq_protocol::sha256_bytes(
@@ -11427,7 +12124,9 @@ sys.stdout.write("\n")
             submission,
         } = collection;
         let error = engine
-            .commit_non_success_collection(&watcher, intake, run, submission, outcome, None)
+            .commit_non_success_collection(
+                &watcher, intake, run, submission, outcome, None, None, None,
+            )
             .expect_err("mismatched source and result planes must fail before commit");
         assert!(matches!(
             error,
@@ -12561,6 +13260,475 @@ sys.stdout.write("\n")
             outcome.result,
             CollectionResult::AdmissionRefused { .. }
         ));
+    }
+
+    #[test]
+    fn bound_execution_refuses_unmapped_subject_identity_before_acquisition() {
+        struct UnusedBindingFactory;
+
+        impl DiagnosticExecutionBindingFactory for UnusedBindingFactory {
+            fn build_execution_binding(
+                &self,
+                _source: DiagnosticBindingSource<'_>,
+            ) -> Result<DiagnosticArtifactExecutionBindingInput, EngineError> {
+                panic!("subject mismatch must refuse before provider acquisition or binding")
+            }
+        }
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (config, watcher, _lock) = binding_recovery_fixture(directory.path());
+        Store::initialize(&config.database_path).expect("initialize store");
+        let identity = EvaluatorRuntimeIdentity::for_test(
+            Sha256Digest::parse(format!("sha256:{}", "a".repeat(64))).expect("digest"),
+        );
+        let mut engine =
+            CollectionEngine::open_with_evaluator_identity(&config, Ok(identity)).expect("engine");
+        let semantic = |id: &str| SemanticIdentityV1 {
+            id: id.to_owned(),
+            version: "1".to_owned(),
+            digest: nq_protocol::sha256_bytes(id.as_bytes()),
+        };
+        let error = engine
+            .diagnostic_execute_bound(
+                &watcher,
+                DiagnosticRequestId("outer-request-unmapped-subject".to_owned()),
+                DiagnosticProductionIdentityV2 {
+                    node_id: "node:test".to_owned(),
+                    subject_id: "different-subject".to_owned(),
+                    vantage: semantic("host-local"),
+                    cohort: semantic("host-cohort"),
+                },
+                &UnusedBindingFactory,
+            )
+            .expect_err("unmapped subject identity must fail closed");
+        assert!(matches!(
+            error,
+            EngineError::Invariant(message)
+                if message.contains("no identity correspondence was supplied")
+        ));
+        assert!(
+            engine
+                .store
+                .watcher_run_outcomes_bounded(10, None)
+                .expect("run history")
+                .is_empty(),
+            "the refused identity substitution performs no provider acquisition"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn production_history_uses_exact_execution_binding_not_current_topology() {
+        fn digest(byte: char) -> String {
+            format!("sha256:{}", byte.to_string().repeat(64))
+        }
+
+        fn identity(kind: &str, value: &SemanticIdentityV1) -> Value {
+            json!({
+                "kind": kind,
+                "id": value.id,
+                "version": value.version,
+                "descriptor_digest": value.digest,
+            })
+        }
+
+        fn runtime_input(
+            record_id: &str,
+            record_schema: &str,
+            value: &Value,
+        ) -> nq_store::RuntimeRecordInput {
+            nq_store::RuntimeRecordInput {
+                record_id: record_id.to_owned(),
+                record_schema: record_schema.to_owned(),
+                canonical_bytes: canonical(value).expect("canonical runtime fixture"),
+                committed_at: "2026-07-29T14:00:00Z".to_owned(),
+            }
+        }
+
+        fn reference(record: &nq_store::RuntimeRecordInput) -> Value {
+            json!({
+                "schema": record.record_schema,
+                "record_id": record.record_id,
+                "bytes_digest": record.canonical_bytes.digest(),
+            })
+        }
+
+        fn runtime_row(store: &Store, record_id: &str) -> nq_store::RuntimeRecordRow {
+            store
+                .runtime_record(record_id)
+                .expect("runtime lookup")
+                .expect("runtime row")
+        }
+
+        let mut artifact = DiagnosticExecutionV2::decode_canonical(include_bytes!(
+            "../../../diagnostic-contract-v2/fixtures/valid/completed_unqualified_clock.json"
+        ))
+        .expect("checked V2 fixture");
+        let node = SemanticIdentityV1 {
+            id: "lab/node-history".to_owned(),
+            version: "1".to_owned(),
+            digest: Sha256Digest::parse(digest('1')).expect("node digest"),
+        };
+        let subject = SemanticIdentityV1 {
+            id: "lab/subject-history".to_owned(),
+            version: "1".to_owned(),
+            digest: Sha256Digest::parse(digest('2')).expect("subject digest"),
+        };
+        let scope = SemanticIdentityV1 {
+            id: "host".to_owned(),
+            version: "1".to_owned(),
+            digest: Sha256Digest::parse(digest('3')).expect("scope digest"),
+        };
+        let vantage = SemanticIdentityV1 {
+            id: "lab/subject-history/host-local".to_owned(),
+            version: "7".to_owned(),
+            digest: Sha256Digest::parse(digest('4')).expect("vantage digest"),
+        };
+        let cohort = SemanticIdentityV1 {
+            id: "generic-host/profiles".to_owned(),
+            version: "11".to_owned(),
+            digest: Sha256Digest::parse(digest('5')).expect("cohort digest"),
+        };
+        let role_identity = SemanticIdentityV1 {
+            id: "generic-host".to_owned(),
+            version: "3".to_owned(),
+            digest: nq_protocol::sha256_bytes(b"generic-host-role"),
+        };
+        let platform = SemanticIdentityV1 {
+            id: "ubuntu/24.04/amd64".to_owned(),
+            version: "1".to_owned(),
+            digest: nq_protocol::sha256_bytes(b"ubuntu-platform"),
+        };
+        artifact.producer.node_id.clone_from(&node.id);
+        artifact.producer.cohort = cohort.clone();
+        artifact.subject.id.clone_from(&subject.id);
+        artifact.vantage = vantage.clone();
+        artifact.request_id = DiagnosticRequestId("outer-request-history-001".to_owned());
+        artifact.artifact_id = artifact
+            .computed_artifact_id()
+            .expect("production artifact ID");
+        artifact
+            .canonical_bytes()
+            .expect("mutated production artifact remains canonical");
+
+        let role_id = digest('6');
+        let activation_id = digest('7');
+        let request_record_id = digest('8');
+        let decision_id = digest('9');
+        let launch_id = digest('a');
+        let binding_id = digest('b');
+        let node_subject_id =
+            nq_protocol::sha256_bytes(b"history-node-subject-relation").into_string();
+        let subject_platform_id =
+            nq_protocol::sha256_bytes(b"history-subject-platform-relation").into_string();
+        let node_vantage_id =
+            nq_protocol::sha256_bytes(b"history-node-vantage-relation").into_string();
+        let node_role_id = nq_protocol::sha256_bytes(b"history-node-role-relation").into_string();
+        let node_cohort_id =
+            nq_protocol::sha256_bytes(b"history-node-cohort-relation").into_string();
+        let role = runtime_input(
+            &role_id,
+            "nq.role_manifest.v1",
+            &json!({
+                "schema": "nq.role_manifest.v1",
+                "subject_scope_classes": [identity("scope", &scope)],
+            }),
+        );
+        let node_subject = runtime_input(
+            &node_subject_id,
+            "nq.host_role_relation.v1",
+            &json!({
+                "schema": "nq.host_role_relation.v1",
+                "relation_id": node_subject_id,
+                "relation_kind": "node_subject",
+                "left": identity("nq_node", &node),
+                "right": identity("subject", &subject),
+            }),
+        );
+        let subject_platform = runtime_input(
+            &subject_platform_id,
+            "nq.host_role_relation.v1",
+            &json!({
+                "schema": "nq.host_role_relation.v1",
+                "relation_id": subject_platform_id,
+                "relation_kind": "subject_platform",
+                "left": identity("subject", &subject),
+                "right": identity("platform", &platform),
+            }),
+        );
+        let node_vantage = runtime_input(
+            &node_vantage_id,
+            "nq.host_role_relation.v1",
+            &json!({
+                "schema": "nq.host_role_relation.v1",
+                "relation_id": node_vantage_id,
+                "relation_kind": "node_vantage",
+                "left": identity("nq_node", &node),
+                "right": identity("vantage", &vantage),
+            }),
+        );
+        let node_role = runtime_input(
+            &node_role_id,
+            "nq.host_role_relation.v1",
+            &json!({
+                "schema": "nq.host_role_relation.v1",
+                "relation_id": node_role_id,
+                "relation_kind": "node_role",
+                "left": identity("nq_node", &node),
+                "right": identity("role", &role_identity),
+            }),
+        );
+        let node_cohort = runtime_input(
+            &node_cohort_id,
+            "nq.host_role_relation.v1",
+            &json!({
+                "schema": "nq.host_role_relation.v1",
+                "relation_id": node_cohort_id,
+                "relation_kind": "node_static_profile_cohort",
+                "left": identity("nq_node", &node),
+                "right": identity("static_cohort", &cohort),
+            }),
+        );
+        let exact_relations = json!({
+            "node_subject": reference(&node_subject),
+            "subject_platform": reference(&subject_platform),
+            "node_vantage": reference(&node_vantage),
+            "node_role": reference(&node_role),
+            "node_static_profile_cohort": reference(&node_cohort),
+        });
+        let activation = runtime_input(
+            &activation_id,
+            "nq.runtime_activation.v1",
+            &json!({
+                "schema": "nq.runtime_activation.v1",
+                "node": identity("nq_node", &node),
+                "role": identity("role", &role_identity),
+                "static_profile_cohort": identity("static_cohort", &cohort),
+                "relations": exact_relations.clone(),
+                "role_scope": scope.id,
+            }),
+        );
+        let request = runtime_input(
+            &request_record_id,
+            "nq.diagnostic_invocation_request.v1",
+            &json!({
+                "schema": "nq.diagnostic_invocation_request.v1",
+                "request_id": artifact.request_id,
+                "request_digest": request_record_id,
+                "target": {
+                    "node": identity("nq_node", &node),
+                    "subject": identity("subject", &subject),
+                    "vantage": identity("vantage", &vantage),
+                },
+                "profile": identity("diagnostic_profile", &artifact.profile),
+            }),
+        );
+        let decision = runtime_input(
+            &decision_id,
+            "nq.invocation_decision.v1",
+            &json!({
+                "schema": "nq.invocation_decision.v1",
+                "decision": "accepted",
+                "request_digest": request_record_id,
+                "request": reference(&request),
+            }),
+        );
+        let launch = runtime_input(
+            &launch_id,
+            "nq.execution_launch.v1",
+            &json!({
+                "schema": "nq.execution_launch.v1",
+                "status": "launched",
+                "outer_request": reference(&request),
+                "invocation_decision": reference(&decision),
+            }),
+        );
+        let resolved = json!({
+            "node": {"identity": identity("nq_node", &node)},
+            "subject": {"identity": identity("subject", &subject)},
+            "vantage": {"identity": identity("vantage", &vantage)},
+            "static_profile_cohort": {"identity": identity("static_cohort", &cohort)},
+            "role": {"identity": identity("role", &role_identity)},
+            "platform": {"identity": identity("platform", &platform)},
+            "diagnostic_profile": {
+                "identity": identity("diagnostic_profile", &artifact.profile)
+            },
+        });
+        let binding_record = runtime_input(
+            &binding_id,
+            "nq.execution_identity_binding.v2",
+            &json!({
+                "schema": "nq.execution_identity_binding.v2",
+                "binding_id": binding_id,
+                "binding_result": "resolved",
+                "outer_request": reference(&request),
+                "invocation_decision": reference(&decision),
+                "execution_launch": reference(&launch),
+                "activation": reference(&activation),
+                "role_manifest": reference(&role),
+                "source_relations": exact_relations.clone(),
+                "resolved_references": resolved,
+            }),
+        );
+        let directory = tempfile::tempdir().expect("store directory");
+        let mut store =
+            Store::initialize(directory.path().join("nq.db")).expect("runtime history store");
+        store
+            .append_runtime_records(&nq_store::RuntimeRecordBatchInput {
+                checkpoint_id: digest('c'),
+                expected_predecessor_checkpoint_id: None,
+                expected_predecessor_ledger_root: None,
+                records: vec![
+                    role.clone(),
+                    node_subject.clone(),
+                    subject_platform.clone(),
+                    node_vantage.clone(),
+                    node_role.clone(),
+                    node_cohort.clone(),
+                    activation.clone(),
+                    request.clone(),
+                    decision.clone(),
+                    launch.clone(),
+                    binding_record.clone(),
+                ],
+            })
+            .expect("append exact production history");
+        let exact_binding = nq_store::DiagnosticArtifactExecutionBinding {
+            execution_binding: runtime_row(&store, &binding_id),
+            outer_request: runtime_row(&store, &request_record_id),
+            invocation_decision: runtime_row(&store, &decision_id),
+            execution_launch: runtime_row(&store, &launch_id),
+            outer_request_id: artifact.request_id.0.clone(),
+            provider_attempts: Vec::new(),
+        };
+        validate_production_v2_execution_binding(&store, &artifact, &exact_binding)
+            .expect("exact historical production binding verifies");
+
+        let substituted_request_id = digest('d');
+        let substituted_request = runtime_input(
+            &substituted_request_id,
+            "nq.diagnostic_invocation_request.v1",
+            &json!({
+                "schema": "nq.diagnostic_invocation_request.v1",
+                "request_id": "outer-request-substituted",
+                "request_digest": substituted_request_id,
+                "target": {
+                    "node": identity("nq_node", &node),
+                    "subject": identity("subject", &subject),
+                    "vantage": identity("vantage", &vantage),
+                },
+                "profile": identity("diagnostic_profile", &artifact.profile),
+            }),
+        );
+        let later_vantage = SemanticIdentityV1 {
+            id: "lab/subject-history/rehome".to_owned(),
+            version: "2".to_owned(),
+            digest: Sha256Digest::parse(digest('e')).expect("later vantage digest"),
+        };
+        let later_vantage_relation_id =
+            nq_protocol::sha256_bytes(b"later-node-vantage-relation").into_string();
+        let later_vantage_relation = runtime_input(
+            &later_vantage_relation_id,
+            "nq.host_role_relation.v1",
+            &json!({
+                "schema": "nq.host_role_relation.v1",
+                "relation_id": later_vantage_relation_id,
+                "relation_kind": "node_vantage",
+                "left": identity("nq_node", &node),
+                "right": identity("vantage", &later_vantage),
+            }),
+        );
+        let mut later_relations = exact_relations.clone();
+        later_relations["node_vantage"] = reference(&later_vantage_relation);
+        let later_activation = runtime_input(
+            &digest('f'),
+            "nq.runtime_activation.v1",
+            &json!({
+                "schema": "nq.runtime_activation.v1",
+                "node": identity("nq_node", &node),
+                "role": identity("role", &role_identity),
+                "static_profile_cohort": identity("static_cohort", &cohort),
+                "relations": later_relations,
+                "role_scope": scope.id,
+            }),
+        );
+        let first_frontier = store
+            .runtime_ledger_checkpoint()
+            .expect("runtime frontier")
+            .expect("nonempty runtime frontier");
+        store
+            .append_runtime_records(&nq_store::RuntimeRecordBatchInput {
+                checkpoint_id: digest('0'),
+                expected_predecessor_checkpoint_id: Some(first_frontier.checkpoint_id),
+                expected_predecessor_ledger_root: Some(first_frontier.checkpoint_ledger_root),
+                records: vec![
+                    substituted_request,
+                    later_vantage_relation,
+                    later_activation,
+                ],
+            })
+            .expect("append later topology and hostile request");
+
+        let mut hostile_outer = exact_binding.clone();
+        hostile_outer.outer_request = runtime_row(&store, &substituted_request_id);
+        hostile_outer.outer_request_id = "outer-request-substituted".to_owned();
+        assert!(matches!(
+            validate_production_v2_execution_binding(&store, &artifact, &hostile_outer),
+            Err(EngineError::Invariant(message))
+                if message.contains("outer request linkage")
+        ));
+
+        let hostile_binding_id = digest('4');
+        let hostile_binding_record = runtime_input(
+            &hostile_binding_id,
+            "nq.execution_identity_binding.v2",
+            &json!({
+                "schema": "nq.execution_identity_binding.v2",
+                "binding_id": hostile_binding_id,
+                "binding_result": "resolved",
+                "outer_request": reference(&request),
+                "invocation_decision": reference(&decision),
+                "execution_launch": reference(&launch),
+                "activation": reference(&activation),
+                "role_manifest": reference(&role),
+                "source_relations": exact_relations,
+                "resolved_references": {
+                    "node": {"identity": identity("nq_node", &node)},
+                    "subject": {"identity": identity("subject", &subject)},
+                    "vantage": {"identity": identity("vantage", &later_vantage)},
+                    "static_profile_cohort": {
+                        "identity": identity("static_cohort", &cohort)
+                    },
+                    "role": {"identity": identity("role", &role_identity)},
+                    "platform": {"identity": identity("platform", &platform)},
+                    "diagnostic_profile": {
+                        "identity": identity("diagnostic_profile", &artifact.profile)
+                    },
+                },
+            }),
+        );
+        let frontier = store
+            .runtime_ledger_checkpoint()
+            .expect("hostile binding frontier")
+            .expect("nonempty frontier");
+        store
+            .append_runtime_records(&nq_store::RuntimeRecordBatchInput {
+                checkpoint_id: digest('5'),
+                expected_predecessor_checkpoint_id: Some(frontier.checkpoint_id),
+                expected_predecessor_ledger_root: Some(frontier.checkpoint_ledger_root),
+                records: vec![hostile_binding_record],
+            })
+            .expect("append hostile binding");
+        let mut hostile_linkage = exact_binding.clone();
+        hostile_linkage.execution_binding = runtime_row(&store, &hostile_binding_id);
+        assert!(matches!(
+            validate_production_v2_execution_binding(&store, &artifact, &hostile_linkage),
+            Err(EngineError::Invariant(message))
+                if message.contains("resolved node, subject, vantage, cohort, or profile")
+        ));
+
+        validate_production_v2_execution_binding(&store, &artifact, &exact_binding)
+            .expect("later topology cannot reinterpret the exact historical binding");
     }
 
     #[test]
