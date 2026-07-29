@@ -24,13 +24,6 @@
 //!     runtime.append_custody_only(request).unwrap();
 //! }
 //! ```
-//!
-//! Test-only prepared-invocation construction is also absent from the default
-//! product feature set:
-//!
-//! ```compile_fail
-//! use nq_host_role_runtime::PreparedGovernedInvocationTestParts;
-//! ```
 
 mod dependency;
 mod inspector;
@@ -49,8 +42,6 @@ pub use dependency::{
     SignedAdmissionReceiptSet,
 };
 pub use inspector::{InspectorEntry, InspectorPage, InspectorProjection, InspectorProjectionState};
-#[cfg(feature = "test-fixtures")]
-pub use prelaunch::PreparedGovernedInvocationTestParts;
 pub(crate) use prelaunch::production_identity;
 pub use prelaunch::{
     GovernedPrelaunchRequest, GovernedProductionIdentity, PreparedGovernedInvocation,

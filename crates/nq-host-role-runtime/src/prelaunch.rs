@@ -90,72 +90,7 @@ pub struct PreparedGovernedInvocation {
     pub(crate) custody_reservation_spec: GovernedCustodyReservation,
 }
 
-/// Exact parts accepted only by the explicitly enabled test-fixture seam.
-///
-/// This carrier performs no validation and must never be used as production
-/// evidence. The default product build does not contain either this type or
-/// its constructor.
-#[cfg(feature = "test-fixtures")]
-pub struct PreparedGovernedInvocationTestParts {
-    /// Exact request occurrence.
-    pub request_id: String,
-    /// Test node identity.
-    pub node: IdentityRef,
-    /// Test subject identity.
-    pub subject: IdentityRef,
-    /// Test vantage identity.
-    pub vantage: IdentityRef,
-    /// Test cohort identity.
-    pub cohort: IdentityRef,
-    /// Exact reservation checkpoint.
-    pub reservation_checkpoint: RuntimeLedgerCheckpoint,
-    /// Exact launch checkpoint.
-    pub launch_checkpoint: RuntimeLedgerCheckpoint,
-    /// Exact request reference.
-    pub outer_request: RecordRef,
-    /// Exact decision reference.
-    pub invocation_decision: RecordRef,
-    /// Exact reservation reference.
-    pub custody_reservation: RecordRef,
-    /// Exact launch reference.
-    pub execution_launch: RecordRef,
-    /// Complete test prelaunch record set.
-    pub prelaunch_records: RuntimeRecordSet,
-    /// Provider intakes preceding the test occurrence.
-    pub existing_provider_intakes: Vec<RecordRef>,
-    /// Test dependency generation.
-    pub dependencies: RuntimeDependencies,
-    /// Exact test dependency custody bytes.
-    pub dependency_custody_bytes: Vec<u8>,
-    /// Exact physical custody reservation.
-    pub custody_reservation_spec: GovernedCustodyReservation,
-}
-
 impl PreparedGovernedInvocation {
-    /// Construct a non-production test token from explicit exact parts.
-    ///
-    /// This method exists only under the `test-fixtures` feature. It assigns no
-    /// standing and deliberately cannot appear in the default product build.
-    #[cfg(feature = "test-fixtures")]
-    #[must_use]
-    pub fn from_test_parts(parts: PreparedGovernedInvocationTestParts) -> Self {
-        Self {
-            request_id: parts.request_id,
-            production: production_identity(parts.node, parts.subject, parts.vantage, parts.cohort),
-            reservation_checkpoint: parts.reservation_checkpoint,
-            launch_checkpoint: parts.launch_checkpoint,
-            outer_request: parts.outer_request,
-            invocation_decision: parts.invocation_decision,
-            custody_reservation: parts.custody_reservation,
-            execution_launch: parts.execution_launch,
-            prelaunch_records: parts.prelaunch_records,
-            existing_provider_intakes: parts.existing_provider_intakes,
-            dependencies: parts.dependencies,
-            dependency_custody_bytes: parts.dependency_custody_bytes,
-            custody_reservation_spec: parts.custody_reservation_spec,
-        }
-    }
-
     /// Return the exact authorized outer request occurrence.
     #[must_use]
     pub fn request_id(&self) -> &str {
