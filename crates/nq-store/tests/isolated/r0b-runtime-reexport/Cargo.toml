@@ -1,0 +1,10 @@
+[package]
+name = "nq-store-r0b-runtime-reexport"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+nq-host-role-runtime = { path = "../../../../nq-host-role-runtime" }

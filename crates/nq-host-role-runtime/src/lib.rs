@@ -29,17 +29,22 @@ mod dependency;
 mod inspector;
 mod prelaunch;
 mod runtime;
+#[cfg(feature = "test-support")]
+pub use runtime::test_support;
 
 pub use dependency::{
     ADMISSION_RECEIPT_SET_SCHEMA, AUTHORITY_ADMISSION_SNAPSHOT_SCHEMA,
     AdmissionReceiptSetAvailability, AdmissionReceiptSetCustody, AdmissionSignatureAlgorithm,
-    AuthorityAdmission, AuthorityAdmissionKind, AuthorityAdmissionSnapshot,
-    DependencyAdmissionKind, DependencyAdmissionReceipt, ED25519_TRUST_ANCHOR_SCHEMA,
-    EXTERNAL_DEPENDENCY_SNAPSHOT_SCHEMA, Ed25519TrustAnchor, ExactExternalDependency,
-    ExternalDependencyAvailability, ExternalDependencySnapshot,
-    RUNTIME_DEPENDENCY_GENERATION_CUSTODY_SCHEMA, RUNTIME_DEPENDENCY_GENERATION_SCHEMA,
-    RuntimeDependencies, RuntimeDependencyGeneration, RuntimeDependencyGenerationCustody,
-    SignedAdmissionReceiptSet,
+    AuthenticatedRuntimeDependencyClosure, AuthenticatedSourceResolution, AuthorityAdmission,
+    AuthorityAdmissionKind, AuthorityAdmissionSnapshot, AuthoritySourcePurpose,
+    AuthoritySourceRequirement, AuthoritySourceResult, AuthoritySourceState,
+    DependencyAdmissionKind, DependencyAdmissionReceipt, DependencyCustodyError,
+    ED25519_TRUST_ANCHOR_SCHEMA, EXTERNAL_DEPENDENCY_SNAPSHOT_SCHEMA, Ed25519TrustAnchor,
+    ExactDependencyCustodyBinding, ExactExternalDependency, ExternalDependencyAvailability,
+    ExternalDependencySnapshot, ExternalSourcePurpose, ExternalSourceRequirement,
+    ExternalSourceResult, ExternalSourceState, RUNTIME_DEPENDENCY_GENERATION_CUSTODY_SCHEMA,
+    RUNTIME_DEPENDENCY_GENERATION_SCHEMA, RuntimeDependencies, RuntimeDependencyGeneration,
+    RuntimeDependencyGenerationCustody, SignedAdmissionReceiptSet,
 };
 pub use inspector::{InspectorEntry, InspectorPage, InspectorProjection, InspectorProjectionState};
 pub(crate) use prelaunch::production_identity;
@@ -230,6 +235,40 @@ pub enum RuntimeError {
     /// Stored dependency-generation identity or bytes were substituted.
     #[error("runtime dependency-generation custody differs from its authenticated generation")]
     RuntimeDependencyGenerationSubstitution,
+    /// A bound dependency reopen was given an impossible empty-byte binding.
+    #[error("dependency-custody binding length must be positive")]
+    CustodyBindingLengthZero,
+    /// Dependency-custody byte length could not be represented as `u64`.
+    #[error("dependency-custody byte length exceeds u64")]
+    CustodyLengthOverflow,
+    /// Exact dependency-custody length differed from its immutable binding.
+    #[error("dependency-custody length differs: expected {expected}, observed {observed}")]
+    CustodyLengthMismatch {
+        /// Required byte length.
+        expected: u64,
+        /// Observed byte length.
+        observed: u64,
+    },
+    /// Exact dependency-custody digest differed from its immutable binding.
+    #[error("dependency-custody digest differs: expected {expected}, observed {observed}")]
+    CustodyDigestMismatch {
+        /// Required byte digest.
+        expected: Sha256Digest,
+        /// Observed byte digest.
+        observed: Sha256Digest,
+    },
+    /// An external-source purpose was paired with an ineligible reference.
+    #[error("external-source requirement is incompatible with its exact reference")]
+    ExternalSourceRequirementInvalid,
+    /// An authority purpose was paired with an ineligible reference.
+    #[error("authority-source requirement is incompatible with its exact reference")]
+    AuthoritySourceRequirementInvalid,
+    /// One exact external source requirement was repeated.
+    #[error("external-source requirement was duplicated")]
+    DuplicateExternalSourceRequirement,
+    /// One exact authority requirement was repeated.
+    #[error("authority-source requirement was duplicated")]
+    DuplicateAuthoritySourceRequirement,
     /// A runtime checkpoint has no exact dependency binding.
     #[error("runtime checkpoint {0} has no dependency binding")]
     CheckpointDependencyMissing(String),

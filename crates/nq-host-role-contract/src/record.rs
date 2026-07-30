@@ -7,14 +7,32 @@ use serde_json::{Map, Value};
 
 use crate::{
     ContractError, Result,
+    capacity::{
+        AppendExtentGeometryV1, CAPACITY_IJSON_SAFE_INTEGER_MAX_V1, CapacityCandidateChargeV1,
+        CapacityLimitRefusalV1, CapacityLogicalDispositionV1, CapacityLogicalLimitsV1,
+        CapacitySemanticComponentsV1, CapacityUsageComponentsV1, CapacityWatermarkClassificationV1,
+        CustodyArenaGeometryV1, checked_append_extent_geometry_v1,
+        checked_capacity_semantic_sum_v1, checked_custody_arena_geometry_v1,
+        checked_logical_preallocated_custody_carriers_v1,
+    },
     identity::{
         EffectiveInterval, Generation, IdentityKind, IdentityRef, NamespaceSnapshot, RecordRef,
         Timestamp, Token,
     },
 };
 
-/// Maximum safe integer under the I-JSON/JCS number model.
-const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+const RESERVATION_PLAN_SCHEMA: &str = "nq.custody_reservation_plan.v1";
+const RESERVATION_PLAN_DIGEST_DOMAIN: &[u8] = b"nq.custody_reservation_plan.v1\0";
+const CAPACITY_ALLOCATION_DIGEST_DOMAIN: &[u8] = b"nq.custody_capacity_allocation.v1\0";
+const QUEUE_OCCURRENCE_DIGEST_DOMAIN: &[u8] = b"nq.capacity_queue_occurrence.v1\0";
+const DESTINATION_GENERATION_DIGEST_DOMAIN: &[u8] = b"nq.capacity_destination_generation.v1\0";
+const DELIVERY_POLICY_GENERATION_DIGEST_DOMAIN: &[u8] =
+    b"nq.capacity_delivery_policy_generation.v1\0";
+const NEUTRAL_STORE_SNAPSHOT: &str = "nq.capacity-allocation-store-snapshot/v1";
+const NEUTRAL_RESERVATION_COMMIT: &str = "nq.capacity-allocation-commit/v1";
+const NEUTRAL_CAPACITY_ALLOCATION_ID: &str = "nq.capacity-allocation-id/unbound-v1";
+/// Authority-neutral future-artifact slot used before terminal finalization.
+pub const CAPACITY_FUTURE_ARTIFACT_SLOT: &str = "nq.future-artifact-slot/unbound-v1";
 const RETRYABLE_OUTCOMES: [&str; 4] = [
     "transport_unavailable",
     "transport_timeout",
@@ -68,6 +86,8 @@ pub enum RuntimeSchema {
     OperationAuthorizationV1,
     /// `nq.custody_reservation.v1`.
     CustodyReservationV1,
+    /// `nq.custody_capacity_allocation.v1`.
+    CustodyCapacityAllocationV1,
     /// `nq.execution_launch.v1`.
     ExecutionLaunchV1,
     /// `nq.native_profile_qualification.v1`.
@@ -98,9 +118,20 @@ pub enum RuntimeSchema {
     DecommissionCutV1,
 }
 
+/// Immutable provenance package containing one runtime schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemaPackageClass {
+    /// Schema bytes from the frozen Campaign 3A decision package.
+    Frozen3A,
+    /// Additive native-profile and native-clock correspondence package.
+    NativeCorrespondence,
+    /// Additive, content-addressed physical-capacity package.
+    Capacity,
+}
+
 impl RuntimeSchema {
     /// Every supported record schema.
-    pub const ALL: [Self; 29] = [
+    pub const ALL: [Self; 30] = [
         Self::RoleManifestV1,
         Self::BufferDeliveryPolicyV1,
         Self::StaticProfileCohortManifestV1,
@@ -116,6 +147,7 @@ impl RuntimeSchema {
         Self::InvocationDecisionV1,
         Self::OperationAuthorizationV1,
         Self::CustodyReservationV1,
+        Self::CustodyCapacityAllocationV1,
         Self::ExecutionLaunchV1,
         Self::NativeProfileQualificationV1,
         Self::NativeClockQualificationV1,
@@ -151,6 +183,7 @@ impl RuntimeSchema {
             Self::InvocationDecisionV1 => "nq.invocation_decision.v1",
             Self::OperationAuthorizationV1 => "nq.operation_authorization.v1",
             Self::CustodyReservationV1 => "nq.custody_reservation.v1",
+            Self::CustodyCapacityAllocationV1 => "nq.custody_capacity_allocation.v1",
             Self::ExecutionLaunchV1 => "nq.execution_launch.v1",
             Self::NativeProfileQualificationV1 => "nq.native_profile_qualification.v1",
             Self::NativeClockQualificationV1 => "nq.native_clock_qualification.v1",
@@ -185,11 +218,33 @@ impl RuntimeSchema {
     #[must_use]
     pub const fn is_native_correspondence(self) -> bool {
         matches!(
-            self,
-            Self::NativeProfileQualificationV1
-                | Self::NativeClockQualificationV1
-                | Self::DeadlineEvaluationV1
+            self.package_class(),
+            SchemaPackageClass::NativeCorrespondence
         )
+    }
+
+    /// Whether this schema belongs to the additive capacity extension.
+    #[must_use]
+    pub const fn is_capacity_extension(self) -> bool {
+        matches!(self.package_class(), SchemaPackageClass::Capacity)
+    }
+
+    /// Whether this schema belongs to the frozen Campaign 3A package.
+    #[must_use]
+    pub const fn is_frozen_3a(self) -> bool {
+        matches!(self.package_class(), SchemaPackageClass::Frozen3A)
+    }
+
+    /// Returns the immutable package class that owns this schema's bytes.
+    #[must_use]
+    pub const fn package_class(self) -> SchemaPackageClass {
+        match self {
+            Self::NativeProfileQualificationV1
+            | Self::NativeClockQualificationV1
+            | Self::DeadlineEvaluationV1 => SchemaPackageClass::NativeCorrespondence,
+            Self::CustodyCapacityAllocationV1 => SchemaPackageClass::Capacity,
+            _ => SchemaPackageClass::Frozen3A,
+        }
     }
 
     /// Returns the immutable-record identity field.
@@ -206,6 +261,7 @@ impl RuntimeSchema {
             Self::InvocationDecisionV1 => "decision_id",
             Self::OperationAuthorizationV1 => "authorization_id",
             Self::CustodyReservationV1 => "reservation_id",
+            Self::CustodyCapacityAllocationV1 => "allocation_id",
             Self::ExecutionLaunchV1 => "launch_id",
             Self::NativeProfileQualificationV1 | Self::NativeClockQualificationV1 => {
                 "qualification_id"
@@ -496,6 +552,36 @@ impl RuntimeSchema {
                 "reservation_commit",
                 "reserved_at",
                 "expires_at",
+                "clock",
+                "nonclaims",
+            ],
+            Self::CustodyCapacityAllocationV1 => &[
+                "schema",
+                "allocation_id",
+                "namespace",
+                "store_genesis_id",
+                "store_integrity_key_generation",
+                "predecessor_capacity",
+                "policy",
+                "rules",
+                "before_snapshot",
+                "request_occurrence",
+                "reservation_plan",
+                "plan_digest",
+                "semantic_components",
+                "semantic_sum_bytes",
+                "carrier_bounds",
+                "arena_layout",
+                "canonical_record_extent",
+                "delivery_ledger_extent",
+                "retained_charge_bytes",
+                "queue",
+                "limits",
+                "logical_preallocated_carrier_bytes_after",
+                "watermark_classification",
+                "decision",
+                "refusal_reasons",
+                "calculated_at",
                 "clock",
                 "nonclaims",
             ],
@@ -866,6 +952,7 @@ carrier_types!(
     (InvocationDecision, InvocationDecision),
     (OperationAuthorization, OperationAuthorization),
     (CustodyReservation, CustodyReservation),
+    (CustodyCapacityAllocation, CustodyCapacityAllocation),
     (ExecutionLaunch, ExecutionLaunch),
     (NativeProfileQualification, NativeProfileQualification),
     (NativeClockQualification, NativeClockQualification),
@@ -925,6 +1012,9 @@ impl RuntimeRecord {
             RuntimeSchema::CustodyReservationV1 => {
                 Self::CustodyReservation(CustodyReservation(record))
             }
+            RuntimeSchema::CustodyCapacityAllocationV1 => {
+                Self::CustodyCapacityAllocation(CustodyCapacityAllocation(record))
+            }
             RuntimeSchema::ExecutionLaunchV1 => Self::ExecutionLaunch(ExecutionLaunch(record)),
             RuntimeSchema::NativeProfileQualificationV1 => {
                 Self::NativeProfileQualification(NativeProfileQualification(record))
@@ -983,6 +1073,7 @@ impl RuntimeRecord {
             Self::InvocationDecision(value) => &value.0,
             Self::OperationAuthorization(value) => &value.0,
             Self::CustodyReservation(value) => &value.0,
+            Self::CustodyCapacityAllocation(value) => &value.0,
             Self::ExecutionLaunch(value) => &value.0,
             Self::NativeProfileQualification(value) => &value.0,
             Self::NativeClockQualification(value) => &value.0,
@@ -1126,6 +1217,518 @@ impl ValidatedRuntimeRecord {
     }
 }
 
+/// Exact authority-neutral transform of one valid v1 custody reservation.
+///
+/// The canonical bytes intentionally carry no record identity. Their
+/// separately returned [`Self::plan_digest`] is domain-separated, so the
+/// plan cannot acquire a self-hash cycle or masquerade as a runtime record.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CustodyReservationPlan {
+    value: Value,
+    canonical_bytes: Vec<u8>,
+    plan_digest: Sha256Digest,
+}
+
+impl CustodyReservationPlan {
+    /// Constructs the total neutral transform of one validated v1
+    /// reservation.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a non-reservation source or any transformed carrier that does
+    /// not satisfy the closed plan schema.
+    pub fn from_reservation(reservation: &ValidatedRuntimeRecord) -> Result<Self> {
+        if reservation.schema() != RuntimeSchema::CustodyReservationV1 {
+            return Err(ContractError::InvalidReservationPlan);
+        }
+        let mut value = reservation.record().as_value().clone();
+        let object = value
+            .as_object_mut()
+            .ok_or(ContractError::InvalidReservationPlan)?;
+        object.remove("reservation_id");
+        object.insert(
+            "schema".to_owned(),
+            Value::String(RESERVATION_PLAN_SCHEMA.to_owned()),
+        );
+        object.insert(
+            "store_snapshot".to_owned(),
+            Value::String(NEUTRAL_STORE_SNAPSHOT.to_owned()),
+        );
+        object.insert(
+            "reservation_commit".to_owned(),
+            Value::String(NEUTRAL_RESERVATION_COMMIT.to_owned()),
+        );
+        Self::validate_value(value)
+    }
+
+    /// Decodes exact canonical plan bytes.
+    ///
+    /// # Errors
+    ///
+    /// Refuses noncanonical bytes or a malformed authority-neutral plan.
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self> {
+        let value: Value = serde_json::from_slice(bytes)?;
+        let canonical_bytes = canonical_json_bytes(&value)?;
+        if canonical_bytes != bytes {
+            return Err(ContractError::NonCanonicalRecord);
+        }
+        Self::from_canonical_value(value, canonical_bytes)
+    }
+
+    /// Validates and canonicalizes an authority-neutral plan value.
+    ///
+    /// # Errors
+    ///
+    /// Refuses every unknown field, unsafe integer, malformed identity,
+    /// invalid reservation arithmetic, authority-bearing token, or invalid
+    /// timestamp interval.
+    pub fn validate_value(value: Value) -> Result<Self> {
+        let canonical_bytes = canonical_json_bytes(&value)?;
+        Self::from_canonical_value(value, canonical_bytes)
+    }
+
+    fn from_canonical_value(value: Value, canonical_bytes: Vec<u8>) -> Result<Self> {
+        validate_common_value(&value)?;
+        crate::schema::validate_capacity_document(RESERVATION_PLAN_SCHEMA, &value)?;
+        validate_reservation_plan(
+            value
+                .as_object()
+                .ok_or(ContractError::InvalidReservationPlan)?,
+        )?;
+        let plan_digest = domain_separated_digest(RESERVATION_PLAN_DIGEST_DOMAIN, &canonical_bytes);
+        Ok(Self {
+            value,
+            canonical_bytes,
+            plan_digest,
+        })
+    }
+
+    /// Returns the exact neutral plan value.
+    #[must_use]
+    pub fn as_value(&self) -> &Value {
+        &self.value
+    }
+
+    /// Returns exact RFC 8785 canonical plan bytes.
+    #[must_use]
+    pub fn canonical_bytes(&self) -> &[u8] {
+        &self.canonical_bytes
+    }
+
+    /// Returns the domain-separated digest bound by the allocation.
+    #[must_use]
+    pub const fn plan_digest(&self) -> &Sha256Digest {
+        &self.plan_digest
+    }
+
+    /// Proves that this plan is the exact total transform of a reservation.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a non-reservation input or malformed source carrier.
+    pub fn matches_reservation(&self, reservation: &ValidatedRuntimeRecord) -> Result<bool> {
+        Ok(Self::from_reservation(reservation)?.canonical_bytes == self.canonical_bytes)
+    }
+}
+
+/// Derives the acyclic identity of a capacity-allocation record.
+///
+/// The preimage removes the root identity and every derived queue-occurrence
+/// identity, and replaces each allocation backlink with one fixed
+/// domain-separated sentinel. All verdict-relevant queue inputs remain.
+///
+/// # Errors
+///
+/// Refuses a malformed allocation shape or canonicalization failure.
+pub fn derive_capacity_allocation_identity(value: &Value) -> Result<Sha256Digest> {
+    let mut preimage = value.clone();
+    let object = preimage
+        .as_object_mut()
+        .ok_or(ContractError::InvalidCapacityAllocation)?;
+    object.remove("allocation_id");
+    let occurrences = object
+        .get_mut("queue")
+        .and_then(Value::as_object_mut)
+        .and_then(|queue| queue.get_mut("occurrences"))
+        .and_then(Value::as_array_mut)
+        .ok_or(ContractError::InvalidCapacityAllocation)?;
+    for occurrence in occurrences {
+        let occurrence = occurrence
+            .as_object_mut()
+            .ok_or(ContractError::InvalidCapacityAllocation)?;
+        occurrence.remove("occurrence_id");
+        occurrence.insert(
+            "capacity_allocation_id".to_owned(),
+            Value::String(NEUTRAL_CAPACITY_ALLOCATION_ID.to_owned()),
+        );
+    }
+    let bytes = canonical_json_bytes(&preimage)?;
+    Ok(domain_separated_digest(
+        CAPACITY_ALLOCATION_DIGEST_DOMAIN,
+        &bytes,
+    ))
+}
+
+/// Derives one queue-occurrence identity from its exact five ratified inputs.
+///
+/// # Errors
+///
+/// Refuses a malformed occurrence shape or canonicalization failure.
+pub fn derive_capacity_queue_occurrence_identity(value: &Value) -> Result<Sha256Digest> {
+    let object = value
+        .as_object()
+        .ok_or(ContractError::InvalidCapacityAllocation)?;
+    if object.get("future_artifact_slot").and_then(Value::as_str)
+        != Some(CAPACITY_FUTURE_ARTIFACT_SLOT)
+    {
+        return Err(ContractError::InvalidCapacityAllocation);
+    }
+    let allocation_id = digest_field(object, "capacity_allocation_id")?;
+    let request_occurrence_id = digest_field(object, "request_occurrence_id")?;
+    let destination_generation_id = digest_field(object, "destination_generation_id")?;
+    let delivery_policy_generation_id = digest_field(object, "delivery_policy_generation_id")?;
+    capacity_queue_occurrence_identity(
+        &allocation_id,
+        &request_occurrence_id,
+        &destination_generation_id,
+        &delivery_policy_generation_id,
+    )
+}
+
+/// Computes the one canonical queue-occurrence identity law.
+///
+/// Store code must call this function rather than duplicate the preimage,
+/// canonicalization, or domain separator.
+///
+/// # Errors
+///
+/// Returns a canonicalization error only if the fixed typed preimage cannot
+/// be serialized by the production canonicalizer.
+pub fn capacity_queue_occurrence_identity(
+    capacity_allocation_id: &Sha256Digest,
+    request_occurrence_id: &Sha256Digest,
+    destination_generation_id: &Sha256Digest,
+    delivery_policy_generation_id: &Sha256Digest,
+) -> Result<Sha256Digest> {
+    let preimage = serde_json::json!({
+        "capacity_allocation_id": capacity_allocation_id,
+        "request_occurrence_id": request_occurrence_id,
+        "destination_generation_id": destination_generation_id,
+        "delivery_policy_generation_id": delivery_policy_generation_id,
+        "future_artifact_slot": CAPACITY_FUTURE_ARTIFACT_SLOT,
+    });
+    let bytes = canonical_json_bytes(&preimage)?;
+    Ok(domain_separated_digest(
+        QUEUE_OCCURRENCE_DIGEST_DOMAIN,
+        &bytes,
+    ))
+}
+
+/// Computes the exact source-bound identity of one destination generation.
+///
+/// This identity binds the admitted destination descriptor and the request's
+/// exact destination generation.  It does not claim that two destinations are
+/// independent, reachable, current, or authorized.
+///
+/// # Errors
+///
+/// Returns a canonicalization error only if the fixed typed preimage cannot
+/// be serialized by the production canonicalizer.
+pub fn capacity_destination_generation_identity(
+    destination: &IdentityRef,
+    generation: &Generation,
+) -> Result<Sha256Digest> {
+    let preimage = serde_json::json!({
+        "schema": "nq.capacity_destination_generation.v1",
+        "destination": destination,
+        "generation": generation,
+    });
+    let bytes = canonical_json_bytes(&preimage)?;
+    Ok(domain_separated_digest(
+        DESTINATION_GENERATION_DIGEST_DOMAIN,
+        &bytes,
+    ))
+}
+
+/// Computes the exact source-bound identity of one delivery-policy generation.
+///
+/// The preimage binds both the immutable buffer-policy record reference and
+/// the delivery-policy descriptor selected by that record.  This preserves
+/// policy-generation source authority without making the derived digest a
+/// policy, authorization, or delivery result.
+///
+/// # Errors
+///
+/// Returns a canonicalization error only if the fixed typed preimage cannot
+/// be serialized by the production canonicalizer.
+pub fn capacity_delivery_policy_generation_identity(
+    buffer_delivery_policy: &RecordRef,
+    delivery_policy: &IdentityRef,
+    generation: &Generation,
+) -> Result<Sha256Digest> {
+    let preimage = serde_json::json!({
+        "schema": "nq.capacity_delivery_policy_generation.v1",
+        "buffer_delivery_policy": buffer_delivery_policy,
+        "delivery_policy": delivery_policy,
+        "generation": generation,
+    });
+    let bytes = canonical_json_bytes(&preimage)?;
+    Ok(domain_separated_digest(
+        DELIVERY_POLICY_GENERATION_DIGEST_DOMAIN,
+        &bytes,
+    ))
+}
+
+/// Computes P0-1 `OccurrenceKeyV1` from one exact validated request.
+///
+/// Authorization-record rotation is deliberately absent from the stable
+/// occurrence key.  The complete node and requesting-principal identity
+/// references remain present, so principal rotation does not collapse.
+///
+/// # Errors
+///
+/// Refuses a non-request carrier or malformed request fields.
+pub fn invocation_occurrence_key_v1(request: &ValidatedRuntimeRecord) -> Result<Sha256Digest> {
+    request_key_v1(request, "nq.invocation-occurrence-key.v1", "request_id")
+}
+
+/// Computes P0-1 `IdempotencyKeyV1` from one exact validated request.
+///
+/// # Errors
+///
+/// Refuses a non-request carrier or malformed request fields.
+pub fn invocation_idempotency_key_v1(request: &ValidatedRuntimeRecord) -> Result<Sha256Digest> {
+    if request.schema() != RuntimeSchema::DiagnosticInvocationRequestV1 {
+        return Err(ContractError::InvalidCapacityAllocation);
+    }
+    let value = request.record().as_value();
+    let node: IdentityRef = serde_json::from_value(value["target"]["node"].clone())?;
+    let principal: IdentityRef = serde_json::from_value(value["requesting_principal"].clone())?;
+    let key = value["idempotency"]["key"]
+        .as_str()
+        .ok_or(ContractError::InvalidCapacityAllocation)?;
+    let preimage = serde_json::json!(["nq.invocation-idempotency-key.v1", node, principal, key,]);
+    Ok(sha256_bytes(&canonical_json_bytes(&preimage)?))
+}
+
+/// Inspectable source closure bound to one closed capacity rule.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CapacityRuleArtifactSourceV1 {
+    rule_identity: &'static str,
+    rule_version: &'static str,
+    digest_domain: &'static str,
+    source_paths: &'static [&'static str],
+    artifact_digest: Sha256Digest,
+}
+
+impl CapacityRuleArtifactSourceV1 {
+    /// Closed rule identity.
+    #[must_use]
+    pub const fn rule_identity(&self) -> &'static str {
+        self.rule_identity
+    }
+
+    /// Closed rule version.
+    #[must_use]
+    pub const fn rule_version(&self) -> &'static str {
+        self.rule_version
+    }
+
+    /// Domain separating this source closure from every other digest use.
+    #[must_use]
+    pub const fn digest_domain(&self) -> &'static str {
+        self.digest_domain
+    }
+
+    /// Ordered repository-relative source paths committed by the digest.
+    #[must_use]
+    pub const fn source_paths(&self) -> &'static [&'static str] {
+        self.source_paths
+    }
+
+    /// Exact digest required by the allocation carrier.
+    #[must_use]
+    pub const fn artifact_digest(&self) -> &Sha256Digest {
+        &self.artifact_digest
+    }
+}
+
+/// Returns the exact seven-entry rule/source/digest map used by allocation
+/// validation.
+///
+/// This is inspectable build evidence only. It does not establish that a
+/// deployed binary was built from, loaded, or is executing the listed source.
+///
+/// # Errors
+///
+/// Refuses if any embedded source asset cannot be resolved.
+pub fn capacity_rule_artifact_sources_v1() -> Result<Vec<CapacityRuleArtifactSourceV1>> {
+    [
+        "nq.logical_preallocated_custody_carriers",
+        "nq.custody_carrier_map",
+        "nq.custody_arena_layout",
+        "nq.append_extent_layout",
+        "nq.delivery_extent_layout",
+        "nq.v3_projection_capsule_bound",
+        "rfc8785-jcs-sha256",
+    ]
+    .into_iter()
+    .map(|rule_identity| {
+        let (digest_domain, source_paths) = capacity_rule_source_descriptor_v1(rule_identity)?;
+        Ok(CapacityRuleArtifactSourceV1 {
+            rule_identity,
+            rule_version: "1",
+            digest_domain,
+            source_paths,
+            artifact_digest: capacity_rule_artifact_digest_v1(rule_identity)?,
+        })
+    })
+    .collect()
+}
+
+/// Returns the exact implementation/static-asset digest admitted for one of
+/// the seven closed capacity rule identities.
+///
+/// Equal digests for distinct geometry rules are intentional when the same
+/// exact implementation source owns both laws.  The rule identity remains a
+/// separate closed field.  The V3 entry binds the exact inspected candidate
+/// manifest bytes; this source correspondence does not satisfy CAP-H14 or
+/// qualify that candidate as a production bound.
+///
+/// # Errors
+///
+/// Refuses every identity outside the seven-rule vocabulary.
+pub fn capacity_rule_artifact_digest_v1(rule_identity: &str) -> Result<Sha256Digest> {
+    let digest = match rule_identity {
+        "nq.logical_preallocated_custody_carriers" => source_closure_digest(
+            "nq.logical_preallocated_custody_carriers.v1",
+            &[(
+                "crates/nq-host-role-contract/src/capacity.rs",
+                include_bytes!("capacity.rs"),
+            )],
+        ),
+        "nq.custody_carrier_map" => source_closure_digest(
+            "nq.custody_carrier_map.v1",
+            &[(
+                "crates/nq-host-role-contract/assets/nq.custody_carrier_map.v1.json",
+                crate::assets::embedded_capacity_static_asset("nq.custody_carrier_map.v1")
+                    .ok_or(ContractError::InvalidCapacityAllocation)?,
+            )],
+        ),
+        "nq.custody_arena_layout" | "nq.append_extent_layout" | "nq.delivery_extent_layout" => {
+            source_closure_digest(
+                "nq.capacity_geometry.v1",
+                &[(
+                    "crates/nq-host-role-contract/src/capacity.rs",
+                    include_bytes!("capacity.rs"),
+                )],
+            )
+        }
+        "nq.v3_projection_capsule_bound" => source_closure_digest(
+            "nq.v3_projection_capsule_bound.v1",
+            &[(
+                "crates/nq-host-role-contract/assets/nq.v3_projection_capsule_bound_manifest.v1.json",
+                crate::assets::embedded_capacity_static_asset(
+                    "nq.v3_projection_capsule_bound_manifest.v1",
+                )
+                .ok_or(ContractError::InvalidCapacityAllocation)?,
+            )],
+        ),
+        "rfc8785-jcs-sha256" => source_closure_digest(
+            "nq.rfc8785_jcs_sha256_implementation.v1",
+            &[
+                (
+                    "crates/nq-protocol/src/canonical.rs",
+                    include_bytes!("../../nq-protocol/src/canonical.rs"),
+                ),
+                (
+                    "crates/nq-protocol/Cargo.toml",
+                    include_bytes!("../../nq-protocol/Cargo.toml"),
+                ),
+                ("Cargo.toml", include_bytes!("../../../Cargo.toml")),
+                ("Cargo.lock", include_bytes!("../../../Cargo.lock")),
+            ],
+        ),
+        _ => return Err(ContractError::InvalidCapacityAllocation),
+    };
+    Ok(digest)
+}
+
+fn capacity_rule_source_descriptor_v1(
+    rule_identity: &str,
+) -> Result<(&'static str, &'static [&'static str])> {
+    match rule_identity {
+        "nq.logical_preallocated_custody_carriers" => Ok((
+            "nq.logical_preallocated_custody_carriers.v1",
+            &["crates/nq-host-role-contract/src/capacity.rs"],
+        )),
+        "nq.custody_carrier_map" => Ok((
+            "nq.custody_carrier_map.v1",
+            &["crates/nq-host-role-contract/assets/nq.custody_carrier_map.v1.json"],
+        )),
+        "nq.custody_arena_layout" | "nq.append_extent_layout" | "nq.delivery_extent_layout" => {
+            Ok((
+                "nq.capacity_geometry.v1",
+                &["crates/nq-host-role-contract/src/capacity.rs"],
+            ))
+        }
+        "nq.v3_projection_capsule_bound" => Ok((
+            "nq.v3_projection_capsule_bound.v1",
+            &[
+                "crates/nq-host-role-contract/assets/nq.v3_projection_capsule_bound_manifest.v1.json",
+            ],
+        )),
+        "rfc8785-jcs-sha256" => Ok((
+            "nq.rfc8785_jcs_sha256_implementation.v1",
+            &[
+                "crates/nq-protocol/src/canonical.rs",
+                "crates/nq-protocol/Cargo.toml",
+                "Cargo.toml",
+                "Cargo.lock",
+            ],
+        )),
+        _ => Err(ContractError::InvalidCapacityAllocation),
+    }
+}
+
+fn source_closure_digest(domain: &str, sources: &[(&str, &[u8])]) -> Sha256Digest {
+    let mut preimage = Vec::new();
+    preimage.extend_from_slice(domain.as_bytes());
+    preimage.push(0);
+    for (path, bytes) in sources {
+        preimage.extend_from_slice(path.as_bytes());
+        preimage.push(0);
+        preimage.extend_from_slice(sha256_bytes(bytes).as_str().as_bytes());
+        preimage.push(0);
+    }
+    sha256_bytes(&preimage)
+}
+
+fn request_key_v1(
+    request: &ValidatedRuntimeRecord,
+    domain: &'static str,
+    field: &'static str,
+) -> Result<Sha256Digest> {
+    if request.schema() != RuntimeSchema::DiagnosticInvocationRequestV1 {
+        return Err(ContractError::InvalidCapacityAllocation);
+    }
+    let value = request.record().as_value();
+    let node: IdentityRef = serde_json::from_value(value["target"]["node"].clone())?;
+    let principal: IdentityRef = serde_json::from_value(value["requesting_principal"].clone())?;
+    let occurrence = value[field]
+        .as_str()
+        .ok_or(ContractError::InvalidCapacityAllocation)?;
+    let preimage = serde_json::json!([domain, node, principal, occurrence]);
+    Ok(sha256_bytes(&canonical_json_bytes(&preimage)?))
+}
+
+fn domain_separated_digest(domain: &[u8], canonical_bytes: &[u8]) -> Sha256Digest {
+    let mut preimage = Vec::with_capacity(domain.len().saturating_add(canonical_bytes.len()));
+    preimage.extend_from_slice(domain);
+    preimage.extend_from_slice(canonical_bytes);
+    sha256_bytes(&preimage)
+}
+
 fn require_exact_fields(
     object: &Map<String, Value>,
     required_fields: &[&str],
@@ -1217,10 +1820,10 @@ fn validate_common_value(value: &Value) -> Result<()> {
             Value::Number(number) => {
                 if number
                     .as_u64()
-                    .is_some_and(|value| value > MAX_SAFE_INTEGER)
-                    || number
-                        .as_i64()
-                        .is_some_and(|value| value.unsigned_abs() > MAX_SAFE_INTEGER)
+                    .is_some_and(|value| value > CAPACITY_IJSON_SAFE_INTEGER_MAX_V1)
+                    || number.as_i64().is_some_and(|value| {
+                        value.unsigned_abs() > CAPACITY_IJSON_SAFE_INTEGER_MAX_V1
+                    })
                 {
                     return Err(ContractError::UnsafeInteger);
                 }
@@ -1283,6 +1886,7 @@ fn validate_local_semantics(schema: RuntimeSchema, object: &Map<String, Value>) 
         RuntimeSchema::InvocationDecisionV1 => validate_decision(object),
         RuntimeSchema::OperationAuthorizationV1 => validate_authorization(object),
         RuntimeSchema::CustodyReservationV1 => validate_reservation(object),
+        RuntimeSchema::CustodyCapacityAllocationV1 => validate_capacity_allocation(object),
         RuntimeSchema::ExecutionLaunchV1 => validate_launch(object),
         RuntimeSchema::NativeProfileQualificationV1 => {
             validate_native_profile_qualification(object)
@@ -1335,6 +1939,16 @@ fn unsigned(object: &Map<String, Value>, field: &'static str) -> Result<u64> {
         .get(field)
         .and_then(Value::as_u64)
         .ok_or(ContractError::ExpectedUnsigned(field))
+}
+
+fn digest_field(object: &Map<String, Value>, field: &'static str) -> Result<Sha256Digest> {
+    serde_json::from_value(
+        object
+            .get(field)
+            .cloned()
+            .ok_or(ContractError::ExpectedString(field))?,
+    )
+    .map_err(ContractError::from)
 }
 
 fn boolean(object: &Map<String, Value>, field: &'static str) -> Result<bool> {
@@ -1783,9 +2397,53 @@ fn validate_decision(decision: &Map<String, Value>) -> Result<()> {
     let state = text(decision, "decision")?;
     if !matches!(
         state,
-        "accepted" | "refused" | "unsupported" | "failed_before_launch"
+        "accepted"
+            | "authentication_refused"
+            | "authorization_refused"
+            | "binding_refused"
+            | "capability_refused"
+            | "deadline_refused"
+            | "custody_refused"
+            | "stale_before_start"
+            | "decommissioned_before_start"
     ) {
         return Err(ContractError::UnknownInvocationDecision(state.to_owned()));
+    }
+    identity(decision, "policy")?
+        .require_kind(IdentityKind::Policy, "invocation_decision.policy")?;
+    identity(decision, "clock")?.require_kind(IdentityKind::Clock, "invocation_decision.clock")?;
+
+    let custody = object(decision, "custody")?;
+    let custody_state = text(custody, "state")?;
+    let reservation = custody
+        .get("reservation")
+        .ok_or(ContractError::InvalidInvocationDecision)?;
+    let custody_matches = match state {
+        "accepted" => custody_state == "reserved" && !reservation.is_null(),
+        "custody_refused" => custody_state == "refused" && !reservation.is_null(),
+        _ => custody_state == "not_applicable" && reservation.is_null(),
+    };
+    if !custody_matches {
+        return Err(ContractError::InvalidInvocationDecision);
+    }
+    if !reservation.is_null() {
+        serde_json::from_value::<RecordRef>(reservation.clone())
+            .map_err(|_| ContractError::InvalidInvocationDecision)?;
+    }
+
+    let required = if state == "accepted" {
+        [
+            "acceptance does not establish diagnostic success",
+            "acceptance does not authorize action",
+        ]
+    } else {
+        [
+            "refusal does not establish diagnostic success",
+            "refusal does not authorize action",
+        ]
+    };
+    if !required_nonclaims(decision, &required)? {
+        return Err(ContractError::InvalidInvocationDecision);
     }
     Ok(())
 }
@@ -1825,13 +2483,30 @@ fn validate_reservation(reservation: &Map<String, Value>) -> Result<()> {
             )
             .ok_or(ContractError::InvalidReservationArithmetic)?;
     }
-    if total != unsigned(reservation, "total_required_bytes")?
-        || unsigned(reservation, "reserved_bytes")? < total
-    {
+    let total_required = unsigned(reservation, "total_required_bytes")?;
+    let reserved_bytes = unsigned(reservation, "reserved_bytes")?;
+    if total != total_required {
         return Err(ContractError::InvalidReservationArithmetic);
     }
-    if text(reservation, "decision")? != "reserved" {
-        return Err(ContractError::CustodyNotReserved);
+    match text(reservation, "decision")? {
+        "reserved" if reserved_bytes < total_required => {
+            return Err(ContractError::InvalidReservationArithmetic);
+        }
+        "reserved" | "refused" => {}
+        state => {
+            return Err(ContractError::UnknownCustodyReservationDecision(
+                state.to_owned(),
+            ));
+        }
+    }
+    if !required_nonclaims(
+        reservation,
+        &[
+            "reservation does not establish diagnostic success",
+            "protected failure reserve is not execution payload capacity",
+        ],
+    )? {
+        return Err(ContractError::InvalidCustodyReservation);
     }
     let reserved = Timestamp::parse(text(reservation, "reserved_at")?)?;
     let expires = Timestamp::parse(text(reservation, "expires_at")?)?;
@@ -1839,6 +2514,392 @@ fn validate_reservation(reservation: &Map<String, Value>) -> Result<()> {
         return Err(ContractError::ExpiredCustodyReservation);
     }
     Ok(())
+}
+
+fn validate_reservation_plan(plan: &Map<String, Value>) -> Result<()> {
+    if text(plan, "schema")? != RESERVATION_PLAN_SCHEMA
+        || text(plan, "store_snapshot")? != NEUTRAL_STORE_SNAPSHOT
+        || text(plan, "reservation_commit")? != NEUTRAL_RESERVATION_COMMIT
+    {
+        return Err(ContractError::InvalidReservationPlan);
+    }
+    identity(plan, "node")?.require_kind(IdentityKind::NqNode, "reservation_plan.node")?;
+    identity(plan, "profile")?
+        .require_kind(IdentityKind::DiagnosticProfile, "reservation_plan.profile")?;
+    identity(plan, "custody_policy")?
+        .require_kind(IdentityKind::Policy, "reservation_plan.custody_policy")?;
+    identity(plan, "calculation_rule")?
+        .require_kind(IdentityKind::Policy, "reservation_plan.calculation_rule")?;
+    identity(plan, "clock")?.require_kind(IdentityKind::Clock, "reservation_plan.clock")?;
+
+    let components = object(plan, "component_bounds")?;
+    let semantic_sum = components.values().try_fold(0_u64, |sum, value| {
+        let component = value
+            .as_u64()
+            .ok_or(ContractError::InvalidReservationPlan)?;
+        sum.checked_add(component)
+            .filter(|value| *value <= CAPACITY_IJSON_SAFE_INTEGER_MAX_V1)
+            .ok_or(ContractError::InvalidReservationPlan)
+    })?;
+    let total_required = unsigned(plan, "total_required_bytes")?;
+    let reserved = unsigned(plan, "reserved_bytes")?;
+    if total_required == 0 || semantic_sum != total_required {
+        return Err(ContractError::InvalidReservationPlan);
+    }
+    match text(plan, "decision")? {
+        "reserved" if reserved == semantic_sum => {}
+        "refused" => {}
+        _ => return Err(ContractError::InvalidReservationPlan),
+    }
+    let reserved_at = Timestamp::parse(text(plan, "reserved_at")?)?;
+    let expires_at = Timestamp::parse(text(plan, "expires_at")?)?;
+    if expires_at.instant() <= reserved_at.instant()
+        || !required_nonclaims(
+            plan,
+            &[
+                "reservation does not establish diagnostic success",
+                "protected failure reserve is not execution payload capacity",
+            ],
+        )?
+    {
+        return Err(ContractError::InvalidReservationPlan);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)] // One closed carrier keeps all no-borrow and identity joins visible.
+fn validate_capacity_allocation(allocation: &Map<String, Value>) -> Result<()> {
+    identity(allocation, "store_integrity_key_generation")?.require_kind(
+        IdentityKind::KeyGeneration,
+        "capacity_allocation.store_integrity_key_generation",
+    )?;
+    identity(allocation, "clock")?
+        .require_kind(IdentityKind::Clock, "capacity_allocation.clock")?;
+    let policy = object(allocation, "policy")?;
+    identity(policy, "capacity_policy")?
+        .require_kind(IdentityKind::Policy, "capacity_allocation.capacity_policy")?;
+    identity(policy, "delivery_policy")?
+        .require_kind(IdentityKind::Policy, "capacity_allocation.delivery_policy")?;
+    let delivery_policy_generation_id = digest_field(policy, "delivery_policy_generation_id")?;
+    let rules = object(allocation, "rules")?;
+    for (field, expected_identity) in [
+        (
+            "capacity_calculation",
+            "nq.logical_preallocated_custody_carriers",
+        ),
+        ("carrier_map", "nq.custody_carrier_map"),
+        ("arena_layout", "nq.custody_arena_layout"),
+        ("record_extent", "nq.append_extent_layout"),
+        ("delivery_extent", "nq.delivery_extent_layout"),
+        ("v3_capsule_bound", "nq.v3_projection_capsule_bound"),
+        ("canonicalization", "rfc8785-jcs-sha256"),
+    ] {
+        require_capacity_rule(rules, field, expected_identity)?;
+    }
+
+    let plan = CustodyReservationPlan::validate_value(
+        allocation
+            .get("reservation_plan")
+            .cloned()
+            .ok_or(ContractError::InvalidCapacityAllocation)?,
+    )
+    .map_err(|_| ContractError::InvalidCapacityAllocation)?;
+    let plan_value = plan
+        .as_value()
+        .as_object()
+        .ok_or(ContractError::InvalidCapacityAllocation)?;
+    if digest_field(allocation, "plan_digest")? != *plan.plan_digest()
+        || allocation.get("semantic_components") != plan_value.get("component_bounds")
+        || policy.get("capacity_policy") != plan_value.get("custody_policy")
+        || allocation.get("clock") != plan_value.get("clock")
+        || allocation.get("calculated_at") != plan_value.get("reserved_at")
+        || object(allocation, "request_occurrence")?.get("request") != plan_value.get("request")
+    {
+        return Err(ContractError::InvalidCapacityAllocation);
+    }
+
+    let components = object(allocation, "semantic_components")?;
+    let semantic_components: CapacitySemanticComponentsV1 =
+        serde_json::from_value(Value::Object(components.clone()))
+            .map_err(|_| ContractError::InvalidCapacityAllocation)?;
+    let semantic_sum = checked_capacity_semantic_sum_v1(&semantic_components)
+        .map_err(|_| ContractError::InvalidCapacityAllocation)?;
+    if semantic_sum == 0 || semantic_sum != unsigned(allocation, "semantic_sum_bytes")? {
+        return Err(ContractError::InvalidCapacityAllocation);
+    }
+
+    let bounds = object(allocation, "carrier_bounds")?;
+    let dependency = unsigned(bounds, "dependency_payload_bytes")?;
+    let raw = unsigned(bounds, "raw_acquisition_payload_bytes")?;
+    let projection = unsigned(bounds, "projection_capsule_bound_bytes")?;
+    let final_closure = unsigned(bounds, "final_closure_payload_bytes")?;
+    let canonical_record = unsigned(bounds, "canonical_record_payload_bytes")?;
+    let protected_failure = unsigned(bounds, "protected_failure_payload_bytes")?;
+    let final_semantic = checked_sum([
+        unsigned(components, "normalized_bytes")?,
+        unsigned(components, "projected_bytes")?,
+        unsigned(components, "diagnostic_artifact_bytes")?,
+    ])?;
+    let canonical_semantic = checked_sum([
+        unsigned(components, "request_and_decision_bytes")?,
+        unsigned(components, "commit_checkpoint_overhead_bytes")?,
+    ])?;
+    if dependency == 0
+        || raw == 0
+        || projection == 0
+        || final_closure == 0
+        || canonical_record == 0
+        || protected_failure == 0
+        || dependency < unsigned(components, "dependency_closure_bytes")?
+        || raw < unsigned(components, "raw_evidence_bytes")?
+        || final_closure < projection
+        || final_closure < final_semantic
+        || canonical_record < canonical_semantic
+    {
+        return Err(ContractError::InvalidCapacityAllocation);
+    }
+
+    let limits = object(allocation, "limits")?;
+    let capacity_limits = CapacityLogicalLimitsV1 {
+        total_bytes: unsigned(limits, "total_bytes")?,
+        high_watermark_bytes: unsigned(limits, "high_watermark_bytes")?,
+        protected_failure_receipt_bytes: unsigned(limits, "protected_failure_receipt_bytes")?,
+        maximum_single_execution_closure_bytes: unsigned(
+            limits,
+            "maximum_single_execution_closure_bytes",
+        )?,
+        maximum_queue_entries: unsigned(object(allocation, "queue")?, "maximum_entries")?,
+    };
+
+    let arena = object(allocation, "arena_layout")?;
+    validate_arena_layout(arena, dependency, raw, final_closure, protected_failure)?;
+    let record_extent = object(allocation, "canonical_record_extent")?;
+    validate_append_extent(record_extent, canonical_record)?;
+
+    let delivery_semantic = unsigned(components, "mandatory_delivery_ledger_bytes")?;
+    let delivery_value = allocation
+        .get("delivery_ledger_extent")
+        .ok_or(ContractError::InvalidCapacityAllocation)?;
+    let queue = object(allocation, "queue")?;
+    let occurrences = array(queue, "occurrences")?;
+    let queue_requirement = text(queue, "requirement")?;
+    let plan_delivery_requirement = plan_value
+        .get("delivery_requirement")
+        .ok_or(ContractError::InvalidCapacityAllocation)?;
+    let delivery_length = match (queue_requirement, delivery_value.as_object()) {
+        ("not_required", None)
+            if delivery_value.is_null()
+                && delivery_semantic == 0
+                && occurrences.is_empty()
+                && unsigned(queue, "slots_reserved")? == 0
+                && plan_delivery_requirement.is_null() =>
+        {
+            0
+        }
+        ("required", Some(extent))
+            if delivery_semantic > 0
+                && !occurrences.is_empty()
+                && plan_delivery_requirement
+                    == policy
+                        .get("buffer_delivery_policy")
+                        .ok_or(ContractError::InvalidCapacityAllocation)?
+                && usize::try_from(unsigned(queue, "slots_reserved")?).ok()
+                    == Some(occurrences.len()) =>
+        {
+            validate_append_extent_at_least(extent, delivery_semantic)?;
+            unsigned(extent, "extent_length_bytes")?
+        }
+        _ => return Err(ContractError::InvalidCapacityAllocation),
+    };
+
+    let queue_before = unsigned(queue, "slots_before")?;
+    let queue_reserved = unsigned(queue, "slots_reserved")?;
+    if capacity_limits.maximum_queue_entries != unsigned(queue, "maximum_entries")? {
+        return Err(ContractError::InvalidCapacityAllocation);
+    }
+
+    let request_occurrence = object(allocation, "request_occurrence")?;
+    let request_occurrence_id = digest_field(request_occurrence, "occurrence_id")?;
+    let allocation_id = digest_field(allocation, "allocation_id")?;
+    let mut destination_generations = BTreeSet::new();
+    let mut occurrence_ids = BTreeSet::new();
+    let mut prior_destination_generation = None;
+    for occurrence in occurrences {
+        let occurrence = occurrence
+            .as_object()
+            .ok_or(ContractError::InvalidCapacityAllocation)?;
+        let occurrence_id = digest_field(occurrence, "occurrence_id")?;
+        let destination_generation_id = digest_field(occurrence, "destination_generation_id")?;
+        if digest_field(occurrence, "capacity_allocation_id")? != allocation_id
+            || digest_field(occurrence, "request_occurrence_id")? != request_occurrence_id
+            || digest_field(occurrence, "delivery_policy_generation_id")?
+                != delivery_policy_generation_id
+            || derive_capacity_queue_occurrence_identity(&Value::Object(occurrence.clone()))?
+                != occurrence_id
+            || prior_destination_generation
+                .as_ref()
+                .is_some_and(|prior| prior >= &destination_generation_id)
+            || !destination_generations.insert(destination_generation_id)
+            || !occurrence_ids.insert(occurrence_id)
+        {
+            return Err(ContractError::InvalidCapacityAllocation);
+        }
+        prior_destination_generation = Some(
+            digest_field(occurrence, "destination_generation_id")
+                .map_err(|_| ContractError::InvalidCapacityAllocation)?,
+        );
+    }
+
+    let before = object(allocation, "before_snapshot")?;
+    let aggregate = checked_logical_preallocated_custody_carriers_v1(
+        &semantic_components,
+        &CapacityUsageComponentsV1 {
+            bootstrap_integrity_carrier_bytes: unsigned(
+                before,
+                "bootstrap_integrity_carrier_bytes",
+            )?,
+            global_prelaunch_refusal_bytes: unsigned(before, "global_prelaunch_refusal_bytes")?,
+            matched_retained_bytes: unsigned(before, "matched_retained_bytes")?,
+            physical_orphan_bytes: unsigned(before, "physical_orphan_bytes")?,
+            missing_committed_bytes: unsigned(before, "missing_committed_bytes")?,
+            active_queue_entries: queue_before,
+        },
+        &CapacityCandidateChargeV1 {
+            arena_file_length_bytes: unsigned(arena, "file_length_bytes")?,
+            canonical_record_extent_length_bytes: unsigned(record_extent, "extent_length_bytes")?,
+            delivery_ledger_extent_length_bytes: delivery_length,
+            final_closure_payload_bytes: final_closure,
+            protected_failure_payload_bytes: protected_failure,
+            queue_entries_reserved: queue_reserved,
+        },
+        &capacity_limits,
+    )
+    .map_err(|_| ContractError::InvalidCapacityAllocation)?;
+    let actual_refusals: Vec<CapacityLimitRefusalV1> =
+        serde_json::from_value(Value::Array(array(allocation, "refusal_reasons")?.clone()))
+            .map_err(|_| ContractError::InvalidCapacityAllocation)?;
+    let actual_decision: CapacityLogicalDispositionV1 =
+        serde_json::from_value(Value::String(text(allocation, "decision")?.to_owned()))
+            .map_err(|_| ContractError::InvalidCapacityAllocation)?;
+    let plan_decision_matches = matches!(
+        (aggregate.disposition(), text(plan_value, "decision")?),
+        (
+            CapacityLogicalDispositionV1::WithinLogicalLimits,
+            "reserved"
+        ) | (CapacityLogicalDispositionV1::Refused, "refused")
+    );
+    let watermark = object(allocation, "watermark_classification")?;
+    let actual_before_watermark: CapacityWatermarkClassificationV1 =
+        serde_json::from_value(Value::String(text(watermark, "used_before")?.to_owned()))
+            .map_err(|_| ContractError::InvalidCapacityAllocation)?;
+    let actual_after_watermark: CapacityWatermarkClassificationV1 =
+        serde_json::from_value(Value::String(text(watermark, "used_after")?.to_owned()))
+            .map_err(|_| ContractError::InvalidCapacityAllocation)?;
+    if semantic_sum != aggregate.semantic_sum_bytes()
+        || aggregate.retained_charge_bytes() != unsigned(allocation, "retained_charge_bytes")?
+        || aggregate.logical_preallocated_carrier_bytes_before()
+            != unsigned(before, "logical_preallocated_carrier_bytes")?
+        || aggregate.logical_preallocated_carrier_bytes_after()
+            != unsigned(allocation, "logical_preallocated_carrier_bytes_after")?
+        || aggregate.queue_entries_after() != unsigned(queue, "slots_after")?
+        || actual_refusals != aggregate.refusal_reasons()
+        || actual_decision != aggregate.disposition()
+        || !plan_decision_matches
+        || unsigned(plan_value, "protected_failure_reserve_bytes")?
+            != capacity_limits.protected_failure_receipt_bytes
+        || actual_before_watermark != aggregate.used_before_watermark()
+        || actual_after_watermark != aggregate.used_after_watermark()
+        || derive_capacity_allocation_identity(&Value::Object(allocation.clone()))? != allocation_id
+        || !required_nonclaims(
+            allocation,
+            &[
+                "capacity allocation performs no filesystem allocation or provider effect",
+                "within logical limits does not establish request acceptance, reservation, launch, or diagnostic result",
+                "capacity allocation validation establishes internal arithmetic only, not evaluator/source-set correspondence or Store-owned construction",
+                "capacity allocation grants no reliance, authorization, or action",
+                "exact source or asset digest correspondence does not establish deployed build or live execution correspondence",
+            ],
+        )?
+    {
+        return Err(ContractError::InvalidCapacityAllocation);
+    }
+    Ok(())
+}
+
+fn require_capacity_rule(
+    rules: &Map<String, Value>,
+    field: &'static str,
+    expected_identity: &str,
+) -> Result<()> {
+    let rule = object(rules, field)?;
+    if text(rule, "identity")? != expected_identity || text(rule, "version")? != "1" {
+        return Err(ContractError::InvalidCapacityAllocation);
+    }
+    let actual_digest: Sha256Digest = serde_json::from_value(
+        rule.get("artifact_digest")
+            .cloned()
+            .ok_or(ContractError::InvalidCapacityAllocation)?,
+    )
+    .map_err(|_| ContractError::InvalidCapacityAllocation)?;
+    if actual_digest != capacity_rule_artifact_digest_v1(expected_identity)? {
+        return Err(ContractError::InvalidCapacityAllocation);
+    }
+    Ok(())
+}
+
+fn validate_arena_layout(
+    arena: &Map<String, Value>,
+    dependency: u64,
+    raw: u64,
+    final_closure: u64,
+    protected_failure: u64,
+) -> Result<()> {
+    let actual: CustodyArenaGeometryV1 = serde_json::from_value(Value::Object(arena.clone()))
+        .map_err(|_| ContractError::InvalidCapacityAllocation)?;
+    let expected =
+        checked_custody_arena_geometry_v1(dependency, raw, final_closure, protected_failure)
+            .map_err(|_| ContractError::InvalidCapacityAllocation)?;
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(ContractError::InvalidCapacityAllocation)
+    }
+}
+
+fn validate_append_extent(extent: &Map<String, Value>, payload: u64) -> Result<()> {
+    validate_append_extent_at_least(extent, payload)?;
+    if unsigned(extent, "payload_bytes")? != payload {
+        return Err(ContractError::InvalidCapacityAllocation);
+    }
+    Ok(())
+}
+
+fn validate_append_extent_at_least(
+    extent: &Map<String, Value>,
+    minimum_payload: u64,
+) -> Result<()> {
+    let actual: AppendExtentGeometryV1 = serde_json::from_value(Value::Object(extent.clone()))
+        .map_err(|_| ContractError::InvalidCapacityAllocation)?;
+    let payload = actual.payload_bytes;
+    if payload == 0 || payload < minimum_payload {
+        return Err(ContractError::InvalidCapacityAllocation);
+    }
+    let expected = checked_append_extent_geometry_v1(payload)
+        .map_err(|_| ContractError::InvalidCapacityAllocation)?;
+    if actual != expected {
+        return Err(ContractError::InvalidCapacityAllocation);
+    }
+    Ok(())
+}
+
+fn checked_add(left: u64, right: u64) -> Result<u64> {
+    left.checked_add(right)
+        .filter(|value| *value <= CAPACITY_IJSON_SAFE_INTEGER_MAX_V1)
+        .ok_or(ContractError::InvalidCapacityAllocation)
+}
+
+fn checked_sum(values: impl IntoIterator<Item = u64>) -> Result<u64> {
+    values.into_iter().try_fold(0_u64, checked_add)
 }
 
 fn validate_launch(launch: &Map<String, Value>) -> Result<()> {
@@ -1850,12 +2911,12 @@ fn validate_launch(launch: &Map<String, Value>) -> Result<()> {
     }
     let launched = Timestamp::parse(text(launch, "launched_at")?)?;
     let deadline = Timestamp::parse(text(launch, "attempt_deadline")?)?;
-    let elapsed = deadline
-        .instant()
-        .signed_duration_since(launched.instant())
-        .num_milliseconds();
-    if elapsed <= 0
-        || u64::try_from(elapsed).ok() != Some(unsigned(launch, "maximum_execution_ms")?)
+    let maximum_execution_ms = unsigned(launch, "maximum_execution_ms")?;
+    let maximum_execution_ms_i64 =
+        i64::try_from(maximum_execution_ms).map_err(|_| ContractError::UnsafeInteger)?;
+    let elapsed = deadline.instant().signed_duration_since(launched.instant());
+    if maximum_execution_ms == 0
+        || elapsed != chrono::Duration::milliseconds(maximum_execution_ms_i64)
     {
         return Err(ContractError::LaunchDeadlineSubstitution);
     }
@@ -1900,7 +2961,7 @@ fn validate_native_profile_qualification(qualification: &Map<String, Value>) -> 
         || unsigned(
             object(native_profile, "detector_closure")?,
             "detector_count",
-        )? > MAX_SAFE_INTEGER
+        )? > CAPACITY_IJSON_SAFE_INTEGER_MAX_V1
         || array(qualification, "qualification_evidence")?.is_empty()
         || !required_nonclaims(
             qualification,

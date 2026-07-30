@@ -1,0 +1,24 @@
+[package]
+name = "nq-host-role-dependency-custody"
+description = "Pure authenticated dependency-custody verifier for NQ host roles"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[features]
+default = []
+test-support = []
+
+[dependencies]
+ed25519-dalek.workspace = true
+hex.workspace = true
+nq-host-role-contract = { path = "../nq-host-role-contract" }
+nq-protocol = { path = "../nq-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

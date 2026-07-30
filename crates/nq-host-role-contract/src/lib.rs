@@ -10,22 +10,44 @@
 //! mutate a node.
 
 mod assets;
+mod capacity;
 mod graph;
 mod identity;
 mod record;
 mod schema;
 
 pub use assets::{
-    CONTRACT_SOURCE_COMMIT, CONTRACT_SOURCE_PATH, CONTRACT_SOURCE_TREE,
-    CORRECTED_SPECIMEN_IDENTITY, CORRECTED_SPECIMEN_SHA256, ContentAddressedSource,
-    ContractExtensionManifest, ContractPackageManifest, ContractSource,
-    NATIVE_CORRESPONDENCE_EXTENSION_IDENTITY, NATIVE_CORRESPONDENCE_SOURCE_SHA256, SchemaAsset,
-    verified_corrected_specimen, verified_native_correspondence_manifest,
-    verified_package_manifest,
+    CAPACITY_EXTENSION_IDENTITY, CAPACITY_EXTENSION_SOURCE_SHA256, CONTRACT_SOURCE_COMMIT,
+    CONTRACT_SOURCE_PATH, CONTRACT_SOURCE_TREE, CORRECTED_SPECIMEN_IDENTITY,
+    CORRECTED_SPECIMEN_SHA256, CapacityExtensionManifest, CapacityExtensionQualificationGap,
+    ContentAddressedSource, ContractExtensionManifest, ContractPackageManifest, ContractSource,
+    NATIVE_CORRESPONDENCE_EXTENSION_IDENTITY, NATIVE_CORRESPONDENCE_SOURCE_SHA256,
+    QualifiedV3ProjectionCapsuleBoundAssets, STORE_OWNED_CAPACITY_ALLOCATION_CONSTRUCTION_GATE,
+    SchemaAsset, StaticAsset, inspected_candidate_v3_projection_capsule_bound_manifest,
+    inspected_qualified_v3_projection_capsule_bound_manifest_v2,
+    require_qualified_v3_projection_capsule_bound_manifest,
+    require_qualified_v3_projection_capsule_bound_manifest_v2,
+    require_store_owned_capacity_allocation_construction, verified_capacity_extension_manifest,
+    verified_corrected_specimen, verified_custody_carrier_map,
+    verified_native_correspondence_manifest, verified_package_manifest,
+    verified_v3_projection_capsule_bound_qualification_v1,
+};
+pub use capacity::{
+    AppendExtentGeometryV1, CAPACITY_IJSON_SAFE_INTEGER_MAX_V1, CUSTODY_CAPACITY_ALIGNMENT_V1,
+    CapacityArithmeticError, CapacityCandidateChargeV1, CapacityLimitRefusalV1,
+    CapacityLogicalDispositionV1, CapacityLogicalLimitsV1, CapacitySemanticComponentsV1,
+    CapacityUsageComponentsV1, CapacityWatermarkClassificationV1, CustodyArenaGeometryV1,
+    LogicalPreallocatedCustodyEvaluationV1, checked_append_extent_geometry_v1,
+    checked_capacity_integer_v1, checked_capacity_post_usage_v1, checked_capacity_queue_after_v1,
+    checked_capacity_retained_charge_v1, checked_capacity_semantic_sum_v1,
+    checked_capacity_single_execution_bound_v1, checked_capacity_usage_v1,
+    checked_custody_arena_geometry_v1, checked_logical_preallocated_custody_carriers_v1,
+    classify_capacity_high_watermark_v1,
 };
 pub use graph::{
+    CapacityDeliveryRequirementSelection, CapacityDeliveryRequirementV1,
     ExecutionBindingSourceCorpus, ExternalRecordCatalog, LaunchCorrespondenceSelection,
-    RuntimeRecordSet, ValidationContext,
+    ReservationPlanDeliveryRequirementSelection, RuntimeRecordSet, ValidationContext,
 };
 pub use identity::{
     CatalogSnapshot, EffectiveInterval, Generation, IdentityCatalog, IdentityId, IdentityKey,
@@ -34,14 +56,20 @@ pub use identity::{
 };
 pub use record::{
     ArtifactCustodyReceipt, ArtifactDeliveryAttempt, ArtifactDeliveryRecord,
-    AuthenticatedArtifactEnvelope, BufferDeliveryPolicy, CustodyReservation, DeadlineEvaluation,
-    DecommissionCut, DecommissionLedgerSnapshot, DiagnosticInvocationRequest,
-    ExecutionIdentityBindingV2, ExecutionLaunch, HostRoleLifecycleEvent, HostRoleRelation,
-    InspectorReadReceipt, InspectorResultSet, InspectorSnapshot, InvocationDecision,
-    NativeClockQualification, NativeProfileQualification, NodeEnrollment, NodeKeyLifecycleEvent,
-    OperationAuthorization, RestoreActivationProof, RoleManifest, RuntimeActivation, RuntimeRecord,
-    RuntimeSchema, StaticProfileCohortManifest, ValidatedRuntimeRecord, WitnessAttachment,
-    WitnessLifecycleEvent,
+    AuthenticatedArtifactEnvelope, BufferDeliveryPolicy, CAPACITY_FUTURE_ARTIFACT_SLOT,
+    CapacityRuleArtifactSourceV1, CustodyCapacityAllocation, CustodyReservation,
+    CustodyReservationPlan, DeadlineEvaluation, DecommissionCut, DecommissionLedgerSnapshot,
+    DiagnosticInvocationRequest, ExecutionIdentityBindingV2, ExecutionLaunch,
+    HostRoleLifecycleEvent, HostRoleRelation, InspectorReadReceipt, InspectorResultSet,
+    InspectorSnapshot, InvocationDecision, NativeClockQualification, NativeProfileQualification,
+    NodeEnrollment, NodeKeyLifecycleEvent, OperationAuthorization, RestoreActivationProof,
+    RoleManifest, RuntimeActivation, RuntimeRecord, RuntimeSchema, SchemaPackageClass,
+    StaticProfileCohortManifest, ValidatedRuntimeRecord, WitnessAttachment, WitnessLifecycleEvent,
+    capacity_delivery_policy_generation_identity, capacity_destination_generation_identity,
+    capacity_queue_occurrence_identity, capacity_rule_artifact_digest_v1,
+    capacity_rule_artifact_sources_v1, derive_capacity_allocation_identity,
+    derive_capacity_queue_occurrence_identity, invocation_idempotency_key_v1,
+    invocation_occurrence_key_v1,
 };
 
 use thiserror::Error;
@@ -207,12 +235,39 @@ pub enum ContractError {
     /// Decision state was unknown.
     #[error("unknown invocation decision {0}")]
     UnknownInvocationDecision(String),
+    /// Invocation decision contradicted its exact custody or nonclaims.
+    #[error("invocation decision contradicts its custody state or required nonclaims")]
+    InvalidInvocationDecision,
     /// Authorization decision was malformed.
     #[error("operation authorization decision is not granted/refused")]
     InvalidAuthorizationDecision,
     /// Reservation component arithmetic failed.
     #[error("custody reservation component arithmetic is inconsistent")]
     InvalidReservationArithmetic,
+    /// Authority-neutral reservation plan differed from the total transform.
+    #[error("custody reservation plan is malformed or does not preserve its v1 source")]
+    InvalidReservationPlan,
+    /// Capacity-allocation carrier arithmetic or closed-state semantics failed.
+    #[error("custody capacity allocation is internally inconsistent")]
+    InvalidCapacityAllocation,
+    /// Capacity allocation did not close over its exact reservation, request,
+    /// policy, and delivery-source graph.
+    #[error("custody capacity allocation source join failed: {0}")]
+    CapacityJoin(&'static str),
+    /// Capacity extension schema or static asset validation failed.
+    #[error("capacity extension asset {asset} is invalid: {detail}")]
+    CapacityAssetValidation {
+        /// Exact schema or asset identity.
+        asset: String,
+        /// Bounded validation detail.
+        detail: String,
+    },
+    /// Reservation decision was outside the ratified reserved/refused vocabulary.
+    #[error("unknown custody reservation decision {0}")]
+    UnknownCustodyReservationDecision(String),
+    /// Reservation omitted a required boundary nonclaim.
+    #[error("custody reservation omits a required nonclaim")]
+    InvalidCustodyReservation,
     /// Custody was not committed before launch.
     #[error("custody reservation is not in reserved state")]
     CustodyNotReserved,

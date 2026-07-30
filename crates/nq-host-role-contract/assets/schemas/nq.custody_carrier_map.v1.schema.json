@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.custody_carrier_map.v1.schema.json",
+  "title": "nq.custody_carrier_map.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "rule_identity",
+    "rule_version",
+    "canonicalization_identity",
+    "alignment_bytes",
+    "semantic_components",
+    "component_mappings",
+    "equations",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.custody_carrier_map.v1"
+    },
+    "rule_identity": {
+      "const": "nq.custody_carrier_map.v1"
+    },
+    "rule_version": {
+      "const": "1"
+    },
+    "canonicalization_identity": {
+      "const": "rfc8785-jcs-sha256-v1"
+    },
+    "alignment_bytes": {
+      "const": 4096
+    },
+    "semantic_components": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "request_and_decision_bytes",
+          "raw_evidence_bytes",
+          "normalized_bytes",
+          "projected_bytes",
+          "diagnostic_artifact_bytes",
+          "dependency_closure_bytes",
+          "commit_checkpoint_overhead_bytes",
+          "mandatory_delivery_ledger_bytes"
+        ]
+      }
+    },
+    "component_mappings": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "semantic_component",
+          "primary_carrier",
+          "constraint"
+        ],
+        "properties": {
+          "semantic_component": {
+            "enum": [
+              "request_and_decision_bytes",
+              "raw_evidence_bytes",
+              "normalized_bytes",
+              "projected_bytes",
+              "diagnostic_artifact_bytes",
+              "dependency_closure_bytes",
+              "commit_checkpoint_overhead_bytes",
+              "mandatory_delivery_ledger_bytes"
+            ]
+          },
+          "primary_carrier": {
+            "enum": [
+              "canonical_record_extent",
+              "arena_raw_section",
+              "arena_final_closure",
+              "arena_dependency_section",
+              "delivery_ledger_extent"
+            ]
+          },
+          "constraint": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+          }
+        }
+      }
+    },
+    "equations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "semantic_sum",
+        "reservation_exactness",
+        "arena_layout",
+        "append_extent_layout",
+        "retained_charge",
+        "store_usage",
+        "post_allocation_usage",
+        "single_execution_limit",
+        "delivery_not_required"
+      ],
+      "properties": {
+        "semantic_sum": {
+          "const": "S=sum_checked(eight_semantic_components)"
+        },
+        "reservation_exactness": {
+          "const": "total_required_bytes=S;reserved_bytes=S"
+        },
+        "arena_layout": {
+          "const": "F=arena_layout_v1(D,R,V,P,A)"
+        },
+        "append_extent_layout": {
+          "const": "extent_length=align_up_checked(3*A+payload_bound,A)"
+        },
+        "retained_charge": {
+          "const": "T=F+M+L"
+        },
+        "store_usage": {
+          "const": "U=B+G+sum(retained_or_charged_T)+missing_committed_bytes"
+        },
+        "post_allocation_usage": {
+          "const": "post=U+candidate_T"
+        },
+        "single_execution_limit": {
+          "const": "max(S,V)<=maximum_single_execution_closure_bytes"
+        },
+        "delivery_not_required": {
+          "const": "s_delivery=0;L=0;queue_slots=0"
+        }
+      }
+    },
+    "nonclaims": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nonclaims"
+    }
+  }
+}

@@ -1,0 +1,574 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.v3_projection_capsule_bound_manifest.v2.schema.json",
+  "title": "nq.v3_projection_capsule_bound_manifest.v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "manifest_identity",
+    "manifest_version",
+    "capsule_schema",
+    "capsule_implementation_source_path",
+    "capsule_implementation_source_sha256",
+    "canonical_serializer_identity",
+    "canonicalization_identity",
+    "generic_field_count",
+    "generic_pointer_family_count",
+    "capsule_field_count",
+    "physical_branches",
+    "semantic_outcome_variants",
+    "semantic_exclusions",
+    "descriptor_governed_open_semantics",
+    "scalar_maxima",
+    "cardinalities",
+    "bounded_json_sources",
+    "generic_pointer_bounds",
+    "capsule_field_inventory",
+    "symbolic_shape_derivations",
+    "symbolic_shape_method",
+    "qualification_basis",
+    "cap_h14_qualification",
+    "qualification_gaps",
+    "bound_evaluator_identity",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.v3_projection_capsule_bound_manifest.v2"
+    },
+    "manifest_identity": {
+      "const": "nq.v3_projection_capsule_bound_manifest.v2"
+    },
+    "manifest_version": {
+      "const": "2"
+    },
+    "capsule_schema": {
+      "const": "nq.governed_projection_capsule.v1"
+    },
+    "capsule_implementation_source_path": {
+      "const": "crates/nq-store/src/governed_projection_capsule.rs"
+    },
+    "capsule_implementation_source_sha256": {
+      "const": "sha256:033b57efb16437a2379307dba0ea495810891bbaeb378462f9b8cf054b5011d3"
+    },
+    "canonical_serializer_identity": {
+      "const": "nq.production-canonical-json.v1"
+    },
+    "canonicalization_identity": {
+      "const": "rfc8785-jcs-sha256-v1"
+    },
+    "generic_field_count": {
+      "const": 16
+    },
+    "generic_pointer_family_count": {
+      "const": 17
+    },
+    "capsule_field_count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "physical_branches": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "branch",
+          "mode",
+          "submission",
+          "expected_semantic_digest",
+          "report_sequence"
+        ],
+        "properties": {
+          "branch": {
+            "enum": [
+              "admitted",
+              "non_success_no_submission",
+              "non_success_rejected_submission"
+            ]
+          },
+          "mode": {
+            "enum": [
+              "admitted",
+              "non_success"
+            ]
+          },
+          "submission": {
+            "enum": [
+              "admitted",
+              "absent",
+              "rejected"
+            ]
+          },
+          "expected_semantic_digest": {
+            "enum": [
+              "required",
+              "absent"
+            ]
+          },
+          "report_sequence": {
+            "enum": [
+              "required",
+              "absent"
+            ]
+          }
+        }
+      }
+    },
+    "semantic_outcome_variants": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "variant_family",
+          "source_identity",
+          "source_path",
+          "source_sha256",
+          "representation_location",
+          "variant_count",
+          "variants"
+        ],
+        "properties": {
+          "variant_family": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+          },
+          "source_identity": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+          },
+          "source_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "source_sha256": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+          },
+          "representation_location": {
+            "enum": [
+              "capsule_branch_selector",
+              "nested_runtime_record_bytes"
+            ]
+          },
+          "variant_count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "variants": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 256,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+            }
+          }
+        }
+      }
+    },
+    "semantic_exclusions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source_identity",
+          "source_path",
+          "source_sha256",
+          "excluded_variants",
+          "reason"
+        ],
+        "properties": {
+          "source_identity": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+          },
+          "source_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "source_sha256": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+          },
+          "excluded_variants": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 256,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+            }
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        }
+      }
+    },
+    "descriptor_governed_open_semantics": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 512,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "descriptor_key",
+          "source_identity",
+          "source_path",
+          "source_sha256",
+          "json_pointer",
+          "reason"
+        ],
+        "properties": {
+          "descriptor_key": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+          },
+          "source_identity": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+          },
+          "source_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "source_sha256": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+          },
+          "json_pointer": {
+            "type": "string",
+            "maxLength": 1024,
+            "pattern": "^(|/.*)$"
+          },
+      "reason": {
+        "enum": [
+          "application- or profile-controlled JSON vocabulary is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the vocabulary is not a closed NQ semantic family",
+          "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
+        ]
+      }
+        }
+      }
+    },
+    "scalar_maxima": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "non_generic_string_utf8_bytes",
+        "rfc3339_timestamp_utf8_bytes",
+        "positive_publication_sequence",
+        "positive_publication_sequence_decimal_width",
+        "ordinal_decimal_width",
+        "raw_byte_length",
+        "raw_byte_length_decimal_width",
+        "sha256_string_utf8_bytes",
+        "ijson_integer_decimal_width"
+      ],
+      "properties": {
+        "non_generic_string_utf8_bytes": {
+          "const": 256
+        },
+        "rfc3339_timestamp_utf8_bytes": {
+          "const": 35
+        },
+        "positive_publication_sequence": {
+          "const": 9007199254740991
+        },
+        "positive_publication_sequence_decimal_width": {
+          "const": 16
+        },
+        "ordinal_decimal_width": {
+          "const": 5
+        },
+        "raw_byte_length": {
+          "const": 16777217
+        },
+        "raw_byte_length_decimal_width": {
+          "const": 8
+        },
+        "sha256_string_utf8_bytes": {
+          "const": 71
+        },
+        "ijson_integer_decimal_width": {
+          "const": 17
+        }
+      }
+    },
+    "cardinalities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observations",
+        "total_coverage_entries",
+        "report_errors",
+        "provider_attempt_bindings",
+        "runtime_records"
+      ],
+      "properties": {
+        "observations": {
+          "$ref": "#/$defs/fixedCardinality"
+        },
+        "total_coverage_entries": {
+          "$ref": "#/$defs/fixedCardinality"
+        },
+        "report_errors": {
+          "$ref": "#/$defs/fixedCardinality"
+        },
+        "provider_attempt_bindings": {
+          "$ref": "#/$defs/fixedCardinality"
+        },
+        "runtime_records": {
+          "$ref": "#/$defs/fixedCardinality"
+        }
+      }
+    },
+    "bounded_json_sources": {
+      "type": "array",
+      "minItems": 15,
+      "maxItems": 15,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "descriptor_key",
+          "source_identity",
+          "source_class",
+          "descriptor_pointer",
+          "required_descriptor_type_identity"
+        ],
+        "properties": {
+          "descriptor_key": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+          },
+          "source_identity": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+          },
+          "source_class": {
+            "enum": [
+              "profile_maximum",
+              "provider_maximum",
+              "policy_maximum",
+              "closed_runtime_schema_maximum"
+            ]
+          },
+          "descriptor_pointer": {
+            "type": "string",
+            "maxLength": 1024,
+            "pattern": "^(|/.*)$"
+          },
+          "source_record_schema": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "maxLength": 255,
+            "pattern": "^[A-Za-z0-9._:/@+-]+$"
+          },
+          "required_descriptor_type_identity": {
+            "const": "nq.protocol.BoundedJsonDescriptor.v1"
+          }
+        }
+      }
+    },
+    "generic_pointer_bounds": {
+      "type": "array",
+      "minItems": 17,
+      "maxItems": 17,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "pointer_family",
+          "classification",
+          "bound_source"
+        ],
+        "properties": {
+          "pointer_family": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": "^/"
+          },
+          "classification": {
+            "enum": [
+              "bounded_canonical_json",
+              "exact_pre_effect_bytes"
+            ]
+          },
+          "bound_source": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+          }
+        }
+      }
+    },
+    "capsule_field_inventory": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4096,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "pointer_family",
+          "classification",
+          "bound_source"
+        ],
+        "properties": {
+          "pointer_family": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": "^/"
+          },
+          "classification": {
+            "enum": [
+              "fixed_literal",
+              "exact_pre_effect_bytes",
+              "scalar_maximum",
+              "option_or_enum",
+              "bounded_collection",
+              "bounded_canonical_json"
+            ]
+          },
+          "bound_source": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+          }
+        }
+      }
+    },
+    "symbolic_shape_derivations": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "branch",
+          "shape_evaluator_identity"
+        ],
+        "properties": {
+          "branch": {
+            "enum": [
+              "admitted",
+              "non_success_no_submission",
+              "non_success_rejected_submission"
+            ]
+          },
+          "shape_evaluator_identity": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+          }
+        }
+      }
+    },
+    "symbolic_shape_method": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "carrier_shape_source",
+        "substitution",
+        "cross_check",
+        "materialization_claim"
+      ],
+      "properties": {
+        "carrier_shape_source": {
+          "const": "production typed branch serializer shapes"
+        },
+        "substitution": {
+          "const": "exact symbolic substitution of committed maxima"
+        },
+        "cross_check": {
+          "const": "independent hand-derived JCS object and array arithmetic"
+        },
+        "materialization_claim": {
+          "const": "typed per-evidence disposition in nq.v3_projection_capsule_bound_qualification.v1"
+        }
+      }
+    },
+    "qualification_basis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "projection_identity",
+        "digest"
+      ],
+      "properties": {
+        "projection_identity": {
+          "const": "nq.v3_projection_capsule_bound_qualification_basis.v1"
+        },
+        "digest": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        }
+      }
+    },
+    "cap_h14_qualification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "qualification_id",
+        "canonical_bytes_sha256"
+      ],
+      "properties": {
+        "schema": {
+          "const": "nq.v3_projection_capsule_bound_qualification.v1"
+        },
+        "qualification_id": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "canonical_bytes_sha256": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        }
+      }
+    },
+    "qualification_gaps": {
+      "type": "array",
+      "maxItems": 0
+    },
+    "bound_evaluator_identity": {
+      "const": "nq.v3_projection_capsule_bound_evaluator.v1"
+    },
+    "nonclaims": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nonclaims"
+    }
+  },
+  "$defs": {
+    "fixedCardinality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maximum",
+        "source_identity"
+      ],
+      "properties": {
+        "maximum": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "source_identity": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        }
+      }
+    }
+  }
+}

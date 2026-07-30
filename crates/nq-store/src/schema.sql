@@ -858,11 +858,12 @@ CREATE TABLE status_events (
     status_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     status_event_id TEXT NOT NULL UNIQUE,
     component_kind TEXT NOT NULL CHECK (component_kind IN
-        ('daemon', 'database', 'profile_catalog', 'admission', 'scheduler', 'instance', 'evaluation', 'notification')),
+        ('daemon', 'database', 'profile_catalog', 'admission', 'scheduler', 'instance', 'diagnostic_execution', 'evaluation', 'notification')),
     component_id TEXT NOT NULL,
     -- Present exactly for canonical results of completed watcher runs,
-    -- including admitted reports. Admission refusals and non-instance
-    -- operational status have no run identity.
+    -- including admitted reports. A governed run-level result is keyed to its
+    -- diagnostic execution instead of being projected into instance health.
+    -- Admission refusals and non-run operational status have no run identity.
     run_id TEXT,
     state TEXT NOT NULL,
     code TEXT NOT NULL,

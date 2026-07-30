@@ -1,0 +1,7 @@
+error[E0432]: unresolved imports `nq_store::AuthenticatedPhysicalPrelaunchSources`, `nq_store::IndependentGovernedProjectionSources`
+ --> tests/ui/r0b/private_store_source_bundle.rs:1:16
+  |
+1 | use nq_store::{AuthenticatedPhysicalPrelaunchSources, IndependentGovernedProjectionSources};
+  |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `IndependentGovernedProjectionSources` in the root
+  |                |
+  |                no `AuthenticatedPhysicalPrelaunchSources` in the root

@@ -14,25 +14,40 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use nq_protocol::{Sha256Digest, canonical_json_bytes, sha256_bytes};
+use nq_protocol::{RequestId, Sha256Digest, canonical_json_bytes, sha256_bytes};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::custody_capacity_model::{
+    CUSTODY_CAPACITY_ALIGNMENT_V1, CapacityModelError, checked_arena_geometry_v1,
+};
+
 const ARENA_FORMAT: &str = "nq.custody_arena.v1";
 const SUPERBLOCK_MAGIC: &[u8; 8] = b"NQCAH001";
 const SECTION_MAGIC: &[u8; 8] = b"NQCAS001";
-const SUPERBLOCK_SIZE: u64 = 4096;
+const SUPERBLOCK_SIZE: u64 = CUSTODY_CAPACITY_ALIGNMENT_V1;
 const SUPERBLOCK_BYTES: usize = 4096;
 const SUPERBLOCK_COUNT: u64 = 2;
-const SECTION_HEADER_SIZE: u64 = 4096;
+const SECTION_HEADER_SIZE: u64 = CUSTODY_CAPACITY_ALIGNMENT_V1;
 const SECTION_HEADER_BYTES: usize = 4096;
 const SUPERBLOCK_JSON_OFFSET: usize = 128;
-const MAX_SUPERBLOCK_JSON_BYTES: usize = 3072;
+// V1 reserved the complete region after the authenticated fixed prefix for
+// canonical header JSON. The former 3072 implementation cap left 896 reserved
+// bytes unusable and became smaller than the now-required exact derivation
+// closure. Using the complete already-reserved region changes no offsets or
+// file geometry. Older readers retain their safe fail-closed behavior when a
+// newer valid header exceeds their narrower implementation cap.
+const MAX_SUPERBLOCK_JSON_BYTES: usize = SUPERBLOCK_BYTES - SUPERBLOCK_JSON_OFFSET;
 const FORMAT_VERSION: u8 = 1;
+const MAX_HEADER_EVALUATION_ID_BYTES: usize = 256;
+const MAX_HEADER_TIMESTAMP_BYTES: usize = 64;
 const ACQUISITION_CARRIER_SCHEMA: &str = "nq.acquisition_custody_carrier.v1";
 const PROTECTED_TERMINAL_SCHEMA: &str = "nq.governed_protected_terminal.v1";
+const PROJECTION_CORRESPONDENCE_REFUSAL_SCHEMA: &str =
+    "nq.governed_projection_correspondence_refusal.v1";
+const MAX_PROJECTION_REFUSAL_DETAIL_BYTES: usize = 1_024;
 
 #[derive(Debug, Error)]
 pub(crate) enum ArenaError {
@@ -49,8 +64,25 @@ pub(crate) enum ArenaState {
     Claimed,
     RawEvidenceSealed,
     DerivationClaimed,
+    /// The exact final-section length and digest are durably committed before
+    /// any final-section byte is written.
+    ///
+    /// This is the one exception to the ordinary "unreferenced frame is
+    /// scratch" law: a referenced frame at this frontier must be adjudicated
+    /// after restart as exact, unavailable, or corrupt.
+    FinalV2SealIntent,
     FinalV2SealedIndexPending,
     FinalV2SealedIndexed,
+    /// Exact final bytes remain sealed, but the Store proved that their
+    /// projection capsule cannot correspond to the committed prelaunch
+    /// frontier. The bounded refusal carrier is retained separately.
+    FinalV2ProjectionRefused,
+    /// A durable final-seal intent was reopened without its exact committed
+    /// frame. This is terminal custody state, not permission to re-evaluate.
+    FinalV2SealCommittedUnavailable,
+    /// A durable final-seal intent was reopened with a substituted, malformed,
+    /// or digest-mismatching frame. This is terminal custody state.
+    FinalV2SealCorrupt,
     FailedIndeterminate,
     ExpiredUnlaunched,
 }
@@ -314,68 +346,26 @@ impl ArenaLayout {
         final_capacity: u64,
         failure_capacity: u64,
     ) -> Result<Self, ArenaError> {
-        if dependency_capacity == 0
-            || raw_capacity == 0
-            || final_capacity == 0
-            || failure_capacity == 0
-        {
-            return Err(ArenaError::Invalid(
-                "all governed arena partitions must be nonzero".into(),
-            ));
-        }
-        let dependency_header_offset = SUPERBLOCK_SIZE
-            .checked_mul(SUPERBLOCK_COUNT)
-            .ok_or_else(|| ArenaError::Invalid("arena offset overflowed".into()))?;
-        let dependency_payload_offset =
-            dependency_header_offset
-                .checked_add(SECTION_HEADER_SIZE)
-                .ok_or_else(|| ArenaError::Invalid("arena offset overflowed".into()))?;
-        let raw_header_offset = align_up(
-            dependency_payload_offset
-                .checked_add(dependency_capacity)
-                .ok_or_else(|| ArenaError::Invalid("arena offset overflowed".into()))?,
-            SUPERBLOCK_SIZE,
-        )?;
-        let raw_payload_offset = raw_header_offset
-            .checked_add(SECTION_HEADER_SIZE)
-            .ok_or_else(|| ArenaError::Invalid("arena offset overflowed".into()))?;
-        let final_header_offset = align_up(
-            raw_payload_offset
-                .checked_add(raw_capacity)
-                .ok_or_else(|| ArenaError::Invalid("arena offset overflowed".into()))?,
-            SUPERBLOCK_SIZE,
-        )?;
-        let final_payload_offset = final_header_offset
-            .checked_add(SECTION_HEADER_SIZE)
-            .ok_or_else(|| ArenaError::Invalid("arena offset overflowed".into()))?;
-        let failure_header_offset = align_up(
-            final_payload_offset
-                .checked_add(final_capacity)
-                .ok_or_else(|| ArenaError::Invalid("arena offset overflowed".into()))?,
-            SUPERBLOCK_SIZE,
-        )?;
-        let failure_payload_offset = failure_header_offset
-            .checked_add(SECTION_HEADER_SIZE)
-            .ok_or_else(|| ArenaError::Invalid("arena offset overflowed".into()))?;
-        let file_length = align_up(
-            failure_payload_offset
-                .checked_add(failure_capacity)
-                .ok_or_else(|| ArenaError::Invalid("arena length overflowed".into()))?,
-            SUPERBLOCK_SIZE,
-        )?;
-        Ok(Self {
-            file_length,
-            dependency_header_offset,
-            dependency_payload_offset,
+        let geometry = checked_arena_geometry_v1(
             dependency_capacity,
-            raw_header_offset,
-            raw_payload_offset,
             raw_capacity,
-            final_header_offset,
-            final_payload_offset,
             final_capacity,
-            failure_header_offset,
-            failure_payload_offset,
+            failure_capacity,
+        )
+        .map_err(arena_geometry_error)?;
+        Ok(Self {
+            file_length: geometry.file_length_bytes,
+            dependency_header_offset: geometry.dependency_header_offset,
+            dependency_payload_offset: geometry.dependency_payload_offset,
+            dependency_capacity,
+            raw_header_offset: geometry.raw_header_offset,
+            raw_payload_offset: geometry.raw_payload_offset,
+            raw_capacity,
+            final_header_offset: geometry.final_header_offset,
+            final_payload_offset: geometry.final_payload_offset,
+            final_capacity,
+            failure_header_offset: geometry.failure_header_offset,
+            failure_payload_offset: geometry.failure_payload_offset,
             failure_capacity,
         })
     }
@@ -441,6 +431,29 @@ impl ArenaLayout {
     }
 }
 
+fn arena_geometry_error(error: CapacityModelError) -> ArenaError {
+    match error {
+        CapacityModelError::ZeroCarrierPayload { .. } => {
+            ArenaError::Invalid("all governed arena partitions must be nonzero".into())
+        }
+        CapacityModelError::UnsafeInteger(_) => {
+            ArenaError::Invalid("arena capacity exceeds exact-I-JSON integer domain".into())
+        }
+        CapacityModelError::ArithmeticOverflow("arena failure end") => {
+            ArenaError::Invalid("arena length overflowed".into())
+        }
+        CapacityModelError::ArithmeticOverflow(operation) if operation.ends_with("alignment") => {
+            ArenaError::Invalid("arena alignment overflowed".into())
+        }
+        CapacityModelError::ArithmeticOverflow(_) => {
+            ArenaError::Invalid("arena offset overflowed".into())
+        }
+        other => ArenaError::Invalid(format!(
+            "arena capacity geometry unexpectedly refused: {other}"
+        )),
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ArenaPrelaunchBinding {
@@ -503,7 +516,17 @@ pub(crate) struct DerivationClaim {
     pub(crate) dependency_generation_id: Sha256Digest,
     pub(crate) dependency_generation_custody_digest: Sha256Digest,
     pub(crate) trust_anchor_id: Sha256Digest,
+    /// Legacy exact text retained only when reopening a header written before
+    /// evaluation identity was compacted. New claims store the digest below.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) evaluation_id: Option<String>,
+    /// Exact digest of the optional evaluation identity.
+    ///
+    /// The canonical final closure retains the original text. Keeping only its
+    /// digest in the fixed physical header makes the maximum header size
+    /// independent of JSON escaping without weakening exact correspondence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) evaluation_id_digest: Option<Sha256Digest>,
     pub(crate) profile_semantic_id: Sha256Digest,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) evaluator_semantic_digest: Option<Sha256Digest>,
@@ -514,6 +537,48 @@ pub(crate) struct DerivationClaim {
     pub(crate) clock_uncertainty_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) clock_qualification_digest: Option<Sha256Digest>,
+}
+
+fn validate_header_request_id(value: &str) -> Result<(), ArenaError> {
+    RequestId::new(value.to_owned())
+        .map(|_| ())
+        .map_err(|error| {
+            ArenaError::Invalid(format!(
+                "arena outer-request identity is not one bounded protocol token: {error}"
+            ))
+        })
+}
+
+fn validate_header_timestamp(value: &str, label: &str) -> Result<(), ArenaError> {
+    if value.is_empty()
+        || value.len() > MAX_HEADER_TIMESTAMP_BYTES
+        || value.chars().any(char::is_control)
+        || chrono::DateTime::parse_from_rfc3339(value).is_err()
+    {
+        return Err(ArenaError::Invalid(format!(
+            "arena {label} must be 1..={MAX_HEADER_TIMESTAMP_BYTES} non-control RFC 3339 bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_derivation_header_text(claim: &DerivationClaim) -> Result<(), ArenaError> {
+    validate_header_timestamp(&claim.derived_at, "derivation time")?;
+    if claim.evaluation_id.is_some() && claim.evaluation_id_digest.is_some() {
+        return Err(ArenaError::Invalid(
+            "arena derivation carries both legacy evaluation text and its compact digest".into(),
+        ));
+    }
+    if claim.evaluation_id.as_ref().is_some_and(|identity| {
+        identity.is_empty()
+            || identity.len() > MAX_HEADER_EVALUATION_ID_BYTES
+            || identity.chars().any(char::is_control)
+    }) {
+        return Err(ArenaError::Invalid(format!(
+            "arena evaluation identity must contain 1..={MAX_HEADER_EVALUATION_ID_BYTES} non-control bytes"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -539,6 +604,24 @@ pub(crate) enum ArenaInventoryEntry {
     Verified {
         relative_path: PathBuf,
         inspection: Box<ArenaInspection>,
+    },
+    Unreadable {
+        relative_path: PathBuf,
+        reason: String,
+    },
+}
+
+/// Narrow read-only durable-state peek used by the global publication fence.
+///
+/// Unlike [`ArenaInventoryEntry`], this does not take the arena's exclusive
+/// lifetime lock and therefore cannot inspect or reopen section bytes. It
+/// validates root/file identity and the checksummed double-superblock only.
+#[derive(Debug)]
+pub(crate) enum ArenaStateInventoryEntry {
+    Verified {
+        relative_path: PathBuf,
+        reservation_id: Sha256Digest,
+        state: ArenaState,
     },
     Unreadable {
         relative_path: PathBuf,
@@ -625,6 +708,17 @@ impl ArenaFailureCarrierCandidate {
         validate_semantic_document(&exact_bytes, PROTECTED_TERMINAL_SCHEMA, "terminal_id")?;
         Ok(Self { exact_bytes })
     }
+
+    pub(crate) fn parse_projection_correspondence_refusal(
+        exact_bytes: Vec<u8>,
+    ) -> Result<Self, ArenaError> {
+        validate_semantic_document(
+            &exact_bytes,
+            PROJECTION_CORRESPONDENCE_REFUSAL_SCHEMA,
+            "refusal_id",
+        )?;
+        Ok(Self { exact_bytes })
+    }
 }
 
 pub(crate) struct CustodyArena {
@@ -642,8 +736,26 @@ pub(crate) struct CustodyArena {
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ArenaFailpoint {
+    FinalSealAfterIntent,
+    FinalSealAfterIntentSigkill,
     SectionAfterSync,
+    SectionAfterSyncSigkill,
     SuperblockAfterSync,
+}
+
+#[cfg(test)]
+fn kill_current_test_process() -> ! {
+    let _ = nix::sys::signal::kill(nix::unistd::Pid::this(), nix::sys::signal::Signal::SIGKILL);
+    // If the kernel rejected the signal, fail hard rather than letting an
+    // abrupt-crash test pass through an ordinary return.
+    std::process::abort()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FinalSealIntentDisposition {
+    Promoted,
+    CommittedUnavailable,
+    Corrupt,
 }
 
 impl CustodyArena {
@@ -673,6 +785,7 @@ impl CustodyArena {
         exact_dependency_closure_bytes: &[u8],
     ) -> Result<Self, ArenaError> {
         layout.validate()?;
+        validate_header_request_id(&prelaunch.outer_request_id)?;
         if exact_dependency_closure_bytes.is_empty()
             || sha256_bytes(exact_dependency_closure_bytes)
                 != prelaunch.dependency_generation_custody_digest
@@ -816,6 +929,83 @@ impl CustodyArena {
             .collect()
     }
 
+    /// Peek durable arena frontiers without contending with live pre-final
+    /// custody handles.
+    ///
+    /// A caller that observes `FinalV2SealedIndexPending` must subsequently
+    /// acquire the ordinary exclusive arena handle before reading any section.
+    /// No bytes or semantic result are exposed by this peek.
+    pub(crate) fn state_inventory_unlocked(
+        database_path: &Path,
+        maximum_entries: usize,
+    ) -> Result<Vec<ArenaStateInventoryEntry>, ArenaError> {
+        let root = Self::root_for_database(database_path)?;
+        match fs::symlink_metadata(&root) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        }
+        let root_identity = verify_arena_root(database_path, &root)?;
+        let mut relative_paths = fs::read_dir(&root)?
+            .map(|entry| entry.map(|entry| PathBuf::from(entry.file_name())))
+            .collect::<Result<Vec<_>, _>>()?;
+        relative_paths.sort();
+        if relative_paths.len() > maximum_entries {
+            return Err(ArenaError::Invalid(format!(
+                "custody arena state inventory exceeds the bounded limit of {maximum_entries}"
+            )));
+        }
+        relative_paths
+            .into_iter()
+            .map(|relative_path| {
+                let inspected = (|| {
+                    if relative_path
+                        .parent()
+                        .is_some_and(|parent| !parent.as_os_str().is_empty())
+                        || relative_path.file_name() != Some(relative_path.as_os_str())
+                    {
+                        return Err(ArenaError::Invalid(
+                            "custody state inventory entry is not one root-relative filename"
+                                .into(),
+                        ));
+                    }
+                    let file =
+                        open_arena_file(database_path, &root, &relative_path, &root_identity)?;
+                    verify_arena_file(database_path, &root, &file)?;
+                    let first = read_superblock(&file, 0);
+                    let second = read_superblock(&file, 1);
+                    let (header, _, _, _) = select_superblock(first, second)?;
+                    header.layout.validate()?;
+                    let metadata = file.metadata()?;
+                    if !metadata.is_file()
+                        || metadata.permissions().mode() & 0o077 != 0
+                        || metadata.len() != header.layout.file_length
+                        || header.schema != ARENA_FORMAT
+                        || header.sequence == 0
+                        || Self::relative_path(&header.prelaunch.reservation_record_id)
+                            != relative_path
+                    {
+                        return Err(ArenaError::Invalid(
+                            "custody state inventory file/header identity differs".into(),
+                        ));
+                    }
+                    Ok((header.prelaunch.reservation_record_id, header.state))
+                })();
+                Ok(match inspected {
+                    Ok((reservation_id, state)) => ArenaStateInventoryEntry::Verified {
+                        relative_path,
+                        reservation_id,
+                        state,
+                    },
+                    Err(error) => ArenaStateInventoryEntry::Unreadable {
+                        relative_path,
+                        reason: error.to_string(),
+                    },
+                })
+            })
+            .collect()
+    }
+
     pub(crate) fn open_by_reservation(
         database_path: &Path,
         reservation_id: &Sha256Digest,
@@ -915,6 +1105,44 @@ impl CustodyArena {
         })
     }
 
+    /// Reopen the checksummed durable header after an indeterminate write on
+    /// this still-lifetime-locked handle.
+    ///
+    /// The operation supplies no retry authority. It exists only so the
+    /// owner of the original one-use launch capability can decide whether a
+    /// pre-final failure may still be protected-terminalized or whether a
+    /// committed final-seal frontier must be left to Store recovery.
+    pub(crate) fn reopen_after_indeterminate_write(&mut self) -> Result<ArenaState, ArenaError> {
+        if !self.poisoned {
+            return Ok(self.header.state);
+        }
+        let first = read_superblock(&self.file, 0);
+        let second = read_superblock(&self.file, 1);
+        let (header, active_superblock, selected_superblock_digest, recovered_torn_superblock) =
+            select_superblock(first, second)?;
+        if header.schema != self.header.schema
+            || header.prelaunch != self.header.prelaunch
+            || header.layout != self.header.layout
+        {
+            return Err(ArenaError::Invalid(
+                "reopened poisoned arena changed immutable identity or layout".into(),
+            ));
+        }
+        self.header = header;
+        self.active_superblock = active_superblock;
+        self.selected_superblock_digest = selected_superblock_digest;
+        self.recovered_torn_superblock = recovered_torn_superblock;
+        self.poisoned = false;
+        if let Err(error) = self
+            .verify_file_shape()
+            .and_then(|()| self.verify_sealed_sections())
+        {
+            self.poisoned = true;
+            return Err(error);
+        }
+        Ok(self.header.state)
+    }
+
     pub(crate) fn claim(
         &mut self,
         execution_launch_record_id: Sha256Digest,
@@ -922,6 +1150,7 @@ impl CustodyArena {
     ) -> Result<(), ArenaError> {
         self.ensure_usable()?;
         self.verify_physical_allocation()?;
+        validate_header_timestamp(&claimed_at, "launch claim")?;
         if self.header.state != ArenaState::Reserved || self.header.claimed_at.is_some() {
             return Err(ArenaError::Invalid(
                 "arena reservation has already been claimed or terminalized".into(),
@@ -1012,11 +1241,35 @@ impl CustodyArena {
             &self.header.prelaunch,
             &derived.token.claim,
         )?;
+        let expected =
+            self.section_commitment(SectionKind::FinalV2Closure, &derived.exact_bytes)?;
         self.execute_poisoned(move |arena| {
+            // Commit the exact expected frame before touching its physical
+            // section. A crash from this point onward cannot make the final
+            // result look like ordinary unreferenced scratch.
+            arena.transition_inner(|header| {
+                header.state = ArenaState::FinalV2SealIntent;
+                header.final_v2_closure = Some(expected.clone());
+                Ok(())
+            })?;
+            #[cfg(test)]
+            if arena.failpoint == Some(ArenaFailpoint::FinalSealAfterIntent) {
+                return Err(ArenaError::Invalid(
+                    "injected crash after durable final-seal intent".into(),
+                ));
+            }
+            #[cfg(test)]
+            if arena.failpoint == Some(ArenaFailpoint::FinalSealAfterIntentSigkill) {
+                kill_current_test_process();
+            }
             let section = arena.write_section(SectionKind::FinalV2Closure, &derived.exact_bytes)?;
+            if section != expected {
+                return Err(ArenaError::Invalid(
+                    "written final section differs from its durable seal intent".into(),
+                ));
+            }
             arena.transition_inner(|header| {
                 header.state = ArenaState::FinalV2SealedIndexPending;
-                header.final_v2_closure = Some(section.clone());
                 Ok(())
             })?;
             Ok(FinalCustodyToken {
@@ -1026,6 +1279,60 @@ impl CustodyArena {
         })
     }
 
+    /// Adjudicate one durable final-seal intent without invoking an evaluator
+    /// or accepting replacement bytes.
+    ///
+    /// An exact staged frame is promoted to the ordinary index-pending
+    /// frontier. Absence and corruption become distinct terminal custody
+    /// states. The operation never retries derivation and never treats an
+    /// unreferenced frame from any other state as committed.
+    pub(crate) fn adjudicate_final_v2_seal_intent(
+        &mut self,
+    ) -> Result<FinalSealIntentDisposition, ArenaError> {
+        self.ensure_usable()?;
+        self.verify_physical_allocation()?;
+        if self.header.state != ArenaState::FinalV2SealIntent {
+            return Err(ArenaError::Invalid(
+                "final-seal adjudication requires one durable seal intent".into(),
+            ));
+        }
+        let expected = self
+            .header
+            .final_v2_closure
+            .clone()
+            .ok_or_else(|| ArenaError::Invalid("final-seal intent has no commitment".into()))?;
+        let observed = self.read_section_frame(SectionKind::FinalV2Closure);
+        let disposition = match observed {
+            Ok(Some(bytes))
+                if expected.kind == SectionKind::FinalV2Closure
+                    && expected.payload_length
+                        == u64::try_from(bytes.len()).unwrap_or(u64::MAX)
+                    && expected.payload_digest == sha256_bytes(&bytes)
+                    && self.header.derivation_claim.as_ref().is_some_and(|claim| {
+                        validate_final_v2_correspondence(&bytes, &self.header.prelaunch, claim)
+                            .is_ok()
+                    }) =>
+            {
+                FinalSealIntentDisposition::Promoted
+            }
+            Ok(None) => FinalSealIntentDisposition::CommittedUnavailable,
+            Ok(Some(_)) | Err(_) => FinalSealIntentDisposition::Corrupt,
+        };
+        self.execute_poisoned(|arena| {
+            arena.transition_inner(|header| {
+                header.state = match disposition {
+                    FinalSealIntentDisposition::Promoted => ArenaState::FinalV2SealedIndexPending,
+                    FinalSealIntentDisposition::CommittedUnavailable => {
+                        ArenaState::FinalV2SealCommittedUnavailable
+                    }
+                    FinalSealIntentDisposition::Corrupt => ArenaState::FinalV2SealCorrupt,
+                };
+                Ok(())
+            })
+        })?;
+        Ok(disposition)
+    }
+
     pub(crate) fn claim_derivation(
         &mut self,
         raw: RawCustodyToken,
@@ -1033,6 +1340,7 @@ impl CustodyArena {
     ) -> Result<DerivationCustodyToken, ArenaError> {
         self.ensure_usable()?;
         self.verify_physical_allocation()?;
+        validate_derivation_header_text(&claim)?;
         if self.header.state != ArenaState::RawEvidenceSealed
             || self.header.derivation_claim.is_some()
         {
@@ -1113,12 +1421,54 @@ impl CustodyArena {
             &self.header.prelaunch,
             self.header.execution_launch_record_id.as_ref(),
             terminal_state,
+            None,
         )?;
         self.execute_poisoned(move |arena| {
             let section =
                 arena.write_section(SectionKind::ProtectedFailure, &failure.exact_bytes)?;
             arena.transition_inner(|header| {
                 header.state = terminal_state;
+                header.protected_failure = Some(section.clone());
+                Ok(())
+            })?;
+            Ok(section)
+        })
+    }
+
+    /// Terminalize one exact sealed final closure whose Store projection
+    /// failed deterministic correspondence validation.
+    ///
+    /// This preserves the immutable final bytes and commits a separate bounded
+    /// reason carrier. It cannot be used for a missing or corrupt final frame,
+    /// and it never re-enters derivation or projection.
+    pub(crate) fn refuse_final_projection(
+        &mut self,
+        refusal: ArenaFailureCarrierCandidate,
+    ) -> Result<SealedSection, ArenaError> {
+        self.ensure_usable()?;
+        self.verify_physical_allocation()?;
+        if self.header.state != ArenaState::FinalV2SealedIndexPending
+            || self.header.final_v2_closure.is_none()
+            || self.header.protected_failure.is_some()
+        {
+            return Err(ArenaError::Invalid(
+                "projection refusal requires one exact index-pending closure".into(),
+            ));
+        }
+        self.read_committed_section(SectionKind::FinalV2Closure)?
+            .ok_or_else(|| ArenaError::Invalid("final projection bytes are unavailable".into()))?;
+        validate_failure_correspondence(
+            &refusal.exact_bytes,
+            &self.header.prelaunch,
+            self.header.execution_launch_record_id.as_ref(),
+            ArenaState::FinalV2ProjectionRefused,
+            self.header.final_v2_closure.as_ref(),
+        )?;
+        self.execute_poisoned(move |arena| {
+            let section =
+                arena.write_section(SectionKind::ProtectedFailure, &refusal.exact_bytes)?;
+            arena.transition_inner(|header| {
+                header.state = ArenaState::FinalV2ProjectionRefused;
                 header.protected_failure = Some(section.clone());
                 Ok(())
             })?;
@@ -1372,6 +1722,10 @@ impl CustodyArena {
                 "injected indeterminate arena section write".into(),
             ));
         }
+        #[cfg(test)]
+        if self.failpoint == Some(ArenaFailpoint::SectionAfterSyncSigkill) {
+            kill_current_test_process();
+        }
         let reopened = self
             .read_section_frame(kind)?
             .ok_or_else(|| ArenaError::Invalid(format!("{kind:?} section vanished after sync")))?;
@@ -1384,6 +1738,26 @@ impl CustodyArena {
             kind,
             payload_length,
             payload_digest,
+        })
+    }
+
+    fn section_commitment(
+        &self,
+        kind: SectionKind,
+        exact_bytes: &[u8],
+    ) -> Result<SealedSection, ArenaError> {
+        let (_, _, capacity) = self.header.layout.section(kind);
+        let payload_length = u64::try_from(exact_bytes.len())
+            .map_err(|_| ArenaError::Invalid("section length overflowed".into()))?;
+        if payload_length == 0 || payload_length > capacity {
+            return Err(ArenaError::Invalid(format!(
+                "{kind:?} section requires {payload_length} bytes but capacity is {capacity}"
+            )));
+        }
+        Ok(SealedSection {
+            kind,
+            payload_length,
+            payload_digest: sha256_bytes(exact_bytes),
         })
     }
 
@@ -1461,8 +1835,16 @@ impl CustodyArena {
         Ok(Some(payload))
     }
 
+    #[allow(clippy::too_many_lines)] // One closed state-shape audit keeps every durable frontier explicit.
     fn verify_file_shape(&self) -> Result<(), ArenaError> {
         self.header.layout.validate()?;
+        validate_header_request_id(&self.header.prelaunch.outer_request_id)?;
+        if let Some(claimed_at) = &self.header.claimed_at {
+            validate_header_timestamp(claimed_at, "launch claim")?;
+        }
+        if let Some(claim) = &self.header.derivation_claim {
+            validate_derivation_header_text(claim)?;
+        }
         let metadata = self.file.metadata()?;
         if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
             return Err(ArenaError::Invalid(
@@ -1476,10 +1858,7 @@ impl CustodyArena {
                 self.header.layout.file_length
             )));
         }
-        if self.header.schema != ARENA_FORMAT
-            || self.header.sequence == 0
-            || self.header.prelaunch.outer_request_id.is_empty()
-        {
+        if self.header.schema != ARENA_FORMAT || self.header.sequence == 0 {
             return Err(ArenaError::Invalid(
                 "arena header has incompatible identity".into(),
             ));
@@ -1517,13 +1896,25 @@ impl CustodyArena {
                     && self.header.final_v2_closure.is_none()
                     && self.header.protected_failure.is_none()
             }
-            ArenaState::FinalV2SealedIndexPending | ArenaState::FinalV2SealedIndexed => {
+            ArenaState::FinalV2SealIntent
+            | ArenaState::FinalV2SealedIndexPending
+            | ArenaState::FinalV2SealedIndexed
+            | ArenaState::FinalV2SealCommittedUnavailable
+            | ArenaState::FinalV2SealCorrupt => {
                 self.header.execution_launch_record_id.is_some()
                     && self.header.claimed_at.is_some()
                     && self.header.raw_evidence.is_some()
                     && self.header.derivation_claim.is_some()
                     && self.header.final_v2_closure.is_some()
                     && self.header.protected_failure.is_none()
+            }
+            ArenaState::FinalV2ProjectionRefused => {
+                self.header.execution_launch_record_id.is_some()
+                    && self.header.claimed_at.is_some()
+                    && self.header.raw_evidence.is_some()
+                    && self.header.derivation_claim.is_some()
+                    && self.header.final_v2_closure.is_some()
+                    && self.header.protected_failure.is_some()
             }
             ArenaState::FailedIndeterminate => {
                 self.header.execution_launch_record_id.is_some()
@@ -1557,6 +1948,20 @@ impl CustodyArena {
             SectionKind::FinalV2Closure,
             SectionKind::ProtectedFailure,
         ] {
+            if kind == SectionKind::FinalV2Closure
+                && matches!(
+                    self.header.state,
+                    ArenaState::FinalV2SealIntent
+                        | ArenaState::FinalV2SealCommittedUnavailable
+                        | ArenaState::FinalV2SealCorrupt
+                )
+            {
+                // The intent header, rather than a successfully reopened
+                // frame, is authoritative at these frontiers. Engine-owned
+                // recovery adjudicates an intent; terminal unavailable/corrupt
+                // states remain inspectable without fabricating bytes.
+                continue;
+            }
             if let Some(bytes) = self.read_committed_section(kind)? {
                 match kind {
                     SectionKind::DependencyClosure => {
@@ -1592,6 +1997,7 @@ impl CustodyArena {
                             &self.header.prelaunch,
                             self.header.execution_launch_record_id.as_ref(),
                             self.header.state,
+                            self.header.final_v2_closure.as_ref(),
                         )?;
                     }
                 }
@@ -2183,14 +2589,21 @@ fn validate_successor(previous: &ArenaHeader, next: &ArenaHeader) -> Result<(), 
             expected.state = next.state;
             expected.derivation_claim.clone_from(&next.derivation_claim);
         }
-        (ArenaState::DerivationClaimed, ArenaState::FinalV2SealedIndexPending) => {
+        (ArenaState::DerivationClaimed, ArenaState::FinalV2SealIntent) => {
             expected.state = next.state;
             expected.final_v2_closure.clone_from(&next.final_v2_closure);
         }
-        (ArenaState::FinalV2SealedIndexPending, ArenaState::FinalV2SealedIndexed) => {
+        (
+            ArenaState::FinalV2SealIntent,
+            ArenaState::FinalV2SealedIndexPending
+            | ArenaState::FinalV2SealCommittedUnavailable
+            | ArenaState::FinalV2SealCorrupt,
+        )
+        | (ArenaState::FinalV2SealedIndexPending, ArenaState::FinalV2SealedIndexed) => {
             expected.state = next.state;
         }
-        (
+        (ArenaState::FinalV2SealedIndexPending, ArenaState::FinalV2ProjectionRefused)
+        | (
             ArenaState::Claimed | ArenaState::RawEvidenceSealed | ArenaState::DerivationClaimed,
             ArenaState::FailedIndeterminate,
         )
@@ -2343,7 +2756,9 @@ fn validate_governed_closure_document(exact_bytes: &[u8]) -> Result<Value, Arena
         .ok_or_else(|| ArenaError::Invalid("final closure schema is absent".into()))?;
     if !matches!(
         schema,
-        "nq.governed_execution_custody_closure.v1" | "nq.governed_execution_custody_closure.v2"
+        "nq.governed_execution_custody_closure.v1"
+            | "nq.governed_execution_custody_closure.v2"
+            | "nq.governed_execution_custody_closure.v3"
     ) {
         return Err(ArenaError::Invalid(
             "final closure schema is unsupported".into(),
@@ -2352,14 +2767,69 @@ fn validate_governed_closure_document(exact_bytes: &[u8]) -> Result<Value, Arena
     validate_semantic_document(exact_bytes, schema, "closure_id")
 }
 
+#[allow(clippy::too_many_lines)] // One terminal-carrier validator preserves every state-specific refusal join.
 fn validate_failure_correspondence(
     exact_bytes: &[u8],
     prelaunch: &ArenaPrelaunchBinding,
     launch: Option<&Sha256Digest>,
     terminal_state: ArenaState,
+    final_closure: Option<&SealedSection>,
 ) -> Result<(), ArenaError> {
     let value: Value = serde_json::from_slice(exact_bytes)
         .map_err(|error| ArenaError::Invalid(format!("cannot decode failure carrier: {error}")))?;
+    if value["schema"] == PROJECTION_CORRESPONDENCE_REFUSAL_SCHEMA {
+        let value = validate_semantic_document(
+            exact_bytes,
+            PROJECTION_CORRESPONDENCE_REFUSAL_SCHEMA,
+            "refusal_id",
+        )?;
+        let reason = value["reason"]
+            .as_object()
+            .ok_or_else(|| ArenaError::Invalid("projection refusal has no typed reason".into()))?;
+        let detail = reason
+            .get("detail")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                ArenaError::Invalid("projection refusal reason detail is absent".into())
+            })?;
+        let source_error_digest = reason
+            .get("source_error_digest")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                ArenaError::Invalid("projection refusal source-error digest is absent".into())
+            })?;
+        Sha256Digest::parse(source_error_digest.to_owned()).map_err(|error| {
+            ArenaError::Invalid(format!(
+                "projection refusal source-error digest is invalid: {error}"
+            ))
+        })?;
+        let Some(final_closure) = final_closure else {
+            return Err(ArenaError::Invalid(
+                "projection refusal has no sealed final-closure commitment".into(),
+            ));
+        };
+        return match (terminal_state, launch) {
+            (ArenaState::FinalV2ProjectionRefused, Some(launch))
+                if value["reservation_record_id"]
+                    == prelaunch.reservation_record_id.as_str()
+                    && value["execution_launch_record_id"] == launch.as_str()
+                    && value["final_closure"]["byte_length"]
+                        == final_closure.payload_length
+                    && value["final_closure"]["bytes_digest"]
+                        == final_closure.payload_digest.as_str()
+                    && reason.get("code").and_then(Value::as_str)
+                        == Some("exact_correspondence_refused")
+                    && detail.len() <= MAX_PROJECTION_REFUSAL_DETAIL_BYTES
+                    && reason.get("truncated").and_then(Value::as_bool).is_some() =>
+            {
+                Ok(())
+            }
+            _ => Err(ArenaError::Invalid(
+                "projection refusal differs from reservation, launch, final closure, reason, or terminal state"
+                    .into(),
+            )),
+        };
+    }
     if value["schema"] == PROTECTED_TERMINAL_SCHEMA {
         let value =
             validate_semantic_document(exact_bytes, PROTECTED_TERMINAL_SCHEMA, "terminal_id")?;
@@ -2418,11 +2888,16 @@ fn validate_failure_correspondence(
 mod tests {
     use std::io::{Seek, SeekFrom, Write};
     use std::os::unix::fs::symlink;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::Command;
 
     use serde_json::{Map, json};
     use tempfile::tempdir;
 
     use super::*;
+
+    const ABRUPT_FINAL_SEAL_DATABASE: &str = "NQ_STORE_ABRUPT_FINAL_SEAL_DATABASE";
+    const ABRUPT_FINAL_SEAL_MODE: &str = "NQ_STORE_ABRUPT_FINAL_SEAL_MODE";
 
     fn digest(label: &[u8]) -> Sha256Digest {
         sha256_bytes(label)
@@ -2441,6 +2916,96 @@ mod tests {
             prelaunch_checkpoint_id: digest(format!("checkpoint:{label}").as_bytes()),
             prelaunch_checkpoint_digest: digest(format!("checkpoint-bytes:{label}").as_bytes()),
         }
+    }
+
+    #[test]
+    fn maximal_bounded_terminal_header_fits_reserved_superblock_region() {
+        const MAX_I_JSON_INTEGER: u64 = 9_007_199_254_740_991;
+        let maximum_timestamp = format!(
+            "2026-07-29T12:00:00.{}Z",
+            "1".repeat(MAX_HEADER_TIMESTAMP_BYTES - 21)
+        );
+        assert_eq!(maximum_timestamp.len(), MAX_HEADER_TIMESTAMP_BYTES);
+        validate_header_timestamp(&maximum_timestamp, "maximum fixture")
+            .expect("maximum bounded timestamp");
+
+        let section = |kind| SealedSection {
+            kind,
+            payload_length: MAX_I_JSON_INTEGER,
+            payload_digest: digest(format!("max-section:{kind:?}").as_bytes()),
+        };
+        let header = ArenaHeader {
+            schema: ARENA_FORMAT.to_owned(),
+            sequence: MAX_I_JSON_INTEGER,
+            prelaunch: ArenaPrelaunchBinding {
+                reservation_record_id: digest(b"max-reservation"),
+                reservation_manifest_digest: digest(b"max-manifest"),
+                outer_request_record_id: digest(b"max-outer-record"),
+                outer_request_id: "x".repeat(255),
+                outer_request_digest: digest(b"max-outer-bytes"),
+                dependency_generation_id: digest(b"max-dependency"),
+                dependency_generation_custody_digest: digest(b"max-dependency-bytes"),
+                trust_anchor_id: digest(b"max-trust-anchor"),
+                prelaunch_checkpoint_id: digest(b"max-checkpoint"),
+                prelaunch_checkpoint_digest: digest(b"max-checkpoint-bytes"),
+            },
+            execution_launch_record_id: Some(digest(b"max-launch")),
+            layout: ArenaLayout::new(
+                MAX_I_JSON_INTEGER / 8,
+                MAX_I_JSON_INTEGER / 8,
+                MAX_I_JSON_INTEGER / 8,
+                MAX_I_JSON_INTEGER / 8,
+            )
+            .expect("maximum-shape layout"),
+            state: ArenaState::FinalV2ProjectionRefused,
+            claimed_at: Some(maximum_timestamp.clone()),
+            derivation_claim: Some(DerivationClaim {
+                derivation_id: digest(b"max-derivation"),
+                dependency_generation_id: digest(b"max-dependency"),
+                dependency_generation_custody_digest: digest(b"max-dependency-bytes"),
+                trust_anchor_id: digest(b"max-trust-anchor"),
+                evaluation_id: None,
+                evaluation_id_digest: Some(sha256_bytes(
+                    "\"".repeat(MAX_HEADER_EVALUATION_ID_BYTES).as_bytes(),
+                )),
+                profile_semantic_id: digest(b"max-profile"),
+                evaluator_semantic_digest: Some(digest(b"max-evaluator-semantic")),
+                evaluator_artifact_digest: digest(b"max-evaluator-artifact"),
+                derived_at: maximum_timestamp,
+                clock_identity: digest(b"max-clock"),
+                clock_uncertainty_ms: Some(MAX_I_JSON_INTEGER),
+                clock_qualification_digest: Some(digest(b"max-clock-qualification")),
+            }),
+            dependency_closure: Some(section(SectionKind::DependencyClosure)),
+            raw_evidence: Some(section(SectionKind::RawEvidence)),
+            final_v2_closure: Some(section(SectionKind::FinalV2Closure)),
+            protected_failure: Some(section(SectionKind::ProtectedFailure)),
+        };
+        validate_header_request_id(&header.prelaunch.outer_request_id)
+            .expect("maximum request identity");
+        validate_derivation_header_text(
+            header
+                .derivation_claim
+                .as_ref()
+                .expect("maximum derivation"),
+        )
+        .expect("maximum derivation text");
+        let payload = canonical_json_bytes(&header).expect("maximum canonical header");
+        assert!(
+            payload.len() > 3072,
+            "fixture must exercise the retired narrow cap"
+        );
+        assert!(
+            payload.len() <= MAX_SUPERBLOCK_JSON_BYTES,
+            "maximal bounded header {} exceeds reserved region {}",
+            payload.len(),
+            MAX_SUPERBLOCK_JSON_BYTES
+        );
+        let encoded = encode_superblock(&header).expect("maximum header encodes");
+        assert_eq!(
+            decode_superblock(&encoded).expect("maximum header decodes"),
+            header
+        );
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2494,6 +3059,7 @@ mod tests {
             dependency_generation_custody_digest: digest(b"dependency-generation-custody"),
             trust_anchor_id: digest(b"trust-anchor"),
             evaluation_id: Some("evaluation-001".into()),
+            evaluation_id_digest: None,
             profile_semantic_id: digest(b"profile"),
             evaluator_semantic_digest: Some(digest(b"evaluator-semantic")),
             evaluator_artifact_digest: digest(b"evaluator-artifact"),
@@ -2629,6 +3195,36 @@ mod tests {
         (prelaunch, arena)
     }
 
+    fn derivation_ready_arena(
+        database: &Path,
+        label: &str,
+    ) -> (ArenaPrelaunchBinding, CustodyArena, Vec<u8>) {
+        let (prelaunch, mut arena) = create_arena(database, label);
+        let launch = digest(format!("{label}:launch").as_bytes());
+        arena
+            .claim(launch.clone(), "2026-07-29T12:00:00Z".into())
+            .expect("claim");
+        let raw = arena
+            .seal_acquisition(acquisition(
+                &launch,
+                NativeAcquisitionOutcome::Response,
+                ProviderInterpretation::CandidateReport,
+                Some(b"exact final-seal-intent raw bytes"),
+                None,
+                None,
+            ))
+            .expect("raw");
+        let claim = derivation_claim();
+        let token = arena
+            .claim_derivation(raw, claim.clone())
+            .expect("derivation");
+        // Reopen through the public arena capability so the fixture matches
+        // the production final-seal path.
+        drop(token);
+        let final_bytes = final_v2(&prelaunch, &claim);
+        (prelaunch, arena, final_bytes)
+    }
+
     #[test]
     fn arena_seals_raw_then_final_and_reopens_exact_bytes() {
         let directory = tempdir().expect("directory");
@@ -2708,6 +3304,214 @@ mod tests {
             reopened.final_v2_closure_bytes().expect("final read"),
             Some(final_bytes)
         );
+    }
+
+    #[test]
+    fn durable_final_seal_intent_promotes_only_exact_staged_bytes() {
+        let directory = tempdir().expect("directory");
+        let database = directory.path().join("intent-exact.db");
+        File::create(&database).expect("database placeholder");
+        let (prelaunch, mut arena, final_bytes) = derivation_ready_arena(&database, "intent-exact");
+        let derivation = arena.reopen_derivation_token().expect("reopen derivation");
+        arena.failpoint = Some(ArenaFailpoint::SectionAfterSync);
+        assert!(matches!(
+            arena.seal_final_v2_closure(
+                DerivedV2ClosureCandidate::from_store_internal_precursor(
+                    derivation,
+                    final_bytes.clone(),
+                )
+                .expect("candidate"),
+            ),
+            Err(ArenaError::Invalid(message)) if message.contains("injected indeterminate")
+        ));
+        drop(arena);
+
+        let mut reopened =
+            CustodyArena::open(&database, &prelaunch).expect("intent is inspectable");
+        assert_eq!(
+            reopened.inspection().expect("inspection").state,
+            ArenaState::FinalV2SealIntent
+        );
+        assert_eq!(
+            reopened
+                .adjudicate_final_v2_seal_intent()
+                .expect("exact intent adjudication"),
+            FinalSealIntentDisposition::Promoted
+        );
+        assert_eq!(
+            reopened.inspection().expect("inspection").state,
+            ArenaState::FinalV2SealedIndexPending
+        );
+        assert_eq!(
+            reopened.final_v2_closure_bytes().expect("final bytes"),
+            Some(final_bytes)
+        );
+    }
+
+    #[test]
+    fn durable_final_seal_intent_terminalizes_absence_and_substitution() {
+        let directory = tempdir().expect("directory");
+
+        let absent_database = directory.path().join("intent-absent.db");
+        File::create(&absent_database).expect("database placeholder");
+        let (absent_prelaunch, mut absent, absent_final) =
+            derivation_ready_arena(&absent_database, "intent-absent");
+        let absent_derivation = absent.reopen_derivation_token().expect("reopen derivation");
+        absent.failpoint = Some(ArenaFailpoint::FinalSealAfterIntent);
+        assert!(
+            absent
+                .seal_final_v2_closure(
+                    DerivedV2ClosureCandidate::from_store_internal_precursor(
+                        absent_derivation,
+                        absent_final,
+                    )
+                    .expect("candidate"),
+                )
+                .is_err()
+        );
+        drop(absent);
+        let mut absent =
+            CustodyArena::open(&absent_database, &absent_prelaunch).expect("inspect absence");
+        assert_eq!(
+            absent
+                .adjudicate_final_v2_seal_intent()
+                .expect("adjudicate absence"),
+            FinalSealIntentDisposition::CommittedUnavailable
+        );
+        assert_eq!(
+            absent.inspection().expect("inspection").state,
+            ArenaState::FinalV2SealCommittedUnavailable
+        );
+
+        let corrupt_database = directory.path().join("intent-corrupt.db");
+        File::create(&corrupt_database).expect("database placeholder");
+        let (corrupt_prelaunch, mut corrupt, corrupt_final) =
+            derivation_ready_arena(&corrupt_database, "intent-corrupt");
+        let corrupt_derivation = corrupt
+            .reopen_derivation_token()
+            .expect("reopen derivation");
+        corrupt.failpoint = Some(ArenaFailpoint::FinalSealAfterIntent);
+        assert!(
+            corrupt
+                .seal_final_v2_closure(
+                    DerivedV2ClosureCandidate::from_store_internal_precursor(
+                        corrupt_derivation,
+                        corrupt_final,
+                    )
+                    .expect("candidate"),
+                )
+                .is_err()
+        );
+        let (header_offset, payload_offset, _) =
+            corrupt.header.layout.section(SectionKind::FinalV2Closure);
+        let path = corrupt.path().to_owned();
+        drop(corrupt);
+        let substitute = b"coherent but different final bytes";
+        let file = OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("corruptor");
+        write_all_at(&file, payload_offset, substitute).expect("substitute payload");
+        let frame = encode_section_header(
+            SectionKind::FinalV2Closure,
+            u64::try_from(substitute.len()).expect("length"),
+            &sha256_bytes(substitute),
+        )
+        .expect("substitute frame");
+        write_all_at(&file, header_offset, &frame).expect("substitute frame write");
+        file.sync_all().expect("sync substitution");
+        drop(file);
+
+        let mut corrupt =
+            CustodyArena::open(&corrupt_database, &corrupt_prelaunch).expect("inspect corruption");
+        assert_eq!(
+            corrupt
+                .adjudicate_final_v2_seal_intent()
+                .expect("adjudicate corruption"),
+            FinalSealIntentDisposition::Corrupt
+        );
+        assert_eq!(
+            corrupt.inspection().expect("inspection").state,
+            ArenaState::FinalV2SealCorrupt
+        );
+    }
+
+    // Ordinary no-op test unless selected by the parent crash harness below.
+    // The parent requires SIGKILL termination; a normal return cannot satisfy
+    // the hostile.
+    #[test]
+    fn abrupt_final_seal_child() {
+        let Ok(database) = std::env::var(ABRUPT_FINAL_SEAL_DATABASE) else {
+            return;
+        };
+        let mode = std::env::var(ABRUPT_FINAL_SEAL_MODE).expect("crash mode");
+        let database = PathBuf::from(database);
+        File::create(&database).expect("database placeholder");
+        let (_prelaunch, mut arena, final_bytes) = derivation_ready_arena(&database, mode.as_str());
+        let derivation = arena.reopen_derivation_token().expect("reopen derivation");
+        arena.failpoint = Some(match mode.as_str() {
+            "intent-only" => ArenaFailpoint::FinalSealAfterIntentSigkill,
+            "exact-frame" => ArenaFailpoint::SectionAfterSyncSigkill,
+            other => panic!("unknown abrupt final-seal mode {other}"),
+        });
+        let _ = arena.seal_final_v2_closure(
+            DerivedV2ClosureCandidate::from_store_internal_precursor(derivation, final_bytes)
+                .expect("candidate"),
+        );
+        panic!("abrupt final-seal child returned without SIGKILL");
+    }
+
+    #[test]
+    fn sigkill_final_seal_windows_recover_without_treating_intent_as_scratch() {
+        let directory = tempdir().expect("directory");
+        for (mode, expected) in [
+            (
+                "intent-only",
+                FinalSealIntentDisposition::CommittedUnavailable,
+            ),
+            ("exact-frame", FinalSealIntentDisposition::Promoted),
+        ] {
+            let database = directory.path().join(format!("{mode}.db"));
+            let status = Command::new(std::env::current_exe().expect("test executable"))
+                .arg("--exact")
+                .arg("custody_arena::tests::abrupt_final_seal_child")
+                .arg("--nocapture")
+                .env(ABRUPT_FINAL_SEAL_DATABASE, &database)
+                .env(ABRUPT_FINAL_SEAL_MODE, mode)
+                .status()
+                .expect("spawn abrupt final-seal child");
+            assert_eq!(
+                status.signal(),
+                Some(libc::SIGKILL),
+                "{mode} child must terminate by SIGKILL, not skip or return"
+            );
+
+            let expected_prelaunch = prelaunch(mode);
+            let mut reopened =
+                CustodyArena::open(&database, &expected_prelaunch).expect("intent inspectable");
+            assert_eq!(
+                reopened.inspection().expect("inspection").state,
+                ArenaState::FinalV2SealIntent
+            );
+            assert_eq!(
+                reopened
+                    .adjudicate_final_v2_seal_intent()
+                    .expect("adjudicate killed seal"),
+                expected
+            );
+            assert_eq!(
+                reopened.inspection().expect("inspection").state,
+                match expected {
+                    FinalSealIntentDisposition::Promoted => {
+                        ArenaState::FinalV2SealedIndexPending
+                    }
+                    FinalSealIntentDisposition::CommittedUnavailable => {
+                        ArenaState::FinalV2SealCommittedUnavailable
+                    }
+                    FinalSealIntentDisposition::Corrupt => unreachable!("not requested"),
+                }
+            );
+        }
     }
 
     #[test]
@@ -3053,6 +3857,93 @@ mod tests {
             CustodyArena::open(&database, &prelaunch),
             Err(ArenaError::Invalid(message)) if message.contains("canonical partition layout")
         ));
+    }
+
+    #[test]
+    fn capacity_model_preserves_frozen_arena_geometry_for_every_alignment_residue() {
+        fn frozen_align(value: u64) -> u64 {
+            (value + SUPERBLOCK_SIZE - 1) & !(SUPERBLOCK_SIZE - 1)
+        }
+
+        fn frozen_offsets(capacities: [u64; 4]) -> [u64; 9] {
+            let dependency_header = 2 * SUPERBLOCK_SIZE;
+            let dependency_payload = dependency_header + SECTION_HEADER_SIZE;
+            let raw_header = frozen_align(dependency_payload + capacities[0]);
+            let raw_payload = raw_header + SECTION_HEADER_SIZE;
+            let final_header = frozen_align(raw_payload + capacities[1]);
+            let final_payload = final_header + SECTION_HEADER_SIZE;
+            let failure_header = frozen_align(final_payload + capacities[2]);
+            let failure_payload = failure_header + SECTION_HEADER_SIZE;
+            let file_length = frozen_align(failure_payload + capacities[3]);
+            [
+                dependency_header,
+                dependency_payload,
+                raw_header,
+                raw_payload,
+                final_header,
+                final_payload,
+                failure_header,
+                failure_payload,
+                file_length,
+            ]
+        }
+
+        for varied_partition in 0..4 {
+            for residue in 0..SUPERBLOCK_SIZE {
+                let mut capacities = [SUPERBLOCK_SIZE; 4];
+                capacities[varied_partition] = if residue == 0 {
+                    SUPERBLOCK_SIZE
+                } else {
+                    residue
+                };
+                let expected = frozen_offsets(capacities);
+                let actual =
+                    ArenaLayout::new(capacities[0], capacities[1], capacities[2], capacities[3])
+                        .expect("all nonzero alignment residues fit");
+                assert_eq!(
+                    [
+                        actual.dependency_header_offset,
+                        actual.dependency_payload_offset,
+                        actual.raw_header_offset,
+                        actual.raw_payload_offset,
+                        actual.final_header_offset,
+                        actual.final_payload_offset,
+                        actual.failure_header_offset,
+                        actual.failure_payload_offset,
+                        actual.file_length,
+                    ],
+                    expected,
+                    "partition {varied_partition}, residue {residue}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn capacity_model_preserves_zero_and_closes_unsafe_integer_boundaries() {
+        assert!(matches!(
+            ArenaLayout::new(0, 1, 1, 1),
+            Err(ArenaError::Invalid(message))
+                if message == "all governed arena partitions must be nonzero"
+        ));
+        for capacities in [
+            [u64::MAX, 1, 1, 1],
+            [1, u64::MAX, 1, 1],
+            [1, 1, u64::MAX, 1],
+            [1, 1, 1, u64::MAX],
+            [u64::MAX - 12_288, 1, 1, 1],
+        ] {
+            assert!(matches!(
+                ArenaLayout::new(
+                    capacities[0],
+                    capacities[1],
+                    capacities[2],
+                    capacities[3]
+                ),
+                Err(ArenaError::Invalid(message))
+                    if message == "arena capacity exceeds exact-I-JSON integer domain"
+            ));
+        }
     }
 
     #[test]

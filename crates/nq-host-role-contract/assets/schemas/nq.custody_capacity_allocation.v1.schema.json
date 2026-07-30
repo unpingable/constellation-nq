@@ -1,0 +1,626 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.custody_capacity_allocation.v1.schema.json",
+  "$comment": "allocation_id is derived from exact canonical bytes after removing only the root allocation_id and queue occurrence_id fields and replacing each queue capacity_allocation_id backlink with nq.capacity-allocation-id/unbound-v1; all other bytes remain verdict-bearing",
+  "title": "nq.custody_capacity_allocation.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "allocation_id",
+    "namespace",
+    "store_genesis_id",
+    "store_integrity_key_generation",
+    "predecessor_capacity",
+    "policy",
+    "rules",
+    "before_snapshot",
+    "request_occurrence",
+    "reservation_plan",
+    "plan_digest",
+    "semantic_components",
+    "semantic_sum_bytes",
+    "carrier_bounds",
+    "arena_layout",
+    "canonical_record_extent",
+    "delivery_ledger_extent",
+    "retained_charge_bytes",
+    "queue",
+    "limits",
+    "logical_preallocated_carrier_bytes_after",
+    "watermark_classification",
+    "decision",
+    "refusal_reasons",
+    "calculated_at",
+    "clock",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.custody_capacity_allocation.v1"
+    },
+    "allocation_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "namespace": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/namespaceSnapshot"
+    },
+    "store_genesis_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "store_integrity_key_generation": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/keyGenerationIdentityReference"
+    },
+    "predecessor_capacity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "root"
+      ],
+      "properties": {
+        "sequence": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "root": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "buffer_delivery_policy",
+        "policy_generation",
+        "capacity_policy",
+        "delivery_policy",
+        "delivery_policy_generation_id"
+      ],
+      "properties": {
+        "buffer_delivery_policy": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        },
+        "policy_generation": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/generation"
+        },
+        "capacity_policy": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/policyIdentityReference"
+        },
+        "delivery_policy": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/policyIdentityReference"
+        },
+        "delivery_policy_generation_id": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        }
+      }
+    },
+    "rules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capacity_calculation",
+        "carrier_map",
+        "arena_layout",
+        "record_extent",
+        "delivery_extent",
+        "v3_capsule_bound",
+        "canonicalization"
+      ],
+      "properties": {
+        "capacity_calculation": {
+          "$ref": "#/$defs/ruleReference"
+        },
+        "carrier_map": {
+          "$ref": "#/$defs/ruleReference"
+        },
+        "arena_layout": {
+          "$ref": "#/$defs/ruleReference"
+        },
+        "record_extent": {
+          "$ref": "#/$defs/ruleReference"
+        },
+        "delivery_extent": {
+          "$ref": "#/$defs/ruleReference"
+        },
+        "v3_capsule_bound": {
+          "$ref": "#/$defs/ruleReference"
+        },
+        "canonicalization": {
+          "$ref": "#/$defs/ruleReference"
+        }
+      }
+    },
+    "before_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "inventory_root",
+        "inventory_count",
+        "bootstrap_integrity_carrier_bytes",
+        "matched_retained_bytes",
+        "physical_orphan_bytes",
+        "missing_committed_bytes",
+        "global_prelaunch_refusal_bytes",
+        "logical_preallocated_carrier_bytes"
+      ],
+      "properties": {
+        "inventory_root": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "inventory_count": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "bootstrap_integrity_carrier_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "matched_retained_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "physical_orphan_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "missing_committed_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "global_prelaunch_refusal_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "logical_preallocated_carrier_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        }
+      }
+    },
+    "request_occurrence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "occurrence_id",
+        "idempotency_key_id",
+        "request"
+      ],
+      "properties": {
+        "occurrence_id": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "idempotency_key_id": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "request": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        }
+      }
+    },
+    "reservation_plan": {
+      "$ref": "nq.custody_reservation_plan.v1.schema.json"
+    },
+    "plan_digest": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "semantic_components": {
+      "$ref": "#/$defs/semanticComponents"
+    },
+    "semantic_sum_bytes": {
+      "$ref": "#/$defs/positiveSafeInteger"
+    },
+    "carrier_bounds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dependency_payload_bytes",
+        "raw_acquisition_payload_bytes",
+        "projection_capsule_bound_bytes",
+        "final_closure_payload_bytes",
+        "canonical_record_payload_bytes",
+        "protected_failure_payload_bytes"
+      ],
+      "properties": {
+        "dependency_payload_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "raw_acquisition_payload_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "projection_capsule_bound_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "final_closure_payload_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "canonical_record_payload_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "protected_failure_payload_bytes": {
+          "$ref": "#/$defs/positiveSafeInteger"
+        }
+      }
+    },
+    "arena_layout": {
+      "$ref": "#/$defs/arenaLayout"
+    },
+    "canonical_record_extent": {
+      "$ref": "#/$defs/requiredExtent"
+    },
+    "delivery_ledger_extent": {
+      "$ref": "#/$defs/deliveryExtent"
+    },
+    "retained_charge_bytes": {
+      "$ref": "#/$defs/positiveSafeInteger"
+    },
+    "queue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requirement",
+        "slots_before",
+        "slots_reserved",
+        "slots_after",
+        "maximum_entries",
+        "occurrences"
+      ],
+      "properties": {
+        "requirement": {
+          "enum": [
+            "required",
+            "not_required"
+          ]
+        },
+        "slots_before": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "slots_reserved": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "slots_after": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "maximum_entries": {
+          "$ref": "#/$defs/positiveSafeInteger"
+        },
+        "occurrences": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/queueOccurrence"
+          }
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maximum_single_execution_closure_bytes",
+        "protected_failure_receipt_bytes",
+        "high_watermark_bytes",
+        "total_bytes"
+      ],
+      "properties": {
+        "maximum_single_execution_closure_bytes": {
+          "$ref": "#/$defs/positiveSafeInteger"
+        },
+        "protected_failure_receipt_bytes": {
+          "$ref": "#/$defs/positiveSafeInteger"
+        },
+        "high_watermark_bytes": {
+          "$ref": "#/$defs/positiveSafeInteger"
+        },
+        "total_bytes": {
+          "$ref": "#/$defs/positiveSafeInteger"
+        }
+      }
+    },
+    "logical_preallocated_carrier_bytes_after": {
+      "$ref": "#/$defs/nonnegativeSafeInteger"
+    },
+    "watermark_classification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "used_before",
+        "used_after"
+      ],
+      "properties": {
+        "used_before": {
+          "enum": [
+            "below",
+            "at_or_above"
+          ]
+        },
+        "used_after": {
+          "enum": [
+            "below",
+            "at_or_above"
+          ]
+        }
+      }
+    },
+    "decision": {
+      "enum": [
+        "within_logical_limits",
+        "refused"
+      ]
+    },
+    "refusal_reasons": {
+      "type": "array",
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "maximum_single_execution_closure_exceeded",
+          "maximum_queue_entries_exceeded",
+          "logical_preallocated_carrier_total_exceeded"
+        ]
+      }
+    },
+    "calculated_at": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+    },
+    "clock": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/clockIdentityReference"
+    },
+    "nonclaims": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nonclaims"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "decision": {
+            "const": "within_logical_limits"
+          }
+        },
+        "required": [
+          "decision"
+        ]
+      },
+      "then": {
+        "properties": {
+          "refusal_reasons": {
+            "maxItems": 0
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "refusal_reasons": {
+            "minItems": 1
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "nonnegativeSafeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "positiveSafeInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "nullableSafeInteger": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        }
+      ]
+    },
+    "semanticComponents": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_and_decision_bytes",
+        "raw_evidence_bytes",
+        "normalized_bytes",
+        "projected_bytes",
+        "diagnostic_artifact_bytes",
+        "dependency_closure_bytes",
+        "commit_checkpoint_overhead_bytes",
+        "mandatory_delivery_ledger_bytes"
+      ],
+      "properties": {
+        "request_and_decision_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "raw_evidence_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "normalized_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "projected_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "diagnostic_artifact_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "dependency_closure_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "commit_checkpoint_overhead_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "mandatory_delivery_ledger_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        }
+      }
+    },
+    "ruleReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity",
+        "version",
+        "artifact_digest"
+      ],
+      "properties": {
+        "identity": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        },
+        "version": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        },
+        "artifact_digest": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        }
+      }
+    },
+    "arenaLayout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "file_length_bytes",
+        "dependency_header_offset",
+        "dependency_payload_offset",
+        "dependency_payload_bytes",
+        "raw_header_offset",
+        "raw_payload_offset",
+        "raw_payload_bytes",
+        "final_header_offset",
+        "final_payload_offset",
+        "final_payload_bytes",
+        "failure_header_offset",
+        "failure_payload_offset",
+        "failure_payload_bytes",
+        "fixed_format_bytes",
+        "alignment_bytes"
+      ],
+      "properties": {
+        "file_length_bytes": {
+          "$ref": "#/$defs/positiveSafeInteger"
+        },
+        "dependency_header_offset": {
+          "const": 8192
+        },
+        "dependency_payload_offset": {
+          "const": 12288
+        },
+        "dependency_payload_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "raw_header_offset": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "raw_payload_offset": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "raw_payload_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "final_header_offset": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "final_payload_offset": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "final_payload_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "failure_header_offset": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "failure_payload_offset": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "failure_payload_bytes": {
+          "$ref": "#/$defs/positiveSafeInteger"
+        },
+        "fixed_format_bytes": {
+          "const": 24576
+        },
+        "alignment_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        }
+      }
+    },
+    "requiredExtent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "superblock_0_offset",
+        "superblock_1_offset",
+        "extent_header_offset",
+        "payload_offset",
+        "payload_bytes",
+        "extent_length_bytes",
+        "fixed_format_bytes",
+        "alignment_bytes"
+      ],
+      "properties": {
+        "superblock_0_offset": {
+          "const": 0
+        },
+        "superblock_1_offset": {
+          "const": 4096
+        },
+        "extent_header_offset": {
+          "const": 8192
+        },
+        "payload_offset": {
+          "const": 12288
+        },
+        "payload_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "extent_length_bytes": {
+          "$ref": "#/$defs/positiveSafeInteger"
+        },
+        "fixed_format_bytes": {
+          "const": 12288
+        },
+        "alignment_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        }
+      }
+    },
+    "deliveryExtent": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/requiredExtent"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "queueOccurrence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "occurrence_id",
+        "capacity_allocation_id",
+        "request_occurrence_id",
+        "destination_generation_id",
+        "delivery_policy_generation_id",
+        "future_artifact_slot"
+      ],
+      "properties": {
+        "occurrence_id": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "capacity_allocation_id": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "request_occurrence_id": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "destination_generation_id": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "delivery_policy_generation_id": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "future_artifact_slot": {
+          "const": "nq.future-artifact-slot/unbound-v1"
+        }
+      }
+    }
+  }
+}

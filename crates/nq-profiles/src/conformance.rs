@@ -171,7 +171,7 @@ impl ProfileModule for ConformanceProfile {
 
         for observation in &admitted.observations {
             let payload: EchoPayload = serde_json::from_value(observation.payload.clone())
-                .map_err(|error| {
+                .map_err(|_| {
                     ProfileRefusal::new(
                         context,
                         self.descriptor(),
@@ -179,7 +179,7 @@ impl ProfileModule for ConformanceProfile {
                         ProfileRefusalCode::InvalidPayload,
                         "echo payload does not match nq.conformance/v1",
                     )
-                    .with_detail("error", error.to_string())
+                    .with_detail("decode_state", "typed_payload_decode_failed")
                 })?;
             validate_basis(self.descriptor(), context, &payload.evidence_basis)?;
             if payload.evidence_basis.capabilities_used != admitted.used_capabilities {
@@ -222,7 +222,7 @@ impl ProfileModule for ConformanceProfile {
             Vec::with_capacity(report.observations.len());
         for observation in &report.observations {
             let payload: EchoPayload = serde_json::from_value(observation.payload.clone())
-                .map_err(|error| projection_failure(report, error.to_string()))?;
+                .map_err(|_| projection_failure(report))?;
             rows.push(Box::new(EchoProjection {
                 profile: report.profile.clone(),
                 ordinal: observation.ordinal,
@@ -251,7 +251,7 @@ fn validate_binding(
         ));
     }
     let scope: FixtureScope =
-        serde_json::from_value(context.scope.value.clone()).map_err(|error| {
+        serde_json::from_value(context.scope.value.clone()).map_err(|_| {
             ProfileRefusal::new(
                 context,
                 descriptor,
@@ -259,7 +259,7 @@ fn validate_binding(
                 ProfileRefusalCode::ScopeEscape,
                 "conformance scope requires exactly bounded id and nonce strings",
             )
-            .with_detail("error", error.to_string())
+            .with_detail("decode_state", "typed_scope_decode_failed")
         })?;
     if scope.id.is_empty()
         || scope.id.len() > 128
@@ -301,13 +301,16 @@ fn inconsistent(
     )
 }
 
-fn projection_failure(report: &ValidatedReport, error: String) -> ProfileRefusal {
+fn projection_failure(report: &ValidatedReport) -> ProfileRefusal {
     ProfileRefusal {
         instance_id: report.instance_id.clone(),
         profile: report.profile.clone(),
         boundary: RefusalBoundary::Observation,
         code: ProfileRefusalCode::InvalidPayload,
         message: "admitted conformance payload could not be projected".to_owned(),
-        details: BTreeMap::from([("error".to_owned(), error)]),
+        details: BTreeMap::from([(
+            "decode_state".to_owned(),
+            "typed_payload_decode_failed".to_owned(),
+        )]),
     }
 }

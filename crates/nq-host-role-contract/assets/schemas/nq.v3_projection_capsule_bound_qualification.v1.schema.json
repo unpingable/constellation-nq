@@ -1,0 +1,785 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.v3_projection_capsule_bound_qualification.v1.schema.json",
+  "title": "nq.v3_projection_capsule_bound_qualification.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "qualification_id",
+    "gate",
+    "status",
+    "qualification_basis",
+    "policy_bindings",
+    "implementation_bindings",
+    "qualification_budget",
+    "materialization_attempts",
+    "census",
+    "evidence_dispositions",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.v3_projection_capsule_bound_qualification.v1"
+    },
+    "qualification_id": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+    },
+    "gate": {
+      "const": "CAP-H14"
+    },
+    "status": {
+      "const": "qualified"
+    },
+    "qualification_basis": {
+      "$ref": "#/$defs/qualificationBasis"
+    },
+    "policy_bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operator_decision",
+        "materialization_budget_decision",
+        "controlling_supplement",
+        "accepted_adjudication"
+      ],
+      "properties": {
+        "operator_decision": {
+          "$ref": "#/$defs/sourceBinding"
+        },
+        "materialization_budget_decision": {
+          "$ref": "#/$defs/sourceBinding"
+        },
+        "controlling_supplement": {
+          "$ref": "#/$defs/sourceBinding"
+        },
+        "accepted_adjudication": {
+          "$ref": "#/$defs/sourceBinding"
+        }
+      }
+    },
+    "implementation_bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evaluator",
+        "canonical_serializer",
+        "independent_arithmetic",
+        "test_source",
+        "post_acceptance_review"
+      ],
+      "properties": {
+        "evaluator": {
+          "$ref": "#/$defs/sourceBinding"
+        },
+        "canonical_serializer": {
+          "$ref": "#/$defs/sourceBinding"
+        },
+        "independent_arithmetic": {
+          "$ref": "#/$defs/sourceBinding"
+        },
+        "test_source": {
+          "$ref": "#/$defs/sourceBinding"
+        },
+        "post_acceptance_review": {
+          "$ref": "#/$defs/reviewBinding"
+        }
+      }
+    },
+    "qualification_budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "identity",
+        "maximum_single_canonical_witness_bytes",
+        "closed_shape_count",
+        "maximum_total_preallocated_witness_bytes",
+        "maximum_parallel_witnesses",
+        "enforcement_identity",
+        "enforcement_binding",
+        "preallocation_receipt"
+      ],
+      "properties": {
+        "schema": {
+          "const": "nq.v3_projection_capsule_materialization_budget.v1"
+        },
+        "identity": {
+          "const": "nq.host-role-runtime-seam.cap-h14-materialization-budget.v1"
+        },
+        "maximum_single_canonical_witness_bytes": {
+          "const": 16777216
+        },
+        "closed_shape_count": {
+          "const": 4
+        },
+        "maximum_total_preallocated_witness_bytes": {
+          "const": 67108864
+        },
+        "maximum_parallel_witnesses": {
+          "const": 1
+        },
+        "enforcement_identity": {
+          "const": "nq.v3_projection_capsule_materialization_preallocation.v1"
+        },
+        "enforcement_binding": {
+          "$ref": "#/$defs/sourceBinding"
+        },
+        "preallocation_receipt": {
+          "$ref": "#/$defs/budgetReceipt"
+        }
+      }
+    },
+    "materialization_attempts": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/materializationAttempt"
+      }
+    },
+    "census": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fields",
+        "sources",
+        "shapes"
+      ],
+      "properties": {
+        "fields": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "population",
+            "manifest_rows_sha256",
+            "qualification_rows_sha256",
+            "rows"
+          ],
+          "properties": {
+            "population": {
+              "const": 151
+            },
+            "manifest_rows_sha256": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+            },
+            "qualification_rows_sha256": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+            },
+            "rows": {
+              "type": "array",
+              "minItems": 151,
+              "maxItems": 151,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/fieldEvidenceRow"
+              }
+            }
+          }
+        },
+        "sources": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "population",
+            "manifest_rows_sha256",
+            "qualification_rows_sha256",
+            "rows"
+          ],
+          "properties": {
+            "population": {
+              "const": 38
+            },
+            "manifest_rows_sha256": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+            },
+            "qualification_rows_sha256": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+            },
+            "rows": {
+              "type": "array",
+              "minItems": 38,
+              "maxItems": 38,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/sourceEvidenceRow"
+              }
+            }
+          }
+        },
+        "shapes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "population",
+            "manifest_rows_sha256",
+            "qualification_rows_sha256",
+            "rows"
+          ],
+          "properties": {
+            "population": {
+              "const": 4
+            },
+            "manifest_rows_sha256": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+            },
+            "qualification_rows_sha256": {
+              "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+            },
+            "rows": {
+              "type": "array",
+              "minItems": 4,
+              "maxItems": 4,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/shapeEvidenceRow"
+              }
+            }
+          }
+        }
+      }
+    },
+    "evidence_dispositions": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/evidenceDisposition"
+      }
+    },
+    "nonclaims": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1024
+      }
+    }
+  },
+  "$defs": {
+    "sourceBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity",
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "identity": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "sha256": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        }
+      }
+    },
+    "reviewBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity",
+        "path",
+        "sha256",
+        "qualification_basis_sha256",
+        "pre_review_projection_sha256"
+      ],
+      "properties": {
+        "identity": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "sha256": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "qualification_basis_sha256": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "pre_review_projection_sha256": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        }
+      }
+    },
+    "budgetReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "receipt_identity",
+        "receipt_sha256",
+        "budget_identity",
+        "preallocated_workspace_bytes",
+        "slot_count",
+        "slot_bytes",
+        "maximum_observed_parallel_materializations",
+        "allocated_block_bytes",
+        "result"
+      ],
+      "properties": {
+        "schema": {
+          "const": "nq.v3_projection_capsule_qualification_budget_enforcement_receipt.v1"
+        },
+        "receipt_identity": {
+          "const": "nq.v3_projection_capsule_qualification_budget_enforcement_receipt.v1"
+        },
+        "receipt_sha256": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "budget_identity": {
+          "const": "nq.host-role-runtime-seam.cap-h14-materialization-budget.v1"
+        },
+        "preallocated_workspace_bytes": {
+          "const": 67108864
+        },
+        "slot_count": {
+          "const": 4
+        },
+        "slot_bytes": {
+          "const": 16777216
+        },
+        "maximum_observed_parallel_materializations": {
+          "const": 1
+        },
+        "allocated_block_bytes": {
+          "type": "integer",
+          "minimum": 67108864,
+          "maximum": 9007199254740991
+        },
+        "result": {
+          "const": "preallocation-verified"
+        }
+      }
+    },
+    "qualificationBasis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "projection_identity",
+        "digest"
+      ],
+      "properties": {
+        "projection_identity": {
+          "const": "nq.v3_projection_capsule_bound_qualification_basis.v1"
+        },
+        "digest": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        }
+      }
+    },
+    "fieldRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pointer_family",
+        "classification",
+        "bound_source"
+      ],
+      "properties": {
+        "pointer_family": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^/"
+        },
+        "classification": {
+          "enum": [
+            "fixed_literal",
+            "exact_pre_effect_bytes",
+            "scalar_maximum",
+            "option_or_enum",
+            "bounded_collection",
+            "bounded_canonical_json"
+          ]
+        },
+        "bound_source": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        }
+      }
+    },
+    "shapeRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "branch",
+        "distribution",
+        "canonical_bytes"
+      ],
+      "properties": {
+        "branch": {
+          "enum": [
+            "admitted",
+            "non_success_no_submission",
+            "non_success_rejected_submission"
+          ]
+        },
+        "distribution": {
+          "enum": [
+            "all_report_level",
+            "one_per_observation_then_nested",
+            "not_applicable"
+          ]
+        },
+        "canonical_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "shapeScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "branch",
+        "distribution"
+      ],
+      "properties": {
+        "branch": {
+          "enum": [
+            "admitted",
+            "non_success_no_submission",
+            "non_success_rejected_submission"
+          ]
+        },
+        "distribution": {
+          "enum": [
+            "all_report_level",
+            "one_per_observation_then_nested",
+            "not_applicable"
+          ]
+        }
+      }
+    },
+    "fieldEvidenceRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pointer_family",
+        "classification",
+        "bound_source",
+        "applicable_shapes",
+        "evidence_case_ids"
+      ],
+      "properties": {
+        "pointer_family": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^/"
+        },
+        "classification": {
+          "enum": [
+            "fixed_literal",
+            "exact_pre_effect_bytes",
+            "scalar_maximum",
+            "option_or_enum",
+            "bounded_collection",
+            "bounded_canonical_json"
+          ]
+        },
+        "bound_source": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        },
+        "applicable_shapes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/shapeScope"
+          }
+        },
+        "evidence_case_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+          }
+        }
+      }
+    },
+    "sourceEvidenceRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_identity",
+        "pointer_families",
+        "applicable_shapes",
+        "evidence_case_ids"
+      ],
+      "properties": {
+        "source_identity": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        },
+        "pointer_families": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 151,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "pattern": "^/"
+          }
+        },
+        "applicable_shapes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/shapeScope"
+          }
+        },
+        "evidence_case_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+          }
+        }
+      }
+    },
+    "shapeEvidenceRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "branch",
+        "distribution",
+        "canonical_bytes",
+        "evidence_case_id",
+        "attempt_identity"
+      ],
+      "properties": {
+        "branch": {
+          "enum": [
+            "admitted",
+            "non_success_no_submission",
+            "non_success_rejected_submission"
+          ]
+        },
+        "distribution": {
+          "enum": [
+            "all_report_level",
+            "one_per_observation_then_nested",
+            "not_applicable"
+          ]
+        },
+        "canonical_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "evidence_case_id": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        },
+        "attempt_identity": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        }
+      }
+    },
+    "materializationAttempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "branch",
+        "distribution",
+        "budget_receipt_sha256",
+        "attempt_receipt_canonical_bytes",
+        "attempt_receipt_sha256",
+        "slot_index",
+        "attempt_identity",
+        "disposition",
+        "output_length_bytes",
+        "output_sha256",
+        "refusal_reason",
+        "observed_parallel_materializations"
+      ],
+      "properties": {
+        "branch": {
+          "enum": [
+            "admitted",
+            "non_success_no_submission",
+            "non_success_rejected_submission"
+          ]
+        },
+        "distribution": {
+          "enum": [
+            "all_report_level",
+            "one_per_observation_then_nested",
+            "not_applicable"
+          ]
+        },
+        "budget_receipt_sha256": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "attempt_receipt_canonical_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16777216
+        },
+        "attempt_receipt_sha256": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        },
+        "slot_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        },
+        "attempt_identity": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        },
+        "disposition": {
+          "enum": [
+            "materialized",
+            "pre-materialization-refused-budget"
+          ]
+        },
+        "output_length_bytes": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16777216
+            }
+          ]
+        },
+        "output_sha256": {
+          "$ref": "#/$defs/nullableDigest"
+        },
+        "refusal_reason": {
+          "$ref": "#/$defs/nullableToken"
+        },
+        "observed_parallel_materializations": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "nullableInteger": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      ]
+    },
+    "nullableDigest": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/digest"
+        }
+      ]
+    },
+    "nullableToken": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        }
+      ]
+    },
+    "evidenceDisposition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_id",
+        "scope",
+        "subject_identity",
+        "disposition",
+        "symbolic_ceiling_bytes",
+        "actual_canonical_bytes",
+        "production_witness_sha256",
+        "unattainability_proof_identity",
+        "unattainability_proof_canonical_bytes",
+        "unattainability_proof_sha256",
+        "budget_identity",
+        "source_constraints_identity",
+        "arithmetic_identity"
+      ],
+      "properties": {
+        "evidence_id": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        },
+        "scope": {
+          "enum": [
+            "descriptor_component",
+            "closed_shape",
+            "generic_domain"
+          ]
+        },
+        "subject_identity": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        },
+        "disposition": {
+          "enum": [
+            "ATTAINABLE-MATERIALIZED",
+            "UNATTAINABLE-PROVED",
+            "INFEASIBLE-UNDER-IDENTIFIED-BUDGET"
+          ]
+        },
+        "symbolic_ceiling_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "actual_canonical_bytes": {
+          "$ref": "#/$defs/nullableInteger"
+        },
+        "production_witness_sha256": {
+          "$ref": "#/$defs/nullableDigest"
+        },
+        "unattainability_proof_identity": {
+          "$ref": "#/$defs/nullableToken"
+        },
+        "unattainability_proof_canonical_bytes": {
+          "$ref": "#/$defs/nullableInteger"
+        },
+        "unattainability_proof_sha256": {
+          "$ref": "#/$defs/nullableDigest"
+        },
+        "budget_identity": {
+          "$ref": "#/$defs/nullableToken"
+        },
+        "source_constraints_identity": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        },
+        "arithmetic_identity": {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/token"
+        }
+      }
+    }
+  }
+}

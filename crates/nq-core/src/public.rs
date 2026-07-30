@@ -410,6 +410,9 @@ pub enum ComponentKind {
     Scheduler,
     /// Watcher instance.
     Instance,
+    /// One bounded diagnostic execution. This reports processing outcome only;
+    /// it is not the health of the subject or resident watcher instance.
+    DiagnosticExecution,
     /// Detector evaluator.
     Evaluation,
     /// Legacy decode-only notification status retained so immutable pre-v2

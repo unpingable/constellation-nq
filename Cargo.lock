@@ -684,6 +684,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nq-host-role-dependency-custody"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "hex",
+ "nq-host-role-contract",
+ "nq-protocol",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "nq-host-role-runtime"
 version = "0.1.0"
 dependencies = [
@@ -692,6 +705,7 @@ dependencies = [
  "hex",
  "nix",
  "nq-host-role-contract",
+ "nq-host-role-dependency-custody",
  "nq-protocol",
  "nq-store",
  "serde",
@@ -734,6 +748,8 @@ dependencies = [
  "hex",
  "libc",
  "nix",
+ "nq-host-role-contract",
+ "nq-host-role-dependency-custody",
  "nq-protocol",
  "rusqlite",
  "serde",
@@ -741,6 +757,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
+ "trybuild",
  "uuid",
 ]
 

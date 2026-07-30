@@ -266,8 +266,20 @@ pub(crate) struct ProviderAttempt {
     request: HelperRequest,
     provider: VerifiedProvider,
     origin_carrier: String,
-    deadline_ms: u64,
+    deadline: ProviderAttemptDeadline,
     checkpoint_contract_digest: Sha256Digest,
+}
+
+/// Origin of the wall-clock deadline retained in one provider-intake artifact.
+///
+/// The legacy collection path begins its deadline when the runner starts. A
+/// governed invocation has already fixed its absolute deadline before any
+/// effect, so deriving another deadline from a later runner start would widen
+/// the authorized occurrence window.
+#[derive(Clone, Debug)]
+enum ProviderAttemptDeadline {
+    RelativeToCaptureStart { duration_ms: u64 },
+    FixedAbsolute { deadline_at: DateTime<Utc> },
 }
 
 impl ProviderAttempt {
@@ -281,6 +293,67 @@ impl ProviderAttempt {
         provider: VerifiedProvider,
         origin_carrier: String,
         deadline_ms: u64,
+        checkpoint_contract_digest: &str,
+    ) -> Result<Self, ProviderIntakeError> {
+        if deadline_ms == 0 {
+            return Err(ProviderIntakeError::Identity(
+                "local provider relative deadline must be nonzero".into(),
+            ));
+        }
+        Self::new_with_deadline(
+            intake_id,
+            attempt_id,
+            run_id,
+            request,
+            provider,
+            origin_carrier,
+            ProviderAttemptDeadline::RelativeToCaptureStart {
+                duration_ms: deadline_ms,
+            },
+            checkpoint_contract_digest,
+        )
+    }
+
+    /// Bind a governed attempt to the absolute deadline fixed before effect.
+    ///
+    /// The runtime may and should recompute a shorter monotonic watchdog
+    /// duration immediately before spawning the provider. That watchdog is an
+    /// execution mechanism, not the artifact's deadline: a later start or
+    /// recomputation must never move `deadline_at`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_governed(
+        intake_id: String,
+        attempt_id: String,
+        run_id: String,
+        request: HelperRequest,
+        provider: VerifiedProvider,
+        origin_carrier: String,
+        absolute_deadline: DateTime<Utc>,
+        checkpoint_contract_digest: &str,
+    ) -> Result<Self, ProviderIntakeError> {
+        Self::new_with_deadline(
+            intake_id,
+            attempt_id,
+            run_id,
+            request,
+            provider,
+            origin_carrier,
+            ProviderAttemptDeadline::FixedAbsolute {
+                deadline_at: absolute_deadline,
+            },
+            checkpoint_contract_digest,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_deadline(
+        intake_id: String,
+        attempt_id: String,
+        run_id: String,
+        request: HelperRequest,
+        provider: VerifiedProvider,
+        origin_carrier: String,
+        deadline: ProviderAttemptDeadline,
         checkpoint_contract_digest: &str,
     ) -> Result<Self, ProviderIntakeError> {
         if intake_id.is_empty()
@@ -297,9 +370,9 @@ impl ProviderAttempt {
                 "attempt, watcher run, and request identities must be nonempty and distinct".into(),
             ));
         }
-        if !matches!(origin_carrier.as_str(), "stdio" | "unix") || deadline_ms == 0 {
+        if !matches!(origin_carrier.as_str(), "stdio" | "unix") {
             return Err(ProviderIntakeError::Identity(
-                "local provider carrier and deadline must be exact and bounded".into(),
+                "local provider carrier must be exact and bounded".into(),
             ));
         }
         let checkpoint_contract_digest =
@@ -311,9 +384,28 @@ impl ProviderAttempt {
             request,
             provider,
             origin_carrier,
-            deadline_ms,
+            deadline,
             checkpoint_contract_digest,
         })
+    }
+
+    fn deadline_at(
+        &self,
+        capture_started_at: DateTime<Utc>,
+    ) -> Result<DateTime<Utc>, ProviderIntakeError> {
+        match self.deadline {
+            ProviderAttemptDeadline::RelativeToCaptureStart { duration_ms } => {
+                let duration_ms = i64::try_from(duration_ms).unwrap_or(i64::MAX);
+                capture_started_at
+                    .checked_add_signed(chrono::Duration::milliseconds(duration_ms))
+                    .ok_or_else(|| {
+                        ProviderIntakeError::Invariant(
+                            "provider relative deadline exceeds the representable UTC range".into(),
+                        )
+                    })
+            }
+            ProviderAttemptDeadline::FixedAbsolute { deadline_at } => Ok(deadline_at),
+        }
     }
 }
 
@@ -991,10 +1083,7 @@ impl ProviderIntakeV1 {
         let raw_sha256 = nq_protocol::sha256_bytes(&raw_bytes);
         let request_digest = nq_protocol::semantic_digest(&attempt.request)
             .map_err(|error| ProviderIntakeError::Canonical(error.to_string()))?;
-        let deadline_at = started_at
-            + chrono::Duration::milliseconds(
-                i64::try_from(attempt.deadline_ms).unwrap_or(i64::MAX),
-            );
+        let deadline_at = attempt.deadline_at(started_at)?;
         let context_digest = nq_protocol::semantic_digest(&ProviderIntakeContextV1 {
             schema: ProviderIntakeContextSchema::V1,
             intake_id: attempt.intake_id.clone(),
@@ -1106,7 +1195,7 @@ impl ProviderIntakeV1 {
             || run.profile_version != self.record.request.profile.version.as_str()
             || run.profile_digest != self.record.request.profile.digest.as_str()
             || run.started_at != timestamp(self.record.started_at)
-            || run.deadline_at != timestamp(self.record.deadline_at)
+            || run.deadline_at != deadline_timestamp(self.record.deadline_at)
             || run.finished_at != timestamp(self.record.finished_at)
             || run.acquisition_outcome
                 != crate::engine::acquisition_code(&self.record.native_outcome.outcome)
@@ -1132,7 +1221,7 @@ impl ProviderIntakeV1 {
             source_admission_id: self.record.provider.source_admission_id.clone(),
             provider_sequence: self.record.provider_sequence.clone(),
             origin_carrier: self.record.origin_carrier.clone(),
-            deadline_at: timestamp(self.record.deadline_at),
+            deadline_at: deadline_timestamp(self.record.deadline_at),
             checkpoint_contract_digest: self.record.checkpoint_contract_digest.to_string(),
             execution_identity_digest,
             admission_context_digest: self.record.provider.admission_context_digest.clone(),
@@ -1332,6 +1421,14 @@ fn digest(field: &'static str, value: &str) -> Result<Sha256Digest, ProviderInta
 
 fn timestamp(value: DateTime<Utc>) -> String {
     value.to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn deadline_timestamp(value: DateTime<Utc>) -> String {
+    if value.timestamp_subsec_nanos() % 1_000_000 == 0 {
+        timestamp(value)
+    } else {
+        value.to_rfc3339_opts(SecondsFormat::Nanos, true)
+    }
 }
 
 fn millisecond_time(value: DateTime<Utc>) -> DateTime<Utc> {
@@ -1539,6 +1636,24 @@ mod tests {
         .expect("valid fixture attempt")
     }
 
+    fn governed_attempt(
+        request: HelperRequest,
+        suffix: &str,
+        absolute_deadline: DateTime<Utc>,
+    ) -> ProviderAttempt {
+        ProviderAttempt::new_governed(
+            format!("intake-{suffix}"),
+            format!("attempt-{suffix}"),
+            format!("run-{suffix}"),
+            request,
+            verified_provider(),
+            "stdio".to_owned(),
+            absolute_deadline,
+            nq_protocol::sha256_bytes(b"checkpoint contract").as_str(),
+        )
+        .expect("valid governed fixture attempt")
+    }
+
     fn capture(stdout: Vec<u8>, outcome: AcquisitionOutcome) -> RunCapture {
         let started_at = DateTime::parse_from_rfc3339("2026-07-20T12:00:00.000Z")
             .expect("start time")
@@ -1552,6 +1667,117 @@ mod tests {
             stderr: b"provider diagnostic".to_vec(),
             outcome,
         }
+    }
+
+    #[test]
+    fn governed_attempt_retains_fixed_deadline_across_later_watchdog_recomputation() {
+        let absolute_deadline = DateTime::parse_from_rfc3339("2026-07-20T12:00:10.000Z")
+            .expect("absolute deadline")
+            .with_timezone(&Utc);
+        let first_start = DateTime::parse_from_rfc3339("2026-07-20T12:00:04.000Z")
+            .expect("first start")
+            .with_timezone(&Utc);
+        let later_start = DateTime::parse_from_rfc3339("2026-07-20T12:00:09.750Z")
+            .expect("later start")
+            .with_timezone(&Utc);
+        let make_capture = |started_at| RunCapture {
+            started_at,
+            finished_at: started_at + Duration::milliseconds(1),
+            duration_ms: 1,
+            exit_code: None,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            outcome: AcquisitionOutcome::Eof,
+        };
+
+        let first = ProviderIntakeV1::from_capture(
+            governed_attempt(request(), "fixed-deadline-first", absolute_deadline),
+            make_capture(first_start),
+            &ResourceLimits::default(),
+        )
+        .expect("first governed intake");
+        let later = ProviderIntakeV1::from_capture(
+            governed_attempt(request(), "fixed-deadline-later", absolute_deadline),
+            make_capture(later_start),
+            &ResourceLimits::default(),
+        )
+        .expect("later governed intake");
+
+        assert_eq!(first.record().deadline_at, absolute_deadline);
+        assert_eq!(later.record().deadline_at, absolute_deadline);
+        assert!(
+            later_start + Duration::milliseconds(1_000) > absolute_deadline,
+            "a stale relative watchdog would have widened the authorized window"
+        );
+        assert_ne!(first.record().started_at, later.record().started_at);
+    }
+
+    #[test]
+    fn governed_attempt_preserves_submillisecond_deadline_identity() {
+        let deadline = DateTime::parse_from_rfc3339("2026-07-20T12:00:10.000001Z")
+            .expect("submillisecond deadline")
+            .with_timezone(&Utc);
+        let started_at = deadline - Duration::milliseconds(1);
+        let intake = ProviderIntakeV1::from_capture(
+            ProviderAttempt::new_governed(
+                "intake-submillisecond".to_owned(),
+                "attempt-submillisecond".to_owned(),
+                "run-submillisecond".to_owned(),
+                request(),
+                verified_provider(),
+                "stdio".to_owned(),
+                deadline,
+                nq_protocol::sha256_bytes(b"checkpoint contract").as_str(),
+            )
+            .expect("governed attempt"),
+            RunCapture {
+                started_at,
+                finished_at: started_at + Duration::microseconds(500),
+                duration_ms: 0,
+                exit_code: None,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                outcome: AcquisitionOutcome::Eof,
+            },
+            &ResourceLimits::default(),
+        )
+        .expect("governed intake");
+
+        assert_eq!(intake.record().deadline_at, deadline);
+        assert_eq!(
+            deadline_timestamp(intake.record().deadline_at),
+            "2026-07-20T12:00:10.000001000Z"
+        );
+        let stored = intake
+            .to_store_input(&local_run(&intake))
+            .expect("exact governed store projection");
+        assert_eq!(stored.deadline_at, "2026-07-20T12:00:10.000001000Z");
+    }
+
+    #[test]
+    fn governed_attempt_cannot_admit_capture_started_after_fixed_deadline() {
+        let absolute_deadline = DateTime::parse_from_rfc3339("2026-07-20T12:00:10.000Z")
+            .expect("absolute deadline")
+            .with_timezone(&Utc);
+        let started_at = absolute_deadline + Duration::milliseconds(1);
+        let result = ProviderIntakeV1::from_capture(
+            governed_attempt(request(), "expired-fixed-deadline", absolute_deadline),
+            RunCapture {
+                started_at,
+                finished_at: started_at + Duration::milliseconds(1),
+                duration_ms: 1,
+                exit_code: None,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                outcome: AcquisitionOutcome::Eof,
+            },
+            &ResourceLimits::default(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(ProviderIntakeError::Invariant(detail)) if detail.contains("deadline_order")
+        ));
     }
 
     fn local_run(intake: &ProviderIntakeV1) -> nq_store::RunInput {
@@ -1568,7 +1794,7 @@ mod tests {
             profile_digest: record.request.profile.digest.to_string(),
             carrier: record.origin_carrier.clone(),
             started_at: timestamp(record.started_at),
-            deadline_at: timestamp(record.deadline_at),
+            deadline_at: deadline_timestamp(record.deadline_at),
             finished_at: timestamp(record.finished_at),
             acquisition_outcome: crate::engine::acquisition_code(&record.native_outcome.outcome)
                 .to_owned(),

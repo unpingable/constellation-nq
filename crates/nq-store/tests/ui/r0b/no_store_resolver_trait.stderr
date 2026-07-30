@@ -1,0 +1,5 @@
+error[E0432]: unresolved import `nq_store::GovernedDependencyResolver`
+ --> tests/ui/r0b/no_store_resolver_trait.rs:1:5
+  |
+1 | use nq_store::GovernedDependencyResolver;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `GovernedDependencyResolver` in the root

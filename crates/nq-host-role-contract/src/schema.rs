@@ -15,10 +15,29 @@ pub(crate) fn validate(schema: RuntimeSchema, value: &Value) -> Result<()> {
     let common = schema_value(COMMON_SCHEMA)?;
     Validator {
         common,
-        runtime_schema: schema,
+        schema_identity: schema.as_str(),
     }
     .validate_at(value, root, root, "$")
     .map_err(|detail| ContractError::SchemaValidation { schema, detail })
+}
+
+/// Validates one non-runtime capacity asset against its exact embedded schema.
+///
+/// Capacity plans and static manifests are deliberately not [`RuntimeSchema`]
+/// variants: they have no runtime-record identity and cannot enter the
+/// immutable record graph merely because their JSON is valid.
+pub(crate) fn validate_capacity_document(schema: &str, value: &Value) -> Result<()> {
+    let root = schema_value(schema)?;
+    let common = schema_value(COMMON_SCHEMA)?;
+    Validator {
+        common,
+        schema_identity: schema,
+    }
+    .validate_at(value, root, root, "$")
+    .map_err(|detail| ContractError::CapacityAssetValidation {
+        asset: schema.to_owned(),
+        detail,
+    })
 }
 
 #[allow(clippy::too_many_lines)] // Closed dispatch keeps schema/cache identity visibly paired.
@@ -78,6 +97,33 @@ fn schema_value(schema: &str) -> Result<&'static Value> {
         "nq.custody_reservation.v1" => {
             cached!(RESERVATION, "nq.custody_reservation.v1")
         }
+        "nq.custody_reservation_plan.v1" => {
+            cached!(RESERVATION_PLAN, "nq.custody_reservation_plan.v1")
+        }
+        "nq.custody_capacity_allocation.v1" => {
+            cached!(CAPACITY_ALLOCATION, "nq.custody_capacity_allocation.v1")
+        }
+        "nq.custody_carrier_map.v1" => {
+            cached!(CARRIER_MAP, "nq.custody_carrier_map.v1")
+        }
+        "nq.v3_projection_capsule_bound_manifest.v1" => {
+            cached!(
+                V3_PROJECTION_CAPSULE_BOUND_MANIFEST,
+                "nq.v3_projection_capsule_bound_manifest.v1"
+            )
+        }
+        "nq.v3_projection_capsule_bound_manifest.v2" => {
+            cached!(
+                V3_PROJECTION_CAPSULE_BOUND_MANIFEST_V2,
+                "nq.v3_projection_capsule_bound_manifest.v2"
+            )
+        }
+        "nq.v3_projection_capsule_bound_qualification.v1" => {
+            cached!(
+                V3_PROJECTION_CAPSULE_BOUND_QUALIFICATION_V1,
+                "nq.v3_projection_capsule_bound_qualification.v1"
+            )
+        }
         "nq.execution_launch.v1" => cached!(LAUNCH, "nq.execution_launch.v1"),
         "nq.native_profile_qualification.v1" => {
             cached!(
@@ -128,7 +174,7 @@ fn schema_value(schema: &str) -> Result<&'static Value> {
 
 struct Validator<'a> {
     common: &'a Value,
-    runtime_schema: RuntimeSchema,
+    schema_identity: &'a str,
 }
 
 impl Validator<'_> {
@@ -158,8 +204,8 @@ impl Validator<'_> {
                 "null" => instance.is_null(),
                 other => {
                     return Err(format!(
-                        "{path}: unsupported embedded schema type {other} in {:?}",
-                        self.runtime_schema
+                        "{path}: unsupported embedded schema type {other} in {}",
+                        self.schema_identity
                     ));
                 }
             };
@@ -240,6 +286,17 @@ impl Validator<'_> {
         } else if let Some(fragment) = reference.strip_prefix("nq.host_role_common.v1.schema.json#")
         {
             (self.common, fragment)
+        } else if let Some((document_name, fragment)) = reference.split_once('#') {
+            let schema_identity = document_name
+                .strip_suffix(".schema.json")
+                .ok_or_else(|| format!("unsupported embedded schema reference {reference}"))?;
+            let document = schema_value(schema_identity)
+                .map_err(|_| format!("unsupported embedded schema reference {reference}"))?;
+            (document, fragment)
+        } else if let Some(schema_identity) = reference.strip_suffix(".schema.json") {
+            let document = schema_value(schema_identity)
+                .map_err(|_| format!("unsupported embedded schema reference {reference}"))?;
+            (document, "")
         } else {
             return Err(format!("unsupported embedded schema reference {reference}"));
         };
@@ -459,7 +516,8 @@ mod tests {
     use super::{COMMON_SCHEMA, known_pattern_matches, schema_value};
     use crate::RuntimeSchema;
 
-    const SUPPORTED_KEYWORDS: [&str; 27] = [
+    const SUPPORTED_KEYWORDS: [&str; 28] = [
+        "$comment",
         "$defs",
         "$id",
         "$ref",
@@ -496,6 +554,13 @@ mod tests {
             .map(RuntimeSchema::as_str)
             .collect::<Vec<_>>();
         schemas.push(COMMON_SCHEMA);
+        schemas.extend([
+            "nq.custody_reservation_plan.v1",
+            "nq.custody_carrier_map.v1",
+            "nq.v3_projection_capsule_bound_manifest.v1",
+            "nq.v3_projection_capsule_bound_manifest.v2",
+            "nq.v3_projection_capsule_bound_qualification.v1",
+        ]);
         for name in schemas {
             audit_schema_node(schema_value(name).expect("embedded schema"), "$");
         }

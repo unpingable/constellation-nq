@@ -14,10 +14,10 @@ use nq_host_role_contract::{
 use nq_protocol::{Sha256Digest, semantic_digest, sha256_bytes};
 use nq_store::{
     CanonicalDocument, CustodiedAcquisition, GovernedAcquisitionCustodyInput, GovernedCustody,
-    GovernedCustodyCommitment, GovernedCustodyReservation, GovernedCustodyState,
-    GovernedDerivationCustodyClaim, GovernedProtectedTerminalInput,
-    GovernedProtectedTerminalization, RuntimeCheckpointDependencyInput, RuntimeLedgerCheckpoint,
-    RuntimeRecordBatchInput, RuntimeRecordInput, runtime_record_batch_digest,
+    GovernedCustodyReservation, GovernedCustodyState, GovernedDerivationCustodyClaim,
+    GovernedProtectedTerminalInput, GovernedProtectedTerminalization,
+    RuntimeCheckpointDependencyInput, RuntimeLedgerCheckpoint, RuntimeRecordBatchInput,
+    RuntimeRecordInput, runtime_record_batch_digest,
 };
 use serde_json::{Value, json};
 
@@ -361,6 +361,13 @@ impl PreparedGovernedInvocation {
             .diagnostic_artifact_capacity_bytes
     }
 
+    /// Return the exact physically reserved projection-capsule bound.
+    #[must_use]
+    pub const fn projection_capsule_capacity_bytes(&self) -> u64 {
+        self.custody_reservation_spec
+            .projection_capsule_capacity_bytes
+    }
+
     /// Return runtime-owned native-deadline provenance when this invocation
     /// used the sealed native preparation path.
     ///
@@ -381,6 +388,25 @@ impl PreparedGovernedInvocation {
     /// Refuses an unreadable or corrupt arena.
     pub fn live_custody_state(&self) -> Result<GovernedCustodyState> {
         self.live_custody.state().map_err(Into::into)
+    }
+
+    /// Reopen only the checksummed durable custody frontier after an
+    /// indeterminate physical write.
+    ///
+    /// This does not resume work or grant a second provider/evaluator
+    /// occurrence. It preserves the original one-use launch authority solely
+    /// so a still-pre-final frontier may be protected-terminalized.
+    ///
+    /// # Errors
+    ///
+    /// Refuses an unreadable, corrupt, or otherwise unreopenable durable
+    /// custody frontier.
+    pub fn reopen_custody_state_after_indeterminate_write(
+        &mut self,
+    ) -> Result<GovernedCustodyState> {
+        self.live_custody
+            .reopen_state_after_indeterminate_write()
+            .map_err(Into::into)
     }
 
     /// Qualify the only terminal runtime write set accepted for this launch.
@@ -634,22 +660,15 @@ impl PreparedGovernedInvocation {
             .map_err(Into::into)
     }
 
-    /// Seal exact bytes of a core-validated complete closure.
+    /// Borrow the exact live custody handle for the Store-owned governed
+    /// publication transaction.
     ///
-    /// The runtime forwards only to the already-owned custody handle. It does
-    /// not validate or mint NQ semantics.
-    ///
-    /// # Errors
-    ///
-    /// Refuses a missing derivation claim, capacity overflow, malformed store
-    /// carrier, replay, or persistence failure.
-    pub fn seal_final_closure(
-        &mut self,
-        exact_closure_bytes: Vec<u8>,
-    ) -> Result<GovernedCustodyCommitment> {
-        self.live_custody
-            .seal_final_closure(exact_closure_bytes)
-            .map_err(Into::into)
+    /// The custody type exposes no public final-seal operation. Product code
+    /// can therefore pass this handle only to the Store API that owns the
+    /// `SQLite` IMMEDIATE publication fence. This method grants no scheduling,
+    /// semantic, reliance, or action authority.
+    pub fn store_projection_custody(&mut self) -> &mut GovernedCustody {
+        &mut self.live_custody
     }
 
     /// Reopen exact final-closure bytes without refreshing or interpreting

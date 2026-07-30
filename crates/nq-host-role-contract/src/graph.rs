@@ -7,8 +7,13 @@ use serde_json::{Map, Value};
 
 use crate::{
     ContractError, Result,
-    identity::{EffectiveInterval, IdentityCatalog, IdentityRef, RecordRef, Timestamp},
-    record::{RuntimeSchema, ValidatedRuntimeRecord, resolve_pointer},
+    identity::{EffectiveInterval, Generation, IdentityCatalog, IdentityRef, RecordRef, Timestamp},
+    record::{
+        CustodyReservationPlan, RuntimeSchema, ValidatedRuntimeRecord,
+        capacity_delivery_policy_generation_identity, capacity_destination_generation_identity,
+        capacity_queue_occurrence_identity, invocation_idempotency_key_v1,
+        invocation_occurrence_key_v1, resolve_pointer,
+    },
 };
 
 const MAX_EXECUTION_BINDING_SOURCE_ENTRIES: usize = 16;
@@ -193,6 +198,185 @@ pub struct LaunchCorrespondenceSelection {
     cohort_semantics_digest: Sha256Digest,
 }
 
+/// Closed delivery obligation earned from one exact capacity-allocation
+/// source join.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapacityDeliveryRequirementV1 {
+    /// The source request did not request delivery.
+    NotRequired,
+    /// The source request selected one or more pre-admitted destinations.
+    Required,
+}
+
+/// Opaque pre-effect delivery inputs earned from an exact neutral reservation
+/// plan and its graph-resolved request, activation, and buffer policy.
+///
+/// This witness intentionally exists before any capacity-allocation or final
+/// reservation identity.  It therefore cannot claim physical allocation,
+/// reservation commitment, request acceptance, launch, or delivery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReservationPlanDeliveryRequirementSelection {
+    plan_digest: Sha256Digest,
+    request: RecordRef,
+    activation: RecordRef,
+    request_occurrence_id: Sha256Digest,
+    idempotency_key_id: Sha256Digest,
+    requirement: CapacityDeliveryRequirementV1,
+    capacity_buffer_policy: RecordRef,
+    destination_generation_ids: Vec<Sha256Digest>,
+    delivery_policy_generation_id: Option<Sha256Digest>,
+}
+
+impl ReservationPlanDeliveryRequirementSelection {
+    /// Returns the exact authority-neutral reservation-plan digest.
+    #[must_use]
+    pub const fn plan_digest(&self) -> &Sha256Digest {
+        &self.plan_digest
+    }
+
+    /// Returns the exact bounded diagnostic request.
+    #[must_use]
+    pub const fn request(&self) -> &RecordRef {
+        &self.request
+    }
+
+    /// Returns the exact runtime activation bound by the plan.
+    #[must_use]
+    pub const fn activation(&self) -> &RecordRef {
+        &self.activation
+    }
+
+    /// Returns the P0-1 request occurrence identity.
+    #[must_use]
+    pub const fn request_occurrence_id(&self) -> &Sha256Digest {
+        &self.request_occurrence_id
+    }
+
+    /// Returns the P0-1 idempotency-key identity.
+    #[must_use]
+    pub const fn idempotency_key_id(&self) -> &Sha256Digest {
+        &self.idempotency_key_id
+    }
+
+    /// Returns whether source delivery was required.
+    #[must_use]
+    pub const fn requirement(&self) -> CapacityDeliveryRequirementV1 {
+        self.requirement
+    }
+
+    /// Returns the exact role-selected buffer/capacity policy.
+    #[must_use]
+    pub const fn capacity_buffer_policy(&self) -> &RecordRef {
+        &self.capacity_buffer_policy
+    }
+
+    /// Returns the exact buffer policy as a delivery source when delivery was
+    /// required.
+    #[must_use]
+    pub const fn delivery_buffer_policy(&self) -> Option<&RecordRef> {
+        match self.requirement {
+            CapacityDeliveryRequirementV1::NotRequired => None,
+            CapacityDeliveryRequirementV1::Required => Some(&self.capacity_buffer_policy),
+        }
+    }
+
+    /// Returns the strict-sorted, unique source destination generations.
+    #[must_use]
+    pub fn destination_generation_ids(&self) -> &[Sha256Digest] {
+        &self.destination_generation_ids
+    }
+
+    /// Returns the exact source policy generation when delivery was required.
+    #[must_use]
+    pub const fn delivery_policy_generation_id(&self) -> Option<&Sha256Digest> {
+        self.delivery_policy_generation_id.as_ref()
+    }
+}
+
+/// Opaque read-only witness that an allocation's queue inputs came from its
+/// exact nested reservation plan, request, and buffer-policy records.
+///
+/// Construction remains private to [`RuntimeRecordSet`].  In particular,
+/// Store callers cannot substitute their own destination or policy sets and
+/// ask the contract package to bless them after the fact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapacityDeliveryRequirementSelection {
+    allocation: RecordRef,
+    final_reservation: RecordRef,
+    source: ReservationPlanDeliveryRequirementSelection,
+    expected_occurrence_ids: Vec<Sha256Digest>,
+}
+
+impl CapacityDeliveryRequirementSelection {
+    /// Returns the exact allocation record that earned this selection.
+    #[must_use]
+    pub const fn allocation(&self) -> &RecordRef {
+        &self.allocation
+    }
+
+    /// Returns the unique final reservation that exactly realizes the nested
+    /// authority-neutral plan.
+    #[must_use]
+    pub const fn final_reservation(&self) -> &RecordRef {
+        &self.final_reservation
+    }
+
+    /// Returns the exact authority-neutral reservation-plan digest.
+    #[must_use]
+    pub const fn plan_digest(&self) -> &Sha256Digest {
+        self.source.plan_digest()
+    }
+
+    /// Returns the exact bounded diagnostic request.
+    #[must_use]
+    pub const fn request(&self) -> &RecordRef {
+        self.source.request()
+    }
+
+    /// Returns the source request occurrence bound by all queue entries.
+    #[must_use]
+    pub const fn request_occurrence_id(&self) -> &Sha256Digest {
+        self.source.request_occurrence_id()
+    }
+
+    /// Returns the P0-1 idempotency-key identity.
+    #[must_use]
+    pub const fn idempotency_key_id(&self) -> &Sha256Digest {
+        self.source.idempotency_key_id()
+    }
+
+    /// Returns whether source delivery was required.
+    #[must_use]
+    pub const fn requirement(&self) -> CapacityDeliveryRequirementV1 {
+        self.source.requirement()
+    }
+
+    /// Returns the exact buffer policy when delivery was required.
+    #[must_use]
+    pub const fn buffer_delivery_policy(&self) -> Option<&RecordRef> {
+        self.source.delivery_buffer_policy()
+    }
+
+    /// Returns the strict-sorted, unique source destination generations.
+    #[must_use]
+    pub fn destination_generation_ids(&self) -> &[Sha256Digest] {
+        self.source.destination_generation_ids()
+    }
+
+    /// Returns the exact source policy generation when delivery was required.
+    #[must_use]
+    pub const fn delivery_policy_generation_id(&self) -> Option<&Sha256Digest> {
+        self.source.delivery_policy_generation_id()
+    }
+
+    /// Returns the exact queue-occurrence identities expected by the source
+    /// join, in destination order.
+    #[must_use]
+    pub fn expected_occurrence_ids(&self) -> &[Sha256Digest] {
+        &self.expected_occurrence_ids
+    }
+}
+
 impl LaunchCorrespondenceSelection {
     /// Returns the exact launch that selected this closure.
     #[must_use]
@@ -303,6 +487,48 @@ impl RuntimeRecordSet {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
+    }
+
+    /// Selects exact pre-effect delivery inputs from one neutral reservation
+    /// plan and its graph-resolved sources.
+    ///
+    /// This is the temporal seam used before a capacity allocation or final
+    /// reservation identity exists.  The result grants no physical effect or
+    /// runtime authority.
+    ///
+    /// # Errors
+    ///
+    /// Refuses unresolved or substituted request, activation, buffer-policy,
+    /// occurrence, idempotency, destination, generation, or delivery inputs.
+    pub fn select_reservation_plan_delivery_requirement(
+        &self,
+        plan: &CustodyReservationPlan,
+    ) -> Result<ReservationPlanDeliveryRequirementSelection> {
+        self.reservation_plan_delivery_requirement(plan)
+    }
+
+    /// Selects the exact delivery inputs earned by one capacity allocation.
+    ///
+    /// This query reruns the allocation's local source join.  It does not
+    /// accept caller-supplied destinations, policy generations, or queue
+    /// occurrences, and it grants no delivery, invocation, reliance, or
+    /// mutation authority.
+    ///
+    /// # Errors
+    ///
+    /// Refuses an absent or substituted allocation and every malformed,
+    /// unresolved, incompatible, duplicate, reordered, or source-substituted
+    /// plan/request/policy/queue join.
+    pub fn select_capacity_delivery_requirement(
+        &self,
+        allocation_reference: &RecordRef,
+    ) -> Result<CapacityDeliveryRequirementSelection> {
+        let allocation = self.exact_record(
+            allocation_reference,
+            RuntimeSchema::CustodyCapacityAllocationV1,
+            "capacity allocation absent or substituted",
+        )?;
+        self.capacity_delivery_requirement(allocation)
     }
 
     /// Selects the unique typed native correspondence closure for one launch.
@@ -827,6 +1053,7 @@ impl RuntimeRecordSet {
         self.validate_topology()?;
         self.validate_lifecycle()?;
         self.validate_invocations()?;
+        self.validate_capacity_allocations()?;
         self.validate_bindings()?;
         self.validate_delivery()?;
         Ok(())
@@ -1818,6 +2045,343 @@ impl RuntimeRecordSet {
         Ok(())
     }
 
+    fn validate_capacity_allocations(&self) -> Result<()> {
+        let allocations = self
+            .by_schema(RuntimeSchema::CustodyCapacityAllocationV1)
+            .collect::<Vec<_>>();
+        for allocation in &allocations {
+            let _ = self.capacity_allocation_source_join(allocation)?;
+        }
+        if !allocations.is_empty() {
+            crate::assets::require_qualified_v3_projection_capsule_bound_manifest_v2()?;
+            crate::assets::require_store_owned_capacity_allocation_construction()?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_lines)] // One exact pre-effect plan/request/policy source join.
+    fn reservation_plan_delivery_requirement(
+        &self,
+        plan: &CustodyReservationPlan,
+    ) -> Result<ReservationPlanDeliveryRequirementSelection> {
+        let plan_value = plan.as_value();
+        let request_reference: RecordRef = serde_json::from_value(plan_value["request"].clone())?;
+        let request = self.exact_record(
+            &request_reference,
+            RuntimeSchema::DiagnosticInvocationRequestV1,
+            "capacity plan request absent or substituted",
+        )?;
+        let activation_reference: RecordRef =
+            serde_json::from_value(plan_value["activation"].clone())?;
+        let activation = self.exact_record(
+            &activation_reference,
+            RuntimeSchema::RuntimeActivationV1,
+            "capacity plan activation absent or substituted",
+        )?;
+        let request_value = request.record().as_value();
+        let activation_value = activation.record().as_value();
+        if request_value["expected_binding"]["activation"]
+            != Value::from(activation_reference.clone())
+            || plan_value["node"] != request_value["target"]["node"]
+            || plan_value["node"] != activation_value["node"]
+            || plan_value["profile"] != request_value["profile"]
+            || plan_value["clock"] != request_value["time_bounds"]["clock"]
+        {
+            return Err(ContractError::CapacityJoin(
+                "plan request, activation, node, profile, or clock substitution",
+            ));
+        }
+
+        let role_reference: RecordRef =
+            serde_json::from_value(activation_value["role_manifest"].clone())?;
+        let role = self.exact_record(
+            &role_reference,
+            RuntimeSchema::RoleManifestV1,
+            "capacity plan role absent or substituted",
+        )?;
+        let policy_reference: RecordRef = serde_json::from_value(
+            role.record().as_value()["buffer_delivery_policy_record"].clone(),
+        )?;
+        let policy = self.exact_record(
+            &policy_reference,
+            RuntimeSchema::BufferDeliveryPolicyV1,
+            "capacity plan buffer policy absent or substituted",
+        )?;
+        let policy_value = policy.record().as_value();
+        let policy_generation = Generation::parse(
+            policy_value["generation"]
+                .as_str()
+                .ok_or(ContractError::CapacityJoin(
+                    "buffer policy generation absent",
+                ))?
+                .to_owned(),
+        )?;
+        let delivery_policy: IdentityRef =
+            serde_json::from_value(policy_value["policy_identities"]["delivery"].clone())?;
+        let expected_policy_generation = capacity_delivery_policy_generation_identity(
+            &policy_reference,
+            &delivery_policy,
+            &policy_generation,
+        )?;
+        if plan_value["custody_policy"] != policy_value["policy_identities"]["custody"]
+            || plan_value["protected_failure_reserve_bytes"]
+                != policy_value["capacity"]["protected_failure_receipt_bytes"]
+        {
+            return Err(ContractError::CapacityJoin(
+                "plan substituted role-selected custody policy or reserve",
+            ));
+        }
+
+        let request_occurrence_id = invocation_occurrence_key_v1(request)?;
+        let idempotency_key_id = invocation_idempotency_key_v1(request)?;
+        let delivery = request_value["delivery"]
+            .as_object()
+            .ok_or(ContractError::CapacityJoin("request delivery absent"))?;
+
+        let (requirement, destination_generation_ids, delivery_policy_generation_id) =
+            match delivery.get("mode").and_then(Value::as_str) {
+                Some("not_requested") => {
+                    if !plan_value["delivery_requirement"].is_null() {
+                        return Err(ContractError::CapacityJoin(
+                            "non-delivery request acquired a delivery obligation",
+                        ));
+                    }
+                    (CapacityDeliveryRequirementV1::NotRequired, Vec::new(), None)
+                }
+                Some("pre_admitted_destination") => {
+                    if plan_value["delivery_requirement"] != Value::from(policy_reference.clone())
+                        || delivery.get("delivery_policy")
+                            != policy_value.pointer("/policy_identities/delivery")
+                    {
+                        return Err(ContractError::CapacityJoin(
+                            "required delivery plan or policy substitution",
+                        ));
+                    }
+                    let destination: IdentityRef = serde_json::from_value(
+                        delivery
+                            .get("destination")
+                            .cloned()
+                            .ok_or(ContractError::CapacityJoin("request destination absent"))?,
+                    )?;
+                    let destination_generation = Generation::parse(
+                        delivery
+                            .get("destination_generation")
+                            .and_then(Value::as_str)
+                            .ok_or(ContractError::CapacityJoin(
+                                "request destination generation absent",
+                            ))?
+                            .to_owned(),
+                    )?;
+                    let destination_generation_id = capacity_destination_generation_identity(
+                        &destination,
+                        &destination_generation,
+                    )?;
+                    (
+                        CapacityDeliveryRequirementV1::Required,
+                        vec![destination_generation_id],
+                        Some(expected_policy_generation.clone()),
+                    )
+                }
+                _ => {
+                    return Err(ContractError::CapacityJoin(
+                        "request delivery mode outside closed vocabulary",
+                    ));
+                }
+            };
+
+        Ok(ReservationPlanDeliveryRequirementSelection {
+            plan_digest: plan.plan_digest().clone(),
+            request: request_reference,
+            activation: activation_reference,
+            request_occurrence_id,
+            idempotency_key_id,
+            requirement,
+            capacity_buffer_policy: policy_reference,
+            destination_generation_ids,
+            delivery_policy_generation_id,
+        })
+    }
+
+    #[allow(clippy::too_many_lines)] // One exact allocation/queue/source join.
+    fn capacity_allocation_source_join(
+        &self,
+        allocation: &ValidatedRuntimeRecord,
+    ) -> Result<(
+        ReservationPlanDeliveryRequirementSelection,
+        Vec<Sha256Digest>,
+    )> {
+        let value = allocation.record().as_value();
+        let plan = CustodyReservationPlan::validate_value(value["reservation_plan"].clone())
+            .map_err(|_| ContractError::CapacityJoin("nested reservation plan invalid"))?;
+        let source = self.reservation_plan_delivery_requirement(&plan)?;
+        let plan_digest: Sha256Digest = serde_json::from_value(value["plan_digest"].clone())?;
+        if plan_digest != *source.plan_digest()
+            || value["request_occurrence"]["request"] != Value::from(source.request().clone())
+            || value["request_occurrence"]["occurrence_id"]
+                != Value::String(source.request_occurrence_id().to_string())
+            || value["request_occurrence"]["idempotency_key_id"]
+                != Value::String(source.idempotency_key_id().to_string())
+        {
+            return Err(ContractError::CapacityJoin(
+                "allocation plan, request occurrence, or idempotency substitution",
+            ));
+        }
+
+        let policy_reference = source.capacity_buffer_policy();
+        let policy = self.exact_record(
+            policy_reference,
+            RuntimeSchema::BufferDeliveryPolicyV1,
+            "capacity buffer policy absent or substituted",
+        )?;
+        let policy_value = policy.record().as_value();
+        let actual_policy_generation: Sha256Digest =
+            serde_json::from_value(value["policy"]["delivery_policy_generation_id"].clone())?;
+        let source_policy_generation = capacity_delivery_policy_generation_identity(
+            policy_reference,
+            &serde_json::from_value(policy_value["policy_identities"]["delivery"].clone())?,
+            &Generation::parse(
+                policy_value["generation"]
+                    .as_str()
+                    .ok_or(ContractError::CapacityJoin(
+                        "buffer policy generation absent",
+                    ))?
+                    .to_owned(),
+            )?,
+        )?;
+        if value["policy"]["buffer_delivery_policy"] != Value::from(policy_reference.clone())
+            || value["policy"]["policy_generation"] != policy_value["generation"]
+            || value["policy"]["capacity_policy"] != policy_value["policy_identities"]["custody"]
+            || value["policy"]["delivery_policy"] != policy_value["policy_identities"]["delivery"]
+            || actual_policy_generation != source_policy_generation
+            || value["limits"]["maximum_single_execution_closure_bytes"]
+                != policy_value["capacity"]["maximum_single_execution_closure_bytes"]
+            || value["limits"]["protected_failure_receipt_bytes"]
+                != policy_value["capacity"]["protected_failure_receipt_bytes"]
+            || value["limits"]["high_watermark_bytes"]
+                != policy_value["capacity"]["high_watermark_bytes"]
+            || value["limits"]["total_bytes"] != policy_value["capacity"]["total_bytes"]
+            || value["queue"]["maximum_entries"]
+                != policy_value["capacity"]["maximum_queue_entries"]
+        {
+            return Err(ContractError::CapacityJoin(
+                "allocation substituted buffer-policy identity, generation, or capacity",
+            ));
+        }
+
+        let occurrences = value["queue"]["occurrences"]
+            .as_array()
+            .ok_or(ContractError::CapacityJoin("queue occurrence set absent"))?;
+        let expected_requirement = match source.requirement() {
+            CapacityDeliveryRequirementV1::NotRequired => "not_required",
+            CapacityDeliveryRequirementV1::Required => "required",
+        };
+        if value["queue"]["requirement"] != expected_requirement
+            || (source.requirement() == CapacityDeliveryRequirementV1::NotRequired
+                && (!occurrences.is_empty() || source.delivery_policy_generation_id().is_some()))
+        {
+            return Err(ContractError::CapacityJoin(
+                "allocation queue requirement differs from exact plan source",
+            ));
+        }
+
+        if usize::try_from(
+            value["queue"]["slots_reserved"]
+                .as_u64()
+                .ok_or(ContractError::CapacityJoin("queue slot count absent"))?,
+        )
+        .ok()
+            != Some(source.destination_generation_ids().len())
+            || occurrences.len() != source.destination_generation_ids().len()
+        {
+            return Err(ContractError::CapacityJoin(
+                "queue cardinality differs from exact source destinations",
+            ));
+        }
+
+        let allocation_id = allocation.record_id();
+        let mut expected_occurrence_ids = Vec::with_capacity(occurrences.len());
+        for (occurrence, expected_destination) in
+            occurrences.iter().zip(source.destination_generation_ids())
+        {
+            let occurrence = occurrence
+                .as_object()
+                .ok_or(ContractError::CapacityJoin("queue occurrence malformed"))?;
+            let actual_destination: Sha256Digest = serde_json::from_value(
+                occurrence.get("destination_generation_id").cloned().ok_or(
+                    ContractError::CapacityJoin("queue destination generation absent"),
+                )?,
+            )?;
+            let actual_policy_generation: Sha256Digest = serde_json::from_value(
+                occurrence
+                    .get("delivery_policy_generation_id")
+                    .cloned()
+                    .ok_or(ContractError::CapacityJoin(
+                        "queue policy generation absent",
+                    ))?,
+            )?;
+            let expected_policy_generation =
+                source
+                    .delivery_policy_generation_id()
+                    .ok_or(ContractError::CapacityJoin(
+                        "delivery occurrence without source policy",
+                    ))?;
+            let expected_occurrence = capacity_queue_occurrence_identity(
+                allocation_id,
+                source.request_occurrence_id(),
+                expected_destination,
+                expected_policy_generation,
+            )?;
+            let actual_occurrence: Sha256Digest =
+                serde_json::from_value(occurrence.get("occurrence_id").cloned().ok_or(
+                    ContractError::CapacityJoin("queue occurrence identity absent"),
+                )?)?;
+            if &actual_destination != expected_destination
+                || &actual_policy_generation != expected_policy_generation
+                || actual_occurrence != expected_occurrence
+            {
+                return Err(ContractError::CapacityJoin(
+                    "queue occurrence differs from exact request/policy source",
+                ));
+            }
+            expected_occurrence_ids.push(expected_occurrence);
+        }
+
+        Ok((source, expected_occurrence_ids))
+    }
+
+    fn capacity_delivery_requirement(
+        &self,
+        allocation: &ValidatedRuntimeRecord,
+    ) -> Result<CapacityDeliveryRequirementSelection> {
+        let (source, expected_occurrence_ids) = self.capacity_allocation_source_join(allocation)?;
+        let value = allocation.record().as_value();
+        let plan = CustodyReservationPlan::validate_value(value["reservation_plan"].clone())
+            .map_err(|_| ContractError::CapacityJoin("nested reservation plan invalid"))?;
+        let mut matching_reservations = Vec::new();
+        for reservation in self.by_schema(RuntimeSchema::CustodyReservationV1) {
+            if plan
+                .matches_reservation(reservation)
+                .map_err(|_| ContractError::CapacityJoin("final reservation comparison failed"))?
+            {
+                matching_reservations.push(reservation);
+            }
+        }
+        let [final_reservation] = matching_reservations.as_slice() else {
+            return Err(ContractError::CapacityJoin(
+                "nested plan does not have exactly one final reservation source",
+            ));
+        };
+        crate::assets::require_qualified_v3_projection_capsule_bound_manifest_v2()?;
+        crate::assets::require_store_owned_capacity_allocation_construction()?;
+
+        Ok(CapacityDeliveryRequirementSelection {
+            allocation: allocation.exact_reference(),
+            final_reservation: final_reservation.exact_reference(),
+            source,
+            expected_occurrence_ids,
+        })
+    }
+
     #[allow(clippy::too_many_lines)] // One closed request/admission/custody/launch law.
     fn validate_invocations(&self) -> Result<()> {
         let mut request_occurrences = BTreeMap::<(String, Sha256Digest, String), Vec<u8>>::new();
@@ -2047,8 +2611,6 @@ impl RuntimeRecordSet {
                     "reservation activation/profile",
                 ));
             }
-            let policy = self.resolve_field(value, "delivery_requirement")?;
-            require_schema(policy, RuntimeSchema::BufferDeliveryPolicyV1)?;
             let total = value["component_bounds"]
                 .as_object()
                 .ok_or(ContractError::InvocationJoin("reservation components"))?
@@ -2070,25 +2632,67 @@ impl RuntimeRecordSet {
             let protected = value["protected_failure_reserve_bytes"].as_u64().ok_or(
                 ContractError::InvocationJoin("reservation protected reserve"),
             )?;
-            let capacity = policy.record().as_value()["capacity"]["total_bytes"]
-                .as_u64()
-                .ok_or(ContractError::InvocationJoin("policy capacity"))?;
-            if value["decision"] != "reserved"
-                || total != required
-                || reserved < required
-                || protected
-                    != policy.record().as_value()["capacity"]["protected_failure_receipt_bytes"]
+            let delivery = request
+                .record()
+                .as_value()
+                .get("delivery")
+                .and_then(Value::as_object)
+                .ok_or(ContractError::InvocationJoin("request delivery absent"))?;
+            match delivery.get("mode").and_then(Value::as_str) {
+                Some("not_requested") => {
+                    if !value["delivery_requirement"].is_null() || total != required {
+                        return Err(ContractError::InvocationJoin(
+                            "non-delivery reservation carried a delivery policy or bad total",
+                        ));
+                    }
+                }
+                Some("pre_admitted_destination") => {
+                    let policy = self.resolve_field(value, "delivery_requirement")?;
+                    require_schema(policy, RuntimeSchema::BufferDeliveryPolicyV1)?;
+                    let capacity = policy.record().as_value()["capacity"]["total_bytes"]
                         .as_u64()
-                        .ok_or(ContractError::InvocationJoin("policy protected reserve"))?
-                || reserved
-                    .checked_add(protected)
-                    .is_none_or(|used| used > capacity)
-                || value["custody_policy"]
-                    != policy.record().as_value()["policy_identities"]["custody"]
-            {
-                return Err(ContractError::InvocationJoin(
-                    "reservation does not close custody policy and capacity",
-                ));
+                        .ok_or(ContractError::InvocationJoin("policy capacity"))?;
+                    let reservation_capacity_is_valid = match value["decision"].as_str() {
+                        Some("reserved") => {
+                            reserved >= required
+                                && reserved
+                                    .checked_add(protected)
+                                    .is_some_and(|used| used <= capacity)
+                        }
+                        // Refusal is a one-way result.  It does not prove that
+                        // numeric capacity was insufficient: commit can fail
+                        // for another exact reason.
+                        Some("refused") => true,
+                        _ => false,
+                    };
+                    if total != required
+                        || protected
+                            != policy.record().as_value()["capacity"]
+                                ["protected_failure_receipt_bytes"]
+                                .as_u64()
+                                .ok_or(ContractError::InvocationJoin(
+                                    "policy protected reserve",
+                                ))?
+                        || !reservation_capacity_is_valid
+                        || value["custody_policy"]
+                            != policy.record().as_value()["policy_identities"]["custody"]
+                        || value["delivery_requirement"] != Value::from(policy.exact_reference())
+                        || delivery.get("delivery_policy")
+                            != policy
+                                .record()
+                                .as_value()
+                                .pointer("/policy_identities/delivery")
+                    {
+                        return Err(ContractError::InvocationJoin(
+                            "reservation does not close custody/delivery policy and capacity",
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(ContractError::InvocationJoin(
+                        "request delivery mode outside closed vocabulary",
+                    ));
+                }
             }
         }
         for launch in self.by_schema(RuntimeSchema::ExecutionLaunchV1) {
@@ -2190,7 +2794,8 @@ impl RuntimeRecordSet {
                 .as_i64()
                 .ok_or(ContractError::InvocationJoin("request execution budget"))?;
             if value["maximum_execution_ms"].as_i64() != Some(budget)
-                || (attempt_deadline - launched_at).num_milliseconds() != budget
+                || attempt_deadline.signed_duration_since(launched_at)
+                    != chrono::Duration::milliseconds(budget)
             {
                 return Err(ContractError::InvocationJoin(
                     "launch execution budget/deadline substitution",

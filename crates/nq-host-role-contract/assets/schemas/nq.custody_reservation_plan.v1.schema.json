@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.custody_reservation_plan.v1.schema.json",
+  "title": "nq.custody_reservation_plan.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "namespace",
+    "node",
+    "request",
+    "activation",
+    "profile",
+    "custody_policy",
+    "delivery_requirement",
+    "store_snapshot",
+    "calculation_rule",
+    "component_bounds",
+    "total_required_bytes",
+    "reserved_bytes",
+    "protected_failure_reserve_bytes",
+    "decision",
+    "reservation_commit",
+    "reserved_at",
+    "expires_at",
+    "clock",
+    "nonclaims"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.custody_reservation_plan.v1"
+    },
+    "namespace": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/namespaceSnapshot"
+    },
+    "node": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nqNodeIdentityReference"
+    },
+    "request": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+    },
+    "activation": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+    },
+    "profile": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/diagnosticProfileIdentityReference"
+    },
+    "custody_policy": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/policyIdentityReference"
+    },
+    "delivery_requirement": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "nq.host_role_common.v1.schema.json#/$defs/recordReference"
+        }
+      ]
+    },
+    "store_snapshot": {
+      "const": "nq.capacity-allocation-store-snapshot/v1"
+    },
+    "calculation_rule": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/identityReference"
+    },
+    "component_bounds": {
+      "$ref": "#/$defs/semanticComponents"
+    },
+    "total_required_bytes": {
+      "$ref": "#/$defs/positiveSafeInteger"
+    },
+    "reserved_bytes": {
+      "$ref": "#/$defs/nonnegativeSafeInteger"
+    },
+    "protected_failure_reserve_bytes": {
+      "$ref": "#/$defs/positiveSafeInteger"
+    },
+    "decision": {
+      "enum": [
+        "reserved",
+        "refused"
+      ]
+    },
+    "reservation_commit": {
+      "const": "nq.capacity-allocation-commit/v1"
+    },
+    "reserved_at": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+    },
+    "expires_at": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/timestamp"
+    },
+    "clock": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/clockIdentityReference"
+    },
+    "nonclaims": {
+      "$ref": "nq.host_role_common.v1.schema.json#/$defs/nonclaims"
+    }
+  },
+  "$defs": {
+    "nonnegativeSafeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "positiveSafeInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "semanticComponents": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_and_decision_bytes",
+        "raw_evidence_bytes",
+        "normalized_bytes",
+        "projected_bytes",
+        "diagnostic_artifact_bytes",
+        "dependency_closure_bytes",
+        "commit_checkpoint_overhead_bytes",
+        "mandatory_delivery_ledger_bytes"
+      ],
+      "properties": {
+        "request_and_decision_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "raw_evidence_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "normalized_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "projected_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "diagnostic_artifact_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "dependency_closure_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "commit_checkpoint_overhead_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        },
+        "mandatory_delivery_ledger_bytes": {
+          "$ref": "#/$defs/nonnegativeSafeInteger"
+        }
+      }
+    }
+  }
+}

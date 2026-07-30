@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use nix::sys::signal::{self, Signal};
+use nix::time::{ClockId, clock_gettime};
 use nix::unistd::Pid;
 use nq_helper_sandbox::{child_has_exited, isolate_command_with_limits};
 use serde::{Deserialize, Serialize};
@@ -192,6 +193,28 @@ pub type AcquisitionFailure = AcquisitionOutcome;
 #[derive(Debug, Default, Clone, Copy)]
 pub struct StdioRunner;
 
+#[derive(Clone, Copy)]
+enum ExecutionDeadline {
+    Relative {
+        started: Instant,
+        duration: Duration,
+    },
+    LinuxBoottime {
+        expires_at_ns: u64,
+    },
+}
+
+impl ExecutionDeadline {
+    fn reached(self) -> io::Result<bool> {
+        match self {
+            Self::Relative { started, duration } => Ok(started.elapsed() >= duration),
+            Self::LinuxBoottime { expires_at_ns } => {
+                linux_boottime_ns().map(|observed| observed >= expires_at_ns)
+            }
+        }
+    }
+}
+
 impl StdioRunner {
     /// Execute exactly one request. `request_json` must be a JSON document
     /// without framing bytes; the runner appends exactly one LF.
@@ -223,8 +246,76 @@ impl StdioRunner {
         deadline: Duration,
         limits: &ResourceLimits,
     ) -> RunCapture {
+        let started = Instant::now();
+        self.run_verified_with_deadline(
+            launch,
+            request_json,
+            ExecutionDeadline::Relative {
+                started,
+                duration: deadline,
+            },
+            limits,
+        )
+    }
+
+    /// Execute one request under one absolute Linux `CLOCK_BOOTTIME` expiry.
+    ///
+    /// This is the governed host-role watchdog. Unlike a duration recomputed
+    /// before dispatch, the fixed expiry cannot move later while NQ performs
+    /// pre-spawn work, and suspended time remains part of the budget.
+    #[must_use]
+    pub(crate) fn run_verified_until_boottime(
+        &self,
+        launch: &VerifiedLaunch,
+        request_json: &[u8],
+        expires_at_ns: u64,
+        limits: &ResourceLimits,
+    ) -> RunCapture {
+        self.run_verified_with_deadline(
+            launch,
+            request_json,
+            ExecutionDeadline::LinuxBoottime { expires_at_ns },
+            limits,
+        )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn run_verified_with_deadline(
+        &self,
+        launch: &VerifiedLaunch,
+        request_json: &[u8],
+        deadline: ExecutionDeadline,
+        limits: &ResourceLimits,
+    ) -> RunCapture {
         let started_at = Utc::now();
         let started = Instant::now();
+        match deadline.reached() {
+            Ok(false) => {}
+            Ok(true) => {
+                return capture(
+                    started_at,
+                    started,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    AcquisitionOutcome::Timeout,
+                );
+            }
+            Err(error) => {
+                return capture(
+                    started_at,
+                    started,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    AcquisitionOutcome::IoFailed {
+                        message: format!(
+                            "deadline clock unavailable before provider spawn: {error}"
+                        ),
+                    },
+                );
+            }
+        }
         let mut child = match spawn(launch, limits) {
             Ok(child) => child,
             Err(error) => {
@@ -294,10 +385,20 @@ impl StdioRunner {
                 terminate_and_reap(&mut child);
                 break None;
             }
-            if started.elapsed() >= deadline {
-                forced_outcome = Some(AcquisitionOutcome::Timeout);
-                terminate_and_reap(&mut child);
-                break None;
+            match deadline.reached() {
+                Ok(false) => {}
+                Ok(true) => {
+                    forced_outcome = Some(AcquisitionOutcome::Timeout);
+                    terminate_and_reap(&mut child);
+                    break None;
+                }
+                Err(error) => {
+                    forced_outcome = Some(AcquisitionOutcome::IoFailed {
+                        message: format!("deadline clock unavailable during provider run: {error}"),
+                    });
+                    terminate_and_reap(&mut child);
+                    break None;
+                }
             }
             match child_has_exited(child.id()) {
                 Ok(true) => match reap_exited_group(&mut child) {
@@ -326,6 +427,7 @@ impl StdioRunner {
         let stdout = stdout_read.bytes;
         let stderr = stderr_read.bytes;
         let exit_code = status.as_ref().and_then(ExitStatus::code);
+        forced_outcome = final_deadline_outcome(forced_outcome, deadline.reached());
 
         let outcome = forced_outcome.unwrap_or_else(|| {
             if let Err(error) = writer_result {
@@ -351,6 +453,39 @@ impl StdioRunner {
 
         capture(started_at, started, exit_code, stdout, stderr, outcome)
     }
+}
+
+fn final_deadline_outcome(
+    existing: Option<AcquisitionOutcome>,
+    observation: io::Result<bool>,
+) -> Option<AcquisitionOutcome> {
+    if existing.is_some() {
+        return existing;
+    }
+    match observation {
+        Ok(false) => None,
+        Ok(true) => Some(AcquisitionOutcome::Timeout),
+        Err(error) => Some(AcquisitionOutcome::IoFailed {
+            message: format!("deadline clock unavailable after provider completion: {error}"),
+        }),
+    }
+}
+
+fn linux_boottime_ns() -> io::Result<u64> {
+    let sample = clock_gettime(ClockId::CLOCK_BOOTTIME).map_err(io::Error::other)?;
+    let seconds = u64::try_from(sample.tv_sec())
+        .map_err(|_| io::Error::other("CLOCK_BOOTTIME returned negative seconds"))?;
+    let nanoseconds = u64::try_from(sample.tv_nsec())
+        .map_err(|_| io::Error::other("CLOCK_BOOTTIME returned negative nanoseconds"))?;
+    if nanoseconds >= 1_000_000_000 {
+        return Err(io::Error::other(
+            "CLOCK_BOOTTIME returned invalid nanoseconds",
+        ));
+    }
+    seconds
+        .checked_mul(1_000_000_000)
+        .and_then(|value| value.checked_add(nanoseconds))
+        .ok_or_else(|| io::Error::other("CLOCK_BOOTTIME nanoseconds overflowed u64"))
 }
 
 fn spawn(launch: &VerifiedLaunch, limits: &ResourceLimits) -> io::Result<Child> {
@@ -718,6 +853,83 @@ mod tests {
         );
         assert_eq!(result.outcome, AcquisitionOutcome::Timeout);
         assert!(result.duration_ms < 1_000);
+    }
+
+    #[test]
+    fn governed_boottime_deadline_is_absolute_and_expired_before_spawn() {
+        if !sealed_execution_available() {
+            return;
+        }
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let marker = directory.path().join("provider-spawned");
+        let command = CommandConfig {
+            executable: PathBuf::from("/bin/sh"),
+            args: vec![
+                "-c".into(),
+                format!("touch {}; read request; printf '{{}}\\n'", marker.display()),
+            ],
+            env: BTreeMap::new(),
+            execution_account: nix::unistd::geteuid().as_raw().to_string(),
+            allow_same_identity_in_debug: true,
+            working_directory: directory.path().to_path_buf(),
+        };
+        let launch = VerifiedLaunch::open(&command).expect("qualify helper");
+        let already_expired = linux_boottime_ns().expect("CLOCK_BOOTTIME");
+
+        let result =
+            StdioRunner.run_verified_until_boottime(&launch, b"{}", already_expired, &limits(1024));
+
+        assert_eq!(result.outcome, AcquisitionOutcome::Timeout);
+        assert!(
+            !marker.exists(),
+            "an expired absolute deadline must refuse before provider spawn"
+        );
+    }
+
+    #[test]
+    fn governed_boottime_deadline_uses_the_fixed_clock_expiry() {
+        let observed = linux_boottime_ns().expect("CLOCK_BOOTTIME");
+        assert!(
+            ExecutionDeadline::LinuxBoottime {
+                expires_at_ns: observed
+            }
+            .reached()
+            .expect("deadline check"),
+            "the same already-observed expiry cannot move later"
+        );
+        assert!(
+            !ExecutionDeadline::LinuxBoottime {
+                expires_at_ns: observed + 60_000_000_000
+            }
+            .reached()
+            .expect("deadline check"),
+            "a bounded future expiry remains open"
+        );
+    }
+
+    #[test]
+    fn terminal_deadline_sample_wins_the_child_exit_race() {
+        assert_eq!(
+            final_deadline_outcome(None, Ok(true)),
+            Some(AcquisitionOutcome::Timeout)
+        );
+        assert_eq!(
+            final_deadline_outcome(
+                None,
+                Err(io::Error::other("qualified clock disappeared"))
+            ),
+            Some(AcquisitionOutcome::IoFailed {
+                message:
+                    "deadline clock unavailable after provider completion: qualified clock disappeared"
+                        .to_owned(),
+            })
+        );
+        assert_eq!(final_deadline_outcome(None, Ok(false)), None);
+        assert_eq!(
+            final_deadline_outcome(Some(AcquisitionOutcome::OutputTooLarge), Ok(true)),
+            Some(AcquisitionOutcome::OutputTooLarge),
+            "an already-observed bounded acquisition failure remains exact"
+        );
     }
 
     #[test]

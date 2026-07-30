@@ -9,12 +9,13 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
+use nix::time::{ClockId, clock_gettime};
 use nq_host_role_contract::{
     IdentityKind, IdentityRef, LaunchCorrespondenceSelection, RecordRef, RuntimeSchema,
     ValidatedRuntimeRecord,
 };
 use nq_host_role_runtime::{
-    ExternalDependencyAvailability, PreparedGovernedInvocation, RuntimeDependencies,
+    CustodyRecord, ExternalDependencyAvailability, PreparedGovernedInvocation, RuntimeDependencies,
 };
 use nq_profiles::{
     DetectorInput, DetectorReport, DetectorState, EVALUATOR_SOURCE_DIGEST, EvidenceWatermark,
@@ -32,10 +33,14 @@ use nq_store::{
     DiagnosticArtifactByteState, DiagnosticArtifactCommitInput, DiagnosticArtifactLocalOriginInput,
     DiagnosticArtifactLookup, DiagnosticArtifactOrigin, DiagnosticArtifactSchemaSupport,
     EvaluationCommitInput, EvaluationInput, EvaluationProfileBinding, EvidenceSnapshot,
-    FindingEventInput, FindingEvidenceInput, FindingSnapshotRow, GenesisInput, ObservationInput,
-    ProfileDescriptorInput, ProviderIntakeCommit, ProviderIntakeInput, ProviderIntakePreflight,
-    RefusalInput, ReportErrorInput, ReportInput, RunInput, RunResultStatusInput, StatusEventInput,
-    Store, SubmissionDisposition, SubmissionInput,
+    FindingEventInput, FindingEvidenceInput, FindingSnapshotRow, GenesisInput,
+    GovernedAcquisitionCustodyInput, GovernedProjectionCapsule, GovernedProjectionCapsuleInput,
+    GovernedProjectionCapsuleMode, GovernedProtectedTerminalClass,
+    GovernedProtectedTerminalDeadlineCompliance, GovernedProtectedTerminalInput,
+    GovernedProtectedTerminalReason, ObservationInput, ProfileDescriptorInput,
+    ProviderIntakeCommit, ProviderIntakeInput, ProviderIntakePreflight, RefusalInput,
+    ReportErrorInput, ReportInput, RunInput, RunResultStatusInput, StatusEventInput, Store,
+    SubmissionDisposition, SubmissionInput,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -68,6 +73,15 @@ use crate::diagnostic_execution_v2::{
     ProfileRefusalBindingV2, ReceivedInputV2, RefusedInputV2,
 };
 use crate::evaluator_identity::EvaluatorRuntimeIdentity;
+use crate::governed_conformance_v2::{
+    GovernedConformanceAcquisitionKindV2, GovernedConformanceArtifactCapacity,
+    GovernedConformanceArtifactContext, GovernedConformanceDerivationV2,
+    GovernedConformancePersistenceV2, GovernedConformanceRefusalKindV2,
+    derive_governed_conformance_v2, governed_conformance_artifact_capacity_bound,
+};
+use crate::governed_custody_projection::construct_governed_custody_projection_v2;
+use crate::governed_derivation::construct_governed_derivation_claim;
+use crate::governed_execution_binding::construct_governed_execution_binding_v2;
 use crate::identity::{ExecutionIdentity, VerifiedLaunch};
 use crate::provider_intake::{
     ProviderAttempt, ProviderIntakeContextV1, ProviderIntakeError, ProviderIntakeRecordV1,
@@ -105,6 +119,9 @@ pub enum EngineError {
     /// Provider identity, attempt, or raw-custody construction failed.
     #[error(transparent)]
     ProviderIntake(#[from] ProviderIntakeError),
+    /// The governed host-role runtime or its exact custody transition refused.
+    #[error(transparent)]
+    HostRoleRuntime(#[from] nq_host_role_runtime::RuntimeError),
     /// Local filesystem failure.
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -120,11 +137,8 @@ pub enum EngineError {
     /// execution without losing required input distinctions.
     #[error("diagnostic execution unsupported: {0}")]
     DiagnosticUnsupported(String),
-    /// Test-only precursor refusal for native host-role correspondence checks.
-    ///
-    /// No production entry point may emit this until a refusal can terminalize
-    /// the already claimed custody occurrence.
-    #[cfg(test)]
+    /// The native host-role seam refused before provider effect after
+    /// terminalizing the exact already-claimed custody occurrence.
     #[error("governed diagnostic execution refused at {code:?}: {detail}")]
     GovernedExecutionRefused {
         /// Closed native seam check that refused.
@@ -156,33 +170,101 @@ pub enum EngineError {
     AcquisitionFailed(Box<AcquisitionFailure>),
 }
 
-/// Test-only closed vocabulary for the native correspondence precursor.
-///
-/// The production API deliberately does not expose this seam while terminal
-/// custody and complete acquisition-plan correspondence remain unavailable.
-#[cfg(test)]
+/// Closed production vocabulary for native governed pre-effect refusal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GovernedExecutionRefusalCode {
-    /// A named immutable prelaunch record was absent or substituted.
-    PrelaunchRecordSubstitution,
+    /// The opaque prepared closure was absent, malformed, or substituted.
+    PreparedClosureInvalid,
     /// The outer request occurrence differed.
     OuterRequestSubstitution,
     /// Node, subject, or vantage identity differed.
     ProductionIdentitySubstitution,
+    /// The exact topology was not effective at the launch occurrence.
+    TopologyNotActive,
+    /// No unique effective node/key lifecycle authority existed.
+    NodeLifecycleAuthorityUnavailable,
+    /// Witness lifecycle continuity could not be established.
+    WitnessLifecycleContinuityUnavailable,
     /// The compiled and requested profiles differed.
     ProfileIncompatible,
-    /// Clock identity or occurrence ordering differed.
-    ClockOrOccurrenceIncompatible,
     /// The selected witness binding differed.
     WitnessBindingMismatch,
-    /// Provider admission or provider/build correspondence differed.
+    /// The selected provider-admission record differed.
     ProviderAdmissionMismatch,
+    /// The configured watcher could not be resolved uniquely.
+    WatcherResolutionFailed,
+    /// The active helper admission differed.
+    ActiveAdmissionMismatch,
+    /// Provider or provider-build identity differed.
+    ProviderIdentityMismatch,
+    /// The conformance witness requested a nonempty host access surface.
+    AccessSurfaceNotEmpty,
+    /// Native subject, scope, nonce, or vantage binding differed.
+    NativeBindingMismatch,
+    /// Production identity descriptor custody or resolution failed.
+    ProductionDescriptorCorrespondenceUnavailable,
+    /// Compiled profile/evaluator correspondence could not be established.
+    NativeProfileCorrespondenceUnavailable,
+    /// Native clock/deadline correspondence could not be established.
+    NativeClockCorrespondenceUnavailable,
+    /// Acquisition custody capacity/correspondence could not be established.
+    NativeCustodyCorrespondenceUnavailable,
+    /// Final diagnostic/closure custody could not be established.
+    NativeFinalCustodyCorrespondenceUnavailable,
+    /// The exact request or launch deadline was reached or invalid.
+    DeadlineExpired,
+    /// The retained executable could not be qualified for launch.
+    LaunchQualificationFailed,
+}
+
+impl GovernedExecutionRefusalCode {
+    /// Stable machine-readable reason code retained by protected terminal
+    /// custody.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PreparedClosureInvalid => "prepared_closure_invalid",
+            Self::OuterRequestSubstitution => "outer_request_substitution",
+            Self::ProductionIdentitySubstitution => "production_identity_substitution",
+            Self::TopologyNotActive => "topology_not_active",
+            Self::NodeLifecycleAuthorityUnavailable => "node_lifecycle_authority_unavailable",
+            Self::WitnessLifecycleContinuityUnavailable => {
+                "witness_lifecycle_continuity_unavailable"
+            }
+            Self::ProfileIncompatible => "profile_incompatible",
+            Self::WitnessBindingMismatch => "witness_binding_mismatch",
+            Self::ProviderAdmissionMismatch => "provider_admission_mismatch",
+            Self::WatcherResolutionFailed => "watcher_resolution_failed",
+            Self::ActiveAdmissionMismatch => "active_admission_mismatch",
+            Self::ProviderIdentityMismatch => "provider_identity_mismatch",
+            Self::AccessSurfaceNotEmpty => "access_surface_not_empty",
+            Self::NativeBindingMismatch => "native_binding_mismatch",
+            Self::ProductionDescriptorCorrespondenceUnavailable => {
+                "production_descriptor_correspondence_unavailable"
+            }
+            Self::NativeProfileCorrespondenceUnavailable => {
+                "native_profile_correspondence_unavailable"
+            }
+            Self::NativeClockCorrespondenceUnavailable => "native_clock_correspondence_unavailable",
+            Self::NativeCustodyCorrespondenceUnavailable => {
+                "native_custody_correspondence_unavailable"
+            }
+            Self::NativeFinalCustodyCorrespondenceUnavailable => {
+                "native_final_custody_correspondence_unavailable"
+            }
+            Self::DeadlineExpired => "deadline_expired",
+            Self::LaunchQualificationFailed => "launch_qualification_failed",
+        }
+    }
 }
 
 #[cfg(test)]
 #[path = "engine_checkpoint_commit_tests.rs"]
 mod checkpoint_commit_tests;
 
+#[cfg(test)]
+#[path = "engine_governed_effect_tests.rs"]
+mod governed_effect_tests;
 #[cfg(test)]
 #[path = "engine_invocation_serialization_tests.rs"]
 mod invocation_serialization_tests;
@@ -1780,6 +1862,7 @@ fn decode_governed_refusal(bytes: &[u8], context: &str) -> Result<GovernedRefusa
 pub struct CollectionEngine {
     config: NqConfig,
     store: Store,
+    startup_projection_recovery: Vec<nq_store::GovernedProjectionRecovery>,
     admission: AdmissionManager,
     runner: StdioRunner,
     unix_runners: BTreeMap<String, BoundUnixRunner>,
@@ -1889,31 +1972,15 @@ fn validate_diagnostic_production_identity(
     Ok(())
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Eq, PartialEq)]
-enum NativeGovernedPreEffectRefusalCode {
-    PreparedClosureInvalid,
-    OuterRequestSubstitution,
-    ProductionIdentitySubstitution,
-    TopologyNotActive,
-    NodeLifecycleAuthorityUnavailable,
-    WitnessLifecycleContinuityUnavailable,
-    ProfileIncompatible,
-    WitnessBindingMismatch,
-    ProviderAdmissionMismatch,
-    WatcherResolutionFailed,
-    ActiveAdmissionMismatch,
-    ProviderIdentityMismatch,
-    AccessSurfaceNotEmpty,
-    NativeBindingMismatch,
-    ProductionDescriptorCorrespondenceUnavailable,
-    NativeProfileCorrespondenceUnavailable,
-    NativeClockCorrespondenceUnavailable,
-    NativeCustodyCorrespondenceUnavailable,
-    NativeFinalCustodyCorrespondenceUnavailable,
-    DeadlineExpired,
-    LaunchQualificationFailed,
+fn semantic_identity_from_production(identity: &IdentityRef) -> SemanticIdentityV1 {
+    SemanticIdentityV1 {
+        id: identity.id.as_str().to_owned(),
+        version: identity.version.as_str().to_owned(),
+        digest: identity.descriptor_digest.clone(),
+    }
 }
+
+type NativeGovernedPreEffectRefusalCode = GovernedExecutionRefusalCode;
 
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -2204,6 +2271,216 @@ fn require_native_clock_correspondence(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn governed_conformance_artifact_context(
+    prepared: &PreparedGovernedInvocation,
+    selection: &LaunchCorrespondenceSelection,
+    production_profile: &IdentityRef,
+    production_clock: &IdentityRef,
+    native_request: &HelperRequest,
+    provider_attempt: &NativeGovernedProviderAttemptPlan,
+    evaluator: &EvaluatorRuntimeIdentity,
+    launched_at: DateTime<Utc>,
+) -> Result<GovernedConformanceArtifactContext, NativeGovernedPreEffectRefusal> {
+    let qualifier = native_governed_record(
+        prepared,
+        selection.native_profile_qualification(),
+        RuntimeSchema::NativeProfileQualificationV1,
+    )?;
+    let production_build: IdentityRef = serde_json::from_value(
+        qualifier.record().as_value()["production_build"].clone(),
+    )
+    .map_err(|error| {
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeProfileCorrespondenceUnavailable,
+            error.to_string(),
+        )
+    })?;
+    if production_build.kind != IdentityKind::Build {
+        return Err(native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeProfileCorrespondenceUnavailable,
+            "native profile qualification production build is not a build identity",
+        ));
+    }
+    validate_authenticated_production_descriptor(
+        prepared.dependencies(),
+        &production_build,
+        "build",
+    )?;
+
+    let semantic = |id: &str, version: &str, descriptor: &Value| {
+        semantic_identity(id, version, descriptor).map_err(|error| {
+            native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::NativeProfileCorrespondenceUnavailable,
+                error.to_string(),
+            )
+        })
+    };
+    let production = prepared.production_identity();
+    let native_profile_semantic =
+        profile_semantic_id(nq_profiles::conformance::MODULE.descriptor()).map_err(|error| {
+            native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::NativeProfileCorrespondenceUnavailable,
+                error.to_string(),
+            )
+        })?;
+    let evaluator_descriptor = json!({
+        "schema": "nq.native_evaluator_identity.v1",
+        "artifact_digest": evaluator.artifact_digest(),
+        "artifact_identity_method": evaluator.artifact_identity_method(),
+        "target_triple": evaluator.target_triple(),
+        "platform_runtime_version": evaluator.platform_runtime_version(),
+        "evaluator_source_digest": EVALUATOR_SOURCE_DIGEST,
+    });
+    let scope_descriptor = json!({
+        "schema": "nq.governed_conformance_scope.v1",
+        "production_subject": production.subject(),
+        "native_subject": native_request.binding.subject,
+        "native_scope": native_request.binding.scope,
+    });
+    let state_model_descriptor = json!({
+        "schema": "nq.governed_conformance_state_model.v1",
+        "profile_semantic_id": native_profile_semantic.as_str(),
+        "state_binding": "exact_request_echo",
+    });
+    let no_threshold_descriptor = json!({
+        "schema": "nq.no_threshold_policy.v1",
+        "profile_semantic_id": native_profile_semantic.as_str(),
+        "hysteresis": "none",
+    });
+    let projection_descriptor = json!({
+        "schema": "nq.governed_conformance_projection.v1",
+        "profile_semantic_id": native_profile_semantic.as_str(),
+        "fields": ["nonce"],
+        "omitted_distinctions": [],
+    });
+    let capture_descriptor = json!({
+        "schema": "nq.local_helper_exact_capture_policy.v1",
+        "provider_request_id": native_request.request_id,
+        "maximum_response_bytes": native_request.bounds.max_response_bytes,
+        "capture_mode": "exact_source",
+    });
+    let admission_descriptor = json!({
+        "schema": "nq.compiled_profile_admission_rule.v1",
+        "profile_semantic_id": native_profile_semantic.as_str(),
+        "helper_protocol_version": nq_protocol::HELPER_PROTOCOL_VERSION,
+    });
+    let normalization_descriptor = json!({
+        "schema": "nq.conformance_normalization_rule.v1",
+        "profile_semantic_id": native_profile_semantic.as_str(),
+        "helper_protocol_version": nq_protocol::HELPER_PROTOCOL_VERSION,
+    });
+    let projection_rule_descriptor = json!({
+        "schema": "nq.conformance_projection_rule.v1",
+        "profile_semantic_id": native_profile_semantic.as_str(),
+        "projection": projection_descriptor,
+    });
+    let selection_descriptor = json!({
+        "schema": "nq.governed_conformance_selection_rule.v1",
+        "expected_role": "governed_conformance_echo",
+        "cardinality": "exactly_one",
+        "production_question": selection.production_question(),
+    });
+
+    let mut limitations = vec![DiagnosticLimitationV1 {
+        kind: DiagnosticLimitationKindV1::Other,
+        code: "clock_accuracy_unqualified".to_owned(),
+        detail:
+            "the native runtime bound the occurrence monotonically but established no finite UTC error"
+                .to_owned(),
+    }];
+    limitations.sort_by(|left, right| left.code.as_bytes().cmp(right.code.as_bytes()));
+    let mut nonclaims = vec![
+        "this artifact does not establish host health".to_owned(),
+        "this artifact does not establish Nightshift posture or recurrence".to_owned(),
+        "this artifact grants no consumer reliance".to_owned(),
+        "this artifact grants no operational authorization or action".to_owned(),
+    ];
+    nonclaims.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+
+    Ok(GovernedConformanceArtifactContext {
+        producer: DiagnosticProducerV1 {
+            node_id: production.node().id.as_str().to_owned(),
+            build: semantic_identity_from_production(&production_build),
+            cohort: semantic_identity_from_production(production.cohort()),
+        },
+        request_id: DiagnosticRequestId(prepared.request_id().to_owned()),
+        run_id: DiagnosticRunId(provider_attempt.run_id.clone()),
+        question: semantic_identity_from_production(selection.production_question()),
+        subject: DiagnosticSubjectV1 {
+            id: production.subject().id.as_str().to_owned(),
+            scope: semantic(
+                "nq.governed_conformance_scope",
+                "1",
+                &scope_descriptor,
+            )?,
+        },
+        profile: semantic_identity_from_production(production_profile),
+        profile_semantic_id: Sha256Digest::parse(native_profile_semantic.as_str().to_owned())
+            .map_err(|error| {
+                native_governed_refusal(
+                    NativeGovernedPreEffectRefusalCode::NativeProfileCorrespondenceUnavailable,
+                    error.to_string(),
+                )
+            })?,
+        vantage: semantic_identity_from_production(production.vantage()),
+        state_model: semantic(
+            "nq.governed_conformance_state_model",
+            "1",
+            &state_model_descriptor,
+        )?,
+        evaluator: semantic("nq.native_evaluator", "1", &evaluator_descriptor)?,
+        threshold_policy: semantic(
+            "nq.conformance_no_threshold",
+            "1",
+            &no_threshold_descriptor,
+        )?,
+        projection: DiagnosticProjectionV1 {
+            identity: semantic(
+                "nq.governed_conformance_projection",
+                "1",
+                &projection_descriptor,
+            )?,
+            omitted_distinctions: vec![],
+        },
+        execution_clock: semantic_identity_from_production(production_clock),
+        clock_qualification: ClockQualificationV2::Unqualified {
+            code: "utc_accuracy_unqualified".to_owned(),
+            detail:
+                "the runtime established CLOCK_REALTIME/CLOCK_BOOTTIME correspondence but no finite UTC error bound"
+                    .to_owned(),
+        },
+        started_at: launched_at,
+        capture_policy: semantic(
+            "nq.local_helper_exact_capture_policy",
+            "1",
+            &capture_descriptor,
+        )?,
+        admission_rule: semantic(
+            "nq.compiled_profile_admission_rule",
+            "1",
+            &admission_descriptor,
+        )?,
+        normalization_rule: semantic(
+            "nq.conformance_normalization_rule",
+            "1",
+            &normalization_descriptor,
+        )?,
+        projection_rule: semantic(
+            "nq.conformance_projection_rule",
+            "1",
+            &projection_rule_descriptor,
+        )?,
+        selection_rule: semantic(
+            "nq.governed_conformance_selection_rule",
+            "1",
+            &selection_descriptor,
+        )?,
+        limitations,
+        nonclaims,
+    })
+}
+
 fn require_effective_node_and_key_authority(
     prepared: &PreparedGovernedInvocation,
 ) -> Result<(), NativeGovernedPreEffectRefusal> {
@@ -2221,12 +2498,14 @@ fn require_effective_node_and_key_authority(
 }
 
 fn require_native_custody_correspondence(
+    store: &Store,
     prepared: &PreparedGovernedInvocation,
     watcher: &WatcherConfig,
     request: &HelperRequest,
     provider: &VerifiedProvider,
     attempt: &NativeGovernedProviderAttemptPlan,
-) -> Result<(), NativeGovernedPreEffectRefusal> {
+    artifact_context: &GovernedConformanceArtifactContext,
+) -> Result<GovernedConformanceArtifactCapacity, NativeGovernedPreEffectRefusal> {
     let reservation = prepared.custody_reservation_spec();
     let dependency_bytes =
         u64::try_from(prepared.dependency_custody_bytes().len()).map_err(|_| {
@@ -2267,16 +2546,64 @@ fn require_native_custody_correspondence(
         dependency_bytes,
         acquisition_bound,
     )?;
+    let diagnostic_bound = governed_conformance_artifact_capacity_bound(
+        artifact_context,
+        &attempt.intake_id,
+        request.instance_id.as_str(),
+        provider_intake_bound,
+    )
+    .map_err(|error| {
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeFinalCustodyCorrespondenceUnavailable,
+            error.to_string(),
+        )
+    })?;
+    require_native_diagnostic_partition_capacity(
+        reservation.diagnostic_artifact_capacity_bytes,
+        diagnostic_bound.canonical_artifact_bytes,
+    )?;
+    let launch_checkpoint_id = Sha256Digest::parse(
+        prepared.launch_checkpoint().checkpoint_id.clone(),
+    )
+    .map_err(|error| {
+        native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeFinalCustodyCorrespondenceUnavailable,
+            format!("launch checkpoint identity cannot be reopened: {error}"),
+        )
+    })?;
+    let final_capacity = store
+        .verify_governed_execution_custody_closure_v3_capacity(reservation, &launch_checkpoint_id)
+        .map_err(|error| {
+            native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::NativeFinalCustodyCorrespondenceUnavailable,
+                error.to_string(),
+            )
+        })?;
+    if final_capacity.diagnostic_artifact_capacity_bytes
+        != reservation.diagnostic_artifact_capacity_bytes
+        || final_capacity.final_closure_capacity_bytes > reservation.final_capacity_bytes
+    {
+        return Err(native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeFinalCustodyCorrespondenceUnavailable,
+            "committed Store capacity result differs from the exact prepared reservation",
+        ));
+    }
+    Ok(diagnostic_bound)
+}
 
-    Err(native_governed_refusal(
-        NativeGovernedPreEffectRefusalCode::NativeFinalCustodyCorrespondenceUnavailable,
-        format!(
-            "exact dependency closure ({dependency_bytes} <= {}) and conservative provider-intake acquisition carrier ({acquisition_bound} <= {}) fit their reserved partitions, but no ratified V2 terminal mapping yet bounds the final derivation/diagnostic/index closure within the reserved final partition ({} bytes); core refuses before acquisition rather than guessing",
-            reservation.dependency_closure_capacity_bytes,
-            reservation.raw_capacity_bytes,
-            reservation.final_capacity_bytes,
-        ),
-    ))
+fn require_native_diagnostic_partition_capacity(
+    diagnostic_capacity_bytes: u64,
+    diagnostic_bound_bytes: u64,
+) -> Result<(), NativeGovernedPreEffectRefusal> {
+    if diagnostic_bound_bytes > diagnostic_capacity_bytes {
+        return Err(native_governed_refusal(
+            NativeGovernedPreEffectRefusalCode::NativeFinalCustodyCorrespondenceUnavailable,
+            format!(
+                "governed conformance diagnostic requires {diagnostic_bound_bytes} bytes but exact reservation provides {diagnostic_capacity_bytes}",
+            ),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -2407,8 +2734,11 @@ struct NativeGovernedPreEffectCandidate {
     provider_admission: nq_store::LocalProviderAdmissionRow,
     selected_witness: RecordRef,
     launch_correspondence: LaunchCorrespondenceSelection,
+    production_clock: IdentityRef,
     native_request: HelperRequest,
     provider_attempt: NativeGovernedProviderAttemptPlan,
+    artifact_context: GovernedConformanceArtifactContext,
+    artifact_capacity: GovernedConformanceArtifactCapacity,
     absolute_deadline: DateTime<Utc>,
     remaining_budget: StdDuration,
 }
@@ -2430,6 +2760,255 @@ struct NativeGovernedExecutionPlan {
     candidate: NativeGovernedPreEffectCandidate,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
+enum GovernedProjectionFailpoint {
+    None,
+    AfterFinalSealBeforeSql,
+    AfterSqlBeforeIndexMark,
+}
+
+enum NativeGovernedSqlCommitPlan {
+    Admitted {
+        collection: CollectionInput,
+        outcome: CollectionOutcome,
+        status: StatusEventInput,
+        expected_semantic_digest: Sha256Digest,
+    },
+    NonSuccess {
+        collection: CollectionInput,
+        outcome: CollectionOutcome,
+        result: RunResultStatusInput,
+    },
+}
+
+impl NativeGovernedSqlCommitPlan {
+    fn projection_capsule_input(
+        &self,
+        reservation_record_id: Sha256Digest,
+        diagnostic_artifact: DiagnosticArtifactCommitInput,
+        publication: nq_store::GovernedProjectionPublication,
+    ) -> GovernedProjectionCapsuleInput {
+        match self {
+            Self::Admitted {
+                collection,
+                status,
+                expected_semantic_digest,
+                ..
+            } => GovernedProjectionCapsuleInput {
+                reservation_record_id,
+                collection: collection.clone(),
+                diagnostic_artifact,
+                status: status.clone(),
+                mode: GovernedProjectionCapsuleMode::Admitted,
+                expected_semantic_digest: Some(expected_semantic_digest.clone()),
+                publication,
+            },
+            Self::NonSuccess {
+                collection, result, ..
+            } => GovernedProjectionCapsuleInput {
+                reservation_record_id,
+                collection: collection.clone(),
+                diagnostic_artifact,
+                status: result.status.clone(),
+                mode: GovernedProjectionCapsuleMode::NonSuccess,
+                expected_semantic_digest: None,
+                publication,
+            },
+        }
+    }
+}
+
+fn governed_persistence_occurrence_id(
+    kind: &'static str,
+    intake: &ProviderIntakeRecordV1,
+) -> Result<String, EngineError> {
+    nq_protocol::semantic_digest(&json!({
+        "schema": "nq.governed_conformance_persistence_occurrence.v1",
+        "kind": kind,
+        "intake_id": intake.intake_id,
+        "attempt_id": intake.attempt_id,
+        "run_id": intake.run_id,
+        "request_id": intake.request_id,
+        "raw_sha256": intake.raw_sha256,
+    }))
+    .map(Sha256Digest::into_string)
+    .map_err(|error| EngineError::Canonical(error.to_string()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_native_governed_sql_commit(
+    watcher: &WatcherConfig,
+    profile: &'static dyn ProfileModule,
+    intake: &ProviderIntakeRecordV1,
+    intake_input: ProviderIntakeInput,
+    run: RunInput,
+    persistence: GovernedConformancePersistenceV2,
+) -> Result<NativeGovernedSqlCommitPlan, EngineError> {
+    let received_at = timestamp(intake.received_at);
+    let raw_bytes = intake_input.raw_bytes.clone();
+    let (submission, outcome) = match persistence {
+        GovernedConformancePersistenceV2::Admitted(admitted) => {
+            let report_id = governed_persistence_occurrence_id("admitted_report", intake)?;
+            let submission_id = governed_persistence_occurrence_id("admitted_submission", intake)?;
+            let semantic_digest = nq_protocol::semantic_digest(&admitted.report)
+                .map_err(|error| EngineError::Canonical(error.to_string()))?;
+            let report_status = semantic_report_status(admitted.validated_report.status).to_owned();
+            let stored_report = store_report(
+                &report_id,
+                watcher,
+                profile,
+                &admitted.report,
+                &admitted.validated_report,
+                intake.received_at,
+            )?;
+            let outcome = CollectionOutcome::admitted(
+                watcher.instance_id.clone(),
+                run.run_id.clone(),
+                report_id,
+                report_status,
+                semantic_digest.to_string(),
+                Vec::new(),
+            );
+            let status = governed_execution_status_event(watcher, intake, &outcome)?;
+            return Ok(NativeGovernedSqlCommitPlan::Admitted {
+                collection: CollectionInput {
+                    intake: intake_input,
+                    run,
+                    submission: Some(SubmissionInput {
+                        submission_id,
+                        raw_bytes,
+                        received_at,
+                        protocol_outcome: "valid_report".to_owned(),
+                        disposition: SubmissionDisposition::Admitted(stored_report),
+                    }),
+                },
+                outcome,
+                status,
+                expected_semantic_digest: semantic_digest,
+            });
+        }
+        GovernedConformancePersistenceV2::Refused { kind, refusal } => {
+            let expected_origin = match kind {
+                GovernedConformanceRefusalKindV2::Helper => {
+                    matches!(&refusal.origin, GovernedRefusalOrigin::Helper(_))
+                }
+                GovernedConformanceRefusalKindV2::Protocol => {
+                    matches!(&refusal.origin, GovernedRefusalOrigin::Protocol(_))
+                }
+                GovernedConformanceRefusalKindV2::Profile => {
+                    matches!(&refusal.origin, GovernedRefusalOrigin::Profile(_))
+                }
+            };
+            if !expected_origin || raw_bytes.is_empty() {
+                return Err(EngineError::Invariant(
+                    "governed refusal persistence kind or exact raw custody differs from its derivation"
+                        .to_owned(),
+                ));
+            }
+            let protocol_outcome = match kind {
+                GovernedConformanceRefusalKindV2::Helper => "valid_refusal",
+                GovernedConformanceRefusalKindV2::Protocol => "rejected",
+                GovernedConformanceRefusalKindV2::Profile => "valid_report",
+            };
+            let stored = stored_governed_refusal(&refusal, intake.received_at)?;
+            let submission_id = governed_persistence_occurrence_id("refused_submission", intake)?;
+            let outcome = CollectionOutcome::rejected(
+                watcher.instance_id.clone(),
+                run.run_id.clone(),
+                refusal,
+            );
+            (
+                Some(SubmissionInput {
+                    submission_id,
+                    raw_bytes,
+                    received_at,
+                    protocol_outcome: protocol_outcome.to_owned(),
+                    disposition: SubmissionDisposition::Rejected { refusal: stored },
+                }),
+                outcome,
+            )
+        }
+        GovernedConformancePersistenceV2::AcquisitionFailed {
+            kind,
+            failure,
+            refusal,
+        } => match kind {
+            GovernedConformanceAcquisitionKindV2::ProviderNoResponse
+            | GovernedConformanceAcquisitionKindV2::NoBytesRetained => {
+                if !raw_bytes.is_empty() || refusal.is_some() {
+                    return Err(EngineError::Invariant(
+                        "no-byte governed acquisition persistence retained bytes or a refusal"
+                            .to_owned(),
+                    ));
+                }
+                (
+                    None,
+                    CollectionOutcome {
+                        schema: CollectionOutcomeSchema::V1,
+                        instance_id: watcher.instance_id.clone(),
+                        run_id: Some(run.run_id.clone()),
+                        result: CollectionResult::AcquisitionFailed { failure },
+                    },
+                )
+            }
+            GovernedConformanceAcquisitionKindV2::BytesRetained => {
+                let refusal = refusal.ok_or_else(|| {
+                    EngineError::Invariant(
+                        "retained governed acquisition failure has no exact refusal".to_owned(),
+                    )
+                })?;
+                if raw_bytes.is_empty()
+                    || !matches!(
+                        &refusal.origin,
+                        GovernedRefusalOrigin::Acquisition(source) if source.failure == failure
+                    )
+                {
+                    return Err(EngineError::Invariant(
+                        "retained governed acquisition bytes, failure, and refusal do not join"
+                            .to_owned(),
+                    ));
+                }
+                let stored = stored_governed_refusal(&refusal, intake.received_at)?;
+                let submission_id =
+                    governed_persistence_occurrence_id("acquisition_refusal_submission", intake)?;
+                let outcome = CollectionOutcome::rejected(
+                    watcher.instance_id.clone(),
+                    run.run_id.clone(),
+                    refusal,
+                );
+                (
+                    Some(SubmissionInput {
+                        submission_id,
+                        raw_bytes,
+                        received_at,
+                        protocol_outcome: "not_validated".to_owned(),
+                        disposition: SubmissionDisposition::Rejected { refusal: stored },
+                    }),
+                    outcome,
+                )
+            }
+        },
+    };
+    let status = governed_execution_status_event(watcher, intake, &outcome)?;
+    Ok(NativeGovernedSqlCommitPlan::NonSuccess {
+        collection: CollectionInput {
+            intake: intake_input,
+            run,
+            submission,
+        },
+        result: RunResultStatusInput {
+            run_id: outcome.run_id.clone().ok_or_else(|| {
+                EngineError::Invariant(
+                    "governed postlaunch result lost its watcher run identity".to_owned(),
+                )
+            })?,
+            status,
+        },
+        outcome,
+    })
+}
+
 /// Total result of attempting to construct the private pre-effect plan.
 ///
 /// Refusal retains the opaque prepared occurrence so a future finalizer can
@@ -2441,6 +3020,156 @@ enum NativeGovernedPreEffectOutcome {
         prepared: Box<PreparedGovernedInvocation>,
         refusal: NativeGovernedPreEffectRefusal,
     },
+}
+
+fn governed_launch_attempt_deadline(
+    prepared: &PreparedGovernedInvocation,
+) -> Result<String, EngineError> {
+    let launch = native_governed_record(
+        prepared,
+        prepared.execution_launch(),
+        RuntimeSchema::ExecutionLaunchV1,
+    )
+    .map_err(|refusal| {
+        EngineError::Invariant(format!(
+            "protected terminal cannot reopen the exact execution launch: {}",
+            refusal.detail
+        ))
+    })?;
+    launch.record().as_value()["attempt_deadline"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            EngineError::Invariant(
+                "protected terminal cannot recover the exact launch attempt deadline".to_owned(),
+            )
+        })
+}
+
+fn governed_protected_terminal_input(
+    prepared: &PreparedGovernedInvocation,
+    terminal_class: GovernedProtectedTerminalClass,
+    reason_code: String,
+    detail: impl Into<String>,
+) -> Result<GovernedProtectedTerminalInput, EngineError> {
+    Ok(GovernedProtectedTerminalInput {
+        execution_launch_record_id: prepared.execution_launch().record_id.clone(),
+        terminal_class,
+        reason: GovernedProtectedTerminalReason {
+            code: reason_code,
+            detail: bounded_governed_terminal_detail(detail.into()),
+        },
+        launch_attempt_deadline: governed_launch_attempt_deadline(prepared)?,
+        terminalized_at: timestamp(Utc::now()),
+        // The host-role runtime has an exact monotonic deadline carrier, but
+        // this failure record is constructed after a failed seam step. Do not
+        // mint a finite wall-clock comparison merely because both strings can
+        // be parsed.
+        deadline_compliance: GovernedProtectedTerminalDeadlineCompliance::NotEstablished,
+    })
+}
+
+fn bounded_governed_terminal_detail(detail: String) -> String {
+    const MAX_BYTES: usize = 2_048;
+    const SUFFIX: &str = "[truncated]";
+
+    let mut detail = detail.replace('\0', "\\0");
+    if detail.is_empty() {
+        return "no additional failure detail was available".to_owned();
+    }
+    if detail.len() <= MAX_BYTES {
+        return detail;
+    }
+    let mut end = MAX_BYTES - SUFFIX.len();
+    while !detail.is_char_boundary(end) {
+        end -= 1;
+    }
+    detail.truncate(end);
+    detail.push_str(SUFFIX);
+    detail
+}
+
+fn terminalize_native_pre_effect_refusal(
+    prepared: &mut PreparedGovernedInvocation,
+    refusal: NativeGovernedPreEffectRefusal,
+) -> EngineError {
+    let code = refusal.code;
+    let detail = bounded_governed_terminal_detail(refusal.detail);
+    let input = governed_protected_terminal_input(
+        prepared,
+        GovernedProtectedTerminalClass::PreEffectRefusal,
+        format!("nq.native_pre_effect.{}", code.as_str()),
+        detail.clone(),
+    );
+    match input.and_then(|input| {
+        prepared
+            .terminalize_immediate_launch(input)
+            .map(|_| ())
+            .map_err(EngineError::from)
+    }) {
+        Ok(()) => EngineError::GovernedExecutionRefused { code, detail },
+        Err(terminal_error) => EngineError::Invariant(format!(
+            "native governed pre-effect refusal {code:?} could not terminalize its exact launch: {terminal_error}; original refusal: {detail}"
+        )),
+    }
+}
+
+fn terminalize_native_postlaunch_failure(
+    prepared: &mut PreparedGovernedInvocation,
+    stage: &'static str,
+    failure: EngineError,
+) -> EngineError {
+    let detail = bounded_governed_terminal_detail(failure.to_string());
+    let input = governed_protected_terminal_input(
+        prepared,
+        GovernedProtectedTerminalClass::PostlaunchFailure,
+        format!("nq.native_postlaunch.{stage}"),
+        detail.clone(),
+    );
+    match input.and_then(|input| {
+        prepared
+            .terminalize_immediate_launch(input)
+            .map(|_| ())
+            .map_err(EngineError::from)
+    }) {
+        Ok(()) => failure,
+        Err(terminal_error) => EngineError::Invariant(format!(
+            "native governed postlaunch failure at {stage} could not terminalize its exact launch: {terminal_error}; original failure: {detail}"
+        )),
+    }
+}
+
+fn handle_native_governed_publication_failure(
+    prepared: &mut PreparedGovernedInvocation,
+    failure: EngineError,
+) -> EngineError {
+    let state = match prepared.live_custody_state() {
+        Ok(state) => state,
+        Err(initial_error) => match prepared.reopen_custody_state_after_indeterminate_write() {
+            Ok(state) => state,
+            Err(reopen_error) => {
+                return EngineError::Invariant(format!(
+                    "governed publication failed and its durable custody frontier could not be reopened: initial state error: {initial_error}; reopen error: {reopen_error}; publication failure: {failure}"
+                ));
+            }
+        },
+    };
+    match state {
+        nq_store::GovernedCustodyState::Reserved
+        | nq_store::GovernedCustodyState::LaunchClaimed
+        | nq_store::GovernedCustodyState::AcquisitionSealed
+        | nq_store::GovernedCustodyState::DerivationClaimed => {
+            terminalize_native_postlaunch_failure(prepared, "final_projection_publication", failure)
+        }
+        nq_store::GovernedCustodyState::FinalSealIntent
+        | nq_store::GovernedCustodyState::FinalClosureIndexPending
+        | nq_store::GovernedCustodyState::FinalClosureIndexed
+        | nq_store::GovernedCustodyState::FinalClosureProjectionRefused
+        | nq_store::GovernedCustodyState::FinalClosureCommittedUnavailable
+        | nq_store::GovernedCustodyState::FinalClosureCorrupt
+        | nq_store::GovernedCustodyState::FailedIndeterminate
+        | nq_store::GovernedCustodyState::ExpiredUnlaunched => failure,
+    }
 }
 
 fn native_timestamp(
@@ -3353,12 +4082,14 @@ impl CollectionEngine {
     ///
     /// Returns a version, integrity, or database-opening error.
     pub fn open(config: &NqConfig) -> Result<Self, EngineError> {
-        let store = Store::open(&config.database_path)?;
+        let mut store = Store::open(&config.database_path)?;
+        let startup_projection_recovery = store.recover_pending_governed_projections()?;
         validate_provider_intake_history(&store)?;
         validate_diagnostic_artifact_history(&store)?;
         Ok(Self {
             config: config.clone(),
             store,
+            startup_projection_recovery,
             admission: AdmissionManager,
             runner: StdioRunner,
             unix_runners: BTreeMap::new(),
@@ -3374,17 +4105,30 @@ impl CollectionEngine {
         config: &NqConfig,
         evaluator_identity: Result<EvaluatorRuntimeIdentity, String>,
     ) -> Result<Self, EngineError> {
-        let store = Store::open(&config.database_path)?;
+        let mut store = Store::open(&config.database_path)?;
+        let startup_projection_recovery = store.recover_pending_governed_projections()?;
         validate_provider_intake_history(&store)?;
         validate_diagnostic_artifact_history(&store)?;
         Ok(Self {
             config: config.clone(),
             store,
+            startup_projection_recovery,
             admission: AdmissionManager,
             runner: StdioRunner,
             unix_runners: BTreeMap::new(),
             evaluator_identity,
         })
+    }
+
+    /// Exact Store-owned projection recoveries attempted while this execution
+    /// runtime opened.
+    ///
+    /// This is startup custody state, not a diagnostic result.  Unavailable or
+    /// corrupt capsules remain durably inspectable through the custody
+    /// inventory and never become successful projections.
+    #[must_use]
+    pub fn startup_projection_recovery(&self) -> &[nq_store::GovernedProjectionRecovery] {
+        &self.startup_projection_recovery
     }
 
     /// The running evaluator identity, or a typed refusal carrying the exact
@@ -3877,12 +4621,24 @@ impl CollectionEngine {
             &native_request,
             &verified_provider,
         )?;
-        require_native_custody_correspondence(
+        let artifact_context = governed_conformance_artifact_context(
+            prepared,
+            &launch_correspondence,
+            &requested_profile,
+            &request_clock,
+            &native_request,
+            &provider_attempt,
+            evaluator,
+            launched_at,
+        )?;
+        let artifact_capacity = require_native_custody_correspondence(
+            &self.store,
             prepared,
             &watcher,
             &native_request,
             &verified_provider,
             &provider_attempt,
+            &artifact_context,
         )?;
         Ok(NativeGovernedPreEffectCandidate {
             watcher,
@@ -3894,8 +4650,11 @@ impl CollectionEngine {
             provider_admission,
             selected_witness,
             launch_correspondence,
+            production_clock: request_clock,
             native_request,
             provider_attempt,
+            artifact_context,
+            artifact_capacity,
             absolute_deadline: attempt_deadline,
             remaining_budget,
         })
@@ -3924,6 +4683,590 @@ impl CollectionEngine {
                 refusal,
             },
         }
+    }
+
+    /// Execute one already-prepared governed conformance request.
+    ///
+    /// The host-role runtime owns request/topology preparation and the one-use
+    /// custody token. This method revalidates the exact native seam, performs
+    /// one bounded local-helper effect, derives one zero-detector V2 artifact,
+    /// commits its complete SQL/runtime projection, and reopens the immutable
+    /// result. It neither schedules another request nor grants reliance,
+    /// authorization, dispatch, or action authority.
+    ///
+    /// # Errors
+    ///
+    /// A pre-effect refusal first terminalizes the exact claimed launch. Any
+    /// failure after provider dispatch but before complete closure likewise
+    /// records a protected postlaunch terminal. Once final custody is sealed,
+    /// a later SQL/index error leaves the occurrence explicitly index-pending
+    /// for recovery and never reruns the provider.
+    pub fn execute_prepared_governed_conformance(
+        &mut self,
+        prepared: PreparedGovernedInvocation,
+    ) -> Result<DiagnosticExecutionV2, EngineError> {
+        self.execute_prepared_governed_conformance_inner(
+            prepared,
+            GovernedProjectionFailpoint::None,
+        )
+    }
+
+    #[cfg(test)]
+    fn execute_prepared_governed_conformance_with_failpoint(
+        &mut self,
+        prepared: PreparedGovernedInvocation,
+        failpoint: GovernedProjectionFailpoint,
+    ) -> Result<DiagnosticExecutionV2, EngineError> {
+        self.execute_prepared_governed_conformance_inner(prepared, failpoint)
+    }
+
+    fn execute_prepared_governed_conformance_inner(
+        &mut self,
+        prepared: PreparedGovernedInvocation,
+        failpoint: GovernedProjectionFailpoint,
+    ) -> Result<DiagnosticExecutionV2, EngineError> {
+        match self.plan_native_governed_conformance(prepared) {
+            NativeGovernedPreEffectOutcome::Ready(plan) => {
+                self.execute_native_governed_conformance_plan(*plan, failpoint)
+            }
+            NativeGovernedPreEffectOutcome::Refused {
+                mut prepared,
+                refusal,
+            } => Err(terminalize_native_pre_effect_refusal(
+                &mut prepared,
+                refusal,
+            )),
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn execute_native_governed_conformance_plan(
+        &mut self,
+        plan: NativeGovernedExecutionPlan,
+        failpoint: GovernedProjectionFailpoint,
+    ) -> Result<DiagnosticExecutionV2, EngineError> {
+        let NativeGovernedExecutionPlan {
+            mut prepared,
+            candidate,
+        } = plan;
+        let NativeGovernedPreEffectCandidate {
+            watcher,
+            profile,
+            active_lock,
+            admission_verification,
+            verified_launch,
+            verified_provider,
+            provider_admission: _provider_admission,
+            selected_witness: _selected_witness,
+            launch_correspondence,
+            production_clock,
+            native_request,
+            provider_attempt,
+            artifact_context,
+            artifact_capacity,
+            absolute_deadline,
+            remaining_budget,
+        } = candidate;
+
+        let fresh_remaining = match require_native_clock_correspondence(
+            &prepared,
+            &launch_correspondence,
+            &production_clock,
+        ) {
+            Ok(remaining) if remaining <= remaining_budget => remaining,
+            Ok(_) => {
+                let refusal = native_governed_refusal(
+                    NativeGovernedPreEffectRefusalCode::NativeClockCorrespondenceUnavailable,
+                    "the runtime-owned monotonic execution window widened after pre-effect qualification",
+                );
+                return Err(terminalize_native_pre_effect_refusal(
+                    &mut prepared,
+                    refusal,
+                ));
+            }
+            Err(refusal) => {
+                return Err(terminalize_native_pre_effect_refusal(
+                    &mut prepared,
+                    refusal,
+                ));
+            }
+        };
+        if fresh_remaining > StdDuration::from_millis(watcher.invocation.deadline_ms) {
+            let refusal = native_governed_refusal(
+                NativeGovernedPreEffectRefusalCode::DeadlineExpired,
+                "the final runtime-owned watchdog broadens the admitted watcher deadline",
+            );
+            return Err(terminalize_native_pre_effect_refusal(
+                &mut prepared,
+                refusal,
+            ));
+        }
+
+        match self.store.provider_intake(&provider_attempt.intake_id) {
+            Ok(None) => {}
+            Ok(Some(_)) => {
+                let refusal = native_governed_refusal(
+                    NativeGovernedPreEffectRefusalCode::NativeCustodyCorrespondenceUnavailable,
+                    "the exact governed provider-intake occurrence already exists; provider replay is forbidden",
+                );
+                return Err(terminalize_native_pre_effect_refusal(
+                    &mut prepared,
+                    refusal,
+                ));
+            }
+            Err(error) => {
+                let refusal = native_governed_refusal(
+                    NativeGovernedPreEffectRefusalCode::NativeCustodyCorrespondenceUnavailable,
+                    error.to_string(),
+                );
+                return Err(terminalize_native_pre_effect_refusal(
+                    &mut prepared,
+                    refusal,
+                ));
+            }
+        }
+
+        let request_json = match nq_protocol::canonical_json_bytes(&native_request) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let refusal = native_governed_refusal(
+                    NativeGovernedPreEffectRefusalCode::NativeCustodyCorrespondenceUnavailable,
+                    error.to_string(),
+                );
+                return Err(terminalize_native_pre_effect_refusal(
+                    &mut prepared,
+                    refusal,
+                ));
+            }
+        };
+        let evaluator_artifact_digest = verified_provider
+            .identity()
+            .evaluator_artifact_digest
+            .clone();
+        let native_boottime_expiry_ns = native_request.deadline.expires_at_ns;
+        let attempt = match ProviderAttempt::new_governed(
+            provider_attempt.intake_id.clone(),
+            provider_attempt.attempt_id.clone(),
+            provider_attempt.run_id.clone(),
+            native_request,
+            verified_provider,
+            provider_attempt.origin_carrier.clone(),
+            absolute_deadline,
+            provider_attempt.checkpoint_contract_digest.as_str(),
+        ) {
+            Ok(attempt) => attempt,
+            Err(error) => {
+                let refusal = native_governed_refusal(
+                    NativeGovernedPreEffectRefusalCode::NativeCustodyCorrespondenceUnavailable,
+                    error.to_string(),
+                );
+                return Err(terminalize_native_pre_effect_refusal(
+                    &mut prepared,
+                    refusal,
+                ));
+            }
+        };
+
+        // This is the only provider effect in the path. Every fallible step
+        // below must either reach a complete final closure or terminalize this
+        // exact launch as a postlaunch custody failure.
+        let capture = self.runner.run_verified_until_boottime(
+            &verified_launch,
+            &request_json,
+            native_boottime_expiry_ns,
+            &watcher.resources,
+        );
+        macro_rules! postlaunch {
+            ($stage:literal, $expression:expr) => {
+                match $expression {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Err(terminalize_native_postlaunch_failure(
+                            &mut prepared,
+                            $stage,
+                            error,
+                        ));
+                    }
+                }
+            };
+        }
+
+        let intake = postlaunch!(
+            "provider_intake",
+            ProviderIntakeV1::from_capture(attempt, capture, &watcher.resources)
+                .map_err(EngineError::from)
+        );
+        let run = postlaunch!(
+            "run_projection",
+            (|| {
+                Ok::<_, EngineError>(RunInput {
+                    run_id: provider_attempt.run_id.clone(),
+                    request_id: intake.record().request_id.clone(),
+                    instance_id: watcher.instance_id.clone(),
+                    admission_id: Some(active_lock.admission_id.clone()),
+                    binding_digest: admission_verification.binding_digest.clone(),
+                    checkpoint_contract_digest: provider_attempt
+                        .checkpoint_contract_digest
+                        .to_string(),
+                    profile_id: watcher.profile.id.clone(),
+                    profile_version: watcher.profile.version.to_string(),
+                    profile_digest: intake.record().request.profile.digest.to_string(),
+                    carrier: intake.record().origin_carrier.clone(),
+                    started_at: timestamp(intake.record().started_at),
+                    deadline_at: deadline_timestamp(intake.record().deadline_at),
+                    finished_at: timestamp(intake.record().finished_at),
+                    acquisition_outcome: acquisition_code(&intake.record().native_outcome.outcome)
+                        .to_owned(),
+                    execution_identity: canonical(&active_lock.execution)?,
+                    resource_outcome: canonical(&intake.record().native_outcome)?,
+                })
+            })()
+        );
+        let intake_input = postlaunch!(
+            "provider_store_projection",
+            intake.to_store_input(&run).map_err(EngineError::from)
+        );
+        let provider_record_id = postlaunch!(
+            "provider_record_identity",
+            nq_store::provider_intake_record_id(&intake_input).map_err(EngineError::from)
+        );
+        let exact_provider_intake_bytes = postlaunch!(
+            "provider_record_canonicalization",
+            nq_protocol::canonical_json_bytes(intake.record())
+                .map_err(|error| EngineError::Canonical(error.to_string()))
+        );
+        let provider_intake_ref = postlaunch!(
+            "provider_record_reference",
+            (|| {
+                Ok::<_, EngineError>(RecordRef {
+                    schema: nq_host_role_contract::Token::parse(nq_store::PROVIDER_INTAKE_SCHEMA)
+                        .map_err(|error| EngineError::Invariant(error.to_string()))?,
+                    record_id: provider_record_id.clone(),
+                    bytes_digest: nq_protocol::sha256_bytes(&exact_provider_intake_bytes),
+                })
+            })()
+        );
+        let provider_append = CustodyRecord::provider_intake(
+            provider_record_id.to_string(),
+            exact_provider_intake_bytes.clone(),
+            timestamp(intake.record().received_at),
+        );
+        let sealed_acquisition = postlaunch!(
+            "acquisition_custody",
+            prepared
+                .seal_acquisition(GovernedAcquisitionCustodyInput {
+                    execution_launch_record_id: prepared.execution_launch().record_id.clone(),
+                    provider_intake_record_id: provider_record_id.clone(),
+                    exact_provider_intake_bytes: exact_provider_intake_bytes.clone(),
+                    exact_raw_provider_bytes: intake.raw_bytes().to_vec(),
+                })
+                .map_err(EngineError::from)
+        );
+        if sealed_acquisition.execution_launch_record_id != prepared.execution_launch().record_id
+            || sealed_acquisition.provider_intake_record_id != provider_record_id
+            || sealed_acquisition.exact_provider_intake_bytes != exact_provider_intake_bytes
+            || sealed_acquisition.exact_raw_provider_bytes != intake.raw_bytes()
+        {
+            return Err(terminalize_native_postlaunch_failure(
+                &mut prepared,
+                "acquisition_reopen",
+                EngineError::Invariant(
+                    "reopened governed acquisition differs from the exact provider occurrence"
+                        .to_owned(),
+                ),
+            ));
+        }
+
+        let GovernedConformanceDerivationV2 {
+            artifact,
+            persistence,
+        } = postlaunch!(
+            "diagnostic_derivation",
+            derive_governed_conformance_v2(artifact_context, intake.record(), intake.raw_bytes(),)
+        );
+        let artifact_length = postlaunch!(
+            "diagnostic_capacity",
+            artifact
+                .canonical_bytes()
+                .map(|bytes| bytes.len())
+                .map_err(|error| EngineError::Canonical(error.to_string()))
+        );
+        if u64::try_from(artifact_length)
+            .ok()
+            .is_none_or(|length| length > artifact_capacity.canonical_artifact_bytes)
+        {
+            return Err(terminalize_native_postlaunch_failure(
+                &mut prepared,
+                "diagnostic_capacity",
+                EngineError::Invariant(
+                    "actual governed diagnostic exceeds its exact pre-effect derived bound"
+                        .to_owned(),
+                ),
+            ));
+        }
+
+        let execution_binding = postlaunch!(
+            "execution_binding",
+            construct_governed_execution_binding_v2(&prepared, &artifact, &provider_intake_ref,)
+                .map_err(|error| EngineError::Invariant(error.to_string()))
+        );
+        let qualified = postlaunch!(
+            "terminal_batch_qualification",
+            prepared
+                .qualify_final_batch(provider_append, execution_binding)
+                .map_err(EngineError::from)
+        );
+        let derivation_claim = postlaunch!(
+            "derivation_identity",
+            construct_governed_derivation_claim(
+                &artifact,
+                &provider_intake_ref,
+                prepared.execution_launch(),
+                prepared.dependencies(),
+                &evaluator_artifact_digest,
+            )
+        );
+        postlaunch!(
+            "derivation_custody",
+            prepared
+                .claim_derivation(derivation_claim.clone())
+                .map_err(EngineError::from)
+        );
+        let projection = postlaunch!(
+            "final_custody_projection",
+            construct_governed_custody_projection_v2(
+                &prepared,
+                &qualified,
+                &artifact,
+                &provider_intake_ref,
+                &intake.record().intake_id,
+                &intake.record().raw_sha256,
+                &derivation_claim,
+            )
+            .map_err(|error| EngineError::Invariant(error.to_string()))
+        );
+        let sql_plan = postlaunch!(
+            "sql_projection_preparation",
+            prepare_native_governed_sql_commit(
+                &watcher,
+                profile,
+                intake.record(),
+                intake_input,
+                run,
+                persistence,
+            )
+        );
+        let reservation_record_id = prepared
+            .custody_reservation_spec()
+            .reservation_record_id
+            .clone();
+        let final_checkpoint_id = Sha256Digest::parse(qualified.batch().checkpoint_id.clone())
+            .map_err(|error| EngineError::Invariant(error.to_string()))?;
+        let diagnostic_commit = projection.diagnostic.clone();
+        let capsule_capacity = prepared.projection_capsule_capacity_bytes();
+        let mut projection = Some(projection);
+        let mut sealed_closure_id = None;
+        let expected_commitment = std::cell::RefCell::new(None);
+        let mut build_final_closure =
+            |publication: &nq_store::GovernedProjectionPublication| -> Result<Vec<u8>, EngineError> {
+                let projection_capsule = GovernedProjectionCapsule::build(
+                    &sql_plan.projection_capsule_input(
+                        reservation_record_id.clone(),
+                        diagnostic_commit.clone(),
+                        publication.clone(),
+                    ),
+                )?;
+                let projection = projection
+                    .take()
+                    .ok_or_else(|| {
+                        EngineError::Invariant(
+                            "governed projection pre-commit seal callback ran twice".into(),
+                        )
+                    })?
+                    .bind_projection_capsule(projection_capsule, capsule_capacity)
+                    .map_err(|error| EngineError::Invariant(error.to_string()))?;
+                let closure_id = projection.closure.closure_id().clone();
+                let exact_closure_bytes =
+                    projection.closure.canonical_bytes().as_bytes().to_vec();
+                let closure_digest = nq_protocol::sha256_bytes(&exact_closure_bytes);
+                let closure_length = u64::try_from(exact_closure_bytes.len()).map_err(|_| {
+                    EngineError::Invariant(
+                        "governed final closure length exceeds the supported identity range"
+                            .to_owned(),
+                    )
+                })?;
+                *expected_commitment.borrow_mut() = Some((closure_digest, closure_length));
+                sealed_closure_id = Some(closure_id);
+                Ok(exact_closure_bytes)
+            };
+        let mut after_final_seal =
+            |commitment: &nq_store::GovernedCustodyCommitment| -> Result<(), EngineError> {
+                let expected = expected_commitment.borrow();
+                let (closure_digest, closure_length) = expected.as_ref().ok_or_else(|| {
+                    EngineError::Invariant(
+                        "governed final closure commitment was checked before construction".into(),
+                    )
+                })?;
+                if commitment.bytes_digest != *closure_digest
+                    || commitment.byte_length != *closure_length
+                {
+                    return Err(EngineError::Invariant(
+                        "sealed governed final closure reopened with different bytes".to_owned(),
+                    ));
+                }
+                if failpoint == GovernedProjectionFailpoint::AfterFinalSealBeforeSql {
+                    return Err(EngineError::Invariant(
+                        "test failpoint: after final seal before SQL projection".into(),
+                    ));
+                }
+                Ok(())
+            };
+
+        // SQL publication order is allocated first under one IMMEDIATE
+        // transaction. Store then seals the exact capsule/final closure before
+        // attempting any SQL row, while that same transaction owns the global
+        // publication gate. Only after sealing succeeds may SQL insertion and
+        // commit occur.
+        let mut publish = || -> Result<CollectionOutcome, EngineError> {
+            Ok(match &sql_plan {
+                NativeGovernedSqlCommitPlan::Admitted {
+                    collection,
+                    outcome,
+                    status,
+                    expected_semantic_digest,
+                } => {
+                    let committed = self
+                        .store
+                        .commit_governed_admitted_run_level_diagnostic_with_publication(
+                            collection,
+                            |receipt| {
+                                if receipt.semantic_digest.as_deref()
+                                    != Some(expected_semantic_digest.as_str())
+                                    || receipt.report_sequence.is_none()
+                                {
+                                    return Err(EngineError::Invariant(
+                                "governed admitted receipt differs from the exact derived report"
+                                    .to_owned(),
+                            ));
+                                }
+                                Ok(nq_store::AdmittedRunLevelDiagnosticCompletion {
+                                    value: outcome.clone(),
+                                    diagnostic_artifact: diagnostic_commit.clone(),
+                                    status: status.clone(),
+                                })
+                            },
+                            prepared.store_projection_custody(),
+                            &mut build_final_closure,
+                            &mut after_final_seal,
+                        )?;
+                    match committed {
+                        ProviderIntakeCommit::Committed { value, .. } => value,
+                        ProviderIntakeCommit::Replayed {
+                            canonical_result, ..
+                        } => {
+                            let reopened = decode_collection_outcome(canonical_result.as_bytes())?;
+                            if &reopened != outcome {
+                                return Err(EngineError::Invariant(
+                                    "governed admitted replay resolved to another result"
+                                        .to_owned(),
+                                ));
+                            }
+                            reopened
+                        }
+                    }
+                }
+                NativeGovernedSqlCommitPlan::NonSuccess {
+                    collection,
+                    outcome,
+                    result,
+                } => {
+                    let committed = self
+                        .store
+                        .commit_governed_non_success_run_level_diagnostic_with_publication(
+                            collection,
+                            result,
+                            &diagnostic_commit,
+                            prepared.store_projection_custody(),
+                            &mut build_final_closure,
+                            &mut after_final_seal,
+                        )?;
+                    match committed.intake {
+                        ProviderIntakeCommit::Committed { .. } => outcome.clone(),
+                        ProviderIntakeCommit::Replayed {
+                            canonical_result, ..
+                        } => {
+                            let reopened = decode_collection_outcome(canonical_result.as_bytes())?;
+                            if &reopened != outcome {
+                                return Err(EngineError::Invariant(
+                                    "governed non-success replay resolved to another result"
+                                        .to_owned(),
+                                ));
+                            }
+                            reopened
+                        }
+                    }
+                }
+            })
+        };
+        let stored_outcome = loop {
+            match publish() {
+                Ok(outcome) => break outcome,
+                Err(EngineError::Store(
+                    nq_store::StoreError::GovernedProjectionRecoveryRequired(_),
+                )) => {
+                    // The Store recovered an older exact pending projection
+                    // while holding the global publication lock. Retry this
+                    // already-derived plan; never invoke the provider again.
+                }
+                Err(error) => {
+                    drop(publish);
+                    return Err(handle_native_governed_publication_failure(
+                        &mut prepared,
+                        error,
+                    ));
+                }
+            }
+        };
+        drop(publish);
+        drop(build_final_closure);
+        let closure_id = sealed_closure_id.ok_or_else(|| {
+            EngineError::Invariant(
+                "governed SQL publication completed without sealing its exact final closure"
+                    .to_owned(),
+            )
+        })?;
+        stored_outcome.validate()?;
+        if failpoint == GovernedProjectionFailpoint::AfterSqlBeforeIndexMark {
+            return Err(EngineError::Invariant(
+                "test failpoint: after SQL projection before index mark".into(),
+            ));
+        }
+
+        drop(prepared);
+        let indexed = self
+            .store
+            .verify_governed_projection_and_mark_indexed(&reservation_record_id)?;
+        if indexed.closure_id != closure_id
+            || indexed.diagnostic_artifact_id != *artifact.artifact_id.as_digest()
+            || indexed.runtime_checkpoint_id != final_checkpoint_id
+        {
+            return Err(EngineError::Invariant(
+                "indexed governed projection differs from the exact completed occurrence"
+                    .to_owned(),
+            ));
+        }
+        let reopened = reopen_diagnostic_artifact(&self.store, artifact.artifact_id.as_digest())?;
+        let SupportedDiagnosticExecution::V2(reopened) = reopened else {
+            return Err(EngineError::Invariant(
+                "governed V2 persistence reopened under another contract".to_owned(),
+            ));
+        };
+        if reopened != artifact {
+            return Err(EngineError::Invariant(
+                "governed V2 persistence changed the exact diagnostic artifact".to_owned(),
+            ));
+        }
+        Ok(reopened)
     }
 
     /// Verify a historical admitted report (read-only; no re-evaluation).
@@ -4307,7 +5650,7 @@ impl CollectionEngine {
             profile_digest: descriptor_digest.as_str().to_owned(),
             carrier: intake.record().origin_carrier.clone(),
             started_at: timestamp(capture.started_at),
-            deadline_at: timestamp(intake.record().deadline_at),
+            deadline_at: deadline_timestamp(intake.record().deadline_at),
             finished_at: timestamp(capture.finished_at),
             acquisition_outcome: acquisition_code(&capture.outcome).to_owned(),
             execution_identity: canonical(&lock.execution)?,
@@ -5250,7 +6593,9 @@ impl CollectionEngine {
                         stdout: Vec::new(),
                         stderr: error.stderr,
                         outcome: AcquisitionOutcome::CarrierStartupFailed {
-                            message: error.failure.to_string(),
+                            message: crate::runner::bounded_acquisition_detail(
+                                error.failure.to_string(),
+                            ),
                         },
                     };
                 }
@@ -5578,77 +6923,84 @@ pub fn validate_diagnostic_artifact_history(
                                 commitment.artifact_id
                             )));
                         }
-                        if artifact.profile().id != run.profile_id
-                            || artifact.profile().version != run.profile_version
-                            || artifact.profile().digest.as_str() != run.profile_digest
-                        {
-                            return Err(EngineError::Invariant(format!(
-                                "local diagnostic artifact {} substitutes its profile origin",
-                                commitment.artifact_id
-                            )));
-                        }
-                        match &production_binding {
-                            Some(binding) => validate_production_v2_execution_binding(
+                        if let Some(binding) = &production_binding {
+                            validate_governed_run_level_v2_origin_shape(
+                                local_v2_artifact,
+                                evaluation_id.as_deref(),
+                            )?;
+                            validate_production_v2_execution_binding(
                                 store,
                                 local_v2_artifact,
                                 binding,
-                            )?,
-                            None if artifact.request_id().as_str() != run.request_id => {
+                            )?;
+                            validate_governed_run_level_v2_history(
+                                store,
+                                local_v2_artifact,
+                                &run,
+                                binding,
+                            )?;
+                        } else {
+                            if artifact.profile().id != run.profile_id
+                                || artifact.profile().version != run.profile_version
+                                || artifact.profile().digest.as_str() != run.profile_digest
+                            {
+                                return Err(EngineError::Invariant(format!(
+                                    "local diagnostic artifact {} substitutes its profile origin",
+                                    commitment.artifact_id
+                                )));
+                            }
+                            if artifact.request_id().as_str() != run.request_id {
                                 return Err(EngineError::Invariant(format!(
                                     "pre-production local diagnostic artifact {} substitutes its child provider request origin",
                                     commitment.artifact_id
                                 )));
                             }
-                            None => {}
-                        }
-                        let local_v2_context = validate_local_v2_provider_correspondence(
-                            store,
-                            &artifact,
-                            &run,
-                            production_binding.as_ref(),
-                        )?;
-                        if let Some(evaluation_id) = evaluation_id {
-                            let admitted =
-                                store.admitted_collection_for_run(run_id)?.ok_or_else(|| {
-                                    EngineError::Invariant(format!(
-                                        "local diagnostic artifact {} origin run {run_id} is not one admitted collection",
-                                        commitment.artifact_id
-                                    ))
-                                })?;
-                            if admitted.evaluations != 1 {
-                                return Err(EngineError::Invariant(format!(
-                                    "local diagnostic artifact {} requires exactly one origin evaluation; durable run {run_id} has {}",
-                                    commitment.artifact_id, admitted.evaluations
-                                )));
-                            }
-                            let evaluation =
-                                store.evaluation_origin(evaluation_id)?.ok_or_else(|| {
-                                    EngineError::Invariant(format!(
-                                        "local diagnostic artifact {} origin evaluation {evaluation_id} is missing",
-                                        commitment.artifact_id
-                                    ))
-                                })?;
-                            if evaluation.trigger_run_id.as_deref() != Some(run_id.as_str()) {
-                                return Err(EngineError::Invariant(format!(
-                                    "local diagnostic artifact {} origin evaluation {evaluation_id} does not belong to run {run_id}",
-                                    commitment.artifact_id
-                                )));
-                            }
-                            let envelope = reopen_exact_evaluation(store, &evaluation)?;
-                            validate_evaluated_diagnostic_correspondence(
-                                store,
-                                &artifact,
-                                &run,
-                                &local_v2_context,
-                                &envelope,
+                            let local_v2_context = validate_local_v2_provider_correspondence(
+                                store, &artifact, &run, None,
                             )?;
-                        } else {
-                            validate_run_only_diagnostic_correspondence(
-                                store,
-                                &artifact,
-                                run_id,
-                                &local_v2_context,
-                            )?;
+                            if let Some(evaluation_id) = evaluation_id {
+                                let admitted =
+                                    store.admitted_collection_for_run(run_id)?.ok_or_else(|| {
+                                        EngineError::Invariant(format!(
+                                            "local diagnostic artifact {} origin run {run_id} is not one admitted collection",
+                                            commitment.artifact_id
+                                        ))
+                                    })?;
+                                if admitted.evaluations != 1 {
+                                    return Err(EngineError::Invariant(format!(
+                                        "local diagnostic artifact {} requires exactly one origin evaluation; durable run {run_id} has {}",
+                                        commitment.artifact_id, admitted.evaluations
+                                    )));
+                                }
+                                let evaluation =
+                                    store.evaluation_origin(evaluation_id)?.ok_or_else(|| {
+                                        EngineError::Invariant(format!(
+                                            "local diagnostic artifact {} origin evaluation {evaluation_id} is missing",
+                                            commitment.artifact_id
+                                        ))
+                                    })?;
+                                if evaluation.trigger_run_id.as_deref() != Some(run_id.as_str()) {
+                                    return Err(EngineError::Invariant(format!(
+                                        "local diagnostic artifact {} origin evaluation {evaluation_id} does not belong to run {run_id}",
+                                        commitment.artifact_id
+                                    )));
+                                }
+                                let envelope = reopen_exact_evaluation(store, &evaluation)?;
+                                validate_evaluated_diagnostic_correspondence(
+                                    store,
+                                    &artifact,
+                                    &run,
+                                    &local_v2_context,
+                                    &envelope,
+                                )?;
+                            } else {
+                                validate_run_only_diagnostic_correspondence(
+                                    store,
+                                    &artifact,
+                                    run_id,
+                                    &local_v2_context,
+                                )?;
+                            }
                         }
                     }
                     verification.supported_available = verification
@@ -6094,6 +7446,522 @@ fn validate_production_v2_execution_binding(
     Ok(())
 }
 
+fn historical_runtime_reference(
+    row: &nq_store::RuntimeRecordRow,
+    purpose: &str,
+) -> Result<RecordRef, EngineError> {
+    Ok(RecordRef {
+        schema: nq_host_role_contract::Token::parse(row.record_schema.clone()).map_err(
+            |error| {
+                EngineError::Invariant(format!(
+                    "{purpose} runtime schema is not a contract token: {error}"
+                ))
+            },
+        )?,
+        record_id: Sha256Digest::parse(row.record_id.clone()).map_err(|error| {
+            EngineError::Invariant(format!(
+                "{purpose} runtime identity is not SHA-256: {error}"
+            ))
+        })?,
+        bytes_digest: row.canonical_bytes_sha256.clone(),
+    })
+}
+
+fn reopen_historical_runtime_snapshot(
+    store: &Store,
+    checkpoint: &nq_store::RuntimeLedgerCheckpoint,
+) -> Result<nq_host_role_contract::RuntimeRecordSet, EngineError> {
+    let mut records = nq_host_role_contract::RuntimeRecordSet::new();
+    let mut after = 0;
+    loop {
+        let page =
+            store.runtime_record_page(Some(checkpoint), after, nq_store::MAX_PUBLIC_QUERY_ROWS)?;
+        if page.checkpoint.as_ref() != Some(checkpoint) {
+            return Err(EngineError::Invariant(format!(
+                "historical runtime snapshot substituted exact checkpoint {}",
+                checkpoint.checkpoint_id
+            )));
+        }
+        for row in &page.records {
+            let validated = ValidatedRuntimeRecord::decode_canonical(
+                row.canonical_bytes.as_bytes(),
+            )
+            .map_err(|error| {
+                EngineError::Invariant(format!(
+                    "historical runtime record {} failed typed reopening: {error}",
+                    row.record_id
+                ))
+            })?;
+            let reference = historical_runtime_reference(row, "historical runtime record")?;
+            if validated.exact_reference() != reference {
+                return Err(EngineError::Invariant(format!(
+                    "historical runtime record {} substituted its schema, identity, or exact bytes",
+                    row.record_id
+                )));
+            }
+            records.insert(validated).map_err(|error| {
+                EngineError::Invariant(format!(
+                    "historical runtime snapshot at {} refused record {}: {error}",
+                    checkpoint.checkpoint_id, row.record_id
+                ))
+            })?;
+        }
+        if page.complete {
+            return Ok(records);
+        }
+        let next = page.next_after_record_sequence.ok_or_else(|| {
+            EngineError::Invariant(format!(
+                "historical runtime snapshot at {} omitted its next exact cursor",
+                checkpoint.checkpoint_id
+            ))
+        })?;
+        if next <= after {
+            return Err(EngineError::Invariant(format!(
+                "historical runtime snapshot at {} did not advance its exact cursor",
+                checkpoint.checkpoint_id
+            )));
+        }
+        after = next;
+    }
+}
+
+fn production_identity_matches_semantic(
+    production: &IdentityRef,
+    semantic: &SemanticIdentityV1,
+) -> bool {
+    production.id.as_str() == semantic.id
+        && production.version.as_str() == semantic.version
+        && production.descriptor_digest == semantic.digest
+}
+
+fn validate_governed_native_request_correspondence(
+    artifact_id: &str,
+    outer_request_id: &str,
+    launch_reference: &RecordRef,
+    provider_request_id: &str,
+    run_request_id: &str,
+) -> Result<(), EngineError> {
+    let expected_child_request =
+        native_child_request_id(outer_request_id, launch_reference).map_err(|error| {
+            EngineError::Invariant(format!(
+                "production run-level diagnostic artifact {artifact_id} cannot recover its exact native child request: {}",
+                error.detail
+            ))
+        })?;
+    if provider_request_id != expected_child_request.as_str()
+        || run_request_id != expected_child_request.as_str()
+    {
+        return Err(EngineError::Invariant(format!(
+            "production run-level diagnostic artifact {artifact_id} substitutes its exact native child request"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_governed_attempt_deadline_correspondence(
+    artifact_id: &str,
+    provider_deadline: DateTime<Utc>,
+    launch_deadline: &str,
+) -> Result<(), EngineError> {
+    let launch_deadline = DateTime::parse_from_rfc3339(launch_deadline)
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|error| {
+            EngineError::Invariant(format!(
+                "production run-level diagnostic artifact {artifact_id} launch attempt deadline is not an RFC 3339 instant: {error}"
+            ))
+        })?;
+    if provider_deadline != launch_deadline {
+        return Err(EngineError::Invariant(format!(
+            "production run-level diagnostic artifact {artifact_id} substitutes its exact launch attempt deadline"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_governed_run_level_v2_origin_shape(
+    artifact: &DiagnosticExecutionV2,
+    evaluation_id: Option<&str>,
+) -> Result<(), EngineError> {
+    let artifact_id = artifact.artifact_id.0.as_str();
+    if evaluation_id.is_some() {
+        return Err(EngineError::Invariant(format!(
+            "production run-level diagnostic artifact {artifact_id} claims a detector evaluation"
+        )));
+    }
+    let expected_native_semantic =
+        profile_semantic_id(nq_profiles::conformance::MODULE.descriptor())
+            .map_err(|error| EngineError::Canonical(error.to_string()))?;
+    if artifact.profile_semantic_id.as_str() != expected_native_semantic.as_str() {
+        return Err(EngineError::Invariant(format!(
+            "production run-level diagnostic artifact {artifact_id} is not bound to canonical nq.conformance/v1 semantics"
+        )));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn validate_governed_run_level_v2_history(
+    store: &Store,
+    artifact: &DiagnosticExecutionV2,
+    run: &nq_store::WatcherRunOutcomeRow,
+    binding: &nq_store::DiagnosticArtifactExecutionBinding,
+) -> Result<(), EngineError> {
+    let artifact_id = artifact.artifact_id.0.as_str();
+    let expected_native_profile: &'static dyn ProfileModule = &nq_profiles::conformance::MODULE;
+    let expected_native_descriptor = expected_native_profile.descriptor();
+    let expected_native_digest = expected_native_descriptor
+        .digest()
+        .map_err(|error| EngineError::Canonical(error.to_string()))?;
+    let expected_native_semantic = profile_semantic_id(expected_native_descriptor)
+        .map_err(|error| EngineError::Canonical(error.to_string()))?;
+    if let Some(admitted) = store.admitted_collection_for_run(&run.run_id)?
+        && admitted.evaluations != 0
+    {
+        return Err(EngineError::Invariant(format!(
+            "production run-level diagnostic artifact {artifact_id} has {} detector evaluations",
+            admitted.evaluations
+        )));
+    }
+
+    let launch_checkpoint = store
+        .runtime_checkpoint_by_id(&binding.execution_launch.checkpoint_id)?
+        .ok_or_else(|| {
+            EngineError::Invariant(format!(
+                "production run-level diagnostic artifact {artifact_id} lost exact launch checkpoint {}",
+                binding.execution_launch.checkpoint_id
+            ))
+        })?;
+    if binding.execution_launch.record_sequence < launch_checkpoint.first_record_sequence
+        || binding.execution_launch.record_sequence > launch_checkpoint.last_record_sequence
+    {
+        return Err(EngineError::Invariant(format!(
+            "production run-level diagnostic artifact {artifact_id} launch is outside its exact historical checkpoint"
+        )));
+    }
+    let runtime = reopen_historical_runtime_snapshot(store, &launch_checkpoint)?;
+    let launch_reference =
+        historical_runtime_reference(&binding.execution_launch, "production execution launch")?;
+    let launch_value = runtime_record_value(
+        &binding.execution_launch,
+        "production governed execution launch",
+    )?;
+    let selection = runtime
+        .select_launch_correspondence(&launch_reference)
+        .map_err(|error| {
+            EngineError::Invariant(format!(
+                "production run-level diagnostic artifact {artifact_id} failed exact typed launch correspondence: {error}"
+            ))
+        })?;
+    runtime
+        .require_effective_launch_lifecycle(&launch_reference)
+        .map_err(|error| {
+            EngineError::Invariant(format!(
+                "production run-level diagnostic artifact {artifact_id} failed historical launch lifecycle: {error}"
+            ))
+        })?;
+    if selection.launch() != &launch_reference
+        || selection.outer_request()
+            != &historical_runtime_reference(&binding.outer_request, "production outer request")?
+        || !production_identity_matches_semantic(
+            selection.production_question(),
+            &artifact.question,
+        )
+    {
+        return Err(EngineError::Invariant(format!(
+            "production run-level diagnostic artifact {artifact_id} substitutes its exact launch, request, or bounded question"
+        )));
+    }
+
+    let qualifier = runtime
+        .get(&selection.native_profile_qualification().record_id)
+        .ok_or_else(|| {
+            EngineError::Invariant(format!(
+                "production run-level diagnostic artifact {artifact_id} lost its exact native profile qualifier"
+            ))
+        })?;
+    if qualifier.exact_reference() != *selection.native_profile_qualification() {
+        return Err(EngineError::Invariant(format!(
+            "production run-level diagnostic artifact {artifact_id} substitutes its native profile qualifier bytes"
+        )));
+    }
+    let qualifier_value = qualifier.record().as_value();
+    let native_profile = required_object_field(
+        qualifier_value,
+        "native_profile",
+        "historical native profile qualification",
+    )?;
+    let native_profile_value = Value::Object(native_profile.clone());
+    let detector_closure = required_object_field(
+        &native_profile_value,
+        "detector_closure",
+        "historical native profile qualification",
+    )?;
+    let qualified_production_profile: IdentityRef = serde_json::from_value(
+        qualifier_value
+            .get("production_profile")
+            .cloned()
+            .ok_or_else(|| {
+                EngineError::Invariant(
+                    "historical native profile qualification has no production profile".into(),
+                )
+            })?,
+    )
+    .map_err(|error| {
+        EngineError::Invariant(format!(
+            "historical production profile identity is malformed: {error}"
+        ))
+    })?;
+    let qualified_question: IdentityRef = serde_json::from_value(
+        qualifier_value
+            .get("production_question")
+            .cloned()
+            .ok_or_else(|| {
+                EngineError::Invariant(
+                    "historical native profile qualification has no production question".into(),
+                )
+            })?,
+    )
+    .map_err(|error| {
+        EngineError::Invariant(format!(
+            "historical production question identity is malformed: {error}"
+        ))
+    })?;
+    if native_profile.get("profile_id").and_then(Value::as_str)
+        != Some(nq_profiles::conformance::PROFILE_ID)
+        || native_profile
+            .get("profile_version")
+            .and_then(Value::as_u64)
+            != Some(u64::from(nq_profiles::conformance::PROFILE_VERSION))
+        || native_profile
+            .get("descriptor_digest")
+            .and_then(Value::as_str)
+            != Some(expected_native_digest.as_str())
+        || native_profile
+            .get("semantic_identity_digest")
+            .and_then(Value::as_str)
+            != Some(expected_native_semantic.as_str())
+        || detector_closure
+            .get("detector_count")
+            .and_then(Value::as_u64)
+            != Some(0)
+        || !production_identity_matches_semantic(&qualified_production_profile, &artifact.profile)
+        || !production_identity_matches_semantic(&qualified_question, &artifact.question)
+    {
+        return Err(EngineError::Invariant(format!(
+            "production run-level diagnostic artifact {artifact_id} does not preserve its exact zero-detector nq.conformance/v1 qualification"
+        )));
+    }
+
+    let [(provider_record, attempt)] = binding.provider_attempts.as_slice() else {
+        return Err(EngineError::Invariant(format!(
+            "production run-level diagnostic artifact {artifact_id} is not bound to exactly one provider occurrence"
+        )));
+    };
+    let intake_row = store.provider_intake(&attempt.intake_id)?.ok_or_else(|| {
+        EngineError::Invariant(format!(
+            "production run-level diagnostic artifact {artifact_id} lost provider intake {}",
+            attempt.intake_id
+        ))
+    })?;
+    let raw = store
+        .provider_intake_raw_bytes(&attempt.intake_id)?
+        .ok_or_else(|| {
+            EngineError::Invariant(format!(
+                "production run-level diagnostic artifact {artifact_id} lost raw custody for provider intake {}",
+                attempt.intake_id
+            ))
+        })?;
+    let provider_intake = ProviderIntakeRecordV1::reopen_store_row(&intake_row, &raw)?;
+    let provider_document = CanonicalDocument::from_serializable(&provider_intake)?;
+    validate_governed_native_request_correspondence(
+        artifact_id,
+        artifact.request_id.as_str(),
+        &launch_reference,
+        &provider_intake.request_id,
+        &run.request_id,
+    )?;
+    let launch_attempt_deadline = launch_value
+        .get("attempt_deadline")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            EngineError::Invariant(format!(
+                "production run-level diagnostic artifact {artifact_id} launch has no attempt deadline"
+            ))
+        })?;
+    let launch_started_at = launch_value
+        .get("launched_at")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            EngineError::Invariant(format!(
+                "production run-level diagnostic artifact {artifact_id} launch has no start instant"
+            ))
+        })
+        .and_then(|value| {
+            DateTime::parse_from_rfc3339(value)
+                .map(|value| value.with_timezone(&Utc))
+                .map_err(|error| {
+                    EngineError::Invariant(format!(
+                        "production run-level diagnostic artifact {artifact_id} launch start is not an RFC 3339 instant: {error}"
+                    ))
+                })
+        })?;
+    validate_governed_attempt_deadline_correspondence(
+        artifact_id,
+        provider_intake.deadline_at,
+        launch_attempt_deadline,
+    )?;
+    if provider_record.record_schema != "nq.provider_intake.v1"
+        || provider_record.record_id != intake_row.intake_digest
+        || provider_record.canonical_bytes != provider_document
+        || provider_intake.run_id != run.run_id
+        || provider_intake.intake_id != attempt.intake_id
+        || provider_intake.request.profile.id.as_str() != nq_profiles::conformance::PROFILE_ID
+        || provider_intake.request.profile.version.as_str()
+            != nq_profiles::conformance::PROFILE_VERSION.to_string()
+        || provider_intake.request.profile.digest.as_str() != expected_native_digest.as_str()
+        || provider_intake.provider.profile_semantic_id.as_str()
+            != expected_native_semantic.as_str()
+        || run.profile_id != nq_profiles::conformance::PROFILE_ID
+        || run.profile_version != nq_profiles::conformance::PROFILE_VERSION.to_string()
+        || run.profile_digest != expected_native_digest.as_str()
+    {
+        return Err(EngineError::Invariant(format!(
+            "production run-level diagnostic artifact {artifact_id} substitutes its exact native provider occurrence"
+        )));
+    }
+    let contributing_intakes = artifact
+        .inputs
+        .received
+        .iter()
+        .map(|input| input.provider_intake_id.as_str())
+        .chain(
+            artifact
+                .inputs
+                .failed
+                .iter()
+                .filter_map(|input| match &input.cause {
+                    FailedInputCauseV2::ProviderNoResponse {
+                        provider_intake_id, ..
+                    }
+                    | FailedInputCauseV2::AcquisitionFailed {
+                        provider_intake_id, ..
+                    } => Some(provider_intake_id.as_str()),
+                    FailedInputCauseV2::Missing { .. } | FailedInputCauseV2::Unsupported { .. } => {
+                        None
+                    }
+                }),
+        )
+        .collect::<BTreeSet<_>>();
+    if contributing_intakes != BTreeSet::from([provider_intake.intake_id.as_str()]) {
+        return Err(EngineError::Invariant(format!(
+            "production run-level diagnostic artifact {artifact_id} substitutes its contributing provider-intake identity"
+        )));
+    }
+    if artifact.started_at != launch_started_at {
+        return Err(EngineError::Invariant(format!(
+            "production run-level diagnostic artifact {artifact_id} start differs from its exact governed launch"
+        )));
+    }
+    if artifact.attempt_interval.started_at != provider_intake.started_at
+        || artifact.attempt_interval.ended_at != provider_intake.finished_at
+    {
+        return Err(EngineError::Invariant(format!(
+            "production run-level diagnostic artifact {artifact_id} attempt interval differs from its provider-intake acquisition"
+        )));
+    }
+    if artifact.completed_at != provider_intake.received_at {
+        return Err(EngineError::Invariant(format!(
+            "production run-level diagnostic artifact {artifact_id} completion differs from its provider-intake receipt"
+        )));
+    }
+    validate_provider_interpretation_derivation(&provider_intake, artifact)?;
+
+    let reservation_reference = launch_value.get("custody_reservation").ok_or_else(|| {
+        EngineError::Invariant(format!(
+            "production run-level diagnostic artifact {artifact_id} launch has no custody reservation"
+        ))
+    })?;
+    let reservation_record = reopen_runtime_reference(
+        store,
+        reservation_reference,
+        "production governed custody reservation",
+    )?;
+    let reservation_id = Sha256Digest::parse(reservation_record.record_id.clone())
+        .map_err(|error| EngineError::Invariant(error.to_string()))?;
+    let inventory = store.governed_custody_inventory()?;
+    let matching = inventory
+        .iter()
+        .filter_map(|entry| match entry {
+            nq_store::GovernedCustodyInventoryEntry::Verified(inspection)
+                if inspection.reservation_record_id == reservation_id =>
+            {
+                Some(inspection.as_ref())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [inspection] = matching.as_slice() else {
+        return Err(EngineError::Invariant(format!(
+            "production run-level diagnostic artifact {artifact_id} has {} verified custody frontiers for reservation {reservation_id}",
+            matching.len()
+        )));
+    };
+    if inspection.state != nq_store::GovernedCustodyState::FinalClosureIndexed
+        || inspection.execution_launch_record_id.as_ref() != Some(&launch_reference.record_id)
+    {
+        return Err(EngineError::Invariant(format!(
+            "production run-level diagnostic artifact {artifact_id} governed custody is not one already-indexed exact launch closure"
+        )));
+    }
+    let projection = store.verify_governed_projection_and_mark_indexed(&reservation_id)?;
+    if projection.disposition != nq_store::GovernedProjectionVerificationDisposition::AlreadyIndexed
+        || projection.diagnostic_artifact_id != artifact.artifact_id.0
+    {
+        return Err(EngineError::Invariant(format!(
+            "production run-level diagnostic artifact {artifact_id} governed projection is not the already-indexed exact artifact"
+        )));
+    }
+    let terminal_checkpoint = store
+        .runtime_checkpoint_by_id(projection.runtime_checkpoint_id.as_str())?
+        .ok_or_else(|| {
+            EngineError::Invariant(format!(
+                "production run-level diagnostic artifact {artifact_id} lost exact terminal checkpoint {}",
+                projection.runtime_checkpoint_id
+            ))
+        })?;
+    if terminal_checkpoint.predecessor_checkpoint_id.as_deref()
+        != Some(launch_checkpoint.checkpoint_id.as_str())
+        || binding.execution_binding.checkpoint_id != terminal_checkpoint.checkpoint_id
+        || provider_record.checkpoint_id != terminal_checkpoint.checkpoint_id
+    {
+        return Err(EngineError::Invariant(format!(
+            "production run-level diagnostic artifact {artifact_id} substitutes its exact launch or terminal checkpoint"
+        )));
+    }
+    let terminal_page = store.runtime_record_page(
+        Some(&terminal_checkpoint),
+        launch_checkpoint.last_record_sequence,
+        nq_store::MAX_PUBLIC_QUERY_ROWS,
+    )?;
+    let terminal_ids = terminal_page
+        .records
+        .iter()
+        .map(|row| row.record_id.as_str())
+        .collect::<Vec<_>>();
+    if !terminal_page.complete
+        || terminal_ids
+            != [
+                provider_record.record_id.as_str(),
+                binding.execution_binding.record_id.as_str(),
+            ]
+    {
+        return Err(EngineError::Invariant(format!(
+            "production run-level diagnostic artifact {artifact_id} terminal checkpoint membership is incomplete or reordered"
+        )));
+    }
+    Ok(())
+}
+
 struct LocalV2HistoryContext {
     provider_intake: ProviderIntakeRecordV1,
     capture_policy: SemanticIdentityV1,
@@ -6493,7 +8361,7 @@ fn validate_local_v2_provider_correspondence(
     let intake_started_at = parse_timestamp(&intake.started_at)?;
     let intake_finished_at = parse_timestamp(&intake.finished_at)?;
     let intake_received_at = parse_timestamp(&intake.received_at)?;
-    if artifact.started_at != intake_started_at
+    if production_binding.is_none() && artifact.started_at != intake_started_at
         || artifact.attempt_interval.started_at != intake_started_at
         || artifact.attempt_interval.ended_at != intake_finished_at
     {
@@ -7097,6 +8965,64 @@ fn instance_status_event(
         detail: canonical(outcome)?,
         observed_at: timestamp(Utc::now()),
     })
+}
+
+fn governed_execution_status_event(
+    watcher: &WatcherConfig,
+    intake: &ProviderIntakeRecordV1,
+    outcome: &CollectionOutcome,
+) -> Result<StatusEventInput, EngineError> {
+    if outcome.instance_id != watcher.instance_id {
+        return Err(EngineError::Invariant(format!(
+            "cannot construct governed execution status for {} from result for {}",
+            watcher.instance_id, outcome.instance_id
+        )));
+    }
+    outcome.validate()?;
+    let run_id = outcome.run_id.as_deref().ok_or_else(|| {
+        EngineError::Invariant("governed execution status lost its exact run identity".to_owned())
+    })?;
+    if intake.run_id != run_id {
+        return Err(EngineError::Invariant(
+            "governed execution status intake and outcome name different runs".to_owned(),
+        ));
+    }
+    let (state, code) = governed_execution_status_projection(outcome)?;
+    let detail = canonical(outcome)?;
+    let status_event_id = nq_protocol::semantic_digest(&json!({
+        "schema": "nq.diagnostic_execution_status_event.v1",
+        "intake_id": intake.intake_id,
+        "run_id": run_id,
+        "code": code,
+        "detail_sha256": detail.digest(),
+        "observed_at": timestamp(intake.received_at),
+    }))
+    .map(Sha256Digest::into_string)
+    .map_err(|error| EngineError::Canonical(error.to_string()))?;
+    Ok(StatusEventInput {
+        status_event_id,
+        component_kind: "diagnostic_execution".to_owned(),
+        component_id: run_id.to_owned(),
+        state: state.to_owned(),
+        code: code.to_owned(),
+        detail,
+        observed_at: timestamp(intake.received_at),
+    })
+}
+
+fn governed_execution_status_projection(
+    outcome: &CollectionOutcome,
+) -> Result<(&'static str, &'static str), EngineError> {
+    outcome.validate()?;
+    let code = match &outcome.result {
+        CollectionResult::Admitted { .. } => "diagnostic_execution_completed",
+        CollectionResult::AdmissionRefused { .. } => "diagnostic_execution_admission_refused",
+        CollectionResult::AcquisitionFailed { .. } => "diagnostic_execution_acquisition_failed",
+        CollectionResult::Rejected { .. } => "diagnostic_execution_refused",
+    };
+    // A bounded processing result is not a health judgment about the subject
+    // or watcher instance.
+    Ok(("unknown", code))
 }
 
 #[derive(Clone, Copy)]
@@ -8814,6 +10740,13 @@ fn admission_refusal_from_engine(
                 message: error.to_string(),
             },
         ),
+        EngineError::HostRoleRuntime(error) => (
+            AdmissionRefusalBoundary::Internal,
+            AdmissionRefusalCode::InvariantViolation,
+            AdmissionRefusalDetails::Invariant {
+                message: error.to_string(),
+            },
+        ),
         EngineError::Io(error) => (
             AdmissionRefusalBoundary::Materialization,
             AdmissionRefusalCode::MaterializationFailure,
@@ -8852,14 +10785,11 @@ fn admission_refusal_from_engine(
             AdmissionRefusalCode::InvariantViolation,
             AdmissionRefusalDetails::Invariant { message },
         ),
-        #[cfg(test)]
         EngineError::GovernedExecutionRefused { code, detail } => (
             AdmissionRefusalBoundary::Internal,
             AdmissionRefusalCode::InvariantViolation,
             AdmissionRefusalDetails::Invariant {
-                message: format!(
-                    "test-only native correspondence precursor refused at {code:?}: {detail}"
-                ),
+                message: format!("native governed execution refused at {code:?}: {detail}"),
             },
         ),
         EngineError::GovernedRefusal(refusal) => (
@@ -9315,28 +11245,22 @@ fn history_lock_path(admissions_dir: &Path, lock: &AdmissionLock) -> PathBuf {
 }
 
 fn boottime_ns() -> Result<u64, EngineError> {
-    let uptime = fs::read_to_string("/proc/uptime")?;
-    let value = uptime
-        .split_whitespace()
-        .next()
-        .ok_or_else(|| EngineError::Invariant("/proc/uptime is empty".into()))?;
-    let (seconds, fraction) = value.split_once('.').unwrap_or((value, "0"));
-    let seconds = seconds
-        .parse::<u64>()
-        .map_err(|error| EngineError::Invariant(format!("invalid /proc/uptime: {error}")))?;
-    let mut nanos = fraction
-        .as_bytes()
-        .iter()
-        .take(9)
-        .fold(0_u64, |value, byte| {
-            value
-                .saturating_mul(10)
-                .saturating_add(u64::from(byte.saturating_sub(b'0')))
-        });
-    for _ in fraction.len().min(9)..9 {
-        nanos = nanos.saturating_mul(10);
+    let sample = clock_gettime(ClockId::CLOCK_BOOTTIME)
+        .map_err(|error| EngineError::Invariant(format!("CLOCK_BOOTTIME unavailable: {error}")))?;
+    let seconds = u64::try_from(sample.tv_sec())
+        .map_err(|_| EngineError::Invariant("CLOCK_BOOTTIME returned negative seconds".into()))?;
+    let nanoseconds = u64::try_from(sample.tv_nsec()).map_err(|_| {
+        EngineError::Invariant("CLOCK_BOOTTIME returned negative nanoseconds".into())
+    })?;
+    if nanoseconds >= 1_000_000_000 {
+        return Err(EngineError::Invariant(
+            "CLOCK_BOOTTIME returned invalid nanoseconds".into(),
+        ));
     }
-    Ok(seconds.saturating_mul(1_000_000_000).saturating_add(nanos))
+    seconds
+        .checked_mul(1_000_000_000)
+        .and_then(|value| value.checked_add(nanoseconds))
+        .ok_or_else(|| EngineError::Invariant("CLOCK_BOOTTIME overflowed u64".into()))
 }
 
 fn token<T>(value: Result<T, nq_protocol::TokenError>) -> Result<T, EngineError> {
@@ -9388,10 +11312,14 @@ fn unix_acquisition_outcome(outcome: UnixAcquisitionOutcome) -> AcquisitionOutco
         UnixAcquisitionOutcome::Response => AcquisitionOutcome::Response,
         UnixAcquisitionOutcome::InvalidRequestFraming { message }
         | UnixAcquisitionOutcome::MalformedFraming { message } => {
-            AcquisitionOutcome::MalformedFraming { message }
+            AcquisitionOutcome::MalformedFraming {
+                message: crate::runner::bounded_acquisition_detail(message),
+            }
         }
         UnixAcquisitionOutcome::RequestWriteFailed { message } => {
-            AcquisitionOutcome::RequestWriteFailed { message }
+            AcquisitionOutcome::RequestWriteFailed {
+                message: crate::runner::bounded_acquisition_detail(message),
+            }
         }
         UnixAcquisitionOutcome::Timeout { phase } => AcquisitionOutcome::ExchangeTimeout {
             phase: match phase {
@@ -9402,15 +11330,17 @@ fn unix_acquisition_outcome(outcome: UnixAcquisitionOutcome) -> AcquisitionOutco
         UnixAcquisitionOutcome::OutputTooLarge => AcquisitionOutcome::OutputTooLarge,
         UnixAcquisitionOutcome::StderrTooLarge => AcquisitionOutcome::StderrTooLarge,
         UnixAcquisitionOutcome::Eof => AcquisitionOutcome::Eof,
-        UnixAcquisitionOutcome::Disconnect { message } => {
-            AcquisitionOutcome::Disconnect { message }
-        }
-        UnixAcquisitionOutcome::MalformedJson { message } => {
-            AcquisitionOutcome::MalformedJson { message }
-        }
+        UnixAcquisitionOutcome::Disconnect { message } => AcquisitionOutcome::Disconnect {
+            message: crate::runner::bounded_acquisition_detail(message),
+        },
+        UnixAcquisitionOutcome::MalformedJson { message } => AcquisitionOutcome::MalformedJson {
+            message: crate::runner::bounded_acquisition_detail(message),
+        },
         UnixAcquisitionOutcome::HelperExited { code } => AcquisitionOutcome::HelperExited { code },
         UnixAcquisitionOutcome::NotRunning => AcquisitionOutcome::NotRunning,
-        UnixAcquisitionOutcome::IoFailed { message } => AcquisitionOutcome::IoFailed { message },
+        UnixAcquisitionOutcome::IoFailed { message } => AcquisitionOutcome::IoFailed {
+            message: crate::runner::bounded_acquisition_detail(message),
+        },
     }
 }
 
@@ -9455,6 +11385,14 @@ pub(crate) fn acquisition_code(outcome: &AcquisitionOutcome) -> &'static str {
 
 fn timestamp(value: DateTime<Utc>) -> String {
     value.to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn deadline_timestamp(value: DateTime<Utc>) -> String {
+    if value.timestamp_subsec_nanos() % 1_000_000 == 0 {
+        timestamp(value)
+    } else {
+        value.to_rfc3339_opts(SecondsFormat::Nanos, true)
+    }
 }
 
 fn parse_timestamp(value: &str) -> Result<DateTime<Utc>, EngineError> {
@@ -11550,7 +13488,10 @@ fn finding_from_row(row: nq_store::FindingSnapshotRow) -> Result<FindingSnapshot
 fn status_from_row(row: nq_store::StatusSnapshotRow) -> Result<ComponentStatus, EngineError> {
     let details: Value = serde_json::from_str(&row.detail_json)
         .map_err(|error| EngineError::Invariant(error.to_string()))?;
-    if row.component_kind == "instance" {
+    if matches!(
+        row.component_kind.as_str(),
+        "instance" | "diagnostic_execution"
+    ) {
         return Err(EngineError::Invariant(
             "nq.status_snapshot.v1 cannot emit governed collection results; use v3".into(),
         ));
@@ -11676,37 +13617,51 @@ fn status_component_v2(
             "generic evaluation status is not authoritative; reopen evaluation_runs".into(),
         ));
     }
-    let detail = if kind == ComponentKind::Instance {
+    let detail = if matches!(
+        kind,
+        ComponentKind::Instance | ComponentKind::DiagnosticExecution
+    ) {
         let result = decode_collection_outcome(detail_json.as_bytes()).map_err(|error| {
             EngineError::Invariant(format!(
-                "instance status {component_id} is not a valid versioned collection result: {error}"
+                "run-bearing status {component_id} is not a valid versioned collection result: {error}"
             ))
         })?;
-        if result.instance_id != component_id {
+        let projection = if kind == ComponentKind::Instance {
+            if result.instance_id != component_id {
+                return Err(EngineError::Invariant(format!(
+                    "instance status {} embeds result for {}",
+                    component_id, result.instance_id
+                )));
+            }
+            let projection = instance_status_projection(&result)?;
+            (projection.state, projection.code)
+        } else {
+            if result.run_id.as_deref() != Some(component_id.as_str()) {
+                return Err(EngineError::Invariant(format!(
+                    "diagnostic-execution status {} embeds another run identity",
+                    component_id
+                )));
+            }
+            governed_execution_status_projection(&result)?
+        };
+        if state != projection.0 || code != projection.1 {
             return Err(EngineError::Invariant(format!(
-                "instance status {} embeds result for {}",
-                component_id, result.instance_id
-            )));
-        }
-        let projection = instance_status_projection(&result)?;
-        if state != projection.state || code != projection.code {
-            return Err(EngineError::Invariant(format!(
-                "instance status {component_id} projects ({state}, {code}) but its typed result requires ({}, {})",
-                projection.state, projection.code
+                "run-bearing status {component_id} projects ({state}, {code}) but its typed result requires ({}, {})",
+                projection.0, projection.1
             )));
         }
         validate_collection_run(store, &result)?;
         if let CollectionResult::Rejected { refusal } = &result.result {
             let run_id = result.run_id.as_deref().ok_or_else(|| {
                 EngineError::Invariant(format!(
-                    "rejected instance status {component_id} has no run identity"
+                    "rejected run-bearing status {component_id} has no run identity"
                 ))
             })?;
             let custody_row = store
                 .rejected_custody_by_refusal_id(&refusal.refusal_id)?
                 .ok_or_else(|| {
                     EngineError::Invariant(format!(
-                        "rejected instance status {} names refusal {} without linked custody",
+                        "rejected run-bearing status {} names refusal {} without linked custody",
                         component_id, refusal.refusal_id
                     ))
                 })?;
@@ -11716,7 +13671,7 @@ fn status_component_v2(
                 || custody.refusal != *refusal
             {
                 return Err(EngineError::Invariant(format!(
-                    "rejected instance status {} disagrees with linked refusal {} or run {}",
+                    "rejected run-bearing status {} disagrees with linked refusal {} or run {}",
                     component_id, refusal.refusal_id, run_id
                 )));
             }
@@ -12071,6 +14026,7 @@ fn parse_component_kind(value: &str) -> Result<ComponentKind, EngineError> {
         "admission" => Ok(ComponentKind::Admission),
         "scheduler" => Ok(ComponentKind::Scheduler),
         "instance" => Ok(ComponentKind::Instance),
+        "diagnostic_execution" => Ok(ComponentKind::DiagnosticExecution),
         "evaluation" => Ok(ComponentKind::Evaluation),
         "notification" => Ok(ComponentKind::Notification),
         _ => Err(EngineError::Invariant(format!("unknown component {value}"))),
@@ -15085,6 +17041,204 @@ sys.stdout.write("\n")
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn governed_run_level_history_accepts_only_exact_zero_evaluation_origin_shape() {
+        let mut artifact = DiagnosticExecutionV2::decode_canonical(include_bytes!(
+            "../../../diagnostic-contract-v2/fixtures/valid/completed_unqualified_clock.json"
+        ))
+        .expect("checked V2 fixture");
+        assert_ne!(
+            artifact.profile.id,
+            nq_profiles::conformance::PROFILE_ID,
+            "the production diagnostic profile remains distinct from the native child profile"
+        );
+        artifact.profile_semantic_id = Sha256Digest::parse(
+            profile_semantic_id(nq_profiles::conformance::MODULE.descriptor())
+                .expect("canonical conformance semantic identity")
+                .as_str()
+                .to_owned(),
+        )
+        .expect("canonical conformance semantic digest");
+
+        validate_governed_run_level_v2_origin_shape(&artifact, None)
+            .expect("exact governed run-level origin accepts zero evaluations");
+
+        assert!(matches!(
+            validate_governed_run_level_v2_origin_shape(
+                &artifact,
+                Some("evaluation:near-miss"),
+            ),
+            Err(EngineError::Invariant(message))
+                if message.contains("claims a detector evaluation")
+        ));
+
+        artifact.profile_semantic_id = Sha256Digest::parse(format!("sha256:{}", "f".repeat(64)))
+            .expect("near-miss semantic identity");
+        assert!(matches!(
+            validate_governed_run_level_v2_origin_shape(&artifact, None),
+            Err(EngineError::Invariant(message))
+                if message.contains("not bound to canonical nq.conformance/v1 semantics")
+        ));
+    }
+
+    #[test]
+    fn governed_history_requires_exact_derived_native_child_request() {
+        let launch_digest = nq_protocol::sha256_bytes(b"historical-governed-launch");
+        let launch = RecordRef {
+            schema: nq_host_role_contract::Token::parse(RuntimeSchema::ExecutionLaunchV1.as_str())
+                .expect("execution launch schema"),
+            record_id: launch_digest.clone(),
+            bytes_digest: launch_digest,
+        };
+        let outer_request_id = "outer-request-history-exact";
+        let child = native_child_request_id(outer_request_id, &launch)
+            .expect("deterministic native child request");
+
+        validate_governed_native_request_correspondence(
+            "sha256:artifact",
+            outer_request_id,
+            &launch,
+            child.as_str(),
+            child.as_str(),
+        )
+        .expect("exact provider and run child request correspondence");
+
+        assert!(matches!(
+            validate_governed_native_request_correspondence(
+                "sha256:artifact",
+                outer_request_id,
+                &launch,
+                "nq-provider-substituted",
+                child.as_str(),
+            ),
+            Err(EngineError::Invariant(message))
+                if message.contains("substitutes its exact native child request")
+        ));
+        assert!(matches!(
+            validate_governed_native_request_correspondence(
+                "sha256:artifact",
+                outer_request_id,
+                &launch,
+                child.as_str(),
+                "nq-provider-substituted",
+            ),
+            Err(EngineError::Invariant(message))
+                if message.contains("substitutes its exact native child request")
+        ));
+    }
+
+    #[test]
+    fn governed_history_binds_provider_deadline_to_exact_launch_instant() {
+        let provider_deadline = DateTime::parse_from_rfc3339("2026-07-29T14:00:00.123456789Z")
+            .expect("provider deadline")
+            .with_timezone(&Utc);
+
+        validate_governed_attempt_deadline_correspondence(
+            "sha256:artifact",
+            provider_deadline,
+            "2026-07-29T10:00:00.123456789-04:00",
+        )
+        .expect("different RFC 3339 rendering of the exact instant passes");
+
+        for substituted in [
+            "2026-07-29T14:00:00.123456788Z",
+            "2026-07-29T14:00:00.123456790Z",
+        ] {
+            assert!(matches!(
+                validate_governed_attempt_deadline_correspondence(
+                    "sha256:artifact",
+                    provider_deadline,
+                    substituted,
+                ),
+                Err(EngineError::Invariant(message))
+                    if message.contains("substitutes its exact launch attempt deadline")
+            ));
+        }
+        assert!(matches!(
+            validate_governed_attempt_deadline_correspondence(
+                "sha256:artifact",
+                provider_deadline,
+                "not-an-instant",
+            ),
+            Err(EngineError::Invariant(message))
+                if message.contains("is not an RFC 3339 instant")
+        ));
+    }
+
+    #[test]
+    fn historical_runtime_snapshot_is_checkpoint_exact_and_never_latest() {
+        fn input(value: &Value) -> nq_store::RuntimeRecordInput {
+            let validated = ValidatedRuntimeRecord::validate_value(value.clone())
+                .expect("ratified specimen record validates");
+            nq_store::RuntimeRecordInput {
+                record_id: validated.record_id().to_string(),
+                record_schema: validated.schema().as_str().to_owned(),
+                canonical_bytes: CanonicalDocument::from_canonical_bytes(
+                    validated.canonical_bytes().to_vec(),
+                )
+                .expect("ratified specimen bytes remain canonical"),
+                committed_at: "2026-07-29T14:00:00Z".to_owned(),
+            }
+        }
+
+        let specimen: Value = serde_json::from_slice(
+            nq_host_role_contract::verified_corrected_specimen()
+                .expect("verified embedded ratified specimen"),
+        )
+        .expect("embedded ratified specimen");
+        let records = specimen["records"]
+            .as_object()
+            .expect("ratified specimen records");
+        let first = input(&records["role_manifest"]);
+        let later = input(&records["cohort_manifest"]);
+        let first_id = Sha256Digest::parse(first.record_id.clone()).expect("first record digest");
+        let later_id = Sha256Digest::parse(later.record_id.clone()).expect("later record digest");
+        let first_checkpoint_id =
+            nq_protocol::sha256_bytes(b"history-exact-checkpoint").to_string();
+        let later_checkpoint_id =
+            nq_protocol::sha256_bytes(b"history-latest-checkpoint").to_string();
+        let directory = tempfile::tempdir().expect("store directory");
+        let mut store =
+            Store::initialize(directory.path().join("nq.db")).expect("runtime history store");
+        let dependency = test_runtime_dependency("history-exact-checkpoint");
+        store
+            .establish_runtime_dependency_trust_root(&dependency.trust_anchor_id)
+            .expect("establish test runtime dependency root");
+        let first_checkpoint = store
+            .append_runtime_records(&nq_store::RuntimeRecordBatchInput {
+                checkpoint_id: first_checkpoint_id.clone(),
+                expected_predecessor_checkpoint_id: None,
+                expected_predecessor_ledger_root: None,
+                dependency: dependency.clone(),
+                records: vec![first],
+            })
+            .expect("append first exact runtime checkpoint");
+        store
+            .append_runtime_records(&nq_store::RuntimeRecordBatchInput {
+                checkpoint_id: later_checkpoint_id,
+                expected_predecessor_checkpoint_id: Some(first_checkpoint.checkpoint.checkpoint_id),
+                expected_predecessor_ledger_root: Some(
+                    first_checkpoint.checkpoint.checkpoint_ledger_root,
+                ),
+                dependency,
+                records: vec![later],
+            })
+            .expect("append later runtime checkpoint");
+
+        let exact = store
+            .runtime_checkpoint_by_id(&first_checkpoint_id)
+            .expect("exact historical checkpoint lookup")
+            .expect("first checkpoint remains available");
+        let snapshot = reopen_historical_runtime_snapshot(&store, &exact)
+            .expect("exact historical runtime snapshot");
+        assert_eq!(snapshot.len(), 1);
+        assert!(snapshot.get(&first_id).is_some());
+        assert!(
+            snapshot.get(&later_id).is_none(),
+            "later current topology cannot fall into the historical snapshot"
+        );
     }
 
     #[test]

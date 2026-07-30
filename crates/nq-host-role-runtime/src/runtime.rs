@@ -23,6 +23,7 @@ use nq_store::{
 use serde_json::{Value, json};
 
 use crate::{
+    AuthenticatedRuntimeDependencyClosure, DependencyCustodyError, ExactDependencyCustodyBinding,
     ExternalDependencyAvailability, GovernedPrelaunchRequest, InspectorPage, InspectorProjection,
     InspectorProjectionState, NativeDeadlinePrelaunchRequest, NativeDeadlineProvenance,
     PreparedGovernedInvocation, Result, RuntimeDependencies, RuntimeError,
@@ -32,6 +33,10 @@ use crate::{
 const PROVIDER_INTAKE_SCHEMA: &str = "nq.provider_intake.v1";
 const LINUX_BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+#[cfg(feature = "test-support")]
+#[path = "test_support.rs"]
+pub mod test_support;
 
 /// One exact canonical record proposed for atomic append.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -186,6 +191,7 @@ struct GovernedPreflight {
     raw_capacity_bytes: u64,
     dependency_closure_capacity_bytes: u64,
     diagnostic_artifact_capacity_bytes: u64,
+    projection_capsule_capacity_bytes: u64,
     final_capacity_bytes: u64,
     protected_failure_capacity_bytes: u64,
     complete_records: RuntimeRecordSet,
@@ -802,6 +808,7 @@ impl HostRoleRuntime {
             dependency_closure_capacity_bytes: preflight.dependency_closure_capacity_bytes,
             raw_capacity_bytes: preflight.raw_capacity_bytes,
             diagnostic_artifact_capacity_bytes: preflight.diagnostic_artifact_capacity_bytes,
+            projection_capsule_capacity_bytes: preflight.projection_capsule_capacity_bytes,
             final_capacity_bytes: preflight.final_capacity_bytes,
             protected_failure_capacity_bytes: preflight.protected_failure_capacity_bytes,
         };
@@ -1056,6 +1063,14 @@ impl HostRoleRuntime {
             .get("diagnostic_artifact_bytes")
             .and_then(Value::as_u64)
             .ok_or(RuntimeError::PrelaunchIdentityMismatch)?;
+        // The capsule is the complete exact Store projection carrier: it is
+        // charged wholly to the reservation's projection component. It must
+        // never borrow normalization or delivery-ledger capacity.
+        let projection_capsule_capacity_bytes = component_bounds
+            .get("projected_bytes")
+            .and_then(Value::as_u64)
+            .filter(|capacity| *capacity > 0)
+            .ok_or(RuntimeError::PrelaunchIdentityMismatch)?;
         let reserved_bytes = reservation.record().as_value()["reserved_bytes"]
             .as_u64()
             .ok_or(RuntimeError::PrelaunchIdentityMismatch)?;
@@ -1079,6 +1094,7 @@ impl HostRoleRuntime {
             raw_capacity_bytes,
             dependency_closure_capacity_bytes,
             diagnostic_artifact_capacity_bytes,
+            projection_capsule_capacity_bytes,
             final_capacity_bytes,
             protected_failure_capacity_bytes,
             complete_records: candidate,
@@ -1663,26 +1679,33 @@ fn reopen_checkpoint_dependencies(
             ));
         }
     };
-    if canonical_custody.digest() != custody_digest.as_str()
-        || u64::try_from(canonical_custody.as_bytes().len()).map_err(|_| {
+    let binding = ExactDependencyCustodyBinding::new(
+        generation_id,
+        trust_anchor_id,
+        custody_digest,
+        custody_length,
+    )
+    .map_err(|error| checkpoint_dependency_binding_error(checkpoint_id, error))?;
+    AuthenticatedRuntimeDependencyClosure::reopen_bound(canonical_custody.as_bytes(), &binding)
+        .map_err(|error| checkpoint_dependency_binding_error(checkpoint_id, error))
+}
+
+fn checkpoint_dependency_binding_error(
+    checkpoint_id: &str,
+    error: DependencyCustodyError,
+) -> RuntimeError {
+    match error {
+        DependencyCustodyError::CustodyBindingLengthZero
+        | DependencyCustodyError::CustodyLengthOverflow
+        | DependencyCustodyError::CustodyLengthMismatch { .. }
+        | DependencyCustodyError::CustodyDigestMismatch { .. } => {
             RuntimeError::CheckpointDependencyCorrupt {
                 checkpoint_id: checkpoint_id.to_owned(),
-                reason: "dependency custody length overflowed".to_owned(),
+                reason: error.to_string(),
             }
-        })? != custody_length
-    {
-        return Err(RuntimeError::CheckpointDependencyCorrupt {
-            checkpoint_id: checkpoint_id.to_owned(),
-            reason: "dependency custody differs from its checkpoint commitment".to_owned(),
-        });
+        }
+        other => RuntimeError::from(other),
     }
-    let custody = crate::RuntimeDependencyGenerationCustody::decode_canonical_closure(
-        canonical_custody.as_bytes(),
-    )?;
-    if custody.generation_id() != &generation_id || custody.trust_anchor_id()? != *trust_root {
-        return Err(RuntimeError::RuntimeDependencyGenerationSubstitution);
-    }
-    custody.reopen(trust_root)
 }
 
 fn combined_historical_validation_context<'a>(
@@ -1941,6 +1964,35 @@ mod tests {
 
     const RECORDS: &str =
         include_str!("../../nq-host-role-contract/assets/host-role-runtime-records.v1.json");
+
+    #[test]
+    fn checkpoint_context_wraps_only_exact_binding_failures_as_corruption() {
+        for error in [
+            DependencyCustodyError::CustodyBindingLengthZero,
+            DependencyCustodyError::CustodyLengthOverflow,
+            DependencyCustodyError::CustodyLengthMismatch {
+                expected: 17,
+                observed: 19,
+            },
+            DependencyCustodyError::CustodyDigestMismatch {
+                expected: sha256_bytes(b"expected"),
+                observed: sha256_bytes(b"observed"),
+            },
+        ] {
+            assert!(matches!(
+                checkpoint_dependency_binding_error("checkpoint", error),
+                RuntimeError::CheckpointDependencyCorrupt { checkpoint_id, .. }
+                    if checkpoint_id == "checkpoint"
+            ));
+        }
+        assert!(matches!(
+            checkpoint_dependency_binding_error(
+                "checkpoint",
+                DependencyCustodyError::DuplicateExternalSourceRequirement,
+            ),
+            RuntimeError::DuplicateExternalSourceRequirement
+        ));
+    }
 
     struct Fixture {
         dependencies: RuntimeDependencies,
@@ -2865,7 +2917,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::too_many_lines)]
-    fn prepared_custody_forwarders_preserve_exact_launch_and_transition_order() {
+    fn prepared_custody_forwarders_preserve_exact_launch_and_pre_final_transition_order() {
         let fixture = fixture();
         let directory = tempdir().expect("directory");
         let database = directory.path().join("ordered-forwarders.db");
@@ -2915,12 +2967,6 @@ mod tests {
             prepared.claim_derivation(claim.clone()).is_err(),
             "derivation cannot skip acquisition custody"
         );
-        assert!(
-            prepared
-                .seal_final_closure(b"not-a-closure".to_vec())
-                .is_err(),
-            "final closure cannot skip acquisition and derivation"
-        );
         assert_eq!(
             prepared.live_custody_state().expect("launch remains live"),
             GovernedCustodyState::LaunchClaimed
@@ -2938,12 +2984,6 @@ mod tests {
         assert_eq!(
             prepared.live_custody_state().expect("acquisition state"),
             GovernedCustodyState::AcquisitionSealed
-        );
-        assert!(
-            prepared
-                .seal_final_closure(b"still-not-a-closure".to_vec())
-                .is_err(),
-            "final closure cannot skip the derivation claim"
         );
         assert!(
             prepared
@@ -2974,36 +3014,11 @@ mod tests {
             prepared.claim_derivation(claim).is_err(),
             "derivation claim is one-use"
         );
-
-        let mut closure = json!({
-            "schema": "nq.governed_execution_custody_closure.v1",
-            "closure_id": sha256_bytes(b"placeholder closure"),
-            "diagnostic": {
-                "schema": "nq.diagnostic_execution.v2",
-                "fixture": "ordered custody capacity component",
-            },
-        });
-        seal_semantic_identity(&mut closure, "closure_id").expect("closure identity");
-        let closure_bytes = canonical_json_bytes(&closure).expect("closure bytes");
-        prepared
-            .seal_final_closure(closure_bytes.clone())
-            .expect("final closure follows derivation");
         assert_eq!(
             prepared
-                .final_closure_bytes()
-                .expect("reopen closure")
-                .expect("closure present"),
-            closure_bytes
-        );
-        assert_eq!(
-            prepared.live_custody_state().expect("final state"),
-            GovernedCustodyState::FinalClosureIndexPending
-        );
-        assert!(
-            prepared
-                .seal_final_closure(b"second closure".to_vec())
-                .is_err(),
-            "final closure seals exactly once"
+                .live_custody_state()
+                .expect("derivation remains pending Store-owned publication"),
+            GovernedCustodyState::DerivationClaimed
         );
     }
 

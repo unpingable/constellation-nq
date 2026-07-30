@@ -1,0 +1,77 @@
+{
+  "schema": "nq.custody_carrier_map.v1",
+  "rule_identity": "nq.custody_carrier_map.v1",
+  "rule_version": "1",
+  "canonicalization_identity": "rfc8785-jcs-sha256-v1",
+  "alignment_bytes": 4096,
+  "semantic_components": [
+    "request_and_decision_bytes",
+    "raw_evidence_bytes",
+    "normalized_bytes",
+    "projected_bytes",
+    "diagnostic_artifact_bytes",
+    "dependency_closure_bytes",
+    "commit_checkpoint_overhead_bytes",
+    "mandatory_delivery_ledger_bytes"
+  ],
+  "component_mappings": [
+    {
+      "semantic_component": "request_and_decision_bytes",
+      "primary_carrier": "canonical_record_extent",
+      "constraint": "exact_bounded_request_decision_records_plus_format_fit_m"
+    },
+    {
+      "semantic_component": "raw_evidence_bytes",
+      "primary_carrier": "arena_raw_section",
+      "constraint": "typed_acquisition_carrier_plus_framing_fit_r"
+    },
+    {
+      "semantic_component": "normalized_bytes",
+      "primary_carrier": "arena_final_closure",
+      "constraint": "capsule_manifest_accounts_field_and_v_covers_it"
+    },
+    {
+      "semantic_component": "projected_bytes",
+      "primary_carrier": "arena_final_closure",
+      "constraint": "capsule_manifest_accounts_field_and_v_covers_it"
+    },
+    {
+      "semantic_component": "diagnostic_artifact_bytes",
+      "primary_carrier": "arena_final_closure",
+      "constraint": "closed_terminal_artifact_branch_fits_v"
+    },
+    {
+      "semantic_component": "dependency_closure_bytes",
+      "primary_carrier": "arena_dependency_section",
+      "constraint": "authenticated_dependency_closure_fits_d"
+    },
+    {
+      "semantic_component": "commit_checkpoint_overhead_bytes",
+      "primary_carrier": "canonical_record_extent",
+      "constraint": "capacity_reservation_launch_checkpoint_projection_records_fit_m"
+    },
+    {
+      "semantic_component": "mandatory_delivery_ledger_bytes",
+      "primary_carrier": "delivery_ledger_extent",
+      "constraint": "policy_maximal_delivery_chain_plus_framing_fits_l"
+    }
+  ],
+  "equations": {
+    "semantic_sum": "S=sum_checked(eight_semantic_components)",
+    "reservation_exactness": "total_required_bytes=S;reserved_bytes=S",
+    "arena_layout": "F=arena_layout_v1(D,R,V,P,A)",
+    "append_extent_layout": "extent_length=align_up_checked(3*A+payload_bound,A)",
+    "retained_charge": "T=F+M+L",
+    "store_usage": "U=B+G+sum(retained_or_charged_T)+missing_committed_bytes",
+    "post_allocation_usage": "post=U+candidate_T",
+    "single_execution_limit": "max(S,V)<=maximum_single_execution_closure_bytes",
+    "delivery_not_required": "s_delivery=0;L=0;queue_slots=0"
+  },
+  "nonclaims": [
+    "the carrier map performs no filesystem allocation",
+    "semantic adequacy does not establish physical carrier allocation",
+    "unused capacity in one carrier cannot be borrowed by another",
+    "the carrier map grants no invocation, reliance, authorization, or action",
+    "exact source or asset digest correspondence does not establish deployed build or live execution correspondence"
+  ]
+}

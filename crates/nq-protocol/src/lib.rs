@@ -5,14 +5,20 @@
 //! the common envelope, echo, capability, and negotiated-bound laws, while a
 //! compiled profile module validates coverage and observation payloads.
 
+mod bounded_json;
 mod builder;
 mod canonical;
 mod conformance;
 mod framing;
+mod governed_derivation;
 mod ids;
 mod model;
 mod validation;
 
+pub use bounded_json::{
+    BoundedJsonDescriptor, BoundedJsonDescriptorError, BoundedJsonError, MAX_BOUNDED_JSON_DEPTH,
+    MAX_I_JSON_INTEGER_DECIMAL_WIDTH,
+};
 pub use builder::{EvidenceReportBuilder, HelperRequestBuilder};
 pub use canonical::{
     CanonicalizationError, DigestParseError, Sha256Digest, canonical_json_bytes, semantic_digest,
@@ -25,6 +31,10 @@ pub use conformance::{
     verify_embedded_conformance_corpus,
 };
 pub use framing::{FramingError, decode_ndjson, encode_ndjson, parse_request, parse_response};
+pub use governed_derivation::{
+    GOVERNED_DERIVATION_IDENTITY_SCHEMA, GovernedDerivationIdentityInput,
+    GovernedDerivationRecordRef, governed_derivation_identity,
+};
 pub use ids::{
     Capability, CoverageKind, ErrorCode, ImplementationName, InstanceId, ObservationKind,
     ProfileId, ProfileVersion, RequestId, ScopeKind, SubjectId, TokenError, VantageKind,

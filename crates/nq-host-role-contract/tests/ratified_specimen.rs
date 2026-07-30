@@ -194,7 +194,7 @@ fn all_ratified_schema_assets_are_embedded_and_all_carriers_parse() {
         manifest.assets.len(),
         RuntimeSchema::ALL
             .iter()
-            .filter(|schema| !schema.is_native_correspondence())
+            .filter(|schema| schema.is_frozen_3a())
             .count()
             + 1
     );
@@ -208,7 +208,7 @@ fn all_ratified_schema_assets_are_embedded_and_all_carriers_parse() {
         observed,
         RuntimeSchema::ALL
             .iter()
-            .filter(|schema| !schema.is_native_correspondence())
+            .filter(|schema| schema.is_frozen_3a())
             .map(|schema| schema.as_str())
             .collect()
     );
@@ -234,6 +234,183 @@ fn frozen_generic_external_prechecks_validate_but_cannot_mint_native_corresponde
         Err(ContractError::InvocationJoin(
             "launch correspondence requires exactly one applicable profile qualifier"
         ))
+    ));
+}
+
+#[test]
+fn launch_budget_refuses_submillisecond_deadline_widening_or_narrowing() {
+    let (values, _, _) = specimen();
+    for hostile_deadline in [
+        "2026-07-28T22:02:32.000000001Z",
+        "2026-07-28T22:02:31.999999999Z",
+    ] {
+        let mut launch = values["execution_launch"].clone();
+        launch["attempt_deadline"] = json!(hostile_deadline);
+        assert!(
+            matches!(
+                ValidatedRuntimeRecord::validate_value(launch),
+                Err(ContractError::LaunchDeadlineSubstitution)
+            ),
+            "{hostile_deadline} must not satisfy the exact 30000ms launch budget"
+        );
+    }
+}
+
+#[test]
+fn invocation_decision_vocabulary_and_custody_shapes_match_the_ratified_schema() {
+    let (values, _, _) = specimen();
+    let accepted = values["invocation_decision"].clone();
+    ValidatedRuntimeRecord::validate_value(accepted.clone()).expect("accepted decision");
+
+    for state in [
+        "authentication_refused",
+        "authorization_refused",
+        "binding_refused",
+        "capability_refused",
+        "deadline_refused",
+        "stale_before_start",
+        "decommissioned_before_start",
+    ] {
+        let mut decision = accepted.clone();
+        decision["decision"] = json!(state);
+        decision["custody"] = json!({
+            "state": "not_applicable",
+            "reservation": null,
+        });
+        decision["nonclaims"] = json!([
+            "refusal does not establish diagnostic success",
+            "refusal does not authorize action",
+        ]);
+        ValidatedRuntimeRecord::validate_value(decision)
+            .unwrap_or_else(|error| panic!("{state} must remain representable: {error}"));
+    }
+
+    let mut custody_refused = accepted;
+    custody_refused["decision"] = json!("custody_refused");
+    custody_refused["custody"]["state"] = json!("refused");
+    custody_refused["nonclaims"] = json!([
+        "refusal does not establish diagnostic success",
+        "refusal does not authorize action",
+    ]);
+    ValidatedRuntimeRecord::validate_value(custody_refused)
+        .expect("custody refusal retains its exact reservation reference");
+}
+
+#[test]
+fn invocation_decision_refuses_stale_generic_states_and_custody_laundering() {
+    let (values, _, _) = specimen();
+    let accepted = values["invocation_decision"].clone();
+
+    for stale in ["refused", "unsupported", "failed_before_launch"] {
+        let mut decision = accepted.clone();
+        decision["decision"] = json!(stale);
+        assert!(
+            matches!(
+                ValidatedRuntimeRecord::validate_value(decision),
+                Err(ContractError::UnknownInvocationDecision(value)) if value == stale
+            ),
+            "{stale} must not survive as a generic invocation decision"
+        );
+    }
+
+    let mut accepted_without_reservation = accepted.clone();
+    accepted_without_reservation["custody"] = json!({
+        "state": "not_applicable",
+        "reservation": null,
+    });
+    assert!(matches!(
+        ValidatedRuntimeRecord::validate_value(accepted_without_reservation),
+        Err(ContractError::InvalidInvocationDecision)
+    ));
+
+    let mut refusal_with_reserved_custody = accepted.clone();
+    refusal_with_reserved_custody["decision"] = json!("authorization_refused");
+    refusal_with_reserved_custody["nonclaims"] = json!([
+        "refusal does not establish diagnostic success",
+        "refusal does not authorize action",
+    ]);
+    assert!(matches!(
+        ValidatedRuntimeRecord::validate_value(refusal_with_reserved_custody),
+        Err(ContractError::InvalidInvocationDecision)
+    ));
+
+    let mut refusal_with_acceptance_nonclaims = accepted;
+    refusal_with_acceptance_nonclaims["decision"] = json!("binding_refused");
+    refusal_with_acceptance_nonclaims["custody"] = json!({
+        "state": "not_applicable",
+        "reservation": null,
+    });
+    assert!(matches!(
+        ValidatedRuntimeRecord::validate_value(refusal_with_acceptance_nonclaims),
+        Err(ContractError::InvalidInvocationDecision)
+    ));
+}
+
+#[test]
+fn custody_reservation_refusal_is_representable_without_inferring_capacity_failure() {
+    let (values, _, _) = specimen();
+    let reserved = values["custody_reservation"].clone();
+
+    let mut refused_without_bytes = reserved.clone();
+    refused_without_bytes["decision"] = json!("refused");
+    refused_without_bytes["reserved_bytes"] = json!(0);
+    ValidatedRuntimeRecord::validate_value(refused_without_bytes)
+        .expect("an explicit capacity refusal remains representable");
+
+    let mut refused_with_sufficient_numeric_capacity = reserved;
+    refused_with_sufficient_numeric_capacity["decision"] = json!("refused");
+    ValidatedRuntimeRecord::validate_value(refused_with_sufficient_numeric_capacity)
+        .expect("refusal does not imply the converse of the reserved-capacity law");
+}
+
+#[test]
+fn custody_reservation_refuses_arithmetic_state_and_nonclaim_laundering() {
+    let (values, _, _) = specimen();
+    let reserved = values["custody_reservation"].clone();
+
+    for decision in ["reserved", "refused"] {
+        let mut inconsistent_total = reserved.clone();
+        inconsistent_total["decision"] = json!(decision);
+        inconsistent_total["total_required_bytes"] = json!(
+            inconsistent_total["total_required_bytes"]
+                .as_u64()
+                .expect("total")
+                + 1
+        );
+        assert!(
+            matches!(
+                ValidatedRuntimeRecord::validate_value(inconsistent_total),
+                Err(ContractError::InvalidReservationArithmetic)
+            ),
+            "{decision} cannot launder component arithmetic"
+        );
+    }
+
+    let mut under_reserved = reserved.clone();
+    under_reserved["reserved_bytes"] = json!(
+        under_reserved["total_required_bytes"]
+            .as_u64()
+            .expect("total")
+            - 1
+    );
+    assert!(matches!(
+        ValidatedRuntimeRecord::validate_value(under_reserved),
+        Err(ContractError::InvalidReservationArithmetic)
+    ));
+
+    let mut unknown_state = reserved.clone();
+    unknown_state["decision"] = json!("unavailable");
+    assert!(matches!(
+        ValidatedRuntimeRecord::validate_value(unknown_state),
+        Err(ContractError::UnknownCustodyReservationDecision(state))
+            if state == "unavailable"
+    ));
+
+    let mut missing_nonclaim = reserved;
+    missing_nonclaim["nonclaims"] = json!(["reservation does not establish diagnostic success"]);
+    assert!(matches!(
+        ValidatedRuntimeRecord::validate_value(missing_nonclaim),
+        Err(ContractError::InvalidCustodyReservation)
     ));
 }
 

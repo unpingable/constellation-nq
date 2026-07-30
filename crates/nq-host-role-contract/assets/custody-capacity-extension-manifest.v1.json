@@ -1,0 +1,84 @@
+{
+  "schema": "nq.host_role_contract_capacity_extension_package.v1",
+  "extension_identity": "nq.custody_capacity_contract.v1",
+  "source_record": {
+    "repository": "skunkworks",
+    "path": "audits/nq-host-role-runtime-seam-v1/records/physical-aggregate-custody-capacity-supplement.md",
+    "sha256": "sha256:c455c06a36ec38b0ddb6c589c046890267fb5409b9a9a841ca4762786622c5ff"
+  },
+  "digest_basis": "sha256 of exact embedded asset bytes",
+  "schema_assets": [
+    {
+      "schema": "nq.custody_reservation_plan.v1",
+      "source_path": "schemas/nq.custody_reservation_plan.v1.schema.json",
+      "sha256": "sha256:ab7a8deb0b122e08d74f8df65ef975e2f04b6c843802f165f24edee1f9a50855"
+    },
+    {
+      "schema": "nq.custody_capacity_allocation.v1",
+      "source_path": "schemas/nq.custody_capacity_allocation.v1.schema.json",
+      "sha256": "sha256:d0b70a0a8746520024175d8d4f8a2496bee08d36672325a305f84a2339aac21e"
+    },
+    {
+      "schema": "nq.custody_carrier_map.v1",
+      "source_path": "schemas/nq.custody_carrier_map.v1.schema.json",
+      "sha256": "sha256:9c911882c6fface9dc8882ecc1ed76a240380715faa5a160afef44e84816b770"
+    },
+    {
+      "schema": "nq.v3_projection_capsule_bound_manifest.v1",
+      "source_path": "schemas/nq.v3_projection_capsule_bound_manifest.v1.schema.json",
+      "sha256": "sha256:9d52629189cbfbd34a01b1b23161da1bbfb2296af70d42f594437a7ff166ef41"
+    },
+    {
+      "schema": "nq.v3_projection_capsule_bound_manifest.v2",
+      "source_path": "schemas/nq.v3_projection_capsule_bound_manifest.v2.schema.json",
+      "sha256": "sha256:3dc592698ede4b619f9a198020754b03b13877122a29cea33f15ce690fae313a"
+    },
+    {
+      "schema": "nq.v3_projection_capsule_bound_qualification.v1",
+      "source_path": "schemas/nq.v3_projection_capsule_bound_qualification.v1.schema.json",
+      "sha256": "sha256:9566f17f30c03bffcdd9f0921e6b49b9e4dda55b19ad38d0ffd676d05dd73c5c"
+    }
+  ],
+  "static_assets": [
+    {
+      "identity": "nq.custody_carrier_map.v1",
+      "schema": "nq.custody_carrier_map.v1",
+      "source_path": "nq.custody_carrier_map.v1.json",
+      "sha256": "sha256:6fa5b977cbf3dc01481452aa08822053eaa3a71954ba0f11e3d7051f00d4c240"
+    },
+    {
+      "identity": "nq.v3_projection_capsule_bound_manifest.v1",
+      "schema": "nq.v3_projection_capsule_bound_manifest.v1",
+      "source_path": "nq.v3_projection_capsule_bound_manifest.v1.json",
+      "sha256": "sha256:99dcd05461f73757bfdbb51b58b0669b7a642191d15fadee9798eebfd4aab79f"
+    },
+    {
+      "identity": "nq.v3_projection_capsule_bound_manifest.v2",
+      "schema": "nq.v3_projection_capsule_bound_manifest.v2",
+      "source_path": "nq.v3_projection_capsule_bound_manifest.v2.json",
+      "sha256": "sha256:d8888e795aac1542aadbcfce7cca92ad93c665bde9a50fd136a0d3e59e086d48"
+    },
+    {
+      "identity": "nq.v3_projection_capsule_bound_qualification.v1",
+      "schema": "nq.v3_projection_capsule_bound_qualification.v1",
+      "source_path": "nq.v3_projection_capsule_bound_qualification.v1.json",
+      "sha256": "sha256:b2c50192b4d63d7a7b3961c3a1a9963d56489c044633e8f0e883b41d22d4a3e3"
+    }
+  ],
+  "qualification_gaps": [
+    {
+      "gate": "C3-STORE-OWNED-CAPACITY-ALLOCATION-CONSTRUCTION",
+      "status": "blocked",
+      "required_evidence": "Store-owned construction binding the exact qualified manifest, evaluator, source set, candidate output, and derived projection-capsule bound",
+      "consequence": "capacity allocation records remain authority-neutral and cannot enter product graph or completed delivery selection"
+    }
+  ],
+  "nonclaims": [
+    "capacity contract validation performs no filesystem allocation or Store mutation",
+    "a reservation plan grants no invocation, reliance, authorization, or action",
+    "a capacity allocation record does not establish request acceptance, launch, or diagnostic result",
+    "capacity allocation validation establishes internal arithmetic only, not evaluator/source-set correspondence or Store-owned construction",
+    "allocation identity neutralizes only its root identity, derived occurrence identities, and allocation backlinks",
+    "schema and static-asset validation is not live-engine correspondence"
+  ]
+}

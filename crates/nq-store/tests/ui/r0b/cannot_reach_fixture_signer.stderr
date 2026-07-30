@@ -1,0 +1,32 @@
+error[E0624]: associated function `fixture_signed` is private
+ --> tests/ui/r0b/cannot_reach_fixture_signer.rs:4:40
+  |
+4 |       let _ = SignedAdmissionReceiptSet::fixture_signed;
+  |                                          ^^^^^^^^^^^^^^ private associated function
+  |
+ ::: $WORKSPACE/crates/nq-host-role-dependency-custody/src/lib.rs
+  |
+  | /     pub(crate) fn fixture_signed(
+  | |         generation: &RuntimeDependencyGeneration,
+  | |         anchor: &Ed25519TrustAnchor,
+  | |         signed_at: Timestamp,
+  | |         mut receipts: Vec<DependencyAdmissionReceipt>,
+  | |         signing_key: &ed25519_dalek::SigningKey,
+  | |     ) -> Result<Self> {
+  | |_____________________- private associated function defined here
+
+error[E0624]: associated function `fixture` is private
+ --> tests/ui/r0b/cannot_reach_fixture_signer.rs:5:33
+  |
+5 |       let _ = Ed25519TrustAnchor::fixture;
+  |                                   ^^^^^^^ private associated function
+  |
+ ::: $WORKSPACE/crates/nq-host-role-dependency-custody/src/lib.rs
+  |
+  | /     pub(crate) fn fixture(
+  | |         key_generation: IdentityRef,
+  | |         trust_policy: IdentityRef,
+  | |         verifier_generation: IdentityRef,
+  | |         public_key: &VerifyingKey,
+  | |     ) -> Result<Self> {
+  | |_____________________- private associated function defined here

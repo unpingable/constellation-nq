@@ -12,25 +12,56 @@
 //! use nq_store::custody_arena::CustodyArena;
 //! ```
 //!
-//! Product code can use the exported governed-custody facade only to reserve,
-//! seal, reopen, and index exact opaque bytes. That facade cannot launch a
-//! provider, parse intake, establish evaluator occurrence, construct a
-//! diagnostic binding, or assign semantic standing.
+//! Product code can use the exported governed-custody facade for pre-final
+//! custody transitions and read-only reopening. Final sealing is deliberately
+//! Store-owned so it cannot occur outside the same IMMEDIATE transaction that
+//! fences global publication order:
+//!
+//! ```compile_fail
+//! # use nq_store::GovernedCustody;
+//! fn bypass_publication_fence(custody: &mut GovernedCustody) {
+//!     let _ = custody.seal_final_closure(b"unfenced".to_vec());
+//! }
+//! ```
+//!
+//! Neither facade can launch a provider, parse intake, establish evaluator
+//! occurrence, construct a diagnostic binding, or assign semantic standing.
 
 mod custody_arena;
+mod custody_capacity_model;
 mod governed_custody;
+#[cfg(test)]
+mod governed_projection_capacity;
+mod governed_projection_capsule;
 
+pub use custody_capacity_model::{
+    AppendExtentGeometryV1, CAPACITY_IJSON_SAFE_INTEGER_MAX_V1, CUSTODY_CAPACITY_ALIGNMENT_V1,
+    CapacityEvaluationDispositionV1, CapacityEvaluationV1, CapacityLimitRefusalV1,
+    CapacityModelError, CapacityPolicyV1, CarrierPayloadBoundsV1, CustodyArenaGeometryV1,
+    CustodyCarrierMapV1, CustodyCarrierRoleV1, DeliveryCapacityPlanV1,
+    DeliveryCapacityRequirementV1, FUTURE_ARTIFACT_SLOT_V1, HighWatermarkClassificationV1,
+    LogicalCarrierUsageV1, SemanticComponentBoundsV1, checked_append_extent_geometry_v1,
+    checked_arena_geometry_v1, checked_bootstrap_carrier_length_v1,
+    checked_logical_carrier_usage_v1, checked_post_allocation_usage_v1, checked_retained_charge_v1,
+    checked_semantic_sum_v1, classify_high_watermark_v1, derive_custody_carrier_map_v1,
+    deterministic_queue_occurrence_key_v1, evaluate_capacity_v1, single_execution_bound_v1,
+    validate_carrier_payload_fit_v1, validate_exact_semantic_reservation_v1,
+    validate_post_allocation_delivery_capacity_correspondence_v1,
+    validate_preallocation_delivery_capacity_correspondence_v1,
+};
 pub use governed_custody::{
     CustodiedAcquisition, GOVERNED_CUSTODY_CLOSURE_SCHEMA, GOVERNED_CUSTODY_CLOSURE_V2_SCHEMA,
-    GOVERNED_PROTECTED_TERMINAL_SCHEMA, GovernedAcquisitionCustodyInput,
-    GovernedClosureAcquisitionInput, GovernedClosureCheckpointInput,
-    GovernedClosureDependencyGenerationInput, GovernedClosureDerivationInput,
-    GovernedClosureLocalOriginInput, GovernedClosurePrelaunchInput, GovernedClosureRecordReference,
-    GovernedCustody, GovernedCustodyCommitment, GovernedCustodyInspection,
-    GovernedCustodyInventoryEntry, GovernedCustodyRecoveryClass, GovernedCustodyReservation,
-    GovernedCustodyReservationLedgerBinding, GovernedCustodyState, GovernedDerivationCustodyClaim,
-    GovernedExecutionCustodyClosureV2, GovernedExecutionCustodyClosureV2Capacity,
-    GovernedExecutionCustodyClosureV2CapacityInput, GovernedExecutionCustodyClosureV2Input,
+    GOVERNED_CUSTODY_CLOSURE_V3_SCHEMA, GOVERNED_PROTECTED_TERMINAL_SCHEMA,
+    GovernedAcquisitionCustodyInput, GovernedClosureAcquisitionInput,
+    GovernedClosureCheckpointInput, GovernedClosureDependencyGenerationInput,
+    GovernedClosureDerivationInput, GovernedClosureLocalOriginInput, GovernedClosurePrelaunchInput,
+    GovernedClosureRecordReference, GovernedCustody, GovernedCustodyCommitment,
+    GovernedCustodyInspection, GovernedCustodyInventoryEntry, GovernedCustodyRecoveryClass,
+    GovernedCustodyReservation, GovernedCustodyReservationLedgerBinding, GovernedCustodyState,
+    GovernedDerivationCustodyClaim, GovernedExecutionCustodyClosureV2,
+    GovernedExecutionCustodyClosureV2Capacity, GovernedExecutionCustodyClosureV2CapacityInput,
+    GovernedExecutionCustodyClosureV2Input, GovernedExecutionCustodyClosureV3,
+    GovernedExecutionCustodyClosureV3Input, GovernedProjectionRecovery,
     GovernedProjectionVerification, GovernedProjectionVerificationDisposition,
     GovernedProtectedFailure, GovernedProtectedFailureAccess, GovernedProtectedTerminal,
     GovernedProtectedTerminalClass, GovernedProtectedTerminalDeadlineCompliance,
@@ -39,6 +70,11 @@ pub use governed_custody::{
     GovernedProtectedTerminalRequest, GovernedProtectedTerminalReservation,
     GovernedProtectedTerminalization, governed_acquisition_capacity_bound,
     governed_execution_custody_closure_v2_capacity_bound,
+    governed_execution_custody_closure_v3_capacity_bound,
+};
+pub use governed_projection_capsule::{
+    GOVERNED_PROJECTION_CAPSULE_SCHEMA, GovernedProjectionCapsule, GovernedProjectionCapsuleInput,
+    GovernedProjectionCapsuleMode, GovernedProjectionPublication,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -342,6 +378,31 @@ pub enum StoreError {
     /// a different bound context.
     #[error("provider intake replay conflict: {0}")]
     ReplayConflict(String),
+    /// A sealed governed V3 projection must be recovered before this writer
+    /// may allocate another publication identity.
+    #[error("governed projection recovery required before publication: {0:?}")]
+    GovernedProjectionRecoveryRequired(Vec<Sha256Digest>),
+    /// Internal typed cause proving a deterministic mismatch between one exact
+    /// sealed projection and exact available correspondence sources.
+    ///
+    /// Store transaction owners must roll back before converting this into the
+    /// durable terminal refusal below.
+    #[doc(hidden)]
+    #[error("governed projection {reservation_record_id} failed exact correspondence: {reason}")]
+    GovernedProjectionLocalCorrespondenceMismatch {
+        reservation_record_id: Sha256Digest,
+        reason: String,
+    },
+    /// Exact final bytes remain in custody, but deterministic projection
+    /// correspondence failed and was durably terminalized.
+    #[error(
+        "governed projection {reservation_record_id} was durably refused by exact correspondence ({refusal_id}): {reason}"
+    )]
+    GovernedProjectionCorrespondenceRefused {
+        reservation_record_id: Sha256Digest,
+        refusal_id: Sha256Digest,
+        reason: String,
+    },
 }
 
 /// A canonical JSON document and its SHA-256 semantic digest.
@@ -3131,6 +3192,22 @@ impl Store {
         runtime_ledger_checkpoint_on_connection(&self.connection)
     }
 
+    /// Reopen one immutable runtime checkpoint by its exact SHA-256 identity.
+    ///
+    /// This lookup never substitutes the latest checkpoint and returns `None`
+    /// when the supplied valid identity is not present.
+    pub fn runtime_checkpoint_by_id(
+        &self,
+        checkpoint_id: &str,
+    ) -> Result<Option<RuntimeLedgerCheckpoint>, StoreError> {
+        Sha256Digest::parse(checkpoint_id.to_owned()).map_err(|error| {
+            StoreError::Invariant(format!(
+                "runtime checkpoint_id is not a SHA-256 identity: {error}"
+            ))
+        })?;
+        runtime_checkpoint_by_id_on_connection(&self.connection, checkpoint_id)
+    }
+
     /// Reopen the exact dependency provenance bound to one checkpoint.
     ///
     /// Missing exact bytes remain committed-unavailable and corrupt bytes are
@@ -3172,7 +3249,14 @@ impl Store {
     pub fn rebuild_runtime_record_lookup(
         &mut self,
     ) -> Result<RuntimeRecordLookupStatus, StoreError> {
-        let transaction = self.immediate_transaction()?;
+        // This is the one deliberately recovery-safe maintenance path for a
+        // disposable projection. It takes the raw SQLite IMMEDIATE writer
+        // fence rather than the ordinary writer gate, because that gate must
+        // refuse while this lookup is stale. Canonical append-only ledger
+        // validation runs first; no diagnostic, custody, or correspondence
+        // state is reclassified by this operation.
+        let transaction = self.immediate_recovery_transaction()?;
+        validate_runtime_record_ledger(&transaction)?;
         transaction.execute("DELETE FROM runtime_record_lookup", [])?;
         transaction.execute(
             "INSERT INTO runtime_record_lookup (
@@ -3190,6 +3274,42 @@ impl Store {
         }
         transaction.commit()?;
         Ok(status)
+    }
+
+    /// Rebuild the disposable latest-status projection from immutable status
+    /// history without entering the governed pending-recovery gate.
+    ///
+    /// The raw IMMEDIATE fence is intentional: a stale `status_current` row
+    /// globally blocks governed recovery, so the ordinary writer path cannot
+    /// be the repair entrance. Canonical status sequence and allocator state
+    /// are validated before the disposable table is touched.
+    pub fn rebuild_status_current_projection(&mut self) -> Result<(), StoreError> {
+        let transaction = self.immediate_recovery_transaction()?;
+        validate_status_sequence_lower_bound(&transaction)?;
+        let _ = dense_governed_publication_frontier(
+            &transaction,
+            "status_events",
+            "status_sequence",
+            "status-event",
+        )?;
+        transaction.execute("DELETE FROM status_current", [])?;
+        transaction.execute(
+            "INSERT INTO status_current (
+                component_kind, component_id, latest_status_event_id
+             )
+             SELECT event.component_kind, event.component_id, event.status_event_id
+             FROM status_events AS event
+             WHERE NOT EXISTS (
+                SELECT 1 FROM status_events AS later
+                WHERE later.component_kind = event.component_kind
+                  AND later.component_id = event.component_id
+                  AND later.status_sequence > event.status_sequence
+             )",
+            [],
+        )?;
+        validate_status_current_projection(&transaction)?;
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Enumerate exact runtime records of one schema using the verified
@@ -3618,6 +3738,7 @@ impl Store {
             collection,
             build,
             AdmittedDiagnosticOriginMode::DetectorEvaluation,
+            |_| Ok(()),
         )
     }
 
@@ -3652,14 +3773,245 @@ impl Store {
                 })
             },
             AdmittedDiagnosticOriginMode::RunLevelProduction,
+            |_| Ok(()),
         )
     }
 
-    fn commit_admitted_collection_inner<T, E, F>(
+    /// Atomically publish one governed admitted diagnostic while exposing the
+    /// exact database publication identities to a pre-commit callback.
+    ///
+    /// The callback runs after all rows and append-only invariants have been
+    /// assembled, but while the IMMEDIATE transaction still owns publication
+    /// order. Returning an error rolls the SQL projection back. This permits a
+    /// caller to physically seal the exact restart capsule before SQL commit;
+    /// it grants no diagnostic, reliance, authorization, or action semantics.
+    #[allow(clippy::too_many_lines)] // One transaction owns build, seal, publication, and replay correspondence.
+    pub fn commit_governed_admitted_run_level_diagnostic_with_publication<T, E, F, G, H>(
+        &mut self,
+        collection: &CollectionInput,
+        build: F,
+        custody: &mut GovernedCustody,
+        build_final_closure: G,
+        after_final_seal: H,
+    ) -> Result<ProviderIntakeCommit<T>, E>
+    where
+        E: From<StoreError>,
+        F: FnOnce(&CollectionReceipt) -> Result<AdmittedRunLevelDiagnosticCompletion<T>, E>,
+        G: FnOnce(&GovernedProjectionPublication) -> Result<Vec<u8>, E>,
+        H: FnOnce(&GovernedCustodyCommitment) -> Result<(), E>,
+    {
+        validate_collection(collection).map_err(E::from)?;
+        if !is_admitted_collection(collection) {
+            return Err(E::from(StoreError::Invariant(
+                "atomic admitted completion requires one admitted custody report".into(),
+            )));
+        }
+        ensure_custody_belongs_to_store(self, custody).map_err(E::from)?;
+        let transaction = self.immediate_transaction().map_err(E::from)?;
+        if let ProviderIntakePreflight::Existing {
+            acknowledgment,
+            canonical_result,
+        } = provider_intake_preflight_on_connection(&transaction, &collection.intake, true)
+            .map_err(E::from)?
+        {
+            let receipt = collection_receipt_for_run(&transaction, &acknowledgment.run_id)
+                .map_err(E::from)?;
+            validate_admitted_run_level_diagnostic_replay(&transaction, &acknowledgment.run_id)
+                .map_err(E::from)?;
+            return Ok(ProviderIntakeCommit::Replayed {
+                receipt,
+                acknowledgment,
+                canonical_result,
+            });
+        }
+
+        let report_sequence = next_report_sequence(&transaction).map_err(E::from)?;
+        let status_sequence = next_status_sequence(&transaction).map_err(E::from)?;
+        let receipt =
+            planned_collection_receipt(collection, Some(report_sequence)).map_err(E::from)?;
+        let completion = build(&receipt)?;
+        let completion = AdmittedCollectionCompletion {
+            value: completion.value,
+            evaluations: Vec::new(),
+            diagnostic_artifact: Some(completion.diagnostic_artifact),
+            status: completion.status,
+        };
+        validate_admitted_completion(
+            collection,
+            &receipt,
+            &completion,
+            AdmittedDiagnosticOriginMode::RunLevelProduction,
+        )
+        .map_err(E::from)?;
+        let artifact = completion.diagnostic_artifact.as_ref().ok_or_else(|| {
+            E::from(StoreError::Invariant(
+                "run-level admitted diagnostic completion requires one exact artifact".into(),
+            ))
+        })?;
+        validate_local_diagnostic_artifact_provenance(artifact, &collection.run)
+            .map_err(E::from)?;
+        let (acknowledgment, _) = build_provider_acknowledgment(
+            &collection.intake,
+            &collection.run.run_id,
+            &completion.status,
+        )
+        .map_err(E::from)?;
+        let publication = GovernedProjectionPublication {
+            report_sequence: Some(report_sequence),
+            status_sequence,
+            acknowledgment_id: acknowledgment.acknowledgment_id.clone(),
+            acknowledgment_committed_at: acknowledgment.committed_at.clone(),
+        };
+
+        // The exact replay carrier reaches durable physical custody before
+        // any SQL row is attempted. Every later insert/constraint/ENOSPC
+        // failure therefore leaves a restart-recoverable pending frontier.
+        let exact_closure_bytes = build_final_closure(&publication)?;
+        let commitment = custody
+            .seal_final_closure(exact_closure_bytes)
+            .map_err(E::from)?;
+        // The callback observes the exact post-seal/pre-SQL crash boundary.
+        // Any failure leaves the already-durable pending closure for startup
+        // recovery; it cannot be mistaken for a pre-seal refusal.
+        after_final_seal(&commitment)?;
+        let prevalidated = match governed_custody::prevalidate_governed_v3_projection_with_custody(
+            &transaction,
+            custody,
+        ) {
+            Ok(Some(prevalidated)) => prevalidated,
+            Ok(None) => {
+                let terminal =
+                    governed_custody::terminalize_projection_incompatible_closure_with_custody(
+                        custody,
+                        "governed admitted publication sealed no exact V3 projection",
+                    )
+                    .map_err(E::from)?;
+                return Err(E::from(terminal));
+            }
+            Err(error @ StoreError::GovernedProjectionLocalCorrespondenceMismatch { .. }) => {
+                let terminal =
+                    governed_custody::terminalize_projection_local_mismatch_with_custody(
+                        custody, &error,
+                    )
+                    .map_err(E::from)?;
+                return Err(E::from(terminal));
+            }
+            Err(error) => return Err(E::from(error)),
+        };
+
+        begin_governed_projection_replay_savepoint(&transaction).map_err(E::from)?;
+        let inserted_receipt = insert_collection_with_publication(
+            &transaction,
+            collection,
+            true,
+            Some(report_sequence),
+        )
+        .map_err(E::from)?;
+        if inserted_receipt != receipt {
+            return Err(E::from(StoreError::Integrity(
+                "governed admitted publication receipt differs from its pre-seal plan".into(),
+            )));
+        }
+        insert_local_diagnostic_artifact(
+            &transaction,
+            collection,
+            &completion,
+            artifact,
+            AdmittedDiagnosticOriginMode::RunLevelProduction,
+        )
+        .map_err(E::from)?;
+        let inserted_status_sequence = insert_status_event_with_sequence(
+            &transaction,
+            &completion.status,
+            Some(&collection.run.run_id),
+            Some(status_sequence),
+        )
+        .map_err(E::from)?;
+        if inserted_status_sequence != status_sequence {
+            return Err(E::from(StoreError::Integrity(
+                "governed admitted status sequence differs from its pre-seal plan".into(),
+            )));
+        }
+        let inserted_acknowledgment = insert_provider_acknowledgment_with_identity(
+            &transaction,
+            &collection.intake,
+            &collection.run.run_id,
+            &completion.status,
+            acknowledgment.acknowledgment_id.clone(),
+            acknowledgment.committed_at.clone(),
+        )
+        .map_err(E::from)?;
+        if inserted_acknowledgment != acknowledgment {
+            return Err(E::from(StoreError::Integrity(
+                "governed admitted acknowledgment differs from its pre-seal plan".into(),
+            )));
+        }
+        validate_provider_intake_invariants(&transaction).map_err(E::from)?;
+        validate_refusal_invariants(&transaction).map_err(E::from)?;
+        validate_run_results(&transaction).map_err(E::from)?;
+        validate_evaluation_refusal_invariants(&transaction).map_err(E::from)?;
+        validate_diagnostic_artifact_invariants(&transaction).map_err(E::from)?;
+        let observed_publication = governed_projection_publication(
+            &transaction,
+            &inserted_receipt,
+            &completion.status,
+            &inserted_acknowledgment,
+        )
+        .map_err(E::from)?;
+        if observed_publication != publication {
+            return Err(E::from(StoreError::Integrity(
+                "governed admitted SQL publication differs from its sealed identity".into(),
+            )));
+        }
+        let verification = maybe_inject_governed_projection_post_insert_test_fault(
+            &transaction,
+            custody.reservation_record_id(),
+        )
+        .and_then(|()| {
+            governed_custody::verify_governed_projection_after_replay_insert_with_custody(
+                &transaction,
+                custody,
+                &prevalidated,
+            )
+        });
+        match verification {
+            Ok(_) => {}
+            Err(error @ StoreError::GovernedProjectionLocalCorrespondenceMismatch { .. }) => {
+                rollback_and_release_governed_projection_replay_savepoint(&transaction)
+                    .map_err(E::from)?;
+                let terminal =
+                    governed_custody::terminalize_projection_local_mismatch_with_custody(
+                        custody, &error,
+                    )
+                    .map_err(E::from)?;
+                drop(prevalidated);
+                transaction
+                    .commit()
+                    .map_err(StoreError::from)
+                    .map_err(E::from)?;
+                return Err(E::from(terminal));
+            }
+            Err(error) => return Err(E::from(error)),
+        }
+        drop(prevalidated);
+        release_governed_projection_replay_savepoint(&transaction).map_err(E::from)?;
+        transaction
+            .commit()
+            .map_err(StoreError::from)
+            .map_err(E::from)?;
+        Ok(ProviderIntakeCommit::Committed {
+            receipt: inserted_receipt,
+            acknowledgment: inserted_acknowledgment,
+            value: completion.value,
+        })
+    }
+
+    fn commit_admitted_collection_inner<T, E, F, G>(
         &mut self,
         collection: &CollectionInput,
         build: F,
         diagnostic_origin_mode: AdmittedDiagnosticOriginMode,
+        before_commit: G,
     ) -> Result<ProviderIntakeCommit<T>, E>
     where
         E: From<StoreError>,
@@ -3667,6 +4019,7 @@ impl Store {
             &AdmittedCollectionView<'_, '_>,
             &CollectionReceipt,
         ) -> Result<AdmittedCollectionCompletion<T>, E>,
+        G: FnOnce(&GovernedProjectionPublication) -> Result<(), E>,
     {
         validate_collection(collection).map_err(E::from)?;
         if !is_admitted_collection(collection) {
@@ -3705,7 +4058,8 @@ impl Store {
             };
             build(&view, &receipt)?
         };
-        validate_admitted_completion(collection, &receipt, &completion).map_err(E::from)?;
+        validate_admitted_completion(collection, &receipt, &completion, diagnostic_origin_mode)
+            .map_err(E::from)?;
         for input in &completion.evaluations {
             insert_evaluation(&transaction, &input.evaluation, input.finding.as_ref())
                 .map_err(E::from)?;
@@ -3742,6 +4096,14 @@ impl Store {
         validate_run_results(&transaction).map_err(E::from)?;
         validate_evaluation_refusal_invariants(&transaction).map_err(E::from)?;
         validate_diagnostic_artifact_invariants(&transaction).map_err(E::from)?;
+        let publication = governed_projection_publication(
+            &transaction,
+            &receipt,
+            &completion.status,
+            &acknowledgment,
+        )
+        .map_err(E::from)?;
+        before_commit(&publication)?;
         transaction
             .commit()
             .map_err(StoreError::from)
@@ -3777,20 +4139,70 @@ impl Store {
         result: &RunResultStatusInput,
         diagnostic_artifact: Option<&DiagnosticArtifactCommitInput>,
     ) -> Result<NonSuccessCollectionArtifactCommit, StoreError> {
-        validate_collection(collection)?;
-        validate_non_success_input(collection, result)?;
-        if let Some(artifact) = diagnostic_artifact {
-            validate_run_only_diagnostic_artifact(collection, artifact)?;
-        }
-        let transaction = self.immediate_transaction()?;
+        self.commit_non_success_collection_with_artifact_inner(
+            collection,
+            result,
+            diagnostic_artifact,
+            RunResultOriginMode::Instance,
+            |_| Ok(()),
+        )
+    }
+
+    /// Atomically append one governed run-level non-success result without
+    /// projecting that bounded diagnostic execution into instance health.
+    ///
+    /// The mandatory status is keyed to the exact run under the
+    /// `diagnostic_execution` component kind. It remains an immutable
+    /// processing result and cannot replace the host/watcher instance status.
+    pub fn commit_governed_non_success_run_level_diagnostic(
+        &mut self,
+        collection: &CollectionInput,
+        result: &RunResultStatusInput,
+        diagnostic_artifact: &DiagnosticArtifactCommitInput,
+    ) -> Result<NonSuccessCollectionArtifactCommit, StoreError> {
+        self.commit_non_success_collection_with_artifact_inner(
+            collection,
+            result,
+            Some(diagnostic_artifact),
+            RunResultOriginMode::DiagnosticExecution,
+            |_| Ok(()),
+        )
+    }
+
+    /// Atomically publish one governed non-success diagnostic while exposing
+    /// its exact database publication identities before SQL commit.
+    #[allow(clippy::too_many_lines)] // One transaction owns non-success custody and publication correspondence.
+    pub fn commit_governed_non_success_run_level_diagnostic_with_publication<E, G, H>(
+        &mut self,
+        collection: &CollectionInput,
+        result: &RunResultStatusInput,
+        diagnostic_artifact: &DiagnosticArtifactCommitInput,
+        custody: &mut GovernedCustody,
+        build_final_closure: G,
+        after_final_seal: H,
+    ) -> Result<NonSuccessCollectionArtifactCommit, E>
+    where
+        E: From<StoreError>,
+        G: FnOnce(&GovernedProjectionPublication) -> Result<Vec<u8>, E>,
+        H: FnOnce(&GovernedCustodyCommitment) -> Result<(), E>,
+    {
+        validate_collection(collection).map_err(E::from)?;
+        validate_non_success_input(collection, result, RunResultOriginMode::DiagnosticExecution)
+            .map_err(E::from)?;
+        validate_run_only_diagnostic_artifact(collection, diagnostic_artifact).map_err(E::from)?;
+        ensure_custody_belongs_to_store(self, custody).map_err(E::from)?;
+        let transaction = self.immediate_transaction().map_err(E::from)?;
         if let ProviderIntakePreflight::Existing {
             acknowledgment,
             canonical_result,
-        } = provider_intake_preflight_on_connection(&transaction, &collection.intake, true)?
+        } = provider_intake_preflight_on_connection(&transaction, &collection.intake, true)
+            .map_err(E::from)?
         {
-            let receipt = collection_receipt_for_run(&transaction, &acknowledgment.run_id)?;
+            let receipt = collection_receipt_for_run(&transaction, &acknowledgment.run_id)
+                .map_err(E::from)?;
             let diagnostic_artifact_id =
-                diagnostic_artifact_id_for_run_on_connection(&transaction, &acknowledgment.run_id)?;
+                diagnostic_artifact_id_for_run_on_connection(&transaction, &acknowledgment.run_id)
+                    .map_err(E::from)?;
             return Ok(NonSuccessCollectionArtifactCommit {
                 intake: ProviderIntakeCommit::Replayed {
                     receipt,
@@ -3800,27 +4212,224 @@ impl Store {
                 diagnostic_artifact_id,
             });
         }
-        let receipt = insert_collection(&transaction, collection)?;
-        validate_refusal_invariants(&transaction)?;
+
+        let status_sequence = next_status_sequence(&transaction).map_err(E::from)?;
+        let receipt = planned_collection_receipt(collection, None).map_err(E::from)?;
+        let (acknowledgment, _) = build_provider_acknowledgment(
+            &collection.intake,
+            &collection.run.run_id,
+            &result.status,
+        )
+        .map_err(E::from)?;
+        let publication = GovernedProjectionPublication {
+            report_sequence: None,
+            status_sequence,
+            acknowledgment_id: acknowledgment.acknowledgment_id.clone(),
+            acknowledgment_committed_at: acknowledgment.committed_at.clone(),
+        };
+
+        let exact_closure_bytes = build_final_closure(&publication)?;
+        let commitment = custody
+            .seal_final_closure(exact_closure_bytes)
+            .map_err(E::from)?;
+        // Preserve the same exact post-seal/pre-SQL crash boundary as the
+        // admitted path.
+        after_final_seal(&commitment)?;
+        let prevalidated = match governed_custody::prevalidate_governed_v3_projection_with_custody(
+            &transaction,
+            custody,
+        ) {
+            Ok(Some(prevalidated)) => prevalidated,
+            Ok(None) => {
+                let terminal =
+                    governed_custody::terminalize_projection_incompatible_closure_with_custody(
+                        custody,
+                        "governed non-success publication sealed no exact V3 projection",
+                    )
+                    .map_err(E::from)?;
+                return Err(E::from(terminal));
+            }
+            Err(error @ StoreError::GovernedProjectionLocalCorrespondenceMismatch { .. }) => {
+                let terminal =
+                    governed_custody::terminalize_projection_local_mismatch_with_custody(
+                        custody, &error,
+                    )
+                    .map_err(E::from)?;
+                return Err(E::from(terminal));
+            }
+            Err(error) => return Err(E::from(error)),
+        };
+
+        begin_governed_projection_replay_savepoint(&transaction).map_err(E::from)?;
+        let inserted_receipt =
+            insert_collection_with_publication(&transaction, collection, true, None)
+                .map_err(E::from)?;
+        if inserted_receipt != receipt {
+            return Err(E::from(StoreError::Integrity(
+                "governed non-success publication receipt differs from its pre-seal plan".into(),
+            )));
+        }
+        insert_run_only_diagnostic_artifact(&transaction, collection, diagnostic_artifact)
+            .map_err(E::from)?;
+        let inserted_status_sequence = insert_status_event_with_sequence(
+            &transaction,
+            &result.status,
+            Some(&result.run_id),
+            Some(status_sequence),
+        )
+        .map_err(E::from)?;
+        if inserted_status_sequence != status_sequence {
+            return Err(E::from(StoreError::Integrity(
+                "governed non-success status sequence differs from its pre-seal plan".into(),
+            )));
+        }
+        let inserted_acknowledgment = insert_provider_acknowledgment_with_identity(
+            &transaction,
+            &collection.intake,
+            &collection.run.run_id,
+            &result.status,
+            acknowledgment.acknowledgment_id.clone(),
+            acknowledgment.committed_at.clone(),
+        )
+        .map_err(E::from)?;
+        if inserted_acknowledgment != acknowledgment {
+            return Err(E::from(StoreError::Integrity(
+                "governed non-success acknowledgment differs from its pre-seal plan".into(),
+            )));
+        }
+        validate_provider_intake_invariants(&transaction).map_err(E::from)?;
+        validate_run_results(&transaction).map_err(E::from)?;
+        validate_diagnostic_artifact_invariants(&transaction).map_err(E::from)?;
+        let observed_publication = governed_projection_publication(
+            &transaction,
+            &inserted_receipt,
+            &result.status,
+            &inserted_acknowledgment,
+        )
+        .map_err(E::from)?;
+        if observed_publication != publication {
+            return Err(E::from(StoreError::Integrity(
+                "governed non-success SQL publication differs from its sealed identity".into(),
+            )));
+        }
+        let verification = maybe_inject_governed_projection_post_insert_test_fault(
+            &transaction,
+            custody.reservation_record_id(),
+        )
+        .and_then(|()| {
+            governed_custody::verify_governed_projection_after_replay_insert_with_custody(
+                &transaction,
+                custody,
+                &prevalidated,
+            )
+        });
+        match verification {
+            Ok(_) => {}
+            Err(error @ StoreError::GovernedProjectionLocalCorrespondenceMismatch { .. }) => {
+                rollback_and_release_governed_projection_replay_savepoint(&transaction)
+                    .map_err(E::from)?;
+                let terminal =
+                    governed_custody::terminalize_projection_local_mismatch_with_custody(
+                        custody, &error,
+                    )
+                    .map_err(E::from)?;
+                drop(prevalidated);
+                transaction
+                    .commit()
+                    .map_err(StoreError::from)
+                    .map_err(E::from)?;
+                return Err(E::from(terminal));
+            }
+            Err(error) => return Err(E::from(error)),
+        }
+        drop(prevalidated);
+        release_governed_projection_replay_savepoint(&transaction).map_err(E::from)?;
+        transaction
+            .commit()
+            .map_err(StoreError::from)
+            .map_err(E::from)?;
+        Ok(NonSuccessCollectionArtifactCommit {
+            intake: ProviderIntakeCommit::Committed {
+                receipt: inserted_receipt,
+                acknowledgment: inserted_acknowledgment,
+                value: (),
+            },
+            diagnostic_artifact_id: Some(diagnostic_artifact.artifact_id.clone()),
+        })
+    }
+
+    fn commit_non_success_collection_with_artifact_inner<E, G>(
+        &mut self,
+        collection: &CollectionInput,
+        result: &RunResultStatusInput,
+        diagnostic_artifact: Option<&DiagnosticArtifactCommitInput>,
+        origin_mode: RunResultOriginMode,
+        before_commit: G,
+    ) -> Result<NonSuccessCollectionArtifactCommit, E>
+    where
+        E: From<StoreError>,
+        G: FnOnce(&GovernedProjectionPublication) -> Result<(), E>,
+    {
+        validate_collection(collection).map_err(E::from)?;
+        validate_non_success_input(collection, result, origin_mode).map_err(E::from)?;
         if let Some(artifact) = diagnostic_artifact {
-            insert_run_only_diagnostic_artifact(&transaction, collection, artifact)?;
+            validate_run_only_diagnostic_artifact(collection, artifact).map_err(E::from)?;
+        }
+        let transaction = self.immediate_transaction().map_err(E::from)?;
+        if let ProviderIntakePreflight::Existing {
+            acknowledgment,
+            canonical_result,
+        } = provider_intake_preflight_on_connection(&transaction, &collection.intake, true)
+            .map_err(E::from)?
+        {
+            let receipt = collection_receipt_for_run(&transaction, &acknowledgment.run_id)
+                .map_err(E::from)?;
+            let diagnostic_artifact_id =
+                diagnostic_artifact_id_for_run_on_connection(&transaction, &acknowledgment.run_id)
+                    .map_err(E::from)?;
+            return Ok(NonSuccessCollectionArtifactCommit {
+                intake: ProviderIntakeCommit::Replayed {
+                    receipt,
+                    acknowledgment,
+                    canonical_result,
+                },
+                diagnostic_artifact_id,
+            });
+        }
+        let receipt = insert_collection(&transaction, collection).map_err(E::from)?;
+        validate_refusal_invariants(&transaction).map_err(E::from)?;
+        if let Some(artifact) = diagnostic_artifact {
+            insert_run_only_diagnostic_artifact(&transaction, collection, artifact)
+                .map_err(E::from)?;
             if fail_non_success_after_artifact_insert_for_test() {
-                return Err(StoreError::Invariant(
+                return Err(E::from(StoreError::Invariant(
                     "injected failure after non-success diagnostic artifact insertion".into(),
-                ));
+                )));
             }
         }
-        insert_status_event(&transaction, &result.status, Some(&result.run_id))?;
+        insert_status_event(&transaction, &result.status, Some(&result.run_id)).map_err(E::from)?;
         let acknowledgment = insert_provider_acknowledgment(
             &transaction,
             &collection.intake,
             &collection.run.run_id,
             &result.status,
-        )?;
-        validate_provider_intake_invariants(&transaction)?;
-        validate_run_results(&transaction)?;
-        validate_diagnostic_artifact_invariants(&transaction)?;
-        transaction.commit()?;
+        )
+        .map_err(E::from)?;
+        validate_provider_intake_invariants(&transaction).map_err(E::from)?;
+        validate_run_results(&transaction).map_err(E::from)?;
+        validate_diagnostic_artifact_invariants(&transaction).map_err(E::from)?;
+        let publication = governed_projection_publication(
+            &transaction,
+            &receipt,
+            &result.status,
+            &acknowledgment,
+        )
+        .map_err(E::from)?;
+        before_commit(&publication)?;
+        transaction
+            .commit()
+            .map_err(StoreError::from)
+            .map_err(E::from)?;
         Ok(NonSuccessCollectionArtifactCommit {
             intake: ProviderIntakeCommit::Committed {
                 receipt,
@@ -4401,11 +5010,1699 @@ impl Store {
         validate_projection_invariants(&self.connection)
     }
 
+    /// Replay the exact SQL projection sealed inside one governed V3 closure.
+    ///
+    /// This historical path never consults current provider admission. It
+    /// consumes only the previously validated capsule plan, preserves its
+    /// exact report/status/acknowledgment publication identities, and commits
+    /// atomically. It cannot invoke a provider, profile, or evaluator.
+    pub(crate) fn commit_reopened_governed_projection(
+        &mut self,
+        reservation_record_id: &Sha256Digest,
+    ) -> Result<(), StoreError> {
+        let database_path = self.path().map(Path::to_path_buf).ok_or_else(|| {
+            StoreError::Invariant(
+                "projection recovery requires a filesystem-backed initialized store".into(),
+            )
+        })?;
+        let transaction = self.immediate_recovery_transaction()?;
+        let pending =
+            match governed_custody::pending_v3_projection_plans(&database_path, &transaction) {
+                Ok(pending) => pending,
+                Err(error @ StoreError::GovernedProjectionLocalCorrespondenceMismatch { .. }) => {
+                    let terminal = governed_custody::terminalize_projection_local_mismatch(
+                        &database_path,
+                        &error,
+                    )?;
+                    transaction.commit()?;
+                    return Err(terminal);
+                }
+                Err(error) => return Err(error),
+            };
+        if let Err(error) = preflight_reopened_governed_projection_batch(&transaction, &pending) {
+            if matches!(
+                error,
+                StoreError::GovernedProjectionLocalCorrespondenceMismatch { .. }
+            ) {
+                let terminal = governed_custody::terminalize_projection_local_mismatch(
+                    &database_path,
+                    &error,
+                )?;
+                drop(pending);
+                transaction.commit()?;
+                return Err(terminal);
+            }
+            return Err(error);
+        }
+        let projection = pending
+            .iter()
+            .find(|projection| &projection.reservation_record_id == reservation_record_id)
+            .ok_or_else(|| {
+                StoreError::Integrity(format!(
+                    "governed projection {reservation_record_id} is not one prevalidated pending V3 projection"
+                ))
+            })?;
+        begin_governed_projection_replay_savepoint(&transaction)?;
+        replay_reopened_governed_projection_on_transaction(
+            &transaction,
+            reservation_record_id,
+            &projection.plan,
+        )?;
+        let verification = maybe_inject_governed_projection_post_insert_test_fault(
+            &transaction,
+            reservation_record_id,
+        )
+        .and_then(|()| {
+            governed_custody::verify_pending_governed_projection_on_connection(
+                &transaction,
+                &database_path,
+                projection,
+                match projection.sql_footprint {
+                    GovernedProjectionSqlFootprint::Absent => {
+                        governed_custody::GovernedProjectionVerificationPhase::UncommittedReplay
+                    }
+                    GovernedProjectionSqlFootprint::ExistingExact => {
+                        governed_custody::GovernedProjectionVerificationPhase::DurableProjection
+                    }
+                },
+            )
+        });
+        match verification {
+            Ok(_) => {}
+            Err(error @ StoreError::GovernedProjectionLocalCorrespondenceMismatch { .. }) => {
+                rollback_and_release_governed_projection_replay_savepoint(&transaction)?;
+                let terminal = governed_custody::terminalize_projection_local_mismatch(
+                    &database_path,
+                    &error,
+                )?;
+                drop(pending);
+                transaction.commit()?;
+                return Err(terminal);
+            }
+            Err(error) => return Err(error),
+        }
+        release_governed_projection_replay_savepoint(&transaction)?;
+        drop(pending);
+        transaction.commit()?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_lines)] // Opening the publication fence also adjudicates all pending physical custody.
     fn immediate_transaction(&mut self) -> Result<Transaction<'_>, StoreError> {
+        let Some(database_path) = self.path().map(Path::to_path_buf) else {
+            return self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(StoreError::from);
+        };
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::from)?;
+        let adjudicated = governed_custody::adjudicate_final_seal_intents(&database_path)?;
+        if let Some(terminal) = adjudicated
+            .iter()
+            .find(|entry| entry.disposition != custody_arena::FinalSealIntentDisposition::Promoted)
+        {
+            return Err(StoreError::Integrity(format!(
+                "governed final-seal intent {} reached terminal custody state {:?}",
+                terminal.reservation_record_id, terminal.disposition
+            )));
+        }
+        let pending =
+            match governed_custody::pending_v3_projection_plans(&database_path, &transaction) {
+                Ok(pending) => pending,
+                Err(error @ StoreError::GovernedProjectionLocalCorrespondenceMismatch { .. }) => {
+                    let terminal = governed_custody::terminalize_projection_local_mismatch(
+                        &database_path,
+                        &error,
+                    )?;
+                    transaction.commit()?;
+                    return Err(terminal);
+                }
+                Err(error) => return Err(error),
+            };
+        if pending.is_empty() {
+            drop(pending);
+            return Ok(transaction);
+        }
+        if let Err(error) = preflight_reopened_governed_projection_batch(&transaction, &pending) {
+            if matches!(
+                error,
+                StoreError::GovernedProjectionLocalCorrespondenceMismatch { .. }
+            ) {
+                let terminal = governed_custody::terminalize_projection_local_mismatch(
+                    &database_path,
+                    &error,
+                )?;
+                drop(pending);
+                transaction.commit()?;
+                return Err(terminal);
+            }
+            return Err(error);
+        }
+        begin_governed_projection_replay_savepoint(&transaction)?;
+        let mut local_terminal = None;
+        for projection in &pending {
+            replay_reopened_governed_projection_on_transaction(
+                &transaction,
+                &projection.reservation_record_id,
+                &projection.plan,
+            )?;
+            let verification = maybe_inject_governed_projection_post_insert_test_fault(
+                &transaction,
+                &projection.reservation_record_id,
+            )
+            .and_then(|()| {
+                governed_custody::verify_pending_governed_projection_on_connection(
+                    &transaction,
+                    &database_path,
+                    projection,
+                    match projection.sql_footprint {
+                        GovernedProjectionSqlFootprint::Absent => {
+                            governed_custody::GovernedProjectionVerificationPhase::UncommittedReplay
+                        }
+                        GovernedProjectionSqlFootprint::ExistingExact => {
+                            governed_custody::GovernedProjectionVerificationPhase::DurableProjection
+                        }
+                    },
+                )
+            });
+            match verification {
+                Ok(_) => {}
+                Err(error @ StoreError::GovernedProjectionLocalCorrespondenceMismatch { .. }) => {
+                    rollback_and_release_governed_projection_replay_savepoint(&transaction)?;
+                    local_terminal = Some(governed_custody::terminalize_projection_local_mismatch(
+                        &database_path,
+                        &error,
+                    )?);
+                    break;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if let Some(terminal) = local_terminal {
+            drop(pending);
+            transaction.commit()?;
+            return Err(terminal);
+        }
+        release_governed_projection_replay_savepoint(&transaction)?;
+        let pending_ids = pending
+            .iter()
+            .map(|projection| projection.reservation_record_id.clone())
+            .collect::<Vec<_>>();
+        drop(pending);
+        transaction.commit()?;
+        // Mark only after the exact recovered SQL transaction is durable. A
+        // separate handle avoids turning the caller's future writer
+        // transaction into a privileged backstage path.
+        let verifier = Store::open(&database_path)?;
+        for reservation_record_id in &pending_ids {
+            verifier.verify_governed_projection_and_mark_indexed(reservation_record_id)?;
+        }
+        // The caller must retry from its already-derived SQL plan. Retrying
+        // reacquires IMMEDIATE and rescans, closing the race with a different
+        // process that may have sealed another pending closure in the gap.
+        Err(StoreError::GovernedProjectionRecoveryRequired(pending_ids))
+    }
+
+    fn immediate_recovery_transaction(&mut self) -> Result<Transaction<'_>, StoreError> {
         self.connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StoreError::from)
     }
+}
+
+pub(crate) fn validate_reopened_governed_projection_plan_before_insert(
+    reservation_record_id: &Sha256Digest,
+    plan: &governed_projection_capsule::ReopenedGovernedProjectionPlan,
+) -> Result<(), StoreError> {
+    validate_collection(&plan.collection)?;
+    let receipt = planned_collection_receipt(&plan.collection, plan.publication.report_sequence)?;
+    match plan.mode {
+        GovernedProjectionCapsuleMode::Admitted => {
+            if !is_admitted_collection(&plan.collection)
+                || receipt.report_sequence != plan.publication.report_sequence
+                || receipt.semantic_digest.as_deref()
+                    != plan
+                        .expected_semantic_digest
+                        .as_ref()
+                        .map(Sha256Digest::as_str)
+            {
+                return Err(StoreError::Integrity(format!(
+                    "governed projection {reservation_record_id} admitted pre-insert shape differs"
+                )));
+            }
+            let completion = AdmittedCollectionCompletion {
+                value: (),
+                evaluations: Vec::new(),
+                diagnostic_artifact: Some(plan.diagnostic.clone()),
+                status: plan.status.clone(),
+            };
+            validate_admitted_completion(
+                &plan.collection,
+                &receipt,
+                &completion,
+                AdmittedDiagnosticOriginMode::RunLevelProduction,
+            )?;
+        }
+        GovernedProjectionCapsuleMode::NonSuccess => {
+            if !is_non_success_collection(&plan.collection)
+                || plan.publication.report_sequence.is_some()
+                || plan.expected_semantic_digest.is_some()
+                || receipt.report_sequence.is_some()
+                || receipt.semantic_digest.is_some()
+            {
+                return Err(StoreError::Integrity(format!(
+                    "governed projection {reservation_record_id} non-success pre-insert shape differs"
+                )));
+            }
+            validate_non_success_input(
+                &plan.collection,
+                &RunResultStatusInput {
+                    run_id: plan.collection.run.run_id.clone(),
+                    status: plan.status.clone(),
+                },
+                RunResultOriginMode::DiagnosticExecution,
+            )?;
+            validate_run_only_diagnostic_artifact(&plan.collection, &plan.diagnostic)?;
+        }
+    }
+    let (acknowledgment, _) = build_provider_acknowledgment_with_identity(
+        &plan.collection.intake,
+        &plan.collection.run.run_id,
+        &plan.status,
+        plan.publication.acknowledgment_id.clone(),
+        plan.publication.acknowledgment_committed_at.clone(),
+    )?;
+    if acknowledgment.acknowledgment_id != plan.publication.acknowledgment_id
+        || acknowledgment.committed_at != plan.publication.acknowledgment_committed_at
+    {
+        return Err(StoreError::Integrity(format!(
+            "governed projection {reservation_record_id} acknowledgment pre-insert identity differs"
+        )));
+    }
+    Ok(())
+}
+
+const GOVERNED_PROJECTION_REPLAY_SAVEPOINT: &str = "nq_governed_projection_replay";
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GovernedProjectionPostInsertTestFault {
+    LocalMismatch,
+    GlobalFailure,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static GOVERNED_PROJECTION_POST_INSERT_TEST_FAULT:
+        std::cell::Cell<Option<GovernedProjectionPostInsertTestFault>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn set_governed_projection_post_insert_test_fault(fault: GovernedProjectionPostInsertTestFault) {
+    GOVERNED_PROJECTION_POST_INSERT_TEST_FAULT.with(|slot| {
+        assert!(
+            slot.replace(Some(fault)).is_none(),
+            "post-insert fault already armed"
+        );
+    });
+}
+
+#[cfg(test)]
+fn maybe_inject_governed_projection_post_insert_test_fault(
+    connection: &Connection,
+    reservation_record_id: &Sha256Digest,
+) -> Result<(), StoreError> {
+    let fault = GOVERNED_PROJECTION_POST_INSERT_TEST_FAULT.with(std::cell::Cell::take);
+    let Some(fault) = fault else {
+        return Ok(());
+    };
+    let projected_statuses: i64 =
+        connection.query_row("SELECT COUNT(*) FROM status_events", [], |row| row.get(0))?;
+    if projected_statuses == 0 {
+        return Err(StoreError::Invariant(
+            "post-insert hostile fired before any status projection existed".into(),
+        ));
+    }
+    match fault {
+        GovernedProjectionPostInsertTestFault::LocalMismatch => {
+            Err(governed_custody::projection_local_mismatch(
+                reservation_record_id,
+                "test-only deterministic mismatch after complete SQL insertion",
+            ))
+        }
+        GovernedProjectionPostInsertTestFault::GlobalFailure => Err(StoreError::Integrity(
+            "test-only global failure after complete SQL insertion".into(),
+        )),
+    }
+}
+
+#[cfg(not(test))]
+#[allow(clippy::unnecessary_wraps)] // The test and product builds intentionally share one fallible fault-hook signature.
+fn maybe_inject_governed_projection_post_insert_test_fault(
+    _connection: &Connection,
+    _reservation_record_id: &Sha256Digest,
+) -> Result<(), StoreError> {
+    Ok(())
+}
+
+fn begin_governed_projection_replay_savepoint(
+    transaction: &Transaction<'_>,
+) -> Result<(), StoreError> {
+    transaction
+        .execute_batch(&format!("SAVEPOINT {GOVERNED_PROJECTION_REPLAY_SAVEPOINT}"))
+        .map_err(StoreError::from)
+}
+
+fn rollback_and_release_governed_projection_replay_savepoint(
+    transaction: &Transaction<'_>,
+) -> Result<(), StoreError> {
+    // ROLLBACK TO leaves the savepoint active. RELEASE is deliberately
+    // explicit: a physical terminal refusal is forbidden unless both
+    // operations succeed while the outer IMMEDIATE fence remains held.
+    transaction
+        .execute_batch(&format!(
+            "ROLLBACK TO SAVEPOINT {GOVERNED_PROJECTION_REPLAY_SAVEPOINT};\
+             RELEASE SAVEPOINT {GOVERNED_PROJECTION_REPLAY_SAVEPOINT}"
+        ))
+        .map_err(StoreError::from)
+}
+
+fn release_governed_projection_replay_savepoint(
+    transaction: &Transaction<'_>,
+) -> Result<(), StoreError> {
+    transaction
+        .execute_batch(&format!(
+            "RELEASE SAVEPOINT {GOVERNED_PROJECTION_REPLAY_SAVEPOINT}"
+        ))
+        .map_err(StoreError::from)
+}
+
+#[allow(clippy::too_many_lines)] // Replay performs one exact all-or-nothing SQL projection.
+fn replay_reopened_governed_projection_on_transaction(
+    transaction: &Transaction<'_>,
+    reservation_record_id: &Sha256Digest,
+    plan: &governed_projection_capsule::ReopenedGovernedProjectionPlan,
+) -> Result<(), StoreError> {
+    validate_reopened_governed_projection_plan_before_insert(reservation_record_id, plan)?;
+    validate_collection(&plan.collection)?;
+    match plan.mode {
+        GovernedProjectionCapsuleMode::Admitted => {
+            if !is_admitted_collection(&plan.collection)
+                || plan.publication.report_sequence.is_none()
+                || plan.expected_semantic_digest.is_none()
+            {
+                return Err(StoreError::Integrity(format!(
+                    "governed projection {reservation_record_id} admitted replay shape differs"
+                )));
+            }
+        }
+        GovernedProjectionCapsuleMode::NonSuccess => {
+            if !is_non_success_collection(&plan.collection)
+                || plan.publication.report_sequence.is_some()
+                || plan.expected_semantic_digest.is_some()
+            {
+                return Err(StoreError::Integrity(format!(
+                    "governed projection {reservation_record_id} non-success replay shape differs"
+                )));
+            }
+        }
+    }
+
+    if preflight_existing_reopened_governed_projection(transaction, reservation_record_id, plan)? {
+        return Ok(());
+    }
+
+    let next_status_sequence: i64 = transaction.query_row(
+        "SELECT COALESCE(MAX(status_sequence), 0) + 1 FROM status_events",
+        [],
+        |row| row.get(0),
+    )?;
+    if plan.publication.status_sequence != next_status_sequence {
+        return Err(StoreError::Integrity(format!(
+            "governed projection {reservation_record_id} sealed status sequence {} is not the exact next publication sequence {next_status_sequence}",
+            plan.publication.status_sequence
+        )));
+    }
+    if let Some(report_sequence) = plan.publication.report_sequence {
+        let next_report_sequence: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(report_sequence), 0) + 1 FROM admitted_reports",
+            [],
+            |row| row.get(0),
+        )?;
+        if report_sequence != next_report_sequence {
+            return Err(StoreError::Integrity(format!(
+                "governed projection {reservation_record_id} sealed report sequence {report_sequence} is not the exact next admitted publication sequence {next_report_sequence}"
+            )));
+        }
+    }
+
+    let receipt = insert_collection_with_publication(
+        transaction,
+        &plan.collection,
+        false,
+        plan.publication.report_sequence,
+    )?;
+    match plan.mode {
+        GovernedProjectionCapsuleMode::Admitted => {
+            let expected_semantic_digest = plan
+                .expected_semantic_digest
+                .as_ref()
+                .expect("shape checked");
+            if receipt.semantic_digest.as_deref() != Some(expected_semantic_digest.as_str())
+                || receipt.report_sequence != plan.publication.report_sequence
+            {
+                return Err(StoreError::Integrity(format!(
+                    "governed projection {reservation_record_id} recovered report identity differs"
+                )));
+            }
+            let completion = AdmittedCollectionCompletion {
+                value: (),
+                evaluations: Vec::new(),
+                diagnostic_artifact: Some(plan.diagnostic.clone()),
+                status: plan.status.clone(),
+            };
+            validate_admitted_completion(
+                &plan.collection,
+                &receipt,
+                &completion,
+                AdmittedDiagnosticOriginMode::RunLevelProduction,
+            )?;
+            insert_local_diagnostic_artifact(
+                transaction,
+                &plan.collection,
+                &completion,
+                &plan.diagnostic,
+                AdmittedDiagnosticOriginMode::RunLevelProduction,
+            )?;
+            validate_refusal_invariants(transaction)?;
+            validate_evaluation_refusal_invariants(transaction)?;
+        }
+        GovernedProjectionCapsuleMode::NonSuccess => {
+            let result = RunResultStatusInput {
+                run_id: plan.collection.run.run_id.clone(),
+                status: plan.status.clone(),
+            };
+            validate_non_success_input(
+                &plan.collection,
+                &result,
+                RunResultOriginMode::DiagnosticExecution,
+            )?;
+            validate_run_only_diagnostic_artifact(&plan.collection, &plan.diagnostic)?;
+            validate_refusal_invariants(transaction)?;
+            insert_run_only_diagnostic_artifact(transaction, &plan.collection, &plan.diagnostic)?;
+        }
+    }
+    let status_sequence = insert_status_event_with_sequence(
+        transaction,
+        &plan.status,
+        Some(&plan.collection.run.run_id),
+        Some(plan.publication.status_sequence),
+    )?;
+    let acknowledgment = insert_provider_acknowledgment_with_identity(
+        transaction,
+        &plan.collection.intake,
+        &plan.collection.run.run_id,
+        &plan.status,
+        plan.publication.acknowledgment_id.clone(),
+        plan.publication.acknowledgment_committed_at.clone(),
+    )?;
+    let actual_publication =
+        governed_projection_publication(transaction, &receipt, &plan.status, &acknowledgment)?;
+    if status_sequence != plan.publication.status_sequence || actual_publication != plan.publication
+    {
+        return Err(StoreError::Integrity(format!(
+            "governed projection {reservation_record_id} recovery allocated another publication identity"
+        )));
+    }
+    validate_provider_intake_invariants(transaction)?;
+    validate_run_results(transaction)?;
+    validate_diagnostic_artifact_invariants(transaction)
+}
+
+fn preflight_existing_reopened_governed_projection(
+    connection: &Connection,
+    reservation_record_id: &Sha256Digest,
+    plan: &governed_projection_capsule::ReopenedGovernedProjectionPlan,
+) -> Result<bool, StoreError> {
+    let ProviderIntakePreflight::Existing {
+        acknowledgment,
+        canonical_result,
+    } = provider_intake_preflight_on_connection(connection, &plan.collection.intake, false)?
+    else {
+        return Ok(false);
+    };
+    let receipt = collection_receipt_for_run(connection, &acknowledgment.run_id)?;
+    let publication =
+        governed_projection_publication(connection, &receipt, &plan.status, &acknowledgment)?;
+    let diagnostic_artifact_id =
+        diagnostic_artifact_id_for_run_on_connection(connection, &acknowledgment.run_id)?;
+    let receipt_shape_matches =
+        match plan.mode {
+            GovernedProjectionCapsuleMode::Admitted => {
+                receipt.report_sequence == plan.publication.report_sequence
+                    && receipt.semantic_digest.as_deref()
+                        == plan
+                            .expected_semantic_digest
+                            .as_ref()
+                            .map(Sha256Digest::as_str)
+            }
+            GovernedProjectionCapsuleMode::NonSuccess => {
+                receipt.report_sequence.is_none()
+                    && receipt.semantic_digest.is_none()
+                    && receipt.refusal_id
+                        == plan.collection.submission.as_ref().and_then(|submission| {
+                            match &submission.disposition {
+                                SubmissionDisposition::Rejected { refusal } => {
+                                    Some(refusal.refusal_id.clone())
+                                }
+                                SubmissionDisposition::Admitted(_) => None,
+                            }
+                        })
+            }
+        };
+    if !receipt_shape_matches
+        || publication != plan.publication
+        || canonical_result.as_bytes() != plan.status.detail.as_bytes()
+        || diagnostic_artifact_id.as_ref() != Some(&plan.diagnostic.artifact_id)
+        || !status_event_matches(connection, &plan.status, &plan.collection.run.run_id)?
+    {
+        return Err(StoreError::Integrity(format!(
+            "governed projection {reservation_record_id} existing SQL publication differs from the sealed capsule"
+        )));
+    }
+    Ok(true)
+}
+
+fn governed_projection_identity_absent(
+    connection: &Connection,
+    reservation_record_id: &Sha256Digest,
+    table: &str,
+    column: &str,
+    value: &str,
+) -> Result<(), StoreError> {
+    // Table and column are selected only by fixed call sites below; caller
+    // material never becomes SQL syntax.
+    let statement = format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE {column} = ?1)");
+    let exists: bool = connection.query_row(&statement, [value], |row| row.get(0))?;
+    if exists {
+        return Err(StoreError::Integrity(format!(
+            "governed projection {reservation_record_id} preflight found existing {table}.{column} identity {value}"
+        )));
+    }
+    Ok(())
+}
+
+fn remember_governed_projection_identity(
+    owners: &mut BTreeMap<String, Sha256Digest>,
+    reservation_record_id: &Sha256Digest,
+    class: &str,
+    value: &str,
+) -> Result<(), StoreError> {
+    let key = format!("{class}\u{0}{value}");
+    if let Some(first) = owners.get(&key) {
+        if first == reservation_record_id {
+            return Ok(());
+        }
+        return Err(StoreError::Integrity(format!(
+            "governed projection batch preflight found {class} collision for {value} between reservations {first} and {reservation_record_id}"
+        )));
+    }
+    owners.insert(key, reservation_record_id.clone());
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GovernedProjectionSqlFootprint {
+    Absent,
+    ExistingExact,
+}
+
+#[allow(clippy::too_many_lines)] // The complete collision namespace is intentionally enumerated at one gate.
+fn remember_reopened_governed_projection_identities(
+    reservation_record_id: &Sha256Digest,
+    plan: &governed_projection_capsule::ReopenedGovernedProjectionPlan,
+    owners: &mut BTreeMap<String, Sha256Digest>,
+) -> Result<(), StoreError> {
+    remember_governed_projection_identity(
+        owners,
+        reservation_record_id,
+        "status_sequence",
+        &plan.publication.status_sequence.to_string(),
+    )?;
+    if let Some(report_sequence) = plan.publication.report_sequence {
+        remember_governed_projection_identity(
+            owners,
+            reservation_record_id,
+            "report_sequence",
+            &report_sequence.to_string(),
+        )?;
+    }
+
+    let intake = &plan.collection.intake;
+    for (class, value) in [
+        ("intake_id", intake.intake_id.as_str()),
+        ("intake_idempotency", intake.idempotency_key.as_str()),
+        ("intake_attempt", intake.attempt_id.as_str()),
+        ("intake_request", intake.request_id.as_str()),
+        ("run_id", plan.collection.run.run_id.as_str()),
+        ("run_request", plan.collection.run.request_id.as_str()),
+        ("artifact_id", plan.diagnostic.artifact_id.as_str()),
+        ("status_event_id", plan.status.status_event_id.as_str()),
+        (
+            "acknowledgment_id",
+            plan.publication.acknowledgment_id.as_str(),
+        ),
+    ] {
+        remember_governed_projection_identity(owners, reservation_record_id, class, value)?;
+    }
+
+    if let Some(submission) = &plan.collection.submission {
+        remember_governed_projection_identity(
+            owners,
+            reservation_record_id,
+            "submission_id",
+            &submission.submission_id,
+        )?;
+        match &submission.disposition {
+            SubmissionDisposition::Admitted(report) => {
+                remember_governed_projection_identity(
+                    owners,
+                    reservation_record_id,
+                    "report_id",
+                    &report.report_id,
+                )?;
+            }
+            SubmissionDisposition::Rejected { refusal } => {
+                remember_governed_projection_identity(
+                    owners,
+                    reservation_record_id,
+                    "refusal_id",
+                    &refusal.refusal_id,
+                )?;
+            }
+        }
+    }
+
+    if let Some(binding) = &plan.diagnostic.local_origin.execution_binding {
+        for (class, value) in [
+            (
+                "runtime_checkpoint_id",
+                binding.runtime_records.checkpoint_id.as_str(),
+            ),
+            (
+                "execution_binding_record_id",
+                binding.execution_binding_record_id.as_str(),
+            ),
+            (
+                "outer_request_record_id",
+                binding.outer_request_record_id.as_str(),
+            ),
+            (
+                "invocation_decision_record_id",
+                binding.invocation_decision_record_id.as_str(),
+            ),
+            (
+                "execution_launch_record_id",
+                binding.execution_launch_record_id.as_str(),
+            ),
+            ("outer_request_id", binding.outer_request_id.as_str()),
+        ] {
+            remember_governed_projection_identity(owners, reservation_record_id, class, value)?;
+        }
+        for record in &binding.runtime_records.records {
+            remember_governed_projection_identity(
+                owners,
+                reservation_record_id,
+                "runtime_record_id",
+                &record.record_id,
+            )?;
+        }
+        for provider in &binding.provider_attempts {
+            for (column, value) in [
+                (
+                    "provider_attempt_record_id",
+                    provider.provider_attempt_record_id.as_str(),
+                ),
+                ("intake_id", provider.intake_id.as_str()),
+            ] {
+                let class = format!("provider_attempt_binding.{column}");
+                remember_governed_projection_identity(
+                    owners,
+                    reservation_record_id,
+                    &class,
+                    value,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn classify_reopened_governed_projection_footprint_with_owners(
+    connection: &Connection,
+    reservation_record_id: &Sha256Digest,
+    plan: &governed_projection_capsule::ReopenedGovernedProjectionPlan,
+    owners: &mut BTreeMap<String, Sha256Digest>,
+) -> Result<GovernedProjectionSqlFootprint, StoreError> {
+    // Register every sealed identity before testing for exact replay. Existing
+    // SQL rows do not grant an identity permission to collide with another
+    // pending physical arena.
+    remember_reopened_governed_projection_identities(reservation_record_id, plan, owners)?;
+    classify_reopened_governed_projection_footprint_after_owner_registration(
+        connection,
+        reservation_record_id,
+        plan,
+    )
+}
+
+#[allow(clippy::too_many_lines)] // Exact preflight keeps every projection identity class in one refusal boundary.
+fn classify_reopened_governed_projection_footprint_after_owner_registration(
+    connection: &Connection,
+    reservation_record_id: &Sha256Digest,
+    plan: &governed_projection_capsule::ReopenedGovernedProjectionPlan,
+) -> Result<GovernedProjectionSqlFootprint, StoreError> {
+    if preflight_existing_reopened_governed_projection(connection, reservation_record_id, plan)? {
+        return Ok(GovernedProjectionSqlFootprint::ExistingExact);
+    }
+
+    governed_projection_identity_absent(
+        connection,
+        reservation_record_id,
+        "status_events",
+        "status_sequence",
+        &plan.publication.status_sequence.to_string(),
+    )?;
+    if let Some(report_sequence) = plan.publication.report_sequence {
+        governed_projection_identity_absent(
+            connection,
+            reservation_record_id,
+            "admitted_reports",
+            "report_sequence",
+            &report_sequence.to_string(),
+        )?;
+    }
+
+    let intake = &plan.collection.intake;
+    for (table, column, value) in [
+        (
+            "provider_intake_attempts",
+            "intake_id",
+            intake.intake_id.as_str(),
+        ),
+        (
+            "provider_intake_attempts",
+            "idempotency_key",
+            intake.idempotency_key.as_str(),
+        ),
+        (
+            "provider_intake_attempts",
+            "attempt_id",
+            intake.attempt_id.as_str(),
+        ),
+        (
+            "provider_intake_attempts",
+            "request_id",
+            intake.request_id.as_str(),
+        ),
+        (
+            "watcher_runs",
+            "run_id",
+            plan.collection.run.run_id.as_str(),
+        ),
+        (
+            "watcher_runs",
+            "request_id",
+            plan.collection.run.request_id.as_str(),
+        ),
+        (
+            "local_watcher_provider_intakes",
+            "intake_id",
+            intake.intake_id.as_str(),
+        ),
+        (
+            "local_watcher_provider_intakes",
+            "run_id",
+            plan.collection.run.run_id.as_str(),
+        ),
+        (
+            "diagnostic_artifact_commitments",
+            "artifact_id",
+            plan.diagnostic.artifact_id.as_str(),
+        ),
+        (
+            "diagnostic_artifact_payloads",
+            "artifact_id",
+            plan.diagnostic.artifact_id.as_str(),
+        ),
+        (
+            "local_diagnostic_artifact_origins",
+            "artifact_id",
+            plan.diagnostic.artifact_id.as_str(),
+        ),
+        (
+            "local_diagnostic_artifact_origins",
+            "run_id",
+            plan.collection.run.run_id.as_str(),
+        ),
+        (
+            "status_events",
+            "status_event_id",
+            plan.status.status_event_id.as_str(),
+        ),
+        (
+            "status_events",
+            "run_id",
+            plan.collection.run.run_id.as_str(),
+        ),
+        (
+            "provider_intake_acknowledgments",
+            "acknowledgment_id",
+            plan.publication.acknowledgment_id.as_str(),
+        ),
+        (
+            "provider_intake_acknowledgments",
+            "intake_id",
+            intake.intake_id.as_str(),
+        ),
+        (
+            "provider_intake_acknowledgments",
+            "run_id",
+            plan.collection.run.run_id.as_str(),
+        ),
+        (
+            "provider_intake_acknowledgments",
+            "status_event_id",
+            plan.status.status_event_id.as_str(),
+        ),
+    ] {
+        governed_projection_identity_absent(
+            connection,
+            reservation_record_id,
+            table,
+            column,
+            value,
+        )?;
+    }
+
+    if let Some(submission) = &plan.collection.submission {
+        governed_projection_identity_absent(
+            connection,
+            reservation_record_id,
+            "raw_submissions",
+            "submission_id",
+            &submission.submission_id,
+        )?;
+        governed_projection_identity_absent(
+            connection,
+            reservation_record_id,
+            "raw_submissions",
+            "run_id",
+            &plan.collection.run.run_id,
+        )?;
+        match &submission.disposition {
+            SubmissionDisposition::Admitted(report) => {
+                governed_projection_identity_absent(
+                    connection,
+                    reservation_record_id,
+                    "admitted_reports",
+                    "report_id",
+                    &report.report_id,
+                )?;
+                governed_projection_identity_absent(
+                    connection,
+                    reservation_record_id,
+                    "admitted_reports",
+                    "submission_id",
+                    &submission.submission_id,
+                )?;
+            }
+            SubmissionDisposition::Rejected { refusal } => {
+                governed_projection_identity_absent(
+                    connection,
+                    reservation_record_id,
+                    "refusals",
+                    "refusal_id",
+                    &refusal.refusal_id,
+                )?;
+            }
+        }
+    }
+    if let Some(evaluation_id) = &plan.diagnostic.local_origin.evaluation_id {
+        governed_projection_identity_absent(
+            connection,
+            reservation_record_id,
+            "local_diagnostic_artifact_origins",
+            "evaluation_id",
+            evaluation_id,
+        )?;
+    }
+    if let Some(binding) = &plan.diagnostic.local_origin.execution_binding {
+        for (column, value) in [
+            (
+                "execution_binding_record_id",
+                binding.execution_binding_record_id.as_str(),
+            ),
+            (
+                "outer_request_record_id",
+                binding.outer_request_record_id.as_str(),
+            ),
+            (
+                "invocation_decision_record_id",
+                binding.invocation_decision_record_id.as_str(),
+            ),
+            (
+                "execution_launch_record_id",
+                binding.execution_launch_record_id.as_str(),
+            ),
+            ("outer_request_id", binding.outer_request_id.as_str()),
+        ] {
+            governed_projection_identity_absent(
+                connection,
+                reservation_record_id,
+                "local_diagnostic_artifact_origins",
+                column,
+                value,
+            )?;
+        }
+        for provider in &binding.provider_attempts {
+            for (column, value) in [
+                (
+                    "provider_attempt_record_id",
+                    provider.provider_attempt_record_id.as_str(),
+                ),
+                ("intake_id", provider.intake_id.as_str()),
+            ] {
+                governed_projection_identity_absent(
+                    connection,
+                    reservation_record_id,
+                    "local_diagnostic_artifact_provider_attempt_bindings",
+                    column,
+                    value,
+                )?;
+            }
+        }
+    }
+    Ok(GovernedProjectionSqlFootprint::Absent)
+}
+
+pub(crate) fn classify_reopened_governed_projection_footprint(
+    connection: &Connection,
+    reservation_record_id: &Sha256Digest,
+    plan: &governed_projection_capsule::ReopenedGovernedProjectionPlan,
+) -> Result<GovernedProjectionSqlFootprint, StoreError> {
+    classify_reopened_governed_projection_footprint_with_owners(
+        connection,
+        reservation_record_id,
+        plan,
+        &mut BTreeMap::new(),
+    )
+}
+
+fn dense_governed_publication_frontier(
+    connection: &Connection,
+    table: &str,
+    sequence_column: &str,
+    label: &str,
+) -> Result<i64, StoreError> {
+    validated_autoincrement_frontier(connection, table, sequence_column, label)
+}
+
+fn validated_autoincrement_frontier(
+    connection: &Connection,
+    table: &str,
+    sequence_column: &str,
+    label: &str,
+) -> Result<i64, StoreError> {
+    // Table and column are selected only by fixed call sites below; caller
+    // material never becomes SQL syntax.
+    let statement =
+        format!("SELECT COUNT(*), MIN({sequence_column}), MAX({sequence_column}) FROM {table}");
+    let (count, minimum, maximum): (i64, Option<i64>, Option<i64>) =
+        connection.query_row(&statement, [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+    if count == 0 {
+        if minimum.is_some() || maximum.is_some() {
+            return Err(StoreError::Integrity(format!(
+                "governed projection batch preflight found an internally inconsistent empty committed {label} ledger"
+            )));
+        }
+        let allocator = connection
+            .query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name = ?1",
+                [table],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        if allocator.is_some_and(|value| value != 0) {
+            return Err(StoreError::Integrity(format!(
+                "governed projection batch preflight found empty {label} rows with advanced sqlite_sequence {allocator:?}"
+            )));
+        }
+        return Ok(1);
+    }
+    let minimum = minimum.ok_or_else(|| {
+        StoreError::Integrity(format!(
+            "governed projection batch preflight found a nonempty committed {label} ledger without a minimum sequence"
+        ))
+    })?;
+    let maximum = maximum.ok_or_else(|| {
+        StoreError::Integrity(format!(
+            "governed projection batch preflight found a nonempty committed {label} ledger without a maximum sequence"
+        ))
+    })?;
+    if minimum != 1 || count != maximum {
+        return Err(StoreError::Integrity(format!(
+            "governed projection batch preflight found a non-dense committed {label} ledger: count {count}, minimum {minimum}, maximum {maximum}"
+        )));
+    }
+    let allocator = connection
+        .query_row(
+            "SELECT seq FROM sqlite_sequence WHERE name = ?1",
+            [table],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    if allocator != Some(maximum) {
+        return Err(StoreError::Integrity(format!(
+            "governed projection batch preflight found {label} sqlite_sequence {allocator:?} different from committed maximum {maximum}"
+        )));
+    }
+    maximum.checked_add(1).ok_or_else(|| {
+        StoreError::Invariant(format!(
+            "governed committed {label} sequence frontier overflowed"
+        ))
+    })
+}
+
+#[derive(Clone, Debug)]
+struct GovernedRuntimeProjectionFrontier {
+    next_checkpoint_sequence: u64,
+    predecessor_checkpoint_id: Option<String>,
+    predecessor_checkpoint_root: Option<Sha256Digest>,
+    next_record_sequence: u64,
+    predecessor_record_id: Option<String>,
+    predecessor_record_root: Option<Sha256Digest>,
+    dependencies: BTreeMap<String, (Sha256Digest, String, usize)>,
+}
+
+fn governed_runtime_projection_frontier(
+    connection: &Connection,
+) -> Result<GovernedRuntimeProjectionFrontier, StoreError> {
+    validate_runtime_record_ledger(connection)?;
+    if !runtime_record_lookup_status_on_connection(connection)?.is_current() {
+        return Err(StoreError::Integrity(
+            "governed projection batch preflight found a stale runtime-record lookup".into(),
+        ));
+    }
+    let next_checkpoint_sequence = u64::try_from(validated_autoincrement_frontier(
+        connection,
+        "runtime_record_checkpoints",
+        "checkpoint_sequence",
+        "runtime checkpoint",
+    )?)
+    .map_err(|_| StoreError::Integrity("runtime checkpoint frontier is negative".into()))?;
+    let predecessor = runtime_ledger_checkpoint_on_connection(connection)?;
+    let (next_record_sequence, predecessor_record_id, predecessor_record_root) =
+        if let Some(checkpoint) = &predecessor {
+            let record = runtime_record_by_sequence_on_connection(
+                connection,
+                checkpoint.last_record_sequence,
+            )?
+            .ok_or_else(|| {
+                StoreError::Integrity("runtime checkpoint frontier lost its terminal record".into())
+            })?;
+            (
+                record.record_sequence.checked_add(1).ok_or_else(|| {
+                    StoreError::Invariant("runtime record frontier overflowed".into())
+                })?,
+                Some(record.record_id),
+                Some(record.ledger_root),
+            )
+        } else {
+            (1, None, None)
+        };
+    Ok(GovernedRuntimeProjectionFrontier {
+        next_checkpoint_sequence,
+        predecessor_checkpoint_id: predecessor
+            .as_ref()
+            .map(|checkpoint| checkpoint.checkpoint_id.clone()),
+        predecessor_checkpoint_root: predecessor
+            .as_ref()
+            .map(|checkpoint| checkpoint.checkpoint_ledger_root.clone()),
+        next_record_sequence,
+        predecessor_record_id,
+        predecessor_record_root,
+        dependencies: BTreeMap::new(),
+    })
+}
+
+fn preflight_runtime_projection_dependency(
+    connection: &Connection,
+    reservation_record_id: &Sha256Digest,
+    dependency: &RuntimeCheckpointDependencyInput,
+    frontier: &mut GovernedRuntimeProjectionFrontier,
+) -> Result<(), StoreError> {
+    validate_runtime_checkpoint_dependency(dependency)
+        .map_err(|error| StoreError::Integrity(error.to_string()))?;
+    let trust_root = runtime_dependency_trust_root_on_connection(connection)?.ok_or_else(|| {
+        StoreError::Integrity(format!(
+            "governed projection {reservation_record_id} has no runtime dependency trust root"
+        ))
+    })?;
+    if trust_root != dependency.trust_anchor_id {
+        return Err(StoreError::Integrity(format!(
+            "governed projection {reservation_record_id} terminal dependency uses trust root {}, expected {trust_root}",
+            dependency.trust_anchor_id
+        )));
+    }
+    let expected = (
+        dependency.trust_anchor_id.clone(),
+        dependency.canonical_custody.digest().to_owned(),
+        dependency.canonical_custody.as_bytes().len(),
+    );
+    if let Some(prior) = frontier
+        .dependencies
+        .get(dependency.dependency_generation_id.as_str())
+    {
+        if prior != &expected {
+            return Err(StoreError::Integrity(format!(
+                "governed projection {reservation_record_id} reuses runtime dependency generation {} with another exact identity",
+                dependency.dependency_generation_id
+            )));
+        }
+        return Ok(());
+    }
+    let existing = connection
+        .query_row(
+            "SELECT trust_anchor_id, custody_schema, canonical_bytes_sha256,
+                    canonical_bytes_length
+             FROM runtime_dependency_generation_commitments
+             WHERE dependency_generation_id = ?1",
+            [dependency.dependency_generation_id.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    if let Some((anchor, schema, digest, length)) = existing {
+        if anchor != expected.0.as_str()
+            || schema != RUNTIME_DEPENDENCY_GENERATION_CUSTODY_SCHEMA
+            || digest != expected.1
+            || usize::try_from(length).ok() != Some(expected.2)
+        {
+            return Err(StoreError::Integrity(format!(
+                "governed projection {reservation_record_id} runtime dependency commitment differs"
+            )));
+        }
+        let payload = connection
+            .query_row(
+                "SELECT canonical_bytes
+                 FROM runtime_dependency_generation_payloads
+                 WHERE dependency_generation_id = ?1",
+                [dependency.dependency_generation_id.as_str()],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        match payload {
+            Some(bytes) if bytes == dependency.canonical_custody.as_bytes() => {}
+            Some(_) => {
+                return Err(StoreError::Integrity(format!(
+                    "governed projection {reservation_record_id} runtime dependency payload is corrupt or substituted"
+                )));
+            }
+            None => {
+                return Err(StoreError::Integrity(format!(
+                    "governed projection {reservation_record_id} runtime dependency payload is committed-unavailable"
+                )));
+            }
+        }
+    }
+    frontier.dependencies.insert(
+        dependency.dependency_generation_id.as_str().to_owned(),
+        expected,
+    );
+    Ok(())
+}
+
+fn preflight_existing_runtime_projection_batch(
+    connection: &Connection,
+    reservation_record_id: &Sha256Digest,
+    batch: &RuntimeRecordBatchInput,
+) -> Result<(), StoreError> {
+    validate_runtime_record_batch(batch)
+        .map_err(|error| StoreError::Integrity(error.to_string()))?;
+    let expected_digest = runtime_record_batch_digest(batch)?;
+    let checkpoint = runtime_checkpoint_by_id_on_connection(connection, &batch.checkpoint_id)?
+        .ok_or_else(|| {
+            StoreError::Integrity(format!(
+                "governed projection {reservation_record_id} existing SQL footprint lacks terminal runtime checkpoint {}",
+                batch.checkpoint_id
+            ))
+        })?;
+    let dependency =
+        runtime_checkpoint_dependency_on_connection(connection, &batch.checkpoint_id)?
+            .ok_or_else(|| {
+                StoreError::Integrity(format!(
+                    "governed projection {reservation_record_id} terminal checkpoint lacks dependency binding"
+                ))
+            })?;
+    let dependency_matches = matches!(
+        dependency,
+        RuntimeCheckpointDependencyAccess {
+            binding: RuntimeCheckpointDependencyBinding::Authenticated {
+                dependency_generation_id,
+                trust_anchor_id,
+                canonical_bytes_sha256,
+                canonical_bytes_length,
+            },
+            byte_state: Some(RuntimeDependencyGenerationByteState::VerifiedAvailable {
+                canonical_custody,
+            }),
+            ..
+        } if dependency_generation_id == batch.dependency.dependency_generation_id
+            && trust_anchor_id == batch.dependency.trust_anchor_id
+            && canonical_bytes_sha256.as_str() == batch.dependency.canonical_custody.digest()
+            && usize::try_from(canonical_bytes_length).ok()
+                == Some(batch.dependency.canonical_custody.as_bytes().len())
+            && canonical_custody == batch.dependency.canonical_custody
+    );
+    if checkpoint.batch_digest != expected_digest
+        || checkpoint.predecessor_checkpoint_id != batch.expected_predecessor_checkpoint_id
+        || checkpoint.predecessor_ledger_root != batch.expected_predecessor_ledger_root
+        || checkpoint.record_count
+            != u64::try_from(batch.records.len()).map_err(|_| {
+                StoreError::Invariant("terminal runtime batch length overflowed".into())
+            })?
+        || !dependency_matches
+    {
+        return Err(StoreError::Integrity(format!(
+            "governed projection {reservation_record_id} existing terminal runtime checkpoint differs"
+        )));
+    }
+    for (offset, expected) in batch.records.iter().enumerate() {
+        let sequence = checkpoint
+            .first_record_sequence
+            .checked_add(u64::try_from(offset).map_err(|_| {
+                StoreError::Invariant("terminal runtime record offset overflowed".into())
+            })?)
+            .ok_or_else(|| StoreError::Invariant("terminal runtime sequence overflowed".into()))?;
+        let actual = runtime_record_by_sequence_on_connection(connection, sequence)?
+            .ok_or_else(|| {
+                StoreError::Integrity(format!(
+                    "governed projection {reservation_record_id} terminal checkpoint lost sequence {sequence}"
+                ))
+            })?;
+        if actual.record_id != expected.record_id
+            || actual.record_schema != expected.record_schema
+            || actual.canonical_bytes != expected.canonical_bytes
+            || actual.committed_at != expected.committed_at
+            || actual.checkpoint_id != batch.checkpoint_id
+        {
+            return Err(StoreError::Integrity(format!(
+                "governed projection {reservation_record_id} existing terminal runtime record differs at sequence {sequence}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)] // One simulation preserves the complete runtime checkpoint frontier.
+fn preflight_absent_runtime_projection_batch(
+    connection: &Connection,
+    reservation_record_id: &Sha256Digest,
+    batch: &RuntimeRecordBatchInput,
+    physical_execution_launch_record_id: &Sha256Digest,
+    owners: &mut BTreeMap<String, Sha256Digest>,
+    frontier: &mut GovernedRuntimeProjectionFrontier,
+    first_local_mismatch: &mut Option<StoreError>,
+) -> Result<(), StoreError> {
+    validate_runtime_record_batch(batch)
+        .map_err(|error| StoreError::Integrity(error.to_string()))?;
+    preflight_runtime_projection_dependency(
+        connection,
+        reservation_record_id,
+        &batch.dependency,
+        frontier,
+    )?;
+    if runtime_checkpoint_by_id_on_connection(connection, &batch.checkpoint_id)?.is_some() {
+        return Err(StoreError::Integrity(format!(
+            "governed projection {reservation_record_id} has a partial or colliding terminal runtime checkpoint {}",
+            batch.checkpoint_id
+        )));
+    }
+    let launch_record = runtime_record_by_id_on_connection(
+        connection,
+        physical_execution_launch_record_id.as_str(),
+    )?
+    .ok_or_else(|| {
+        StoreError::Integrity(format!(
+            "governed projection {reservation_record_id} lost its exact physical execution-launch record {physical_execution_launch_record_id}"
+        ))
+    })?;
+    let launch_checkpoint =
+        runtime_checkpoint_by_id_on_connection(connection, &launch_record.checkpoint_id)?
+            .ok_or_else(|| {
+                StoreError::Integrity(format!(
+                    "governed projection {reservation_record_id} execution launch belongs to missing checkpoint {}",
+                    launch_record.checkpoint_id
+                ))
+            })?;
+    let sealed_launch_id = Some(launch_checkpoint.checkpoint_id.clone());
+    let sealed_launch_root = Some(launch_checkpoint.checkpoint_ledger_root.clone());
+    if frontier.predecessor_checkpoint_id != sealed_launch_id
+        || frontier.predecessor_checkpoint_root != sealed_launch_root
+    {
+        return Err(StoreError::Integrity(format!(
+            "governed projection {reservation_record_id} terminal runtime predecessor differs from the committed/simulated frontier"
+        )));
+    }
+    if batch.expected_predecessor_checkpoint_id != sealed_launch_id
+        || batch.expected_predecessor_ledger_root != sealed_launch_root
+    {
+        first_local_mismatch.get_or_insert_with(|| {
+            governed_custody::projection_local_mismatch(
+                reservation_record_id,
+                "terminal checkpoint does not continue the exact sealed launch frontier",
+            )
+        });
+    }
+    let checkpoint_sequence = frontier.next_checkpoint_sequence;
+    remember_governed_projection_identity(
+        owners,
+        reservation_record_id,
+        "runtime_checkpoint_sequence",
+        &checkpoint_sequence.to_string(),
+    )?;
+    governed_projection_identity_absent(
+        connection,
+        reservation_record_id,
+        "runtime_record_checkpoints",
+        "checkpoint_sequence",
+        &checkpoint_sequence.to_string(),
+    )?;
+
+    let mut predecessor_record_id = frontier.predecessor_record_id.clone();
+    let mut predecessor_record_root = frontier.predecessor_record_root.clone();
+    let mut next_record_sequence = frontier.next_record_sequence;
+    for record in &batch.records {
+        governed_projection_identity_absent(
+            connection,
+            reservation_record_id,
+            "runtime_record_ledger",
+            "record_id",
+            &record.record_id,
+        )?;
+        let sequence = next_record_sequence;
+        remember_governed_projection_identity(
+            owners,
+            reservation_record_id,
+            "runtime_record_sequence",
+            &sequence.to_string(),
+        )?;
+        governed_projection_identity_absent(
+            connection,
+            reservation_record_id,
+            "runtime_record_ledger",
+            "record_sequence",
+            &sequence.to_string(),
+        )?;
+        governed_projection_identity_absent(
+            connection,
+            reservation_record_id,
+            "runtime_record_lookup",
+            "record_id",
+            &record.record_id,
+        )?;
+        governed_projection_identity_absent(
+            connection,
+            reservation_record_id,
+            "runtime_record_lookup",
+            "record_sequence",
+            &sequence.to_string(),
+        )?;
+        let root = runtime_record_root(
+            sequence,
+            record,
+            &batch.checkpoint_id,
+            predecessor_record_id.as_deref(),
+            predecessor_record_root.as_ref(),
+        )?;
+        remember_governed_projection_identity(
+            owners,
+            reservation_record_id,
+            "runtime_record_root",
+            root.as_str(),
+        )?;
+        governed_projection_identity_absent(
+            connection,
+            reservation_record_id,
+            "runtime_record_ledger",
+            "ledger_root",
+            root.as_str(),
+        )?;
+        predecessor_record_id = Some(record.record_id.clone());
+        predecessor_record_root = Some(root);
+        next_record_sequence = next_record_sequence.checked_add(1).ok_or_else(|| {
+            StoreError::Invariant("terminal runtime record sequence overflowed".into())
+        })?;
+    }
+    let checkpoint_root = predecessor_record_root.clone().ok_or_else(|| {
+        StoreError::Invariant("terminal runtime batch produced no checkpoint root".into())
+    })?;
+    remember_governed_projection_identity(
+        owners,
+        reservation_record_id,
+        "runtime_checkpoint_root",
+        checkpoint_root.as_str(),
+    )?;
+    governed_projection_identity_absent(
+        connection,
+        reservation_record_id,
+        "runtime_record_checkpoints",
+        "checkpoint_ledger_root",
+        checkpoint_root.as_str(),
+    )?;
+    frontier.next_checkpoint_sequence = frontier
+        .next_checkpoint_sequence
+        .checked_add(1)
+        .ok_or_else(|| {
+            StoreError::Invariant("terminal runtime checkpoint sequence overflowed".into())
+        })?;
+    frontier.predecessor_checkpoint_id = Some(batch.checkpoint_id.clone());
+    frontier.predecessor_checkpoint_root = Some(checkpoint_root);
+    frontier.next_record_sequence = next_record_sequence;
+    frontier.predecessor_record_id = predecessor_record_id;
+    frontier.predecessor_record_root = predecessor_record_root;
+    Ok(())
+}
+
+/// Read-only whole-batch replay preflight.
+///
+/// This runs after physical correspondence and sorting, but before the first
+/// INSERT. It simulates both global publication sequences and rejects existing
+/// or intra-batch identity collisions. It grants no retry or publication
+/// authority; callers still perform the exact insertion and full post-insert
+/// verification inside the same IMMEDIATE transaction.
+#[allow(clippy::too_many_lines)] // Whole-batch preflight preserves all shared publication-frontier checks.
+pub(crate) fn preflight_reopened_governed_projection_batch(
+    connection: &Connection,
+    pending: &[governed_custody::PendingGovernedProjection<'_>],
+) -> Result<(), StoreError> {
+    // A missing parent plus an orphaned child is a partial durable footprint,
+    // even when the pending plan's root identity is absent. Check the whole
+    // committed relational source before any arena-local mismatch can be
+    // exposed; this covers report children and provider-attempt bindings
+    // without trusting a hand-maintained list of current child tables.
+    let mut foreign_key_check = connection.prepare("PRAGMA foreign_key_check")?;
+    let mut foreign_key_violations = foreign_key_check.query([])?;
+    if let Some(row) = foreign_key_violations.next()? {
+        let table: String = row.get(0)?;
+        let rowid: Option<i64> = row.get(1)?;
+        let parent: String = row.get(2)?;
+        let constraint: i64 = row.get(3)?;
+        return Err(StoreError::Integrity(format!(
+            "governed projection batch preflight found foreign-key violation in {table} row {rowid:?} against {parent} constraint {constraint}"
+        )));
+    }
+    // `status_current` is a disposable projection, but governed replay writes
+    // it. Stale or substituted current-state rows are therefore a global
+    // repair condition, never evidence against one sealed arena.
+    validate_status_current_projection(connection)?;
+    // These implicit allocators are part of durable logical state. A local
+    // sealed mismatch cannot be blamed while any allocator is advanced,
+    // corrupt, or inconsistent with its append-only rows.
+    let _ = validated_autoincrement_frontier(
+        connection,
+        "provider_intake_attempts",
+        "intake_sequence",
+        "provider-intake",
+    )?;
+    let _ = validated_autoincrement_frontier(
+        connection,
+        "diagnostic_artifact_commitments",
+        "artifact_sequence",
+        "diagnostic-artifact",
+    )?;
+    let mut next_status_sequence = dense_governed_publication_frontier(
+        connection,
+        "status_events",
+        "status_sequence",
+        "status-event",
+    )?;
+    let mut next_report_sequence = dense_governed_publication_frontier(
+        connection,
+        "admitted_reports",
+        "report_sequence",
+        "admitted-report",
+    )?;
+    let mut runtime_frontier = governed_runtime_projection_frontier(connection)?;
+    let mut owners = BTreeMap::new();
+    let mut new_projection = Vec::with_capacity(pending.len());
+    let mut first_local_mismatch = None;
+
+    // Collect the complete batch owner set before any SQL classification.
+    // This makes collision discovery independent of custody inventory or
+    // publication order and anchors launch ownership in physical custody.
+    for projection in pending {
+        remember_governed_projection_identity(
+            &mut owners,
+            &projection.reservation_record_id,
+            "execution_launch_record_id",
+            projection.physical_execution_launch_record_id.as_str(),
+        )?;
+        remember_reopened_governed_projection_identities(
+            &projection.reservation_record_id,
+            &projection.plan,
+            &mut owners,
+        )?;
+    }
+
+    for projection in pending {
+        let reservation_record_id = &projection.reservation_record_id;
+        let plan = &projection.plan;
+        let classified = classify_reopened_governed_projection_footprint_after_owner_registration(
+            connection,
+            reservation_record_id,
+            plan,
+        )?;
+        if classified != projection.sql_footprint {
+            return Err(StoreError::Integrity(format!(
+                "governed projection {reservation_record_id} SQL footprint changed within one IMMEDIATE preflight"
+            )));
+        }
+        if let Some(binding) = &plan.diagnostic.local_origin.execution_binding {
+            match classified {
+                GovernedProjectionSqlFootprint::Absent => {
+                    preflight_absent_runtime_projection_batch(
+                        connection,
+                        reservation_record_id,
+                        &binding.runtime_records,
+                        &projection.physical_execution_launch_record_id,
+                        &mut owners,
+                        &mut runtime_frontier,
+                        &mut first_local_mismatch,
+                    )?;
+                }
+                GovernedProjectionSqlFootprint::ExistingExact => {
+                    preflight_existing_runtime_projection_batch(
+                        connection,
+                        reservation_record_id,
+                        &binding.runtime_records,
+                    )?;
+                }
+            }
+        }
+        new_projection.push(classified == GovernedProjectionSqlFootprint::Absent);
+    }
+
+    for (projection, is_new) in pending.iter().zip(new_projection) {
+        if !is_new {
+            continue;
+        }
+        let reservation_record_id = &projection.reservation_record_id;
+        let plan = &projection.plan;
+        if let Err(error) =
+            validate_reopened_governed_projection_plan_before_insert(reservation_record_id, plan)
+        {
+            first_local_mismatch.get_or_insert_with(|| {
+                governed_custody::projection_local_mismatch(
+                    reservation_record_id,
+                    format!("sealed projection plan is intrinsically invalid: {error}"),
+                )
+            });
+        }
+        match plan.publication.status_sequence.cmp(&next_status_sequence) {
+            std::cmp::Ordering::Less => {
+                return Err(StoreError::Integrity(format!(
+                    "governed projection {reservation_record_id} sealed status sequence {} collides with the committed or simulated frontier {next_status_sequence}",
+                    plan.publication.status_sequence
+                )));
+            }
+            std::cmp::Ordering::Greater => {
+                first_local_mismatch.get_or_insert_with(|| {
+                    governed_custody::projection_local_mismatch(
+                        reservation_record_id,
+                        format!(
+                            "sealed status sequence {} skips the exact next frontier {next_status_sequence}",
+                            plan.publication.status_sequence
+                        ),
+                    )
+                });
+            }
+            std::cmp::Ordering::Equal => {}
+        }
+        next_status_sequence = next_status_sequence.checked_add(1).ok_or_else(|| {
+            StoreError::Invariant("governed status-sequence preflight overflowed".into())
+        })?;
+        match (plan.mode, plan.publication.report_sequence) {
+            (GovernedProjectionCapsuleMode::Admitted, Some(sequence)) => {
+                match sequence.cmp(&next_report_sequence) {
+                    std::cmp::Ordering::Less => {
+                        return Err(StoreError::Integrity(format!(
+                            "governed projection {reservation_record_id} sealed report sequence {sequence} collides with the committed or simulated frontier {next_report_sequence}"
+                        )));
+                    }
+                    std::cmp::Ordering::Greater => {
+                        first_local_mismatch.get_or_insert_with(|| {
+                            governed_custody::projection_local_mismatch(
+                                reservation_record_id,
+                                format!(
+                                    "sealed report sequence {sequence} skips the exact next frontier {next_report_sequence}"
+                                ),
+                            )
+                        });
+                    }
+                    std::cmp::Ordering::Equal => {}
+                }
+                next_report_sequence = next_report_sequence.checked_add(1).ok_or_else(|| {
+                    StoreError::Invariant("governed report-sequence preflight overflowed".into())
+                })?;
+            }
+            (GovernedProjectionCapsuleMode::NonSuccess, None) => {}
+            _ => {
+                first_local_mismatch.get_or_insert_with(|| {
+                    governed_custody::projection_local_mismatch(
+                        reservation_record_id,
+                        "sealed projection mode and report-sequence shape differ",
+                    )
+                });
+            }
+        }
+    }
+    if let Some(error) = first_local_mismatch {
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// An instance-specific database watermark captured within an evaluation transaction.
@@ -4474,6 +6771,12 @@ pub struct AdmittedRunLevelDiagnosticCompletion<T> {
 enum AdmittedDiagnosticOriginMode {
     DetectorEvaluation,
     RunLevelProduction,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RunResultOriginMode {
+    Instance,
+    DiagnosticExecution,
 }
 
 /// Required profile identity for every detector evaluation, independent of
@@ -4814,7 +7117,9 @@ pub struct StatusEventInput {
 pub struct RunResultStatusInput {
     /// Exact run created by the accompanying collection input.
     pub run_id: String,
-    /// Instance status whose canonical detail carries that same run identity.
+    /// Bounded result status whose canonical detail carries that same run
+    /// identity. Legacy collection paths use the watcher instance; governed
+    /// run-level paths use the exact diagnostic execution.
     pub status: StatusEventInput,
 }
 
@@ -5187,7 +7492,12 @@ impl Store {
         };
         store.validate_v3_upgrade_source()?;
         {
-            let transaction = store.immediate_transaction()?;
+            // The ordinary writer gate is defined only for the current
+            // schema. This transaction has already locked and revalidated the
+            // exact v3 source and its named backup; running current-schema
+            // projection recovery against a v3 database would either query
+            // tables that do not exist or reinterpret legacy state.
+            let transaction = store.immediate_recovery_transaction()?;
             // The read-only preflight above provides an early diagnostic. This
             // second complete validation is authoritative: BEGIN IMMEDIATE now
             // prevents a writer from changing the v3 source between validation
@@ -5341,7 +7651,10 @@ impl Store {
         };
         validate_v4_upgrade_source_connection(&store.connection)?;
         {
-            let transaction = store.immediate_transaction()?;
+            // The ordinary writer gate is defined only for the current
+            // schema. This transaction has already locked and revalidated the
+            // exact v4 source and its named backup.
+            let transaction = store.immediate_recovery_transaction()?;
             validate_v4_upgrade_source_connection(&transaction)?;
             if sha256_file(backup_path)? != receipt.backup_digest {
                 return Err(StoreError::Invariant(
@@ -5460,7 +7773,10 @@ impl Store {
         };
         validate_v5_upgrade_source_connection(&store.connection)?;
         {
-            let transaction = store.immediate_transaction()?;
+            // The ordinary writer gate is defined only for the current
+            // schema. This transaction has already locked and revalidated the
+            // exact v5 source and its named backup.
+            let transaction = store.immediate_recovery_transaction()?;
             validate_v5_upgrade_source_connection(&transaction)?;
             if sha256_file(backup_path)? != receipt.backup_digest {
                 return Err(StoreError::Invariant(
@@ -5581,7 +7897,10 @@ impl Store {
         };
         validate_v6_upgrade_source_connection(&store.connection)?;
         {
-            let transaction = store.immediate_transaction()?;
+            // The ordinary writer gate is defined only for the current
+            // schema. This transaction has already locked and revalidated the
+            // exact v6 source and its named backup.
+            let transaction = store.immediate_recovery_transaction()?;
             validate_v6_upgrade_source_connection(&transaction)?;
             if sha256_file(backup_path)? != receipt.backup_digest {
                 return Err(StoreError::Invariant(
@@ -6038,7 +8357,7 @@ impl Store {
     }
 
     /// Prove every completed admitted or non-success watcher run has exactly
-    /// one atomically linked canonical instance result.
+    /// one atomically linked canonical result with its declared origin scope.
     pub fn validate_run_results(&self) -> Result<(), StoreError> {
         validate_run_results(&self.connection)
     }
@@ -8681,6 +11000,13 @@ fn validate_resolved_diagnostic_artifact_execution_binding(
             "diagnostic artifact {artifact_id} outer request identity differs from linkage"
         )));
     }
+    if binding_value.pointer("/resolved_references/diagnostic_profile/identity")
+        != request_value.get("profile")
+    {
+        return Err(StoreError::Integrity(format!(
+            "diagnostic artifact {artifact_id} resolved production profile differs from its outer request"
+        )));
+    }
     let launch_value: Value = serde_json::from_slice(
         binding.execution_launch.canonical_bytes.as_bytes(),
     )
@@ -8850,20 +11176,75 @@ fn validate_local_diagnostic_artifact_provenance(
     artifact: &DiagnosticArtifactCommitInput,
     run: &RunInput,
 ) -> Result<(), StoreError> {
-    let request_id = artifact
-        .local_origin
-        .execution_binding
-        .as_ref()
-        .map_or(run.request_id.as_str(), |binding| {
-            binding.outer_request_id.as_str()
-        });
+    let (request_id, profile_id, profile_version, profile_digest) = if let Some(binding) =
+        &artifact.local_origin.execution_binding
+    {
+        let matching = binding
+            .runtime_records
+            .records
+            .iter()
+            .filter(|record| record.record_id == binding.execution_binding_record_id)
+            .collect::<Vec<_>>();
+        let [binding_record] = matching.as_slice() else {
+            return Err(StoreError::Invariant(
+                    "local diagnostic artifact production binding is absent or duplicated in its terminal batch"
+                        .into(),
+                ));
+        };
+        if binding_record.record_schema != "nq.execution_identity_binding.v2" {
+            return Err(StoreError::Invariant(
+                "local diagnostic artifact production binding uses an incompatible schema".into(),
+            ));
+        }
+        let binding_value: Value =
+            serde_json::from_slice(binding_record.canonical_bytes.as_bytes())
+                .map_err(|error| StoreError::CanonicalJson(error.to_string()))?;
+        let profile = binding_value
+                .pointer("/resolved_references/diagnostic_profile/identity")
+                .and_then(Value::as_object)
+                .ok_or_else(|| {
+                    StoreError::Invariant(
+                        "local diagnostic artifact production binding has no resolved diagnostic profile"
+                            .into(),
+                    )
+                })?;
+        let field = |name: &str| {
+            profile
+                .get(name)
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    StoreError::Invariant(format!(
+                        "local diagnostic artifact production profile has no string {name}"
+                    ))
+                })
+        };
+        if profile.get("kind").and_then(Value::as_str) != Some("diagnostic_profile") {
+            return Err(StoreError::Invariant(
+                "local diagnostic artifact production profile has the wrong identity kind".into(),
+            ));
+        }
+        (
+            binding.outer_request_id.clone(),
+            field("id")?,
+            field("version")?,
+            field("descriptor_digest")?,
+        )
+    } else {
+        (
+            run.request_id.clone(),
+            run.profile_id.clone(),
+            run.profile_version.clone(),
+            run.profile_digest.clone(),
+        )
+    };
     validate_local_diagnostic_artifact_provenance_fields(
         &artifact.canonical_bytes,
         &run.run_id,
-        request_id,
-        &run.profile_id,
-        &run.profile_version,
-        &run.profile_digest,
+        &request_id,
+        &profile_id,
+        &profile_version,
+        &profile_digest,
         &artifact.local_origin.completed_at,
     )
 }
@@ -9580,8 +11961,16 @@ fn validate_local_diagnostic_artifact_origin_modes(
                  OR NOT EXISTS (
                         SELECT 1 FROM status_events AS status
                         WHERE status.run_id = local.run_id
-                          AND status.component_kind = 'instance'
-                          AND status.component_id = run.instance_id
+                          AND (
+                               (
+                                    status.component_kind = 'instance'
+                                AND status.component_id = run.instance_id
+                               )
+                            OR (
+                                    status.component_kind = 'diagnostic_execution'
+                                AND status.component_id = run.run_id
+                               )
+                          )
                     )
                  OR NOT EXISTS (
                         SELECT 1 FROM provider_intake_acknowledgments AS acknowledgment
@@ -9601,6 +11990,7 @@ fn validate_local_diagnostic_artifact_origin_modes(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // Full history validation keeps every local-origin binding jointly checked.
 fn validate_local_diagnostic_artifact_provenance_history(
     connection: &Connection,
 ) -> Result<(), StoreError> {
@@ -9676,18 +12066,54 @@ fn validate_local_diagnostic_artifact_provenance_history(
                 "local diagnostic artifact {artifact_id} binding origin disagrees with exact linkage"
             )));
         }
-        let expected_request_id = production_binding
-            .as_ref()
-            .map_or(run_binding.0.as_str(), |binding| {
-                binding.outer_request_id.as_str()
-            });
+        let (expected_request_id, profile_id, profile_version, profile_digest) = if let Some(
+            binding,
+        ) =
+            &production_binding
+        {
+            let request_value: Value = serde_json::from_slice(
+                binding.outer_request.canonical_bytes.as_bytes(),
+            )
+            .map_err(|error| {
+                StoreError::Integrity(format!(
+                    "local diagnostic artifact {artifact_id} outer request cannot decode: {error}"
+                ))
+            })?;
+            let profile = request_value
+                    .get("profile")
+                    .and_then(Value::as_object)
+                    .ok_or_else(|| {
+                        StoreError::Integrity(format!(
+                            "local diagnostic artifact {artifact_id} outer request has no diagnostic profile"
+                        ))
+                    })?;
+            let field = |name: &str| {
+                profile
+                        .get(name)
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .ok_or_else(|| {
+                            StoreError::Integrity(format!(
+                                "local diagnostic artifact {artifact_id} outer profile has no string {name}"
+                            ))
+                        })
+            };
+            (
+                binding.outer_request_id.clone(),
+                field("id")?,
+                field("version")?,
+                field("descriptor_digest")?,
+            )
+        } else {
+            (run_binding.0, run_binding.1, run_binding.2, run_binding.3)
+        };
         validate_local_diagnostic_artifact_provenance_fields(
             &document,
             run_id,
-            expected_request_id,
-            &run_binding.1,
-            &run_binding.2,
-            &run_binding.3,
+            &expected_request_id,
+            &profile_id,
+            &profile_version,
+            &profile_digest,
             completed_at,
         )
         .map_err(|error| {
@@ -10980,9 +13406,15 @@ fn validate_run_results(connection: &Connection) -> Result<(), StoreError> {
              FROM status_events AS status
              JOIN watcher_runs AS run ON run.run_id = status.run_id
              WHERE status.run_id IS NOT NULL
-               AND (
-                    status.component_kind <> 'instance'
-                 OR status.component_id <> run.instance_id
+               AND NOT (
+                    (
+                         status.component_kind = 'instance'
+                     AND status.component_id = run.instance_id
+                    )
+                 OR (
+                         status.component_kind = 'diagnostic_execution'
+                     AND status.component_id = run.run_id
+                    )
                )
              ORDER BY status.run_id
              LIMIT 1",
@@ -11653,6 +14085,10 @@ fn validate_projection_invariants(connection: &Connection) -> Result<(), StoreEr
             "finding_current is stale or inconsistent for {stale_findings} events"
         )));
     }
+    validate_status_current_projection(connection)
+}
+
+fn validate_status_current_projection(connection: &Connection) -> Result<(), StoreError> {
     let stale_statuses: i64 = connection.query_row(
         "SELECT COUNT(*) FROM status_events AS event
          WHERE NOT EXISTS (
@@ -11671,6 +14107,21 @@ fn validate_projection_invariants(connection: &Connection) -> Result<(), StoreEr
     if stale_statuses != 0 {
         return Err(StoreError::Integrity(format!(
             "status_current is stale or inconsistent for {stale_statuses} events"
+        )));
+    }
+    let orphaned_or_mismatched: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM status_current AS current
+         LEFT JOIN status_events AS selected
+           ON selected.status_event_id = current.latest_status_event_id
+         WHERE selected.status_event_id IS NULL
+            OR selected.component_kind <> current.component_kind
+            OR selected.component_id <> current.component_id",
+        [],
+        |row| row.get(0),
+    )?;
+    if orphaned_or_mismatched != 0 {
+        return Err(StoreError::Integrity(format!(
+            "status_current contains {orphaned_or_mismatched} orphaned or mismatched rows"
         )));
     }
     Ok(())
@@ -12262,6 +14713,7 @@ fn insert_materialization_event(
 fn validate_non_success_input(
     collection: &CollectionInput,
     result: &RunResultStatusInput,
+    origin_mode: RunResultOriginMode,
 ) -> Result<(), StoreError> {
     if result.run_id != collection.run.run_id {
         return Err(StoreError::Invariant(format!(
@@ -12269,12 +14721,26 @@ fn validate_non_success_input(
             result.run_id, collection.run.run_id
         )));
     }
-    if result.status.component_kind != "instance"
-        || result.status.component_id != collection.run.instance_id
-    {
-        return Err(StoreError::Invariant(
-            "run-bearing result must be an instance status for the collection instance".into(),
-        ));
+    match origin_mode {
+        RunResultOriginMode::Instance
+            if result.status.component_kind != "instance"
+                || result.status.component_id != collection.run.instance_id =>
+        {
+            return Err(StoreError::Invariant(
+                "legacy run-bearing result must be an instance status for the collection instance"
+                    .into(),
+            ));
+        }
+        RunResultOriginMode::DiagnosticExecution
+            if result.status.component_kind != "diagnostic_execution"
+                || result.status.component_id != collection.run.run_id =>
+        {
+            return Err(StoreError::Invariant(
+                "governed run-bearing result must be a diagnostic-execution status for the exact collection run"
+                    .into(),
+            ));
+        }
+        _ => {}
     }
     if !is_non_success_collection(collection) {
         return Err(StoreError::Invariant(
@@ -12288,13 +14754,28 @@ fn validate_admitted_completion<T>(
     collection: &CollectionInput,
     receipt: &CollectionReceipt,
     completion: &AdmittedCollectionCompletion<T>,
+    origin_mode: AdmittedDiagnosticOriginMode,
 ) -> Result<(), StoreError> {
-    if completion.status.component_kind != "instance"
-        || completion.status.component_id != collection.run.instance_id
-    {
-        return Err(StoreError::Invariant(
-            "admitted result must be an instance status for the collection instance".into(),
-        ));
+    match origin_mode {
+        AdmittedDiagnosticOriginMode::DetectorEvaluation
+            if completion.status.component_kind != "instance"
+                || completion.status.component_id != collection.run.instance_id =>
+        {
+            return Err(StoreError::Invariant(
+                "admitted detector result must be an instance status for the collection instance"
+                    .into(),
+            ));
+        }
+        AdmittedDiagnosticOriginMode::RunLevelProduction
+            if completion.status.component_kind != "diagnostic_execution"
+                || completion.status.component_id != collection.run.run_id =>
+        {
+            return Err(StoreError::Invariant(
+                "admitted governed result must be a diagnostic-execution status for the exact collection run"
+                    .into(),
+            ));
+        }
+        _ => {}
     }
     let mut evaluation_ids = BTreeSet::new();
     for input in &completion.evaluations {
@@ -12597,11 +15078,12 @@ fn provider_intake_preflight_on_connection(
     })
 }
 
-fn insert_provider_intake(
+fn insert_provider_intake_with_admission_mode(
     transaction: &Transaction<'_>,
     intake: &ProviderIntakeInput,
+    require_current_admission: bool,
 ) -> Result<(), StoreError> {
-    validate_provider_admission(transaction, intake, true)?;
+    validate_provider_admission(transaction, intake, require_current_admission)?;
     let digests = provider_intake_digests(intake)?;
     transaction.execute(
         "INSERT INTO provider_intake_attempts (
@@ -12686,9 +15168,35 @@ fn build_provider_acknowledgment(
     run_id: &str,
     status: &StatusEventInput,
 ) -> Result<(DurableIntakeAcknowledgment, CanonicalDocument), StoreError> {
-    let digests = provider_intake_digests(intake)?;
     let acknowledgment_id = uuid::Uuid::new_v4().to_string();
     let committed_at = now_utc();
+    build_provider_acknowledgment_with_identity(
+        intake,
+        run_id,
+        status,
+        acknowledgment_id,
+        committed_at,
+    )
+}
+
+fn build_provider_acknowledgment_with_identity(
+    intake: &ProviderIntakeInput,
+    run_id: &str,
+    status: &StatusEventInput,
+    acknowledgment_id: String,
+    committed_at: String,
+) -> Result<(DurableIntakeAcknowledgment, CanonicalDocument), StoreError> {
+    let digests = provider_intake_digests(intake)?;
+    uuid::Uuid::parse_str(&acknowledgment_id).map_err(|error| {
+        StoreError::Invariant(format!(
+            "provider acknowledgment identity is not a UUID: {error}"
+        ))
+    })?;
+    chrono::DateTime::parse_from_rfc3339(&committed_at).map_err(|error| {
+        StoreError::Invariant(format!(
+            "provider acknowledgment commit time is not RFC 3339: {error}"
+        ))
+    })?;
     let canonical_result_digest = status.detail.digest().to_owned();
     let detail = CanonicalDocument::from_serializable(&ProviderAcknowledgmentDocument {
         schema: PROVIDER_INTAKE_ACK_SCHEMA,
@@ -12756,6 +15264,109 @@ fn insert_provider_acknowledgment(
         ],
     )?;
     Ok(acknowledgment)
+}
+
+fn insert_provider_acknowledgment_with_identity(
+    transaction: &Transaction<'_>,
+    intake: &ProviderIntakeInput,
+    run_id: &str,
+    status: &StatusEventInput,
+    acknowledgment_id: String,
+    committed_at: String,
+) -> Result<DurableIntakeAcknowledgment, StoreError> {
+    let (acknowledgment, detail) = build_provider_acknowledgment_with_identity(
+        intake,
+        run_id,
+        status,
+        acknowledgment_id,
+        committed_at,
+    )?;
+    transaction.execute(
+        "INSERT INTO provider_intake_acknowledgments (
+            acknowledgment_id, intake_id, run_id, provider_admission_id,
+            status_event_id, schema_id, detail_json, acknowledgment_digest,
+            committed_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            acknowledgment.acknowledgment_id,
+            acknowledgment.intake_id,
+            acknowledgment.run_id,
+            acknowledgment.provider_admission_id,
+            acknowledgment.status_event_id,
+            PROVIDER_INTAKE_ACK_SCHEMA,
+            detail.as_bytes(),
+            detail.digest(),
+            acknowledgment.committed_at,
+        ],
+    )?;
+    Ok(acknowledgment)
+}
+
+fn governed_projection_publication(
+    connection: &Connection,
+    receipt: &CollectionReceipt,
+    status: &StatusEventInput,
+    acknowledgment: &DurableIntakeAcknowledgment,
+) -> Result<GovernedProjectionPublication, StoreError> {
+    let status_sequence = connection
+        .query_row(
+            "SELECT status_sequence FROM status_events WHERE status_event_id = ?1",
+            [&status.status_event_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .ok_or_else(|| {
+            StoreError::Integrity(format!(
+                "status event {} has no immutable publication sequence",
+                status.status_event_id
+            ))
+        })?;
+    if acknowledgment.status_event_id != status.status_event_id {
+        return Err(StoreError::Integrity(
+            "provider acknowledgment names another status event".into(),
+        ));
+    }
+    Ok(GovernedProjectionPublication {
+        report_sequence: receipt.report_sequence,
+        status_sequence,
+        acknowledgment_id: acknowledgment.acknowledgment_id.clone(),
+        acknowledgment_committed_at: acknowledgment.committed_at.clone(),
+    })
+}
+
+fn status_event_matches(
+    connection: &Connection,
+    expected: &StatusEventInput,
+    expected_run_id: &str,
+) -> Result<bool, StoreError> {
+    let row = connection
+        .query_row(
+            "SELECT component_kind, component_id, run_id, state, code,
+                    detail_json, observed_at
+             FROM status_events WHERE status_event_id = ?1",
+            [&expected.status_event_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Vec<u8>>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            },
+        )
+        .optional()?;
+    Ok(row.is_some_and(|row| {
+        row.0 == expected.component_kind
+            && row.1 == expected.component_id
+            && row.2.as_deref() == Some(expected_run_id)
+            && row.3 == expected.state
+            && row.4 == expected.code
+            && row.5 == expected.detail.as_bytes()
+            && row.6 == expected.observed_at
+    }))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -12915,11 +15526,122 @@ fn collection_receipt_for_run(
     })
 }
 
+fn planned_collection_receipt(
+    collection: &CollectionInput,
+    expected_report_sequence: Option<i64>,
+) -> Result<CollectionReceipt, StoreError> {
+    if expected_report_sequence.is_some_and(|sequence| sequence <= 0) {
+        return Err(StoreError::Invariant(
+            "planned admitted report sequence must be positive".into(),
+        ));
+    }
+    let Some(submission) = &collection.submission else {
+        if expected_report_sequence.is_some() {
+            return Err(StoreError::Invariant(
+                "collection without a submission cannot reserve a report sequence".into(),
+            ));
+        }
+        return Ok(CollectionReceipt {
+            raw_sha256: None,
+            semantic_digest: None,
+            report_sequence: None,
+            refusal_id: None,
+        });
+    };
+    let raw_sha256 = Some(sha256_digest(&submission.raw_bytes));
+    match &submission.disposition {
+        SubmissionDisposition::Rejected { refusal } => {
+            if expected_report_sequence.is_some() {
+                return Err(StoreError::Invariant(
+                    "rejected submission cannot reserve an admitted report sequence".into(),
+                ));
+            }
+            Ok(CollectionReceipt {
+                raw_sha256,
+                semantic_digest: None,
+                report_sequence: None,
+                refusal_id: Some(refusal.refusal_id.clone()),
+            })
+        }
+        SubmissionDisposition::Admitted(report) => {
+            let report_sequence = expected_report_sequence.ok_or_else(|| {
+                StoreError::Invariant(
+                    "admitted submission requires one planned report sequence".into(),
+                )
+            })?;
+            Ok(CollectionReceipt {
+                raw_sha256,
+                semantic_digest: Some(report.canonical_report.digest().to_owned()),
+                report_sequence: Some(report_sequence),
+                refusal_id: None,
+            })
+        }
+    }
+}
+
+fn next_report_sequence(connection: &Connection) -> Result<i64, StoreError> {
+    let sequence = connection.query_row(
+        "SELECT COALESCE(MAX(report_sequence), 0) + 1 FROM admitted_reports",
+        [],
+        |row| row.get(0),
+    )?;
+    if sequence <= 0 {
+        return Err(StoreError::Integrity(
+            "next admitted report sequence is not positive".into(),
+        ));
+    }
+    Ok(sequence)
+}
+
+fn next_status_sequence(connection: &Connection) -> Result<i64, StoreError> {
+    let sequence = connection.query_row(
+        "SELECT COALESCE(MAX(status_sequence), 0) + 1 FROM status_events",
+        [],
+        |row| row.get(0),
+    )?;
+    if sequence <= 0 {
+        return Err(StoreError::Integrity(
+            "next status publication sequence is not positive".into(),
+        ));
+    }
+    Ok(sequence)
+}
+
+fn ensure_custody_belongs_to_store(
+    store: &Store,
+    custody: &GovernedCustody,
+) -> Result<(), StoreError> {
+    let database_path = store.path().ok_or_else(|| {
+        StoreError::Invariant(
+            "governed publication requires a filesystem-backed initialized store".into(),
+        )
+    })?;
+    if database_path != custody.database_path() {
+        return Err(StoreError::Invariant(
+            "governed custody handle belongs to a different Store database".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn insert_collection(
     transaction: &Transaction<'_>,
     collection: &CollectionInput,
 ) -> Result<CollectionReceipt, StoreError> {
-    insert_provider_intake(transaction, &collection.intake)?;
+    insert_collection_with_publication(transaction, collection, true, None)
+}
+
+fn insert_collection_with_publication(
+    transaction: &Transaction<'_>,
+    collection: &CollectionInput,
+    require_current_admission: bool,
+    expected_report_sequence: Option<i64>,
+) -> Result<CollectionReceipt, StoreError> {
+    insert_provider_intake_with_admission_mode(
+        transaction,
+        &collection.intake,
+        require_current_admission,
+    )?;
     insert_run(transaction, &collection.run)?;
     insert_local_provider_intake_link(
         transaction,
@@ -13004,6 +15726,7 @@ fn insert_collection(
                 &submission.submission_id,
                 report,
                 &admission_context_digest,
+                expected_report_sequence,
             )?;
             receipt.semantic_digest = Some(report.canonical_report.digest().to_owned());
             receipt.report_sequence = Some(sequence);
@@ -13017,11 +15740,28 @@ fn insert_status_event(
     status: &StatusEventInput,
     run_id: Option<&str>,
 ) -> Result<(), StoreError> {
+    insert_status_event_with_sequence(transaction, status, run_id, None).map(|_| ())
+}
+
+fn insert_status_event_with_sequence(
+    transaction: &Transaction<'_>,
+    status: &StatusEventInput,
+    run_id: Option<&str>,
+    expected_status_sequence: Option<i64>,
+) -> Result<i64, StoreError> {
+    if expected_status_sequence.is_some_and(|sequence| sequence <= 0) {
+        return Err(StoreError::Invariant(
+            "status publication sequence must be positive".into(),
+        ));
+    }
+    // Binding NULL to an INTEGER PRIMARY KEY preserves SQLite's ordinary
+    // monotonic allocation. Recovery binds the exact sealed sequence instead.
+    let sql = "INSERT INTO status_events (
+        status_sequence, status_event_id, component_kind, component_id,
+        run_id, state, code, detail_json, observed_at
+     ) VALUES (?9, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
     transaction.execute(
-        "INSERT INTO status_events (
-            status_event_id, component_kind, component_id, run_id, state, code,
-            detail_json, observed_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        sql,
         params![
             status.status_event_id,
             status.component_kind,
@@ -13031,8 +15771,11 @@ fn insert_status_event(
             status.code,
             status.detail.as_bytes(),
             status.observed_at,
+            expected_status_sequence,
         ],
     )?;
+    let status_sequence =
+        expected_status_sequence.unwrap_or_else(|| transaction.last_insert_rowid());
     transaction.execute(
         "INSERT INTO status_current (component_kind, component_id, latest_status_event_id)
          VALUES (?1, ?2, ?3)
@@ -13044,7 +15787,7 @@ fn insert_status_event(
             status.status_event_id,
         ],
     )?;
-    Ok(())
+    Ok(status_sequence)
 }
 
 fn insert_run(transaction: &Transaction<'_>, run: &RunInput) -> Result<(), StoreError> {
@@ -13105,21 +15848,35 @@ fn insert_run(transaction: &Transaction<'_>, run: &RunInput) -> Result<(), Store
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // The append-only report row binds one explicit canonical parameter set.
 fn insert_report(
     transaction: &Transaction<'_>,
     submission_id: &str,
     report: &ReportInput,
     admission_context_digest: &str,
+    expected_report_sequence: Option<i64>,
 ) -> Result<i64, StoreError> {
+    if expected_report_sequence.is_some_and(|sequence| sequence <= 0) {
+        return Err(StoreError::Invariant(
+            "report publication sequence must be positive".into(),
+        ));
+    }
     let judgment_digest =
         judgment_digest(admission_context_digest, report.validated_report.digest())?;
+    // Binding NULL to an INTEGER PRIMARY KEY preserves SQLite's ordinary
+    // AUTOINCREMENT allocation. Recovery binds the exact sealed sequence.
+    let sql = "INSERT INTO admitted_reports (
+        report_sequence, report_id, submission_id, instance_id, profile_id,
+        profile_version, profile_digest, observed_at, received_at,
+        report_status, canonical_json, semantic_digest,
+        validated_report_json, judgment_schema_version, judgment_digest,
+        admission_context_digest, next_checkpoint_json, admitted_at
+     ) VALUES (
+        ?18, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+        ?14, ?15, ?16, ?17
+     )";
     transaction.execute(
-        "INSERT INTO admitted_reports (
-            report_id, submission_id, instance_id, profile_id, profile_version,
-            profile_digest, observed_at, received_at, report_status, canonical_json,
-            semantic_digest, validated_report_json, judgment_schema_version,
-            judgment_digest, admission_context_digest, next_checkpoint_json, admitted_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        sql,
         params![
             report.report_id,
             submission_id,
@@ -13141,9 +15898,11 @@ fn insert_report(
                 .as_ref()
                 .map(CanonicalDocument::as_bytes),
             report.admitted_at,
+            expected_report_sequence,
         ],
     )?;
-    let report_sequence = transaction.last_insert_rowid();
+    let report_sequence =
+        expected_report_sequence.unwrap_or_else(|| transaction.last_insert_rowid());
     for observation in &report.observations {
         transaction.execute(
             "INSERT INTO observations (
@@ -13781,11 +16540,27 @@ fn insert_finding_event(
 #[cfg(test)]
 #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 mod tests {
+    use std::fs::{File, OpenOptions};
+    use std::io::Write;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::Command;
+
     use serde_json::json;
     use tempfile::tempdir;
 
     use super::*;
+    use crate::custody_arena::{ArenaState, CustodyArena};
 
+    const ABRUPT_GOVERNED_PROJECTION_MANIFEST: &str =
+        "NQ_STORE_ABRUPT_GOVERNED_PROJECTION_MANIFEST";
+    const ABRUPT_GOVERNED_PROJECTION_MODE: &str = "NQ_STORE_ABRUPT_GOVERNED_PROJECTION_MODE";
+    const PENDING_V3_FIXTURE_CLAIM_MUTATION: &str = "NQ_STORE_PENDING_V3_FIXTURE_CLAIM_MUTATION";
+    const PENDING_V3_FIXTURE_PHYSICAL_SOURCE_MUTATION: &str =
+        "NQ_STORE_PENDING_V3_FIXTURE_PHYSICAL_SOURCE_MUTATION";
+    const PENDING_V3_FIXTURE_POST_SEAL_SQL_MUTATION: &str =
+        "NQ_STORE_PENDING_V3_FIXTURE_POST_SEAL_SQL_MUTATION";
+    const PENDING_V3_FIXTURE_DEPENDENCY_MUTATION: &str =
+        "NQ_STORE_PENDING_V3_FIXTURE_DEPENDENCY_MUTATION";
     const TIME: &str = "2026-07-16T12:00:00.000Z";
     const ADMISSION_A: &str = "00000000-0000-4000-8000-000000000000";
     const BINDING_A: &str = "00000000-0000-4000-8000-000000000001";
@@ -13995,6 +16770,313 @@ mod tests {
         }
     }
 
+    fn host_role_fixture_record_ref(value: &Value) -> nq_host_role_contract::RecordRef {
+        serde_json::from_value(value.clone()).expect("exact host-role fixture record reference")
+    }
+
+    fn authenticated_governed_runtime_dependency(
+        authentication: &Value,
+        generation_match: &Value,
+        capability: &Value,
+        custody_commit: &Value,
+        operation_authorization: &RuntimeRecordInput,
+        mutation: R0bDependencyFixtureMutation,
+    ) -> RuntimeCheckpointDependencyInput {
+        use nq_host_role_dependency_custody::{
+            AuthorityAdmissionKind, ExternalDependencyAvailability,
+            test_support::{
+                RuntimeDependencyFixtureReceiptTarget, RuntimeDependencyFixtureScenario,
+                runtime_dependency_custody_fixture,
+            },
+        };
+
+        let authentication = host_role_fixture_record_ref(authentication);
+        let generation_match = host_role_fixture_record_ref(generation_match);
+        let capability = host_role_fixture_record_ref(capability);
+        let custody_commit = host_role_fixture_record_ref(custody_commit);
+        let operation_authorization =
+            host_role_fixture_record_ref(&governed_record_reference(operation_authorization));
+        let external_reference = |role| match role {
+            R0bExternalRole::Authentication => authentication.clone(),
+            R0bExternalRole::GenerationMatch => generation_match.clone(),
+            R0bExternalRole::Capability => capability.clone(),
+            R0bExternalRole::Custody => custody_commit.clone(),
+        };
+        let authority_target = |role| match role {
+            R0bAuthorityRole::InvocationAuthentication => (
+                authentication.clone(),
+                AuthorityAdmissionKind::InvocationAuthentication,
+            ),
+            R0bAuthorityRole::OperationAuthorization => (
+                operation_authorization.clone(),
+                AuthorityAdmissionKind::OperationAuthorization,
+            ),
+        };
+        let scenario = match mutation {
+            R0bDependencyFixtureMutation::Exact
+            | R0bDependencyFixtureMutation::ExternalMalformedHex(_)
+            | R0bDependencyFixtureMutation::ExternalAvailabilityMismatch(_)
+            | R0bDependencyFixtureMutation::ExternalByteSubstitution(_)
+            | R0bDependencyFixtureMutation::ExternalSnapshotNoncanonical(_)
+            | R0bDependencyFixtureMutation::InvalidReceiptSignature(_)
+            | R0bDependencyFixtureMutation::SubstitutedTrustRoot(_) => {
+                RuntimeDependencyFixtureScenario::Exact
+            }
+            R0bDependencyFixtureMutation::ExternalArchivedRetrieved(role) => {
+                RuntimeDependencyFixtureScenario::ExternalAvailability {
+                    reference: external_reference(role),
+                    availability: ExternalDependencyAvailability::ArchivedRetrieved,
+                }
+            }
+            R0bDependencyFixtureMutation::ExternalCommittedUnavailable(role) => {
+                RuntimeDependencyFixtureScenario::ExternalAvailability {
+                    reference: external_reference(role),
+                    availability: ExternalDependencyAvailability::CommittedUnavailable,
+                }
+            }
+            R0bDependencyFixtureMutation::ExternalOmitted(role) => {
+                RuntimeDependencyFixtureScenario::ExternalOmitted {
+                    reference: external_reference(role),
+                }
+            }
+            R0bDependencyFixtureMutation::ExternalValidReplacement(role) => {
+                RuntimeDependencyFixtureScenario::ExternalValidReplacement {
+                    reference: external_reference(role),
+                }
+            }
+            R0bDependencyFixtureMutation::ExternalReceiptOmitted(role) => {
+                RuntimeDependencyFixtureScenario::SignedReceiptOmitted {
+                    target: RuntimeDependencyFixtureReceiptTarget::External(external_reference(
+                        role,
+                    )),
+                }
+            }
+            R0bDependencyFixtureMutation::ExternalReceiptSubstituted(role) => {
+                RuntimeDependencyFixtureScenario::SignedReceiptSubstituted {
+                    target: RuntimeDependencyFixtureReceiptTarget::External(external_reference(
+                        role,
+                    )),
+                }
+            }
+            R0bDependencyFixtureMutation::ReceiptExtraneous => {
+                RuntimeDependencyFixtureScenario::SignedReceiptExtraneous
+            }
+            R0bDependencyFixtureMutation::AuthorityOmitted(role) => {
+                let (reference, kind) = authority_target(role);
+                RuntimeDependencyFixtureScenario::AuthorityOmitted { reference, kind }
+            }
+            R0bDependencyFixtureMutation::AuthorityWrongReference(role) => {
+                let (reference, kind) = authority_target(role);
+                RuntimeDependencyFixtureScenario::AuthorityWrongReference { reference, kind }
+            }
+            R0bDependencyFixtureMutation::AuthorityWrongPurpose(role) => {
+                let (reference, kind) = authority_target(role);
+                RuntimeDependencyFixtureScenario::AuthorityWrongPurpose { reference, kind }
+            }
+            R0bDependencyFixtureMutation::AuthorityReceiptOmitted(role) => {
+                let (reference, kind) = authority_target(role);
+                RuntimeDependencyFixtureScenario::SignedReceiptOmitted {
+                    target: RuntimeDependencyFixtureReceiptTarget::Authority { reference, kind },
+                }
+            }
+            R0bDependencyFixtureMutation::AuthorityReceiptSubstituted(role) => {
+                let (reference, kind) = authority_target(role);
+                RuntimeDependencyFixtureScenario::SignedReceiptSubstituted {
+                    target: RuntimeDependencyFixtureReceiptTarget::Authority { reference, kind },
+                }
+            }
+        };
+        let raw_external_target = match mutation {
+            R0bDependencyFixtureMutation::ExternalMalformedHex(role)
+            | R0bDependencyFixtureMutation::ExternalAvailabilityMismatch(role)
+            | R0bDependencyFixtureMutation::ExternalByteSubstitution(role)
+            | R0bDependencyFixtureMutation::ExternalSnapshotNoncanonical(role) => {
+                Some(external_reference(role))
+            }
+            _ => None,
+        };
+        let fixture = runtime_dependency_custody_fixture(
+            47,
+            Vec::new(),
+            vec![
+                (
+                    authentication.clone(),
+                    b"governed-authentication-evidence-bytes".to_vec(),
+                ),
+                (
+                    generation_match,
+                    b"governed-generation-match-bytes".to_vec(),
+                ),
+                (capability, b"governed-capability-bytes".to_vec()),
+                (
+                    custody_commit,
+                    b"governed-reservation-commit-bytes".to_vec(),
+                ),
+            ],
+            vec![operation_authorization],
+            vec![authentication],
+            scenario,
+        );
+        let mut custody_value: Value = serde_json::from_slice(fixture.canonical_custody_bytes())
+            .expect("decode R0b dependency custody fixture");
+        if let Some(target) = raw_external_target {
+            let external_hex = custody_value["external_dependency_canonical_bytes"]
+                .as_str()
+                .expect("R0b external snapshot hex");
+            let external_bytes = hex::decode(external_hex).expect("R0b external snapshot bytes");
+            let mut external_value: Value =
+                serde_json::from_slice(&external_bytes).expect("R0b external snapshot JSON");
+            let dependency = external_value["dependencies"]
+                .as_array_mut()
+                .expect("R0b external dependencies")
+                .iter_mut()
+                .find(|dependency| {
+                    dependency["reference"]["record_id"].as_str() == Some(target.record_id.as_str())
+                })
+                .expect("R0b external mutation target");
+            match mutation {
+                R0bDependencyFixtureMutation::ExternalMalformedHex(_) => {
+                    dependency["exact_bytes_hex"] = json!("ABC");
+                }
+                R0bDependencyFixtureMutation::ExternalAvailabilityMismatch(_) => {
+                    dependency["availability"] = json!("committed_unavailable");
+                }
+                R0bDependencyFixtureMutation::ExternalByteSubstitution(_) => {
+                    dependency["exact_bytes_hex"] =
+                        json!(hex::encode(b"R0b substituted exact external bytes"));
+                }
+                R0bDependencyFixtureMutation::ExternalSnapshotNoncanonical(_) => {}
+                _ => unreachable!("R0b raw external target has a raw external mutation"),
+            }
+            let external_bytes = if matches!(
+                mutation,
+                R0bDependencyFixtureMutation::ExternalSnapshotNoncanonical(_)
+            ) {
+                serde_json::to_vec_pretty(&external_value)
+                    .expect("encode noncanonical R0b external snapshot")
+            } else {
+                nq_protocol::canonical_json_bytes(&external_value)
+                    .expect("encode hostile R0b external snapshot")
+            };
+            custody_value["external_dependency_canonical_bytes"] =
+                json!(hex::encode(external_bytes));
+        }
+        if matches!(
+            mutation,
+            R0bDependencyFixtureMutation::InvalidReceiptSignature(_)
+        ) {
+            let receipt_hex = custody_value["admission_receipt_set_canonical_bytes"]
+                .as_str()
+                .expect("R0b receipt-set hex");
+            let receipt_bytes = hex::decode(receipt_hex).expect("R0b receipt-set bytes");
+            let mut receipt_value: Value =
+                serde_json::from_slice(&receipt_bytes).expect("R0b receipt-set JSON");
+            let signature = receipt_value["signature_hex"]
+                .as_str()
+                .expect("R0b receipt signature");
+            let mut substituted = signature.as_bytes().to_vec();
+            substituted[0] = if substituted[0] == b'0' { b'1' } else { b'0' };
+            receipt_value["signature_hex"] =
+                json!(String::from_utf8(substituted).expect("R0b ASCII signature"));
+            custody_value["admission_receipt_set_canonical_bytes"] = json!(hex::encode(
+                nq_protocol::canonical_json_bytes(&receipt_value)
+                    .expect("encode invalid-signature R0b receipt set")
+            ));
+        }
+        let custody_bytes = nq_protocol::canonical_json_bytes(&custody_value)
+            .expect("encode R0b dependency custody fixture");
+        let canonical_custody = CanonicalDocument::from_canonical_bytes(custody_bytes)
+            .expect("canonical authenticated governed dependency custody");
+        RuntimeCheckpointDependencyInput {
+            dependency_generation_id: fixture.generation_id().clone(),
+            trust_anchor_id: fixture.trust_anchor_id().clone(),
+            canonical_custody,
+        }
+    }
+
+    struct AuthenticatedNativePrelaunchFixture {
+        authentication_evidence: Value,
+        generation_match: Value,
+        capability: Value,
+        custody_commit: Value,
+        invocation_authorization: RuntimeRecordInput,
+        activation: RuntimeRecordInput,
+        clock_qualification: RuntimeRecordInput,
+        dependency: RuntimeCheckpointDependencyInput,
+    }
+
+    /// Build one independently identified, fully authenticated native
+    /// prelaunch source set for the custom multi-arena recovery fixtures.
+    ///
+    /// The four external references deliberately retain the exact bytes used
+    /// by the shared R0b fixture signer. The operation authorization and
+    /// topology records are occurrence-specific so a second reservation
+    /// checkpoint never reuses an already committed runtime-record identity.
+    fn authenticated_native_prelaunch_fixture(suffix: &str) -> AuthenticatedNativePrelaunchFixture {
+        let authentication_evidence = json!({
+            "schema": "nq.external_record.v1",
+            "record_id": typed_digest("governed-authentication-evidence"),
+            "bytes_digest": typed_digest("governed-authentication-evidence-bytes"),
+        });
+        let generation_match = json!({
+            "schema": "nq.external_record.v1",
+            "record_id": typed_digest("governed-generation-match"),
+            "bytes_digest": typed_digest("governed-generation-match-bytes"),
+        });
+        let capability = json!({
+            "schema": "nq.external_record.v1",
+            "record_id": typed_digest("governed-capability"),
+            "bytes_digest": typed_digest("governed-capability-bytes"),
+        });
+        let custody_commit = json!({
+            "schema": "nq.external_record.v1",
+            "record_id": typed_digest("governed-reservation-commit"),
+            "bytes_digest": typed_digest("governed-reservation-commit-bytes"),
+        });
+        let invocation_authorization = governed_runtime_record(
+            typed_digest(&format!("invocation-authorization-{suffix}")),
+            "nq.operation_authorization.v1",
+            json!({
+                "schema": "nq.operation_authorization.v1",
+                "fixture": format!("native-prelaunch-authorization-{suffix}"),
+            }),
+        );
+        let activation = governed_runtime_record(
+            typed_digest(&format!("runtime-activation-{suffix}")),
+            "nq.runtime_activation.v1",
+            json!({
+                "schema": "nq.runtime_activation.v1",
+                "fixture": format!("native-prelaunch-activation-{suffix}"),
+            }),
+        );
+        let clock_qualification = governed_runtime_record(
+            typed_digest(&format!("native-clock-qualification-{suffix}")),
+            "nq.native_clock_qualification.v1",
+            json!({
+                "schema": "nq.native_clock_qualification.v1",
+                "fixture": format!("native-prelaunch-clock-{suffix}"),
+            }),
+        );
+        let dependency = authenticated_governed_runtime_dependency(
+            &authentication_evidence,
+            &generation_match,
+            &capability,
+            &custody_commit,
+            &invocation_authorization,
+            R0bDependencyFixtureMutation::Exact,
+        );
+        AuthenticatedNativePrelaunchFixture {
+            authentication_evidence,
+            generation_match,
+            capability,
+            custody_commit,
+            invocation_authorization,
+            activation,
+            clock_qualification,
+            dependency,
+        }
+    }
+
     fn initial_runtime_batch(records: Vec<RuntimeRecordInput>) -> RuntimeRecordBatchInput {
         RuntimeRecordBatchInput {
             checkpoint_id: digest("runtime-checkpoint-initial"),
@@ -14011,7 +17093,7 @@ mod tests {
             .expect("runtime dependency bootstrap trust root");
     }
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug)]
     enum GovernedDerivationSubstitution {
         Identity,
         DependencyGeneration,
@@ -14026,9 +17108,33 @@ mod tests {
         ClockQualification,
     }
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug)]
+    enum NativePrelaunchReferenceField {
+        Authentication,
+        InvocationAuthorization,
+        GenerationMatch,
+        Capability,
+        Custody,
+    }
+
+    impl NativePrelaunchReferenceField {
+        const fn key(self) -> &'static str {
+            match self {
+                Self::Authentication => "authentication",
+                Self::InvocationAuthorization => "invocation_authorization",
+                Self::GenerationMatch => "generation_match",
+                Self::Capability => "capability",
+                Self::Custody => "custody",
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
     enum GovernedProjectionFixtureMode {
         Complete,
+        V3CrashAfterFinalSealBeforeSql,
+        V3CrashAfterSqlBeforeIndexMark,
+        V3CrashWithStatusSequenceGap,
         InsufficientCommittedCapacity,
         LegacyV1Complete,
         FullTopologyNativeLaunch,
@@ -14038,12 +17144,29 @@ mod tests {
         MissingSql,
         RawSubstitution,
         ProviderDocumentSubstitution,
+        ProviderDocumentMalformed,
+        ProviderDocumentNoncanonical,
         IncompleteRuntimeWriteSet,
         DiagnosticEvaluatorArtifactMasquerade,
         DiagnosticClockQualificationSubstitution,
         NativeDeadlineReferenceSubstitution,
         NativeDeadlineProvenanceSubstitution,
+        NativeDeadlineRecordMissing,
+        NativeDeadlineDuplicate,
+        NativeDeadlineMalformedReference,
+        NativePrelaunchDeadlineDeclarationMissing,
+        NativeUnknownPrelaunchCheck,
+        NativePrelaunchMalformedReference(NativePrelaunchReferenceField),
+        NativePrelaunchCrossSourceSubstitution(NativePrelaunchReferenceField),
+        AcceptedDecisionAuthenticationSourceSubstitution,
+        AcceptedDecisionAuthorizationSourceSubstitution,
         NativeLaunchExtraneousRecord,
+        LaunchStatusSubstitution,
+        LegacyOuterRequestReferenceSubstitution,
+        LegacyDecisionReferenceSubstitution,
+        LegacyUndeclaredDeadlineRecord,
+        LegacyLaunchExtraneousRecord,
+        LegacyNativeResidueWithoutPrelaunchChecks,
         DerivationSubstitution(GovernedDerivationSubstitution),
         ReservationCheckpointIdentitySubstitution,
         ReservationCheckpointDigestSubstitution,
@@ -14052,6 +17175,1133 @@ mod tests {
         LaunchCheckpointDigestSubstitution,
         LaunchCheckpointMembershipSubstitution,
         LaunchClaimTimeSubstitution,
+        V3MissingCapsule,
+        ReservationDigestCoherentSubstitution,
+        CapsuleExecutionLaunchBindingSubstitution,
+        TerminalPredecessorIdentitySubstitution,
+        TerminalPredecessorRootSubstitution,
+    }
+
+    /// Test-only compositional plan for one pending V3 projection fixture.
+    ///
+    /// The four axes deliberately mirror the recovery blame phases. A sealed
+    /// claim can therefore be held constant while an independently selected
+    /// source or post-seal SQL frontier changes. `Legacy` is only the
+    /// mechanical compatibility adapter for the pre-existing monolithic
+    /// fixture matrix; new breadth cases must use the typed variants.
+    #[derive(Clone, Copy, Debug)]
+    enum PendingV3ClaimMutation {
+        None,
+        Legacy(GovernedProjectionFixtureMode),
+        Pc03OuterRequestRecordId,
+        Pc03OuterRequestBytesDigest,
+        Pc03OuterRequestLogicalId,
+        Pc03DecisionRecordId,
+        Pc03DecisionBytesDigest,
+        Pc03ReservationMembership(PendingV3ReservationMembershipMutation),
+        Pc04LaunchRecordId,
+        Pc04LaunchRecordBytesDigest,
+        Pc04LaunchRecordSchema,
+        Pc04LaunchCheckpointId,
+        Pc04LaunchCheckpointDigest,
+        Pc04LaunchMembership(PendingV3LaunchMembershipMutation),
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum PendingV3ReservationMembershipMutation {
+        MissingOuterRequest,
+        MissingDecision,
+        MissingReservation,
+        DuplicateOuterRequest,
+        DuplicateDecision,
+        DuplicateReservation,
+        SubstitutedMember,
+        Reordered,
+        ExtraneousMember,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum PendingV3LaunchMembershipMutation {
+        MissingDeadline,
+        MissingLaunch,
+        DuplicateDeadline,
+        DuplicateLaunch,
+        SubstitutedMember,
+        Reordered,
+        ExtraneousMember,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum PendingV3PhysicalSourceMutation {
+        None,
+        Legacy(GovernedProjectionFixtureMode),
+        Pc03DecisionNotAccepted,
+        Pc03ReservationCheckpointMissing,
+        Pc03ReservationCheckpointCorrupt,
+        Pc04LaunchCheckpointMissing,
+        Pc04LaunchCheckpointCorrupt,
+        Pc04LaunchPredecessorCheckpointIdCorrupt,
+        Pc04LaunchPredecessorLedgerRootCorrupt,
+        Pc04NativeLaunchPredicate(PendingV3NativeLaunchPredicateMutation),
+        R0bOperationAuthorizationMissing,
+        R0bOperationAuthorizationDuplicate,
+        R0bOperationAuthorizationBytesMismatch,
+        R0bRequestLaunchAuthenticationMismatch,
+        R0bRequestDecisionAuthenticationMismatch,
+        R0bRequestLaunchAuthorizationMismatch,
+        R0bRequestDecisionAuthorizationMismatch,
+        R0bReservationLaunchCustodyMismatch,
+        R0bGenerationReferenceMalformed,
+        R0bLaunchDependencyBindingDifferent,
+        R0bArenaDependencyBytesDifferentFromSql,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum PendingV3NativeLaunchPredicateMutation {
+        DeadlineReferenceBytesDigest,
+        LaunchOuterRequestReference,
+        DeadlineOuterRequestReference,
+        LaunchDecisionReference,
+        LaunchReservationReference,
+        ActivationEquality,
+        ActivationMembership,
+        ClockQualificationMembership,
+        DeadlineDecisionState,
+        DeadlineViolations,
+        DerivedAttemptDeadline,
+        Clock,
+        MaximumExecutionBound,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum PendingV3PostSealSqlMutation {
+        None,
+        Legacy(GovernedProjectionFixtureMode),
+        DependencyCustodyCommittedUnavailable,
+        DependencyCustodyCorrupt,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum R0bExternalRole {
+        Authentication,
+        GenerationMatch,
+        Capability,
+        Custody,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum R0bAuthorityRole {
+        InvocationAuthentication,
+        OperationAuthorization,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum R0bDependencyFixtureMutation {
+        Exact,
+        ExternalArchivedRetrieved(R0bExternalRole),
+        ExternalCommittedUnavailable(R0bExternalRole),
+        ExternalMalformedHex(R0bExternalRole),
+        ExternalAvailabilityMismatch(R0bExternalRole),
+        ExternalByteSubstitution(R0bExternalRole),
+        ExternalSnapshotNoncanonical(R0bExternalRole),
+        ExternalOmitted(R0bExternalRole),
+        ExternalValidReplacement(R0bExternalRole),
+        ExternalReceiptOmitted(R0bExternalRole),
+        ExternalReceiptSubstituted(R0bExternalRole),
+        ReceiptExtraneous,
+        InvalidReceiptSignature(R0bExternalRole),
+        SubstitutedTrustRoot(R0bExternalRole),
+        AuthorityOmitted(R0bAuthorityRole),
+        AuthorityWrongReference(R0bAuthorityRole),
+        AuthorityWrongPurpose(R0bAuthorityRole),
+        AuthorityReceiptOmitted(R0bAuthorityRole),
+        AuthorityReceiptSubstituted(R0bAuthorityRole),
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum PendingV3CrashWindow {
+        AfterFinalSealBeforeSql,
+        AfterSqlBeforeIndexMark,
+        Legacy(GovernedProjectionFixtureMode),
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct PendingV3FixtureSpec {
+        claim_mutation: PendingV3ClaimMutation,
+        physical_source_mutation: PendingV3PhysicalSourceMutation,
+        post_seal_sql_mutation: PendingV3PostSealSqlMutation,
+        dependency_fixture_mutation: R0bDependencyFixtureMutation,
+        crash_window: PendingV3CrashWindow,
+    }
+
+    const PENDING_V3_PC03_FACTORIZED_CLAIMS: &[(&str, PendingV3ClaimMutation, &str)] = &[
+        (
+            "outer-request-record-id",
+            PendingV3ClaimMutation::Pc03OuterRequestRecordId,
+            "outer request runtime record differs",
+        ),
+        (
+            "outer-request-bytes-digest",
+            PendingV3ClaimMutation::Pc03OuterRequestBytesDigest,
+            "outer request runtime record differs",
+        ),
+        (
+            "decision-record-id",
+            PendingV3ClaimMutation::Pc03DecisionRecordId,
+            "accepted invocation decision runtime record differs",
+        ),
+        (
+            "decision-bytes-digest",
+            PendingV3ClaimMutation::Pc03DecisionBytesDigest,
+            "accepted invocation decision runtime record differs",
+        ),
+        (
+            "membership-missing-outer-request",
+            PendingV3ClaimMutation::Pc03ReservationMembership(
+                PendingV3ReservationMembershipMutation::MissingOuterRequest,
+            ),
+            "reservation checkpoint membership differs",
+        ),
+        (
+            "membership-missing-decision",
+            PendingV3ClaimMutation::Pc03ReservationMembership(
+                PendingV3ReservationMembershipMutation::MissingDecision,
+            ),
+            "reservation checkpoint membership differs",
+        ),
+        (
+            "membership-missing-reservation",
+            PendingV3ClaimMutation::Pc03ReservationMembership(
+                PendingV3ReservationMembershipMutation::MissingReservation,
+            ),
+            "reservation checkpoint membership differs",
+        ),
+        (
+            "membership-duplicate-outer-request",
+            PendingV3ClaimMutation::Pc03ReservationMembership(
+                PendingV3ReservationMembershipMutation::DuplicateOuterRequest,
+            ),
+            "reservation checkpoint membership differs",
+        ),
+        (
+            "membership-duplicate-decision",
+            PendingV3ClaimMutation::Pc03ReservationMembership(
+                PendingV3ReservationMembershipMutation::DuplicateDecision,
+            ),
+            "reservation checkpoint membership differs",
+        ),
+        (
+            "membership-duplicate-reservation",
+            PendingV3ClaimMutation::Pc03ReservationMembership(
+                PendingV3ReservationMembershipMutation::DuplicateReservation,
+            ),
+            "reservation checkpoint membership differs",
+        ),
+        (
+            "membership-substituted",
+            PendingV3ClaimMutation::Pc03ReservationMembership(
+                PendingV3ReservationMembershipMutation::SubstitutedMember,
+            ),
+            "reservation checkpoint membership differs",
+        ),
+        (
+            "membership-reordered",
+            PendingV3ClaimMutation::Pc03ReservationMembership(
+                PendingV3ReservationMembershipMutation::Reordered,
+            ),
+            "reservation checkpoint membership differs",
+        ),
+        (
+            "membership-extraneous",
+            PendingV3ClaimMutation::Pc03ReservationMembership(
+                PendingV3ReservationMembershipMutation::ExtraneousMember,
+            ),
+            "reservation checkpoint membership differs",
+        ),
+    ];
+
+    const PENDING_V3_PC04_FACTORIZED_CLAIMS: &[(&str, PendingV3ClaimMutation, &str)] = &[
+        (
+            "launch-record-id",
+            PendingV3ClaimMutation::Pc04LaunchRecordId,
+            "launch checkpoint membership differs",
+        ),
+        (
+            "launch-record-bytes-digest",
+            PendingV3ClaimMutation::Pc04LaunchRecordBytesDigest,
+            "launch checkpoint membership differs",
+        ),
+        (
+            "launch-checkpoint-id",
+            PendingV3ClaimMutation::Pc04LaunchCheckpointId,
+            "launch checkpoint digest differs",
+        ),
+        (
+            "launch-checkpoint-digest",
+            PendingV3ClaimMutation::Pc04LaunchCheckpointDigest,
+            "launch checkpoint digest differs",
+        ),
+        (
+            "membership-missing-deadline",
+            PendingV3ClaimMutation::Pc04LaunchMembership(
+                PendingV3LaunchMembershipMutation::MissingDeadline,
+            ),
+            "launch checkpoint membership differs",
+        ),
+        (
+            "membership-missing-launch",
+            PendingV3ClaimMutation::Pc04LaunchMembership(
+                PendingV3LaunchMembershipMutation::MissingLaunch,
+            ),
+            "launch checkpoint membership differs",
+        ),
+        (
+            "membership-duplicate-deadline",
+            PendingV3ClaimMutation::Pc04LaunchMembership(
+                PendingV3LaunchMembershipMutation::DuplicateDeadline,
+            ),
+            "launch checkpoint membership differs",
+        ),
+        (
+            "membership-duplicate-launch",
+            PendingV3ClaimMutation::Pc04LaunchMembership(
+                PendingV3LaunchMembershipMutation::DuplicateLaunch,
+            ),
+            "launch checkpoint membership differs",
+        ),
+        (
+            "membership-substituted",
+            PendingV3ClaimMutation::Pc04LaunchMembership(
+                PendingV3LaunchMembershipMutation::SubstitutedMember,
+            ),
+            "launch checkpoint membership differs",
+        ),
+        (
+            "membership-reordered",
+            PendingV3ClaimMutation::Pc04LaunchMembership(
+                PendingV3LaunchMembershipMutation::Reordered,
+            ),
+            "launch checkpoint membership differs",
+        ),
+        (
+            "membership-extraneous",
+            PendingV3ClaimMutation::Pc04LaunchMembership(
+                PendingV3LaunchMembershipMutation::ExtraneousMember,
+            ),
+            "launch checkpoint membership differs",
+        ),
+    ];
+
+    const PENDING_V3_PC04_PHYSICAL_PREDICATES: &[(
+        &str,
+        PendingV3NativeLaunchPredicateMutation,
+        &str,
+    )] = &[
+        (
+            "deadline-reference-bytes-digest",
+            PendingV3NativeLaunchPredicateMutation::DeadlineReferenceBytesDigest,
+            "native physical launch declaration differs from its exact deadline-plus-launch checkpoint",
+        ),
+        (
+            "launch-outer-request-reference",
+            PendingV3NativeLaunchPredicateMutation::LaunchOuterRequestReference,
+            "native deadline provenance or its exact deadline-to-launch join differs",
+        ),
+        (
+            "deadline-outer-request-reference",
+            PendingV3NativeLaunchPredicateMutation::DeadlineOuterRequestReference,
+            "native deadline provenance or its exact deadline-to-launch join differs",
+        ),
+        (
+            "launch-decision-reference",
+            PendingV3NativeLaunchPredicateMutation::LaunchDecisionReference,
+            "native deadline provenance or its exact deadline-to-launch join differs",
+        ),
+        (
+            "launch-reservation-reference",
+            PendingV3NativeLaunchPredicateMutation::LaunchReservationReference,
+            "native deadline provenance or its exact deadline-to-launch join differs",
+        ),
+        (
+            "activation-equality",
+            PendingV3NativeLaunchPredicateMutation::ActivationEquality,
+            "native deadline provenance or its exact deadline-to-launch join differs",
+        ),
+        (
+            "activation-membership",
+            PendingV3NativeLaunchPredicateMutation::ActivationMembership,
+            "native deadline provenance or its exact deadline-to-launch join differs",
+        ),
+        (
+            "clock-qualification-membership",
+            PendingV3NativeLaunchPredicateMutation::ClockQualificationMembership,
+            "native deadline provenance or its exact deadline-to-launch join differs",
+        ),
+        (
+            "deadline-decision-state",
+            PendingV3NativeLaunchPredicateMutation::DeadlineDecisionState,
+            "native deadline provenance or its exact deadline-to-launch join differs",
+        ),
+        (
+            "deadline-violations",
+            PendingV3NativeLaunchPredicateMutation::DeadlineViolations,
+            "native deadline provenance or its exact deadline-to-launch join differs",
+        ),
+        (
+            "derived-attempt-deadline",
+            PendingV3NativeLaunchPredicateMutation::DerivedAttemptDeadline,
+            "native deadline provenance or its exact deadline-to-launch join differs",
+        ),
+        (
+            "clock",
+            PendingV3NativeLaunchPredicateMutation::Clock,
+            "native deadline provenance or its exact deadline-to-launch join differs",
+        ),
+        (
+            "maximum-execution-bound",
+            PendingV3NativeLaunchPredicateMutation::MaximumExecutionBound,
+            "native deadline provenance or its exact deadline-to-launch join differs",
+        ),
+    ];
+
+    impl PendingV3FixtureSpec {
+        const fn exact_native() -> Self {
+            Self {
+                claim_mutation: PendingV3ClaimMutation::None,
+                physical_source_mutation: PendingV3PhysicalSourceMutation::None,
+                post_seal_sql_mutation: PendingV3PostSealSqlMutation::None,
+                dependency_fixture_mutation: R0bDependencyFixtureMutation::Exact,
+                crash_window: PendingV3CrashWindow::AfterFinalSealBeforeSql,
+            }
+        }
+
+        const fn legacy(mode: GovernedProjectionFixtureMode) -> Self {
+            match mode {
+                GovernedProjectionFixtureMode::V3CrashAfterFinalSealBeforeSql
+                | GovernedProjectionFixtureMode::V3CrashAfterSqlBeforeIndexMark
+                | GovernedProjectionFixtureMode::V3CrashWithStatusSequenceGap => Self {
+                    claim_mutation: PendingV3ClaimMutation::None,
+                    physical_source_mutation: PendingV3PhysicalSourceMutation::None,
+                    post_seal_sql_mutation: PendingV3PostSealSqlMutation::None,
+                    dependency_fixture_mutation: R0bDependencyFixtureMutation::Exact,
+                    crash_window: PendingV3CrashWindow::Legacy(mode),
+                },
+                GovernedProjectionFixtureMode::MissingSql => Self {
+                    claim_mutation: PendingV3ClaimMutation::None,
+                    physical_source_mutation: PendingV3PhysicalSourceMutation::None,
+                    post_seal_sql_mutation: PendingV3PostSealSqlMutation::Legacy(mode),
+                    dependency_fixture_mutation: R0bDependencyFixtureMutation::Exact,
+                    crash_window: PendingV3CrashWindow::Legacy(mode),
+                },
+                GovernedProjectionFixtureMode::RawSubstitution
+                | GovernedProjectionFixtureMode::ProviderDocumentSubstitution
+                | GovernedProjectionFixtureMode::ProviderDocumentMalformed
+                | GovernedProjectionFixtureMode::ProviderDocumentNoncanonical
+                | GovernedProjectionFixtureMode::NativeDeadlineReferenceSubstitution
+                | GovernedProjectionFixtureMode::NativeDeadlineProvenanceSubstitution
+                | GovernedProjectionFixtureMode::NativeDeadlineRecordMissing
+                | GovernedProjectionFixtureMode::NativeDeadlineDuplicate
+                | GovernedProjectionFixtureMode::NativeDeadlineMalformedReference
+                | GovernedProjectionFixtureMode::NativePrelaunchDeadlineDeclarationMissing
+                | GovernedProjectionFixtureMode::NativeUnknownPrelaunchCheck
+                | GovernedProjectionFixtureMode::NativePrelaunchMalformedReference(_)
+                | GovernedProjectionFixtureMode::NativePrelaunchCrossSourceSubstitution(_)
+                | GovernedProjectionFixtureMode::AcceptedDecisionAuthenticationSourceSubstitution
+                | GovernedProjectionFixtureMode::AcceptedDecisionAuthorizationSourceSubstitution
+                | GovernedProjectionFixtureMode::NativeLaunchExtraneousRecord
+                | GovernedProjectionFixtureMode::LaunchStatusSubstitution
+                | GovernedProjectionFixtureMode::LegacyOuterRequestReferenceSubstitution
+                | GovernedProjectionFixtureMode::LegacyDecisionReferenceSubstitution
+                | GovernedProjectionFixtureMode::LegacyUndeclaredDeadlineRecord
+                | GovernedProjectionFixtureMode::LegacyLaunchExtraneousRecord
+                | GovernedProjectionFixtureMode::LegacyNativeResidueWithoutPrelaunchChecks
+                | GovernedProjectionFixtureMode::LaunchClaimTimeSubstitution => Self {
+                    claim_mutation: PendingV3ClaimMutation::None,
+                    physical_source_mutation: PendingV3PhysicalSourceMutation::Legacy(mode),
+                    post_seal_sql_mutation: PendingV3PostSealSqlMutation::None,
+                    dependency_fixture_mutation: R0bDependencyFixtureMutation::Exact,
+                    crash_window: PendingV3CrashWindow::Legacy(mode),
+                },
+                _ => Self {
+                    claim_mutation: PendingV3ClaimMutation::Legacy(mode),
+                    physical_source_mutation: PendingV3PhysicalSourceMutation::None,
+                    post_seal_sql_mutation: PendingV3PostSealSqlMutation::None,
+                    dependency_fixture_mutation: R0bDependencyFixtureMutation::Exact,
+                    crash_window: PendingV3CrashWindow::Legacy(mode),
+                },
+            }
+        }
+
+        const fn legacy_mode(self) -> Option<GovernedProjectionFixtureMode> {
+            match (
+                self.claim_mutation,
+                self.physical_source_mutation,
+                self.post_seal_sql_mutation,
+                self.dependency_fixture_mutation,
+                self.crash_window,
+            ) {
+                (PendingV3ClaimMutation::Legacy(mode), _, _, _, _)
+                | (_, PendingV3PhysicalSourceMutation::Legacy(mode), _, _, _)
+                | (_, _, PendingV3PostSealSqlMutation::Legacy(mode), _, _)
+                | (_, _, _, _, PendingV3CrashWindow::Legacy(mode)) => Some(mode),
+                _ => None,
+            }
+        }
+    }
+
+    fn pending_v3_reference_index(records: &[Value], schema: &str) -> usize {
+        records
+            .iter()
+            .position(|record| record["schema"].as_str() == Some(schema))
+            .unwrap_or_else(|| panic!("pending V3 fixture has no {schema} reference"))
+    }
+
+    fn pending_v3_foreign_reference(schema: &str, label: &str) -> Value {
+        json!({
+            "schema": schema,
+            "record_id": typed_digest(&format!("{label}-record")),
+            "bytes_digest": typed_digest(&format!("{label}-bytes")),
+        })
+    }
+
+    fn pending_v3_recompute_embedded_capsule_id(closure: &mut Value) {
+        let capsule = closure
+            .get_mut("projection_capsule")
+            .expect("pending V3 closure has a capsule");
+        let capsule_object = capsule
+            .as_object_mut()
+            .expect("pending V3 capsule is an object");
+        capsule_object.remove("capsule_id");
+        let capsule_id =
+            nq_protocol::semantic_digest(capsule).expect("pending V3 capsule identity");
+        capsule
+            .as_object_mut()
+            .expect("pending V3 capsule remains an object")
+            .insert("capsule_id".to_owned(), json!(capsule_id));
+    }
+
+    fn apply_pending_v3_claim_mutation(closure: &mut Value, mutation: PendingV3ClaimMutation) {
+        const OUTER_REQUEST_SCHEMA: &str = "nq.diagnostic_invocation_request.v1";
+        const DECISION_SCHEMA: &str = "nq.invocation_decision.v1";
+        const RESERVATION_SCHEMA: &str = "nq.custody_reservation.v1";
+        const DEADLINE_SCHEMA: &str = "nq.deadline_evaluation.v1";
+        const LAUNCH_SCHEMA: &str = "nq.execution_launch.v1";
+
+        match mutation {
+            PendingV3ClaimMutation::None | PendingV3ClaimMutation::Legacy(_) => {}
+            PendingV3ClaimMutation::Pc03OuterRequestRecordId => {
+                let substituted = typed_digest("pc03-claim-outer-request-record");
+                closure["prelaunch"]["outer_request"]["record_id"] = json!(substituted);
+                let records = closure["prelaunch"]["reservation_checkpoint"]["runtime_records"]
+                    .as_array_mut()
+                    .expect("reservation checkpoint claim records");
+                let index = pending_v3_reference_index(records, OUTER_REQUEST_SCHEMA);
+                records[index]["record_id"] = json!(substituted);
+                closure["projection_capsule"]["diagnostic"]["local_origin"]["execution_binding"]
+                    ["outer_request_record_id"] = json!(substituted);
+                pending_v3_recompute_embedded_capsule_id(closure);
+            }
+            PendingV3ClaimMutation::Pc03OuterRequestBytesDigest => {
+                let substituted = typed_digest("pc03-claim-outer-request-bytes");
+                closure["prelaunch"]["outer_request"]["bytes_digest"] = json!(substituted);
+                let records = closure["prelaunch"]["reservation_checkpoint"]["runtime_records"]
+                    .as_array_mut()
+                    .expect("reservation checkpoint claim records");
+                let index = pending_v3_reference_index(records, OUTER_REQUEST_SCHEMA);
+                records[index]["bytes_digest"] = json!(substituted);
+            }
+            PendingV3ClaimMutation::Pc03OuterRequestLogicalId => {
+                closure["projection_capsule"]["diagnostic"]["local_origin"]["execution_binding"]
+                    ["outer_request_id"] = json!("pc03-substituted-outer-request");
+                pending_v3_recompute_embedded_capsule_id(closure);
+            }
+            PendingV3ClaimMutation::Pc03DecisionRecordId => {
+                let substituted = typed_digest("pc03-claim-decision-record");
+                closure["prelaunch"]["invocation_decision"]["record_id"] = json!(substituted);
+                let records = closure["prelaunch"]["reservation_checkpoint"]["runtime_records"]
+                    .as_array_mut()
+                    .expect("reservation checkpoint claim records");
+                let index = pending_v3_reference_index(records, DECISION_SCHEMA);
+                records[index]["record_id"] = json!(substituted);
+                closure["projection_capsule"]["diagnostic"]["local_origin"]["execution_binding"]
+                    ["invocation_decision_record_id"] = json!(substituted);
+                pending_v3_recompute_embedded_capsule_id(closure);
+            }
+            PendingV3ClaimMutation::Pc03DecisionBytesDigest => {
+                let substituted = typed_digest("pc03-claim-decision-bytes");
+                closure["prelaunch"]["invocation_decision"]["bytes_digest"] = json!(substituted);
+                let records = closure["prelaunch"]["reservation_checkpoint"]["runtime_records"]
+                    .as_array_mut()
+                    .expect("reservation checkpoint claim records");
+                let index = pending_v3_reference_index(records, DECISION_SCHEMA);
+                records[index]["bytes_digest"] = json!(substituted);
+            }
+            PendingV3ClaimMutation::Pc03ReservationMembership(membership) => {
+                let records = closure["prelaunch"]["reservation_checkpoint"]["runtime_records"]
+                    .as_array_mut()
+                    .expect("reservation checkpoint claim records");
+                let schema = match membership {
+                    PendingV3ReservationMembershipMutation::MissingOuterRequest
+                    | PendingV3ReservationMembershipMutation::DuplicateOuterRequest => {
+                        OUTER_REQUEST_SCHEMA
+                    }
+                    PendingV3ReservationMembershipMutation::MissingDecision
+                    | PendingV3ReservationMembershipMutation::DuplicateDecision => DECISION_SCHEMA,
+                    PendingV3ReservationMembershipMutation::MissingReservation
+                    | PendingV3ReservationMembershipMutation::DuplicateReservation => {
+                        RESERVATION_SCHEMA
+                    }
+                    PendingV3ReservationMembershipMutation::SubstitutedMember
+                    | PendingV3ReservationMembershipMutation::Reordered
+                    | PendingV3ReservationMembershipMutation::ExtraneousMember => "",
+                };
+                match membership {
+                    PendingV3ReservationMembershipMutation::MissingOuterRequest
+                    | PendingV3ReservationMembershipMutation::MissingDecision
+                    | PendingV3ReservationMembershipMutation::MissingReservation => {
+                        let index = pending_v3_reference_index(records, schema);
+                        records.remove(index);
+                    }
+                    PendingV3ReservationMembershipMutation::DuplicateOuterRequest
+                    | PendingV3ReservationMembershipMutation::DuplicateDecision
+                    | PendingV3ReservationMembershipMutation::DuplicateReservation => {
+                        let index = pending_v3_reference_index(records, schema);
+                        records.insert(index + 1, records[index].clone());
+                    }
+                    PendingV3ReservationMembershipMutation::SubstitutedMember => {
+                        let index = pending_v3_reference_index(records, OUTER_REQUEST_SCHEMA);
+                        records[index] = pending_v3_foreign_reference(
+                            OUTER_REQUEST_SCHEMA,
+                            "pc03-substituted-membership",
+                        );
+                    }
+                    PendingV3ReservationMembershipMutation::Reordered => records.reverse(),
+                    PendingV3ReservationMembershipMutation::ExtraneousMember => {
+                        records.push(pending_v3_foreign_reference(
+                            RESERVATION_SCHEMA,
+                            "pc03-extraneous-membership",
+                        ));
+                    }
+                }
+            }
+            PendingV3ClaimMutation::Pc04LaunchRecordId => {
+                let substituted = typed_digest("pc04-claim-launch-record");
+                let records = closure["prelaunch"]["launch_checkpoint"]["runtime_records"]
+                    .as_array_mut()
+                    .expect("launch checkpoint claim records");
+                let index = pending_v3_reference_index(records, LAUNCH_SCHEMA);
+                records[index]["record_id"] = json!(substituted);
+            }
+            PendingV3ClaimMutation::Pc04LaunchRecordBytesDigest => {
+                let records = closure["prelaunch"]["launch_checkpoint"]["runtime_records"]
+                    .as_array_mut()
+                    .expect("launch checkpoint claim records");
+                let index = pending_v3_reference_index(records, LAUNCH_SCHEMA);
+                records[index]["bytes_digest"] =
+                    json!(typed_digest("pc04-claim-launch-record-bytes"));
+            }
+            PendingV3ClaimMutation::Pc04LaunchRecordSchema => {
+                let records = closure["prelaunch"]["launch_checkpoint"]["runtime_records"]
+                    .as_array_mut()
+                    .expect("launch checkpoint claim records");
+                let index = pending_v3_reference_index(records, LAUNCH_SCHEMA);
+                records[index]["schema"] = json!("nq.test_substituted_execution_launch.v1");
+            }
+            PendingV3ClaimMutation::Pc04LaunchCheckpointId => {
+                closure["prelaunch"]["launch_checkpoint"]["checkpoint_id"] =
+                    json!(typed_digest("pc04-claim-launch-checkpoint"));
+            }
+            PendingV3ClaimMutation::Pc04LaunchCheckpointDigest => {
+                closure["prelaunch"]["launch_checkpoint"]["batch_digest"] =
+                    json!(typed_digest("pc04-claim-launch-checkpoint-digest"));
+            }
+            PendingV3ClaimMutation::Pc04LaunchMembership(membership) => {
+                let records = closure["prelaunch"]["launch_checkpoint"]["runtime_records"]
+                    .as_array_mut()
+                    .expect("launch checkpoint claim records");
+                let schema = match membership {
+                    PendingV3LaunchMembershipMutation::MissingDeadline
+                    | PendingV3LaunchMembershipMutation::DuplicateDeadline => DEADLINE_SCHEMA,
+                    PendingV3LaunchMembershipMutation::MissingLaunch
+                    | PendingV3LaunchMembershipMutation::DuplicateLaunch => LAUNCH_SCHEMA,
+                    PendingV3LaunchMembershipMutation::SubstitutedMember
+                    | PendingV3LaunchMembershipMutation::Reordered
+                    | PendingV3LaunchMembershipMutation::ExtraneousMember => "",
+                };
+                match membership {
+                    PendingV3LaunchMembershipMutation::MissingDeadline
+                    | PendingV3LaunchMembershipMutation::MissingLaunch => {
+                        let index = pending_v3_reference_index(records, schema);
+                        records.remove(index);
+                    }
+                    PendingV3LaunchMembershipMutation::DuplicateDeadline
+                    | PendingV3LaunchMembershipMutation::DuplicateLaunch => {
+                        let index = pending_v3_reference_index(records, schema);
+                        records.insert(index + 1, records[index].clone());
+                    }
+                    PendingV3LaunchMembershipMutation::SubstitutedMember => {
+                        let index = pending_v3_reference_index(records, DEADLINE_SCHEMA);
+                        records[index] = pending_v3_foreign_reference(
+                            DEADLINE_SCHEMA,
+                            "pc04-substituted-membership",
+                        );
+                    }
+                    PendingV3LaunchMembershipMutation::Reordered => records.reverse(),
+                    PendingV3LaunchMembershipMutation::ExtraneousMember => {
+                        records.push(pending_v3_foreign_reference(
+                            LAUNCH_SCHEMA,
+                            "pc04-extraneous-membership",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    impl PendingV3ClaimMutation {
+        const fn env_name(self) -> &'static str {
+            match self {
+                Self::None => "none",
+                Self::Legacy(_) => panic!("legacy fixture modes do not use typed child axes"),
+                Self::Pc03OuterRequestRecordId => "pc03-outer-request-record-id",
+                Self::Pc03OuterRequestBytesDigest => "pc03-outer-request-bytes-digest",
+                Self::Pc03OuterRequestLogicalId => "pc03-outer-request-logical-id",
+                Self::Pc03DecisionRecordId => "pc03-decision-record-id",
+                Self::Pc03DecisionBytesDigest => "pc03-decision-bytes-digest",
+                Self::Pc03ReservationMembership(membership) => match membership {
+                    PendingV3ReservationMembershipMutation::MissingOuterRequest => {
+                        "pc03-membership-missing-outer-request"
+                    }
+                    PendingV3ReservationMembershipMutation::MissingDecision => {
+                        "pc03-membership-missing-decision"
+                    }
+                    PendingV3ReservationMembershipMutation::MissingReservation => {
+                        "pc03-membership-missing-reservation"
+                    }
+                    PendingV3ReservationMembershipMutation::DuplicateOuterRequest => {
+                        "pc03-membership-duplicate-outer-request"
+                    }
+                    PendingV3ReservationMembershipMutation::DuplicateDecision => {
+                        "pc03-membership-duplicate-decision"
+                    }
+                    PendingV3ReservationMembershipMutation::DuplicateReservation => {
+                        "pc03-membership-duplicate-reservation"
+                    }
+                    PendingV3ReservationMembershipMutation::SubstitutedMember => {
+                        "pc03-membership-substituted"
+                    }
+                    PendingV3ReservationMembershipMutation::Reordered => {
+                        "pc03-membership-reordered"
+                    }
+                    PendingV3ReservationMembershipMutation::ExtraneousMember => {
+                        "pc03-membership-extraneous"
+                    }
+                },
+                Self::Pc04LaunchRecordId => "pc04-launch-record-id",
+                Self::Pc04LaunchRecordBytesDigest => "pc04-launch-record-bytes-digest",
+                Self::Pc04LaunchRecordSchema => "pc04-launch-record-schema",
+                Self::Pc04LaunchCheckpointId => "pc04-launch-checkpoint-id",
+                Self::Pc04LaunchCheckpointDigest => "pc04-launch-checkpoint-digest",
+                Self::Pc04LaunchMembership(membership) => match membership {
+                    PendingV3LaunchMembershipMutation::MissingDeadline => {
+                        "pc04-membership-missing-deadline"
+                    }
+                    PendingV3LaunchMembershipMutation::MissingLaunch => {
+                        "pc04-membership-missing-launch"
+                    }
+                    PendingV3LaunchMembershipMutation::DuplicateDeadline => {
+                        "pc04-membership-duplicate-deadline"
+                    }
+                    PendingV3LaunchMembershipMutation::DuplicateLaunch => {
+                        "pc04-membership-duplicate-launch"
+                    }
+                    PendingV3LaunchMembershipMutation::SubstitutedMember => {
+                        "pc04-membership-substituted"
+                    }
+                    PendingV3LaunchMembershipMutation::Reordered => "pc04-membership-reordered",
+                    PendingV3LaunchMembershipMutation::ExtraneousMember => {
+                        "pc04-membership-extraneous"
+                    }
+                },
+            }
+        }
+
+        fn from_env_name(value: &str) -> Self {
+            match value {
+                "none" => Self::None,
+                "pc03-outer-request-record-id" => Self::Pc03OuterRequestRecordId,
+                "pc03-outer-request-bytes-digest" => Self::Pc03OuterRequestBytesDigest,
+                "pc03-outer-request-logical-id" => Self::Pc03OuterRequestLogicalId,
+                "pc03-decision-record-id" => Self::Pc03DecisionRecordId,
+                "pc03-decision-bytes-digest" => Self::Pc03DecisionBytesDigest,
+                "pc03-membership-missing-outer-request" => Self::Pc03ReservationMembership(
+                    PendingV3ReservationMembershipMutation::MissingOuterRequest,
+                ),
+                "pc03-membership-missing-decision" => Self::Pc03ReservationMembership(
+                    PendingV3ReservationMembershipMutation::MissingDecision,
+                ),
+                "pc03-membership-missing-reservation" => Self::Pc03ReservationMembership(
+                    PendingV3ReservationMembershipMutation::MissingReservation,
+                ),
+                "pc03-membership-duplicate-outer-request" => Self::Pc03ReservationMembership(
+                    PendingV3ReservationMembershipMutation::DuplicateOuterRequest,
+                ),
+                "pc03-membership-duplicate-decision" => Self::Pc03ReservationMembership(
+                    PendingV3ReservationMembershipMutation::DuplicateDecision,
+                ),
+                "pc03-membership-duplicate-reservation" => Self::Pc03ReservationMembership(
+                    PendingV3ReservationMembershipMutation::DuplicateReservation,
+                ),
+                "pc03-membership-substituted" => Self::Pc03ReservationMembership(
+                    PendingV3ReservationMembershipMutation::SubstitutedMember,
+                ),
+                "pc03-membership-reordered" => Self::Pc03ReservationMembership(
+                    PendingV3ReservationMembershipMutation::Reordered,
+                ),
+                "pc03-membership-extraneous" => Self::Pc03ReservationMembership(
+                    PendingV3ReservationMembershipMutation::ExtraneousMember,
+                ),
+                "pc04-launch-record-id" => Self::Pc04LaunchRecordId,
+                "pc04-launch-record-bytes-digest" => Self::Pc04LaunchRecordBytesDigest,
+                "pc04-launch-record-schema" => Self::Pc04LaunchRecordSchema,
+                "pc04-launch-checkpoint-id" => Self::Pc04LaunchCheckpointId,
+                "pc04-launch-checkpoint-digest" => Self::Pc04LaunchCheckpointDigest,
+                "pc04-membership-missing-deadline" => {
+                    Self::Pc04LaunchMembership(PendingV3LaunchMembershipMutation::MissingDeadline)
+                }
+                "pc04-membership-missing-launch" => {
+                    Self::Pc04LaunchMembership(PendingV3LaunchMembershipMutation::MissingLaunch)
+                }
+                "pc04-membership-duplicate-deadline" => {
+                    Self::Pc04LaunchMembership(PendingV3LaunchMembershipMutation::DuplicateDeadline)
+                }
+                "pc04-membership-duplicate-launch" => {
+                    Self::Pc04LaunchMembership(PendingV3LaunchMembershipMutation::DuplicateLaunch)
+                }
+                "pc04-membership-substituted" => {
+                    Self::Pc04LaunchMembership(PendingV3LaunchMembershipMutation::SubstitutedMember)
+                }
+                "pc04-membership-reordered" => {
+                    Self::Pc04LaunchMembership(PendingV3LaunchMembershipMutation::Reordered)
+                }
+                "pc04-membership-extraneous" => {
+                    Self::Pc04LaunchMembership(PendingV3LaunchMembershipMutation::ExtraneousMember)
+                }
+                other => panic!("unknown pending V3 claim mutation {other}"),
+            }
+        }
+    }
+
+    impl R0bExternalRole {
+        const fn env_name(self) -> &'static str {
+            match self {
+                Self::Authentication => "authentication",
+                Self::GenerationMatch => "generation-match",
+                Self::Capability => "capability",
+                Self::Custody => "custody",
+            }
+        }
+
+        fn from_env_name(value: &str) -> Self {
+            match value {
+                "authentication" => Self::Authentication,
+                "generation-match" => Self::GenerationMatch,
+                "capability" => Self::Capability,
+                "custody" => Self::Custody,
+                other => panic!("unknown R0b external role {other}"),
+            }
+        }
+    }
+
+    impl R0bAuthorityRole {
+        const fn env_name(self) -> &'static str {
+            match self {
+                Self::InvocationAuthentication => "invocation-authentication",
+                Self::OperationAuthorization => "operation-authorization",
+            }
+        }
+
+        fn from_env_name(value: &str) -> Self {
+            match value {
+                "invocation-authentication" => Self::InvocationAuthentication,
+                "operation-authorization" => Self::OperationAuthorization,
+                other => panic!("unknown R0b authority role {other}"),
+            }
+        }
+    }
+
+    impl R0bDependencyFixtureMutation {
+        fn env_name(self) -> String {
+            let external =
+                |prefix: &str, role: R0bExternalRole| format!("{prefix}-{}", role.env_name());
+            let authority =
+                |prefix: &str, role: R0bAuthorityRole| format!("{prefix}-{}", role.env_name());
+            match self {
+                Self::Exact => "exact".to_owned(),
+                Self::ExternalArchivedRetrieved(role) => {
+                    external("external-archived-retrieved", role)
+                }
+                Self::ExternalCommittedUnavailable(role) => {
+                    external("external-committed-unavailable", role)
+                }
+                Self::ExternalMalformedHex(role) => external("external-malformed-hex", role),
+                Self::ExternalAvailabilityMismatch(role) => {
+                    external("external-availability-mismatch", role)
+                }
+                Self::ExternalByteSubstitution(role) => {
+                    external("external-byte-substitution", role)
+                }
+                Self::ExternalSnapshotNoncanonical(role) => {
+                    external("external-snapshot-noncanonical", role)
+                }
+                Self::ExternalOmitted(role) => external("external-omitted", role),
+                Self::ExternalValidReplacement(role) => {
+                    external("external-valid-replacement", role)
+                }
+                Self::ExternalReceiptOmitted(role) => external("external-receipt-omitted", role),
+                Self::ExternalReceiptSubstituted(role) => {
+                    external("external-receipt-substituted", role)
+                }
+                Self::ReceiptExtraneous => "receipt-extraneous".to_owned(),
+                Self::InvalidReceiptSignature(role) => external("invalid-receipt-signature", role),
+                Self::SubstitutedTrustRoot(role) => external("substituted-trust-root", role),
+                Self::AuthorityOmitted(role) => authority("authority-omitted", role),
+                Self::AuthorityWrongReference(role) => authority("authority-wrong-reference", role),
+                Self::AuthorityWrongPurpose(role) => authority("authority-wrong-purpose", role),
+                Self::AuthorityReceiptOmitted(role) => authority("authority-receipt-omitted", role),
+                Self::AuthorityReceiptSubstituted(role) => {
+                    authority("authority-receipt-substituted", role)
+                }
+            }
+        }
+
+        fn from_env_name(value: &str) -> Self {
+            if value == "exact" {
+                return Self::Exact;
+            }
+            if value == "receipt-extraneous" {
+                return Self::ReceiptExtraneous;
+            }
+            for (prefix, constructor) in [
+                (
+                    "external-archived-retrieved-",
+                    Self::ExternalArchivedRetrieved as fn(R0bExternalRole) -> Self,
+                ),
+                (
+                    "external-committed-unavailable-",
+                    Self::ExternalCommittedUnavailable,
+                ),
+                ("external-malformed-hex-", Self::ExternalMalformedHex),
+                (
+                    "external-availability-mismatch-",
+                    Self::ExternalAvailabilityMismatch,
+                ),
+                (
+                    "external-byte-substitution-",
+                    Self::ExternalByteSubstitution,
+                ),
+                (
+                    "external-snapshot-noncanonical-",
+                    Self::ExternalSnapshotNoncanonical,
+                ),
+                ("external-omitted-", Self::ExternalOmitted),
+                (
+                    "external-valid-replacement-",
+                    Self::ExternalValidReplacement,
+                ),
+                ("external-receipt-omitted-", Self::ExternalReceiptOmitted),
+                (
+                    "external-receipt-substituted-",
+                    Self::ExternalReceiptSubstituted,
+                ),
+                ("invalid-receipt-signature-", Self::InvalidReceiptSignature),
+                ("substituted-trust-root-", Self::SubstitutedTrustRoot),
+            ] {
+                if let Some(role) = value.strip_prefix(prefix) {
+                    return constructor(R0bExternalRole::from_env_name(role));
+                }
+            }
+            for (prefix, constructor) in [
+                (
+                    "authority-omitted-",
+                    Self::AuthorityOmitted as fn(R0bAuthorityRole) -> Self,
+                ),
+                ("authority-wrong-reference-", Self::AuthorityWrongReference),
+                ("authority-wrong-purpose-", Self::AuthorityWrongPurpose),
+                ("authority-receipt-omitted-", Self::AuthorityReceiptOmitted),
+                (
+                    "authority-receipt-substituted-",
+                    Self::AuthorityReceiptSubstituted,
+                ),
+            ] {
+                if let Some(role) = value.strip_prefix(prefix) {
+                    return constructor(R0bAuthorityRole::from_env_name(role));
+                }
+            }
+            panic!("unknown R0b dependency fixture mutation {value}");
+        }
+    }
+
+    impl PendingV3PostSealSqlMutation {
+        const fn env_name(self) -> &'static str {
+            match self {
+                Self::None => "none",
+                Self::Legacy(_) => panic!("legacy fixture modes do not use typed child axes"),
+                Self::DependencyCustodyCommittedUnavailable => {
+                    "dependency-custody-committed-unavailable"
+                }
+                Self::DependencyCustodyCorrupt => "dependency-custody-corrupt",
+            }
+        }
+
+        fn from_env_name(value: &str) -> Self {
+            match value {
+                "none" => Self::None,
+                "dependency-custody-committed-unavailable" => {
+                    Self::DependencyCustodyCommittedUnavailable
+                }
+                "dependency-custody-corrupt" => Self::DependencyCustodyCorrupt,
+                other => panic!("unknown pending V3 post-seal SQL mutation {other}"),
+            }
+        }
+    }
+
+    impl PendingV3PhysicalSourceMutation {
+        const fn env_name(self) -> &'static str {
+            match self {
+                Self::None => "none",
+                Self::Legacy(_) => panic!("legacy fixture modes do not use typed child axes"),
+                Self::Pc03DecisionNotAccepted => "pc03-decision-not-accepted",
+                Self::Pc03ReservationCheckpointMissing => "pc03-reservation-checkpoint-missing",
+                Self::Pc03ReservationCheckpointCorrupt => "pc03-reservation-checkpoint-corrupt",
+                Self::Pc04LaunchCheckpointMissing => "pc04-launch-checkpoint-missing",
+                Self::Pc04LaunchCheckpointCorrupt => "pc04-launch-checkpoint-corrupt",
+                Self::Pc04LaunchPredecessorCheckpointIdCorrupt => {
+                    "pc04-launch-predecessor-checkpoint-id-corrupt"
+                }
+                Self::Pc04LaunchPredecessorLedgerRootCorrupt => {
+                    "pc04-launch-predecessor-ledger-root-corrupt"
+                }
+                Self::Pc04NativeLaunchPredicate(predicate) => predicate.env_name(),
+                Self::R0bOperationAuthorizationMissing => "r0b-operation-authorization-missing",
+                Self::R0bOperationAuthorizationDuplicate => "r0b-operation-authorization-duplicate",
+                Self::R0bOperationAuthorizationBytesMismatch => {
+                    "r0b-operation-authorization-bytes-mismatch"
+                }
+                Self::R0bRequestLaunchAuthenticationMismatch => {
+                    "r0b-request-launch-authentication-mismatch"
+                }
+                Self::R0bRequestDecisionAuthenticationMismatch => {
+                    "r0b-request-decision-authentication-mismatch"
+                }
+                Self::R0bRequestLaunchAuthorizationMismatch => {
+                    "r0b-request-launch-authorization-mismatch"
+                }
+                Self::R0bRequestDecisionAuthorizationMismatch => {
+                    "r0b-request-decision-authorization-mismatch"
+                }
+                Self::R0bReservationLaunchCustodyMismatch => {
+                    "r0b-reservation-launch-custody-mismatch"
+                }
+                Self::R0bGenerationReferenceMalformed => "r0b-generation-reference-malformed",
+                Self::R0bLaunchDependencyBindingDifferent => {
+                    "r0b-launch-dependency-binding-different"
+                }
+                Self::R0bArenaDependencyBytesDifferentFromSql => {
+                    "r0b-arena-dependency-bytes-different-from-sql"
+                }
+            }
+        }
+
+        fn from_env_name(value: &str) -> Self {
+            match value {
+                "none" => Self::None,
+                "pc03-decision-not-accepted" => Self::Pc03DecisionNotAccepted,
+                "pc03-reservation-checkpoint-missing" => Self::Pc03ReservationCheckpointMissing,
+                "pc03-reservation-checkpoint-corrupt" => Self::Pc03ReservationCheckpointCorrupt,
+                "pc04-launch-checkpoint-missing" => Self::Pc04LaunchCheckpointMissing,
+                "pc04-launch-checkpoint-corrupt" => Self::Pc04LaunchCheckpointCorrupt,
+                "pc04-launch-predecessor-checkpoint-id-corrupt" => {
+                    Self::Pc04LaunchPredecessorCheckpointIdCorrupt
+                }
+                "pc04-launch-predecessor-ledger-root-corrupt" => {
+                    Self::Pc04LaunchPredecessorLedgerRootCorrupt
+                }
+                "r0b-operation-authorization-missing" => Self::R0bOperationAuthorizationMissing,
+                "r0b-operation-authorization-duplicate" => Self::R0bOperationAuthorizationDuplicate,
+                "r0b-operation-authorization-bytes-mismatch" => {
+                    Self::R0bOperationAuthorizationBytesMismatch
+                }
+                "r0b-request-launch-authentication-mismatch" => {
+                    Self::R0bRequestLaunchAuthenticationMismatch
+                }
+                "r0b-request-decision-authentication-mismatch" => {
+                    Self::R0bRequestDecisionAuthenticationMismatch
+                }
+                "r0b-request-launch-authorization-mismatch" => {
+                    Self::R0bRequestLaunchAuthorizationMismatch
+                }
+                "r0b-request-decision-authorization-mismatch" => {
+                    Self::R0bRequestDecisionAuthorizationMismatch
+                }
+                "r0b-reservation-launch-custody-mismatch" => {
+                    Self::R0bReservationLaunchCustodyMismatch
+                }
+                "r0b-generation-reference-malformed" => Self::R0bGenerationReferenceMalformed,
+                "r0b-launch-dependency-binding-different" => {
+                    Self::R0bLaunchDependencyBindingDifferent
+                }
+                "r0b-arena-dependency-bytes-different-from-sql" => {
+                    Self::R0bArenaDependencyBytesDifferentFromSql
+                }
+                other => Self::Pc04NativeLaunchPredicate(
+                    PendingV3NativeLaunchPredicateMutation::from_env_name(other),
+                ),
+            }
+        }
+    }
+
+    impl PendingV3NativeLaunchPredicateMutation {
+        const fn env_name(self) -> &'static str {
+            match self {
+                Self::DeadlineReferenceBytesDigest => "pc04-native-deadline-reference-bytes-digest",
+                Self::LaunchOuterRequestReference => "pc04-native-launch-outer-request-reference",
+                Self::DeadlineOuterRequestReference => {
+                    "pc04-native-deadline-outer-request-reference"
+                }
+                Self::LaunchDecisionReference => "pc04-native-launch-decision-reference",
+                Self::LaunchReservationReference => "pc04-native-launch-reservation-reference",
+                Self::ActivationEquality => "pc04-native-activation-equality",
+                Self::ActivationMembership => "pc04-native-activation-membership",
+                Self::ClockQualificationMembership => "pc04-native-clock-qualification-membership",
+                Self::DeadlineDecisionState => "pc04-native-deadline-decision-state",
+                Self::DeadlineViolations => "pc04-native-deadline-violations",
+                Self::DerivedAttemptDeadline => "pc04-native-derived-attempt-deadline",
+                Self::Clock => "pc04-native-clock",
+                Self::MaximumExecutionBound => "pc04-native-maximum-execution-bound",
+            }
+        }
+
+        fn from_env_name(value: &str) -> Self {
+            match value {
+                "pc04-native-deadline-reference-bytes-digest" => Self::DeadlineReferenceBytesDigest,
+                "pc04-native-launch-outer-request-reference" => Self::LaunchOuterRequestReference,
+                "pc04-native-deadline-outer-request-reference" => {
+                    Self::DeadlineOuterRequestReference
+                }
+                "pc04-native-launch-decision-reference" => Self::LaunchDecisionReference,
+                "pc04-native-launch-reservation-reference" => Self::LaunchReservationReference,
+                "pc04-native-activation-equality" => Self::ActivationEquality,
+                "pc04-native-activation-membership" => Self::ActivationMembership,
+                "pc04-native-clock-qualification-membership" => Self::ClockQualificationMembership,
+                "pc04-native-deadline-decision-state" => Self::DeadlineDecisionState,
+                "pc04-native-deadline-violations" => Self::DeadlineViolations,
+                "pc04-native-derived-attempt-deadline" => Self::DerivedAttemptDeadline,
+                "pc04-native-clock" => Self::Clock,
+                "pc04-native-maximum-execution-bound" => Self::MaximumExecutionBound,
+                other => panic!("unknown pending V3 physical-source mutation {other}"),
+            }
+        }
     }
 
     struct GovernedProjectionFixture {
@@ -14060,8 +18310,560 @@ mod tests {
         reservation: GovernedCustodyReservation,
         reservation_record_id: Sha256Digest,
         launch_checkpoint_id: Sha256Digest,
-        diagnostic_artifact_id: Sha256Digest,
         exact_closure_bytes: Vec<u8>,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum R0bDependencyExpected {
+        Pass,
+        Global(&'static str),
+    }
+
+    #[derive(Clone, Debug)]
+    struct R0bDependencyCase {
+        id: String,
+        mutation: R0bDependencyFixtureMutation,
+        expected: R0bDependencyExpected,
+        retained_external_mode: Option<(
+            R0bExternalRole,
+            nq_host_role_dependency_custody::ExternalDependencyAvailability,
+        )>,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct R0bPhysicalCase {
+        id: &'static str,
+        mutation: PendingV3PhysicalSourceMutation,
+        expected_reason: &'static str,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum R0bBindingMutation {
+        None,
+        CommitmentMissing,
+        PayloadMissing,
+        PayloadSubstituted,
+        PayloadNoncanonical,
+        ReservationBindingMissing,
+        BootstrapRootSubstituted,
+        CustodyDigestSubstituted,
+        CustodyLengthSubstituted,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct R0bBindingCase {
+        id: &'static str,
+        physical_mutation: PendingV3PhysicalSourceMutation,
+        binding_mutation: R0bBindingMutation,
+        expected_capacity_reason: &'static str,
+        expected_reopen_reason: &'static str,
+    }
+
+    const R0B_PHYSICAL_CASES: &[R0bPhysicalCase] = &[
+        R0bPhysicalCase {
+            id: "O02",
+            mutation: PendingV3PhysicalSourceMutation::R0bOperationAuthorizationMissing,
+            expected_reason: "reservation checkpoint requires exactly one materialized operation authorization",
+        },
+        R0bPhysicalCase {
+            id: "O03",
+            mutation: PendingV3PhysicalSourceMutation::R0bOperationAuthorizationDuplicate,
+            expected_reason: "reservation checkpoint requires exactly one materialized operation authorization",
+        },
+        R0bPhysicalCase {
+            id: "O04",
+            mutation: PendingV3PhysicalSourceMutation::R0bOperationAuthorizationBytesMismatch,
+            expected_reason: "materialized operation authorization differs from the exact physical reference",
+        },
+        R0bPhysicalCase {
+            id: "P01",
+            mutation: PendingV3PhysicalSourceMutation::R0bRequestLaunchAuthenticationMismatch,
+            expected_reason: "prelaunch check authentication differs from outer request authentication_evidence",
+        },
+        R0bPhysicalCase {
+            id: "P02",
+            mutation: PendingV3PhysicalSourceMutation::R0bRequestDecisionAuthenticationMismatch,
+            expected_reason: "accepted invocation decision authentication_evidence differs from outer request",
+        },
+        R0bPhysicalCase {
+            id: "P03",
+            mutation: PendingV3PhysicalSourceMutation::R0bRequestLaunchAuthorizationMismatch,
+            expected_reason: "prelaunch check invocation_authorization differs from outer request invocation_authorization",
+        },
+        R0bPhysicalCase {
+            id: "P04",
+            mutation: PendingV3PhysicalSourceMutation::R0bRequestDecisionAuthorizationMismatch,
+            expected_reason: "accepted invocation decision invocation_authorization differs from outer request",
+        },
+        R0bPhysicalCase {
+            id: "P05",
+            mutation: PendingV3PhysicalSourceMutation::R0bReservationLaunchCustodyMismatch,
+            expected_reason: "prelaunch check custody differs from reservation reservation_commit",
+        },
+        R0bPhysicalCase {
+            id: "P06",
+            mutation: PendingV3PhysicalSourceMutation::R0bGenerationReferenceMalformed,
+            expected_reason: "invalid exact reference at /prelaunch_checks/generation_match",
+        },
+    ];
+
+    const R0B_BINDING_CASES: &[R0bBindingCase] = &[
+        R0bBindingCase {
+            id: "B01",
+            physical_mutation: PendingV3PhysicalSourceMutation::None,
+            binding_mutation: R0bBindingMutation::CommitmentMissing,
+            expected_capacity_reason: "references a missing dependency commitment",
+            expected_reopen_reason: "references a missing dependency commitment",
+        },
+        R0bBindingCase {
+            id: "B02",
+            physical_mutation: PendingV3PhysicalSourceMutation::None,
+            binding_mutation: R0bBindingMutation::PayloadMissing,
+            expected_capacity_reason: "committed-unavailable",
+            expected_reopen_reason: "committed-unavailable",
+        },
+        R0bBindingCase {
+            id: "B03",
+            physical_mutation: PendingV3PhysicalSourceMutation::None,
+            binding_mutation: R0bBindingMutation::PayloadSubstituted,
+            expected_capacity_reason: "stored byte digest differs from committed custody",
+            expected_reopen_reason: "stored byte digest differs from committed custody",
+        },
+        R0bBindingCase {
+            id: "B04",
+            physical_mutation: PendingV3PhysicalSourceMutation::None,
+            binding_mutation: R0bBindingMutation::PayloadNoncanonical,
+            expected_capacity_reason: "has invalid batch digest",
+            expected_reopen_reason: "has invalid batch digest",
+        },
+        R0bBindingCase {
+            id: "B05",
+            physical_mutation: PendingV3PhysicalSourceMutation::None,
+            binding_mutation: R0bBindingMutation::ReservationBindingMissing,
+            expected_capacity_reason: "lacks dependency provenance",
+            expected_reopen_reason: "lacks dependency provenance",
+        },
+        // B06 and B11 deliberately name two logical properties of one
+        // append-valid specimen: both physical checkpoints select a second
+        // authenticated generation while the arena retains its original
+        // exact dependency bytes. This is one detection branch, not two
+        // independent specimens or corroborating observations.
+        R0bBindingCase {
+            id: "B06",
+            physical_mutation:
+                PendingV3PhysicalSourceMutation::R0bArenaDependencyBytesDifferentFromSql,
+            binding_mutation: R0bBindingMutation::None,
+            expected_capacity_reason: "dependency identity differs from reservation",
+            expected_reopen_reason: "dependency closure is substituted or differs from sealed custody",
+        },
+        R0bBindingCase {
+            id: "B07",
+            physical_mutation: PendingV3PhysicalSourceMutation::None,
+            binding_mutation: R0bBindingMutation::BootstrapRootSubstituted,
+            expected_capacity_reason: "selected non-bootstrap trust root",
+            expected_reopen_reason: "selected non-bootstrap trust root",
+        },
+        R0bBindingCase {
+            id: "B08",
+            physical_mutation: PendingV3PhysicalSourceMutation::None,
+            binding_mutation: R0bBindingMutation::CustodyDigestSubstituted,
+            expected_capacity_reason: "dependency binding differs from its commitment",
+            expected_reopen_reason: "dependency binding differs from its commitment",
+        },
+        R0bBindingCase {
+            id: "B09",
+            physical_mutation: PendingV3PhysicalSourceMutation::None,
+            binding_mutation: R0bBindingMutation::CustodyLengthSubstituted,
+            expected_capacity_reason: "stored byte length",
+            expected_reopen_reason: "stored byte length",
+        },
+        R0bBindingCase {
+            id: "B10",
+            physical_mutation: PendingV3PhysicalSourceMutation::R0bLaunchDependencyBindingDifferent,
+            binding_mutation: R0bBindingMutation::None,
+            expected_capacity_reason: "dependency identity differs from reservation",
+            expected_reopen_reason: "dependency closure is substituted or differs from sealed custody",
+        },
+        R0bBindingCase {
+            id: "B11",
+            physical_mutation:
+                PendingV3PhysicalSourceMutation::R0bArenaDependencyBytesDifferentFromSql,
+            binding_mutation: R0bBindingMutation::None,
+            expected_capacity_reason: "dependency identity differs from reservation",
+            expected_reopen_reason: "dependency closure is substituted or differs from sealed custody",
+        },
+    ];
+
+    fn r0b_dependency_cases() -> Vec<R0bDependencyCase> {
+        use nq_host_role_dependency_custody::ExternalDependencyAvailability;
+
+        let mut cases = Vec::new();
+        for role in [
+            R0bExternalRole::Authentication,
+            R0bExternalRole::GenerationMatch,
+            R0bExternalRole::Capability,
+            R0bExternalRole::Custody,
+        ] {
+            let suffix = role.env_name();
+            cases.extend([
+                R0bDependencyCase {
+                    id: format!("E01-{suffix}"),
+                    mutation: R0bDependencyFixtureMutation::Exact,
+                    expected: R0bDependencyExpected::Pass,
+                    retained_external_mode: Some((role, ExternalDependencyAvailability::Online)),
+                },
+                R0bDependencyCase {
+                    id: format!("E02-{suffix}"),
+                    mutation: R0bDependencyFixtureMutation::ExternalArchivedRetrieved(role),
+                    expected: R0bDependencyExpected::Pass,
+                    retained_external_mode: Some((
+                        role,
+                        ExternalDependencyAvailability::ArchivedRetrieved,
+                    )),
+                },
+                R0bDependencyCase {
+                    id: format!("E03-{suffix}"),
+                    mutation: R0bDependencyFixtureMutation::ExternalOmitted(role),
+                    expected: R0bDependencyExpected::Global(
+                        "is absent from authenticated dependency generation",
+                    ),
+                    retained_external_mode: None,
+                },
+                R0bDependencyCase {
+                    id: format!("E04-{suffix}"),
+                    mutation: R0bDependencyFixtureMutation::ExternalCommittedUnavailable(role),
+                    expected: R0bDependencyExpected::Global("is committed-unavailable"),
+                    retained_external_mode: None,
+                },
+                R0bDependencyCase {
+                    id: format!("E05-{suffix}"),
+                    mutation: R0bDependencyFixtureMutation::ExternalMalformedHex(role),
+                    expected: R0bDependencyExpected::Global(
+                        "external dependency exact bytes are not canonical lowercase hexadecimal",
+                    ),
+                    retained_external_mode: None,
+                },
+                R0bDependencyCase {
+                    id: format!("E06-{suffix}"),
+                    mutation: R0bDependencyFixtureMutation::ExternalAvailabilityMismatch(role),
+                    expected: R0bDependencyExpected::Global(
+                        "external dependency availability disagrees with exact-byte custody",
+                    ),
+                    retained_external_mode: None,
+                },
+                R0bDependencyCase {
+                    id: format!("E07-{suffix}"),
+                    mutation: R0bDependencyFixtureMutation::ExternalByteSubstitution(role),
+                    expected: R0bDependencyExpected::Global(
+                        "exact bytes differ from its reference",
+                    ),
+                    retained_external_mode: None,
+                },
+                R0bDependencyCase {
+                    id: format!("E08-{suffix}"),
+                    mutation: R0bDependencyFixtureMutation::ExternalSnapshotNoncanonical(role),
+                    expected: R0bDependencyExpected::Global(
+                        "external-dependency snapshot bytes are not exact RFC 8785 canonical JSON",
+                    ),
+                    retained_external_mode: None,
+                },
+                R0bDependencyCase {
+                    id: format!("E09-{suffix}"),
+                    mutation: R0bDependencyFixtureMutation::ExternalReceiptOmitted(role),
+                    expected: R0bDependencyExpected::Global(
+                        "dependency admission receipt is absent from the signed closed set",
+                    ),
+                    retained_external_mode: None,
+                },
+                R0bDependencyCase {
+                    id: format!("E10-{suffix}"),
+                    mutation: R0bDependencyFixtureMutation::ExternalReceiptSubstituted(role),
+                    expected: R0bDependencyExpected::Global(
+                        "dependency admission receipt differs from its admitted dependency",
+                    ),
+                    retained_external_mode: None,
+                },
+                R0bDependencyCase {
+                    id: format!("E11-{suffix}"),
+                    mutation: R0bDependencyFixtureMutation::ReceiptExtraneous,
+                    expected: R0bDependencyExpected::Global(
+                        "signed dependency admission receipt set contains an extraneous receipt",
+                    ),
+                    retained_external_mode: None,
+                },
+                R0bDependencyCase {
+                    id: format!("E12-{suffix}"),
+                    mutation: R0bDependencyFixtureMutation::InvalidReceiptSignature(role),
+                    expected: R0bDependencyExpected::Global(
+                        "dependency admission receipt-set signature is invalid",
+                    ),
+                    retained_external_mode: None,
+                },
+                R0bDependencyCase {
+                    id: format!("E13-{suffix}"),
+                    mutation: R0bDependencyFixtureMutation::SubstitutedTrustRoot(role),
+                    expected: R0bDependencyExpected::Global("selected non-bootstrap trust root"),
+                    retained_external_mode: None,
+                },
+                R0bDependencyCase {
+                    id: format!("E14-{suffix}"),
+                    mutation: R0bDependencyFixtureMutation::ExternalValidReplacement(role),
+                    expected: R0bDependencyExpected::Global(
+                        "is absent from authenticated dependency generation",
+                    ),
+                    retained_external_mode: None,
+                },
+            ]);
+        }
+        cases.extend([
+            R0bDependencyCase {
+                id: "A01".to_owned(),
+                mutation: R0bDependencyFixtureMutation::Exact,
+                expected: R0bDependencyExpected::Pass,
+                retained_external_mode: None,
+            },
+            R0bDependencyCase {
+                id: "A02".to_owned(),
+                mutation: R0bDependencyFixtureMutation::AuthorityOmitted(
+                    R0bAuthorityRole::InvocationAuthentication,
+                ),
+                expected: R0bDependencyExpected::Global(
+                    "invocation_authentication authority admission",
+                ),
+                retained_external_mode: None,
+            },
+            R0bDependencyCase {
+                id: "A03".to_owned(),
+                mutation: R0bDependencyFixtureMutation::AuthorityWrongReference(
+                    R0bAuthorityRole::InvocationAuthentication,
+                ),
+                expected: R0bDependencyExpected::Global(
+                    "invocation_authentication authority admission",
+                ),
+                retained_external_mode: None,
+            },
+            R0bDependencyCase {
+                id: "A04".to_owned(),
+                mutation: R0bDependencyFixtureMutation::AuthorityWrongPurpose(
+                    R0bAuthorityRole::InvocationAuthentication,
+                ),
+                expected: R0bDependencyExpected::Global(
+                    "authority admission purpose does not match its record schema",
+                ),
+                retained_external_mode: None,
+            },
+            R0bDependencyCase {
+                id: "A05".to_owned(),
+                mutation: R0bDependencyFixtureMutation::ExternalReceiptSubstituted(
+                    R0bExternalRole::Authentication,
+                ),
+                expected: R0bDependencyExpected::Global(
+                    "dependency admission receipt differs from its admitted dependency",
+                ),
+                retained_external_mode: None,
+            },
+            R0bDependencyCase {
+                id: "A06".to_owned(),
+                mutation: R0bDependencyFixtureMutation::AuthorityReceiptSubstituted(
+                    R0bAuthorityRole::InvocationAuthentication,
+                ),
+                expected: R0bDependencyExpected::Global(
+                    "dependency admission receipt differs from its admitted dependency",
+                ),
+                retained_external_mode: None,
+            },
+            R0bDependencyCase {
+                id: "O01".to_owned(),
+                mutation: R0bDependencyFixtureMutation::Exact,
+                expected: R0bDependencyExpected::Pass,
+                retained_external_mode: None,
+            },
+            R0bDependencyCase {
+                id: "O05".to_owned(),
+                mutation: R0bDependencyFixtureMutation::AuthorityOmitted(
+                    R0bAuthorityRole::OperationAuthorization,
+                ),
+                expected: R0bDependencyExpected::Global(
+                    "operation_authorization authority admission",
+                ),
+                retained_external_mode: None,
+            },
+            R0bDependencyCase {
+                id: "O06".to_owned(),
+                mutation: R0bDependencyFixtureMutation::AuthorityWrongReference(
+                    R0bAuthorityRole::OperationAuthorization,
+                ),
+                expected: R0bDependencyExpected::Global(
+                    "operation_authorization authority admission",
+                ),
+                retained_external_mode: None,
+            },
+            R0bDependencyCase {
+                id: "O07".to_owned(),
+                mutation: R0bDependencyFixtureMutation::AuthorityWrongPurpose(
+                    R0bAuthorityRole::OperationAuthorization,
+                ),
+                expected: R0bDependencyExpected::Global(
+                    "authority admission purpose does not match its record schema",
+                ),
+                retained_external_mode: None,
+            },
+            R0bDependencyCase {
+                id: "O08".to_owned(),
+                mutation: R0bDependencyFixtureMutation::AuthorityReceiptSubstituted(
+                    R0bAuthorityRole::OperationAuthorization,
+                ),
+                expected: R0bDependencyExpected::Global(
+                    "dependency admission receipt differs from its admitted dependency",
+                ),
+                retained_external_mode: None,
+            },
+        ]);
+        cases
+    }
+
+    fn r0b_external_purpose(
+        role: R0bExternalRole,
+    ) -> nq_host_role_dependency_custody::ExternalSourcePurpose {
+        use nq_host_role_dependency_custody::ExternalSourcePurpose;
+
+        match role {
+            R0bExternalRole::Authentication => ExternalSourcePurpose::InvocationAuthentication,
+            R0bExternalRole::GenerationMatch => ExternalSourcePurpose::GenerationMatch,
+            R0bExternalRole::Capability => ExternalSourcePurpose::Capability,
+            R0bExternalRole::Custody => ExternalSourcePurpose::CustodyReservationCommit,
+        }
+    }
+
+    fn assert_r0b_retained_external_mode(
+        case: &R0bDependencyCase,
+        observations: &[crate::governed_custody::R0bAuthenticatedSourceModes],
+        expected_observation_count: Option<usize>,
+    ) {
+        let Some((role, availability)) = case.retained_external_mode else {
+            return;
+        };
+        if let Some(expected_observation_count) = expected_observation_count {
+            assert_eq!(
+                observations.len(),
+                expected_observation_count,
+                "{} did not expose every successful Store source resolution",
+                case.id
+            );
+        } else {
+            assert!(
+                !observations.is_empty(),
+                "{} did not expose a successful Store source resolution",
+                case.id
+            );
+        }
+        let purpose = r0b_external_purpose(role);
+        for observation in observations {
+            assert!(
+                observation
+                    .external
+                    .iter()
+                    .any(|(observed_purpose, observed_availability)| {
+                        *observed_purpose == purpose && *observed_availability == availability
+                    }),
+                "{} did not retain {purpose:?} as {availability:?}: {observation:?}",
+                case.id
+            );
+        }
+    }
+
+    fn assert_r0b_dependency_result<T: std::fmt::Debug>(
+        case: &R0bDependencyCase,
+        surface: &str,
+        result: &Result<T, StoreError>,
+    ) {
+        match case.expected {
+            R0bDependencyExpected::Pass => {
+                assert!(
+                    result.is_ok(),
+                    "{} {surface} unexpectedly failed: {result:?}",
+                    case.id
+                );
+            }
+            R0bDependencyExpected::Global(fragment) => {
+                assert!(
+                    matches!(result, Err(StoreError::Integrity(message))
+                        if message.contains(fragment)),
+                    "{} {surface} did not fail globally with {fragment:?}: {result:?}",
+                    case.id
+                );
+            }
+        }
+    }
+
+    fn assert_historical_pre_v3_complete_verification_refuses(
+        fixture: &GovernedProjectionFixture,
+        label: &str,
+    ) {
+        let closure: Value = serde_json::from_slice(&fixture.exact_closure_bytes)
+            .expect("historical governed closure JSON");
+        assert!(
+            matches!(
+                closure["schema"].as_str(),
+                Some(GOVERNED_CUSTODY_CLOSURE_SCHEMA | GOVERNED_CUSTODY_CLOSURE_V2_SCHEMA)
+            ),
+            "{label} must remain an explicitly historical pre-V3 fixture"
+        );
+        let arena = CustodyArena::open_by_reservation(
+            fixture
+                .store
+                .path()
+                .expect("historical governed fixture database"),
+            &fixture.reservation_record_id,
+        )
+        .expect("open historical governed arena")
+        .expect("historical governed arena exists");
+        assert_eq!(
+            arena
+                .final_v2_closure_bytes()
+                .expect("read historical governed closure")
+                .as_deref(),
+            Some(fixture.exact_closure_bytes.as_slice()),
+            "{label} historical bytes changed before complete verification"
+        );
+        drop(arena);
+        let error = fixture
+            .store
+            .verify_governed_projection_and_mark_indexed(&fixture.reservation_record_id)
+            .expect_err("historical pre-V3 closure must not earn complete-verification standing");
+        assert!(
+            matches!(error, StoreError::Integrity(ref message)
+            if message.contains(
+                "historical pre-V3 closure cannot earn authenticated complete-verification standing"
+            )),
+            "{label}: {error}"
+        );
+        assert_governed_projection_pending(&fixture.store, &fixture.reservation_record_id);
+    }
+
+    fn kill_current_projection_test_process() -> ! {
+        let _ = nix::sys::signal::kill(nix::unistd::Pid::this(), nix::sys::signal::Signal::SIGKILL);
+        // A denied signal must fail this hostile rather than allowing a normal
+        // return to masquerade as an abrupt-death result.
+        std::process::abort()
+    }
+
+    fn write_governed_projection_crash_manifest(path: &Path, value: &Value) {
+        let bytes =
+            nq_protocol::canonical_json_bytes(value).expect("canonical abrupt projection manifest");
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(path)
+            .expect("create abrupt projection manifest");
+        file.write_all(&bytes)
+            .expect("write abrupt projection manifest");
+        file.sync_all().expect("sync abrupt projection manifest");
+        drop(file);
+        File::open(path.parent().expect("manifest parent"))
+            .expect("open abrupt projection manifest parent")
+            .sync_all()
+            .expect("sync abrupt projection manifest parent");
     }
 
     fn governed_runtime_record(
@@ -14125,6 +18927,12 @@ mod tests {
             json!({
                 "schema": "nq.diagnostic_invocation_request.v1",
                 "request_id": outer_request_id,
+                "profile": {
+                    "kind": "diagnostic_profile",
+                    "id": collection.run.profile_id,
+                    "version": collection.run.profile_version,
+                    "descriptor_digest": collection.run.profile_digest,
+                },
             }),
         );
         let invocation_decision = governed_runtime_record(
@@ -14176,13 +18984,25 @@ mod tests {
             .expect("run-level launch record");
         let provider_record_id =
             provider_intake_record_id(provider_intake).expect("provider record identity");
+        let provider_request = json!({
+            "request_id": provider_intake.request_id,
+        });
+        let provider_request_digest =
+            nq_protocol::semantic_digest(&provider_request).expect("provider request digest");
         let provider_record = governed_runtime_record(
             provider_record_id,
             "nq.provider_intake.v1",
             json!({
                 "schema": "nq.provider_intake.v1",
                 "intake_id": provider_intake.intake_id,
+                "attempt_id": provider_intake.attempt_id,
+                "idempotency_key": provider_intake.idempotency_key,
+                "run_id": collection.run.run_id,
                 "request_id": provider_intake.request_id,
+                "request": provider_request,
+                "request_digest": provider_request_digest,
+                "raw_length": provider_intake.raw_bytes.len(),
+                "raw_sha256": nq_protocol::sha256_bytes(&provider_intake.raw_bytes),
             }),
         );
         let artifact_id = typed_digest(&format!("run-level-artifact-{suffix}"));
@@ -14216,6 +19036,16 @@ mod tests {
                     "file_bytes_digest": diagnostic.digest(),
                 },
                 "provider_attempts": [governed_record_reference(&provider_record)],
+                "resolved_references": {
+                    "diagnostic_profile": {
+                        "identity": {
+                            "kind": "diagnostic_profile",
+                            "id": collection.run.profile_id,
+                            "version": collection.run.profile_version,
+                            "descriptor_digest": collection.run.profile_digest,
+                        },
+                    },
+                },
             }),
         );
         DiagnosticArtifactCommitInput {
@@ -14274,10 +19104,10 @@ mod tests {
             diagnostic_artifact: artifact,
             status: StatusEventInput {
                 status_event_id: format!("status-{}", collection.run.run_id),
-                component_kind: "instance".into(),
-                component_id: collection.run.instance_id.clone(),
-                state: "healthy".into(),
-                code: "report_complete".into(),
+                component_kind: "diagnostic_execution".into(),
+                component_id: collection.run.run_id.clone(),
+                state: "unknown".into(),
+                code: "diagnostic_execution_completed".into(),
                 detail: document(json!({
                     "schema": "nq.collection_outcome.v2",
                     "instance_id": collection.run.instance_id,
@@ -14299,13 +19129,74 @@ mod tests {
     fn governed_projection_fixture(
         mode: GovernedProjectionFixtureMode,
     ) -> GovernedProjectionFixture {
+        governed_projection_fixture_with_spec(PendingV3FixtureSpec::legacy(mode))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn pending_v3_fixture(spec: PendingV3FixtureSpec) -> GovernedProjectionFixture {
+        governed_projection_fixture_with_spec(spec)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn governed_projection_fixture_with_spec(
+        spec: PendingV3FixtureSpec,
+    ) -> GovernedProjectionFixture {
+        governed_projection_fixture_with_spec_and_pre_effect_hook(spec, |_, _, _| Ok(()))
+            .expect("governed projection fixture pre-effect hook")
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn governed_projection_fixture_with_spec_and_pre_effect_hook<F>(
+        spec: PendingV3FixtureSpec,
+        pre_effect: F,
+    ) -> Result<GovernedProjectionFixture, StoreError>
+    where
+        F: FnOnce(&Store, &GovernedCustodyReservation, &Sha256Digest) -> Result<(), StoreError>,
+    {
+        let mode = spec
+            .legacy_mode()
+            .unwrap_or(GovernedProjectionFixtureMode::FullTopologyNativeLaunch);
+        let pending_v3_pc04_physical_predicate = match spec.physical_source_mutation {
+            PendingV3PhysicalSourceMutation::Pc04NativeLaunchPredicate(predicate) => {
+                Some(predicate)
+            }
+            _ => None,
+        };
         let legacy_v1 = matches!(mode, GovernedProjectionFixtureMode::LegacyV1Complete);
-        let native_launch = matches!(
+        // Current pending-V3 fixtures use the fully declared native launch
+        // shape by default. Only the explicitly historical/legacy cases retain
+        // the old launch adapter; they cannot earn current authenticated
+        // recovery standing.
+        let native_launch = !matches!(
             mode,
-            GovernedProjectionFixtureMode::FullTopologyNativeLaunch
-                | GovernedProjectionFixtureMode::NativeDeadlineReferenceSubstitution
+            GovernedProjectionFixtureMode::Complete
+                | GovernedProjectionFixtureMode::LegacyV1Complete
+                | GovernedProjectionFixtureMode::LegacyOuterRequestReferenceSubstitution
+                | GovernedProjectionFixtureMode::LegacyDecisionReferenceSubstitution
+                | GovernedProjectionFixtureMode::LegacyUndeclaredDeadlineRecord
+                | GovernedProjectionFixtureMode::LegacyLaunchExtraneousRecord
+                | GovernedProjectionFixtureMode::LegacyNativeResidueWithoutPrelaunchChecks
+        );
+        let physical_launch_shape_hostile = matches!(
+            mode,
+            GovernedProjectionFixtureMode::NativeDeadlineReferenceSubstitution
                 | GovernedProjectionFixtureMode::NativeDeadlineProvenanceSubstitution
+                | GovernedProjectionFixtureMode::NativeDeadlineRecordMissing
+                | GovernedProjectionFixtureMode::NativeDeadlineDuplicate
+                | GovernedProjectionFixtureMode::NativeDeadlineMalformedReference
+                | GovernedProjectionFixtureMode::NativePrelaunchDeadlineDeclarationMissing
+                | GovernedProjectionFixtureMode::NativeUnknownPrelaunchCheck
+                | GovernedProjectionFixtureMode::NativePrelaunchMalformedReference(_)
+                | GovernedProjectionFixtureMode::NativePrelaunchCrossSourceSubstitution(_)
+                | GovernedProjectionFixtureMode::AcceptedDecisionAuthenticationSourceSubstitution
+                | GovernedProjectionFixtureMode::AcceptedDecisionAuthorizationSourceSubstitution
                 | GovernedProjectionFixtureMode::NativeLaunchExtraneousRecord
+                | GovernedProjectionFixtureMode::LaunchStatusSubstitution
+                | GovernedProjectionFixtureMode::LegacyOuterRequestReferenceSubstitution
+                | GovernedProjectionFixtureMode::LegacyDecisionReferenceSubstitution
+                | GovernedProjectionFixtureMode::LegacyUndeclaredDeadlineRecord
+                | GovernedProjectionFixtureMode::LegacyLaunchExtraneousRecord
+                | GovernedProjectionFixtureMode::LegacyNativeResidueWithoutPrelaunchChecks
         );
         let directory = tempdir().expect("governed fixture directory");
         let database = directory.path().join("nq.db");
@@ -14319,45 +19210,141 @@ mod tests {
         ) {
             65_536
         } else {
-            131_072
+            196_608
         };
         let reserved_bytes = 65_536_u64
             .checked_add(65_536)
             .and_then(|subtotal| subtotal.checked_add(final_capacity_bytes))
             .expect("fixture reservation capacity");
 
-        let dependency = runtime_dependency("governed-projection");
-        establish_runtime_root(&mut store, &dependency);
+        let authentication_evidence = json!({
+            "schema": "nq.external_record.v1",
+            "record_id": typed_digest("governed-authentication-evidence"),
+            "bytes_digest": typed_digest("governed-authentication-evidence-bytes"),
+        });
+        let alternate_authentication_evidence = json!({
+            "schema": "nq.external_record.v1",
+            "record_id": typed_digest("alternate-governed-authentication-evidence"),
+            "bytes_digest": typed_digest("alternate-governed-authentication-evidence-bytes"),
+        });
+        let invocation_authorization = governed_runtime_record(
+            typed_digest("governed-invocation-authorization"),
+            "nq.operation_authorization.v1",
+            json!({
+                "schema": "nq.operation_authorization.v1",
+                "fixture": "native-prelaunch-authorization",
+            }),
+        );
+        let alternate_invocation_authorization = governed_runtime_record(
+            typed_digest("alternate-governed-invocation-authorization"),
+            "nq.operation_authorization.v1",
+            json!({
+                "schema": "nq.operation_authorization.v1",
+                "fixture": "alternate-native-prelaunch-authorization",
+            }),
+        );
+        let generation_match = json!({
+            "schema": "nq.external_record.v1",
+            "record_id": typed_digest("governed-generation-match"),
+            "bytes_digest": typed_digest("governed-generation-match-bytes"),
+        });
+        let capability = json!({
+            "schema": "nq.external_record.v1",
+            "record_id": typed_digest("governed-capability"),
+            "bytes_digest": typed_digest("governed-capability-bytes"),
+        });
+        let custody_commit = json!({
+            "schema": "nq.external_record.v1",
+            "record_id": typed_digest("governed-reservation-commit"),
+            "bytes_digest": typed_digest("governed-reservation-commit-bytes"),
+        });
+        let alternate_custody_commit = json!({
+            "schema": "nq.external_record.v1",
+            "record_id": typed_digest("alternate-governed-reservation-commit"),
+            "bytes_digest": typed_digest("alternate-governed-reservation-commit-bytes"),
+        });
         let outer_request_id = "outer-request-governed";
+        let mut outer_request_value = json!({
+            "schema": "nq.diagnostic_invocation_request.v1",
+            "request_id": outer_request_id,
+            "profile": {
+                "kind": "diagnostic_profile",
+                "id": collection.run.profile_id,
+                "version": collection.run.profile_version,
+                "descriptor_digest": collection.run.profile_digest,
+            },
+        });
+        if native_launch {
+            outer_request_value["authentication_evidence"] = authentication_evidence.clone();
+            outer_request_value["invocation_authorization"] =
+                governed_record_reference(&invocation_authorization);
+        }
         let outer_request = governed_runtime_record(
             typed_digest("governed-outer-request"),
             "nq.diagnostic_invocation_request.v1",
-            json!({
-                "schema": "nq.diagnostic_invocation_request.v1",
-                "request_id": outer_request_id,
-            }),
+            outer_request_value,
         );
+        let mut invocation_decision_value = json!({
+            "schema": "nq.invocation_decision.v1",
+            "decision": if matches!(
+                spec.physical_source_mutation,
+                PendingV3PhysicalSourceMutation::Pc03DecisionNotAccepted
+            ) {
+                "refused"
+            } else {
+                "accepted"
+            },
+        });
+        if native_launch {
+            invocation_decision_value["authentication_evidence"] = authentication_evidence.clone();
+            invocation_decision_value["invocation_authorization"] =
+                governed_record_reference(&invocation_authorization);
+            match mode {
+                GovernedProjectionFixtureMode::AcceptedDecisionAuthenticationSourceSubstitution => {
+                    invocation_decision_value["authentication_evidence"] =
+                        alternate_authentication_evidence.clone();
+                }
+                GovernedProjectionFixtureMode::AcceptedDecisionAuthorizationSourceSubstitution => {
+                    invocation_decision_value["invocation_authorization"] =
+                        governed_record_reference(&alternate_invocation_authorization);
+                }
+                _ => {}
+            }
+            match spec.physical_source_mutation {
+                PendingV3PhysicalSourceMutation::R0bRequestDecisionAuthenticationMismatch => {
+                    invocation_decision_value["authentication_evidence"] =
+                        alternate_authentication_evidence.clone();
+                }
+                PendingV3PhysicalSourceMutation::R0bRequestDecisionAuthorizationMismatch => {
+                    invocation_decision_value["invocation_authorization"] =
+                        governed_record_reference(&alternate_invocation_authorization);
+                }
+                _ => {}
+            }
+        }
         let invocation_decision = governed_runtime_record(
             typed_digest("governed-invocation-decision"),
             "nq.invocation_decision.v1",
-            json!({
-                "schema": "nq.invocation_decision.v1",
-                "decision": "accepted",
-            }),
+            invocation_decision_value,
         );
+        let mut reservation_value = json!({
+            "schema": "nq.custody_reservation.v1",
+            "reservation": "governed-projection",
+            "component_bounds": {
+                "diagnostic_artifact_bytes": 65_536,
+                "raw_evidence_bytes": 65_536,
+                "dependency_closure_bytes": 65_536,
+                "projected_bytes": 65_536,
+            },
+            "reserved_bytes": reserved_bytes,
+        });
+        if native_launch {
+            reservation_value["reservation_commit"] = custody_commit.clone();
+        }
         let reservation_record = governed_runtime_record(
             typed_digest("governed-reservation"),
             "nq.custody_reservation.v1",
-            json!({
-                "schema": "nq.custody_reservation.v1",
-                "reservation": "governed-projection",
-                "component_bounds": {
-                    "diagnostic_artifact_bytes": 65_536,
-                    "raw_evidence_bytes": 65_536,
-                    "dependency_closure_bytes": 65_536,
-                },
-                "reserved_bytes": reserved_bytes,
-            }),
+            reservation_value,
         );
         let role_manifest = governed_runtime_record(
             typed_digest("governed-role-manifest"),
@@ -14415,41 +19402,90 @@ mod tests {
                 "fixture": "full-topology-clock-qualification",
             }),
         );
+        let alternate_outer_request_reference = pending_v3_foreign_reference(
+            "nq.diagnostic_invocation_request.v1",
+            "pc04-physical-outer-request",
+        );
+        let alternate_decision_reference = pending_v3_foreign_reference(
+            "nq.invocation_decision.v1",
+            "pc04-physical-invocation-decision",
+        );
+        let alternate_reservation_reference =
+            pending_v3_foreign_reference("nq.custody_reservation.v1", "pc04-physical-reservation");
+        let alternate_activation_reference =
+            pending_v3_foreign_reference("nq.runtime_activation.v1", "pc04-physical-activation");
+        let alternate_clock_qualification_reference = pending_v3_foreign_reference(
+            "nq.native_clock_qualification.v1",
+            "pc04-physical-clock-qualification",
+        );
+        let mut deadline_value = json!({
+            "schema": "nq.deadline_evaluation.v1",
+            "outer_request": governed_record_reference(&outer_request),
+            "activation": governed_record_reference(&activation),
+            "clock_qualification": governed_record_reference(&native_clock_qualification),
+            "clock": {"fixture": "boottime-realtime-bridge"},
+            "request_bounds": {
+                "maximum_execution_ms": 1_000,
+            },
+            "sample": {
+                "boot_epoch": typed_digest("governed-boot-epoch"),
+                "boottime_at_ns": "1000000000",
+            },
+            "derived": {
+                "launched_at": if matches!(
+                    mode,
+                    GovernedProjectionFixtureMode::NativeDeadlineProvenanceSubstitution
+                ) {
+                    "2026-07-29T23:59:58Z"
+                } else {
+                    TIME
+                },
+                "attempt_deadline": "2026-07-30T00:00:01Z",
+                "boottime_expiry_ns": "2000000000",
+            },
+            "decision": {
+                "state": "accepted",
+                "violations": [],
+            },
+        });
+        match pending_v3_pc04_physical_predicate {
+            Some(PendingV3NativeLaunchPredicateMutation::DeadlineOuterRequestReference) => {
+                deadline_value["outer_request"] = alternate_outer_request_reference.clone();
+            }
+            Some(
+                PendingV3NativeLaunchPredicateMutation::ActivationEquality
+                | PendingV3NativeLaunchPredicateMutation::ActivationMembership,
+            ) => {
+                deadline_value["activation"] = alternate_activation_reference.clone();
+            }
+            Some(PendingV3NativeLaunchPredicateMutation::ClockQualificationMembership) => {
+                deadline_value["clock_qualification"] =
+                    alternate_clock_qualification_reference.clone();
+            }
+            Some(PendingV3NativeLaunchPredicateMutation::DeadlineDecisionState) => {
+                deadline_value["decision"]["state"] = json!("refused");
+            }
+            Some(PendingV3NativeLaunchPredicateMutation::DeadlineViolations) => {
+                deadline_value["decision"]["violations"] =
+                    json!(["pc04-hostile-deadline-violation"]);
+            }
+            Some(PendingV3NativeLaunchPredicateMutation::DerivedAttemptDeadline) => {
+                deadline_value["derived"]["attempt_deadline"] = json!("2026-07-30T00:00:02Z");
+            }
+            Some(PendingV3NativeLaunchPredicateMutation::Clock) => {
+                deadline_value["clock"] = json!({"fixture": "pc04-alternate-clock"});
+            }
+            Some(PendingV3NativeLaunchPredicateMutation::MaximumExecutionBound) => {
+                deadline_value["request_bounds"]["maximum_execution_ms"] = json!(2_000);
+            }
+            _ => {}
+        }
         let deadline = governed_runtime_record(
             typed_digest("governed-deadline-evaluation"),
             "nq.deadline_evaluation.v1",
-            json!({
-                "schema": "nq.deadline_evaluation.v1",
-                "outer_request": governed_record_reference(&outer_request),
-                "activation": governed_record_reference(&activation),
-                "clock_qualification": governed_record_reference(&native_clock_qualification),
-                "clock": {"fixture": "boottime-realtime-bridge"},
-                "request_bounds": {
-                    "maximum_execution_ms": 1_000,
-                },
-                "sample": {
-                    "boot_epoch": typed_digest("governed-boot-epoch"),
-                    "boottime_at_ns": "1000000000",
-                },
-                "derived": {
-                    "launched_at": if matches!(
-                        mode,
-                        GovernedProjectionFixtureMode::NativeDeadlineProvenanceSubstitution
-                    ) {
-                        "2026-07-29T23:59:58Z"
-                    } else {
-                        TIME
-                    },
-                    "attempt_deadline": "2026-07-30T00:00:01Z",
-                    "boottime_expiry_ns": "2000000000",
-                },
-                "decision": {
-                    "state": "accepted",
-                    "violations": [],
-                },
-            }),
+            deadline_value,
         );
-        let launch_deadline_reference = if matches!(
+        let mut launch_deadline_reference = if matches!(
             mode,
             GovernedProjectionFixtureMode::NativeDeadlineReferenceSubstitution
         ) {
@@ -14461,41 +19497,240 @@ mod tests {
         } else {
             governed_record_reference(&deadline)
         };
+        if matches!(
+            pending_v3_pc04_physical_predicate,
+            Some(PendingV3NativeLaunchPredicateMutation::DeadlineReferenceBytesDigest)
+        ) {
+            launch_deadline_reference["bytes_digest"] =
+                json!(typed_digest("pc04-physical-deadline-reference-bytes"));
+        }
+        let launch_outer_request_reference = if matches!(
+            pending_v3_pc04_physical_predicate,
+            Some(PendingV3NativeLaunchPredicateMutation::LaunchOuterRequestReference)
+        ) {
+            alternate_outer_request_reference
+        } else if matches!(
+            mode,
+            GovernedProjectionFixtureMode::LegacyOuterRequestReferenceSubstitution
+        ) {
+            json!({
+                "schema": "nq.diagnostic_invocation_request.v1",
+                "record_id": typed_digest("foreign-legacy-outer-request"),
+                "bytes_digest": typed_digest("foreign-legacy-outer-request-bytes"),
+            })
+        } else {
+            governed_record_reference(&outer_request)
+        };
+        let launch_decision_reference = if matches!(
+            pending_v3_pc04_physical_predicate,
+            Some(PendingV3NativeLaunchPredicateMutation::LaunchDecisionReference)
+        ) {
+            alternate_decision_reference
+        } else if matches!(
+            mode,
+            GovernedProjectionFixtureMode::LegacyDecisionReferenceSubstitution
+        ) {
+            json!({
+                "schema": "nq.invocation_decision.v1",
+                "record_id": typed_digest("foreign-legacy-invocation-decision"),
+                "bytes_digest": typed_digest("foreign-legacy-invocation-decision-bytes"),
+            })
+        } else {
+            governed_record_reference(&invocation_decision)
+        };
+        let launch_reservation_reference = if matches!(
+            pending_v3_pc04_physical_predicate,
+            Some(PendingV3NativeLaunchPredicateMutation::LaunchReservationReference)
+        ) {
+            alternate_reservation_reference
+        } else {
+            governed_record_reference(&reservation_record)
+        };
+        let launch_activation_reference = if matches!(
+            pending_v3_pc04_physical_predicate,
+            Some(PendingV3NativeLaunchPredicateMutation::ActivationMembership)
+        ) {
+            alternate_activation_reference
+        } else {
+            governed_record_reference(&activation)
+        };
+        // These five nondeadline prechecks are exact references. The native
+        // product keeps authentication, generation, capability, and custody
+        // sources in authenticated dependency-generation custody; only the
+        // invocation authorization is necessarily a runtime-ledger member.
+        // This Store fixture proves exact reference shape and the retained
+        // launch/request/reservation joins without pretending every external
+        // dependency is a reservation-checkpoint row. Exact external bytes
+        // and purpose-specific admissions remain in authenticated dependency
+        // custody rather than acquiring synthetic runtime-ledger membership.
+        let mut native_prelaunch_checks = json!({
+            "authentication": authentication_evidence,
+            "invocation_authorization": governed_record_reference(&invocation_authorization),
+            "generation_match": generation_match,
+            "deadline": launch_deadline_reference,
+            "capability": capability,
+            "custody": custody_commit,
+        });
+        match mode {
+            GovernedProjectionFixtureMode::NativeDeadlineMalformedReference => {
+                native_prelaunch_checks["deadline"]["record_id"] = json!(7);
+            }
+            GovernedProjectionFixtureMode::NativePrelaunchDeadlineDeclarationMissing => {
+                native_prelaunch_checks
+                    .as_object_mut()
+                    .expect("native prelaunch object")
+                    .remove("deadline");
+            }
+            GovernedProjectionFixtureMode::NativeUnknownPrelaunchCheck => {
+                native_prelaunch_checks["future_unqualified_check"] = json!({"fixture": true});
+            }
+            GovernedProjectionFixtureMode::NativePrelaunchMalformedReference(field) => {
+                native_prelaunch_checks[field.key()]["record_id"] = json!(7);
+            }
+            GovernedProjectionFixtureMode::NativePrelaunchCrossSourceSubstitution(field) => {
+                native_prelaunch_checks[field.key()] = match field {
+                    NativePrelaunchReferenceField::Authentication => {
+                        alternate_authentication_evidence.clone()
+                    }
+                    NativePrelaunchReferenceField::InvocationAuthorization => {
+                        governed_record_reference(&alternate_invocation_authorization)
+                    }
+                    NativePrelaunchReferenceField::Custody => alternate_custody_commit.clone(),
+                    NativePrelaunchReferenceField::GenerationMatch
+                    | NativePrelaunchReferenceField::Capability => {
+                        unreachable!("only cross-source native prelaunch joins are substituted")
+                    }
+                };
+            }
+            _ => {}
+        }
+        match spec.physical_source_mutation {
+            PendingV3PhysicalSourceMutation::R0bRequestLaunchAuthenticationMismatch => {
+                native_prelaunch_checks["authentication"] =
+                    alternate_authentication_evidence.clone();
+            }
+            PendingV3PhysicalSourceMutation::R0bRequestLaunchAuthorizationMismatch => {
+                native_prelaunch_checks["invocation_authorization"] =
+                    governed_record_reference(&alternate_invocation_authorization);
+            }
+            PendingV3PhysicalSourceMutation::R0bReservationLaunchCustodyMismatch => {
+                native_prelaunch_checks["custody"] = alternate_custody_commit.clone();
+            }
+            PendingV3PhysicalSourceMutation::R0bGenerationReferenceMalformed => {
+                native_prelaunch_checks["generation_match"]["record_id"] = json!(7);
+            }
+            _ => {}
+        }
         let execution_launch = governed_runtime_record(
             typed_digest("governed-execution-launch"),
             "nq.execution_launch.v1",
             if native_launch {
                 json!({
                     "schema": "nq.execution_launch.v1",
-                    "status": "launched",
+                    "status": if matches!(
+                        mode,
+                        GovernedProjectionFixtureMode::LaunchStatusSubstitution
+                    ) {
+                        "not_launched"
+                    } else {
+                        "launched"
+                    },
                     "launched_at": TIME,
                     "attempt_deadline": "2026-07-30T00:00:01Z",
                     "maximum_execution_ms": 1_000,
                     "clock": {"fixture": "boottime-realtime-bridge"},
-                    "outer_request": governed_record_reference(&outer_request),
-                    "invocation_decision": governed_record_reference(&invocation_decision),
-                    "custody_reservation": governed_record_reference(&reservation_record),
-                    "activation_snapshot": governed_record_reference(&activation),
-                    "prelaunch_checks": {
-                        "deadline": launch_deadline_reference,
-                    },
+                    "outer_request": launch_outer_request_reference,
+                    "invocation_decision": launch_decision_reference,
+                    "custody_reservation": launch_reservation_reference,
+                    "activation_snapshot": launch_activation_reference,
+                    "prelaunch_checks": native_prelaunch_checks,
                 })
             } else {
-                json!({
+                let mut legacy_launch = json!({
                     "schema": "nq.execution_launch.v1",
                     "status": "launched",
                     "launched_at": TIME,
-                    "outer_request": governed_record_reference(&outer_request),
-                    "invocation_decision": governed_record_reference(&invocation_decision),
-                })
+                    "outer_request": launch_outer_request_reference,
+                    "invocation_decision": launch_decision_reference,
+                });
+                if matches!(
+                    mode,
+                    GovernedProjectionFixtureMode::LegacyNativeResidueWithoutPrelaunchChecks
+                ) {
+                    legacy_launch["attempt_deadline"] = json!("2026-07-30T00:00:01Z");
+                }
+                legacy_launch
             },
         );
+        let dependency = if native_launch {
+            authenticated_governed_runtime_dependency(
+                &authentication_evidence,
+                &generation_match,
+                &capability,
+                &custody_commit,
+                &invocation_authorization,
+                spec.dependency_fixture_mutation,
+            )
+        } else {
+            runtime_dependency("governed-projection")
+        };
+        let alternate_dependency = if matches!(
+            spec.physical_source_mutation,
+            PendingV3PhysicalSourceMutation::R0bLaunchDependencyBindingDifferent
+                | PendingV3PhysicalSourceMutation::R0bArenaDependencyBytesDifferentFromSql
+        ) {
+            let alternate = authenticated_governed_runtime_dependency(
+                &authentication_evidence,
+                &generation_match,
+                &capability,
+                &custody_commit,
+                &invocation_authorization,
+                R0bDependencyFixtureMutation::ExternalArchivedRetrieved(
+                    R0bExternalRole::Authentication,
+                ),
+            );
+            assert_eq!(
+                alternate.trust_anchor_id, dependency.trust_anchor_id,
+                "R0b alternate dependency must remain under the same bootstrap root"
+            );
+            assert_ne!(
+                alternate.dependency_generation_id, dependency.dependency_generation_id,
+                "R0b alternate dependency must be a distinct exact generation"
+            );
+            Some(alternate)
+        } else {
+            None
+        };
+        establish_runtime_root(&mut store, &dependency);
         let mut reservation_records = vec![
             outer_request.clone(),
             invocation_decision.clone(),
             reservation_record.clone(),
         ];
         if native_launch {
+            if !matches!(
+                spec.physical_source_mutation,
+                PendingV3PhysicalSourceMutation::R0bOperationAuthorizationMissing
+            ) {
+                reservation_records.push(
+                    if matches!(
+                        spec.physical_source_mutation,
+                        PendingV3PhysicalSourceMutation::R0bOperationAuthorizationBytesMismatch
+                    ) {
+                        governed_runtime_record(
+                            Sha256Digest::parse(invocation_authorization.record_id.clone())
+                                .expect("operation-authorization record identity"),
+                            "nq.operation_authorization.v1",
+                            json!({
+                                "schema": "nq.operation_authorization.v1",
+                                "fixture": "substituted-native-prelaunch-authorization",
+                            }),
+                        )
+                    } else {
+                        invocation_authorization
+                    },
+                );
+            }
             reservation_records.extend([
                 role_manifest,
                 cohort_manifest,
@@ -14505,6 +19740,19 @@ mod tests {
                 profile_qualification,
                 native_clock_qualification,
             ]);
+            if matches!(
+                mode,
+                GovernedProjectionFixtureMode::NativePrelaunchCrossSourceSubstitution(
+                    NativePrelaunchReferenceField::InvocationAuthorization
+                ) | GovernedProjectionFixtureMode::AcceptedDecisionAuthorizationSourceSubstitution
+            ) || matches!(
+                spec.physical_source_mutation,
+                PendingV3PhysicalSourceMutation::R0bOperationAuthorizationDuplicate
+                    | PendingV3PhysicalSourceMutation::R0bRequestLaunchAuthorizationMismatch
+                    | PendingV3PhysicalSourceMutation::R0bRequestDecisionAuthorizationMismatch
+            ) {
+                reservation_records.push(alternate_invocation_authorization);
+            }
         }
         match mode {
             GovernedProjectionFixtureMode::DuplicateOuterRequestInReservation => {
@@ -14543,7 +19791,17 @@ mod tests {
             checkpoint_id: typed_digest("governed-reservation-checkpoint").into_string(),
             expected_predecessor_checkpoint_id: None,
             expected_predecessor_ledger_root: None,
-            dependency: dependency.clone(),
+            dependency: if matches!(
+                spec.physical_source_mutation,
+                PendingV3PhysicalSourceMutation::R0bArenaDependencyBytesDifferentFromSql
+            ) {
+                alternate_dependency
+                    .as_ref()
+                    .expect("R0b alternate reservation dependency")
+                    .clone()
+            } else {
+                dependency.clone()
+            },
             records: reservation_records,
         };
         let reservation_batch_digest =
@@ -14574,6 +19832,7 @@ mod tests {
             dependency_closure_capacity_bytes: 65_536,
             raw_capacity_bytes: 65_536,
             diagnostic_artifact_capacity_bytes: 65_536,
+            projection_capsule_capacity_bytes: 65_536,
             final_capacity_bytes,
             protected_failure_capacity_bytes: 16_384,
         };
@@ -14594,25 +19853,68 @@ mod tests {
                     .checkpoint_ledger_root
                     .clone(),
             ),
-            dependency: dependency.clone(),
-            records: if native_launch {
-                let mut records = vec![deadline.clone(), execution_launch.clone()];
-                if matches!(
-                    mode,
-                    GovernedProjectionFixtureMode::NativeLaunchExtraneousRecord
-                ) {
-                    records.push(governed_runtime_record(
-                        typed_digest("extraneous-native-launch-record"),
-                        "nq.host_role_lifecycle_event.v1",
-                        json!({
-                            "schema": "nq.host_role_lifecycle_event.v1",
-                            "fixture": "must not share a native launch checkpoint",
-                        }),
-                    ));
-                }
-                records
+            dependency: if matches!(
+                spec.physical_source_mutation,
+                PendingV3PhysicalSourceMutation::R0bLaunchDependencyBindingDifferent
+                    | PendingV3PhysicalSourceMutation::R0bArenaDependencyBytesDifferentFromSql
+            ) {
+                alternate_dependency
+                    .as_ref()
+                    .expect("R0b alternate launch dependency")
+                    .clone()
             } else {
-                vec![execution_launch.clone()]
+                dependency.clone()
+            },
+            records: if native_launch {
+                match mode {
+                    GovernedProjectionFixtureMode::NativeDeadlineRecordMissing
+                    | GovernedProjectionFixtureMode::NativePrelaunchDeadlineDeclarationMissing => {
+                        vec![execution_launch.clone()]
+                    }
+                    GovernedProjectionFixtureMode::NativeDeadlineDuplicate => vec![
+                        deadline.clone(),
+                        governed_runtime_record(
+                            typed_digest("duplicate-native-deadline-record"),
+                            "nq.deadline_evaluation.v1",
+                            json!({
+                                "schema": "nq.deadline_evaluation.v1",
+                                "fixture": "duplicate-native-deadline",
+                            }),
+                        ),
+                        execution_launch.clone(),
+                    ],
+                    GovernedProjectionFixtureMode::NativeLaunchExtraneousRecord => vec![
+                        deadline.clone(),
+                        execution_launch.clone(),
+                        governed_runtime_record(
+                            typed_digest("extraneous-native-launch-record"),
+                            "nq.host_role_lifecycle_event.v1",
+                            json!({
+                                "schema": "nq.host_role_lifecycle_event.v1",
+                                "fixture": "must not share a native launch checkpoint",
+                            }),
+                        ),
+                    ],
+                    _ => vec![deadline.clone(), execution_launch.clone()],
+                }
+            } else {
+                match mode {
+                    GovernedProjectionFixtureMode::LegacyUndeclaredDeadlineRecord => {
+                        vec![deadline.clone(), execution_launch.clone()]
+                    }
+                    GovernedProjectionFixtureMode::LegacyLaunchExtraneousRecord => vec![
+                        execution_launch.clone(),
+                        governed_runtime_record(
+                            typed_digest("extraneous-legacy-launch-record"),
+                            "nq.host_role_lifecycle_event.v1",
+                            json!({
+                                "schema": "nq.host_role_lifecycle_event.v1",
+                                "fixture": "must not share a legacy launch checkpoint",
+                            }),
+                        ),
+                    ],
+                    _ => vec![execution_launch.clone()],
+                }
             },
         };
         let launch_receipt = store
@@ -14632,16 +19934,32 @@ mod tests {
                 },
             )
             .expect("physical launch claim");
+        let launch_checkpoint_id =
+            Sha256Digest::parse(launch_receipt.checkpoint.checkpoint_id.clone())
+                .expect("launch checkpoint identity");
+        pre_effect(&store, &reservation, &launch_checkpoint_id)?;
 
         let provider_record_id =
             provider_intake_record_id(&collection.intake).expect("provider record identity");
+        let provider_request = json!({
+            "request_id": collection.intake.request_id,
+        });
+        let provider_request_digest =
+            nq_protocol::semantic_digest(&provider_request).expect("provider request digest");
         let provider_record = governed_runtime_record(
             provider_record_id.clone(),
             "nq.provider_intake.v1",
             json!({
                 "schema": "nq.provider_intake.v1",
                 "intake_id": collection.intake.intake_id,
+                "attempt_id": collection.intake.attempt_id,
+                "idempotency_key": collection.intake.idempotency_key,
+                "run_id": collection.run.run_id,
                 "request_id": collection.intake.request_id,
+                "request": provider_request.clone(),
+                "request_digest": provider_request_digest,
+                "raw_length": collection.intake.raw_bytes.len(),
+                "raw_sha256": nq_protocol::sha256_bytes(&collection.intake.raw_bytes),
             }),
         );
         let diagnostic_artifact_id = typed_digest("governed-diagnostic-artifact");
@@ -14721,6 +20039,16 @@ mod tests {
                     "file_bytes_digest": diagnostic.digest(),
                 },
                 "provider_attempts": [governed_record_reference(&provider_record)],
+                "resolved_references": {
+                    "diagnostic_profile": {
+                        "identity": {
+                            "kind": "diagnostic_profile",
+                            "id": collection.run.profile_id,
+                            "version": collection.run.profile_version,
+                            "descriptor_digest": collection.run.profile_digest,
+                        },
+                    },
+                },
             }),
         );
         let final_batch = RuntimeRecordBatchInput {
@@ -14762,30 +20090,77 @@ mod tests {
         } else {
             collection.intake.raw_bytes.clone()
         };
-        let exact_provider_intake_bytes = if matches!(
-            mode,
-            GovernedProjectionFixtureMode::ProviderDocumentSubstitution
-        ) {
-            nq_protocol::canonical_json_bytes(&json!({
-                "schema": "nq.provider_intake.v1",
-                "intake_id": "substituted-provider-document",
-                "request_id": collection.intake.request_id,
-            }))
-            .expect("substituted provider document")
-        } else {
-            provider_record.canonical_bytes.as_bytes().to_vec()
+        let exact_provider_intake_bytes = match mode {
+            GovernedProjectionFixtureMode::ProviderDocumentSubstitution => {
+                nq_protocol::canonical_json_bytes(&json!({
+                    "schema": "nq.provider_intake.v1",
+                    "intake_id": "substituted-provider-document",
+                    "attempt_id": collection.intake.attempt_id,
+                    "idempotency_key": collection.intake.idempotency_key,
+                    "run_id": collection.run.run_id,
+                    "request_id": collection.intake.request_id,
+                    "request": provider_request,
+                    "request_digest": provider_request_digest,
+                    "raw_length": collection.intake.raw_bytes.len(),
+                    "raw_sha256": nq_protocol::sha256_bytes(&collection.intake.raw_bytes),
+                }))
+                .expect("substituted provider document")
+            }
+            GovernedProjectionFixtureMode::ProviderDocumentMalformed => b"{".to_vec(),
+            GovernedProjectionFixtureMode::ProviderDocumentNoncanonical => {
+                let value: Value =
+                    serde_json::from_slice(provider_record.canonical_bytes.as_bytes())
+                        .expect("decode provider document for noncanonical hostile");
+                serde_json::to_vec_pretty(&value).expect("encode noncanonical provider document")
+            }
+            _ => provider_record.canonical_bytes.as_bytes().to_vec(),
         };
         custody
             .seal_acquisition(GovernedAcquisitionCustodyInput {
                 execution_launch_record_id: Sha256Digest::parse(execution_launch.record_id.clone())
                     .expect("launch identity"),
-                provider_intake_record_id: provider_record_id,
+                provider_intake_record_id: provider_record_id.clone(),
                 exact_provider_intake_bytes,
                 exact_raw_provider_bytes: raw_provider_bytes,
             })
             .expect("physical acquisition seal");
+        let diagnostic_file_bytes_digest = nq_protocol::sha256_bytes(diagnostic.as_bytes());
+        let execution_launch_record_id = Sha256Digest::parse(execution_launch.record_id.clone())
+            .expect("launch record identity");
+        let execution_launch_bytes_digest =
+            Sha256Digest::parse(execution_launch.canonical_bytes.digest().to_owned())
+                .expect("launch record bytes digest");
+        let provider_record_bytes_digest =
+            Sha256Digest::parse(provider_record.canonical_bytes.digest().to_owned())
+                .expect("provider record bytes digest");
+        let derivation_id = nq_protocol::governed_derivation_identity(
+            &nq_protocol::GovernedDerivationIdentityInput {
+                diagnostic_artifact_id: &diagnostic_artifact_id,
+                diagnostic_file_bytes_digest: &diagnostic_file_bytes_digest,
+                provider_intake: nq_protocol::GovernedDerivationRecordRef {
+                    schema: "nq.provider_intake.v1",
+                    record_id: &provider_record_id,
+                    bytes_digest: &provider_record_bytes_digest,
+                },
+                execution_launch: nq_protocol::GovernedDerivationRecordRef {
+                    schema: "nq.execution_launch.v1",
+                    record_id: &execution_launch_record_id,
+                    bytes_digest: &execution_launch_bytes_digest,
+                },
+                dependency_generation_id: &dependency.dependency_generation_id,
+                dependency_generation_custody_digest: &dependency_custody_digest,
+                trust_anchor_id: &dependency.trust_anchor_id,
+                profile_semantic_id: &collection.intake.profile_semantic_id,
+                evaluator_semantic_digest: &evaluator_identity_digest,
+                evaluator_artifact_digest: &collection.intake.evaluator_artifact_digest,
+                derived_at: TIME,
+                clock_identity: &typed_digest("governed-clock"),
+                clock_qualification_digest: &clock_qualification_digest,
+            },
+        )
+        .expect("shared governed derivation identity");
         let derivation_claim = GovernedDerivationCustodyClaim {
-            derivation_id: typed_digest("governed-derivation"),
+            derivation_id,
             dependency_generation_id: dependency.dependency_generation_id.clone(),
             dependency_generation_custody_digest: dependency_custody_digest.clone(),
             trust_anchor_id: dependency.trust_anchor_id.clone(),
@@ -14807,6 +20182,7 @@ mod tests {
                         .clone(),
                     trust_anchor_id: derivation_claim.trust_anchor_id.clone(),
                     evaluation_id: derivation_claim.evaluation_id.clone(),
+                    evaluation_id_digest: None,
                     profile_semantic_id: derivation_claim.profile_semantic_id.clone(),
                     evaluator_semantic_digest: None,
                     evaluator_artifact_digest: derivation_claim.evaluator_artifact_digest.clone(),
@@ -14837,6 +20213,8 @@ mod tests {
             mode,
             GovernedProjectionFixtureMode::ReservationCheckpointIdentitySubstitution
         ) {
+            // Deliberately fresh: the closure claim must never select the
+            // source whose availability controls local-vs-global blame.
             typed_digest("substituted-reservation-checkpoint")
         } else {
             Sha256Digest::parse(reservation_receipt.checkpoint.checkpoint_id.clone())
@@ -14869,6 +20247,8 @@ mod tests {
             mode,
             GovernedProjectionFixtureMode::LaunchCheckpointIdentitySubstitution
         ) {
+            // Deliberately fresh for the same independent-source selection
+            // law as the reservation-checkpoint hostile above.
             typed_digest("substituted-launch-checkpoint")
         } else {
             Sha256Digest::parse(launch_receipt.checkpoint.checkpoint_id.clone())
@@ -14897,14 +20277,6 @@ mod tests {
         let derivation_substitution = match mode {
             GovernedProjectionFixtureMode::DerivationSubstitution(field) => Some(field),
             _ => None,
-        };
-        let closure_derivation_id = if matches!(
-            derivation_substitution,
-            Some(GovernedDerivationSubstitution::Identity)
-        ) {
-            typed_digest("substituted-derivation")
-        } else {
-            derivation_claim.derivation_id.clone()
         };
         let closure_dependency_generation_id = if matches!(
             derivation_substitution,
@@ -14988,6 +20360,39 @@ mod tests {
         } else {
             derivation_claim.clock_qualification_digest.clone()
         };
+        let closure_derivation_id = if matches!(
+            derivation_substitution,
+            Some(GovernedDerivationSubstitution::Identity)
+        ) {
+            typed_digest("substituted-derivation")
+        } else {
+            nq_protocol::governed_derivation_identity(
+                &nq_protocol::GovernedDerivationIdentityInput {
+                    diagnostic_artifact_id: &diagnostic_artifact_id,
+                    diagnostic_file_bytes_digest: &diagnostic_file_bytes_digest,
+                    provider_intake: nq_protocol::GovernedDerivationRecordRef {
+                        schema: "nq.provider_intake.v1",
+                        record_id: &provider_record_id,
+                        bytes_digest: &provider_record_bytes_digest,
+                    },
+                    execution_launch: nq_protocol::GovernedDerivationRecordRef {
+                        schema: "nq.execution_launch.v1",
+                        record_id: &execution_launch_record_id,
+                        bytes_digest: &execution_launch_bytes_digest,
+                    },
+                    dependency_generation_id: &closure_dependency_generation_id,
+                    dependency_generation_custody_digest: &closure_dependency_custody_digest,
+                    trust_anchor_id: &closure_trust_anchor,
+                    profile_semantic_id: &closure_profile_semantic_id,
+                    evaluator_semantic_digest: &closure_evaluator_identity_digest,
+                    evaluator_artifact_digest: &closure_evaluator_artifact_digest,
+                    derived_at: &closure_derived_at,
+                    clock_identity: &closure_clock_identity,
+                    clock_qualification_digest: &closure_clock_qualification_digest,
+                },
+            )
+            .expect("coherent hostile governed derivation identity")
+        };
         let final_batch_digest =
             runtime_record_batch_digest(&final_batch).expect("final checkpoint digest");
         let mut closure = json!({
@@ -15049,6 +20454,23 @@ mod tests {
                 "custody_bytes_digest": dependency_custody_digest,
             },
         });
+        if matches!(
+            mode,
+            GovernedProjectionFixtureMode::ReservationDigestCoherentSubstitution
+        ) {
+            let substituted_digest = typed_digest("pc02-substituted-reservation-digest");
+            closure["reservation"]["bytes_digest"] = json!(substituted_digest);
+            let reservation_record_id = reservation_record.record_id.as_str();
+            let checkpoint_records =
+                closure["prelaunch"]["reservation_checkpoint"]["runtime_records"]
+                    .as_array_mut()
+                    .expect("reservation checkpoint records");
+            let reservation_reference = checkpoint_records
+                .iter_mut()
+                .find(|record| record["record_id"].as_str() == Some(reservation_record_id))
+                .expect("reservation checkpoint contains reservation record");
+            reservation_reference["bytes_digest"] = json!(substituted_digest);
+        }
         if legacy_v1 {
             let derivation = closure
                 .get_mut("derivation")
@@ -15065,12 +20487,214 @@ mod tests {
             .insert("closure_id".to_owned(), json!(closure_id));
         let exact_closure_bytes =
             nq_protocol::canonical_json_bytes(&closure).expect("governed closure bytes");
-        custody
-            .seal_final_closure(exact_closure_bytes.clone())
-            .expect("physical final closure");
-        drop(custody);
 
-        if !matches!(mode, GovernedProjectionFixtureMode::MissingSql) {
+        let projection_crash_mode = match spec.crash_window {
+            PendingV3CrashWindow::AfterFinalSealBeforeSql => {
+                Some("after-final-seal-before-sql".to_owned())
+            }
+            PendingV3CrashWindow::AfterSqlBeforeIndexMark => {
+                Some("after-sql-before-index-mark".to_owned())
+            }
+            PendingV3CrashWindow::Legacy(_) => match mode {
+                GovernedProjectionFixtureMode::V3CrashAfterFinalSealBeforeSql => {
+                    Some("after-final-seal-before-sql".to_owned())
+                }
+                GovernedProjectionFixtureMode::V3CrashAfterSqlBeforeIndexMark => {
+                    Some("after-sql-before-index-mark".to_owned())
+                }
+                GovernedProjectionFixtureMode::V3CrashWithStatusSequenceGap => {
+                    Some("after-final-seal-before-sql-status-gap".to_owned())
+                }
+                _ => std::env::var(ABRUPT_GOVERNED_PROJECTION_MODE).ok(),
+            },
+        };
+        if let Some(projection_crash_mode) = projection_crash_mode {
+            let manifest_path = PathBuf::from(
+                std::env::var(ABRUPT_GOVERNED_PROJECTION_MANIFEST)
+                    .expect("abrupt projection manifest path"),
+            );
+            let result = RunResultStatusInput {
+                run_id: collection.run.run_id.clone(),
+                status: StatusEventInput {
+                    status_event_id: "status-governed-v3-crash".to_owned(),
+                    component_kind: "diagnostic_execution".to_owned(),
+                    component_id: collection.run.run_id.clone(),
+                    state: "unknown".to_owned(),
+                    code: "diagnostic_execution_refused".to_owned(),
+                    detail: document(json!({
+                        "schema": "nq.test_governed_projection_result.v1",
+                        "run_id": collection.run.run_id,
+                        "outcome": "explicit_refusal",
+                    })),
+                    observed_at: TIME.to_owned(),
+                },
+            };
+            let capsule_collection = collection.clone();
+            let capsule_artifact = artifact.clone();
+            let capsule_status = result.status.clone();
+            let capsule_reservation_id = reservation.reservation_record_id.clone();
+            let v2_closure = closure.clone();
+            let manifest_database = database.clone();
+            let manifest_run_id = collection.run.run_id.clone();
+            let manifest_intake_id = collection.intake.intake_id.clone();
+            let manifest_artifact_id = diagnostic_artifact_id.clone();
+            let manifest_status_event_id = result.status.status_event_id.clone();
+            let substituted_predecessor_checkpoint_id =
+                reservation_receipt.checkpoint.checkpoint_id.clone();
+            let substituted_predecessor_ledger_root = reservation_receipt
+                .checkpoint
+                .checkpoint_ledger_root
+                .clone();
+            // An exact committed but non-launch runtime record makes any
+            // accidental capsule-anchored frontier lookup observably global.
+            // Correct recovery anchors the frontier in physical custody and
+            // later classifies this capsule binding difference locally.
+            let substituted_execution_launch_record_id = reservation_record.record_id.clone();
+            let closure_crash_mode = projection_crash_mode.clone();
+            let mut build_final_closure =
+                move |publication: &GovernedProjectionPublication| -> Result<Vec<u8>, StoreError> {
+                    let mut sealed_publication = publication.clone();
+                    if closure_crash_mode == "after-final-seal-before-sql-status-gap" {
+                        sealed_publication.status_sequence = sealed_publication
+                            .status_sequence
+                            .checked_add(1)
+                            .ok_or_else(|| {
+                                StoreError::Invariant(
+                                    "hostile status-sequence gap overflowed".into(),
+                                )
+                            })?;
+                    }
+                    let capsule =
+                        GovernedProjectionCapsule::build(&GovernedProjectionCapsuleInput {
+                            reservation_record_id: capsule_reservation_id.clone(),
+                            collection: capsule_collection.clone(),
+                            diagnostic_artifact: capsule_artifact.clone(),
+                            status: capsule_status.clone(),
+                            mode: GovernedProjectionCapsuleMode::NonSuccess,
+                            expected_semantic_digest: None,
+                            publication: sealed_publication.clone(),
+                        })?;
+                    let mut capsule_value: Value =
+                        serde_json::from_slice(capsule.canonical_bytes().as_bytes())
+                            .map_err(|error| StoreError::CanonicalJson(error.to_string()))?;
+                    if matches!(
+                        mode,
+                        GovernedProjectionFixtureMode::CapsuleExecutionLaunchBindingSubstitution
+                    ) {
+                        capsule_value["diagnostic"]["local_origin"]["execution_binding"]["execution_launch_record_id"] =
+                            json!(substituted_execution_launch_record_id);
+                    }
+                    if matches!(
+                        mode,
+                        GovernedProjectionFixtureMode::TerminalPredecessorIdentitySubstitution
+                    ) {
+                        capsule_value["diagnostic"]["local_origin"]["execution_binding"]["runtime_records"]
+                            ["expected_predecessor_checkpoint_id"] =
+                            json!(substituted_predecessor_checkpoint_id);
+                    }
+                    if matches!(
+                        mode,
+                        GovernedProjectionFixtureMode::TerminalPredecessorRootSubstitution
+                    ) {
+                        capsule_value["diagnostic"]["local_origin"]["execution_binding"]["runtime_records"]
+                            ["expected_predecessor_ledger_root"] =
+                            json!(substituted_predecessor_ledger_root);
+                    }
+                    if matches!(
+                        mode,
+                        GovernedProjectionFixtureMode::CapsuleExecutionLaunchBindingSubstitution
+                            | GovernedProjectionFixtureMode::TerminalPredecessorIdentitySubstitution
+                            | GovernedProjectionFixtureMode::TerminalPredecessorRootSubstitution
+                    ) {
+                        let capsule_object = capsule_value.as_object_mut().ok_or_else(|| {
+                            StoreError::Invariant(
+                                "hostile governed capsule is not an object".into(),
+                            )
+                        })?;
+                        capsule_object.remove("capsule_id");
+                        let capsule_id = nq_protocol::semantic_digest(&capsule_value)
+                            .map_err(|error| StoreError::CanonicalJson(error.to_string()))?;
+                        capsule_value
+                            .as_object_mut()
+                            .expect("hostile governed capsule remains an object")
+                            .insert("capsule_id".to_owned(), json!(capsule_id));
+                    }
+                    let mut v3_closure = v2_closure.clone();
+                    let closure_object = v3_closure.as_object_mut().ok_or_else(|| {
+                        StoreError::Invariant(
+                            "governed crash fixture closure is not an object".into(),
+                        )
+                    })?;
+                    closure_object.remove("closure_id");
+                    closure_object.insert(
+                        "schema".to_owned(),
+                        Value::String(GOVERNED_CUSTODY_CLOSURE_V3_SCHEMA.to_owned()),
+                    );
+                    if !matches!(mode, GovernedProjectionFixtureMode::V3MissingCapsule) {
+                        closure_object.insert("projection_capsule".to_owned(), capsule_value);
+                    }
+                    apply_pending_v3_claim_mutation(&mut v3_closure, spec.claim_mutation);
+                    let closure_id = nq_protocol::semantic_digest(&v3_closure)
+                        .map_err(|error| StoreError::CanonicalJson(error.to_string()))?;
+                    v3_closure
+                        .as_object_mut()
+                        .expect("governed crash fixture closure remains an object")
+                        .insert("closure_id".to_owned(), json!(closure_id));
+                    let exact_v3_closure = nq_protocol::canonical_json_bytes(&v3_closure)
+                        .map_err(|error| StoreError::CanonicalJson(error.to_string()))?;
+                    write_governed_projection_crash_manifest(
+                        &manifest_path,
+                        &json!({
+                            "schema": "nq.test_abrupt_governed_projection.v1",
+                            "database_path": manifest_database,
+                            "reservation_record_id": capsule_reservation_id,
+                            "run_id": manifest_run_id,
+                            "intake_id": manifest_intake_id,
+                            "diagnostic_artifact_id": manifest_artifact_id,
+                            "status_event_id": manifest_status_event_id,
+                            "report_sequence": sealed_publication.report_sequence,
+                            "status_sequence": sealed_publication.status_sequence,
+                            "acknowledgment_id": sealed_publication.acknowledgment_id,
+                            "acknowledgment_committed_at":
+                                sealed_publication.acknowledgment_committed_at,
+                            "closure_bytes_digest":
+                                nq_protocol::sha256_bytes(&exact_v3_closure),
+                            "closure_byte_length": exact_v3_closure.len(),
+                            "crash_mode": closure_crash_mode,
+                        }),
+                    );
+                    Ok(exact_v3_closure)
+                };
+            let crash_after_final_seal = projection_crash_mode != "after-sql-before-index-mark";
+            store
+                .commit_governed_non_success_run_level_diagnostic_with_publication(
+                    &collection,
+                    &result,
+                    &artifact,
+                    &mut custody,
+                    &mut build_final_closure,
+                    |_| -> Result<(), StoreError> {
+                        if crash_after_final_seal {
+                            kill_current_projection_test_process();
+                        }
+                        Ok(())
+                    },
+                )
+                .expect("governed V3 crash fixture SQL publication");
+            if projection_crash_mode == "after-sql-before-index-mark" {
+                kill_current_projection_test_process();
+            }
+            panic!("abrupt governed projection child returned without SIGKILL");
+        }
+
+        // Legacy V1/V2 closure fixtures represent SQL that was already
+        // committed before the physical closure became index-pending. Once a
+        // non-V3 final closure is pending, the global writer fence must refuse
+        // every new ordinary publication because no sealed replay capsule
+        // exists.
+        if !matches!(mode, GovernedProjectionFixtureMode::MissingSql)
+            && !physical_launch_shape_hostile
+        {
             store
                 .commit_non_success_collection_with_artifact(
                     &collection,
@@ -15084,18 +20708,19 @@ mod tests {
                 .expect("governed SQL projection");
         }
 
-        GovernedProjectionFixture {
+        custody
+            .seal_final_closure(exact_closure_bytes.clone())
+            .expect("physical final closure");
+        drop(custody);
+
+        Ok(GovernedProjectionFixture {
             store,
             directory,
             reservation_record_id: reservation.reservation_record_id.clone(),
-            launch_checkpoint_id: Sha256Digest::parse(
-                launch_receipt.checkpoint.checkpoint_id.clone(),
-            )
-            .expect("launch checkpoint identity"),
+            launch_checkpoint_id,
             reservation,
-            diagnostic_artifact_id,
             exact_closure_bytes,
-        }
+        })
     }
 
     fn assert_governed_projection_pending(store: &Store, reservation_record_id: &Sha256Digest) {
@@ -15117,6 +20742,6725 @@ mod tests {
             frontier.recovery_class,
             GovernedCustodyRecoveryClass::FinalClosureAwaitingProjection
         );
+    }
+
+    fn manifest_string<'a>(manifest: &'a Value, field: &str) -> &'a str {
+        manifest[field]
+            .as_str()
+            .unwrap_or_else(|| panic!("abrupt projection manifest field {field} is not a string"))
+    }
+
+    fn governed_projection_run_count(store: &Store, run_id: &str) -> i64 {
+        store
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM watcher_runs WHERE run_id = ?1",
+                [run_id],
+                |row| row.get(0),
+            )
+            .expect("governed projection run count")
+    }
+
+    fn governed_projection_append_counts(store: &Store) -> Vec<(&'static str, i64)> {
+        [
+            "watcher_runs",
+            "provider_intake_attempts",
+            "raw_submissions",
+            "refusals",
+            "diagnostic_artifact_commitments",
+            "diagnostic_artifact_payloads",
+            "local_diagnostic_artifact_origins",
+            "local_diagnostic_artifact_provider_attempt_bindings",
+            "runtime_record_ledger",
+            "runtime_record_checkpoints",
+            "status_events",
+            "provider_intake_acknowledgments",
+        ]
+        .into_iter()
+        .map(|table| {
+            let count = store
+                .connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap_or_else(|error| panic!("count {table}: {error}"));
+            (table, count)
+        })
+        .collect()
+    }
+
+    fn assert_exact_governed_projection_rows(store: &Store, manifest: &Value) {
+        let run_id = manifest_string(manifest, "run_id");
+        let intake_id = manifest_string(manifest, "intake_id");
+        let artifact_id =
+            Sha256Digest::parse(manifest_string(manifest, "diagnostic_artifact_id").to_owned())
+                .expect("manifest diagnostic artifact identity");
+        let status_event_id = manifest_string(manifest, "status_event_id");
+        let status_sequence = manifest["status_sequence"]
+            .as_i64()
+            .expect("manifest status sequence");
+        let acknowledgment_id = manifest_string(manifest, "acknowledgment_id");
+        let acknowledgment_committed_at = manifest_string(manifest, "acknowledgment_committed_at");
+
+        assert_eq!(governed_projection_run_count(store, run_id), 1);
+        let receipt = collection_receipt_for_run(&store.connection, run_id)
+            .expect("exact collection receipt");
+        assert_eq!(
+            receipt.report_sequence, None,
+            "a governed V2 non-success artifact must not acquire a report sequence"
+        );
+        assert_eq!(receipt.semantic_digest, None);
+        assert_eq!(
+            store
+                .diagnostic_artifact_id_for_run(run_id)
+                .expect("run artifact lookup"),
+            Some(artifact_id.clone())
+        );
+        assert!(matches!(
+            store
+                .diagnostic_artifact(&artifact_id, &["nq.diagnostic_execution.v2"])
+                .expect("exact diagnostic artifact"),
+            DiagnosticArtifactLookup::Found(DiagnosticArtifactAccess {
+                byte_state: DiagnosticArtifactByteState::VerifiedAvailable { .. },
+                ..
+            })
+        ));
+
+        let observed_status: (i64, String, String, String) = store
+            .connection
+            .query_row(
+                "SELECT status_sequence, status_event_id, component_kind, component_id
+                 FROM status_events WHERE run_id = ?1",
+                [run_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("exact governed status");
+        assert_eq!(
+            observed_status,
+            (
+                status_sequence,
+                status_event_id.to_owned(),
+                "diagnostic_execution".to_owned(),
+                run_id.to_owned(),
+            )
+        );
+
+        let observed_ack: (String, String, String, String) = store
+            .connection
+            .query_row(
+                "SELECT acknowledgment_id, intake_id, status_event_id, committed_at
+                 FROM provider_intake_acknowledgments WHERE run_id = ?1",
+                [run_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("exact governed acknowledgment");
+        assert_eq!(
+            observed_ack,
+            (
+                acknowledgment_id.to_owned(),
+                intake_id.to_owned(),
+                status_event_id.to_owned(),
+                acknowledgment_committed_at.to_owned(),
+            )
+        );
+    }
+
+    #[allow(clippy::struct_field_names)] // Test-only carrier names deliberately retain their source roles.
+    struct SourceOnlyPendingProjection {
+        reservation_record_id: Sha256Digest,
+        provider_intake_record_id: Sha256Digest,
+        reservation_checkpoint_id: String,
+        launch_checkpoint_id: String,
+    }
+
+    struct Pc13AbsentProjection {
+        reservation_record_id: Sha256Digest,
+        launch_checkpoint_id: Sha256Digest,
+        execution_launch_record_id: Sha256Digest,
+        collection: CollectionInput,
+        diagnostic_artifact: DiagnosticArtifactCommitInput,
+        status: StatusEventInput,
+        publication: GovernedProjectionPublication,
+        exact_final_closure: Vec<u8>,
+    }
+
+    fn ordered_test_digest(
+        prefix: &str,
+        anchor: &Sha256Digest,
+        before_anchor: bool,
+    ) -> (String, Sha256Digest) {
+        for ordinal in 0_u32..100_000 {
+            let label = format!("{prefix}-{ordinal}");
+            let candidate = typed_digest(&label);
+            if (candidate < *anchor) == before_anchor {
+                return (label, candidate);
+            }
+        }
+        panic!("could not derive an ordered test digest around {anchor}");
+    }
+
+    /// Append one real, physically sealed V3 projection after an already
+    /// committed terminal runtime checkpoint, but deliberately omit its SQL
+    /// projection. This is a test-only recovery bypass: it uses the same
+    /// source records, custody arena, capsule, and exact closure as ordinary
+    /// governed publication without allowing an ordinary writer to recover
+    /// the earlier pending arena first.
+    #[allow(clippy::too_many_lines)]
+    fn append_pc13_absent_projection(
+        store: &mut Store,
+        first_reservation_record_id: &Sha256Digest,
+        reservation_before_first: bool,
+        status_sequence: i64,
+        diagnostic_artifact_id_override: Option<Sha256Digest>,
+    ) -> Pc13AbsentProjection {
+        assert!(
+            status_sequence > 0,
+            "PC-13 status sequence must be positive"
+        );
+        let (suffix, reservation_record_id) = ordered_test_digest(
+            if reservation_before_first {
+                "pc13-b-before"
+            } else {
+                "pc13-b-after"
+            },
+            first_reservation_record_id,
+            reservation_before_first,
+        );
+        let native_prelaunch = authenticated_native_prelaunch_fixture(&suffix);
+        let dependency = native_prelaunch.dependency.clone();
+        let dependency_custody_digest =
+            Sha256Digest::parse(dependency.canonical_custody.digest().to_owned())
+                .expect("PC-13 dependency custody digest");
+        let profile_digest: String = store
+            .connection
+            .query_row(
+                "SELECT profile_digest FROM admission_records
+                 WHERE admission_id = 'admission-provider-governed'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("PC-13 existing profile binding");
+        let collection = rejected_fixture_collection_with_existing_binding(
+            store,
+            "fixture-a",
+            &suffix,
+            &profile_digest,
+            "admission-provider-governed",
+        );
+        let predecessor = store
+            .runtime_ledger_checkpoint()
+            .expect("PC-13 runtime frontier")
+            .expect("PC-13 A terminal frontier exists");
+        let outer_request_id = format!("outer-request-{suffix}");
+        let outer_request = governed_runtime_record(
+            typed_digest(&format!("outer-request-record-{suffix}")),
+            "nq.diagnostic_invocation_request.v1",
+            json!({
+                "schema": "nq.diagnostic_invocation_request.v1",
+                "request_id": outer_request_id,
+                "profile": {
+                    "kind": "diagnostic_profile",
+                    "id": collection.run.profile_id,
+                    "version": collection.run.profile_version,
+                    "descriptor_digest": collection.run.profile_digest,
+                },
+                "authentication_evidence":
+                    native_prelaunch.authentication_evidence.clone(),
+                "invocation_authorization":
+                    governed_record_reference(&native_prelaunch.invocation_authorization),
+            }),
+        );
+        let invocation_decision = governed_runtime_record(
+            typed_digest(&format!("invocation-decision-{suffix}")),
+            "nq.invocation_decision.v1",
+            json!({
+                "schema": "nq.invocation_decision.v1",
+                "decision": "accepted",
+                "authentication_evidence":
+                    native_prelaunch.authentication_evidence.clone(),
+                "invocation_authorization":
+                    governed_record_reference(&native_prelaunch.invocation_authorization),
+            }),
+        );
+        let dependency_capacity = 65_536_u64;
+        let raw_capacity = 65_536_u64;
+        let diagnostic_capacity = 65_536_u64;
+        let projection_capsule_capacity = 65_536_u64;
+        let final_capacity = 196_608_u64;
+        let reserved_bytes = dependency_capacity
+            .checked_add(raw_capacity)
+            .and_then(|subtotal| subtotal.checked_add(final_capacity))
+            .expect("PC-13 reservation capacity");
+        let reservation_record = governed_runtime_record(
+            reservation_record_id.clone(),
+            "nq.custody_reservation.v1",
+            json!({
+                "schema": "nq.custody_reservation.v1",
+                "reservation": suffix,
+                "component_bounds": {
+                    "diagnostic_artifact_bytes": diagnostic_capacity,
+                    "raw_evidence_bytes": raw_capacity,
+                    "dependency_closure_bytes": dependency_capacity,
+                    "projected_bytes": projection_capsule_capacity,
+                },
+                "reserved_bytes": reserved_bytes,
+                "reservation_commit": native_prelaunch.custody_commit.clone(),
+            }),
+        );
+        let reservation_checkpoint_id = typed_digest(&format!("reservation-checkpoint-{suffix}"));
+        let reservation_batch = RuntimeRecordBatchInput {
+            checkpoint_id: reservation_checkpoint_id.to_string(),
+            expected_predecessor_checkpoint_id: Some(predecessor.checkpoint_id.clone()),
+            expected_predecessor_ledger_root: Some(predecessor.checkpoint_ledger_root.clone()),
+            dependency: dependency.clone(),
+            records: vec![
+                outer_request.clone(),
+                invocation_decision.clone(),
+                reservation_record.clone(),
+                native_prelaunch.invocation_authorization.clone(),
+                native_prelaunch.activation.clone(),
+                native_prelaunch.clock_qualification.clone(),
+            ],
+        };
+        let reservation_batch_digest =
+            runtime_record_batch_digest(&reservation_batch).expect("PC-13 reservation digest");
+        let reservation = GovernedCustodyReservation {
+            reservation_record_id: reservation_record_id.clone(),
+            reservation_manifest_digest: Sha256Digest::parse(
+                reservation_record.canonical_bytes.digest().to_owned(),
+            )
+            .expect("PC-13 reservation manifest digest"),
+            outer_request_record_id: Sha256Digest::parse(outer_request.record_id.clone())
+                .expect("PC-13 outer-request record identity"),
+            outer_request_id: outer_request_id.clone(),
+            outer_request_digest: Sha256Digest::parse(
+                outer_request.canonical_bytes.digest().to_owned(),
+            )
+            .expect("PC-13 outer-request digest"),
+            dependency_generation_id: dependency.dependency_generation_id.clone(),
+            dependency_generation_custody_digest: dependency_custody_digest.clone(),
+            trust_anchor_id: dependency.trust_anchor_id.clone(),
+            prelaunch_checkpoint_id: reservation_checkpoint_id.clone(),
+            prelaunch_checkpoint_digest: reservation_batch_digest,
+            dependency_closure_capacity_bytes: dependency_capacity,
+            raw_capacity_bytes: raw_capacity,
+            diagnostic_artifact_capacity_bytes: diagnostic_capacity,
+            projection_capsule_capacity_bytes: projection_capsule_capacity,
+            final_capacity_bytes: final_capacity,
+            protected_failure_capacity_bytes: 16_384,
+        };
+        let mut custody = store
+            .reserve_governed_custody(reservation, dependency.canonical_custody.as_bytes())
+            .expect("reserve PC-13 B custody");
+        let reservation_transaction = store
+            .immediate_recovery_transaction()
+            .expect("PC-13 B reservation transaction");
+        let reservation_receipt =
+            append_runtime_records_in_transaction(&reservation_transaction, &reservation_batch)
+                .expect("append PC-13 B reservation checkpoint");
+        reservation_transaction
+            .commit()
+            .expect("commit PC-13 B reservation checkpoint");
+
+        let deadline = governed_runtime_record(
+            typed_digest(&format!("deadline-evaluation-{suffix}")),
+            "nq.deadline_evaluation.v1",
+            json!({
+                "schema": "nq.deadline_evaluation.v1",
+                "outer_request": governed_record_reference(&outer_request),
+                "activation": governed_record_reference(&native_prelaunch.activation),
+                "clock_qualification":
+                    governed_record_reference(&native_prelaunch.clock_qualification),
+                "clock": {"fixture": "boottime-realtime-bridge"},
+                "request_bounds": {
+                    "maximum_execution_ms": 1_000,
+                },
+                "sample": {
+                    "boot_epoch": typed_digest(&format!("boot-epoch-{suffix}")),
+                    "boottime_at_ns": "1000000000",
+                },
+                "derived": {
+                    "launched_at": TIME,
+                    "attempt_deadline": "2026-07-30T00:00:01Z",
+                    "boottime_expiry_ns": "2000000000",
+                },
+                "decision": {
+                    "state": "accepted",
+                    "violations": [],
+                },
+            }),
+        );
+        let execution_launch = governed_runtime_record(
+            typed_digest(&format!("execution-launch-{suffix}")),
+            "nq.execution_launch.v1",
+            json!({
+                "schema": "nq.execution_launch.v1",
+                "status": "launched",
+                "launched_at": TIME,
+                "attempt_deadline": "2026-07-30T00:00:01Z",
+                "maximum_execution_ms": 1_000,
+                "clock": {"fixture": "boottime-realtime-bridge"},
+                "outer_request": governed_record_reference(&outer_request),
+                "invocation_decision": governed_record_reference(&invocation_decision),
+                "custody_reservation": governed_record_reference(&reservation_record),
+                "activation_snapshot":
+                    governed_record_reference(&native_prelaunch.activation),
+                "prelaunch_checks": {
+                    "authentication": native_prelaunch.authentication_evidence.clone(),
+                    "invocation_authorization":
+                        governed_record_reference(&native_prelaunch.invocation_authorization),
+                    "generation_match": native_prelaunch.generation_match.clone(),
+                    "deadline": governed_record_reference(&deadline),
+                    "capability": native_prelaunch.capability.clone(),
+                    "custody": native_prelaunch.custody_commit.clone(),
+                },
+            }),
+        );
+        let execution_launch_record_id = Sha256Digest::parse(execution_launch.record_id.clone())
+            .expect("PC-13 B launch record identity");
+        let launch_checkpoint_id = typed_digest(&format!("launch-checkpoint-{suffix}"));
+        let launch_batch = RuntimeRecordBatchInput {
+            checkpoint_id: launch_checkpoint_id.to_string(),
+            expected_predecessor_checkpoint_id: Some(
+                reservation_receipt.checkpoint.checkpoint_id.clone(),
+            ),
+            expected_predecessor_ledger_root: Some(
+                reservation_receipt
+                    .checkpoint
+                    .checkpoint_ledger_root
+                    .clone(),
+            ),
+            dependency: dependency.clone(),
+            records: vec![deadline, execution_launch.clone()],
+        };
+        let launch_transaction = store
+            .immediate_recovery_transaction()
+            .expect("PC-13 B launch transaction");
+        let launch_receipt =
+            append_runtime_records_in_transaction(&launch_transaction, &launch_batch)
+                .expect("append PC-13 B launch checkpoint");
+        launch_transaction
+            .commit()
+            .expect("commit PC-13 B launch checkpoint");
+        custody
+            .claim_launch(execution_launch_record_id.clone(), TIME.to_owned())
+            .expect("claim PC-13 B launch");
+
+        let provider_record_id =
+            provider_intake_record_id(&collection.intake).expect("PC-13 provider record identity");
+        let provider_request = json!({
+            "request_id": collection.intake.request_id,
+        });
+        let provider_request_digest =
+            nq_protocol::semantic_digest(&provider_request).expect("PC-13 provider request digest");
+        let provider_record = governed_runtime_record(
+            provider_record_id.clone(),
+            "nq.provider_intake.v1",
+            json!({
+                "schema": "nq.provider_intake.v1",
+                "intake_id": collection.intake.intake_id,
+                "attempt_id": collection.intake.attempt_id,
+                "idempotency_key": collection.intake.idempotency_key,
+                "run_id": collection.run.run_id,
+                "request_id": collection.intake.request_id,
+                "request": provider_request,
+                "request_digest": provider_request_digest,
+                "raw_length": collection.intake.raw_bytes.len(),
+                "raw_sha256": nq_protocol::sha256_bytes(&collection.intake.raw_bytes),
+            }),
+        );
+        let diagnostic_artifact_id = diagnostic_artifact_id_override
+            .unwrap_or_else(|| typed_digest(&format!("diagnostic-artifact-{suffix}")));
+        let evaluator_identity_digest = typed_digest(&format!("evaluator-identity-{suffix}"));
+        let clock_identity = typed_digest(&format!("clock-{suffix}"));
+        let clock_qualification = json!({
+            "state": "unqualified",
+            "code": "fixture_clock_unqualified",
+            "detail": "the fixture establishes no finite UTC-error bound",
+        });
+        let clock_qualification_digest =
+            nq_protocol::semantic_digest(&clock_qualification).expect("PC-13 clock qualification");
+        let diagnostic = document(json!({
+            "schema": "nq.diagnostic_execution.v2",
+            "artifact_id": diagnostic_artifact_id,
+            "run_id": collection.run.run_id,
+            "request_id": outer_request_id,
+            "attempt_interval": {
+                "qualification": clock_qualification,
+            },
+            "evaluator": {
+                "digest": evaluator_identity_digest,
+            },
+            "execution_clock": {
+                "digest": clock_identity,
+            },
+            "profile": {
+                "id": collection.run.profile_id,
+                "version": collection.run.profile_version,
+                "digest": collection.run.profile_digest,
+            },
+            "profile_semantic_id": collection.intake.profile_semantic_id,
+            "completed_at": TIME,
+            "disposition": "refused",
+        }));
+        let binding_id = typed_digest(&format!("execution-binding-{suffix}"));
+        let binding_record = governed_runtime_record(
+            binding_id.clone(),
+            "nq.execution_identity_binding.v2",
+            json!({
+                "schema": "nq.execution_identity_binding.v2",
+                "binding_id": binding_id,
+                "outer_request": governed_record_reference(&outer_request),
+                "invocation_decision": governed_record_reference(&invocation_decision),
+                "execution_launch": governed_record_reference(&execution_launch),
+                "diagnostic": {
+                    "schema": "nq.diagnostic_execution.v2",
+                    "request_id": outer_request_id,
+                    "artifact_id": diagnostic_artifact_id,
+                    "file_bytes_digest": diagnostic.digest(),
+                },
+                "provider_attempts": [governed_record_reference(&provider_record)],
+                "resolved_references": {
+                    "diagnostic_profile": {
+                        "identity": {
+                            "kind": "diagnostic_profile",
+                            "id": collection.run.profile_id,
+                            "version": collection.run.profile_version,
+                            "descriptor_digest": collection.run.profile_digest,
+                        },
+                    },
+                },
+            }),
+        );
+        let final_checkpoint_id = typed_digest(&format!("final-checkpoint-{suffix}"));
+        let final_batch = RuntimeRecordBatchInput {
+            checkpoint_id: final_checkpoint_id.to_string(),
+            expected_predecessor_checkpoint_id: Some(
+                launch_receipt.checkpoint.checkpoint_id.clone(),
+            ),
+            expected_predecessor_ledger_root: Some(
+                launch_receipt.checkpoint.checkpoint_ledger_root.clone(),
+            ),
+            dependency: dependency.clone(),
+            records: vec![provider_record.clone(), binding_record.clone()],
+        };
+        let diagnostic_artifact = DiagnosticArtifactCommitInput {
+            artifact_id: diagnostic_artifact_id.clone(),
+            contract_schema: "nq.diagnostic_execution.v2".to_owned(),
+            canonical_bytes: diagnostic.clone(),
+            local_origin: DiagnosticArtifactLocalOriginInput {
+                run_id: collection.run.run_id.clone(),
+                evaluation_id: None,
+                completed_at: TIME.to_owned(),
+                execution_binding: Some(DiagnosticArtifactExecutionBindingInput {
+                    runtime_records: final_batch.clone(),
+                    execution_binding_record_id: binding_record.record_id.clone(),
+                    outer_request_record_id: outer_request.record_id.clone(),
+                    invocation_decision_record_id: invocation_decision.record_id.clone(),
+                    execution_launch_record_id: execution_launch.record_id.clone(),
+                    outer_request_id: outer_request_id.clone(),
+                    provider_attempts: vec![DiagnosticArtifactProviderAttemptBindingInput {
+                        provider_attempt_record_id: provider_record.record_id.clone(),
+                        intake_id: collection.intake.intake_id.clone(),
+                    }],
+                }),
+            },
+        };
+
+        custody
+            .seal_acquisition(GovernedAcquisitionCustodyInput {
+                execution_launch_record_id: execution_launch_record_id.clone(),
+                provider_intake_record_id: provider_record_id.clone(),
+                exact_provider_intake_bytes: provider_record.canonical_bytes.as_bytes().to_vec(),
+                exact_raw_provider_bytes: collection.intake.raw_bytes.clone(),
+            })
+            .expect("seal PC-13 B acquisition");
+        let diagnostic_file_bytes_digest = nq_protocol::sha256_bytes(diagnostic.as_bytes());
+        let execution_launch_bytes_digest =
+            Sha256Digest::parse(execution_launch.canonical_bytes.digest().to_owned())
+                .expect("PC-13 B launch bytes digest");
+        let provider_record_bytes_digest =
+            Sha256Digest::parse(provider_record.canonical_bytes.digest().to_owned())
+                .expect("PC-13 B provider bytes digest");
+        let derivation_id = nq_protocol::governed_derivation_identity(
+            &nq_protocol::GovernedDerivationIdentityInput {
+                diagnostic_artifact_id: &diagnostic_artifact_id,
+                diagnostic_file_bytes_digest: &diagnostic_file_bytes_digest,
+                provider_intake: nq_protocol::GovernedDerivationRecordRef {
+                    schema: "nq.provider_intake.v1",
+                    record_id: &provider_record_id,
+                    bytes_digest: &provider_record_bytes_digest,
+                },
+                execution_launch: nq_protocol::GovernedDerivationRecordRef {
+                    schema: "nq.execution_launch.v1",
+                    record_id: &execution_launch_record_id,
+                    bytes_digest: &execution_launch_bytes_digest,
+                },
+                dependency_generation_id: &dependency.dependency_generation_id,
+                dependency_generation_custody_digest: &dependency_custody_digest,
+                trust_anchor_id: &dependency.trust_anchor_id,
+                profile_semantic_id: &collection.intake.profile_semantic_id,
+                evaluator_semantic_digest: &evaluator_identity_digest,
+                evaluator_artifact_digest: &collection.intake.evaluator_artifact_digest,
+                derived_at: TIME,
+                clock_identity: &clock_identity,
+                clock_qualification_digest: &clock_qualification_digest,
+            },
+        )
+        .expect("PC-13 B derivation identity");
+        let derivation_claim = GovernedDerivationCustodyClaim {
+            derivation_id: derivation_id.clone(),
+            dependency_generation_id: dependency.dependency_generation_id.clone(),
+            dependency_generation_custody_digest: dependency_custody_digest.clone(),
+            trust_anchor_id: dependency.trust_anchor_id.clone(),
+            evaluation_id: None,
+            profile_semantic_id: collection.intake.profile_semantic_id.clone(),
+            evaluator_identity_digest: evaluator_identity_digest.clone(),
+            evaluator_artifact_digest: collection.intake.evaluator_artifact_digest.clone(),
+            derived_at: TIME.to_owned(),
+            clock_identity: clock_identity.clone(),
+            clock_qualification_digest: clock_qualification_digest.clone(),
+        };
+        custody
+            .claim_derivation(derivation_claim.clone())
+            .expect("claim PC-13 B derivation");
+
+        let status = StatusEventInput {
+            status_event_id: format!("status-{suffix}"),
+            component_kind: "diagnostic_execution".to_owned(),
+            component_id: collection.run.run_id.clone(),
+            state: "unknown".to_owned(),
+            code: "diagnostic_execution_refused".to_owned(),
+            detail: document(json!({
+                "schema": "nq.test_pc13_projection_result.v1",
+                "run_id": collection.run.run_id,
+                "outcome": "explicit_refusal",
+            })),
+            observed_at: TIME.to_owned(),
+        };
+        let publication = GovernedProjectionPublication {
+            report_sequence: None,
+            status_sequence,
+            acknowledgment_id: format!(
+                "00000000-0000-4000-8000-{:012x}",
+                if reservation_before_first {
+                    1_u64
+                } else {
+                    2_u64
+                }
+            ),
+            acknowledgment_committed_at: TIME.to_owned(),
+        };
+        let capsule = GovernedProjectionCapsule::build(&GovernedProjectionCapsuleInput {
+            reservation_record_id: reservation_record_id.clone(),
+            collection: collection.clone(),
+            diagnostic_artifact: diagnostic_artifact.clone(),
+            status: status.clone(),
+            mode: GovernedProjectionCapsuleMode::NonSuccess,
+            expected_semantic_digest: None,
+            publication: publication.clone(),
+        })
+        .expect("build PC-13 B capsule");
+        let capsule_value: Value = serde_json::from_slice(capsule.canonical_bytes().as_bytes())
+            .expect("decode PC-13 B capsule");
+        let final_batch_digest =
+            runtime_record_batch_digest(&final_batch).expect("PC-13 B final batch digest");
+        let launch_batch_digest =
+            runtime_record_batch_digest(&launch_batch).expect("PC-13 B launch batch digest");
+        let mut closure = json!({
+            "schema": GOVERNED_CUSTODY_CLOSURE_V3_SCHEMA,
+            "reservation": governed_record_reference(&reservation_record),
+            "prelaunch": {
+                "outer_request": governed_record_reference(&outer_request),
+                "invocation_decision": governed_record_reference(&invocation_decision),
+                "reservation_checkpoint": {
+                    "checkpoint_id": reservation_checkpoint_id,
+                    "batch_digest": runtime_record_batch_digest(&reservation_batch)
+                        .expect("PC-13 B reservation checkpoint digest"),
+                    "runtime_records": reservation_batch
+                        .records
+                        .iter()
+                        .map(governed_record_reference)
+                        .collect::<Vec<_>>(),
+                },
+                "launch_checkpoint": {
+                    "checkpoint_id": launch_checkpoint_id,
+                    "batch_digest": launch_batch_digest,
+                    "runtime_records": launch_batch
+                        .records
+                        .iter()
+                        .map(governed_record_reference)
+                        .collect::<Vec<_>>(),
+                },
+            },
+            "acquisition": {
+                "execution_launch_record_id": execution_launch_record_id,
+                "provider_intake": governed_record_reference(&provider_record),
+                "intake_id": collection.intake.intake_id,
+                "raw_provider_bytes_digest":
+                    nq_protocol::sha256_bytes(&collection.intake.raw_bytes),
+            },
+            "derivation": {
+                "derivation_id": derivation_claim.derivation_id,
+                "dependency_generation_id": derivation_claim.dependency_generation_id,
+                "dependency_generation_custody_digest":
+                    derivation_claim.dependency_generation_custody_digest,
+                "trust_anchor_id": derivation_claim.trust_anchor_id,
+                "evaluation_id": derivation_claim.evaluation_id,
+                "profile_semantic_id": derivation_claim.profile_semantic_id,
+                "evaluator_semantic_digest":
+                    derivation_claim.evaluator_identity_digest,
+                "evaluator_artifact_digest":
+                    derivation_claim.evaluator_artifact_digest,
+                "derived_at": derivation_claim.derived_at,
+                "clock_identity": derivation_claim.clock_identity,
+                "clock_qualification_digest":
+                    derivation_claim.clock_qualification_digest,
+            },
+            "diagnostic": serde_json::from_slice::<Value>(diagnostic.as_bytes())
+                .expect("PC-13 B diagnostic value"),
+            "local_origin": {
+                "run_id": collection.run.run_id,
+                "evaluation_id": null,
+                "completed_at": TIME,
+            },
+            "execution_binding": governed_record_reference(&binding_record),
+            "runtime_records": final_batch
+                .records
+                .iter()
+                .map(governed_record_reference)
+                .collect::<Vec<_>>(),
+            "dependency_generation": {
+                "checkpoint_id": final_batch.checkpoint_id,
+                "checkpoint_digest": final_batch_digest,
+                "generation_id": dependency.dependency_generation_id,
+                "trust_anchor_id": dependency.trust_anchor_id,
+                "custody_bytes_digest": dependency_custody_digest,
+            },
+            "projection_capsule": capsule_value,
+        });
+        let closure_id = nq_protocol::semantic_digest(&closure).expect("PC-13 B closure identity");
+        closure
+            .as_object_mut()
+            .expect("PC-13 B closure object")
+            .insert("closure_id".to_owned(), json!(closure_id));
+        let exact_final_closure =
+            nq_protocol::canonical_json_bytes(&closure).expect("PC-13 B closure bytes");
+        custody
+            .seal_final_closure(exact_final_closure.clone())
+            .expect("seal PC-13 B final closure");
+
+        Pc13AbsentProjection {
+            reservation_record_id,
+            launch_checkpoint_id,
+            execution_launch_record_id,
+            collection,
+            diagnostic_artifact,
+            status,
+            publication,
+            exact_final_closure,
+        }
+    }
+
+    fn pc13_projection_manifest(projection: &Pc13AbsentProjection) -> Value {
+        json!({
+            "run_id": projection.collection.run.run_id,
+            "intake_id": projection.collection.intake.intake_id,
+            "diagnostic_artifact_id": projection.diagnostic_artifact.artifact_id,
+            "status_event_id": projection.status.status_event_id,
+            "status_sequence": projection.publication.status_sequence,
+            "acknowledgment_id": projection.publication.acknowledgment_id,
+            "acknowledgment_committed_at":
+                projection.publication.acknowledgment_committed_at,
+        })
+    }
+
+    fn assert_pc13_arena(
+        database: &Path,
+        reservation_record_id: &Sha256Digest,
+        exact_final_closure: &[u8],
+        expected_state: ArenaState,
+    ) {
+        let arena = CustodyArena::open_by_reservation(database, reservation_record_id)
+            .expect("open PC-13 arena")
+            .expect("PC-13 arena exists");
+        assert_eq!(
+            arena.inspection().expect("inspect PC-13 arena").state,
+            expected_state
+        );
+        assert_eq!(
+            arena
+                .final_v2_closure_bytes()
+                .expect("read PC-13 final closure")
+                .as_deref(),
+            Some(exact_final_closure)
+        );
+    }
+
+    fn pc13_existing_exact_absent_pair(
+        parent: &Path,
+        b_reservation_before_a: bool,
+        b_status_delta: i64,
+        collide_with_a_artifact: bool,
+    ) -> (
+        Value,
+        PathBuf,
+        Store,
+        Sha256Digest,
+        Vec<u8>,
+        Pc13AbsentProjection,
+    ) {
+        let a_manifest = spawn_abrupt_governed_projection(parent, "after-sql-before-index-mark");
+        let database = PathBuf::from(manifest_string(&a_manifest, "database_path"));
+        let a_reservation_record_id =
+            Sha256Digest::parse(manifest_string(&a_manifest, "reservation_record_id").to_owned())
+                .expect("PC-13 A reservation identity");
+        let a_status_sequence = a_manifest["status_sequence"]
+            .as_i64()
+            .expect("PC-13 A status sequence");
+        let a_artifact_id =
+            Sha256Digest::parse(manifest_string(&a_manifest, "diagnostic_artifact_id").to_owned())
+                .expect("PC-13 A artifact identity");
+        let a_arena = CustodyArena::open_by_reservation(&database, &a_reservation_record_id)
+            .expect("open PC-13 A arena")
+            .expect("PC-13 A arena exists");
+        let a_exact_final = a_arena
+            .final_v2_closure_bytes()
+            .expect("read PC-13 A final closure")
+            .expect("PC-13 A final closure exists");
+        drop(a_arena);
+        let mut store = Store::open(&database).expect("open PC-13 pair store");
+        assert_exact_governed_projection_rows(&store, &a_manifest);
+        assert_governed_projection_pending(&store, &a_reservation_record_id);
+        let b = append_pc13_absent_projection(
+            &mut store,
+            &a_reservation_record_id,
+            b_reservation_before_a,
+            a_status_sequence
+                .checked_add(b_status_delta)
+                .expect("PC-13 B status sequence"),
+            collide_with_a_artifact.then_some(a_artifact_id),
+        );
+        assert_eq!(
+            b.reservation_record_id < a_reservation_record_id,
+            b_reservation_before_a,
+            "PC-13 fixture must exhibit the requested lexical arena order"
+        );
+        assert_ne!(
+            b.execution_launch_record_id,
+            Sha256Digest::parse(
+                serde_json::from_slice::<Value>(&a_exact_final)
+                    .expect("decode PC-13 A closure")["acquisition"]
+                    ["execution_launch_record_id"]
+                    .as_str()
+                    .expect("PC-13 A launch identity")
+                    .to_owned(),
+            )
+            .expect("parse PC-13 A launch identity"),
+            "PC-13 B must use a distinct physical launch"
+        );
+        assert_governed_projection_pending(&store, &a_reservation_record_id);
+        assert_governed_projection_pending(&store, &b.reservation_record_id);
+        assert_eq!(
+            governed_projection_run_count(&store, &b.collection.run.run_id),
+            0,
+            "PC-13 B must be a real sealed Absent projection"
+        );
+        (
+            a_manifest,
+            database,
+            store,
+            a_reservation_record_id,
+            a_exact_final,
+            b,
+        )
+    }
+
+    /// Add a second, independently real source bundle to an existing pending
+    /// store. Its provider occurrence deliberately reuses the first arena's
+    /// native intake identities while changing exact raw custody and the
+    /// provider-record identity. Its V3 closure has no capsule so a correct
+    /// whole-batch scan must discover the source collision before that local
+    /// capsule error regardless of arena inventory order.
+    #[allow(clippy::too_many_lines)]
+    fn append_source_only_missing_capsule_projection(
+        store: &mut Store,
+        database: &Path,
+        first_reservation_record_id: &Sha256Digest,
+        malformed_before_first: bool,
+    ) -> SourceOnlyPendingProjection {
+        let first_arena = CustodyArena::open_by_reservation(database, first_reservation_record_id)
+            .expect("open first source arena")
+            .expect("first source arena exists");
+        let first_acquisition = first_arena
+            .acquisition_for_projection()
+            .expect("reopen first physical acquisition");
+        let first_closure_bytes = first_arena
+            .final_v2_closure_bytes()
+            .expect("read first V3 closure")
+            .expect("first V3 closure exists");
+        drop(first_arena);
+
+        let (suffix, reservation_record_id) = ordered_test_digest(
+            if malformed_before_first {
+                "source-collision-before"
+            } else {
+                "source-collision-after"
+            },
+            first_reservation_record_id,
+            malformed_before_first,
+        );
+        let native_prelaunch = authenticated_native_prelaunch_fixture(&suffix);
+        let dependency = native_prelaunch.dependency.clone();
+        let dependency_custody_digest =
+            Sha256Digest::parse(dependency.canonical_custody.digest().to_owned())
+                .expect("source-only dependency custody digest");
+        let predecessor = store
+            .runtime_ledger_checkpoint()
+            .expect("source-only runtime frontier")
+            .expect("first pending source has a launch checkpoint");
+        let outer_request_id = format!("outer-request-{suffix}");
+        let outer_request = governed_runtime_record(
+            typed_digest(&format!("outer-request-record-{suffix}")),
+            "nq.diagnostic_invocation_request.v1",
+            json!({
+                "schema": "nq.diagnostic_invocation_request.v1",
+                "request_id": outer_request_id,
+                "authentication_evidence":
+                    native_prelaunch.authentication_evidence.clone(),
+                "invocation_authorization":
+                    governed_record_reference(&native_prelaunch.invocation_authorization),
+            }),
+        );
+        let invocation_decision = governed_runtime_record(
+            typed_digest(&format!("invocation-decision-{suffix}")),
+            "nq.invocation_decision.v1",
+            json!({
+                "schema": "nq.invocation_decision.v1",
+                "decision": "accepted",
+                "authentication_evidence":
+                    native_prelaunch.authentication_evidence.clone(),
+                "invocation_authorization":
+                    governed_record_reference(&native_prelaunch.invocation_authorization),
+            }),
+        );
+        let dependency_capacity = 65_536_u64;
+        let raw_capacity = 65_536_u64;
+        let diagnostic_capacity = 65_536_u64;
+        let projection_capsule_capacity = 65_536_u64;
+        let final_capacity = 196_608_u64;
+        let reserved_bytes = dependency_capacity
+            .checked_add(raw_capacity)
+            .and_then(|subtotal| subtotal.checked_add(final_capacity))
+            .expect("source-only reservation capacity");
+        let reservation_record = governed_runtime_record(
+            reservation_record_id.clone(),
+            "nq.custody_reservation.v1",
+            json!({
+                "schema": "nq.custody_reservation.v1",
+                "reservation": suffix,
+                "component_bounds": {
+                    "diagnostic_artifact_bytes": diagnostic_capacity,
+                    "raw_evidence_bytes": raw_capacity,
+                    "dependency_closure_bytes": dependency_capacity,
+                    "projected_bytes": projection_capsule_capacity,
+                },
+                "reserved_bytes": reserved_bytes,
+                "reservation_commit": native_prelaunch.custody_commit.clone(),
+            }),
+        );
+        let reservation_checkpoint_id =
+            typed_digest(&format!("reservation-checkpoint-{suffix}")).into_string();
+        let reservation_batch = RuntimeRecordBatchInput {
+            checkpoint_id: reservation_checkpoint_id.clone(),
+            expected_predecessor_checkpoint_id: Some(predecessor.checkpoint_id.clone()),
+            expected_predecessor_ledger_root: Some(predecessor.checkpoint_ledger_root.clone()),
+            dependency: dependency.clone(),
+            records: vec![
+                outer_request.clone(),
+                invocation_decision.clone(),
+                reservation_record.clone(),
+                native_prelaunch.invocation_authorization.clone(),
+                native_prelaunch.activation.clone(),
+                native_prelaunch.clock_qualification.clone(),
+            ],
+        };
+        let reservation_batch_digest = runtime_record_batch_digest(&reservation_batch)
+            .expect("source-only reservation digest");
+        let reservation = GovernedCustodyReservation {
+            reservation_record_id: reservation_record_id.clone(),
+            reservation_manifest_digest: Sha256Digest::parse(
+                reservation_record.canonical_bytes.digest().to_owned(),
+            )
+            .expect("source-only reservation manifest digest"),
+            outer_request_record_id: Sha256Digest::parse(outer_request.record_id.clone())
+                .expect("source-only outer request record identity"),
+            outer_request_id: outer_request_id.clone(),
+            outer_request_digest: Sha256Digest::parse(
+                outer_request.canonical_bytes.digest().to_owned(),
+            )
+            .expect("source-only outer request digest"),
+            dependency_generation_id: dependency.dependency_generation_id.clone(),
+            dependency_generation_custody_digest: dependency_custody_digest.clone(),
+            trust_anchor_id: dependency.trust_anchor_id.clone(),
+            prelaunch_checkpoint_id: Sha256Digest::parse(reservation_checkpoint_id.clone())
+                .expect("source-only reservation checkpoint identity"),
+            prelaunch_checkpoint_digest: reservation_batch_digest,
+            dependency_closure_capacity_bytes: dependency_capacity,
+            raw_capacity_bytes: raw_capacity,
+            diagnostic_artifact_capacity_bytes: diagnostic_capacity,
+            projection_capsule_capacity_bytes: projection_capsule_capacity,
+            final_capacity_bytes: final_capacity,
+            protected_failure_capacity_bytes: 16_384,
+        };
+        let mut custody = store
+            .reserve_governed_custody(reservation, dependency.canonical_custody.as_bytes())
+            .expect("reserve second physical source arena");
+        let reservation_transaction = store
+            .immediate_recovery_transaction()
+            .expect("second reservation recovery transaction");
+        let reservation_receipt =
+            append_runtime_records_in_transaction(&reservation_transaction, &reservation_batch)
+                .expect("append second reservation checkpoint");
+        reservation_transaction
+            .commit()
+            .expect("commit second reservation checkpoint");
+
+        let deadline = governed_runtime_record(
+            typed_digest(&format!("deadline-evaluation-{suffix}")),
+            "nq.deadline_evaluation.v1",
+            json!({
+                "schema": "nq.deadline_evaluation.v1",
+                "outer_request": governed_record_reference(&outer_request),
+                "activation": governed_record_reference(&native_prelaunch.activation),
+                "clock_qualification":
+                    governed_record_reference(&native_prelaunch.clock_qualification),
+                "clock": {"fixture": "boottime-realtime-bridge"},
+                "request_bounds": {
+                    "maximum_execution_ms": 1_000,
+                },
+                "sample": {
+                    "boot_epoch": typed_digest(&format!("boot-epoch-{suffix}")),
+                    "boottime_at_ns": "1000000000",
+                },
+                "derived": {
+                    "launched_at": TIME,
+                    "attempt_deadline": "2026-07-30T00:00:01Z",
+                    "boottime_expiry_ns": "2000000000",
+                },
+                "decision": {
+                    "state": "accepted",
+                    "violations": [],
+                },
+            }),
+        );
+        let launch = governed_runtime_record(
+            typed_digest(&format!("execution-launch-{suffix}")),
+            "nq.execution_launch.v1",
+            json!({
+                "schema": "nq.execution_launch.v1",
+                "status": "launched",
+                "launched_at": TIME,
+                "attempt_deadline": "2026-07-30T00:00:01Z",
+                "maximum_execution_ms": 1_000,
+                "clock": {"fixture": "boottime-realtime-bridge"},
+                "outer_request": governed_record_reference(&outer_request),
+                "invocation_decision": governed_record_reference(&invocation_decision),
+                "custody_reservation": governed_record_reference(&reservation_record),
+                "activation_snapshot":
+                    governed_record_reference(&native_prelaunch.activation),
+                "prelaunch_checks": {
+                    "authentication": native_prelaunch.authentication_evidence.clone(),
+                    "invocation_authorization":
+                        governed_record_reference(&native_prelaunch.invocation_authorization),
+                    "generation_match": native_prelaunch.generation_match.clone(),
+                    "deadline": governed_record_reference(&deadline),
+                    "capability": native_prelaunch.capability.clone(),
+                    "custody": native_prelaunch.custody_commit.clone(),
+                },
+            }),
+        );
+        let launch_checkpoint_id =
+            typed_digest(&format!("launch-checkpoint-{suffix}")).into_string();
+        let launch_batch = RuntimeRecordBatchInput {
+            checkpoint_id: launch_checkpoint_id.clone(),
+            expected_predecessor_checkpoint_id: Some(reservation_receipt.checkpoint.checkpoint_id),
+            expected_predecessor_ledger_root: Some(
+                reservation_receipt.checkpoint.checkpoint_ledger_root,
+            ),
+            dependency: dependency.clone(),
+            records: vec![deadline, launch.clone()],
+        };
+        let launch_transaction = store
+            .immediate_recovery_transaction()
+            .expect("second launch recovery transaction");
+        append_runtime_records_in_transaction(&launch_transaction, &launch_batch)
+            .expect("append second launch checkpoint");
+        launch_transaction
+            .commit()
+            .expect("commit second launch checkpoint");
+        let launch_record_id =
+            Sha256Digest::parse(launch.record_id).expect("source-only launch record identity");
+        custody
+            .claim_launch(launch_record_id.clone(), TIME.to_owned())
+            .expect("claim second physical launch");
+
+        let mut provider_value: Value =
+            serde_json::from_slice(&first_acquisition.exact_provider_intake_bytes)
+                .expect("decode first provider source");
+        let second_raw = format!("distinct exact provider bytes for {suffix}\n").into_bytes();
+        provider_value["raw_length"] = json!(second_raw.len());
+        provider_value["raw_sha256"] = json!(nq_protocol::sha256_bytes(&second_raw));
+        let second_provider_bytes = nq_protocol::canonical_json_bytes(&provider_value)
+            .expect("canonical second provider source");
+        let provider_intake_record_id = nq_protocol::sha256_bytes(&second_provider_bytes);
+        assert_ne!(
+            provider_intake_record_id, first_acquisition.provider_intake_record_id,
+            "source hostile requires different physical provider-record identities"
+        );
+        custody
+            .seal_acquisition(GovernedAcquisitionCustodyInput {
+                execution_launch_record_id: launch_record_id,
+                provider_intake_record_id: provider_intake_record_id.clone(),
+                exact_provider_intake_bytes: second_provider_bytes,
+                exact_raw_provider_bytes: second_raw,
+            })
+            .expect("seal second physical provider source");
+        custody
+            .claim_derivation(GovernedDerivationCustodyClaim {
+                derivation_id: typed_digest(&format!("derivation-{suffix}")),
+                dependency_generation_id: dependency.dependency_generation_id,
+                dependency_generation_custody_digest: dependency_custody_digest,
+                trust_anchor_id: dependency.trust_anchor_id,
+                evaluation_id: None,
+                profile_semantic_id: typed_digest(&format!("profile-semantic-{suffix}")),
+                evaluator_identity_digest: typed_digest(&format!("evaluator-identity-{suffix}")),
+                evaluator_artifact_digest: typed_digest(&format!("evaluator-artifact-{suffix}")),
+                derived_at: TIME.to_owned(),
+                clock_identity: typed_digest(&format!("clock-{suffix}")),
+                clock_qualification_digest: typed_digest(&format!("clock-qualification-{suffix}")),
+            })
+            .expect("claim second derivation occurrence");
+
+        let mut missing_capsule_closure: Value =
+            serde_json::from_slice(&first_closure_bytes).expect("decode first V3 closure");
+        let closure_object = missing_capsule_closure
+            .as_object_mut()
+            .expect("first V3 closure is an object");
+        closure_object.remove("closure_id");
+        closure_object.remove("projection_capsule");
+        let closure_id = nq_protocol::semantic_digest(&missing_capsule_closure)
+            .expect("source-only missing-capsule closure identity");
+        missing_capsule_closure
+            .as_object_mut()
+            .expect("source-only closure remains an object")
+            .insert("closure_id".to_owned(), json!(closure_id));
+        custody
+            .seal_final_closure(
+                nq_protocol::canonical_json_bytes(&missing_capsule_closure)
+                    .expect("canonical source-only missing-capsule closure"),
+            )
+            .expect("seal second missing-capsule closure");
+
+        SourceOnlyPendingProjection {
+            reservation_record_id,
+            provider_intake_record_id,
+            reservation_checkpoint_id,
+            launch_checkpoint_id,
+        }
+    }
+
+    fn spawn_abrupt_governed_projection(parent: &Path, mode: &str) -> Value {
+        let manifest_path = parent.join(format!("{mode}.json"));
+        let status = Command::new(std::env::current_exe().expect("test executable"))
+            .arg("--exact")
+            .arg("tests::abrupt_governed_projection_child")
+            .arg("--nocapture")
+            .env(ABRUPT_GOVERNED_PROJECTION_MODE, mode)
+            .env(ABRUPT_GOVERNED_PROJECTION_MANIFEST, &manifest_path)
+            .env("TMPDIR", parent)
+            .status()
+            .expect("spawn abrupt governed projection child");
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGKILL),
+            "{mode} child must terminate by SIGKILL, not skip or return"
+        );
+        let manifest_bytes =
+            std::fs::read(&manifest_path).expect("read abrupt projection manifest");
+        serde_json::from_slice(&manifest_bytes).expect("decode abrupt projection manifest")
+    }
+
+    fn pending_v3_projection_dependency_generation(
+        store: &Store,
+        reservation_record_id: &str,
+    ) -> String {
+        store
+            .connection
+            .query_row(
+                "SELECT binding.dependency_generation_id
+                 FROM runtime_record_ledger AS record
+                 JOIN runtime_checkpoint_dependency_bindings AS binding
+                   ON binding.checkpoint_id = record.checkpoint_id
+                 WHERE record.record_id = ?1",
+                [reservation_record_id],
+                |row| row.get(0),
+            )
+            .expect("pending V3 reservation dependency generation")
+    }
+
+    fn apply_pending_v3_physical_source_mutation(
+        manifest: &Value,
+        mutation: PendingV3PhysicalSourceMutation,
+    ) {
+        if matches!(
+            mutation,
+            PendingV3PhysicalSourceMutation::None
+                | PendingV3PhysicalSourceMutation::Legacy(_)
+                | PendingV3PhysicalSourceMutation::Pc03DecisionNotAccepted
+                | PendingV3PhysicalSourceMutation::Pc04NativeLaunchPredicate(_)
+        ) {
+            return;
+        }
+        let database = PathBuf::from(manifest_string(manifest, "database_path"));
+        let reservation_record_id =
+            Sha256Digest::parse(manifest_string(manifest, "reservation_record_id").to_owned())
+                .expect("pending V3 physical-source reservation identity");
+        let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+            .expect("open pending V3 physical-source arena")
+            .expect("pending V3 physical-source arena exists");
+        let inspection = arena
+            .inspection()
+            .expect("inspect pending V3 physical-source arena");
+        let reservation_checkpoint_id = inspection.prelaunch.prelaunch_checkpoint_id.into_string();
+        let execution_launch_record_id = inspection
+            .execution_launch_record_id
+            .expect("pending V3 physical-source launch identity")
+            .into_string();
+        drop(arena);
+        let store = Store::open(&database).expect("open pending V3 physical-source store");
+        let launch_checkpoint_id: String = store
+            .connection
+            .query_row(
+                "SELECT checkpoint_id FROM runtime_record_ledger WHERE record_id = ?1",
+                [&execution_launch_record_id],
+                |row| row.get(0),
+            )
+            .expect("pending V3 physical-source launch checkpoint identity");
+        match mutation {
+            PendingV3PhysicalSourceMutation::Pc03ReservationCheckpointMissing
+            | PendingV3PhysicalSourceMutation::Pc04LaunchCheckpointMissing => {
+                let trigger: String = store
+                    .connection
+                    .query_row(
+                        "SELECT sql FROM sqlite_schema
+                         WHERE type = 'trigger'
+                           AND name = 'immutable_runtime_record_checkpoints_delete'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .expect("pending V3 checkpoint delete trigger");
+                store
+                    .connection
+                    .execute_batch(
+                        "DROP TRIGGER immutable_runtime_record_checkpoints_delete;
+                         PRAGMA foreign_keys = OFF;",
+                    )
+                    .expect("permit pending V3 checkpoint deletion");
+                store
+                    .connection
+                    .execute(
+                        "DELETE FROM runtime_record_checkpoints WHERE checkpoint_id = ?1",
+                        [
+                            if matches!(
+                                mutation,
+                                PendingV3PhysicalSourceMutation::Pc03ReservationCheckpointMissing
+                            ) {
+                                &reservation_checkpoint_id
+                            } else {
+                                &launch_checkpoint_id
+                            },
+                        ],
+                    )
+                    .expect("remove pending V3 physical-source checkpoint");
+                store
+                    .connection
+                    .execute_batch("PRAGMA foreign_keys = ON;")
+                    .expect("restore pending V3 foreign keys");
+                store
+                    .connection
+                    .execute_batch(&trigger)
+                    .expect("restore pending V3 checkpoint delete trigger");
+            }
+            PendingV3PhysicalSourceMutation::Pc03ReservationCheckpointCorrupt
+            | PendingV3PhysicalSourceMutation::Pc04LaunchCheckpointCorrupt => {
+                let trigger: String = store
+                    .connection
+                    .query_row(
+                        "SELECT sql FROM sqlite_schema
+                         WHERE type = 'trigger'
+                           AND name = 'immutable_runtime_record_checkpoints_update'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .expect("pending V3 checkpoint update trigger");
+                store
+                    .connection
+                    .execute_batch("DROP TRIGGER immutable_runtime_record_checkpoints_update;")
+                    .expect("permit pending V3 checkpoint corruption");
+                store
+                    .connection
+                    .execute(
+                        "UPDATE runtime_record_checkpoints
+                         SET batch_digest = ?1
+                         WHERE checkpoint_id = ?2",
+                        params![
+                            typed_digest("pending-v3-corrupt-physical-checkpoint").as_str(),
+                            if matches!(
+                                mutation,
+                                PendingV3PhysicalSourceMutation::Pc03ReservationCheckpointCorrupt
+                            ) {
+                                &reservation_checkpoint_id
+                            } else {
+                                &launch_checkpoint_id
+                            },
+                        ],
+                    )
+                    .expect("corrupt pending V3 physical-source checkpoint");
+                store
+                    .connection
+                    .execute_batch(&trigger)
+                    .expect("restore pending V3 checkpoint update trigger");
+            }
+            PendingV3PhysicalSourceMutation::Pc04LaunchPredecessorCheckpointIdCorrupt
+            | PendingV3PhysicalSourceMutation::Pc04LaunchPredecessorLedgerRootCorrupt => {
+                let trigger: String = store
+                    .connection
+                    .query_row(
+                        "SELECT sql FROM sqlite_schema
+                         WHERE type = 'trigger'
+                           AND name = 'immutable_runtime_record_checkpoints_update'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .expect("pending V3 checkpoint update trigger");
+                store
+                    .connection
+                    .execute_batch(
+                        "DROP TRIGGER immutable_runtime_record_checkpoints_update;
+                         PRAGMA foreign_keys = OFF;",
+                    )
+                    .expect("permit pending V3 predecessor corruption");
+                if matches!(
+                    mutation,
+                    PendingV3PhysicalSourceMutation::Pc04LaunchPredecessorCheckpointIdCorrupt
+                ) {
+                    store
+                        .connection
+                        .execute(
+                            "UPDATE runtime_record_checkpoints
+                             SET predecessor_checkpoint_id = ?1
+                             WHERE checkpoint_id = ?2",
+                            params![
+                                typed_digest("pc04-corrupt-launch-predecessor-checkpoint").as_str(),
+                                launch_checkpoint_id,
+                            ],
+                        )
+                        .expect("corrupt pending V3 launch predecessor identity");
+                } else {
+                    store
+                        .connection
+                        .execute(
+                            "UPDATE runtime_record_checkpoints
+                             SET predecessor_ledger_root = ?1
+                             WHERE checkpoint_id = ?2",
+                            params![
+                                typed_digest("pc04-corrupt-launch-predecessor-root").as_str(),
+                                launch_checkpoint_id,
+                            ],
+                        )
+                        .expect("corrupt pending V3 launch predecessor root");
+                }
+                store
+                    .connection
+                    .execute_batch("PRAGMA foreign_keys = ON;")
+                    .expect("restore pending V3 predecessor foreign keys");
+                store
+                    .connection
+                    .execute_batch(&trigger)
+                    .expect("restore pending V3 checkpoint update trigger");
+            }
+            PendingV3PhysicalSourceMutation::None
+            | PendingV3PhysicalSourceMutation::Legacy(_)
+            | PendingV3PhysicalSourceMutation::Pc03DecisionNotAccepted
+            | PendingV3PhysicalSourceMutation::Pc04NativeLaunchPredicate(_)
+            | PendingV3PhysicalSourceMutation::R0bOperationAuthorizationMissing
+            | PendingV3PhysicalSourceMutation::R0bOperationAuthorizationDuplicate
+            | PendingV3PhysicalSourceMutation::R0bOperationAuthorizationBytesMismatch
+            | PendingV3PhysicalSourceMutation::R0bRequestLaunchAuthenticationMismatch
+            | PendingV3PhysicalSourceMutation::R0bRequestDecisionAuthenticationMismatch
+            | PendingV3PhysicalSourceMutation::R0bRequestLaunchAuthorizationMismatch
+            | PendingV3PhysicalSourceMutation::R0bRequestDecisionAuthorizationMismatch
+            | PendingV3PhysicalSourceMutation::R0bReservationLaunchCustodyMismatch
+            | PendingV3PhysicalSourceMutation::R0bGenerationReferenceMalformed
+            | PendingV3PhysicalSourceMutation::R0bLaunchDependencyBindingDifferent
+            | PendingV3PhysicalSourceMutation::R0bArenaDependencyBytesDifferentFromSql => {}
+        }
+    }
+
+    fn apply_pending_v3_post_seal_sql_mutation(
+        manifest: &Value,
+        mutation: PendingV3PostSealSqlMutation,
+    ) {
+        if matches!(
+            mutation,
+            PendingV3PostSealSqlMutation::None | PendingV3PostSealSqlMutation::Legacy(_)
+        ) {
+            return;
+        }
+        let database = PathBuf::from(manifest_string(manifest, "database_path"));
+        let store = Store::open(&database).expect("open pending V3 post-seal mutation store");
+        let dependency_generation_id = pending_v3_projection_dependency_generation(
+            &store,
+            manifest_string(manifest, "reservation_record_id"),
+        );
+        match mutation {
+            PendingV3PostSealSqlMutation::DependencyCustodyCommittedUnavailable => {
+                let trigger: String = store
+                    .connection
+                    .query_row(
+                        "SELECT sql FROM sqlite_schema
+                         WHERE type = 'trigger'
+                           AND name =
+                             'immutable_runtime_dependency_generation_payloads_delete'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .expect("pending V3 payload delete trigger");
+                store
+                    .connection
+                    .execute_batch(
+                        "DROP TRIGGER \
+                         immutable_runtime_dependency_generation_payloads_delete;",
+                    )
+                    .expect("drop pending V3 payload delete trigger");
+                store
+                    .connection
+                    .execute(
+                        "DELETE FROM runtime_dependency_generation_payloads
+                         WHERE dependency_generation_id = ?1",
+                        [&dependency_generation_id],
+                    )
+                    .expect("remove pending V3 dependency bytes");
+                store
+                    .connection
+                    .execute_batch(&trigger)
+                    .expect("restore pending V3 payload delete trigger");
+            }
+            PendingV3PostSealSqlMutation::DependencyCustodyCorrupt => {
+                let trigger: String = store
+                    .connection
+                    .query_row(
+                        "SELECT sql FROM sqlite_schema
+                         WHERE type = 'trigger'
+                           AND name =
+                             'immutable_runtime_dependency_generation_payloads_update'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .expect("pending V3 payload update trigger");
+                let original: Vec<u8> = store
+                    .connection
+                    .query_row(
+                        "SELECT canonical_bytes
+                         FROM runtime_dependency_generation_payloads
+                         WHERE dependency_generation_id = ?1",
+                        [&dependency_generation_id],
+                        |row| row.get(0),
+                    )
+                    .expect("pending V3 exact dependency bytes");
+                let mut corrupt: Value =
+                    serde_json::from_slice(&original).expect("pending V3 dependency JSON");
+                corrupt["pending_v3_hostile"] = Value::Bool(true);
+                let corrupt = nq_protocol::canonical_json_bytes(&corrupt)
+                    .expect("canonical pending V3 hostile dependency");
+                store
+                    .connection
+                    .execute_batch(
+                        "DROP TRIGGER \
+                         immutable_runtime_dependency_generation_payloads_update;",
+                    )
+                    .expect("drop pending V3 payload update trigger");
+                store
+                    .connection
+                    .execute(
+                        "UPDATE runtime_dependency_generation_payloads
+                         SET canonical_bytes = ?1
+                         WHERE dependency_generation_id = ?2",
+                        params![corrupt, dependency_generation_id],
+                    )
+                    .expect("substitute pending V3 dependency bytes");
+                store
+                    .connection
+                    .execute_batch(&trigger)
+                    .expect("restore pending V3 payload update trigger");
+            }
+            PendingV3PostSealSqlMutation::None | PendingV3PostSealSqlMutation::Legacy(_) => {}
+        }
+    }
+
+    fn apply_r0b_store_trust_root_substitution(
+        store: &Store,
+        mutation: R0bDependencyFixtureMutation,
+    ) {
+        if !matches!(
+            mutation,
+            R0bDependencyFixtureMutation::SubstitutedTrustRoot(_)
+        ) {
+            return;
+        }
+        let trigger: String = store
+            .connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                 WHERE type = 'trigger'
+                   AND name = 'immutable_runtime_dependency_trust_roots_update'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("R0b trust-root update trigger");
+        store
+            .connection
+            .execute_batch("DROP TRIGGER immutable_runtime_dependency_trust_roots_update;")
+            .expect("drop R0b trust-root update trigger");
+        store
+            .connection
+            .execute(
+                "UPDATE runtime_dependency_trust_roots
+                 SET trust_anchor_id = ?1
+                 WHERE singleton = 1",
+                [typed_digest("r0b-substituted-bootstrap-root").as_str()],
+            )
+            .expect("substitute R0b bootstrap trust root");
+        store
+            .connection
+            .execute_batch(&trigger)
+            .expect("restore R0b trust-root update trigger");
+    }
+
+    fn r0b_immutable_trigger(store: &Store, name: &str) -> String {
+        store
+            .connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                 WHERE type = 'trigger' AND name = ?1",
+                [name],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|error| panic!("read R0b immutable trigger {name}: {error}"))
+    }
+
+    fn r0b_drop_trigger(store: &Store, name: &str) -> String {
+        let sql = r0b_immutable_trigger(store, name);
+        store
+            .connection
+            .execute_batch(&format!("DROP TRIGGER {name};"))
+            .unwrap_or_else(|error| panic!("drop R0b immutable trigger {name}: {error}"));
+        sql
+    }
+
+    fn r0b_restore_trigger(store: &Store, name: &str, sql: &str) {
+        store
+            .connection
+            .execute_batch(sql)
+            .unwrap_or_else(|error| panic!("restore R0b immutable trigger {name}: {error}"));
+    }
+
+    fn apply_r0b_binding_mutation(
+        store: &Store,
+        reservation_checkpoint_id: &str,
+        mutation: R0bBindingMutation,
+    ) {
+        if matches!(mutation, R0bBindingMutation::None) {
+            return;
+        }
+        if matches!(mutation, R0bBindingMutation::BootstrapRootSubstituted) {
+            apply_r0b_store_trust_root_substitution(
+                store,
+                R0bDependencyFixtureMutation::SubstitutedTrustRoot(R0bExternalRole::Authentication),
+            );
+            return;
+        }
+        let dependency_generation_id: String = store
+            .connection
+            .query_row(
+                "SELECT dependency_generation_id
+                 FROM runtime_checkpoint_dependency_bindings
+                 WHERE checkpoint_id = ?1",
+                [reservation_checkpoint_id],
+                |row| row.get(0),
+            )
+            .expect("R0b reservation dependency generation");
+        match mutation {
+            R0bBindingMutation::CommitmentMissing => {
+                let trigger = r0b_drop_trigger(
+                    store,
+                    "immutable_runtime_dependency_generation_commitments_delete",
+                );
+                store
+                    .connection
+                    .execute_batch("PRAGMA foreign_keys = OFF;")
+                    .expect("disable R0b commitment foreign keys");
+                store
+                    .connection
+                    .execute(
+                        "DELETE FROM runtime_dependency_generation_commitments
+                         WHERE dependency_generation_id = ?1",
+                        [&dependency_generation_id],
+                    )
+                    .expect("remove R0b dependency commitment");
+                store
+                    .connection
+                    .execute_batch("PRAGMA foreign_keys = ON;")
+                    .expect("restore R0b commitment foreign keys");
+                r0b_restore_trigger(
+                    store,
+                    "immutable_runtime_dependency_generation_commitments_delete",
+                    &trigger,
+                );
+            }
+            R0bBindingMutation::PayloadMissing => {
+                let trigger = r0b_drop_trigger(
+                    store,
+                    "immutable_runtime_dependency_generation_payloads_delete",
+                );
+                store
+                    .connection
+                    .execute(
+                        "DELETE FROM runtime_dependency_generation_payloads
+                         WHERE dependency_generation_id = ?1",
+                        [&dependency_generation_id],
+                    )
+                    .expect("remove R0b dependency payload");
+                r0b_restore_trigger(
+                    store,
+                    "immutable_runtime_dependency_generation_payloads_delete",
+                    &trigger,
+                );
+            }
+            R0bBindingMutation::PayloadSubstituted => {
+                let trigger = r0b_drop_trigger(
+                    store,
+                    "immutable_runtime_dependency_generation_payloads_update",
+                );
+                let mut substituted: Vec<u8> = store
+                    .connection
+                    .query_row(
+                        "SELECT canonical_bytes
+                         FROM runtime_dependency_generation_payloads
+                         WHERE dependency_generation_id = ?1",
+                        [&dependency_generation_id],
+                        |row| row.get(0),
+                    )
+                    .expect("read exact R0b payload for same-length substitution");
+                let byte = substituted
+                    .iter_mut()
+                    .find(|byte| **byte == b'n')
+                    .expect("R0b payload contains a mutable JSON string byte");
+                *byte = b'm';
+                store
+                    .connection
+                    .execute(
+                        "UPDATE runtime_dependency_generation_payloads
+                         SET canonical_bytes = ?1
+                         WHERE dependency_generation_id = ?2",
+                        params![substituted, dependency_generation_id],
+                    )
+                    .expect("substitute R0b dependency payload");
+                r0b_restore_trigger(
+                    store,
+                    "immutable_runtime_dependency_generation_payloads_update",
+                    &trigger,
+                );
+            }
+            R0bBindingMutation::PayloadNoncanonical => {
+                let payload_trigger = r0b_drop_trigger(
+                    store,
+                    "immutable_runtime_dependency_generation_payloads_update",
+                );
+                let commitment_trigger = r0b_drop_trigger(
+                    store,
+                    "immutable_runtime_dependency_generation_commitments_update",
+                );
+                let binding_trigger = r0b_drop_trigger(
+                    store,
+                    "immutable_runtime_checkpoint_dependency_bindings_update",
+                );
+                store
+                    .connection
+                    .execute_batch("PRAGMA foreign_keys = OFF;")
+                    .expect("disable R0b digest foreign keys");
+                let original: Vec<u8> = store
+                    .connection
+                    .query_row(
+                        "SELECT canonical_bytes
+                         FROM runtime_dependency_generation_payloads
+                         WHERE dependency_generation_id = ?1",
+                        [&dependency_generation_id],
+                        |row| row.get(0),
+                    )
+                    .expect("read exact R0b dependency payload");
+                let value: Value =
+                    serde_json::from_slice(&original).expect("decode R0b dependency payload");
+                let payload =
+                    serde_json::to_vec_pretty(&value).expect("pretty R0b dependency payload");
+                let digest = nq_protocol::sha256_bytes(&payload);
+                let length = i64::try_from(payload.len()).expect("R0b payload length fits i64");
+                store
+                    .connection
+                    .execute(
+                        "UPDATE runtime_dependency_generation_commitments
+                         SET canonical_bytes_sha256 = ?1,
+                             canonical_bytes_length = ?2
+                         WHERE dependency_generation_id = ?3",
+                        params![digest.as_str(), length, dependency_generation_id],
+                    )
+                    .expect("update R0b dependency commitment digest");
+                store
+                    .connection
+                    .execute(
+                        "UPDATE runtime_checkpoint_dependency_bindings
+                         SET canonical_bytes_sha256 = ?1
+                         WHERE dependency_generation_id = ?2",
+                        params![digest.as_str(), dependency_generation_id],
+                    )
+                    .expect("update R0b checkpoint dependency digests");
+                store
+                    .connection
+                    .execute(
+                        "UPDATE runtime_dependency_generation_payloads
+                         SET canonical_bytes = ?1
+                         WHERE dependency_generation_id = ?2",
+                        params![payload, dependency_generation_id],
+                    )
+                    .expect("install noncanonical R0b dependency payload");
+                store
+                    .connection
+                    .execute_batch("PRAGMA foreign_keys = ON;")
+                    .expect("restore R0b digest foreign keys");
+                r0b_restore_trigger(
+                    store,
+                    "immutable_runtime_dependency_generation_payloads_update",
+                    &payload_trigger,
+                );
+                r0b_restore_trigger(
+                    store,
+                    "immutable_runtime_dependency_generation_commitments_update",
+                    &commitment_trigger,
+                );
+                r0b_restore_trigger(
+                    store,
+                    "immutable_runtime_checkpoint_dependency_bindings_update",
+                    &binding_trigger,
+                );
+            }
+            R0bBindingMutation::CustodyDigestSubstituted => {
+                let trigger = r0b_drop_trigger(
+                    store,
+                    "immutable_runtime_dependency_generation_commitments_update",
+                );
+                store
+                    .connection
+                    .execute_batch("PRAGMA foreign_keys = OFF;")
+                    .expect("disable R0b commitment-digest foreign keys");
+                store
+                    .connection
+                    .execute(
+                        "UPDATE runtime_dependency_generation_commitments
+                         SET canonical_bytes_sha256 = ?1
+                         WHERE dependency_generation_id = ?2",
+                        params![
+                            typed_digest("r0b-substituted-custody-digest").as_str(),
+                            dependency_generation_id
+                        ],
+                    )
+                    .expect("substitute R0b commitment custody digest");
+                store
+                    .connection
+                    .execute_batch("PRAGMA foreign_keys = ON;")
+                    .expect("restore R0b commitment-digest foreign keys");
+                r0b_restore_trigger(
+                    store,
+                    "immutable_runtime_dependency_generation_commitments_update",
+                    &trigger,
+                );
+            }
+            R0bBindingMutation::ReservationBindingMissing => {
+                let trigger = r0b_drop_trigger(
+                    store,
+                    "immutable_runtime_checkpoint_dependency_bindings_delete",
+                );
+                store
+                    .connection
+                    .execute(
+                        "DELETE FROM runtime_checkpoint_dependency_bindings
+                         WHERE checkpoint_id = ?1",
+                        [reservation_checkpoint_id],
+                    )
+                    .expect("remove R0b reservation dependency binding");
+                r0b_restore_trigger(
+                    store,
+                    "immutable_runtime_checkpoint_dependency_bindings_delete",
+                    &trigger,
+                );
+            }
+            R0bBindingMutation::CustodyLengthSubstituted => {
+                let trigger = r0b_drop_trigger(
+                    store,
+                    "immutable_runtime_dependency_generation_payloads_update",
+                );
+                let mut payload: Vec<u8> = store
+                    .connection
+                    .query_row(
+                        "SELECT canonical_bytes
+                         FROM runtime_dependency_generation_payloads
+                         WHERE dependency_generation_id = ?1",
+                        [&dependency_generation_id],
+                        |row| row.get(0),
+                    )
+                    .expect("read R0b payload for length mutation");
+                payload.push(b' ');
+                store
+                    .connection
+                    .execute(
+                        "UPDATE runtime_dependency_generation_payloads
+                         SET canonical_bytes = ?1
+                         WHERE dependency_generation_id = ?2",
+                        params![payload, dependency_generation_id],
+                    )
+                    .expect("substitute R0b dependency payload length");
+                r0b_restore_trigger(
+                    store,
+                    "immutable_runtime_dependency_generation_payloads_update",
+                    &trigger,
+                );
+            }
+            R0bBindingMutation::None | R0bBindingMutation::BootstrapRootSubstituted => {
+                unreachable!("R0b no-op/root mutations returned before SQL mutation")
+            }
+        }
+    }
+
+    fn spawn_pending_v3_fixture(parent: &Path, label: &str, spec: PendingV3FixtureSpec) -> Value {
+        assert!(
+            !matches!(spec.claim_mutation, PendingV3ClaimMutation::Legacy(_))
+                && !matches!(
+                    spec.physical_source_mutation,
+                    PendingV3PhysicalSourceMutation::Legacy(_)
+                )
+                && !matches!(
+                    spec.post_seal_sql_mutation,
+                    PendingV3PostSealSqlMutation::Legacy(_)
+                )
+                && !matches!(spec.crash_window, PendingV3CrashWindow::Legacy(_)),
+            "typed pending V3 fixtures cannot contain legacy adapters"
+        );
+        let crash_mode = match spec.crash_window {
+            PendingV3CrashWindow::AfterFinalSealBeforeSql => "after-final-seal-before-sql",
+            PendingV3CrashWindow::AfterSqlBeforeIndexMark => "after-sql-before-index-mark",
+            PendingV3CrashWindow::Legacy(_) => unreachable!("legacy rejected above"),
+        };
+        let manifest_path = parent.join(format!("{label}.json"));
+        let status = Command::new(std::env::current_exe().expect("test executable"))
+            .arg("--exact")
+            .arg("tests::abrupt_governed_projection_child")
+            .arg("--nocapture")
+            .env(ABRUPT_GOVERNED_PROJECTION_MODE, crash_mode)
+            .env(ABRUPT_GOVERNED_PROJECTION_MANIFEST, &manifest_path)
+            .env(
+                PENDING_V3_FIXTURE_CLAIM_MUTATION,
+                spec.claim_mutation.env_name(),
+            )
+            .env(
+                PENDING_V3_FIXTURE_PHYSICAL_SOURCE_MUTATION,
+                spec.physical_source_mutation.env_name(),
+            )
+            .env(
+                PENDING_V3_FIXTURE_POST_SEAL_SQL_MUTATION,
+                spec.post_seal_sql_mutation.env_name(),
+            )
+            .env(
+                PENDING_V3_FIXTURE_DEPENDENCY_MUTATION,
+                spec.dependency_fixture_mutation.env_name(),
+            )
+            .env("TMPDIR", parent)
+            .status()
+            .expect("spawn typed pending V3 child");
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGKILL),
+            "{label} child must terminate by SIGKILL, not skip or return"
+        );
+        let manifest_bytes = std::fs::read(&manifest_path).expect("read typed pending V3 manifest");
+        let manifest: Value =
+            serde_json::from_slice(&manifest_bytes).expect("decode typed pending V3 manifest");
+        apply_pending_v3_post_seal_sql_mutation(&manifest, spec.post_seal_sql_mutation);
+        manifest
+    }
+
+    fn assert_abrupt_projection_durably_refuses(
+        parent: &Path,
+        mode: &str,
+        expected_reason_fragment: &str,
+    ) -> (Sha256Digest, Sha256Digest, String) {
+        let manifest = spawn_abrupt_governed_projection(parent, mode);
+        assert_projection_manifest_durably_refuses(&manifest, mode, expected_reason_fragment)
+    }
+
+    fn assert_projection_manifest_durably_refuses(
+        manifest: &Value,
+        label: &str,
+        expected_reason_fragment: &str,
+    ) -> (Sha256Digest, Sha256Digest, String) {
+        let mode = label;
+        let database = PathBuf::from(manifest_string(manifest, "database_path"));
+        let reservation_record_id =
+            Sha256Digest::parse(manifest_string(manifest, "reservation_record_id").to_owned())
+                .expect("manifest reservation identity");
+        let expected_closure_digest =
+            Sha256Digest::parse(manifest_string(manifest, "closure_bytes_digest").to_owned())
+                .expect("manifest closure digest");
+        let expected_closure_length = manifest["closure_byte_length"]
+            .as_u64()
+            .expect("manifest closure length");
+        let mut store = Store::open(&database).expect("open hostile projection store");
+        assert_governed_projection_pending(&store, &reservation_record_id);
+        let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+            .expect("open hostile pending arena")
+            .expect("hostile pending arena exists");
+        let exact_final_before = arena
+            .final_v2_closure_bytes()
+            .expect("read hostile final closure")
+            .expect("hostile final closure exists");
+        assert!(
+            arena
+                .protected_failure_bytes()
+                .expect("inspect pre-refusal carrier")
+                .is_none()
+        );
+        drop(arena);
+        let logical_before = logical_state_digest(
+            &store.connection,
+            b"nq.test.projection-refusal-no-sql-delta.v1\0",
+        )
+        .expect("pre-refusal logical state");
+        let recovered = store
+            .recover_pending_governed_projections()
+            .expect("terminalize exact projection-local mismatch");
+        let [
+            GovernedProjectionRecovery::CorrespondenceRefused {
+                reservation_record_id: refused_reservation,
+                refusal_id,
+                reason,
+            },
+        ] = recovered.as_slice()
+        else {
+            panic!("{mode} produced unexpected recovery: {recovered:?}");
+        };
+        assert_eq!(refused_reservation, &reservation_record_id, "{mode}");
+        assert!(
+            reason.contains(expected_reason_fragment),
+            "{mode} refusal reason {reason:?} lacks {expected_reason_fragment:?}"
+        );
+        assert_eq!(
+            logical_state_digest(
+                &store.connection,
+                b"nq.test.projection-refusal-no-sql-delta.v1\0",
+            )
+            .expect("post-refusal logical state"),
+            logical_before,
+            "{mode} must append no SQL row and advance no SQLite allocator"
+        );
+        let refused = store
+            .governed_custody_inventory()
+            .expect("projection-refused inventory")
+            .into_iter()
+            .find_map(|entry| match entry {
+                GovernedCustodyInventoryEntry::Verified(frontier)
+                    if frontier.reservation_record_id == reservation_record_id =>
+                {
+                    Some(frontier)
+                }
+                _ => None,
+            })
+            .expect("projection-refused frontier");
+        assert_eq!(
+            refused.recovery_class,
+            GovernedCustodyRecoveryClass::FinalClosureProjectionRefused,
+            "{mode}"
+        );
+        assert_eq!(
+            refused
+                .final_closure
+                .as_ref()
+                .map(|closure| (closure.bytes_digest.clone(), closure.byte_length)),
+            Some((expected_closure_digest.clone(), expected_closure_length)),
+            "{mode} refusal must retain the exact historical closure"
+        );
+        let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+            .expect("reopen hostile refused arena")
+            .expect("hostile refused arena exists");
+        assert_eq!(
+            arena
+                .final_v2_closure_bytes()
+                .expect("reopen hostile final closure")
+                .as_deref(),
+            Some(exact_final_before.as_slice()),
+            "{mode} changed the exact final bytes"
+        );
+        let exact_refusal_bytes = arena
+            .protected_failure_bytes()
+            .expect("read exact hostile refusal")
+            .expect("hostile refusal carrier exists");
+        drop(arena);
+        let refusal_value: Value =
+            serde_json::from_slice(&exact_refusal_bytes).expect("decode hostile refusal carrier");
+        assert_eq!(
+            nq_protocol::canonical_json_bytes(&refusal_value)
+                .expect("canonicalize hostile refusal"),
+            exact_refusal_bytes,
+            "{mode} refusal carrier is not canonical"
+        );
+        assert_eq!(
+            refusal_value["schema"],
+            "nq.governed_projection_correspondence_refusal.v1"
+        );
+        assert_eq!(
+            refusal_value["reservation_record_id"],
+            reservation_record_id.as_str()
+        );
+        assert_eq!(
+            refusal_value["final_closure"]["bytes_digest"],
+            expected_closure_digest.as_str()
+        );
+        assert_eq!(
+            refusal_value["final_closure"]["byte_length"],
+            expected_closure_length
+        );
+        assert_eq!(
+            refusal_value["reason"]["code"],
+            "exact_correspondence_refused"
+        );
+        let mut refusal_preimage = refusal_value
+            .as_object()
+            .cloned()
+            .expect("hostile refusal is an object");
+        refusal_preimage.remove("refusal_id");
+        assert_eq!(
+            nq_protocol::semantic_digest(&refusal_preimage)
+                .expect("recompute hostile refusal identity"),
+            *refusal_id,
+            "{mode} refusal identity does not recompute"
+        );
+        drop(store);
+        let mut store =
+            Store::open(&database).expect("reopen projection-refused store after restart");
+        let repeated = store
+            .recover_governed_projection_and_mark_indexed(&reservation_record_id)
+            .expect("reopen exact durable refusal");
+        assert!(
+            matches!(
+                repeated,
+                GovernedProjectionRecovery::CorrespondenceRefused {
+                    reservation_record_id: ref repeated_reservation,
+                    refusal_id: ref repeated_refusal,
+                    reason: ref repeated_reason,
+                } if repeated_reservation == &reservation_record_id
+                    && repeated_refusal == refusal_id
+                    && repeated_reason == reason
+            ),
+            "{mode} repeat recovery changed its refusal: {repeated:?}"
+        );
+        let repeated_arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+            .expect("reopen repeated hostile arena")
+            .expect("repeated hostile arena exists");
+        assert_eq!(
+            repeated_arena
+                .protected_failure_bytes()
+                .expect("reopen repeated refusal bytes")
+                .as_deref(),
+            Some(exact_refusal_bytes.as_slice()),
+            "{mode} repeated refusal changed its exact carrier"
+        );
+        drop(repeated_arena);
+        let profile_digest: String = store
+            .connection
+            .query_row(
+                "SELECT profile_digest FROM profile_descriptor_snapshots
+                 WHERE profile_id = 'fixture.health' AND profile_version = '1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("fixture profile digest");
+        let unrelated = rejected_fixture_collection(&mut store, "fixture-a", mode, &profile_digest);
+        assert!(matches!(
+            store
+                .commit_non_success_collection(
+                    &unrelated,
+                    &non_success_status(&unrelated.run.run_id, &unrelated.run.instance_id, mode,),
+                )
+                .expect("unrelated writer progresses after terminal refusal"),
+            ProviderIntakeCommit::Committed { .. }
+        ));
+        (reservation_record_id, refusal_id.clone(), reason.clone())
+    }
+
+    fn assert_pending_v3_projection_durably_refuses(
+        parent: &Path,
+        label: &str,
+        spec: PendingV3FixtureSpec,
+        expected_reason_fragment: &str,
+    ) -> (Sha256Digest, Sha256Digest, String) {
+        let manifest = spawn_pending_v3_fixture(parent, label, spec);
+        assert_projection_manifest_durably_refuses(&manifest, label, expected_reason_fragment)
+    }
+
+    fn assert_pending_v3_projection_remains_global(
+        parent: &Path,
+        label: &str,
+        spec: PendingV3FixtureSpec,
+        expected_reason_fragment: &str,
+    ) {
+        assert!(
+            !matches!(
+                spec.physical_source_mutation,
+                PendingV3PhysicalSourceMutation::None | PendingV3PhysicalSourceMutation::Legacy(_)
+            ) || !matches!(
+                spec.post_seal_sql_mutation,
+                PendingV3PostSealSqlMutation::None | PendingV3PostSealSqlMutation::Legacy(_)
+            ) || !matches!(
+                spec.dependency_fixture_mutation,
+                R0bDependencyFixtureMutation::Exact
+            ),
+            "global precedence helper requires an independent source mutation"
+        );
+        let manifest = spawn_pending_v3_fixture(parent, label, spec);
+        let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+        let reservation_record_id =
+            Sha256Digest::parse(manifest_string(&manifest, "reservation_record_id").to_owned())
+                .expect("typed global reservation identity");
+        let mut store = Store::open(&database).expect("open typed global pending store");
+        apply_r0b_store_trust_root_substitution(&store, spec.dependency_fixture_mutation);
+        assert_governed_projection_pending(&store, &reservation_record_id);
+        let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+            .expect("open typed global pending arena")
+            .expect("typed global pending arena exists");
+        let exact_final = arena
+            .final_v2_closure_bytes()
+            .expect("read typed global exact closure")
+            .expect("typed global exact closure exists");
+        assert!(
+            arena
+                .protected_failure_bytes()
+                .expect("inspect typed global protected failure")
+                .is_none()
+        );
+        drop(arena);
+        apply_pending_v3_physical_source_mutation(&manifest, spec.physical_source_mutation);
+        let logical_before = logical_state_digest(
+            &store.connection,
+            b"nq.test.pending-v3-global-precedence.v1\0",
+        )
+        .expect("typed global post-mutation state");
+
+        for attempt in 0..2 {
+            let error = store
+                .recover_pending_governed_projections()
+                .expect_err("typed global source defect must remain pending");
+            assert!(
+                matches!(error, StoreError::Integrity(ref message)
+                    if message.contains(expected_reason_fragment)),
+                "{label} attempt {attempt}: {error}"
+            );
+            assert_eq!(
+                logical_state_digest(
+                    &store.connection,
+                    b"nq.test.pending-v3-global-precedence.v1\0",
+                )
+                .expect("typed global unchanged state"),
+                logical_before,
+                "{label} changed SQL rows or SQLite allocation"
+            );
+            assert_governed_projection_pending(&store, &reservation_record_id);
+            let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+                .expect("reopen typed global arena")
+                .expect("typed global arena remains");
+            assert_eq!(
+                arena
+                    .final_v2_closure_bytes()
+                    .expect("reopen typed global exact closure")
+                    .as_deref(),
+                Some(exact_final.as_slice()),
+                "{label} changed exact final bytes"
+            );
+            assert!(
+                arena
+                    .protected_failure_bytes()
+                    .expect("inspect typed global refusal carrier")
+                    .is_none(),
+                "{label} must not blame the sealed claim"
+            );
+        }
+
+        if matches!(
+            spec.physical_source_mutation,
+            PendingV3PhysicalSourceMutation::Pc03ReservationCheckpointMissing
+                | PendingV3PhysicalSourceMutation::Pc03ReservationCheckpointCorrupt
+                | PendingV3PhysicalSourceMutation::Pc04LaunchCheckpointMissing
+                | PendingV3PhysicalSourceMutation::Pc04LaunchCheckpointCorrupt
+                | PendingV3PhysicalSourceMutation::Pc04LaunchPredecessorCheckpointIdCorrupt
+                | PendingV3PhysicalSourceMutation::Pc04LaunchPredecessorLedgerRootCorrupt
+        ) {
+            let Err(restart_error) = Store::open(&database) else {
+                panic!("{label} corrupted source must fence restart");
+            };
+            assert!(
+                matches!(restart_error, StoreError::Integrity(ref message)
+                    if message.contains(expected_reason_fragment)
+                        || (matches!(
+                            spec.physical_source_mutation,
+                            PendingV3PhysicalSourceMutation::Pc03ReservationCheckpointMissing
+                                | PendingV3PhysicalSourceMutation::Pc04LaunchCheckpointMissing
+                                | PendingV3PhysicalSourceMutation::Pc04LaunchPredecessorCheckpointIdCorrupt
+                        ) && message.contains("foreign-key violations"))),
+                "{label} restart: {restart_error}"
+            );
+        }
+        let writer_error = store
+            .record_status(&StatusEventInput {
+                status_event_id: format!("pending-v3-later-writer-{label}"),
+                component_kind: "database".to_owned(),
+                component_id: "pending-v3-later-writer".to_owned(),
+                state: "unknown".to_owned(),
+                code: "pending_v3_later_writer".to_owned(),
+                detail: document(json!({
+                    "schema": "nq.test_pending_v3_later_writer.v1",
+                    "case": label,
+                })),
+                observed_at: TIME.to_owned(),
+            })
+            .expect_err("typed global pending writer must remain fenced");
+        assert!(
+            matches!(writer_error, StoreError::Integrity(ref message)
+                if message.contains(expected_reason_fragment)),
+            "{label} writer: {writer_error}"
+        );
+        assert_eq!(
+            logical_state_digest(
+                &store.connection,
+                b"nq.test.pending-v3-global-precedence.v1\0",
+            )
+            .expect("typed global unchanged state after writer"),
+            logical_before,
+            "{label} writer changed globally blocked state"
+        );
+        assert_governed_projection_pending(&store, &reservation_record_id);
+    }
+
+    // Ordinary no-op unless selected by the parent abrupt-death harness.
+    #[test]
+    fn abrupt_governed_projection_child() {
+        let Ok(mode) = std::env::var(ABRUPT_GOVERNED_PROJECTION_MODE) else {
+            return;
+        };
+        if let Ok(claim_mutation) = std::env::var(PENDING_V3_FIXTURE_CLAIM_MUTATION) {
+            let physical_source_mutation =
+                std::env::var(PENDING_V3_FIXTURE_PHYSICAL_SOURCE_MUTATION)
+                    .expect("typed pending V3 physical-source axis");
+            let post_seal_sql_mutation = std::env::var(PENDING_V3_FIXTURE_POST_SEAL_SQL_MUTATION)
+                .expect("typed pending V3 post-seal SQL axis");
+            let dependency_fixture_mutation = std::env::var(PENDING_V3_FIXTURE_DEPENDENCY_MUTATION)
+                .expect("typed pending V3 dependency-fixture axis");
+            let crash_window = match mode.as_str() {
+                "after-final-seal-before-sql" => PendingV3CrashWindow::AfterFinalSealBeforeSql,
+                "after-sql-before-index-mark" => PendingV3CrashWindow::AfterSqlBeforeIndexMark,
+                other => panic!("unknown typed pending V3 crash window {other}"),
+            };
+            let _ = pending_v3_fixture(PendingV3FixtureSpec {
+                claim_mutation: PendingV3ClaimMutation::from_env_name(&claim_mutation),
+                physical_source_mutation: PendingV3PhysicalSourceMutation::from_env_name(
+                    &physical_source_mutation,
+                ),
+                post_seal_sql_mutation: PendingV3PostSealSqlMutation::from_env_name(
+                    &post_seal_sql_mutation,
+                ),
+                dependency_fixture_mutation: R0bDependencyFixtureMutation::from_env_name(
+                    &dependency_fixture_mutation,
+                ),
+                crash_window,
+            });
+            panic!("typed pending V3 child returned without SIGKILL");
+        }
+        let fixture_mode = match mode.as_str() {
+            "after-final-seal-before-sql" => {
+                GovernedProjectionFixtureMode::V3CrashAfterFinalSealBeforeSql
+            }
+            "after-sql-before-index-mark" => {
+                GovernedProjectionFixtureMode::V3CrashAfterSqlBeforeIndexMark
+            }
+            "after-final-seal-before-sql-status-gap" => {
+                GovernedProjectionFixtureMode::V3CrashWithStatusSequenceGap
+            }
+            "pc03-reservation-checkpoint-id" => {
+                GovernedProjectionFixtureMode::ReservationCheckpointIdentitySubstitution
+            }
+            "pc03-reservation-checkpoint-digest" => {
+                GovernedProjectionFixtureMode::ReservationCheckpointDigestSubstitution
+            }
+            "pc03-reservation-checkpoint-membership" => {
+                GovernedProjectionFixtureMode::ReservationCheckpointMembershipSubstitution
+            }
+            "pc03-decision-authentication-cross-source-substitution" => {
+                GovernedProjectionFixtureMode::AcceptedDecisionAuthenticationSourceSubstitution
+            }
+            "pc03-decision-authorization-cross-source-substitution" => {
+                GovernedProjectionFixtureMode::AcceptedDecisionAuthorizationSourceSubstitution
+            }
+            "pc01-missing-capsule" => GovernedProjectionFixtureMode::V3MissingCapsule,
+            "pc02-reservation-digest" => {
+                GovernedProjectionFixtureMode::ReservationDigestCoherentSubstitution
+            }
+            "pc04-launch-checkpoint-id" => {
+                GovernedProjectionFixtureMode::LaunchCheckpointIdentitySubstitution
+            }
+            "pc04-launch-checkpoint-digest" => {
+                GovernedProjectionFixtureMode::LaunchCheckpointDigestSubstitution
+            }
+            "pc04-launch-checkpoint-membership" => {
+                GovernedProjectionFixtureMode::LaunchCheckpointMembershipSubstitution
+            }
+            "pc04-launch-claim-time" => GovernedProjectionFixtureMode::LaunchClaimTimeSubstitution,
+            "pc04-deadline-reference" => {
+                GovernedProjectionFixtureMode::NativeDeadlineReferenceSubstitution
+            }
+            "pc04-deadline-provenance" => {
+                GovernedProjectionFixtureMode::NativeDeadlineProvenanceSubstitution
+            }
+            "pc04-native-deadline-row-missing" => {
+                GovernedProjectionFixtureMode::NativeDeadlineRecordMissing
+            }
+            "pc04-native-deadline-duplicate" => {
+                GovernedProjectionFixtureMode::NativeDeadlineDuplicate
+            }
+            "pc04-native-deadline-reference-malformed" => {
+                GovernedProjectionFixtureMode::NativeDeadlineMalformedReference
+            }
+            "pc04-native-deadline-declaration-missing" => {
+                GovernedProjectionFixtureMode::NativePrelaunchDeadlineDeclarationMissing
+            }
+            "pc04-native-unknown-prelaunch-check" => {
+                GovernedProjectionFixtureMode::NativeUnknownPrelaunchCheck
+            }
+            "pc04-native-authentication-reference-malformed" => {
+                GovernedProjectionFixtureMode::NativePrelaunchMalformedReference(
+                    NativePrelaunchReferenceField::Authentication,
+                )
+            }
+            "pc04-native-invocation-authorization-reference-malformed" => {
+                GovernedProjectionFixtureMode::NativePrelaunchMalformedReference(
+                    NativePrelaunchReferenceField::InvocationAuthorization,
+                )
+            }
+            "pc04-native-generation-match-reference-malformed" => {
+                GovernedProjectionFixtureMode::NativePrelaunchMalformedReference(
+                    NativePrelaunchReferenceField::GenerationMatch,
+                )
+            }
+            "pc04-native-capability-reference-malformed" => {
+                GovernedProjectionFixtureMode::NativePrelaunchMalformedReference(
+                    NativePrelaunchReferenceField::Capability,
+                )
+            }
+            "pc04-native-custody-reference-malformed" => {
+                GovernedProjectionFixtureMode::NativePrelaunchMalformedReference(
+                    NativePrelaunchReferenceField::Custody,
+                )
+            }
+            "pc04-native-authentication-cross-source-substitution" => {
+                GovernedProjectionFixtureMode::NativePrelaunchCrossSourceSubstitution(
+                    NativePrelaunchReferenceField::Authentication,
+                )
+            }
+            "pc04-native-invocation-authorization-cross-source-substitution" => {
+                GovernedProjectionFixtureMode::NativePrelaunchCrossSourceSubstitution(
+                    NativePrelaunchReferenceField::InvocationAuthorization,
+                )
+            }
+            "pc04-native-custody-cross-source-substitution" => {
+                GovernedProjectionFixtureMode::NativePrelaunchCrossSourceSubstitution(
+                    NativePrelaunchReferenceField::Custody,
+                )
+            }
+            "pc04-launch-extraneous-record" => {
+                GovernedProjectionFixtureMode::NativeLaunchExtraneousRecord
+            }
+            "pc04-launch-status-substitution" => {
+                GovernedProjectionFixtureMode::LaunchStatusSubstitution
+            }
+            "pc04-legacy-outer-request-reference" => {
+                GovernedProjectionFixtureMode::LegacyOuterRequestReferenceSubstitution
+            }
+            "pc04-legacy-decision-reference" => {
+                GovernedProjectionFixtureMode::LegacyDecisionReferenceSubstitution
+            }
+            "pc04-legacy-undeclared-deadline" => {
+                GovernedProjectionFixtureMode::LegacyUndeclaredDeadlineRecord
+            }
+            "pc04-legacy-extraneous-record" => {
+                GovernedProjectionFixtureMode::LegacyLaunchExtraneousRecord
+            }
+            "pc04-legacy-native-residue" => {
+                GovernedProjectionFixtureMode::LegacyNativeResidueWithoutPrelaunchChecks
+            }
+            "pc05-identity" => GovernedProjectionFixtureMode::DerivationSubstitution(
+                GovernedDerivationSubstitution::Identity,
+            ),
+            "pc05-dependency-generation" => GovernedProjectionFixtureMode::DerivationSubstitution(
+                GovernedDerivationSubstitution::DependencyGeneration,
+            ),
+            "pc05-dependency-digest" => GovernedProjectionFixtureMode::DerivationSubstitution(
+                GovernedDerivationSubstitution::DependencyCustodyDigest,
+            ),
+            "pc05-trust-anchor" => GovernedProjectionFixtureMode::DerivationSubstitution(
+                GovernedDerivationSubstitution::TrustAnchor,
+            ),
+            "pc05-evaluation" => GovernedProjectionFixtureMode::DerivationSubstitution(
+                GovernedDerivationSubstitution::Evaluation,
+            ),
+            "pc05-profile" => GovernedProjectionFixtureMode::DerivationSubstitution(
+                GovernedDerivationSubstitution::ProfileSemantic,
+            ),
+            "pc05-evaluator-semantic" => GovernedProjectionFixtureMode::DerivationSubstitution(
+                GovernedDerivationSubstitution::EvaluatorIdentity,
+            ),
+            "pc05-evaluator-artifact" => GovernedProjectionFixtureMode::DerivationSubstitution(
+                GovernedDerivationSubstitution::EvaluatorArtifact,
+            ),
+            "pc05-derived-at" => GovernedProjectionFixtureMode::DerivationSubstitution(
+                GovernedDerivationSubstitution::DerivedAt,
+            ),
+            "pc05-clock" => GovernedProjectionFixtureMode::DerivationSubstitution(
+                GovernedDerivationSubstitution::ClockIdentity,
+            ),
+            "pc05-clock-qualification" => GovernedProjectionFixtureMode::DerivationSubstitution(
+                GovernedDerivationSubstitution::ClockQualification,
+            ),
+            "pc07-raw-bytes" => GovernedProjectionFixtureMode::RawSubstitution,
+            "pc07-provider-document" => GovernedProjectionFixtureMode::ProviderDocumentSubstitution,
+            "pc07-provider-malformed" => GovernedProjectionFixtureMode::ProviderDocumentMalformed,
+            "pc07-provider-noncanonical" => {
+                GovernedProjectionFixtureMode::ProviderDocumentNoncanonical
+            }
+            "pc08-evaluator-artifact" => {
+                GovernedProjectionFixtureMode::DiagnosticEvaluatorArtifactMasquerade
+            }
+            "pc08-clock-qualification" => {
+                GovernedProjectionFixtureMode::DiagnosticClockQualificationSubstitution
+            }
+            "pc08-execution-launch-binding" => {
+                GovernedProjectionFixtureMode::CapsuleExecutionLaunchBindingSubstitution
+            }
+            "pc09-terminal-records" => GovernedProjectionFixtureMode::IncompleteRuntimeWriteSet,
+            "pc10-terminal-predecessor-id" => {
+                GovernedProjectionFixtureMode::TerminalPredecessorIdentitySubstitution
+            }
+            "pc10-terminal-predecessor-root" => {
+                GovernedProjectionFixtureMode::TerminalPredecessorRootSubstitution
+            }
+            other => panic!("unknown abrupt governed projection mode {other}"),
+        };
+        let _ = governed_projection_fixture(fixture_mode);
+        panic!("abrupt governed projection child returned without SIGKILL");
+    }
+
+    #[test]
+    fn sigkill_governed_projection_windows_recover_exactly_once() {
+        let directory = tempdir().expect("abrupt projection parent directory");
+        for (mode, sql_present_before_recovery) in [
+            ("after-final-seal-before-sql", false),
+            ("after-sql-before-index-mark", true),
+        ] {
+            let manifest = spawn_abrupt_governed_projection(directory.path(), mode);
+            let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+            let reservation_record_id =
+                Sha256Digest::parse(manifest_string(&manifest, "reservation_record_id").to_owned())
+                    .expect("manifest reservation identity");
+            let diagnostic_artifact_id = Sha256Digest::parse(
+                manifest_string(&manifest, "diagnostic_artifact_id").to_owned(),
+            )
+            .expect("manifest artifact identity");
+            let run_id = manifest_string(&manifest, "run_id");
+            let expected_closure_digest =
+                Sha256Digest::parse(manifest_string(&manifest, "closure_bytes_digest").to_owned())
+                    .expect("manifest closure digest");
+            let expected_closure_length = manifest["closure_byte_length"]
+                .as_u64()
+                .expect("manifest closure length");
+
+            let mut store = Store::open(&database).expect("open killed governed projection store");
+            assert_governed_projection_pending(&store, &reservation_record_id);
+            let inventory = store
+                .governed_custody_inventory()
+                .expect("killed governed projection inventory");
+            let pending = inventory
+                .iter()
+                .find_map(|entry| match entry {
+                    GovernedCustodyInventoryEntry::Verified(frontier)
+                        if frontier.reservation_record_id == reservation_record_id =>
+                    {
+                        Some(frontier)
+                    }
+                    _ => None,
+                })
+                .expect("killed governed projection frontier");
+            let final_closure = pending
+                .final_closure
+                .as_ref()
+                .expect("sealed governed projection closure");
+            assert_eq!(final_closure.bytes_digest, expected_closure_digest);
+            assert_eq!(final_closure.byte_length, expected_closure_length);
+            assert_eq!(
+                governed_projection_run_count(&store, run_id),
+                i64::from(sql_present_before_recovery),
+                "{mode} SQL visibility before restart recovery"
+            );
+            if sql_present_before_recovery {
+                assert_exact_governed_projection_rows(&store, &manifest);
+            } else {
+                assert_eq!(
+                    store
+                        .diagnostic_artifact_id_for_run(run_id)
+                        .expect("pre-recovery artifact lookup"),
+                    None
+                );
+            }
+
+            let recovered = store
+                .recover_pending_governed_projections()
+                .expect("recover exact sealed governed projection");
+            assert!(
+                matches!(
+                    recovered.as_slice(),
+                    [GovernedProjectionRecovery::Recovered(verification)]
+                        if verification.reservation_record_id == reservation_record_id
+                            && verification.diagnostic_artifact_id == diagnostic_artifact_id
+                            && verification.disposition
+                                == GovernedProjectionVerificationDisposition::Indexed
+                ),
+                "unexpected {mode} recovery: {recovered:?}"
+            );
+            assert_exact_governed_projection_rows(&store, &manifest);
+            let counts_after_recovery = governed_projection_append_counts(&store);
+
+            assert!(
+                store
+                    .recover_pending_governed_projections()
+                    .expect("repeat startup recovery")
+                    .is_empty(),
+                "an indexed projection must not be replayed"
+            );
+            let reverification = store
+                .verify_governed_projection_and_mark_indexed(&reservation_record_id)
+                .expect("reservation-only exact reverification");
+            assert_eq!(
+                reverification.disposition,
+                GovernedProjectionVerificationDisposition::AlreadyIndexed
+            );
+            assert_eq!(
+                governed_projection_append_counts(&store),
+                counts_after_recovery,
+                "repeat recovery and AlreadyIndexed verification must append no rows"
+            );
+            let indexed = store
+                .governed_custody_inventory()
+                .expect("indexed governed projection inventory")
+                .into_iter()
+                .find_map(|entry| match entry {
+                    GovernedCustodyInventoryEntry::Verified(frontier)
+                        if frontier.reservation_record_id == reservation_record_id =>
+                    {
+                        Some(frontier)
+                    }
+                    _ => None,
+                })
+                .expect("indexed governed projection frontier");
+            assert_eq!(
+                indexed.recovery_class,
+                GovernedCustodyRecoveryClass::Indexed
+            );
+            assert_eq!(
+                indexed
+                    .final_closure
+                    .as_ref()
+                    .map(|closure| (closure.bytes_digest.clone(), closure.byte_length)),
+                Some((expected_closure_digest, expected_closure_length)),
+                "recovery cannot rewrite the exact sealed final closure"
+            );
+        }
+    }
+
+    #[test]
+    fn pending_v3_typed_exact_native_path_recovers_without_adapter_drift() {
+        let directory = tempdir().expect("typed pending V3 positive parent");
+        for (label, crash_window) in [
+            (
+                "typed-exact-native-before-sql",
+                PendingV3CrashWindow::AfterFinalSealBeforeSql,
+            ),
+            (
+                "typed-exact-native-after-sql",
+                PendingV3CrashWindow::AfterSqlBeforeIndexMark,
+            ),
+        ] {
+            let manifest = spawn_pending_v3_fixture(
+                directory.path(),
+                label,
+                PendingV3FixtureSpec {
+                    crash_window,
+                    ..PendingV3FixtureSpec::exact_native()
+                },
+            );
+            let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+            let reservation_record_id =
+                Sha256Digest::parse(manifest_string(&manifest, "reservation_record_id").to_owned())
+                    .expect("typed positive reservation identity");
+            let diagnostic_artifact_id = Sha256Digest::parse(
+                manifest_string(&manifest, "diagnostic_artifact_id").to_owned(),
+            )
+            .expect("typed positive artifact identity");
+            let mut store = Store::open(&database).expect("open typed positive store");
+            let recovered = store
+                .recover_pending_governed_projections()
+                .expect("recover typed exact native projection");
+            assert!(
+                matches!(
+                    recovered.as_slice(),
+                    [GovernedProjectionRecovery::Recovered(verification)]
+                        if verification.reservation_record_id == reservation_record_id
+                            && verification.diagnostic_artifact_id == diagnostic_artifact_id
+                            && verification.disposition
+                                == GovernedProjectionVerificationDisposition::Indexed
+                ),
+                "unexpected {label} recovery: {recovered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn r0b_dependency_source_matrix_is_global_under_abrupt_pending_recovery() {
+        let directory = tempdir().expect("R0b dependency recovery parent");
+        for case in r0b_dependency_cases() {
+            let spec = PendingV3FixtureSpec {
+                dependency_fixture_mutation: case.mutation,
+                crash_window: PendingV3CrashWindow::AfterFinalSealBeforeSql,
+                ..PendingV3FixtureSpec::exact_native()
+            };
+            match case.expected {
+                R0bDependencyExpected::Pass => {
+                    let manifest =
+                        spawn_pending_v3_fixture(directory.path(), &format!("R-{}", case.id), spec);
+                    let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+                    let reservation_record_id = Sha256Digest::parse(
+                        manifest_string(&manifest, "reservation_record_id").to_owned(),
+                    )
+                    .expect("R0b positive recovery reservation");
+                    let expected_closure_digest = Sha256Digest::parse(
+                        manifest_string(&manifest, "closure_bytes_digest").to_owned(),
+                    )
+                    .expect("R0b positive recovery closure digest");
+                    let expected_closure_length = manifest["closure_byte_length"]
+                        .as_u64()
+                        .expect("R0b positive recovery closure length");
+                    let mut store = Store::open(&database).expect("open R0b pending store");
+                    let _ = crate::governed_custody::take_r0b_authenticated_source_modes();
+                    let recovered = store
+                        .recover_pending_governed_projections()
+                        .expect("recover exact R0b dependency source");
+                    assert!(
+                        matches!(
+                            recovered.as_slice(),
+                            [GovernedProjectionRecovery::Recovered(verification)]
+                                if verification.reservation_record_id == reservation_record_id
+                                    && verification.disposition
+                                        == GovernedProjectionVerificationDisposition::Indexed
+                        ),
+                        "{} R produced unexpected recovery: {recovered:?}",
+                        case.id
+                    );
+                    let arena =
+                        CustodyArena::open_by_reservation(&database, &reservation_record_id)
+                            .expect("open recovered R0b arena")
+                            .expect("recovered R0b arena exists");
+                    let exact_final = arena
+                        .final_v2_closure_bytes()
+                        .expect("read recovered R0b closure")
+                        .expect("recovered R0b closure exists");
+                    assert_eq!(
+                        (
+                            nq_protocol::sha256_bytes(&exact_final),
+                            u64::try_from(exact_final.len()).expect("R0b closure length"),
+                        ),
+                        (expected_closure_digest, expected_closure_length),
+                        "{} R rewrote the exact final closure",
+                        case.id
+                    );
+                    assert!(
+                        arena
+                            .protected_failure_bytes()
+                            .expect("inspect recovered R0b refusal")
+                            .is_none(),
+                        "{} R created a projection-local refusal",
+                        case.id
+                    );
+                    drop(arena);
+                    let source_modes =
+                        crate::governed_custody::take_r0b_authenticated_source_modes();
+                    assert_r0b_retained_external_mode(&case, &source_modes, None);
+                }
+                R0bDependencyExpected::Global(fragment) => {
+                    assert_pending_v3_projection_remains_global(
+                        directory.path(),
+                        &format!("R-{}", case.id),
+                        spec,
+                        fragment,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn r0b_dependency_source_matrix_is_global_in_complete_verification() {
+        let directory = tempdir().expect("R0b dependency verification parent");
+        for case in r0b_dependency_cases() {
+            let manifest = spawn_pending_v3_fixture(
+                directory.path(),
+                &format!("V-{}", case.id),
+                PendingV3FixtureSpec {
+                    dependency_fixture_mutation: case.mutation,
+                    // A hostile nested source is sealed before death. The
+                    // ordinary after-SQL path correctly refuses it before SQL
+                    // commit, so the public V source-dominance case begins
+                    // from the committed exact artifact with its projection
+                    // still pending. Positive cases additionally exercise the
+                    // fully committed SQL footprint.
+                    crash_window: if matches!(case.expected, R0bDependencyExpected::Pass) {
+                        PendingV3CrashWindow::AfterSqlBeforeIndexMark
+                    } else {
+                        PendingV3CrashWindow::AfterFinalSealBeforeSql
+                    },
+                    ..PendingV3FixtureSpec::exact_native()
+                },
+            );
+            let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+            let reservation_record_id =
+                Sha256Digest::parse(manifest_string(&manifest, "reservation_record_id").to_owned())
+                    .expect("R0b complete-verification reservation");
+            let expected_closure_digest =
+                Sha256Digest::parse(manifest_string(&manifest, "closure_bytes_digest").to_owned())
+                    .expect("R0b complete-verification closure digest");
+            let expected_closure_length = manifest["closure_byte_length"]
+                .as_u64()
+                .expect("R0b complete-verification closure length");
+            let store = Store::open(&database).expect("open R0b complete-verification store");
+            apply_r0b_store_trust_root_substitution(&store, case.mutation);
+            let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+                .expect("open R0b verification arena")
+                .expect("R0b verification arena exists");
+            let exact_final = arena
+                .final_v2_closure_bytes()
+                .expect("read R0b verification closure")
+                .expect("R0b verification closure exists");
+            assert_eq!(
+                (
+                    nq_protocol::sha256_bytes(&exact_final),
+                    u64::try_from(exact_final.len()).expect("R0b verification closure length"),
+                ),
+                (expected_closure_digest, expected_closure_length),
+                "{} V began with substituted final bytes",
+                case.id
+            );
+            assert!(
+                arena
+                    .protected_failure_bytes()
+                    .expect("inspect R0b verification refusal")
+                    .is_none(),
+                "{} V began with a projection-local refusal",
+                case.id
+            );
+            drop(arena);
+            let logical_before =
+                logical_state_digest(&store.connection, b"nq.test.r0b-complete-verification.v1\0")
+                    .expect("R0b complete-verification initial state");
+            let _ = crate::governed_custody::take_r0b_authenticated_source_modes();
+            match case.expected {
+                R0bDependencyExpected::Pass => {
+                    let verification = store
+                        .verify_governed_projection_and_mark_indexed(&reservation_record_id)
+                        .unwrap_or_else(|error| {
+                            panic!("{} V unexpectedly failed: {error}", case.id)
+                        });
+                    assert_eq!(
+                        verification.disposition,
+                        GovernedProjectionVerificationDisposition::Indexed,
+                        "{} V did not advance the exact artifact",
+                        case.id
+                    );
+                    assert_r0b_retained_external_mode(
+                        &case,
+                        &crate::governed_custody::take_r0b_authenticated_source_modes(),
+                        None,
+                    );
+                }
+                R0bDependencyExpected::Global(fragment) => {
+                    for attempt in 0..2 {
+                        let error = store
+                            .verify_governed_projection_and_mark_indexed(&reservation_record_id)
+                            .expect_err("R0b hostile complete verification must fail");
+                        assert!(
+                            matches!(error, StoreError::Integrity(ref message)
+                                if message.contains(fragment)),
+                            "{} V attempt {attempt} did not fail globally with {fragment:?}: {error}",
+                            case.id
+                        );
+                        assert_eq!(
+                            logical_state_digest(
+                                &store.connection,
+                                b"nq.test.r0b-complete-verification.v1\0",
+                            )
+                            .expect("R0b unchanged complete-verification state"),
+                            logical_before,
+                            "{} V attempt {attempt} changed SQL or allocator state",
+                            case.id
+                        );
+                        assert_governed_projection_pending(&store, &reservation_record_id);
+                        let arena =
+                            CustodyArena::open_by_reservation(&database, &reservation_record_id)
+                                .expect("reopen hostile R0b verification arena")
+                                .expect("hostile R0b verification arena exists");
+                        assert_eq!(
+                            arena
+                                .final_v2_closure_bytes()
+                                .expect("reopen hostile R0b closure")
+                                .as_deref(),
+                            Some(exact_final.as_slice()),
+                            "{} V attempt {attempt} changed exact final bytes",
+                            case.id
+                        );
+                        assert!(
+                            arena
+                                .protected_failure_bytes()
+                                .expect("inspect hostile R0b local refusal")
+                                .is_none(),
+                            "{} V attempt {attempt} created a projection-local refusal",
+                            case.id
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn r0b_indexed_projection_reauthenticates_dependency_custody_on_every_verification() {
+        let directory = tempdir().expect("R0b indexed reauthentication parent");
+        for (label, mutation, expected_reason) in [
+            (
+                "committed-unavailable",
+                PendingV3PostSealSqlMutation::DependencyCustodyCommittedUnavailable,
+                "runtime dependency payload is committed-unavailable",
+            ),
+            (
+                "corrupt",
+                PendingV3PostSealSqlMutation::DependencyCustodyCorrupt,
+                "runtime dependency payload is corrupt or substituted",
+            ),
+        ] {
+            let manifest = spawn_pending_v3_fixture(
+                directory.path(),
+                &format!("V-indexed-{label}"),
+                PendingV3FixtureSpec {
+                    crash_window: PendingV3CrashWindow::AfterSqlBeforeIndexMark,
+                    ..PendingV3FixtureSpec::exact_native()
+                },
+            );
+            let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+            let reservation_record_id =
+                Sha256Digest::parse(manifest_string(&manifest, "reservation_record_id").to_owned())
+                    .expect("R0b indexed reservation identity");
+            let store = Store::open(&database).expect("open exact R0b indexed store");
+            let indexed = store
+                .verify_governed_projection_and_mark_indexed(&reservation_record_id)
+                .expect("index exact R0b projection before source loss");
+            assert_eq!(
+                indexed.disposition,
+                GovernedProjectionVerificationDisposition::Indexed
+            );
+            let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+                .expect("open exact indexed R0b arena")
+                .expect("exact indexed R0b arena exists");
+            let exact_final = arena
+                .final_v2_closure_bytes()
+                .expect("read exact indexed R0b closure")
+                .expect("exact indexed R0b closure exists");
+            assert_eq!(
+                arena
+                    .inspection()
+                    .expect("inspect exact indexed R0b arena")
+                    .state,
+                ArenaState::FinalV2SealedIndexed
+            );
+            drop(arena);
+
+            apply_pending_v3_post_seal_sql_mutation(&manifest, mutation);
+            let logical_before = logical_state_digest(
+                &store.connection,
+                b"nq.test.r0b-indexed-reauthentication.v1\0",
+            )
+            .expect("R0b indexed hostile starting state");
+            for attempt in 0..2 {
+                let error = store
+                    .verify_governed_projection_and_mark_indexed(&reservation_record_id)
+                    .expect_err("an indexed projection must reauthenticate dependency custody");
+                assert!(
+                    matches!(error, StoreError::Integrity(ref message)
+                        if message.contains(expected_reason)),
+                    "V/indexed-{label} attempt {attempt} did not preserve source failure: {error}"
+                );
+                assert_eq!(
+                    logical_state_digest(
+                        &store.connection,
+                        b"nq.test.r0b-indexed-reauthentication.v1\0",
+                    )
+                    .expect("R0b indexed hostile unchanged state"),
+                    logical_before,
+                    "V/indexed-{label} attempt {attempt} changed SQL or allocator state"
+                );
+                let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+                    .expect("reopen hostile indexed R0b arena")
+                    .expect("hostile indexed R0b arena exists");
+                assert_eq!(
+                    arena
+                        .inspection()
+                        .expect("inspect hostile indexed R0b arena")
+                        .state,
+                    ArenaState::FinalV2SealedIndexed,
+                    "V/indexed-{label} attempt {attempt} rewrote the indexed state bit"
+                );
+                assert_eq!(
+                    arena
+                        .final_v2_closure_bytes()
+                        .expect("reopen hostile indexed R0b closure")
+                        .as_deref(),
+                    Some(exact_final.as_slice()),
+                    "V/indexed-{label} attempt {attempt} changed exact final bytes"
+                );
+                assert!(
+                    arena
+                        .protected_failure_bytes()
+                        .expect("inspect hostile indexed R0b local refusal")
+                        .is_none(),
+                    "V/indexed-{label} attempt {attempt} created a projection-local refusal"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn r0b_physical_requirement_matrix_is_global_before_provider_effect() {
+        const STOP_AFTER_PRE_EFFECT_GATE: &str = "r0b-physical-stop-after-pre-effect-capacity";
+
+        for case in R0B_PHYSICAL_CASES {
+            let mut observed = None;
+            let fixture_result = governed_projection_fixture_with_spec_and_pre_effect_hook(
+                PendingV3FixtureSpec {
+                    physical_source_mutation: case.mutation,
+                    ..PendingV3FixtureSpec::exact_native()
+                },
+                |store, reservation, launch_checkpoint_id| {
+                    let provider_rows_before: i64 = store.connection.query_row(
+                        "SELECT COUNT(*) FROM provider_intake_attempts",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    assert_eq!(
+                        provider_rows_before, 0,
+                        "{} reached the physical source gate after a provider effect",
+                        case.id
+                    );
+                    let v2 = store.verify_governed_execution_custody_closure_v2_capacity(
+                        reservation,
+                        launch_checkpoint_id,
+                    );
+                    let v3 = store.verify_governed_execution_custody_closure_v3_capacity(
+                        reservation,
+                        launch_checkpoint_id,
+                    );
+                    let provider_rows_after: i64 = store.connection.query_row(
+                        "SELECT COUNT(*) FROM provider_intake_attempts",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    assert_eq!(
+                        provider_rows_after, 0,
+                        "{} capacity verification performed a provider effect",
+                        case.id
+                    );
+                    observed = Some((v2, v3));
+                    Err(StoreError::Invariant(STOP_AFTER_PRE_EFFECT_GATE.to_owned()))
+                },
+            );
+            assert!(
+                matches!(fixture_result, Err(StoreError::Invariant(ref message))
+                    if message == STOP_AFTER_PRE_EFFECT_GATE),
+                "{} did not stop at the pre-effect capacity boundary",
+                case.id
+            );
+            let (v2, v3) = observed
+                .take()
+                .unwrap_or_else(|| panic!("{} did not run the pre-effect hook", case.id));
+            for (surface, result) in [("C/V2", v2), ("C/V3", v3)] {
+                assert!(
+                    matches!(result, Err(StoreError::Integrity(ref message))
+                        if message.contains(case.expected_reason)),
+                    "{} {surface} did not fail globally with {:?}: {result:?}",
+                    case.id,
+                    case.expected_reason
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn r0b_binding_matrix_is_global_before_provider_effect() {
+        const STOP_AFTER_PRE_EFFECT_GATE: &str = "r0b-binding-stop-after-pre-effect-capacity";
+
+        for case in R0B_BINDING_CASES {
+            let mut observed = None;
+            let fixture_result = governed_projection_fixture_with_spec_and_pre_effect_hook(
+                PendingV3FixtureSpec {
+                    physical_source_mutation: case.physical_mutation,
+                    ..PendingV3FixtureSpec::exact_native()
+                },
+                |store, reservation, launch_checkpoint_id| {
+                    apply_r0b_binding_mutation(
+                        store,
+                        reservation.prelaunch_checkpoint_id.as_str(),
+                        case.binding_mutation,
+                    );
+                    let provider_rows_before: i64 = store.connection.query_row(
+                        "SELECT COUNT(*) FROM provider_intake_attempts",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    assert_eq!(
+                        provider_rows_before, 0,
+                        "{} reached the binding gate after a provider effect",
+                        case.id
+                    );
+                    let v2 = store.verify_governed_execution_custody_closure_v2_capacity(
+                        reservation,
+                        launch_checkpoint_id,
+                    );
+                    let v3 = store.verify_governed_execution_custody_closure_v3_capacity(
+                        reservation,
+                        launch_checkpoint_id,
+                    );
+                    let provider_rows_after: i64 = store.connection.query_row(
+                        "SELECT COUNT(*) FROM provider_intake_attempts",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    assert_eq!(
+                        provider_rows_after, 0,
+                        "{} binding verification performed a provider effect",
+                        case.id
+                    );
+                    observed = Some((v2, v3));
+                    Err(StoreError::Invariant(STOP_AFTER_PRE_EFFECT_GATE.to_owned()))
+                },
+            );
+            assert!(
+                matches!(fixture_result, Err(StoreError::Invariant(ref message))
+                    if message == STOP_AFTER_PRE_EFFECT_GATE),
+                "{} did not stop at the pre-effect binding boundary",
+                case.id
+            );
+            let (v2, v3) = observed
+                .take()
+                .unwrap_or_else(|| panic!("{} did not run the binding hook", case.id));
+            for (surface, result) in [("C/V2", v2), ("C/V3", v3)] {
+                assert!(
+                    matches!(result, Err(StoreError::Integrity(ref message))
+                        if message.contains(case.expected_capacity_reason)),
+                    "{} {surface} did not fail globally with {:?}: {result:?}",
+                    case.id,
+                    case.expected_capacity_reason
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn r0b_b04_private_reader_rejects_noncanonical_authenticated_payload() {
+        const STOP_AFTER_PRIVATE_READER: &str = "r0b-b04-stop-after-private-reader";
+        let mut observed = false;
+        let fixture_result = governed_projection_fixture_with_spec_and_pre_effect_hook(
+            PendingV3FixtureSpec::exact_native(),
+            |store, reservation, _launch_checkpoint_id| {
+                apply_r0b_binding_mutation(
+                    store,
+                    reservation.prelaunch_checkpoint_id.as_str(),
+                    R0bBindingMutation::PayloadNoncanonical,
+                );
+                let access = runtime_checkpoint_dependency_on_connection(
+                    &store.connection,
+                    reservation.prelaunch_checkpoint_id.as_str(),
+                )?
+                .expect("B04 private reader finds the dependency binding");
+                assert!(
+                    matches!(
+                        access.byte_state,
+                        Some(RuntimeDependencyGenerationByteState::Corrupt { ref reason })
+                            if reason.contains(
+                                "document bytes are valid JSON but not canonical"
+                            )
+                    ),
+                    "B04 private reader did not isolate the canonical-byte branch: {access:?}"
+                );
+                observed = true;
+                Err(StoreError::Invariant(STOP_AFTER_PRIVATE_READER.to_owned()))
+            },
+        );
+        assert!(
+            matches!(fixture_result, Err(StoreError::Invariant(ref message))
+                if message == STOP_AFTER_PRIVATE_READER),
+            "B04 private reader control did not stop at its boundary"
+        );
+        assert!(observed, "B04 private reader control did not execute");
+    }
+
+    #[test]
+    fn r0b_b11_private_checkpoint_verifier_rejects_substituted_exact_slice() {
+        let directory = tempdir().expect("R0b B11 private checkpoint control parent");
+        let manifest = spawn_pending_v3_fixture(
+            directory.path(),
+            "B11-private",
+            PendingV3FixtureSpec {
+                physical_source_mutation:
+                    PendingV3PhysicalSourceMutation::R0bArenaDependencyBytesDifferentFromSql,
+                crash_window: PendingV3CrashWindow::AfterFinalSealBeforeSql,
+                ..PendingV3FixtureSpec::exact_native()
+            },
+        );
+        let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+        let reservation_record_id =
+            Sha256Digest::parse(manifest_string(&manifest, "reservation_record_id").to_owned())
+                .expect("R0b B11 private checkpoint reservation identity");
+        let store = Store::open(&database).expect("open R0b B11 private checkpoint store");
+        let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+            .expect("open R0b B11 private checkpoint arena")
+            .expect("R0b B11 private checkpoint arena exists");
+        let inspection = arena
+            .inspection()
+            .expect("inspect R0b B11 private checkpoint arena");
+        drop(arena);
+        let error = governed_custody::r0b_verify_checkpoint_dependency_with_arena_bytes_for_test(
+            &store,
+            &reservation_record_id,
+            inspection.prelaunch.prelaunch_checkpoint_id.as_str(),
+        )
+        .expect_err("B11 private checkpoint verifier must reject the arena byte slice");
+        assert!(
+            matches!(error, StoreError::Integrity(ref message)
+            if message.contains(
+                "dependency closure is substituted or differs from sealed custody"
+            )),
+            "B11 private checkpoint verifier did not isolate exact-byte inequality: {error}"
+        );
+    }
+
+    #[test]
+    fn r0b_b12_through_b15_requirement_context_is_closed_and_role_exact() {
+        use governed_custody::R0bRequirementContextMutation::{
+            DuplicateExternal, Exact, ExtraneousExternal, OmitExternal, SwapExternalPurposes,
+        };
+
+        let directory = tempdir().expect("R0b requirement-context control parent");
+        let manifest = spawn_pending_v3_fixture(
+            directory.path(),
+            "B12-B15",
+            PendingV3FixtureSpec {
+                crash_window: PendingV3CrashWindow::AfterFinalSealBeforeSql,
+                ..PendingV3FixtureSpec::exact_native()
+            },
+        );
+        let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+        let reservation_record_id =
+            Sha256Digest::parse(manifest_string(&manifest, "reservation_record_id").to_owned())
+                .expect("R0b requirement-context reservation identity");
+        let store = Store::open(&database).expect("open exact R0b requirement-context store");
+
+        let counts = governed_custody::r0b_verify_requirement_context_for_test(
+            &store,
+            &reservation_record_id,
+            Exact,
+        )
+        .expect("exact R0b requirement context passes");
+        assert_eq!(counts.external, 4, "R0b derives four external roles");
+        assert_eq!(counts.authority, 2, "R0b derives two authority roles");
+
+        for (id, mutation) in [
+            ("B12", OmitExternal),
+            ("B13", DuplicateExternal),
+            ("B14", ExtraneousExternal),
+            ("B15", SwapExternalPurposes),
+        ] {
+            let error = governed_custody::r0b_verify_requirement_context_for_test(
+                &store,
+                &reservation_record_id,
+                mutation,
+            )
+            .expect_err("hostile R0b requirement context must not pass");
+            assert!(
+                matches!(error, StoreError::Integrity(ref message)
+                if message.contains(
+                    "authenticated prelaunch source summary differs from its Store-selected context"
+                )),
+                "{id} did not fail as a global closed-set/context mismatch: {error}"
+            );
+            assert_eq!(
+                counts,
+                governed_custody::R0bRequirementContextCounts {
+                    external: 4,
+                    authority: 2,
+                },
+                "{id} changed the exact derived requirement cardinality"
+            );
+        }
+    }
+
+    #[test]
+    fn r0b_physical_requirement_matrix_is_global_under_abrupt_pending_recovery() {
+        let directory = tempdir().expect("R0b physical recovery parent");
+        for case in R0B_PHYSICAL_CASES {
+            assert_pending_v3_projection_remains_global(
+                directory.path(),
+                &format!("R-{}", case.id),
+                PendingV3FixtureSpec {
+                    physical_source_mutation: case.mutation,
+                    crash_window: PendingV3CrashWindow::AfterFinalSealBeforeSql,
+                    ..PendingV3FixtureSpec::exact_native()
+                },
+                case.expected_reason,
+            );
+        }
+    }
+
+    #[test]
+    fn r0b_binding_matrix_is_global_under_abrupt_pending_recovery() {
+        let directory = tempdir().expect("R0b binding recovery parent");
+        for case in R0B_BINDING_CASES {
+            let manifest = spawn_pending_v3_fixture(
+                directory.path(),
+                &format!("R-{}", case.id),
+                PendingV3FixtureSpec {
+                    physical_source_mutation: case.physical_mutation,
+                    crash_window: PendingV3CrashWindow::AfterFinalSealBeforeSql,
+                    ..PendingV3FixtureSpec::exact_native()
+                },
+            );
+            let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+            let reservation_record_id =
+                Sha256Digest::parse(manifest_string(&manifest, "reservation_record_id").to_owned())
+                    .expect("R0b binding recovery reservation");
+            let mut store = Store::open(&database).expect("open exact R0b binding recovery store");
+            let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+                .expect("open R0b binding recovery arena")
+                .expect("R0b binding recovery arena exists");
+            let inspection = arena
+                .inspection()
+                .expect("inspect R0b binding recovery arena");
+            let exact_final = arena
+                .final_v2_closure_bytes()
+                .expect("read R0b binding recovery closure")
+                .expect("R0b binding recovery closure exists");
+            assert!(
+                arena
+                    .protected_failure_bytes()
+                    .expect("inspect R0b binding recovery refusal")
+                    .is_none()
+            );
+            drop(arena);
+            apply_r0b_binding_mutation(
+                &store,
+                inspection.prelaunch.prelaunch_checkpoint_id.as_str(),
+                case.binding_mutation,
+            );
+            let logical_before =
+                logical_state_digest(&store.connection, b"nq.test.r0b-binding-recovery.v1\0")
+                    .expect("R0b binding recovery initial state");
+            for attempt in 0..2 {
+                let error = store
+                    .recover_pending_governed_projections()
+                    .expect_err("R0b hostile binding recovery must fail globally");
+                assert!(
+                    matches!(error, StoreError::Integrity(ref message)
+                        if message.contains(case.expected_reopen_reason)),
+                    "{} R attempt {attempt} did not fail globally with {:?}: {error}",
+                    case.id,
+                    case.expected_reopen_reason
+                );
+                assert_eq!(
+                    logical_state_digest(&store.connection, b"nq.test.r0b-binding-recovery.v1\0",)
+                        .expect("R0b binding recovery unchanged state"),
+                    logical_before,
+                    "{} R attempt {attempt} changed SQL or allocator state",
+                    case.id
+                );
+                assert_governed_projection_pending(&store, &reservation_record_id);
+                let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+                    .expect("reopen hostile R0b binding recovery arena")
+                    .expect("hostile R0b binding recovery arena exists");
+                assert_eq!(
+                    arena
+                        .final_v2_closure_bytes()
+                        .expect("reopen hostile R0b binding recovery closure")
+                        .as_deref(),
+                    Some(exact_final.as_slice()),
+                    "{} R attempt {attempt} changed exact final bytes",
+                    case.id
+                );
+                assert!(
+                    arena
+                        .protected_failure_bytes()
+                        .expect("inspect hostile R0b binding recovery local refusal")
+                        .is_none(),
+                    "{} R attempt {attempt} created a projection-local refusal",
+                    case.id
+                );
+            }
+            let writer_error = store
+                .record_status(&StatusEventInput {
+                    status_event_id: format!("r0b-binding-writer-{}", case.id),
+                    component_kind: "database".to_owned(),
+                    component_id: "r0b-binding-writer".to_owned(),
+                    state: "unknown".to_owned(),
+                    code: "r0b_binding_writer".to_owned(),
+                    detail: document(json!({
+                        "schema": "nq.test_r0b_binding_writer.v1",
+                        "case": case.id,
+                    })),
+                    observed_at: TIME.to_owned(),
+                })
+                .expect_err("R0b hostile binding recovery must fence writers");
+            assert!(
+                matches!(writer_error, StoreError::Integrity(ref message)
+                    if message.contains(case.expected_reopen_reason)),
+                "{} R writer did not preserve the global reason: {writer_error}",
+                case.id
+            );
+            assert_eq!(
+                logical_state_digest(&store.connection, b"nq.test.r0b-binding-recovery.v1\0",)
+                    .expect("R0b binding recovery unchanged writer state"),
+                logical_before,
+                "{} R writer changed SQL or allocator state",
+                case.id
+            );
+            assert_governed_projection_pending(&store, &reservation_record_id);
+        }
+    }
+
+    #[test]
+    fn r0b_physical_requirement_matrix_is_global_in_complete_verification() {
+        let directory = tempdir().expect("R0b physical verification parent");
+        for case in R0B_PHYSICAL_CASES {
+            let manifest = spawn_pending_v3_fixture(
+                directory.path(),
+                &format!("V-{}", case.id),
+                PendingV3FixtureSpec {
+                    physical_source_mutation: case.mutation,
+                    crash_window: PendingV3CrashWindow::AfterFinalSealBeforeSql,
+                    ..PendingV3FixtureSpec::exact_native()
+                },
+            );
+            let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+            let reservation_record_id =
+                Sha256Digest::parse(manifest_string(&manifest, "reservation_record_id").to_owned())
+                    .expect("R0b physical verification reservation");
+            let store = Store::open(&database).expect("open R0b physical verification store");
+            let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+                .expect("open R0b physical verification arena")
+                .expect("R0b physical verification arena exists");
+            let exact_final = arena
+                .final_v2_closure_bytes()
+                .expect("read R0b physical verification closure")
+                .expect("R0b physical verification closure exists");
+            assert!(
+                arena
+                    .protected_failure_bytes()
+                    .expect("inspect R0b physical verification refusal")
+                    .is_none()
+            );
+            drop(arena);
+            let logical_before = logical_state_digest(
+                &store.connection,
+                b"nq.test.r0b-physical-complete-verification.v1\0",
+            )
+            .expect("R0b physical verification initial state");
+            for attempt in 0..2 {
+                let error = store
+                    .verify_governed_projection_and_mark_indexed(&reservation_record_id)
+                    .expect_err("R0b hostile physical complete verification must fail");
+                assert!(
+                    matches!(error, StoreError::Integrity(ref message)
+                        if message.contains(case.expected_reason)),
+                    "{} V attempt {attempt} did not fail globally with {:?}: {error}",
+                    case.id,
+                    case.expected_reason
+                );
+                assert_eq!(
+                    logical_state_digest(
+                        &store.connection,
+                        b"nq.test.r0b-physical-complete-verification.v1\0",
+                    )
+                    .expect("R0b physical verification unchanged state"),
+                    logical_before,
+                    "{} V attempt {attempt} changed SQL or allocator state",
+                    case.id
+                );
+                assert_governed_projection_pending(&store, &reservation_record_id);
+                let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+                    .expect("reopen hostile R0b physical arena")
+                    .expect("hostile R0b physical arena exists");
+                assert_eq!(
+                    arena
+                        .final_v2_closure_bytes()
+                        .expect("reopen hostile R0b physical closure")
+                        .as_deref(),
+                    Some(exact_final.as_slice()),
+                    "{} V attempt {attempt} changed exact final bytes",
+                    case.id
+                );
+                assert!(
+                    arena
+                        .protected_failure_bytes()
+                        .expect("inspect hostile R0b physical local refusal")
+                        .is_none(),
+                    "{} V attempt {attempt} created a projection-local refusal",
+                    case.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn r0b_binding_matrix_is_global_in_complete_verification() {
+        let directory = tempdir().expect("R0b binding verification parent");
+        for case in R0B_BINDING_CASES {
+            let manifest = spawn_pending_v3_fixture(
+                directory.path(),
+                &format!("V-{}", case.id),
+                PendingV3FixtureSpec {
+                    physical_source_mutation: case.physical_mutation,
+                    crash_window: PendingV3CrashWindow::AfterFinalSealBeforeSql,
+                    ..PendingV3FixtureSpec::exact_native()
+                },
+            );
+            let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+            let reservation_record_id =
+                Sha256Digest::parse(manifest_string(&manifest, "reservation_record_id").to_owned())
+                    .expect("R0b binding verification reservation");
+            let store = Store::open(&database).expect("open exact R0b binding verification store");
+            let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+                .expect("open R0b binding verification arena")
+                .expect("R0b binding verification arena exists");
+            let inspection = arena
+                .inspection()
+                .expect("inspect R0b binding verification arena");
+            let exact_final = arena
+                .final_v2_closure_bytes()
+                .expect("read R0b binding verification closure")
+                .expect("R0b binding verification closure exists");
+            assert!(
+                arena
+                    .protected_failure_bytes()
+                    .expect("inspect R0b binding verification refusal")
+                    .is_none()
+            );
+            drop(arena);
+            apply_r0b_binding_mutation(
+                &store,
+                inspection.prelaunch.prelaunch_checkpoint_id.as_str(),
+                case.binding_mutation,
+            );
+            let logical_before =
+                logical_state_digest(&store.connection, b"nq.test.r0b-binding-verification.v1\0")
+                    .expect("R0b binding verification initial state");
+            for attempt in 0..2 {
+                let error = store
+                    .verify_governed_projection_and_mark_indexed(&reservation_record_id)
+                    .expect_err("R0b hostile binding verification must fail globally");
+                assert!(
+                    matches!(error, StoreError::Integrity(ref message)
+                        if message.contains(case.expected_reopen_reason)),
+                    "{} V attempt {attempt} did not fail globally with {:?}: {error}",
+                    case.id,
+                    case.expected_reopen_reason
+                );
+                assert_eq!(
+                    logical_state_digest(
+                        &store.connection,
+                        b"nq.test.r0b-binding-verification.v1\0",
+                    )
+                    .expect("R0b binding verification unchanged state"),
+                    logical_before,
+                    "{} V attempt {attempt} changed SQL or allocator state",
+                    case.id
+                );
+                assert_governed_projection_pending(&store, &reservation_record_id);
+                let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+                    .expect("reopen hostile R0b binding verification arena")
+                    .expect("hostile R0b binding verification arena exists");
+                assert_eq!(
+                    arena
+                        .final_v2_closure_bytes()
+                        .expect("reopen hostile R0b binding verification closure")
+                        .as_deref(),
+                    Some(exact_final.as_slice()),
+                    "{} V attempt {attempt} changed exact final bytes",
+                    case.id
+                );
+                assert!(
+                    arena
+                        .protected_failure_bytes()
+                        .expect("inspect hostile R0b binding verification local refusal")
+                        .is_none(),
+                    "{} V attempt {attempt} created a projection-local refusal",
+                    case.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pending_v3_pc03_claim_table_has_dependency_source_precedence_twins() {
+        let directory = tempdir().expect("typed PC-03 table parent");
+        for &(label, claim_mutation, local_reason) in PENDING_V3_PC03_FACTORIZED_CLAIMS {
+            assert_pending_v3_projection_remains_global(
+                directory.path(),
+                &format!("pc03-{label}-unavailable"),
+                PendingV3FixtureSpec {
+                    claim_mutation,
+                    post_seal_sql_mutation:
+                        PendingV3PostSealSqlMutation::DependencyCustodyCommittedUnavailable,
+                    ..PendingV3FixtureSpec::exact_native()
+                },
+                "runtime dependency payload is committed-unavailable",
+            );
+            assert_pending_v3_projection_durably_refuses(
+                directory.path(),
+                &format!("pc03-{label}-local"),
+                PendingV3FixtureSpec {
+                    claim_mutation,
+                    ..PendingV3FixtureSpec::exact_native()
+                },
+                local_reason,
+            );
+            assert_pending_v3_projection_remains_global(
+                directory.path(),
+                &format!("pc03-{label}-corrupt"),
+                PendingV3FixtureSpec {
+                    claim_mutation,
+                    post_seal_sql_mutation: PendingV3PostSealSqlMutation::DependencyCustodyCorrupt,
+                    ..PendingV3FixtureSpec::exact_native()
+                },
+                "runtime dependency payload is corrupt or substituted",
+            );
+        }
+    }
+
+    #[test]
+    fn pending_v3_pc03_physical_sources_are_global_and_dominate_every_claim() {
+        let directory = tempdir().expect("typed PC-03 physical-source parent");
+        assert_pending_v3_projection_remains_global(
+            directory.path(),
+            "pc03-decision-not-accepted",
+            PendingV3FixtureSpec {
+                physical_source_mutation: PendingV3PhysicalSourceMutation::Pc03DecisionNotAccepted,
+                ..PendingV3FixtureSpec::exact_native()
+            },
+            "arena-bound reservation checkpoint source is corrupt or incomplete",
+        );
+        for &(label, claim_mutation, _) in PENDING_V3_PC03_FACTORIZED_CLAIMS {
+            for (suffix, physical_source_mutation, expected_reason) in [
+                (
+                    "reservation-missing",
+                    PendingV3PhysicalSourceMutation::Pc03ReservationCheckpointMissing,
+                    "breaks checkpoint sequence or predecessor chain",
+                ),
+                (
+                    "reservation-corrupt",
+                    PendingV3PhysicalSourceMutation::Pc03ReservationCheckpointCorrupt,
+                    "runtime checkpoint",
+                ),
+            ] {
+                assert_pending_v3_projection_remains_global(
+                    directory.path(),
+                    &format!("pc03-{label}-{suffix}"),
+                    PendingV3FixtureSpec {
+                        claim_mutation,
+                        physical_source_mutation,
+                        ..PendingV3FixtureSpec::exact_native()
+                    },
+                    expected_reason,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pending_v3_pc03_logical_id_is_an_explicit_nonfactorizing_nonclaim() {
+        let directory = tempdir().expect("typed PC-03 logical-ID nonclaim parent");
+        let claim_mutation = PendingV3ClaimMutation::Pc03OuterRequestLogicalId;
+        assert_pending_v3_projection_durably_refuses(
+            directory.path(),
+            "pc03-logical-id-intrinsic-local",
+            PendingV3FixtureSpec {
+                claim_mutation,
+                ..PendingV3FixtureSpec::exact_native()
+            },
+            "sealed projection plan is intrinsically invalid",
+        );
+        for (suffix, post_seal_sql_mutation, expected_reason) in [
+            (
+                "unavailable",
+                PendingV3PostSealSqlMutation::DependencyCustodyCommittedUnavailable,
+                "runtime dependency payload is committed-unavailable",
+            ),
+            (
+                "corrupt",
+                PendingV3PostSealSqlMutation::DependencyCustodyCorrupt,
+                "runtime dependency payload is corrupt or substituted",
+            ),
+        ] {
+            assert_pending_v3_projection_remains_global(
+                directory.path(),
+                &format!("pc03-logical-id-intrinsic-{suffix}"),
+                PendingV3FixtureSpec {
+                    claim_mutation,
+                    post_seal_sql_mutation,
+                    ..PendingV3FixtureSpec::exact_native()
+                },
+                expected_reason,
+            );
+        }
+    }
+
+    #[test]
+    fn pending_v3_pc04_claim_table_has_source_precedence_twins() {
+        let directory = tempdir().expect("typed PC-04 table parent");
+        for &(label, claim_mutation, local_reason) in PENDING_V3_PC04_FACTORIZED_CLAIMS {
+            assert_pending_v3_projection_remains_global(
+                directory.path(),
+                &format!("pc04-{label}-dependency-unavailable"),
+                PendingV3FixtureSpec {
+                    claim_mutation,
+                    post_seal_sql_mutation:
+                        PendingV3PostSealSqlMutation::DependencyCustodyCommittedUnavailable,
+                    ..PendingV3FixtureSpec::exact_native()
+                },
+                "runtime dependency payload is committed-unavailable",
+            );
+            assert_pending_v3_projection_durably_refuses(
+                directory.path(),
+                &format!("pc04-{label}-local"),
+                PendingV3FixtureSpec {
+                    claim_mutation,
+                    ..PendingV3FixtureSpec::exact_native()
+                },
+                local_reason,
+            );
+            assert_pending_v3_projection_remains_global(
+                directory.path(),
+                &format!("pc04-{label}-dependency-corrupt"),
+                PendingV3FixtureSpec {
+                    claim_mutation,
+                    post_seal_sql_mutation: PendingV3PostSealSqlMutation::DependencyCustodyCorrupt,
+                    ..PendingV3FixtureSpec::exact_native()
+                },
+                "runtime dependency payload is corrupt or substituted",
+            );
+            for (suffix, physical_source_mutation, expected_reason) in [
+                (
+                    "launch-checkpoint-missing",
+                    PendingV3PhysicalSourceMutation::Pc04LaunchCheckpointMissing,
+                    "runtime checkpoint frontier does not cover the complete record ledger",
+                ),
+                (
+                    "launch-checkpoint-corrupt",
+                    PendingV3PhysicalSourceMutation::Pc04LaunchCheckpointCorrupt,
+                    "has invalid batch digest",
+                ),
+            ] {
+                assert_pending_v3_projection_remains_global(
+                    directory.path(),
+                    &format!("pc04-{label}-{suffix}"),
+                    PendingV3FixtureSpec {
+                        claim_mutation,
+                        physical_source_mutation,
+                        ..PendingV3FixtureSpec::exact_native()
+                    },
+                    expected_reason,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pending_v3_pc04_launch_reference_claims_hold_pc07_pc08_controls_exact() {
+        let directory = tempdir().expect("typed PC-04 held-control parent");
+        let control_manifest = spawn_pending_v3_fixture(
+            directory.path(),
+            "pc04-held-control-exact",
+            PendingV3FixtureSpec::exact_native(),
+        );
+        let read_closure = |manifest: &Value| {
+            let database = PathBuf::from(manifest_string(manifest, "database_path"));
+            let reservation_record_id =
+                Sha256Digest::parse(manifest_string(manifest, "reservation_record_id").to_owned())
+                    .expect("PC-04 held-control reservation identity");
+            let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+                .expect("open PC-04 held-control arena")
+                .expect("PC-04 held-control arena exists");
+            let bytes = arena
+                .final_v2_closure_bytes()
+                .expect("read PC-04 held-control closure")
+                .expect("PC-04 held-control closure exists");
+            serde_json::from_slice::<Value>(&bytes).expect("decode PC-04 held-control closure")
+        };
+        let control = read_closure(&control_manifest);
+        for (label, claim_mutation) in [
+            (
+                "launch-record-id",
+                PendingV3ClaimMutation::Pc04LaunchRecordId,
+            ),
+            (
+                "launch-record-bytes-digest",
+                PendingV3ClaimMutation::Pc04LaunchRecordBytesDigest,
+            ),
+        ] {
+            let manifest = spawn_pending_v3_fixture(
+                directory.path(),
+                &format!("pc04-held-control-{label}"),
+                PendingV3FixtureSpec {
+                    claim_mutation,
+                    ..PendingV3FixtureSpec::exact_native()
+                },
+            );
+            let hostile = read_closure(&manifest);
+            assert_ne!(
+                hostile["prelaunch"]["launch_checkpoint"]["runtime_records"],
+                control["prelaunch"]["launch_checkpoint"]["runtime_records"],
+                "{label} must change the one selected PC-04 claim"
+            );
+            for pointer in [
+                "/prelaunch/launch_checkpoint/checkpoint_id",
+                "/prelaunch/launch_checkpoint/batch_digest",
+                "/acquisition",
+                "/derivation",
+                "/execution_binding",
+                "/runtime_records",
+                "/dependency_generation",
+                "/projection_capsule/diagnostic/local_origin/execution_binding",
+            ] {
+                assert_eq!(
+                    hostile.pointer(pointer),
+                    control.pointer(pointer),
+                    "{label} crossed the held PC-07/PC-08 control at {pointer}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pending_v3_pc04_physical_predicate_table_is_global_before_fresh_claim() {
+        let directory = tempdir().expect("typed PC-04 physical-predicate parent");
+        for &(label, predicate, expected_reason) in PENDING_V3_PC04_PHYSICAL_PREDICATES {
+            assert_pending_v3_projection_remains_global(
+                directory.path(),
+                &format!("pc04-physical-{label}"),
+                PendingV3FixtureSpec {
+                    claim_mutation: PendingV3ClaimMutation::Pc04LaunchCheckpointId,
+                    physical_source_mutation:
+                        PendingV3PhysicalSourceMutation::Pc04NativeLaunchPredicate(predicate),
+                    ..PendingV3FixtureSpec::exact_native()
+                },
+                expected_reason,
+            );
+        }
+    }
+
+    #[test]
+    fn pending_v3_pc04_physical_predecessor_corruption_dominates_fresh_claim() {
+        let directory = tempdir().expect("typed PC-04 predecessor parent");
+        for (label, physical_source_mutation) in [
+            (
+                "predecessor-checkpoint-id",
+                PendingV3PhysicalSourceMutation::Pc04LaunchPredecessorCheckpointIdCorrupt,
+            ),
+            (
+                "predecessor-ledger-root",
+                PendingV3PhysicalSourceMutation::Pc04LaunchPredecessorLedgerRootCorrupt,
+            ),
+        ] {
+            assert_pending_v3_projection_remains_global(
+                directory.path(),
+                &format!("pc04-{label}"),
+                PendingV3FixtureSpec {
+                    claim_mutation: PendingV3ClaimMutation::Pc04LaunchCheckpointId,
+                    physical_source_mutation,
+                    ..PendingV3FixtureSpec::exact_native()
+                },
+                "breaks checkpoint sequence or predecessor chain",
+            );
+        }
+    }
+
+    #[test]
+    fn pending_v3_pc04_launch_schema_is_an_explicit_nonfactorizing_nonclaim() {
+        let directory = tempdir().expect("typed PC-04 launch-schema nonclaim parent");
+        let claim_mutation = PendingV3ClaimMutation::Pc04LaunchRecordSchema;
+        // The normal typed V3 builder requires exactly one
+        // `nq.execution_launch.v1` member, so there is no second valid schema
+        // choice to factor against physical custody. The existing Store-owned
+        // hostile callback can nevertheless retain the canonical sealed-invalid
+        // carrier; recovery must classify it locally without counting it as a
+        // factorized launch-correspondence row.
+        assert_pending_v3_projection_durably_refuses(
+            directory.path(),
+            "pc04-launch-schema-intrinsic-local",
+            PendingV3FixtureSpec {
+                claim_mutation,
+                ..PendingV3FixtureSpec::exact_native()
+            },
+            "launch checkpoint membership differs",
+        );
+        for (suffix, post_seal_sql_mutation, expected_reason) in [
+            (
+                "unavailable",
+                PendingV3PostSealSqlMutation::DependencyCustodyCommittedUnavailable,
+                "runtime dependency payload is committed-unavailable",
+            ),
+            (
+                "corrupt",
+                PendingV3PostSealSqlMutation::DependencyCustodyCorrupt,
+                "runtime dependency payload is corrupt or substituted",
+            ),
+        ] {
+            assert_pending_v3_projection_remains_global(
+                directory.path(),
+                &format!("pc04-launch-schema-intrinsic-{suffix}"),
+                PendingV3FixtureSpec {
+                    claim_mutation,
+                    post_seal_sql_mutation,
+                    ..PendingV3FixtureSpec::exact_native()
+                },
+                expected_reason,
+            );
+        }
+    }
+
+    #[test]
+    fn v3_projection_local_sequence_gap_is_durably_refused_without_sql_delta() {
+        let directory = tempdir().expect("projection-refusal parent directory");
+        let manifest = spawn_abrupt_governed_projection(
+            directory.path(),
+            "after-final-seal-before-sql-status-gap",
+        );
+        let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+        let reservation_record_id =
+            Sha256Digest::parse(manifest_string(&manifest, "reservation_record_id").to_owned())
+                .expect("manifest reservation identity");
+        let expected_closure_digest =
+            Sha256Digest::parse(manifest_string(&manifest, "closure_bytes_digest").to_owned())
+                .expect("manifest closure digest");
+        let expected_closure_length = manifest["closure_byte_length"]
+            .as_u64()
+            .expect("manifest closure length");
+
+        let mut store = Store::open(&database).expect("open sequence-gap projection store");
+        assert_governed_projection_pending(&store, &reservation_record_id);
+        let counts_before_recovery = governed_projection_append_counts(&store);
+        let recovered = store
+            .recover_pending_governed_projections()
+            .expect("terminalize exact projection-local sequence gap");
+        let [
+            GovernedProjectionRecovery::CorrespondenceRefused {
+                reservation_record_id: refused_reservation,
+                refusal_id,
+                reason,
+            },
+        ] = recovered.as_slice()
+        else {
+            panic!("unexpected projection-local recovery: {recovered:?}");
+        };
+        assert_eq!(refused_reservation, &reservation_record_id);
+        assert!(reason.contains("skips the exact next frontier"), "{reason}");
+        assert_eq!(
+            governed_projection_append_counts(&store),
+            counts_before_recovery,
+            "projection-local refusal must commit no SQL projection rows"
+        );
+
+        let refused = store
+            .governed_custody_inventory()
+            .expect("projection-refused custody inventory")
+            .into_iter()
+            .find_map(|entry| match entry {
+                GovernedCustodyInventoryEntry::Verified(frontier)
+                    if frontier.reservation_record_id == reservation_record_id =>
+                {
+                    Some(frontier)
+                }
+                _ => None,
+            })
+            .expect("projection-refused frontier");
+        assert_eq!(
+            refused.recovery_class,
+            GovernedCustodyRecoveryClass::FinalClosureProjectionRefused
+        );
+        assert_eq!(
+            refused
+                .final_closure
+                .as_ref()
+                .map(|closure| (closure.bytes_digest.clone(), closure.byte_length)),
+            Some((expected_closure_digest, expected_closure_length)),
+            "terminal refusal cannot rewrite the exact sealed final closure"
+        );
+
+        let repeated = store
+            .recover_governed_projection_and_mark_indexed(&reservation_record_id)
+            .expect("reopen the exact durable refusal");
+        assert!(
+            matches!(
+                repeated,
+                GovernedProjectionRecovery::CorrespondenceRefused {
+                    reservation_record_id: ref repeated_reservation,
+                    refusal_id: ref repeated_refusal,
+                    reason: ref repeated_reason,
+                } if repeated_reservation == &reservation_record_id
+                    && repeated_refusal == refusal_id
+                    && repeated_reason == reason
+            ),
+            "repeat recovery must preserve exact refusal identity and reason: {repeated:?}"
+        );
+
+        let profile_digest: String = store
+            .connection
+            .query_row(
+                "SELECT profile_digest FROM profile_descriptor_snapshots
+                 WHERE profile_id = 'fixture.health' AND profile_version = '1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("fixture profile digest");
+        let unrelated = rejected_fixture_collection(
+            &mut store,
+            "fixture-a",
+            "after-projection-refusal",
+            &profile_digest,
+        );
+        let committed = store
+            .commit_non_success_collection(
+                &unrelated,
+                &non_success_status(
+                    &unrelated.run.run_id,
+                    &unrelated.run.instance_id,
+                    "after-projection-refusal",
+                ),
+            )
+            .expect("an unrelated writer progresses after terminal refusal");
+        assert!(matches!(committed, ProviderIntakeCommit::Committed { .. }));
+    }
+
+    #[test]
+    fn v3_projection_pc01_through_pc10_exact_mismatches_durably_refuse() {
+        let directory = tempdir().expect("projection correspondence matrix directory");
+        for (mode, expected_reason) in [
+            (
+                "pc01-missing-capsule",
+                "sealed V3 closure has no embedded projection capsule",
+            ),
+            (
+                "pc02-reservation-digest",
+                "custody reservation runtime record differs from its sealed reference",
+            ),
+            // PC-03: exact prelaunch/checkpoint sources exist, but the sealed
+            // closure selects a different bounded relationship.
+            (
+                "pc03-reservation-checkpoint-id",
+                "reservation checkpoint digest differs from its sealed reference",
+            ),
+            (
+                "pc03-reservation-checkpoint-digest",
+                "reservation checkpoint digest differs from its sealed reference",
+            ),
+            (
+                "pc03-reservation-checkpoint-membership",
+                "reservation checkpoint membership differs from its sealed reference",
+            ),
+            // PC-04: launch checkpoint, physical claim, and native deadline
+            // provenance remain independently inspectable.
+            (
+                "pc04-launch-checkpoint-id",
+                "launch checkpoint digest differs from its sealed reference",
+            ),
+            (
+                "pc04-launch-checkpoint-digest",
+                "launch checkpoint digest differs from its sealed reference",
+            ),
+            (
+                "pc04-launch-checkpoint-membership",
+                "launch checkpoint membership differs from its sealed reference",
+            ),
+            // PC-05: every frozen derivation field is perturbed separately.
+            (
+                "pc05-identity",
+                "sealed derivation differs from the complete physical claim or local origin",
+            ),
+            (
+                "pc05-dependency-generation",
+                "sealed derivation differs from the complete physical claim or local origin",
+            ),
+            (
+                "pc05-dependency-digest",
+                "sealed derivation differs from the complete physical claim or local origin",
+            ),
+            (
+                "pc05-trust-anchor",
+                "sealed derivation differs from the complete physical claim or local origin",
+            ),
+            (
+                "pc05-evaluation",
+                "sealed derivation differs from the complete physical claim or local origin",
+            ),
+            (
+                "pc05-profile",
+                "sealed derivation differs from the complete physical claim or local origin",
+            ),
+            (
+                "pc05-evaluator-semantic",
+                "sealed derivation differs from the complete physical claim or local origin",
+            ),
+            (
+                "pc05-evaluator-artifact",
+                "sealed derivation differs from the complete physical claim or local origin",
+            ),
+            (
+                "pc05-derived-at",
+                "sealed derivation differs from the complete physical claim or local origin",
+            ),
+            (
+                "pc05-clock",
+                "sealed derivation differs from the complete physical claim or local origin",
+            ),
+            (
+                "pc05-clock-qualification",
+                "sealed derivation differs from the complete physical claim or local origin",
+            ),
+            // PC-07/08/09 representatives exercise the physical acquisition,
+            // diagnostic, and terminal-write-set boundaries respectively.
+            (
+                "pc07-provider-document",
+                "capsule provider record bytes differ from physical custody",
+            ),
+            (
+                "pc08-evaluator-artifact",
+                "diagnostic profile, evaluator, derivation time, or clock differs from custody",
+            ),
+            ("pc08-clock-qualification", "clock qualification"),
+            (
+                "pc08-execution-launch-binding",
+                "capsule execution binding or terminal checkpoint differs from sealed closure",
+            ),
+            (
+                "pc09-terminal-records",
+                "capsule terminal write set differs from sealed ordered membership",
+            ),
+            (
+                "pc10-terminal-predecessor-id",
+                "terminal checkpoint does not continue the exact sealed launch frontier",
+            ),
+            (
+                "pc10-terminal-predecessor-root",
+                "terminal checkpoint does not continue the exact sealed launch frontier",
+            ),
+        ] {
+            let _ =
+                assert_abrupt_projection_durably_refuses(directory.path(), mode, expected_reason);
+        }
+    }
+
+    #[test]
+    fn selected_source_corruption_is_global_and_pending() {
+        let directory = tempdir().expect("global-source parent directory");
+        for (mode, expected_reason) in [
+            (
+                "pc03-decision-authentication-cross-source-substitution",
+                "accepted invocation decision authentication_evidence differs from outer request",
+            ),
+            (
+                "pc03-decision-authorization-cross-source-substitution",
+                "accepted invocation decision invocation_authorization differs from outer request",
+            ),
+            (
+                "pc04-launch-claim-time",
+                "physical launch checkpoint membership, predecessor, or claim time differs",
+            ),
+            (
+                "pc04-deadline-reference",
+                "native physical launch declaration differs from its exact deadline-plus-launch checkpoint",
+            ),
+            ("pc04-deadline-provenance", "native deadline provenance"),
+            (
+                "pc04-native-deadline-row-missing",
+                "native physical launch declaration requires exactly one deadline record",
+            ),
+            (
+                "pc04-native-deadline-duplicate",
+                "native physical launch declaration requires exactly one deadline record",
+            ),
+            (
+                "pc04-native-deadline-reference-malformed",
+                "invalid exact reference at /prelaunch_checks/deadline",
+            ),
+            (
+                "pc04-native-deadline-declaration-missing",
+                "prelaunch_checks does not have the exact v1 key set",
+            ),
+            (
+                "pc04-native-unknown-prelaunch-check",
+                "prelaunch_checks does not have the exact v1 key set",
+            ),
+            (
+                "pc04-native-authentication-reference-malformed",
+                "invalid exact reference at /prelaunch_checks/authentication",
+            ),
+            (
+                "pc04-native-invocation-authorization-reference-malformed",
+                "invalid exact reference at /prelaunch_checks/invocation_authorization",
+            ),
+            (
+                "pc04-native-generation-match-reference-malformed",
+                "invalid exact reference at /prelaunch_checks/generation_match",
+            ),
+            (
+                "pc04-native-capability-reference-malformed",
+                "invalid exact reference at /prelaunch_checks/capability",
+            ),
+            (
+                "pc04-native-custody-reference-malformed",
+                "invalid exact reference at /prelaunch_checks/custody",
+            ),
+            (
+                "pc04-native-authentication-cross-source-substitution",
+                "prelaunch check authentication differs from outer request authentication_evidence",
+            ),
+            (
+                "pc04-native-invocation-authorization-cross-source-substitution",
+                "prelaunch check invocation_authorization differs from outer request invocation_authorization",
+            ),
+            (
+                "pc04-native-custody-cross-source-substitution",
+                "prelaunch check custody differs from reservation reservation_commit",
+            ),
+            (
+                "pc04-launch-extraneous-record",
+                "native physical launch declaration differs from its exact deadline-plus-launch checkpoint",
+            ),
+            (
+                "pc04-launch-status-substitution",
+                "physical execution launch status is not launched",
+            ),
+            (
+                "pc04-legacy-outer-request-reference",
+                "legacy physical launch request or decision reference differs",
+            ),
+            (
+                "pc04-legacy-decision-reference",
+                "legacy physical launch request or decision reference differs",
+            ),
+            (
+                "pc04-legacy-undeclared-deadline",
+                "legacy physical launch declaration requires one exact launch-only checkpoint",
+            ),
+            (
+                "pc04-legacy-extraneous-record",
+                "legacy physical launch declaration requires one exact launch-only checkpoint",
+            ),
+            (
+                "pc04-legacy-native-residue",
+                "legacy physical launch declaration retains native-only field attempt_deadline",
+            ),
+            (
+                "pc07-raw-bytes",
+                "physical provider-intake raw length or digest differs from exact raw custody",
+            ),
+            (
+                "pc07-provider-malformed",
+                "physical provider-intake bytes are not canonical",
+            ),
+            (
+                "pc07-provider-noncanonical",
+                "physical provider-intake bytes are not canonical",
+            ),
+        ] {
+            let manifest = spawn_abrupt_governed_projection(directory.path(), mode);
+            let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+            let reservation_record_id =
+                Sha256Digest::parse(manifest_string(&manifest, "reservation_record_id").to_owned())
+                    .expect("selected-source reservation identity");
+            let mut store = Store::open(&database).expect("open selected-source store");
+            let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+                .expect("open selected-source arena")
+                .expect("selected-source arena exists");
+            let exact_final = arena
+                .final_v2_closure_bytes()
+                .expect("read selected-source closure")
+                .expect("selected-source closure exists");
+            drop(arena);
+            let logical_before =
+                logical_state_digest(&store.connection, b"nq.test.pc04-global-source.v1\0")
+                    .expect("selected-source starting state");
+
+            for attempt in 0..2 {
+                let error = store
+                    .recover_pending_governed_projections()
+                    .expect_err("PC-04 physical source corruption must remain global");
+                assert!(
+                    matches!(error, StoreError::Integrity(ref message)
+                        if message.contains(expected_reason)),
+                    "{mode} attempt {attempt}: {error}"
+                );
+                assert_eq!(
+                    logical_state_digest(&store.connection, b"nq.test.pc04-global-source.v1\0",)
+                        .expect("selected-source unchanged state"),
+                    logical_before,
+                    "{mode} changed SQL while globally blocked"
+                );
+                assert_governed_projection_pending(&store, &reservation_record_id);
+                let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+                    .expect("reopen selected-source arena")
+                    .expect("selected-source arena remains");
+                assert_eq!(
+                    arena
+                        .final_v2_closure_bytes()
+                        .expect("reopen selected-source closure")
+                        .as_deref(),
+                    Some(exact_final.as_slice())
+                );
+                assert!(
+                    arena
+                        .protected_failure_bytes()
+                        .expect("inspect selected-source refusal")
+                        .is_none(),
+                    "{mode} must not become a projection-local refusal"
+                );
+            }
+            let writer_error = store
+                .record_status(&StatusEventInput {
+                    status_event_id: format!("pc04-later-writer-{mode}"),
+                    component_kind: "database".to_owned(),
+                    component_id: "pc04-later-writer".to_owned(),
+                    state: "unknown".to_owned(),
+                    code: "pc04_later_writer".to_owned(),
+                    detail: document(json!({
+                        "schema": "nq.test_pc04_later_writer.v1",
+                        "mode": mode,
+                    })),
+                    observed_at: TIME.to_owned(),
+                })
+                .expect_err("PC-04 physical source corruption must fence ordinary writers");
+            assert!(
+                matches!(writer_error, StoreError::Integrity(ref message)
+                    if message.contains(expected_reason)),
+                "{mode} writer: {writer_error}"
+            );
+            assert_eq!(
+                logical_state_digest(&store.connection, b"nq.test.pc04-global-source.v1\0",)
+                    .expect("selected-source unchanged state after writer"),
+                logical_before
+            );
+            assert_governed_projection_pending(&store, &reservation_record_id);
+        }
+    }
+
+    #[test]
+    fn pc03_pc04_arena_source_corruption_dominates_fresh_claim_mismatch() {
+        let directory = tempdir().expect("PC-03/04 source-precedence parent directory");
+        for (mode, source) in [
+            ("pc03-reservation-checkpoint-id", "reservation"),
+            ("pc04-launch-checkpoint-id", "launch"),
+        ] {
+            let manifest = spawn_abrupt_governed_projection(directory.path(), mode);
+            let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+            let reservation_record_id =
+                Sha256Digest::parse(manifest_string(&manifest, "reservation_record_id").to_owned())
+                    .expect("PC-03/04 source-precedence reservation identity");
+            let mut store = Store::open(&database).expect("open PC-03/04 source-precedence store");
+            let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+                .expect("open PC-03/04 source-precedence arena")
+                .expect("PC-03/04 source-precedence arena exists");
+            let inspection = arena
+                .inspection()
+                .expect("inspect PC-03/04 source-precedence arena");
+            let exact_final = arena
+                .final_v2_closure_bytes()
+                .expect("read PC-03/04 source-precedence closure")
+                .expect("PC-03/04 source-precedence closure exists");
+            drop(arena);
+            let checkpoint_id = match source {
+                "reservation" => inspection.prelaunch.prelaunch_checkpoint_id.to_string(),
+                "launch" => {
+                    inspection
+                        .execution_launch_record_id
+                        .as_ref()
+                        .and_then(|launch_id| {
+                            runtime_record_by_id_on_connection(
+                                &store.connection,
+                                launch_id.as_str(),
+                            )
+                            .expect("read PC-04 physical launch")
+                        })
+                        .expect("PC-04 physical launch exists")
+                        .checkpoint_id
+                }
+                _ => unreachable!(),
+            };
+            let trigger: String = store
+                .connection
+                .query_row(
+                    "SELECT sql FROM sqlite_schema
+                     WHERE type = 'trigger'
+                       AND name = 'immutable_runtime_record_checkpoints_update'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("PC-03/04 checkpoint update trigger");
+            store
+                .connection
+                .execute_batch("DROP TRIGGER immutable_runtime_record_checkpoints_update;")
+                .expect("drop PC-03/04 checkpoint update trigger");
+            store
+                .connection
+                .execute(
+                    "UPDATE runtime_record_checkpoints
+                     SET batch_digest = ?1
+                     WHERE checkpoint_id = ?2",
+                    params![
+                        typed_digest(&format!("pc03-pc04-corrupt-{source}-checkpoint")).as_str(),
+                        checkpoint_id,
+                    ],
+                )
+                .expect("corrupt PC-03/04 arena-selected checkpoint");
+            store
+                .connection
+                .execute_batch(&trigger)
+                .expect("restore PC-03/04 checkpoint update trigger");
+            let logical_before = logical_state_digest(
+                &store.connection,
+                b"nq.test.pc03-pc04-source-precedence.v1\0",
+            )
+            .expect("PC-03/04 source-precedence starting state");
+
+            for attempt in 0..2 {
+                let error = store
+                    .recover_pending_governed_projections()
+                    .expect_err("arena-selected source corruption must dominate local claim");
+                assert!(
+                    matches!(error, StoreError::Integrity(ref message)
+                        if message.contains("runtime checkpoint")
+                            && message.contains("has invalid batch digest")),
+                    "{mode}/{source} attempt {attempt}: {error}"
+                );
+                assert_eq!(
+                    logical_state_digest(
+                        &store.connection,
+                        b"nq.test.pc03-pc04-source-precedence.v1\0",
+                    )
+                    .expect("PC-03/04 source-precedence unchanged state"),
+                    logical_before
+                );
+                assert_governed_projection_pending(&store, &reservation_record_id);
+                let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+                    .expect("reopen PC-03/04 source-precedence arena")
+                    .expect("PC-03/04 source-precedence arena remains");
+                assert_eq!(
+                    arena
+                        .final_v2_closure_bytes()
+                        .expect("reopen PC-03/04 source-precedence closure")
+                        .as_deref(),
+                    Some(exact_final.as_slice())
+                );
+                assert!(
+                    arena
+                        .protected_failure_bytes()
+                        .expect("inspect PC-03/04 source-precedence refusal")
+                        .is_none()
+                );
+            }
+            let writer_error = store
+                .record_status(&StatusEventInput {
+                    status_event_id: format!("pc03-pc04-later-writer-{source}"),
+                    component_kind: "database".to_owned(),
+                    component_id: "pc03-pc04-later-writer".to_owned(),
+                    state: "unknown".to_owned(),
+                    code: "pc03_pc04_later_writer".to_owned(),
+                    detail: document(json!({
+                        "schema": "nq.test_pc03_pc04_later_writer.v1",
+                        "source": source,
+                    })),
+                    observed_at: TIME.to_owned(),
+                })
+                .expect_err("arena-selected source corruption must fence ordinary writers");
+            assert!(
+                matches!(writer_error, StoreError::Integrity(ref message)
+                    if message.contains("runtime checkpoint")
+                        && message.contains("has invalid batch digest")),
+                "{mode}/{source} writer: {writer_error}"
+            );
+            assert_eq!(
+                logical_state_digest(
+                    &store.connection,
+                    b"nq.test.pc03-pc04-source-precedence.v1\0",
+                )
+                .expect("PC-03/04 source-precedence unchanged state after writer"),
+                logical_before
+            );
+        }
+    }
+
+    #[test]
+    fn physical_native_identity_collision_dominates_missing_capsule_in_both_orders() {
+        for malformed_before_first in [true, false] {
+            let directory = tempdir().expect("source-collision parent directory");
+            let manifest =
+                spawn_abrupt_governed_projection(directory.path(), "after-final-seal-before-sql");
+            let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+            let first_reservation_record_id =
+                Sha256Digest::parse(manifest_string(&manifest, "reservation_record_id").to_owned())
+                    .expect("first source reservation identity");
+            let mut store = Store::open(&database).expect("open source-collision store");
+            let first_arena =
+                CustodyArena::open_by_reservation(&database, &first_reservation_record_id)
+                    .expect("open first source arena")
+                    .expect("first source arena exists");
+            let first_inspection = first_arena
+                .inspection()
+                .expect("inspect first source arena");
+            let first_provider_record_id = first_arena
+                .acquisition_for_projection()
+                .expect("first source acquisition")
+                .provider_intake_record_id;
+            let first_exact_final = first_arena
+                .final_v2_closure_bytes()
+                .expect("read first exact final closure")
+                .expect("first exact final closure exists");
+            drop(first_arena);
+
+            let malformed = append_source_only_missing_capsule_projection(
+                &mut store,
+                &database,
+                &first_reservation_record_id,
+                malformed_before_first,
+            );
+            assert_eq!(
+                malformed.reservation_record_id < first_reservation_record_id,
+                malformed_before_first,
+                "hostile must exercise both physical inventory orders"
+            );
+            assert_ne!(
+                malformed.provider_intake_record_id, first_provider_record_id,
+                "provider record identities must differ while native IDs collide"
+            );
+            assert_ne!(
+                malformed.reservation_checkpoint_id,
+                first_inspection.prelaunch.prelaunch_checkpoint_id.as_str(),
+            );
+            let first_launch_checkpoint_id = first_inspection
+                .execution_launch_record_id
+                .as_ref()
+                .and_then(|launch_id| {
+                    runtime_record_by_id_on_connection(&store.connection, launch_id.as_str())
+                        .expect("read first physical launch")
+                })
+                .expect("first physical launch exists")
+                .checkpoint_id;
+            assert_ne!(malformed.launch_checkpoint_id, first_launch_checkpoint_id,);
+            let malformed_exact_final =
+                CustodyArena::open_by_reservation(&database, &malformed.reservation_record_id)
+                    .expect("open malformed source arena")
+                    .expect("malformed source arena exists")
+                    .final_v2_closure_bytes()
+                    .expect("read malformed exact final closure")
+                    .expect("malformed exact final closure exists");
+            let logical_before = logical_state_digest(
+                &store.connection,
+                b"nq.test.physical-source-owner-collision.v1\0",
+            )
+            .expect("source-collision starting state");
+
+            for attempt in 0..2 {
+                let error = store
+                    .recover_pending_governed_projections()
+                    .expect_err("physical native identity collision must remain global");
+                assert!(
+                    matches!(error, StoreError::Integrity(ref message)
+                    if message.contains("intake_id collision")
+                        && message.contains(first_reservation_record_id.as_str())
+                        && message.contains(
+                            malformed.reservation_record_id.as_str()
+                        )),
+                    "order {malformed_before_first} attempt {attempt}: {error}"
+                );
+                assert_eq!(
+                    logical_state_digest(
+                        &store.connection,
+                        b"nq.test.physical-source-owner-collision.v1\0",
+                    )
+                    .expect("source-collision unchanged state"),
+                    logical_before,
+                    "order {malformed_before_first} attempt {attempt} changed SQL or allocator state"
+                );
+                for reservation_record_id in [
+                    &first_reservation_record_id,
+                    &malformed.reservation_record_id,
+                ] {
+                    assert_governed_projection_pending(&store, reservation_record_id);
+                    let arena = CustodyArena::open_by_reservation(&database, reservation_record_id)
+                        .expect("reopen source-collision arena")
+                        .expect("source-collision arena remains");
+                    let expected_final = if reservation_record_id == &first_reservation_record_id {
+                        first_exact_final.as_slice()
+                    } else {
+                        malformed_exact_final.as_slice()
+                    };
+                    assert_eq!(
+                        arena
+                            .final_v2_closure_bytes()
+                            .expect("reopen source-collision exact final")
+                            .as_deref(),
+                        Some(expected_final),
+                        "global source collision changed exact final custody"
+                    );
+                    assert!(
+                        arena
+                            .protected_failure_bytes()
+                            .expect("inspect source-collision refusal bytes")
+                            .is_none(),
+                        "global source collision cannot terminalize either arena"
+                    );
+                }
+            }
+            let writer_error = store
+                .record_status(&StatusEventInput {
+                    status_event_id: format!(
+                        "source-collision-later-writer-{malformed_before_first}"
+                    ),
+                    component_kind: "database".to_owned(),
+                    component_id: "source-collision-later-writer".to_owned(),
+                    state: "unknown".to_owned(),
+                    code: "source_collision_later_writer".to_owned(),
+                    detail: document(json!({
+                        "schema": "nq.test_source_collision_later_writer.v1",
+                        "malformed_before_first": malformed_before_first,
+                    })),
+                    observed_at: TIME.to_owned(),
+                })
+                .expect_err("physical native identity collision must fence ordinary writers");
+            assert!(
+                matches!(writer_error, StoreError::Integrity(ref message)
+                    if message.contains("intake_id collision")
+                        && message.contains(first_reservation_record_id.as_str())
+                        && message.contains(malformed.reservation_record_id.as_str())),
+                "order {malformed_before_first} writer: {writer_error}"
+            );
+            assert_eq!(
+                logical_state_digest(
+                    &store.connection,
+                    b"nq.test.physical-source-owner-collision.v1\0",
+                )
+                .expect("source-collision unchanged state after writer"),
+                logical_before,
+                "ordinary writer changed globally blocked SQL or allocator state"
+            );
+            for (reservation_record_id, expected_final) in [
+                (&first_reservation_record_id, first_exact_final.as_slice()),
+                (
+                    &malformed.reservation_record_id,
+                    malformed_exact_final.as_slice(),
+                ),
+            ] {
+                assert_governed_projection_pending(&store, reservation_record_id);
+                let arena = CustodyArena::open_by_reservation(&database, reservation_record_id)
+                    .expect("reopen writer-fenced source arena")
+                    .expect("writer-fenced source arena remains");
+                assert_eq!(
+                    arena
+                        .final_v2_closure_bytes()
+                        .expect("reopen writer-fenced exact final")
+                        .as_deref(),
+                    Some(expected_final)
+                );
+                assert!(
+                    arena
+                        .protected_failure_bytes()
+                        .expect("inspect writer-fenced refusal")
+                        .is_none()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pc06_dependency_unavailable_or_corrupt_remains_global_and_pending() {
+        let directory = tempdir().expect("PC-06 parent directory");
+        for mutation in [
+            "committed-unavailable",
+            "substituted-payload",
+            "noncanonical-payload",
+            "missing-commitment",
+            "missing-binding",
+            "substituted-generation",
+            "substituted-trust-anchor",
+            "binding-digest-disagreement",
+        ] {
+            let case_directory = directory.path().join(mutation);
+            std::fs::create_dir_all(&case_directory).expect("create PC-06 case directory");
+            let manifest =
+                spawn_abrupt_governed_projection(&case_directory, "after-final-seal-before-sql");
+            let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+            let reservation_record_id =
+                Sha256Digest::parse(manifest_string(&manifest, "reservation_record_id").to_owned())
+                    .expect("PC-06 reservation identity");
+            let mut store = Store::open(&database).expect("open PC-06 store");
+            let dependency_generation_id: String = store
+                .connection
+                .query_row(
+                    "SELECT dependency_generation_id
+                     FROM runtime_dependency_generation_commitments
+                     ORDER BY dependency_generation_id LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("PC-06 dependency generation");
+            let checkpoint_id: String = store
+                .connection
+                .query_row(
+                    "SELECT checkpoint_id
+                     FROM runtime_checkpoint_dependency_bindings
+                     WHERE dependency_generation_id = ?1
+                     ORDER BY checkpoint_id LIMIT 1",
+                    [&dependency_generation_id],
+                    |row| row.get(0),
+                )
+                .expect("PC-06 dependency checkpoint");
+            let expected_error_fragment = match mutation {
+                "committed-unavailable" => {
+                    let trigger: String = store
+                        .connection
+                        .query_row(
+                            "SELECT sql FROM sqlite_schema
+                             WHERE type = 'trigger'
+                               AND name =
+                                 'immutable_runtime_dependency_generation_payloads_delete'",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .expect("PC-06 payload delete trigger");
+                    store
+                        .connection
+                        .execute_batch(
+                            "DROP TRIGGER \
+                             immutable_runtime_dependency_generation_payloads_delete;",
+                        )
+                        .expect("drop PC-06 payload delete trigger");
+                    store
+                        .connection
+                        .execute(
+                            "DELETE FROM runtime_dependency_generation_payloads
+                             WHERE dependency_generation_id = ?1",
+                            [&dependency_generation_id],
+                        )
+                        .expect("remove PC-06 dependency bytes");
+                    store
+                        .connection
+                        .execute_batch(&trigger)
+                        .expect("restore PC-06 payload delete trigger");
+                    "runtime dependency payload is committed-unavailable"
+                }
+                "substituted-payload" => {
+                    let trigger: String = store
+                        .connection
+                        .query_row(
+                            "SELECT sql FROM sqlite_schema
+                             WHERE type = 'trigger'
+                               AND name =
+                                 'immutable_runtime_dependency_generation_payloads_update'",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .expect("PC-06 payload update trigger");
+                    let original: Vec<u8> = store
+                        .connection
+                        .query_row(
+                            "SELECT canonical_bytes
+                             FROM runtime_dependency_generation_payloads
+                             WHERE dependency_generation_id = ?1",
+                            [&dependency_generation_id],
+                            |row| row.get(0),
+                        )
+                        .expect("PC-06 original dependency bytes");
+                    let mut substituted: Value =
+                        serde_json::from_slice(&original).expect("PC-06 dependency JSON");
+                    substituted["pc06_hostile"] = Value::Bool(true);
+                    let substituted = nq_protocol::canonical_json_bytes(&substituted)
+                        .expect("canonical PC-06 hostile dependency");
+                    store
+                        .connection
+                        .execute_batch(
+                            "DROP TRIGGER \
+                             immutable_runtime_dependency_generation_payloads_update;",
+                        )
+                        .expect("drop PC-06 payload update trigger");
+                    store
+                        .connection
+                        .execute(
+                            "UPDATE runtime_dependency_generation_payloads
+                             SET canonical_bytes = ?1
+                             WHERE dependency_generation_id = ?2",
+                            params![substituted, dependency_generation_id],
+                        )
+                        .expect("substitute PC-06 dependency bytes");
+                    store
+                        .connection
+                        .execute_batch(&trigger)
+                        .expect("restore PC-06 payload update trigger");
+                    "runtime dependency payload is corrupt or substituted"
+                }
+                "noncanonical-payload" => {
+                    let trigger: String = store
+                        .connection
+                        .query_row(
+                            "SELECT sql FROM sqlite_schema
+                             WHERE type = 'trigger'
+                               AND name =
+                                 'immutable_runtime_dependency_generation_payloads_update'",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .expect("PC-06 payload update trigger");
+                    store
+                        .connection
+                        .execute_batch(
+                            "DROP TRIGGER \
+                             immutable_runtime_dependency_generation_payloads_update;",
+                        )
+                        .expect("drop PC-06 payload update trigger");
+                    store
+                        .connection
+                        .execute(
+                            "UPDATE runtime_dependency_generation_payloads
+                             SET canonical_bytes = ?1
+                             WHERE dependency_generation_id = ?2",
+                            params![
+                                br#"{ "pc06_noncanonical": true }"#.as_slice(),
+                                dependency_generation_id
+                            ],
+                        )
+                        .expect("substitute PC-06 noncanonical dependency bytes");
+                    store
+                        .connection
+                        .execute_batch(&trigger)
+                        .expect("restore PC-06 payload update trigger");
+                    "runtime dependency payload is corrupt or substituted"
+                }
+                "missing-commitment" => {
+                    let trigger: String = store
+                        .connection
+                        .query_row(
+                            "SELECT sql FROM sqlite_schema
+                             WHERE type = 'trigger'
+                               AND name =
+                                 'immutable_runtime_dependency_generation_commitments_delete'",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .expect("PC-06 commitment delete trigger");
+                    store
+                        .connection
+                        .execute_batch(
+                            "DROP TRIGGER \
+                             immutable_runtime_dependency_generation_commitments_delete;
+                             PRAGMA foreign_keys = OFF;",
+                        )
+                        .expect("permit PC-06 commitment deletion");
+                    store
+                        .connection
+                        .execute(
+                            "DELETE FROM runtime_dependency_generation_commitments
+                             WHERE dependency_generation_id = ?1",
+                            [&dependency_generation_id],
+                        )
+                        .expect("remove PC-06 dependency commitment");
+                    store
+                        .connection
+                        .execute_batch("PRAGMA foreign_keys = ON;")
+                        .expect("restore PC-06 foreign keys");
+                    store
+                        .connection
+                        .execute_batch(&trigger)
+                        .expect("restore PC-06 commitment delete trigger");
+                    "references a missing dependency commitment"
+                }
+                "missing-binding" => {
+                    let trigger: String = store
+                        .connection
+                        .query_row(
+                            "SELECT sql FROM sqlite_schema
+                             WHERE type = 'trigger'
+                               AND name =
+                                 'immutable_runtime_checkpoint_dependency_bindings_delete'",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .expect("PC-06 binding delete trigger");
+                    store
+                        .connection
+                        .execute_batch(
+                            "DROP TRIGGER \
+                             immutable_runtime_checkpoint_dependency_bindings_delete;",
+                        )
+                        .expect("drop PC-06 binding delete trigger");
+                    store
+                        .connection
+                        .execute(
+                            "DELETE FROM runtime_checkpoint_dependency_bindings
+                             WHERE checkpoint_id = ?1",
+                            [&checkpoint_id],
+                        )
+                        .expect("remove PC-06 checkpoint dependency binding");
+                    store
+                        .connection
+                        .execute_batch(&trigger)
+                        .expect("restore PC-06 binding delete trigger");
+                    "lacks dependency provenance"
+                }
+                "substituted-generation" => {
+                    let (trust_anchor_id, original_custody): (String, Vec<u8>) = store
+                        .connection
+                        .query_row(
+                            "SELECT commitment.trust_anchor_id, payload.canonical_bytes
+                             FROM runtime_dependency_generation_commitments AS commitment
+                             JOIN runtime_dependency_generation_payloads AS payload
+                               ON payload.dependency_generation_id =
+                                  commitment.dependency_generation_id
+                             WHERE commitment.dependency_generation_id = ?1",
+                            [&dependency_generation_id],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .expect("PC-06 original exact dependency custody");
+                    let original_custody: Value = serde_json::from_slice(&original_custody)
+                        .expect("PC-06 original dependency JSON");
+                    let foreign_generation = document(json!({
+                        "schema": "nq.test_runtime_dependency_generation.v1",
+                        "label": "pc06-valid-foreign-generation",
+                        "trust_anchor_id": trust_anchor_id,
+                    }));
+                    let foreign_generation_id =
+                        Sha256Digest::parse(foreign_generation.digest().to_owned())
+                            .expect("PC-06 foreign generation identity");
+                    let foreign_custody = document(json!({
+                        "schema": RUNTIME_DEPENDENCY_GENERATION_CUSTODY_SCHEMA,
+                        "generation_id": foreign_generation_id,
+                        "generation_canonical_bytes":
+                            hex::encode(foreign_generation.as_bytes()),
+                        "identity_catalog_canonical_bytes": "",
+                        "external_dependency_canonical_bytes": "",
+                        "authority_admission_canonical_bytes": "",
+                        "trust_anchor_canonical_bytes": original_custody
+                            ["trust_anchor_canonical_bytes"],
+                        "admission_receipt_set_canonical_bytes": "",
+                    }));
+                    let foreign_dependency = RuntimeCheckpointDependencyInput {
+                        dependency_generation_id: foreign_generation_id.clone(),
+                        trust_anchor_id: Sha256Digest::parse(trust_anchor_id)
+                            .expect("PC-06 original trust anchor identity"),
+                        canonical_custody: foreign_custody,
+                    };
+                    validate_runtime_checkpoint_dependency(&foreign_dependency)
+                        .expect("PC-06 foreign generation is independently exact");
+                    store
+                        .connection
+                        .execute(
+                            "INSERT INTO runtime_dependency_generation_commitments (
+                                dependency_generation_id, trust_anchor_id, custody_schema,
+                                canonical_bytes_sha256, canonical_bytes_length, committed_at
+                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                            params![
+                                foreign_dependency.dependency_generation_id.as_str(),
+                                foreign_dependency.trust_anchor_id.as_str(),
+                                RUNTIME_DEPENDENCY_GENERATION_CUSTODY_SCHEMA,
+                                foreign_dependency.canonical_custody.digest(),
+                                i64::try_from(
+                                    foreign_dependency.canonical_custody.as_bytes().len()
+                                )
+                                .expect("PC-06 foreign custody length"),
+                                TIME,
+                            ],
+                        )
+                        .expect("commit PC-06 foreign generation identity");
+                    store
+                        .connection
+                        .execute(
+                            "INSERT INTO runtime_dependency_generation_payloads (
+                                dependency_generation_id, canonical_bytes
+                             ) VALUES (?1, ?2)",
+                            params![
+                                foreign_dependency.dependency_generation_id.as_str(),
+                                foreign_dependency.canonical_custody.as_bytes(),
+                            ],
+                        )
+                        .expect("commit PC-06 foreign generation bytes");
+                    let checkpoint =
+                        runtime_checkpoint_by_id_on_connection(&store.connection, &checkpoint_id)
+                            .expect("read PC-06 checkpoint")
+                            .expect("PC-06 checkpoint exists");
+                    let records = (checkpoint.first_record_sequence
+                        ..=checkpoint.last_record_sequence)
+                        .map(|sequence| {
+                            let record = runtime_record_by_sequence_on_connection(
+                                &store.connection,
+                                sequence,
+                            )
+                            .expect("read PC-06 checkpoint record")
+                            .expect("PC-06 checkpoint record exists");
+                            RuntimeRecordInput {
+                                record_id: record.record_id,
+                                record_schema: record.record_schema,
+                                canonical_bytes: record.canonical_bytes,
+                                committed_at: record.committed_at,
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    let foreign_batch_digest = runtime_record_batch_digest_v2(
+                        &checkpoint.checkpoint_id,
+                        checkpoint.predecessor_checkpoint_id.as_deref(),
+                        checkpoint.predecessor_ledger_root.as_ref(),
+                        &foreign_dependency.dependency_generation_id,
+                        &foreign_dependency.trust_anchor_id,
+                        foreign_dependency.canonical_custody.digest(),
+                        foreign_dependency.canonical_custody.as_bytes().len(),
+                        &records,
+                    )
+                    .expect("PC-06 coherent foreign checkpoint digest");
+                    let binding_trigger: String = store
+                        .connection
+                        .query_row(
+                            "SELECT sql FROM sqlite_schema
+                             WHERE type = 'trigger'
+                               AND name =
+                                 'immutable_runtime_checkpoint_dependency_bindings_update'",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .expect("PC-06 binding update trigger");
+                    let checkpoint_trigger: String = store
+                        .connection
+                        .query_row(
+                            "SELECT sql FROM sqlite_schema
+                             WHERE type = 'trigger'
+                               AND name =
+                                 'immutable_runtime_record_checkpoints_update'",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .expect("PC-06 checkpoint update trigger");
+                    store
+                        .connection
+                        .execute_batch(
+                            "DROP TRIGGER \
+                             immutable_runtime_checkpoint_dependency_bindings_update;
+                             DROP TRIGGER immutable_runtime_record_checkpoints_update;
+                             PRAGMA foreign_keys = OFF;",
+                        )
+                        .expect("permit PC-06 generation substitution");
+                    store
+                        .connection
+                        .execute(
+                            "UPDATE runtime_checkpoint_dependency_bindings
+                             SET dependency_generation_id = ?1,
+                                 canonical_bytes_sha256 = ?2
+                             WHERE checkpoint_id = ?3",
+                            params![
+                                foreign_dependency.dependency_generation_id.as_str(),
+                                foreign_dependency.canonical_custody.digest(),
+                                checkpoint_id
+                            ],
+                        )
+                        .expect("substitute PC-06 dependency generation");
+                    store
+                        .connection
+                        .execute(
+                            "UPDATE runtime_record_checkpoints
+                             SET batch_digest = ?1
+                             WHERE checkpoint_id = ?2",
+                            params![foreign_batch_digest.as_str(), checkpoint_id],
+                        )
+                        .expect("recompute PC-06 checkpoint digest");
+                    store
+                        .connection
+                        .execute_batch("PRAGMA foreign_keys = ON;")
+                        .expect("restore PC-06 foreign keys");
+                    store
+                        .connection
+                        .execute_batch(&binding_trigger)
+                        .expect("restore PC-06 binding update trigger");
+                    store
+                        .connection
+                        .execute_batch(&checkpoint_trigger)
+                        .expect("restore PC-06 checkpoint update trigger");
+                    "dependency closure is substituted or differs from sealed custody"
+                }
+                "substituted-trust-anchor" => {
+                    let trigger: String = store
+                        .connection
+                        .query_row(
+                            "SELECT sql FROM sqlite_schema
+                             WHERE type = 'trigger'
+                               AND name =
+                                 'immutable_runtime_checkpoint_dependency_bindings_update'",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .expect("PC-06 binding update trigger");
+                    store
+                        .connection
+                        .execute_batch(
+                            "DROP TRIGGER \
+                             immutable_runtime_checkpoint_dependency_bindings_update;
+                             PRAGMA foreign_keys = OFF;",
+                        )
+                        .expect("permit PC-06 trust-anchor substitution");
+                    store
+                        .connection
+                        .execute(
+                            "UPDATE runtime_checkpoint_dependency_bindings
+                             SET trust_anchor_id = ?1
+                             WHERE checkpoint_id = ?2",
+                            params![
+                                typed_digest("pc06-substituted-trust-anchor").as_str(),
+                                checkpoint_id
+                            ],
+                        )
+                        .expect("substitute PC-06 trust anchor");
+                    store
+                        .connection
+                        .execute_batch("PRAGMA foreign_keys = ON;")
+                        .expect("restore PC-06 foreign keys");
+                    store
+                        .connection
+                        .execute_batch(&trigger)
+                        .expect("restore PC-06 binding update trigger");
+                    "selected non-bootstrap trust root"
+                }
+                "binding-digest-disagreement" => {
+                    let trigger: String = store
+                        .connection
+                        .query_row(
+                            "SELECT sql FROM sqlite_schema
+                             WHERE type = 'trigger'
+                               AND name =
+                                 'immutable_runtime_checkpoint_dependency_bindings_update'",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .expect("PC-06 binding update trigger");
+                    store
+                        .connection
+                        .execute_batch(
+                            "DROP TRIGGER \
+                             immutable_runtime_checkpoint_dependency_bindings_update;
+                             PRAGMA foreign_keys = OFF;",
+                        )
+                        .expect("permit PC-06 binding-digest substitution");
+                    store
+                        .connection
+                        .execute(
+                            "UPDATE runtime_checkpoint_dependency_bindings
+                             SET canonical_bytes_sha256 = ?1
+                             WHERE checkpoint_id = ?2",
+                            params![
+                                typed_digest("pc06-substituted-binding-digest").as_str(),
+                                checkpoint_id
+                            ],
+                        )
+                        .expect("substitute PC-06 binding digest");
+                    store
+                        .connection
+                        .execute_batch("PRAGMA foreign_keys = ON;")
+                        .expect("restore PC-06 foreign keys");
+                    store
+                        .connection
+                        .execute_batch(&trigger)
+                        .expect("restore PC-06 binding update trigger");
+                    "dependency binding differs from its commitment"
+                }
+                _ => unreachable!(),
+            };
+            match mutation {
+                "committed-unavailable" => {
+                    let access = store
+                        .runtime_checkpoint_dependency(&checkpoint_id)
+                        .expect("PC-06 unavailable dependency access")
+                        .expect("PC-06 unavailable dependency binding");
+                    assert!(matches!(
+                        access.byte_state,
+                        Some(RuntimeDependencyGenerationByteState::CommittedUnavailable)
+                    ));
+                }
+                "substituted-payload" | "noncanonical-payload" => {
+                    let access = store
+                        .runtime_checkpoint_dependency(&checkpoint_id)
+                        .expect("PC-06 corrupt dependency access")
+                        .expect("PC-06 corrupt dependency binding");
+                    assert!(matches!(
+                        access.byte_state,
+                        Some(RuntimeDependencyGenerationByteState::Corrupt { .. })
+                    ));
+                }
+                "substituted-generation" => {
+                    let access = store
+                        .runtime_checkpoint_dependency(&checkpoint_id)
+                        .expect("PC-06 foreign generation access")
+                        .expect("PC-06 foreign generation binding");
+                    assert!(matches!(
+                        access,
+                        RuntimeCheckpointDependencyAccess {
+                            binding:
+                                RuntimeCheckpointDependencyBinding::Authenticated {
+                                    dependency_generation_id: ref generation,
+                                    ..
+                                },
+                            byte_state:
+                                Some(
+                                    RuntimeDependencyGenerationByteState::VerifiedAvailable {
+                                        ..
+                                    }
+                                ),
+                            ..
+                        } if generation.as_str() != dependency_generation_id
+                    ));
+                }
+                "missing-binding" => assert!(
+                    store
+                        .runtime_checkpoint_dependency(&checkpoint_id)
+                        .expect("PC-06 missing-binding access")
+                        .is_none()
+                ),
+                _ => {
+                    let error = store
+                        .runtime_checkpoint_dependency(&checkpoint_id)
+                        .expect_err("PC-06 substituted dependency must fail exact access");
+                    assert!(
+                        matches!(error, StoreError::Integrity(ref message)
+                            if message.contains(expected_error_fragment)),
+                        "{mutation}: {error}"
+                    );
+                }
+            }
+            let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+                .expect("open PC-06 arena")
+                .expect("PC-06 arena exists");
+            let exact_final = arena
+                .final_v2_closure_bytes()
+                .expect("read PC-06 final closure")
+                .expect("PC-06 final closure exists");
+            drop(arena);
+            let logical_before =
+                logical_state_digest(&store.connection, b"nq.test.pc06-global-pending.v1\0")
+                    .expect("PC-06 post-mutation state");
+            for attempt in 0..2 {
+                let error = store
+                    .recover_pending_governed_projections()
+                    .expect_err("PC-06 dependency defect must remain global");
+                assert!(
+                    matches!(error, StoreError::Integrity(ref message)
+                        if message.contains(expected_error_fragment)),
+                    "{mutation} attempt {attempt}: {error}"
+                );
+                assert_eq!(
+                    logical_state_digest(&store.connection, b"nq.test.pc06-global-pending.v1\0",)
+                        .expect("PC-06 unchanged state"),
+                    logical_before
+                );
+                assert_governed_projection_pending(&store, &reservation_record_id);
+                let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+                    .expect("reopen PC-06 arena")
+                    .expect("PC-06 arena remains");
+                assert_eq!(
+                    arena
+                        .final_v2_closure_bytes()
+                        .expect("reopen PC-06 final closure")
+                        .as_deref(),
+                    Some(exact_final.as_slice())
+                );
+                assert!(
+                    arena
+                        .protected_failure_bytes()
+                        .expect("inspect PC-06 refusal bytes")
+                        .is_none(),
+                    "{mutation} must not become projection correspondence refusal"
+                );
+            }
+            let writer_error = store
+                .record_status(&StatusEventInput {
+                    status_event_id: format!("pc06-later-writer-{mutation}"),
+                    component_kind: "database".to_owned(),
+                    component_id: "pc06-later-writer".to_owned(),
+                    state: "unknown".to_owned(),
+                    code: "pc06_later_writer".to_owned(),
+                    detail: document(json!({
+                        "schema": "nq.test_pc06_later_writer.v1",
+                        "mutation": mutation,
+                    })),
+                    observed_at: TIME.to_owned(),
+                })
+                .expect_err("PC-06 ordinary writer must remain globally fenced");
+            assert!(
+                matches!(writer_error, StoreError::Integrity(ref message)
+                    if message.contains(expected_error_fragment)),
+                "{mutation} writer: {writer_error}"
+            );
+            assert_eq!(
+                logical_state_digest(&store.connection, b"nq.test.pc06-global-pending.v1\0",)
+                    .expect("PC-06 unchanged state after writer"),
+                logical_before,
+                "{mutation} ordinary writer changed globally blocked state"
+            );
+            assert_governed_projection_pending(&store, &reservation_record_id);
+        }
+    }
+
+    #[test]
+    fn pc11_partial_provider_attempt_binding_dominates_local_mismatch() {
+        let directory = tempdir().expect("PC-11 partial-footprint parent directory");
+        let manifest = spawn_abrupt_governed_projection(
+            directory.path(),
+            "after-final-seal-before-sql-status-gap",
+        );
+        let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+        let reservation_record_id =
+            Sha256Digest::parse(manifest_string(&manifest, "reservation_record_id").to_owned())
+                .expect("PC-11 reservation identity");
+        let artifact_id = manifest_string(&manifest, "diagnostic_artifact_id");
+        let mut store = Store::open(&database).expect("open PC-11 partial-footprint store");
+        let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+            .expect("open PC-11 pending arena")
+            .expect("PC-11 pending arena exists");
+        let exact_final = arena
+            .final_v2_closure_bytes()
+            .expect("read PC-11 exact closure")
+            .expect("PC-11 exact closure exists");
+        drop(arena);
+
+        // Model a crash/corrupt writer that left one child of the pending
+        // artifact root without its parent. Root-only Absent classification
+        // must not allow the independent sealed status-sequence mismatch to
+        // terminalize this arena.
+        store
+            .connection
+            .execute_batch("PRAGMA foreign_keys = OFF;")
+            .expect("disable PC-11 foreign keys for hostile setup");
+        store
+            .connection
+            .execute(
+                "INSERT INTO local_diagnostic_artifact_provider_attempt_bindings (
+                    artifact_id, ordinal, provider_attempt_record_id, intake_id
+                 ) VALUES (?1, 0, ?2, ?3)",
+                params![
+                    artifact_id,
+                    typed_digest("pc11-orphan-provider-attempt").as_str(),
+                    "pc11-orphan-intake",
+                ],
+            )
+            .expect("insert PC-11 orphan provider-attempt binding");
+        store
+            .connection
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .expect("restore PC-11 foreign keys");
+        let logical_before =
+            logical_state_digest(&store.connection, b"nq.test.pc11-partial-footprint.v1\0")
+                .expect("PC-11 post-hostile logical state");
+
+        for attempt in 0..2 {
+            let error = store
+                .recover_pending_governed_projections()
+                .expect_err("partial SQL footprint must remain globally blocked");
+            assert!(
+                matches!(error, StoreError::Integrity(ref message)
+                if message.contains("foreign-key violation")
+                    && message.contains(
+                        "local_diagnostic_artifact_provider_attempt_bindings"
+                    )),
+                "PC-11 attempt {attempt}: {error}"
+            );
+            assert_eq!(
+                logical_state_digest(&store.connection, b"nq.test.pc11-partial-footprint.v1\0",)
+                    .expect("PC-11 unchanged state"),
+                logical_before,
+                "PC-11 global partial footprint changed SQL state"
+            );
+            assert_governed_projection_pending(&store, &reservation_record_id);
+            let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+                .expect("reopen PC-11 pending arena")
+                .expect("PC-11 pending arena remains");
+            assert_eq!(
+                arena
+                    .final_v2_closure_bytes()
+                    .expect("reopen PC-11 exact closure")
+                    .as_deref(),
+                Some(exact_final.as_slice())
+            );
+            assert!(
+                arena
+                    .protected_failure_bytes()
+                    .expect("inspect PC-11 refusal bytes")
+                    .is_none(),
+                "global partial footprint must not terminalize one arena"
+            );
+        }
+        let writer_error = store
+            .record_status(&StatusEventInput {
+                status_event_id: "pc11-partial-later-writer".to_owned(),
+                component_kind: "database".to_owned(),
+                component_id: "pc11-partial-later-writer".to_owned(),
+                state: "unknown".to_owned(),
+                code: "pc11_partial_later_writer".to_owned(),
+                detail: document(json!({
+                    "schema": "nq.test_pc11_partial_later_writer.v1",
+                })),
+                observed_at: TIME.to_owned(),
+            })
+            .expect_err("PC-11 partial footprint must fence an ordinary writer");
+        assert!(
+            matches!(writer_error, StoreError::Integrity(ref message)
+            if message.contains("foreign-key violation")
+                && message.contains(
+                    "local_diagnostic_artifact_provider_attempt_bindings"
+                )),
+            "PC-11 partial-footprint writer: {writer_error}"
+        );
+        assert_eq!(
+            logical_state_digest(&store.connection, b"nq.test.pc11-partial-footprint.v1\0",)
+                .expect("PC-11 unchanged partial state after writer"),
+            logical_before,
+            "PC-11 ordinary writer changed globally blocked partial state"
+        );
+        assert_governed_projection_pending(&store, &reservation_record_id);
+    }
+
+    #[test]
+    fn pc11_existing_sql_one_field_collision_is_global() {
+        let directory = tempdir().expect("PC-11 collision parent directory");
+        let manifest =
+            spawn_abrupt_governed_projection(directory.path(), "after-sql-before-index-mark");
+        let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+        let reservation_record_id =
+            Sha256Digest::parse(manifest_string(&manifest, "reservation_record_id").to_owned())
+                .expect("PC-11 collision reservation identity");
+        let acknowledgment_id = manifest_string(&manifest, "acknowledgment_id");
+        let mut store = Store::open(&database).expect("open PC-11 collision store");
+        assert_exact_governed_projection_rows(&store, &manifest);
+        let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+            .expect("open PC-11 collision arena")
+            .expect("PC-11 collision arena exists");
+        let exact_final = arena
+            .final_v2_closure_bytes()
+            .expect("read PC-11 collision closure")
+            .expect("PC-11 collision closure exists");
+        drop(arena);
+
+        let trigger: String = store
+            .connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                 WHERE type = 'trigger'
+                   AND name =
+                     'immutable_provider_intake_acknowledgments_update'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("PC-11 acknowledgment update trigger");
+        store
+            .connection
+            .execute_batch(
+                "DROP TRIGGER \
+                 immutable_provider_intake_acknowledgments_update;",
+            )
+            .expect("drop PC-11 acknowledgment trigger");
+        store
+            .connection
+            .execute(
+                "UPDATE provider_intake_acknowledgments
+                 SET committed_at = ?1
+                 WHERE acknowledgment_id = ?2",
+                params!["2026-07-16T12:00:01.000Z", acknowledgment_id],
+            )
+            .expect("substitute one PC-11 durable publication field");
+        store
+            .connection
+            .execute_batch(&trigger)
+            .expect("restore PC-11 acknowledgment trigger");
+        let logical_before =
+            logical_state_digest(&store.connection, b"nq.test.pc11-existing-collision.v1\0")
+                .expect("PC-11 collision logical state");
+
+        for attempt in 0..2 {
+            let error = store
+                .recover_pending_governed_projections()
+                .expect_err("one-field existing SQL collision must remain global");
+            assert!(
+                matches!(error, StoreError::Integrity(ref message)
+                if message.contains(
+                    "acknowledgment substitutes its bound identities or canonical result"
+                )),
+                "PC-11 collision attempt {attempt}: {error}"
+            );
+            assert_eq!(
+                logical_state_digest(&store.connection, b"nq.test.pc11-existing-collision.v1\0",)
+                    .expect("PC-11 collision unchanged state"),
+                logical_before
+            );
+            assert_governed_projection_pending(&store, &reservation_record_id);
+            let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+                .expect("reopen PC-11 collision arena")
+                .expect("PC-11 collision arena remains");
+            assert_eq!(
+                arena
+                    .final_v2_closure_bytes()
+                    .expect("reopen PC-11 collision closure")
+                    .as_deref(),
+                Some(exact_final.as_slice())
+            );
+            assert!(
+                arena
+                    .protected_failure_bytes()
+                    .expect("inspect PC-11 collision refusal")
+                    .is_none()
+            );
+        }
+        let writer_error = store
+            .record_status(&StatusEventInput {
+                status_event_id: "pc11-collision-later-writer".to_owned(),
+                component_kind: "database".to_owned(),
+                component_id: "pc11-collision-later-writer".to_owned(),
+                state: "unknown".to_owned(),
+                code: "pc11_collision_later_writer".to_owned(),
+                detail: document(json!({
+                    "schema": "nq.test_pc11_collision_later_writer.v1",
+                })),
+                observed_at: TIME.to_owned(),
+            })
+            .expect_err("PC-11 existing collision must fence an ordinary writer");
+        assert!(
+            matches!(writer_error, StoreError::Integrity(ref message)
+            if message.contains(
+                "acknowledgment substitutes its bound identities or canonical result"
+            )),
+            "PC-11 collision writer: {writer_error}"
+        );
+        assert_eq!(
+            logical_state_digest(&store.connection, b"nq.test.pc11-existing-collision.v1\0",)
+                .expect("PC-11 unchanged collision state after writer"),
+            logical_before,
+            "PC-11 ordinary writer changed globally blocked collision state"
+        );
+        assert_governed_projection_pending(&store, &reservation_record_id);
+    }
+
+    #[test]
+    fn pc11_existing_exact_replay_is_sql_idempotent_until_exact_index_mark() {
+        let directory = tempdir().expect("PC-11 exact replay parent directory");
+        let manifest =
+            spawn_abrupt_governed_projection(directory.path(), "after-sql-before-index-mark");
+        let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+        let reservation_record_id =
+            Sha256Digest::parse(manifest_string(&manifest, "reservation_record_id").to_owned())
+                .expect("PC-11 exact replay reservation identity");
+        let mut store = Store::open(&database).expect("open PC-11 exact replay store");
+        assert_exact_governed_projection_rows(&store, &manifest);
+        assert_governed_projection_pending(&store, &reservation_record_id);
+
+        let logical_before = logical_state_digest(
+            &store.connection,
+            b"nq.test.pc11-existing-exact-replay.v1\0",
+        )
+        .expect("PC-11 exact replay starting state");
+        let append_counts_before = governed_projection_append_counts(&store);
+        for attempt in 0..2 {
+            store
+                .commit_reopened_governed_projection(&reservation_record_id)
+                .unwrap_or_else(|error| {
+                    panic!("PC-11 ExistingExact replay attempt {attempt}: {error}")
+                });
+            assert_eq!(
+                logical_state_digest(
+                    &store.connection,
+                    b"nq.test.pc11-existing-exact-replay.v1\0",
+                )
+                .expect("PC-11 exact replay unchanged state"),
+                logical_before,
+                "PC-11 ExistingExact replay attempt {attempt} changed SQL or sqlite_sequence"
+            );
+            assert_eq!(
+                governed_projection_append_counts(&store),
+                append_counts_before,
+                "PC-11 ExistingExact replay attempt {attempt} appended a row"
+            );
+            assert_governed_projection_pending(&store, &reservation_record_id);
+        }
+
+        let verification = store
+            .verify_governed_projection_and_mark_indexed(&reservation_record_id)
+            .expect("PC-11 exact physical index mark");
+        assert_eq!(
+            verification.disposition,
+            GovernedProjectionVerificationDisposition::Indexed
+        );
+        assert_eq!(
+            logical_state_digest(
+                &store.connection,
+                b"nq.test.pc11-existing-exact-replay.v1\0",
+            )
+            .expect("PC-11 exact replay state after physical mark"),
+            logical_before,
+            "PC-11 exact physical index mark changed logical SQL state"
+        );
+        assert_eq!(
+            governed_projection_append_counts(&store),
+            append_counts_before
+        );
+        let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+            .expect("reopen PC-11 exact arena")
+            .expect("PC-11 exact arena exists");
+        assert_eq!(
+            arena.inspection().expect("inspect PC-11 exact arena").state,
+            ArenaState::FinalV2SealedIndexed
+        );
+    }
+
+    #[test]
+    fn pc13_existing_exact_then_absent_replays_by_sealed_status_in_both_lexical_orders() {
+        for b_reservation_before_a in [false, true] {
+            let directory = tempdir().expect("PC-13A parent directory");
+            let (a_manifest, database, mut store, a_reservation_record_id, a_exact_final, b) =
+                pc13_existing_exact_absent_pair(directory.path(), b_reservation_before_a, 1, false);
+
+            let recovered = store
+                .recover_pending_governed_projections()
+                .expect("PC-13A exact batch recovery");
+            let recovered_reservations = recovered
+                .iter()
+                .map(|entry| match entry {
+                    GovernedProjectionRecovery::Recovered(verification)
+                    | GovernedProjectionRecovery::AlreadyIndexed(verification) => {
+                        verification.reservation_record_id.clone()
+                    }
+                    other => panic!("PC-13A unexpected recovery result: {other:?}"),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                recovered_reservations,
+                vec![
+                    a_reservation_record_id.clone(),
+                    b.reservation_record_id.clone(),
+                ],
+                "PC-13A recovery must follow sealed publication order, not lexical arena order"
+            );
+            assert_exact_governed_projection_rows(&store, &a_manifest);
+            assert_exact_governed_projection_rows(&store, &pc13_projection_manifest(&b));
+            assert_pc13_arena(
+                &database,
+                &a_reservation_record_id,
+                &a_exact_final,
+                ArenaState::FinalV2SealedIndexed,
+            );
+            assert_pc13_arena(
+                &database,
+                &b.reservation_record_id,
+                &b.exact_final_closure,
+                ArenaState::FinalV2SealedIndexed,
+            );
+            let logical_after = logical_state_digest(
+                &store.connection,
+                b"nq.test.pc13a-existing-exact-absent.v1\0",
+            )
+            .expect("PC-13A post-recovery state");
+            assert!(
+                store
+                    .recover_pending_governed_projections()
+                    .expect("repeat PC-13A recovery")
+                    .is_empty(),
+                "indexed PC-13A arenas must not replay"
+            );
+            assert_eq!(
+                logical_state_digest(
+                    &store.connection,
+                    b"nq.test.pc13a-existing-exact-absent.v1\0",
+                )
+                .expect("PC-13A repeated state"),
+                logical_after,
+                "repeat PC-13A recovery changed SQL or allocator state"
+            );
+        }
+    }
+
+    #[test]
+    fn pc13_existing_exact_survives_one_absent_local_gap_in_both_lexical_orders() {
+        for b_reservation_before_a in [false, true] {
+            let directory = tempdir().expect("PC-13B parent directory");
+            let (a_manifest, database, mut store, a_reservation_record_id, a_exact_final, b) =
+                pc13_existing_exact_absent_pair(directory.path(), b_reservation_before_a, 2, false);
+            let logical_before = logical_state_digest(
+                &store.connection,
+                b"nq.test.pc13b-existing-exact-local-gap.v1\0",
+            )
+            .expect("PC-13B state before recovery");
+
+            let recovered = store
+                .recover_pending_governed_projections()
+                .expect("PC-13B local mismatch is terminalized");
+            let (refusal_id, reason) = recovered
+                .iter()
+                .find_map(|entry| match entry {
+                    GovernedProjectionRecovery::CorrespondenceRefused {
+                        reservation_record_id,
+                        refusal_id,
+                        reason,
+                    } if reservation_record_id == &b.reservation_record_id => {
+                        Some((refusal_id.clone(), reason.clone()))
+                    }
+                    _ => None,
+                })
+                .expect("PC-13B B refusal result");
+            assert!(
+                reason.contains("skips the exact next frontier"),
+                "PC-13B unexpected refusal: {reason}"
+            );
+            assert!(
+                recovered.iter().any(|entry| matches!(
+                    entry,
+                    GovernedProjectionRecovery::Recovered(verification)
+                        | GovernedProjectionRecovery::AlreadyIndexed(verification)
+                        if verification.reservation_record_id == a_reservation_record_id
+                )),
+                "PC-13B A exact projection was not independently verified"
+            );
+            assert_eq!(
+                logical_state_digest(
+                    &store.connection,
+                    b"nq.test.pc13b-existing-exact-local-gap.v1\0",
+                )
+                .expect("PC-13B state after recovery"),
+                logical_before,
+                "PC-13B local refusal or A exact replay changed SQL or allocator state"
+            );
+            assert_exact_governed_projection_rows(&store, &a_manifest);
+            assert_eq!(
+                governed_projection_run_count(&store, &b.collection.run.run_id),
+                0,
+                "PC-13B refused B cannot acquire SQL projection rows"
+            );
+            assert_pc13_arena(
+                &database,
+                &a_reservation_record_id,
+                &a_exact_final,
+                ArenaState::FinalV2SealedIndexed,
+            );
+            assert_pc13_arena(
+                &database,
+                &b.reservation_record_id,
+                &b.exact_final_closure,
+                ArenaState::FinalV2ProjectionRefused,
+            );
+            let b_arena = CustodyArena::open_by_reservation(&database, &b.reservation_record_id)
+                .expect("reopen PC-13B B arena")
+                .expect("PC-13B B arena exists");
+            let exact_refusal = b_arena
+                .protected_failure_bytes()
+                .expect("read PC-13B refusal")
+                .expect("PC-13B refusal exists");
+            drop(b_arena);
+            let repeated = store
+                .recover_governed_projection_and_mark_indexed(&b.reservation_record_id)
+                .expect("repeat PC-13B refusal");
+            assert!(matches!(
+                repeated,
+                GovernedProjectionRecovery::CorrespondenceRefused {
+                    reservation_record_id,
+                    refusal_id: repeated_refusal_id,
+                    reason: repeated_reason,
+                } if reservation_record_id == b.reservation_record_id
+                    && repeated_refusal_id == refusal_id
+                    && repeated_reason == reason
+            ));
+            let b_arena = CustodyArena::open_by_reservation(&database, &b.reservation_record_id)
+                .expect("reopen repeated PC-13B B arena")
+                .expect("repeated PC-13B B arena exists");
+            assert_eq!(
+                b_arena
+                    .protected_failure_bytes()
+                    .expect("reopen PC-13B refusal")
+                    .as_deref(),
+                Some(exact_refusal.as_slice())
+            );
+            assert_eq!(
+                logical_state_digest(
+                    &store.connection,
+                    b"nq.test.pc13b-existing-exact-local-gap.v1\0",
+                )
+                .expect("PC-13B repeated state"),
+                logical_before,
+                "repeat PC-13B refusal changed SQL or allocator state"
+            );
+        }
+    }
+
+    #[test]
+    fn pc13_global_owner_collision_dominates_local_gap_in_both_lexical_orders() {
+        for b_reservation_before_a in [false, true] {
+            let directory = tempdir().expect("PC-13C parent directory");
+            let (_a_manifest, database, mut store, a_reservation_record_id, a_exact_final, b) =
+                pc13_existing_exact_absent_pair(directory.path(), b_reservation_before_a, 2, true);
+            let logical_before =
+                logical_state_digest(&store.connection, b"nq.test.pc13c-owner-collision.v1\0")
+                    .expect("PC-13C state before recovery");
+            let mut first_message = None;
+            for attempt in 0..2 {
+                let error = store
+                    .recover_pending_governed_projections()
+                    .expect_err("PC-13C owner collision must remain global");
+                let StoreError::Integrity(message) = error else {
+                    panic!("PC-13C attempt {attempt} was not global integrity: {error}");
+                };
+                assert!(
+                    message.contains("artifact_id collision")
+                        && message.contains(a_reservation_record_id.as_str())
+                        && message.contains(b.reservation_record_id.as_str()),
+                    "PC-13C attempt {attempt}: {message}"
+                );
+                if let Some(first) = &first_message {
+                    assert_eq!(&message, first, "PC-13C global result changed");
+                } else {
+                    first_message = Some(message);
+                }
+                assert_eq!(
+                    logical_state_digest(&store.connection, b"nq.test.pc13c-owner-collision.v1\0",)
+                        .expect("PC-13C unchanged state"),
+                    logical_before,
+                    "PC-13C global collision changed SQL or allocator state"
+                );
+                for (reservation_record_id, exact_final) in [
+                    (&a_reservation_record_id, a_exact_final.as_slice()),
+                    (&b.reservation_record_id, b.exact_final_closure.as_slice()),
+                ] {
+                    assert_pc13_arena(
+                        &database,
+                        reservation_record_id,
+                        exact_final,
+                        ArenaState::FinalV2SealedIndexPending,
+                    );
+                    let arena = CustodyArena::open_by_reservation(&database, reservation_record_id)
+                        .expect("reopen PC-13C pending arena")
+                        .expect("PC-13C pending arena exists");
+                    assert!(
+                        arena
+                            .protected_failure_bytes()
+                            .expect("inspect PC-13C refusal carrier")
+                            .is_none(),
+                        "PC-13C global collision cannot terminalize either arena"
+                    );
+                }
+            }
+            let writer_error = store
+                .record_status(&StatusEventInput {
+                    status_event_id: format!(
+                        "pc13c-later-writer-{}",
+                        if b_reservation_before_a {
+                            "before"
+                        } else {
+                            "after"
+                        }
+                    ),
+                    component_kind: "database".to_owned(),
+                    component_id: "pc13c-later-writer".to_owned(),
+                    state: "unknown".to_owned(),
+                    code: "pc13c_later_writer".to_owned(),
+                    detail: document(json!({
+                        "schema": "nq.test_pc13c_later_writer.v1",
+                    })),
+                    observed_at: TIME.to_owned(),
+                })
+                .expect_err("PC-13C collision must fence ordinary writers");
+            assert!(
+                matches!(writer_error, StoreError::Integrity(ref message)
+                    if message.contains("artifact_id collision")
+                        && message.contains(a_reservation_record_id.as_str())
+                        && message.contains(b.reservation_record_id.as_str())),
+                "PC-13C writer: {writer_error}"
+            );
+            assert_eq!(
+                logical_state_digest(&store.connection, b"nq.test.pc13c-owner-collision.v1\0",)
+                    .expect("PC-13C state after writer"),
+                logical_before,
+                "PC-13C ordinary writer changed globally blocked state"
+            );
+        }
+    }
+
+    #[test]
+    fn pc13_corrupt_committed_frontier_dominates_both_real_arenas() {
+        for b_reservation_before_a in [false, true] {
+            let directory = tempdir().expect("PC-13D parent directory");
+            let (_a_manifest, database, mut store, a_reservation_record_id, a_exact_final, b) =
+                pc13_existing_exact_absent_pair(directory.path(), b_reservation_before_a, 2, false);
+            assert_eq!(
+                store
+                    .connection
+                    .execute(
+                        "UPDATE sqlite_sequence
+                         SET seq = seq + 1
+                         WHERE name = 'status_events'",
+                        [],
+                    )
+                    .expect("advance PC-13D status allocator"),
+                1,
+                "PC-13D fixture requires the committed A status allocator"
+            );
+            let logical_before =
+                logical_state_digest(&store.connection, b"nq.test.pc13d-corrupt-frontier.v1\0")
+                    .expect("PC-13D corrupted state");
+
+            for attempt in 0..2 {
+                let error = store
+                    .recover_pending_governed_projections()
+                    .expect_err("PC-13D corrupt frontier must remain global");
+                assert!(
+                    matches!(error, StoreError::Integrity(ref message)
+                        if message.contains("status-event")
+                            && message.contains("sqlite_sequence")),
+                    "PC-13D attempt {attempt}: {error}"
+                );
+                assert_eq!(
+                    logical_state_digest(
+                        &store.connection,
+                        b"nq.test.pc13d-corrupt-frontier.v1\0",
+                    )
+                    .expect("PC-13D unchanged state"),
+                    logical_before,
+                    "PC-13D global frontier failure changed SQL or allocator state"
+                );
+                for (reservation_record_id, exact_final) in [
+                    (&a_reservation_record_id, a_exact_final.as_slice()),
+                    (&b.reservation_record_id, b.exact_final_closure.as_slice()),
+                ] {
+                    assert_pc13_arena(
+                        &database,
+                        reservation_record_id,
+                        exact_final,
+                        ArenaState::FinalV2SealedIndexPending,
+                    );
+                    let arena = CustodyArena::open_by_reservation(&database, reservation_record_id)
+                        .expect("reopen PC-13D pending arena")
+                        .expect("PC-13D pending arena exists");
+                    assert!(
+                        arena
+                            .protected_failure_bytes()
+                            .expect("inspect PC-13D refusal carrier")
+                            .is_none(),
+                        "PC-13D global corruption cannot terminalize either arena"
+                    );
+                }
+            }
+            let writer_error = store
+                .record_status(&StatusEventInput {
+                    status_event_id: format!(
+                        "pc13d-later-writer-{}",
+                        if b_reservation_before_a {
+                            "before"
+                        } else {
+                            "after"
+                        }
+                    ),
+                    component_kind: "database".to_owned(),
+                    component_id: "pc13d-later-writer".to_owned(),
+                    state: "unknown".to_owned(),
+                    code: "pc13d_later_writer".to_owned(),
+                    detail: document(json!({
+                        "schema": "nq.test_pc13d_later_writer.v1",
+                    })),
+                    observed_at: TIME.to_owned(),
+                })
+                .expect_err("PC-13D corrupt frontier must fence ordinary writers");
+            assert!(
+                matches!(writer_error, StoreError::Integrity(ref message)
+                    if message.contains("status-event")
+                        && message.contains("sqlite_sequence")),
+                "PC-13D writer: {writer_error}"
+            );
+            assert_eq!(
+                logical_state_digest(&store.connection, b"nq.test.pc13d-corrupt-frontier.v1\0",)
+                    .expect("PC-13D state after writer"),
+                logical_before,
+                "PC-13D ordinary writer changed globally corrupt state"
+            );
+        }
+    }
+
+    #[test]
+    fn pc13_two_absent_terminal_replays_are_explicitly_rejected() {
+        for (a_mode, b_status_sequence, b_is_status_first) in [
+            ("after-final-seal-before-sql", 2_i64, false),
+            ("after-final-seal-before-sql-status-gap", 1_i64, true),
+        ] {
+            for b_reservation_before_a in [false, true] {
+                let directory = tempdir().expect("PC-13E parent directory");
+                let a_manifest = spawn_abrupt_governed_projection(directory.path(), a_mode);
+                let database = PathBuf::from(manifest_string(&a_manifest, "database_path"));
+                let a_reservation_record_id = Sha256Digest::parse(
+                    manifest_string(&a_manifest, "reservation_record_id").to_owned(),
+                )
+                .expect("PC-13E A reservation identity");
+                let a_arena =
+                    CustodyArena::open_by_reservation(&database, &a_reservation_record_id)
+                        .expect("open PC-13E A arena")
+                        .expect("PC-13E A arena exists");
+                let a_exact_final = a_arena
+                    .final_v2_closure_bytes()
+                    .expect("read PC-13E A closure")
+                    .expect("PC-13E A closure exists");
+                drop(a_arena);
+                let mut store = Store::open(&database).expect("open PC-13E store");
+                assert_eq!(
+                    governed_projection_run_count(&store, manifest_string(&a_manifest, "run_id"),),
+                    0,
+                    "PC-13E A must be Absent"
+                );
+                let b = append_pc13_absent_projection(
+                    &mut store,
+                    &a_reservation_record_id,
+                    b_reservation_before_a,
+                    b_status_sequence,
+                    None,
+                );
+                assert_eq!(
+                    b.reservation_record_id < a_reservation_record_id,
+                    b_reservation_before_a,
+                    "PC-13E lexical order fixture"
+                );
+                assert_eq!(
+                    store
+                        .runtime_ledger_checkpoint()
+                        .expect("PC-13E runtime frontier")
+                        .expect("PC-13E B launch frontier")
+                        .checkpoint_id,
+                    b.launch_checkpoint_id.to_string(),
+                    "PC-13E construction must end at B's physical launch"
+                );
+                let a_status_sequence = a_manifest["status_sequence"]
+                    .as_i64()
+                    .expect("PC-13E A sealed status");
+                assert_eq!(
+                    b.publication.status_sequence < a_status_sequence,
+                    b_is_status_first,
+                    "PC-13E must exercise both explicit sealed-status orders"
+                );
+                assert_ne!(
+                    a_status_sequence, b.publication.status_sequence,
+                    "PC-13E status identities must be distinct"
+                );
+                assert_eq!(
+                    governed_projection_run_count(&store, &b.collection.run.run_id),
+                    0,
+                    "PC-13E B must be Absent"
+                );
+                let logical_before = logical_state_digest(
+                    &store.connection,
+                    b"nq.test.pc13e-two-absent-rejection.v1\0",
+                )
+                .expect("PC-13E state before recovery");
+
+                for attempt in 0..2 {
+                    let error = store
+                        .recover_pending_governed_projections()
+                        .expect_err("PC-13E two Absent terminals must be rejected");
+                    assert!(
+                        matches!(error, StoreError::Integrity(ref message)
+                            if message.contains("terminal runtime predecessor differs")),
+                        "PC-13E {a_mode} attempt {attempt}: {error}"
+                    );
+                    assert_eq!(
+                        logical_state_digest(
+                            &store.connection,
+                            b"nq.test.pc13e-two-absent-rejection.v1\0",
+                        )
+                        .expect("PC-13E unchanged state"),
+                        logical_before,
+                        "PC-13E rejection changed SQL or allocator state"
+                    );
+                    for (reservation_record_id, exact_final) in [
+                        (&a_reservation_record_id, a_exact_final.as_slice()),
+                        (&b.reservation_record_id, b.exact_final_closure.as_slice()),
+                    ] {
+                        assert_pc13_arena(
+                            &database,
+                            reservation_record_id,
+                            exact_final,
+                            ArenaState::FinalV2SealedIndexPending,
+                        );
+                        let arena =
+                            CustodyArena::open_by_reservation(&database, reservation_record_id)
+                                .expect("reopen PC-13E pending arena")
+                                .expect("PC-13E pending arena exists");
+                        assert!(
+                            arena
+                                .protected_failure_bytes()
+                                .expect("inspect PC-13E refusal carrier")
+                                .is_none(),
+                            "PC-13E global predecessor rejection cannot terminalize an arena"
+                        );
+                    }
+                }
+                let writer_error = store
+                    .record_status(&StatusEventInput {
+                        status_event_id: format!(
+                            "pc13e-later-writer-{}-{}",
+                            if a_mode.ends_with("status-gap") {
+                                "b-first"
+                            } else {
+                                "a-first"
+                            },
+                            if b_reservation_before_a {
+                                "before"
+                            } else {
+                                "after"
+                            }
+                        ),
+                        component_kind: "database".to_owned(),
+                        component_id: "pc13e-later-writer".to_owned(),
+                        state: "unknown".to_owned(),
+                        code: "pc13e_later_writer".to_owned(),
+                        detail: document(json!({
+                            "schema": "nq.test_pc13e_later_writer.v1",
+                        })),
+                        observed_at: TIME.to_owned(),
+                    })
+                    .expect_err("PC-13E rejected batch must fence ordinary writers");
+                assert!(
+                    matches!(writer_error, StoreError::Integrity(ref message)
+                        if message.contains("terminal runtime predecessor differs")),
+                    "PC-13E writer: {writer_error}"
+                );
+                assert_eq!(
+                    logical_state_digest(
+                        &store.connection,
+                        b"nq.test.pc13e-two-absent-rejection.v1\0",
+                    )
+                    .expect("PC-13E state after writer"),
+                    logical_before,
+                    "PC-13E ordinary writer changed rejected state"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn committed_status_ledger_gap_is_global_and_leaves_projection_pending() {
+        let directory = tempdir().expect("committed-ledger-gap parent directory");
+        let manifest =
+            spawn_abrupt_governed_projection(directory.path(), "after-final-seal-before-sql");
+        let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+        let reservation_record_id =
+            Sha256Digest::parse(manifest_string(&manifest, "reservation_record_id").to_owned())
+                .expect("manifest reservation identity");
+        let mut store = Store::open(&database).expect("open committed-ledger-gap store");
+        assert_governed_projection_pending(&store, &reservation_record_id);
+
+        store
+            .connection
+            .execute(
+                "INSERT INTO status_events (
+                    status_sequence, status_event_id, component_kind, component_id,
+                    run_id, state, code, detail_json, observed_at
+                 ) VALUES (2, ?1, 'database', 'hostile-gap', NULL, 'unknown',
+                    'hostile_gap', ?2, ?3)",
+                params![
+                    "status-hostile-committed-gap",
+                    br#"{"schema":"nq.test_committed_status_gap.v1"}"#.as_slice(),
+                    TIME,
+                ],
+            )
+            .expect("inject test-only committed status-ledger gap");
+        store
+            .connection
+            .execute(
+                "INSERT INTO status_current (
+                    component_kind, component_id, latest_status_event_id
+                 ) VALUES ('database', 'hostile-gap', ?1)",
+                ["status-hostile-committed-gap"],
+            )
+            .expect("keep disposable status projection exact over the injected ledger gap");
+        let counts_before_recovery = governed_projection_append_counts(&store);
+        let error = store
+            .recover_pending_governed_projections()
+            .expect_err("a corrupt committed ledger must block globally");
+        assert!(
+            matches!(error, StoreError::Integrity(ref message)
+                if message.contains("non-dense committed status-event ledger")),
+            "{error}"
+        );
+        assert_eq!(
+            governed_projection_append_counts(&store),
+            counts_before_recovery,
+            "global ledger corruption must not append or terminalize anything"
+        );
+        assert_governed_projection_pending(&store, &reservation_record_id);
+    }
+
+    #[test]
+    fn foreign_runtime_frontier_dominates_projection_local_gap() {
+        let directory = tempdir().expect("runtime-frontier parent directory");
+        let manifest = spawn_abrupt_governed_projection(
+            directory.path(),
+            "after-final-seal-before-sql-status-gap",
+        );
+        let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+        let reservation_record_id =
+            Sha256Digest::parse(manifest_string(&manifest, "reservation_record_id").to_owned())
+                .expect("manifest reservation identity");
+        let mut store = Store::open(&database).expect("open runtime-frontier store");
+        assert_governed_projection_pending(&store, &reservation_record_id);
+
+        // Bypass the ordinary writer fence only inside this hostile test to
+        // model a foreign committed runtime append after physical final seal.
+        let predecessor = store
+            .runtime_ledger_checkpoint()
+            .expect("runtime frontier")
+            .expect("prelaunch runtime checkpoint");
+        let dependency = store
+            .runtime_checkpoint_dependency(&predecessor.checkpoint_id)
+            .expect("runtime dependency lookup")
+            .expect("runtime dependency binding");
+        let (
+            RuntimeCheckpointDependencyBinding::Authenticated {
+                dependency_generation_id,
+                trust_anchor_id,
+                ..
+            },
+            Some(RuntimeDependencyGenerationByteState::VerifiedAvailable { canonical_custody }),
+        ) = (dependency.binding, dependency.byte_state)
+        else {
+            panic!("fixture runtime dependency must reopen exactly");
+        };
+        let foreign_record = RuntimeRecordInput {
+            record_id: typed_digest("foreign-runtime-after-seal").to_string(),
+            record_schema: "nq.host_role_lifecycle_event.v1".to_owned(),
+            canonical_bytes: document(json!({
+                "schema": "nq.host_role_lifecycle_event.v1",
+                "event": "hostile_foreign_append_after_seal",
+            })),
+            committed_at: TIME.to_owned(),
+        };
+        let foreign_batch = RuntimeRecordBatchInput {
+            checkpoint_id: typed_digest("foreign-checkpoint-after-seal").to_string(),
+            expected_predecessor_checkpoint_id: Some(predecessor.checkpoint_id.clone()),
+            expected_predecessor_ledger_root: Some(predecessor.checkpoint_ledger_root.clone()),
+            dependency: RuntimeCheckpointDependencyInput {
+                dependency_generation_id,
+                trust_anchor_id,
+                canonical_custody,
+            },
+            records: vec![foreign_record],
+        };
+        let transaction = store
+            .immediate_recovery_transaction()
+            .expect("hostile runtime append transaction");
+        append_runtime_records_in_transaction(&transaction, &foreign_batch)
+            .expect("commit hostile foreign runtime frontier");
+        transaction
+            .commit()
+            .expect("commit hostile runtime frontier");
+
+        let counts_before_recovery = governed_projection_append_counts(&store);
+        let error = store
+            .recover_pending_governed_projections()
+            .expect_err("foreign runtime frontier must dominate local sequence gap");
+        assert!(
+            matches!(error, StoreError::Integrity(ref message)
+                if message.contains("terminal runtime predecessor differs")),
+            "{error}"
+        );
+        assert_eq!(
+            governed_projection_append_counts(&store),
+            counts_before_recovery,
+            "global runtime advancement must append no projection rows and terminalize no arena"
+        );
+        assert_governed_projection_pending(&store, &reservation_record_id);
+    }
+
+    #[test]
+    fn advanced_sqlite_allocator_dominates_projection_local_gap() {
+        let directory = tempdir().expect("allocator-frontier parent directory");
+        let manifest = spawn_abrupt_governed_projection(
+            directory.path(),
+            "after-final-seal-before-sql-status-gap",
+        );
+        let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+        let reservation_record_id =
+            Sha256Digest::parse(manifest_string(&manifest, "reservation_record_id").to_owned())
+                .expect("manifest reservation identity");
+        let mut store = Store::open(&database).expect("open allocator-frontier store");
+        assert_governed_projection_pending(&store, &reservation_record_id);
+
+        let advanced = store
+            .connection
+            .execute(
+                "UPDATE sqlite_sequence
+                 SET seq = seq + 1
+                 WHERE name = 'diagnostic_artifact_commitments'",
+                [],
+            )
+            .expect("advance test-only artifact allocator");
+        if advanced == 0 {
+            store
+                .connection
+                .execute(
+                    "INSERT INTO sqlite_sequence (name, seq)
+                     VALUES ('diagnostic_artifact_commitments', 1)",
+                    [],
+                )
+                .expect("create test-only advanced artifact allocator");
+        }
+        let counts_before_recovery = governed_projection_append_counts(&store);
+        let error = store
+            .recover_pending_governed_projections()
+            .expect_err("advanced allocator must dominate local sequence gap");
+        assert!(
+            matches!(error, StoreError::Integrity(ref message)
+                if message.contains("diagnostic-artifact")
+                    && message.contains("sqlite_sequence")),
+            "{error}"
+        );
+        assert_eq!(
+            governed_projection_append_counts(&store),
+            counts_before_recovery,
+            "allocator corruption must append no projection rows and terminalize no arena"
+        );
+        assert_governed_projection_pending(&store, &reservation_record_id);
+    }
+
+    #[test]
+    fn whole_batch_duplicate_identity_names_both_reservations_without_mutation() {
+        let directory = tempdir().expect("batch-duplicate parent directory");
+        let manifest =
+            spawn_abrupt_governed_projection(directory.path(), "after-final-seal-before-sql");
+        let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+        let reservation_record_id =
+            Sha256Digest::parse(manifest_string(&manifest, "reservation_record_id").to_owned())
+                .expect("manifest reservation identity");
+        let mut store = Store::open(&database).expect("open batch-duplicate store");
+        let counts_before = governed_projection_append_counts(&store);
+        let transaction = store
+            .immediate_recovery_transaction()
+            .expect("batch-duplicate publication fence");
+        let mut pending = governed_custody::pending_v3_projection_plans(&database, &transaction)
+            .expect("one exact pending plan");
+        assert_eq!(pending.len(), 1);
+        let first = pending.pop().expect("first pending projection");
+        let second_reservation = typed_digest("hostile-second-batch-reservation");
+        let mut second = first.clone();
+        second.reservation_record_id = second_reservation.clone();
+        second.sql_footprint = GovernedProjectionSqlFootprint::Absent;
+        let candidates = vec![first, second];
+        let error = preflight_reopened_governed_projection_batch(&transaction, &candidates)
+            .expect_err("duplicate batch identity must block before insertion");
+        let StoreError::Integrity(message) = error else {
+            panic!("batch collision must remain global: {error}");
+        };
+        assert!(
+            message.contains("execution_launch_record_id collision"),
+            "{message}"
+        );
+        assert!(
+            message.contains(reservation_record_id.as_str())
+                && message.contains(second_reservation.as_str()),
+            "both reservation identities must remain inspectable: {message}"
+        );
+        transaction
+            .commit()
+            .expect("commit mutation-free batch preflight");
+        assert_eq!(
+            governed_projection_append_counts(&store),
+            counts_before,
+            "whole-batch collision preflight cannot append or terminalize"
+        );
+        assert_governed_projection_pending(&store, &reservation_record_id);
+    }
+
+    #[test]
+    fn pc12_post_insert_local_mismatch_rolls_back_savepoint_before_refusal() {
+        let directory = tempdir().expect("PC-12 parent directory");
+        let manifest =
+            spawn_abrupt_governed_projection(directory.path(), "after-final-seal-before-sql");
+        let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+        let reservation_record_id =
+            Sha256Digest::parse(manifest_string(&manifest, "reservation_record_id").to_owned())
+                .expect("PC-12 reservation identity");
+        let mut store = Store::open(&database).expect("open PC-12 store");
+        let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+            .expect("open PC-12 arena")
+            .expect("PC-12 arena exists");
+        let exact_final_before = arena
+            .final_v2_closure_bytes()
+            .expect("read PC-12 final closure")
+            .expect("PC-12 final closure exists");
+        drop(arena);
+        let logical_before =
+            logical_state_digest(&store.connection, b"nq.test.pc12-savepoint-rollback.v1\0")
+                .expect("PC-12 state before replay");
+
+        set_governed_projection_post_insert_test_fault(
+            GovernedProjectionPostInsertTestFault::LocalMismatch,
+        );
+        let recovered = store
+            .recover_pending_governed_projections()
+            .expect("PC-12 local mismatch becomes a durable refusal");
+        let [
+            GovernedProjectionRecovery::CorrespondenceRefused {
+                reservation_record_id: refused_reservation,
+                refusal_id,
+                reason,
+            },
+        ] = recovered.as_slice()
+        else {
+            panic!("unexpected PC-12 local recovery: {recovered:?}");
+        };
+        assert_eq!(refused_reservation, &reservation_record_id);
+        assert!(
+            reason.contains("after complete SQL insertion"),
+            "unexpected PC-12 reason: {reason}"
+        );
+        assert_eq!(
+            logical_state_digest(&store.connection, b"nq.test.pc12-savepoint-rollback.v1\0",)
+                .expect("PC-12 state after refusal"),
+            logical_before,
+            "PC-12 must roll back every row and sqlite_sequence allocation"
+        );
+        let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+            .expect("reopen PC-12 arena")
+            .expect("PC-12 arena remains");
+        assert_eq!(
+            arena.inspection().expect("inspect PC-12 refusal").state,
+            ArenaState::FinalV2ProjectionRefused
+        );
+        assert_eq!(
+            arena
+                .final_v2_closure_bytes()
+                .expect("reopen PC-12 final closure")
+                .as_deref(),
+            Some(exact_final_before.as_slice())
+        );
+        let exact_refusal = arena
+            .protected_failure_bytes()
+            .expect("read PC-12 refusal carrier")
+            .expect("PC-12 refusal carrier exists");
+        drop(arena);
+        let repeated = store
+            .recover_governed_projection_and_mark_indexed(&reservation_record_id)
+            .expect("repeat PC-12 refusal");
+        assert!(
+            matches!(
+                repeated,
+                GovernedProjectionRecovery::CorrespondenceRefused {
+                    reservation_record_id: ref repeated_reservation,
+                    refusal_id: ref repeated_refusal_id,
+                    reason: ref repeated_reason,
+                } if repeated_reservation == &reservation_record_id
+                    && repeated_refusal_id == refusal_id
+                    && repeated_reason == reason
+            ),
+            "repeat PC-12 refusal changed: {repeated:?}"
+        );
+        let reopened = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+            .expect("reopen repeated PC-12 arena")
+            .expect("repeated PC-12 arena remains");
+        assert_eq!(
+            reopened
+                .protected_failure_bytes()
+                .expect("reopen exact PC-12 refusal carrier")
+                .as_deref(),
+            Some(exact_refusal.as_slice())
+        );
+    }
+
+    #[test]
+    fn pc12_post_insert_global_failure_rolls_back_and_remains_pending() {
+        let directory = tempdir().expect("PC-12 global parent directory");
+        let manifest =
+            spawn_abrupt_governed_projection(directory.path(), "after-final-seal-before-sql");
+        let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+        let reservation_record_id =
+            Sha256Digest::parse(manifest_string(&manifest, "reservation_record_id").to_owned())
+                .expect("PC-12 global reservation identity");
+        let mut store = Store::open(&database).expect("open PC-12 global store");
+        let logical_before =
+            logical_state_digest(&store.connection, b"nq.test.pc12-global-rollback.v1\0")
+                .expect("PC-12 global state before replay");
+        set_governed_projection_post_insert_test_fault(
+            GovernedProjectionPostInsertTestFault::GlobalFailure,
+        );
+        let error = store
+            .recover_pending_governed_projections()
+            .expect_err("PC-12 global failure must not be terminalized");
+        assert!(
+            matches!(error, StoreError::Integrity(ref message)
+                if message.contains("global failure after complete SQL insertion")),
+            "{error}"
+        );
+        assert_eq!(
+            logical_state_digest(&store.connection, b"nq.test.pc12-global-rollback.v1\0",)
+                .expect("PC-12 global state after rollback"),
+            logical_before
+        );
+        assert_governed_projection_pending(&store, &reservation_record_id);
+        let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+            .expect("open PC-12 global arena")
+            .expect("PC-12 global arena exists");
+        assert!(
+            arena
+                .protected_failure_bytes()
+                .expect("inspect PC-12 global refusal bytes")
+                .is_none()
+        );
+        drop(arena);
+        let recovered = store
+            .recover_pending_governed_projections()
+            .expect("retry PC-12 after one-shot global failure");
+        assert!(
+            matches!(
+                recovered.as_slice(),
+                [GovernedProjectionRecovery::Recovered(verification)]
+                    if verification.reservation_record_id == reservation_record_id
+            ),
+            "unexpected PC-12 retry recovery: {recovered:?}"
+        );
+    }
+
+    #[test]
+    fn pc14_pending_projection_recovers_after_explicit_disposable_lookup_rebuild() {
+        let directory = tempdir().expect("PC-14 parent directory");
+        let manifest =
+            spawn_abrupt_governed_projection(directory.path(), "after-final-seal-before-sql");
+        let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+        let reservation_record_id =
+            Sha256Digest::parse(manifest_string(&manifest, "reservation_record_id").to_owned())
+                .expect("PC-14 reservation identity");
+        let mut store = Store::open(&database).expect("open PC-14 store");
+        let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+            .expect("open PC-14 arena")
+            .expect("PC-14 arena exists");
+        let exact_final_before = arena
+            .final_v2_closure_bytes()
+            .expect("read PC-14 final closure")
+            .expect("PC-14 final closure exists");
+        drop(arena);
+        let logical_before_corruption =
+            logical_state_digest(&store.connection, b"nq.test.pc14-disposable-lookup.v1\0")
+                .expect("PC-14 logical state before corruption");
+
+        store
+            .connection
+            .execute("DELETE FROM runtime_record_lookup", [])
+            .expect("corrupt only the disposable lookup");
+        assert!(
+            !store
+                .runtime_record_lookup_status()
+                .expect("stale PC-14 lookup status")
+                .is_current()
+        );
+        let recovery_error = store
+            .recover_pending_governed_projections()
+            .expect_err("stale disposable lookup must globally fence recovery");
+        assert!(
+            matches!(recovery_error, StoreError::Integrity(ref message)
+                if message.contains("stale runtime-record lookup")),
+            "{recovery_error}"
+        );
+        assert_governed_projection_pending(&store, &reservation_record_id);
+
+        let rebuilt = store
+            .rebuild_runtime_record_lookup()
+            .expect("raw IMMEDIATE PC-14 rebuild");
+        assert!(rebuilt.is_current());
+        assert_eq!(
+            logical_state_digest(&store.connection, b"nq.test.pc14-disposable-lookup.v1\0",)
+                .expect("PC-14 logical state after rebuild"),
+            logical_before_corruption,
+            "rebuilding a disposable lookup must reproduce its exact canonical projection"
+        );
+        let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+            .expect("reopen PC-14 arena")
+            .expect("PC-14 arena remains");
+        assert_eq!(
+            arena
+                .final_v2_closure_bytes()
+                .expect("reopen PC-14 final closure")
+                .as_deref(),
+            Some(exact_final_before.as_slice())
+        );
+        assert_eq!(
+            arena
+                .inspection()
+                .expect("inspect PC-14 pending arena")
+                .state,
+            ArenaState::FinalV2SealedIndexPending
+        );
+        drop(arena);
+
+        let recovered = store
+            .recover_pending_governed_projections()
+            .expect("recover after PC-14 rebuild");
+        assert!(
+            matches!(
+                recovered.as_slice(),
+                [GovernedProjectionRecovery::Recovered(verification)]
+                    if verification.reservation_record_id == reservation_record_id
+            ),
+            "unexpected PC-14 recovery: {recovered:?}"
+        );
+        assert_exact_governed_projection_rows(&store, &manifest);
+    }
+
+    #[test]
+    fn pc14_rebuild_refuses_corrupt_canonical_ledger_before_touching_lookup() {
+        let directory = tempdir().expect("PC-14 corrupt-ledger parent directory");
+        let manifest =
+            spawn_abrupt_governed_projection(directory.path(), "after-final-seal-before-sql");
+        let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+        let reservation_record_id =
+            Sha256Digest::parse(manifest_string(&manifest, "reservation_record_id").to_owned())
+                .expect("PC-14 corrupt-ledger reservation identity");
+        let mut store = Store::open(&database).expect("open PC-14 corrupt-ledger store");
+        store
+            .connection
+            .execute(
+                "UPDATE runtime_record_lookup
+                 SET ledger_root = ?1
+                 WHERE record_sequence = (
+                    SELECT MIN(record_sequence) FROM runtime_record_lookup
+                 )",
+                [typed_digest("pc14-hostile-lookup-root").as_str()],
+            )
+            .expect("corrupt disposable lookup row");
+        let lookup_before = store
+            .connection
+            .prepare(
+                "SELECT record_id, record_sequence, record_schema, ledger_root
+                 FROM runtime_record_lookup ORDER BY record_sequence",
+            )
+            .expect("prepare PC-14 lookup snapshot")
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .expect("query PC-14 lookup snapshot")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect PC-14 lookup snapshot");
+
+        let trigger: String = store
+            .connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                 WHERE type = 'trigger'
+                   AND name = 'immutable_runtime_record_ledger_update'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("capture runtime-ledger update trigger");
+        store
+            .connection
+            .execute_batch("DROP TRIGGER immutable_runtime_record_ledger_update;")
+            .expect("drop runtime-ledger update trigger");
+        store
+            .connection
+            .execute(
+                "UPDATE runtime_record_ledger
+                 SET ledger_root = ?1
+                 WHERE record_sequence = (
+                    SELECT MIN(record_sequence) FROM runtime_record_ledger
+                 )",
+                [typed_digest("pc14-hostile-canonical-root").as_str()],
+            )
+            .expect("corrupt canonical runtime ledger");
+        store
+            .connection
+            .execute_batch(&trigger)
+            .expect("restore runtime-ledger update trigger");
+
+        let error = store
+            .rebuild_runtime_record_lookup()
+            .expect_err("canonical corruption must refuse before lookup rebuild");
+        assert!(
+            matches!(error, StoreError::Integrity(ref message)
+                if message.contains("invalid ledger root")
+                    || message.contains("root differs")),
+            "{error}"
+        );
+        let lookup_after = store
+            .connection
+            .prepare(
+                "SELECT record_id, record_sequence, record_schema, ledger_root
+                 FROM runtime_record_lookup ORDER BY record_sequence",
+            )
+            .expect("prepare post-refusal PC-14 lookup snapshot")
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .expect("query post-refusal PC-14 lookup snapshot")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect post-refusal PC-14 lookup snapshot");
+        assert_eq!(
+            lookup_after, lookup_before,
+            "failed rebuild must not rewrite the disposable lookup"
+        );
+        assert_governed_projection_pending(&store, &reservation_record_id);
+        let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+            .expect("reopen corrupt-ledger PC-14 arena")
+            .expect("corrupt-ledger PC-14 arena remains");
+        assert!(
+            arena
+                .protected_failure_bytes()
+                .expect("inspect PC-14 refusal bytes")
+                .is_none(),
+            "global canonical corruption must not terminalize one pending arena"
+        );
+    }
+
+    #[test]
+    fn pc14_pending_exact_sql_waits_for_explicit_status_projection_rebuild() {
+        let directory = tempdir().expect("PC-14 status projection parent directory");
+        let manifest =
+            spawn_abrupt_governed_projection(directory.path(), "after-sql-before-index-mark");
+        let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+        let reservation_record_id =
+            Sha256Digest::parse(manifest_string(&manifest, "reservation_record_id").to_owned())
+                .expect("PC-14 status reservation identity");
+        let status_event_id = manifest_string(&manifest, "status_event_id").to_owned();
+        let mut store = Store::open(&database).expect("open PC-14 status store");
+        let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+            .expect("open PC-14 status arena")
+            .expect("PC-14 status arena exists");
+        let exact_final_before = arena
+            .final_v2_closure_bytes()
+            .expect("read PC-14 status final closure")
+            .expect("PC-14 status final closure exists");
+        drop(arena);
+        assert_exact_governed_projection_rows(&store, &manifest);
+
+        store
+            .connection
+            .execute(
+                "DELETE FROM status_current WHERE latest_status_event_id = ?1",
+                [&status_event_id],
+            )
+            .expect("corrupt only status_current");
+        let error = store
+            .recover_pending_governed_projections()
+            .expect_err("stale status_current must globally fence recovery");
+        assert!(
+            matches!(error, StoreError::Integrity(ref message)
+                if message.contains("status_current is stale")),
+            "{error}"
+        );
+        assert_governed_projection_pending(&store, &reservation_record_id);
+        let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+            .expect("reopen stale-status PC-14 arena")
+            .expect("stale-status PC-14 arena remains");
+        assert!(
+            arena
+                .protected_failure_bytes()
+                .expect("inspect stale-status refusal bytes")
+                .is_none()
+        );
+        drop(arena);
+
+        store
+            .rebuild_status_current_projection()
+            .expect("raw IMMEDIATE status_current rebuild");
+        validate_status_current_projection(&store.connection)
+            .expect("rebuilt status_current validates");
+        let arena = CustodyArena::open_by_reservation(&database, &reservation_record_id)
+            .expect("reopen rebuilt-status PC-14 arena")
+            .expect("rebuilt-status PC-14 arena remains");
+        assert_eq!(
+            arena
+                .final_v2_closure_bytes()
+                .expect("read rebuilt-status PC-14 final closure")
+                .as_deref(),
+            Some(exact_final_before.as_slice())
+        );
+        assert_eq!(
+            arena
+                .inspection()
+                .expect("inspect rebuilt-status arena")
+                .state,
+            ArenaState::FinalV2SealedIndexPending
+        );
+        drop(arena);
+
+        let recovered = store
+            .recover_pending_governed_projections()
+            .expect("recover exact SQL after status_current rebuild");
+        assert!(
+            matches!(
+                recovered.as_slice(),
+                [GovernedProjectionRecovery::Recovered(verification)]
+                    if verification.reservation_record_id == reservation_record_id
+            ),
+            "unexpected status-current PC-14 recovery: {recovered:?}"
+        );
+        assert_exact_governed_projection_rows(&store, &manifest);
     }
 
     #[test]
@@ -15168,6 +27512,25 @@ mod tests {
                 .expect("exact production binding")
                 .is_some()
         );
+        let statuses = store
+            .status_history_bounded(10, None)
+            .expect("run-level status history");
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].component_kind, "diagnostic_execution");
+        assert_eq!(statuses[0].component_id, collection.run.run_id);
+        assert_eq!(statuses[0].state, "unknown");
+        assert_eq!(statuses[0].code, "diagnostic_execution_completed");
+        assert!(
+            store
+                .status_snapshots()
+                .expect("run-level status projection")
+                .iter()
+                .all(|status| {
+                    status.component_kind != "instance"
+                        || status.component_id != collection.run.instance_id
+                }),
+            "a governed execution must not create or advance watcher-instance health"
+        );
         store.validate().expect("run-level store validates");
         drop(store);
 
@@ -15189,7 +27552,12 @@ mod tests {
 
     #[test]
     fn admitted_run_level_path_preserves_detector_law_and_rolls_back_hostiles() {
-        for mutation in ["legacy_api", "missing_binding", "evaluation_origin"] {
+        for mutation in [
+            "legacy_api",
+            "missing_binding",
+            "evaluation_origin",
+            "instance_status",
+        ] {
             let (mut store, profile_digest) = configured_store();
             let suffix = format!("run-level-{mutation}");
             let collection = admitted_run_level_collection(&mut store, &suffix, &profile_digest);
@@ -15214,16 +27582,21 @@ mod tests {
                 })
             } else {
                 store.commit_admitted_run_level_diagnostic(&collection, |_view, receipt| {
-                    Ok::<_, StoreError>(admitted_run_level_completion(
-                        &collection,
-                        artifact.clone(),
-                        receipt,
-                    ))
+                    let mut completion =
+                        admitted_run_level_completion(&collection, artifact.clone(), receipt);
+                    if mutation == "instance_status" {
+                        completion.status.component_kind = "instance".to_owned();
+                        completion.status.component_id = collection.run.instance_id.clone();
+                        completion.status.state = "healthy".to_owned();
+                        completion.status.code = "report_complete".to_owned();
+                    }
+                    Ok::<_, StoreError>(completion)
                 })
             };
             let expected_refusal = match (&result, mutation) {
                 (Err(StoreError::Invariant(message)), "legacy_api") => {
                     message.contains("admitted detector diagnostic")
+                        || message.contains("admitted detector result")
                 }
                 (Err(StoreError::Invariant(message)), "missing_binding") => {
                     message.contains("run-level diagnostic requires")
@@ -15231,6 +27604,9 @@ mod tests {
                 (Err(StoreError::Invariant(message)), "evaluation_origin") => {
                     message.contains("provenance")
                         || message.contains("run-level diagnostic requires")
+                }
+                (Err(StoreError::Invariant(message)), "instance_status") => {
+                    message.contains("diagnostic-execution status")
                 }
                 _ => false,
             };
@@ -15303,32 +27679,22 @@ mod tests {
     }
 
     #[test]
-    fn governed_projection_verification_is_reservation_only_and_idempotent() {
+    fn historical_v2_projection_is_readable_but_cannot_earn_complete_verification() {
         let fixture = governed_projection_fixture(GovernedProjectionFixtureMode::Complete);
-        let first = fixture
-            .store
-            .verify_governed_projection_and_mark_indexed(&fixture.reservation_record_id)
-            .expect("first exact projection verification");
-        assert_eq!(
-            first.disposition,
-            GovernedProjectionVerificationDisposition::Indexed
+        assert_historical_pre_v3_complete_verification_refuses(
+            &fixture,
+            "historical V2 exact projection",
         );
-        assert_eq!(first.diagnostic_artifact_id, fixture.diagnostic_artifact_id);
-        let second = fixture
-            .store
-            .verify_governed_projection_and_mark_indexed(&fixture.reservation_record_id)
-            .expect("idempotent exact projection re-verification");
-        assert_eq!(
-            second.disposition,
-            GovernedProjectionVerificationDisposition::AlreadyIndexed
-        );
-        assert_eq!(second.closure_id, first.closure_id);
-        assert_eq!(second.runtime_checkpoint_id, first.runtime_checkpoint_id);
     }
 
     #[test]
     fn governed_v2_committed_capacity_is_verified_before_effect() {
-        let sufficient = governed_projection_fixture(GovernedProjectionFixtureMode::Complete);
+        let sufficient =
+            governed_projection_fixture(GovernedProjectionFixtureMode::FullTopologyNativeLaunch);
+        let live_custody = sufficient
+            .store
+            .open_governed_custody(sufficient.reservation.clone())
+            .expect("prepared invocation retains its live custody handle");
         let capacity = sufficient
             .store
             .verify_governed_execution_custody_closure_v2_capacity(
@@ -15343,6 +27709,7 @@ mod tests {
         assert!(
             capacity.final_closure_capacity_bytes <= sufficient.reservation.final_capacity_bytes
         );
+        drop(live_custody);
 
         let insufficient = governed_projection_fixture(
             GovernedProjectionFixtureMode::InsufficientCommittedCapacity,
@@ -15362,6 +27729,455 @@ mod tests {
             ),
             "unexpected insufficient-capacity result: {refusal:?}"
         );
+    }
+
+    #[test]
+    fn governed_v3_capacity_rejects_caller_only_projection_component_substitution() {
+        let fixture =
+            governed_projection_fixture(GovernedProjectionFixtureMode::FullTopologyNativeLaunch);
+        let mut substituted = fixture.reservation.clone();
+        substituted.projection_capsule_capacity_bytes = substituted
+            .projection_capsule_capacity_bytes
+            .checked_add(1)
+            .expect("fixture projection component increment");
+        let error = fixture
+            .store
+            .verify_governed_execution_custody_closure_v3_capacity(
+                &substituted,
+                &fixture.launch_checkpoint_id,
+            )
+            .expect_err("caller-only projected component substitution must fail");
+        assert!(
+            matches!(error, StoreError::Integrity(ref message)
+            if message.contains(
+                "caller capacity differs from the exact custody reservation record"
+            )),
+            "unexpected V3 projected-component substitution result: {error}"
+        );
+    }
+
+    #[test]
+    fn r0b_dependency_source_matrix_is_global_before_provider_effect_for_v2_and_v3_capacity() {
+        const STOP_AFTER_PRE_EFFECT_GATE: &str = "r0b-stop-after-pre-effect-capacity";
+
+        for case in r0b_dependency_cases() {
+            let mut observed = None;
+            let fixture_result = governed_projection_fixture_with_spec_and_pre_effect_hook(
+                PendingV3FixtureSpec {
+                    dependency_fixture_mutation: case.mutation,
+                    ..PendingV3FixtureSpec::exact_native()
+                },
+                |store, reservation, launch_checkpoint_id| {
+                    apply_r0b_store_trust_root_substitution(store, case.mutation);
+                    let _ = crate::governed_custody::take_r0b_authenticated_source_modes();
+                    let provider_rows_before: i64 = store.connection.query_row(
+                        "SELECT COUNT(*) FROM provider_intake_attempts",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    assert_eq!(
+                        provider_rows_before, 0,
+                        "{} reached the capacity gate after a provider effect",
+                        case.id
+                    );
+                    let v2 = store.verify_governed_execution_custody_closure_v2_capacity(
+                        reservation,
+                        launch_checkpoint_id,
+                    );
+                    let v3 = store.verify_governed_execution_custody_closure_v3_capacity(
+                        reservation,
+                        launch_checkpoint_id,
+                    );
+                    let provider_rows_after: i64 = store.connection.query_row(
+                        "SELECT COUNT(*) FROM provider_intake_attempts",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    assert_eq!(
+                        provider_rows_after, 0,
+                        "{} capacity verification performed a provider effect",
+                        case.id
+                    );
+                    observed = Some((
+                        v2,
+                        v3,
+                        crate::governed_custody::take_r0b_authenticated_source_modes(),
+                    ));
+                    Err(StoreError::Invariant(STOP_AFTER_PRE_EFFECT_GATE.to_owned()))
+                },
+            );
+            assert!(
+                matches!(fixture_result, Err(StoreError::Invariant(ref message))
+                    if message == STOP_AFTER_PRE_EFFECT_GATE),
+                "{} did not stop at the pre-effect capacity boundary",
+                case.id
+            );
+            let (v2, v3, source_modes) = observed
+                .take()
+                .unwrap_or_else(|| panic!("{} did not run the pre-effect hook", case.id));
+            assert_r0b_dependency_result(&case, "C/V2", &v2);
+            assert_r0b_dependency_result(&case, "C/V3", &v3);
+            let successful_resolutions =
+                usize::from(matches!(case.expected, R0bDependencyExpected::Pass)) * 2;
+            assert_r0b_retained_external_mode(&case, &source_modes, Some(successful_resolutions));
+        }
+    }
+
+    fn assert_pc04_historical_standing_boundary(
+        mode: GovernedProjectionFixtureMode,
+        authenticated_capacity_expected: bool,
+    ) {
+        let fixture = governed_projection_fixture(mode);
+        let logical_before = logical_state_digest(
+            &fixture.store.connection,
+            b"nq.test.pc04-historical-authenticated-standing.v1\0",
+        )
+        .expect("historical PC-04 starting state");
+        let arena = CustodyArena::open_by_reservation(
+            fixture.store.path().expect("historical PC-04 database"),
+            &fixture.reservation_record_id,
+        )
+        .expect("open historical PC-04 arena")
+        .expect("historical PC-04 arena exists");
+        let exact_final = arena
+            .final_v2_closure_bytes()
+            .expect("read historical PC-04 final closure")
+            .expect("historical PC-04 final closure exists");
+        let exact_dependency = arena
+            .dependency_closure_bytes()
+            .expect("read historical PC-04 dependency custody");
+        assert!(
+            arena
+                .protected_failure_bytes()
+                .expect("inspect historical PC-04 protected failure")
+                .is_none()
+        );
+        drop(arena);
+
+        for attempt in 0..2 {
+            let v2 = fixture
+                .store
+                .verify_governed_execution_custody_closure_v2_capacity(
+                    &fixture.reservation,
+                    &fixture.launch_checkpoint_id,
+                );
+            let v3 = fixture
+                .store
+                .verify_governed_execution_custody_closure_v3_capacity(
+                    &fixture.reservation,
+                    &fixture.launch_checkpoint_id,
+                );
+            for (surface, result) in [("V2", v2.map(|_| ())), ("V3", v3.map(|_| ()))] {
+                if authenticated_capacity_expected {
+                    assert!(
+                        result.is_ok(),
+                        "PC-04 {mode:?} {surface} capacity attempt {attempt} rejected current authenticated dependency custody: {result:?}"
+                    );
+                } else {
+                    assert!(
+                        matches!(result, Err(StoreError::Integrity(ref message))
+                            if message.contains("authenticated dependency reopen failed")
+                                && message.contains("invalid dependency-custody JSON")),
+                        "PC-04 {mode:?} {surface} capacity attempt {attempt} did not refuse legacy dependency custody globally: {result:?}"
+                    );
+                }
+            }
+            let verification_error = fixture
+                .store
+                .verify_governed_projection_and_mark_indexed(&fixture.reservation_record_id)
+                .expect_err(
+                    "historical pre-V3 closure must not earn complete-verification standing",
+                );
+            assert!(
+                matches!(verification_error, StoreError::Integrity(ref message)
+                if message.contains(
+                    "historical pre-V3 closure cannot earn authenticated complete-verification standing"
+                )),
+                "PC-04 {mode:?} complete-verification attempt {attempt}: {verification_error}"
+            );
+            assert_eq!(
+                logical_state_digest(
+                    &fixture.store.connection,
+                    b"nq.test.pc04-historical-authenticated-standing.v1\0",
+                )
+                .expect("historical PC-04 unchanged state"),
+                logical_before,
+                "PC-04 {mode:?} attempt {attempt} changed SQL or allocator state"
+            );
+            assert_governed_projection_pending(&fixture.store, &fixture.reservation_record_id);
+        }
+
+        let arena = CustodyArena::open_by_reservation(
+            fixture.store.path().expect("historical PC-04 database"),
+            &fixture.reservation_record_id,
+        )
+        .expect("reopen historical PC-04 arena")
+        .expect("historical PC-04 arena still exists");
+        assert_eq!(
+            arena
+                .final_v2_closure_bytes()
+                .expect("reopen historical PC-04 final closure")
+                .as_deref(),
+            Some(exact_final.as_slice()),
+            "PC-04 {mode:?} changed retained historical final bytes"
+        );
+        assert_eq!(
+            arena
+                .dependency_closure_bytes()
+                .expect("reopen historical PC-04 dependency custody"),
+            exact_dependency,
+            "PC-04 {mode:?} changed retained historical dependency bytes"
+        );
+        assert!(
+            arena
+                .protected_failure_bytes()
+                .expect("reopen historical PC-04 protected failure")
+                .is_none(),
+            "PC-04 {mode:?} converted a global standing failure into a protected local refusal"
+        );
+    }
+
+    #[test]
+    fn pc04_legacy_dependency_custody_is_retained_but_refused_at_authenticated_capacity() {
+        assert_pc04_historical_standing_boundary(GovernedProjectionFixtureMode::Complete, false);
+    }
+
+    #[test]
+    fn pc04_authenticated_dependency_may_pass_capacity_but_historical_closure_cannot_complete() {
+        assert_pc04_historical_standing_boundary(
+            GovernedProjectionFixtureMode::FullTopologyNativeLaunch,
+            true,
+        );
+    }
+
+    #[test]
+    fn pc03_accepted_decision_sources_are_global_in_capacity_and_complete_verification() {
+        for (mode, expected_reason) in [
+            (
+                GovernedProjectionFixtureMode::AcceptedDecisionAuthenticationSourceSubstitution,
+                "accepted invocation decision authentication_evidence differs from outer request",
+            ),
+            (
+                GovernedProjectionFixtureMode::AcceptedDecisionAuthorizationSourceSubstitution,
+                "accepted invocation decision invocation_authorization differs from outer request",
+            ),
+        ] {
+            let fixture = governed_projection_fixture(mode);
+            let logical_before = logical_state_digest(
+                &fixture.store.connection,
+                b"nq.test.pc03-accepted-decision-source-law.v1\0",
+            )
+            .expect("PC-03 accepted-decision starting state");
+            let capacity_error = fixture
+                .store
+                .verify_governed_execution_custody_closure_v2_capacity(
+                    &fixture.reservation,
+                    &fixture.launch_checkpoint_id,
+                )
+                .expect_err("PC-03 hostile capacity path must fail globally");
+            assert!(
+                matches!(capacity_error, StoreError::Integrity(ref message)
+                    if message.contains(expected_reason)),
+                "PC-03 {mode:?}: {capacity_error}"
+            );
+            assert_historical_pre_v3_complete_verification_refuses(
+                &fixture,
+                &format!("PC-03 {mode:?}"),
+            );
+            assert_eq!(
+                logical_state_digest(
+                    &fixture.store.connection,
+                    b"nq.test.pc03-accepted-decision-source-law.v1\0",
+                )
+                .expect("PC-03 accepted-decision unchanged state"),
+                logical_before,
+                "PC-03 {mode:?} verification changed SQL state"
+            );
+            assert_governed_projection_pending(&fixture.store, &fixture.reservation_record_id);
+            let arena = CustodyArena::open_by_reservation(
+                fixture.store.path().expect("PC-03 fixture database"),
+                &fixture.reservation_record_id,
+            )
+            .expect("open PC-03 hostile arena")
+            .expect("PC-03 hostile arena exists");
+            assert_eq!(
+                arena
+                    .final_v2_closure_bytes()
+                    .expect("read PC-03 hostile closure")
+                    .as_deref(),
+                Some(fixture.exact_closure_bytes.as_slice())
+            );
+            assert!(
+                arena
+                    .protected_failure_bytes()
+                    .expect("inspect PC-03 hostile refusal")
+                    .is_none(),
+                "PC-03 accepted-decision source failure must never become a local refusal"
+            );
+        }
+    }
+
+    #[test]
+    fn pc04_declared_launch_hostiles_are_global_in_capacity_and_complete_verification() {
+        for (mode, expected_reason) in [
+            (
+                GovernedProjectionFixtureMode::NativeDeadlineRecordMissing,
+                "native physical launch declaration requires exactly one deadline record",
+            ),
+            (
+                GovernedProjectionFixtureMode::NativeDeadlineProvenanceSubstitution,
+                "native deadline provenance",
+            ),
+            (
+                GovernedProjectionFixtureMode::NativeDeadlineDuplicate,
+                "native physical launch declaration requires exactly one deadline record",
+            ),
+            (
+                GovernedProjectionFixtureMode::NativeLaunchExtraneousRecord,
+                "native physical launch declaration differs from its exact deadline-plus-launch checkpoint",
+            ),
+            (
+                GovernedProjectionFixtureMode::NativeDeadlineMalformedReference,
+                "invalid exact reference at /prelaunch_checks/deadline",
+            ),
+            (
+                GovernedProjectionFixtureMode::NativeDeadlineReferenceSubstitution,
+                "native physical launch declaration differs from its exact deadline-plus-launch checkpoint",
+            ),
+            (
+                GovernedProjectionFixtureMode::NativePrelaunchDeadlineDeclarationMissing,
+                "prelaunch_checks does not have the exact v1 key set",
+            ),
+            (
+                GovernedProjectionFixtureMode::NativeUnknownPrelaunchCheck,
+                "prelaunch_checks does not have the exact v1 key set",
+            ),
+            (
+                GovernedProjectionFixtureMode::NativePrelaunchMalformedReference(
+                    NativePrelaunchReferenceField::Authentication,
+                ),
+                "invalid exact reference at /prelaunch_checks/authentication",
+            ),
+            (
+                GovernedProjectionFixtureMode::NativePrelaunchMalformedReference(
+                    NativePrelaunchReferenceField::InvocationAuthorization,
+                ),
+                "invalid exact reference at /prelaunch_checks/invocation_authorization",
+            ),
+            (
+                GovernedProjectionFixtureMode::NativePrelaunchMalformedReference(
+                    NativePrelaunchReferenceField::GenerationMatch,
+                ),
+                "invalid exact reference at /prelaunch_checks/generation_match",
+            ),
+            (
+                GovernedProjectionFixtureMode::NativePrelaunchMalformedReference(
+                    NativePrelaunchReferenceField::Capability,
+                ),
+                "invalid exact reference at /prelaunch_checks/capability",
+            ),
+            (
+                GovernedProjectionFixtureMode::NativePrelaunchMalformedReference(
+                    NativePrelaunchReferenceField::Custody,
+                ),
+                "invalid exact reference at /prelaunch_checks/custody",
+            ),
+            (
+                GovernedProjectionFixtureMode::NativePrelaunchCrossSourceSubstitution(
+                    NativePrelaunchReferenceField::Authentication,
+                ),
+                "prelaunch check authentication differs from outer request authentication_evidence",
+            ),
+            (
+                GovernedProjectionFixtureMode::NativePrelaunchCrossSourceSubstitution(
+                    NativePrelaunchReferenceField::InvocationAuthorization,
+                ),
+                "prelaunch check invocation_authorization differs from outer request invocation_authorization",
+            ),
+            (
+                GovernedProjectionFixtureMode::NativePrelaunchCrossSourceSubstitution(
+                    NativePrelaunchReferenceField::Custody,
+                ),
+                "prelaunch check custody differs from reservation reservation_commit",
+            ),
+            (
+                GovernedProjectionFixtureMode::LaunchStatusSubstitution,
+                "physical execution launch status is not launched",
+            ),
+            (
+                GovernedProjectionFixtureMode::LegacyOuterRequestReferenceSubstitution,
+                "legacy physical launch request or decision reference differs",
+            ),
+            (
+                GovernedProjectionFixtureMode::LegacyDecisionReferenceSubstitution,
+                "legacy physical launch request or decision reference differs",
+            ),
+            (
+                GovernedProjectionFixtureMode::LegacyUndeclaredDeadlineRecord,
+                "legacy physical launch declaration requires one exact launch-only checkpoint",
+            ),
+            (
+                GovernedProjectionFixtureMode::LegacyLaunchExtraneousRecord,
+                "legacy physical launch declaration requires one exact launch-only checkpoint",
+            ),
+            (
+                GovernedProjectionFixtureMode::LegacyNativeResidueWithoutPrelaunchChecks,
+                "legacy physical launch declaration retains native-only field attempt_deadline",
+            ),
+        ] {
+            let fixture = governed_projection_fixture(mode);
+            let logical_before = logical_state_digest(
+                &fixture.store.connection,
+                b"nq.test.pc04-common-launch-law.v1\0",
+            )
+            .expect("PC-04 common-law starting state");
+            let capacity_error = fixture
+                .store
+                .verify_governed_execution_custody_closure_v2_capacity(
+                    &fixture.reservation,
+                    &fixture.launch_checkpoint_id,
+                )
+                .expect_err("PC-04 hostile capacity path must fail globally");
+            assert!(
+                matches!(capacity_error, StoreError::Integrity(ref message)
+                    if message.contains(expected_reason)),
+                "PC-04 {mode:?} capacity path: {capacity_error}"
+            );
+            assert_historical_pre_v3_complete_verification_refuses(
+                &fixture,
+                &format!("PC-04 hostile {mode:?}"),
+            );
+            assert_eq!(
+                logical_state_digest(
+                    &fixture.store.connection,
+                    b"nq.test.pc04-common-launch-law.v1\0",
+                )
+                .expect("PC-04 common-law unchanged state"),
+                logical_before,
+                "PC-04 {mode:?} capacity or complete verification changed SQL state"
+            );
+            assert_governed_projection_pending(&fixture.store, &fixture.reservation_record_id);
+            let arena = CustodyArena::open_by_reservation(
+                fixture.store.path().expect("PC-04 fixture database"),
+                &fixture.reservation_record_id,
+            )
+            .expect("open PC-04 hostile arena")
+            .expect("PC-04 hostile arena exists");
+            assert_eq!(
+                arena
+                    .final_v2_closure_bytes()
+                    .expect("read PC-04 hostile closure")
+                    .as_deref(),
+                Some(fixture.exact_closure_bytes.as_slice())
+            );
+            assert!(
+                arena
+                    .protected_failure_bytes()
+                    .expect("inspect PC-04 hostile refusal")
+                    .is_none(),
+                "PC-04 physical source shape must never become a local refusal"
+            );
+        }
     }
 
     #[test]
@@ -15390,9 +28206,16 @@ mod tests {
             "V1 bytes must not be upgraded or re-encoded during reopen"
         );
         drop(reopened_custody);
-        reopened_store
+        let error = reopened_store
             .verify_governed_projection_and_mark_indexed(&reservation_record_id)
-            .expect("legacy V1 projection remains verifiable");
+            .expect_err("legacy V1 cannot earn authenticated complete-verification standing");
+        assert!(
+            matches!(error, StoreError::Integrity(ref message)
+            if message.contains(
+                "historical pre-V3 closure cannot earn authenticated complete-verification standing"
+            )),
+            "{error}"
+        );
         drop(directory);
     }
 
@@ -15421,10 +28244,10 @@ mod tests {
                 .to_string()
             )
         );
-        fixture
-            .store
-            .verify_governed_projection_and_mark_indexed(&fixture.reservation_record_id)
-            .expect("full exact topology and native deadline provenance");
+        assert_historical_pre_v3_complete_verification_refuses(
+            &fixture,
+            "historical V2 full topology",
+        );
     }
 
     #[test]
@@ -15434,16 +28257,10 @@ mod tests {
             GovernedProjectionFixtureMode::DiagnosticClockQualificationSubstitution,
         ] {
             let fixture = governed_projection_fixture(mode);
-            let error = fixture
-                .store
-                .verify_governed_projection_and_mark_indexed(&fixture.reservation_record_id)
-                .expect_err("diagnostic-side identity substitution must refuse");
-            assert!(
-                matches!(error, StoreError::Integrity(ref message)
-                    if message.contains("governed projection")),
-                "{error}"
+            assert_historical_pre_v3_complete_verification_refuses(
+                &fixture,
+                &format!("historical V2 diagnostic identity substitution {mode:?}"),
             );
-            assert_governed_projection_pending(&fixture.store, &fixture.reservation_record_id);
         }
     }
 
@@ -15455,16 +28272,10 @@ mod tests {
             GovernedProjectionFixtureMode::NativeLaunchExtraneousRecord,
         ] {
             let fixture = governed_projection_fixture(mode);
-            let error = fixture
-                .store
-                .verify_governed_projection_and_mark_indexed(&fixture.reservation_record_id)
-                .expect_err("native deadline substitution must refuse");
-            assert!(
-                matches!(error, StoreError::Integrity(ref message)
-                    if message.contains("deadline")),
-                "{error}"
+            assert_historical_pre_v3_complete_verification_refuses(
+                &fixture,
+                &format!("historical V2 native deadline substitution {mode:?}"),
             );
-            assert_governed_projection_pending(&fixture.store, &fixture.reservation_record_id);
         }
     }
 
@@ -15476,16 +28287,10 @@ mod tests {
             GovernedProjectionFixtureMode::DuplicateCustodyReservationInReservation,
         ] {
             let fixture = governed_projection_fixture(mode);
-            let error = fixture
-                .store
-                .verify_governed_projection_and_mark_indexed(&fixture.reservation_record_id)
-                .expect_err("an essential reservation record must be unique");
-            assert!(
-                matches!(error, StoreError::Integrity(ref message)
-                    if message.contains("reservation checkpoint membership")),
-                "{error}"
+            assert_historical_pre_v3_complete_verification_refuses(
+                &fixture,
+                &format!("historical V2 duplicate reservation member {mode:?}"),
             );
-            assert_governed_projection_pending(&fixture.store, &fixture.reservation_record_id);
         }
     }
 
@@ -15498,16 +28303,10 @@ mod tests {
             GovernedProjectionFixtureMode::IncompleteRuntimeWriteSet,
         ] {
             let fixture = governed_projection_fixture(mode);
-            let error = fixture
-                .store
-                .verify_governed_projection_and_mark_indexed(&fixture.reservation_record_id)
-                .expect_err("mismatching projection must refuse");
-            assert!(
-                matches!(error, StoreError::Integrity(ref message)
-                    if message.contains("governed projection")),
-                "{error}"
+            assert_historical_pre_v3_complete_verification_refuses(
+                &fixture,
+                &format!("historical V2 mismatching projection {mode:?}"),
             );
-            assert_governed_projection_pending(&fixture.store, &fixture.reservation_record_id);
         }
     }
 
@@ -15556,59 +28355,64 @@ mod tests {
             GovernedProjectionFixtureMode::LaunchClaimTimeSubstitution,
         ] {
             let fixture = governed_projection_fixture(mode);
-            let error = fixture
-                .store
-                .verify_governed_projection_and_mark_indexed(&fixture.reservation_record_id)
-                .expect_err("substituted derivation or prelaunch binding must refuse");
-            assert!(
-                matches!(error, StoreError::Integrity(ref message)
-                    if message.contains("governed projection")),
-                "{error}"
+            assert_historical_pre_v3_complete_verification_refuses(
+                &fixture,
+                &format!("historical V2 derivation/prelaunch substitution {mode:?}"),
             );
-            assert_governed_projection_pending(&fixture.store, &fixture.reservation_record_id);
         }
     }
 
     #[test]
     fn governed_projection_reverification_detects_sql_corruption_after_indexing() {
-        let fixture = governed_projection_fixture(GovernedProjectionFixtureMode::Complete);
-        fixture
-            .store
-            .verify_governed_projection_and_mark_indexed(&fixture.reservation_record_id)
+        let directory = tempdir().expect("V3 reverification parent");
+        let manifest = spawn_pending_v3_fixture(
+            directory.path(),
+            "v3-reverification-after-sql",
+            PendingV3FixtureSpec {
+                crash_window: PendingV3CrashWindow::AfterSqlBeforeIndexMark,
+                ..PendingV3FixtureSpec::exact_native()
+            },
+        );
+        let database = PathBuf::from(manifest_string(&manifest, "database_path"));
+        let reservation_record_id =
+            Sha256Digest::parse(manifest_string(&manifest, "reservation_record_id").to_owned())
+                .expect("V3 reverification reservation identity");
+        let diagnostic_artifact_id =
+            Sha256Digest::parse(manifest_string(&manifest, "diagnostic_artifact_id").to_owned())
+                .expect("V3 reverification artifact identity");
+        let store = Store::open(&database).expect("open V3 reverification store");
+        store
+            .verify_governed_projection_and_mark_indexed(&reservation_record_id)
             .expect("initial exact projection verification");
-        fixture
-            .store
+        store
             .connection
             .execute_batch("DROP TRIGGER immutable_diagnostic_artifact_payloads_update;")
             .expect("test-only payload trigger removal");
-        fixture
-            .store
+        store
             .connection
             .execute(
                 "UPDATE diagnostic_artifact_payloads
                  SET canonical_bytes = X'7b7d'
                  WHERE artifact_id = ?1",
-                [fixture.diagnostic_artifact_id.as_str()],
+                [diagnostic_artifact_id.as_str()],
             )
             .expect("test-only artifact corruption");
-        let error = fixture
-            .store
-            .verify_governed_projection_and_mark_indexed(&fixture.reservation_record_id)
+        let error = store
+            .verify_governed_projection_and_mark_indexed(&reservation_record_id)
             .expect_err("already-indexed state must not bypass exact re-verification");
         assert!(
             matches!(error, StoreError::Integrity(ref message)
                 if message.contains("diagnostic artifact")),
             "{error}"
         );
-        let inventory = fixture
-            .store
+        let inventory = store
             .governed_custody_inventory()
             .expect("post-corruption physical inventory");
         let frontier = inventory
             .iter()
             .find_map(|entry| match entry {
                 GovernedCustodyInventoryEntry::Verified(frontier)
-                    if frontier.reservation_record_id == fixture.reservation_record_id =>
+                    if frontier.reservation_record_id == reservation_record_id =>
                 {
                     Some(frontier)
                 }
@@ -15911,8 +28715,17 @@ mod tests {
 
     fn fixture_collection(
         store: &mut Store,
+        run: RunInput,
+        submission: Option<SubmissionInput>,
+    ) -> CollectionInput {
+        fixture_collection_with_existing_binding(store, run, submission, false)
+    }
+
+    fn fixture_collection_with_existing_binding(
+        store: &mut Store,
         mut run: RunInput,
         submission: Option<SubmissionInput>,
+        binding_already_active: bool,
     ) -> CollectionInput {
         let source_admission_id = run
             .admission_id
@@ -15937,7 +28750,9 @@ mod tests {
             .expect("fixture source execution identity");
         run.execution_identity = CanonicalDocument::from_canonical_bytes(execution_identity_bytes)
             .expect("fixture execution identity canonical");
-        activate_fixture_provider(store, &run, &source_admission_id);
+        if !binding_already_active {
+            activate_fixture_provider(store, &run, &source_admission_id);
+        }
         let provider_admission = store
             .provider_admission_for_source(&source_admission_id)
             .expect("fixture provider admission query")
@@ -16130,6 +28945,40 @@ mod tests {
                     },
                 },
             }),
+        )
+    }
+
+    fn rejected_fixture_collection_with_existing_binding(
+        store: &mut Store,
+        instance_id: &str,
+        suffix: &str,
+        profile_digest: &str,
+        admission_id: &str,
+    ) -> CollectionInput {
+        let mut existing_run = run(instance_id, suffix, profile_digest);
+        existing_run.admission_id = Some(admission_id.to_owned());
+        fixture_collection_with_existing_binding(
+            store,
+            existing_run,
+            Some(SubmissionInput {
+                submission_id: format!("submission-{suffix}"),
+                raw_bytes: format!("rejected-{suffix}\n").into_bytes(),
+                received_at: TIME.to_owned(),
+                protocol_outcome: "rejected".to_owned(),
+                disposition: SubmissionDisposition::Rejected {
+                    refusal: RefusalInput {
+                        refusal_id: format!("refusal-{suffix}"),
+                        source_kind: "protocol".to_owned(),
+                        responsible_instance_id: instance_id.to_owned(),
+                        boundary: "response".to_owned(),
+                        code: "invalid_response".to_owned(),
+                        profile_semantic_id: None,
+                        detail: document(json!({"fixture": suffix})),
+                        created_at: TIME.to_owned(),
+                    },
+                },
+            }),
+            true,
         )
     }
 
@@ -19790,6 +32639,7 @@ mod tests {
                 "submission-migrated-v3",
                 &historical_report,
                 &admission_context_digest,
+                None,
             )
             .expect("v3 admitted report with historical checkpoint");
             insert_status_event(
@@ -20894,6 +33744,56 @@ mod tests {
             batch.records[0].canonical_bytes
         );
         store.validate().expect("runtime history validates");
+    }
+
+    #[test]
+    fn runtime_checkpoint_lookup_is_exact_and_never_falls_forward() {
+        let mut store = Store::initialize_in_memory().expect("store initializes");
+        let first = initial_runtime_batch(vec![runtime_record(
+            "checkpoint-exact-first",
+            "nq.provider_intake.v1",
+            "2026-07-29T12:00:00Z",
+        )]);
+        establish_runtime_root(&mut store, &first.dependency);
+        let first_receipt = store
+            .append_runtime_records(&first)
+            .expect("first checkpoint commits");
+        let second = next_runtime_batch(
+            "checkpoint-exact-second",
+            &first_receipt.checkpoint,
+            first.dependency,
+        );
+        let second_receipt = store
+            .append_runtime_records(&second)
+            .expect("second checkpoint commits");
+
+        assert_ne!(
+            first_receipt.checkpoint.checkpoint_id,
+            second_receipt.checkpoint.checkpoint_id
+        );
+        assert_eq!(
+            store
+                .runtime_checkpoint_by_id(&first_receipt.checkpoint.checkpoint_id)
+                .expect("historical checkpoint lookup"),
+            Some(first_receipt.checkpoint.clone())
+        );
+        assert_eq!(
+            store
+                .runtime_ledger_checkpoint()
+                .expect("latest checkpoint lookup"),
+            Some(second_receipt.checkpoint)
+        );
+        assert_eq!(
+            store
+                .runtime_checkpoint_by_id(typed_digest("unknown-checkpoint").as_str())
+                .expect("unknown exact checkpoint lookup"),
+            None
+        );
+        assert!(matches!(
+            store.runtime_checkpoint_by_id("not-a-sha256"),
+            Err(StoreError::Invariant(message))
+                if message.contains("checkpoint_id is not a SHA-256 identity")
+        ));
     }
 
     #[test]

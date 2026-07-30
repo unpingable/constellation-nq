@@ -8,12 +8,17 @@ license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 
+[features]
+default = []
+test-support = ["nq-host-role-dependency-custody/test-support"]
+
 [dependencies]
 chrono.workspace = true
 ed25519-dalek.workspace = true
 hex.workspace = true
 nix = { workspace = true, features = ["time"] }
 nq-host-role-contract = { path = "../nq-host-role-contract" }
+nq-host-role-dependency-custody = { path = "../nq-host-role-dependency-custody" }
 nq-protocol = { path = "../nq-protocol" }
 nq-store = { path = "../nq-store" }
 serde.workspace = true
@@ -21,6 +26,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+nq-host-role-dependency-custody = { path = "../nq-host-role-dependency-custody", features = ["test-support"] }
 tempfile.workspace = true
 
 [lints]
