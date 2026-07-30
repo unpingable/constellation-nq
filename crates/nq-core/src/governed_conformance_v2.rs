@@ -1265,7 +1265,7 @@ mod tests {
     fn intake(
         suffix: &str,
         request: HelperRequest,
-        raw: Vec<u8>,
+        raw: &[u8],
         outcome: AcquisitionOutcome,
     ) -> ProviderIntakeRecordV1 {
         let started_at = at(0);
@@ -1281,7 +1281,7 @@ mod tests {
             finished_at,
             duration_ms: 1,
             exit_code: (outcome == AcquisitionOutcome::Response).then_some(0),
-            stdout: raw.clone(),
+            stdout: raw.to_owned(),
             stderr: vec![],
             outcome: outcome.clone(),
         };
@@ -1339,12 +1339,12 @@ mod tests {
                 outcome,
             },
             raw_length: raw.len(),
-            raw_sha256: nq_protocol::sha256_bytes(&raw),
+            raw_sha256: nq_protocol::sha256_bytes(raw),
             provider_sequence: None,
             interpretation,
         };
         record
-            .verify_historical_raw(&raw)
+            .verify_historical_raw(raw)
             .expect("historical intake remains exactly reconstructible");
         record
     }
@@ -1481,7 +1481,7 @@ mod tests {
         let complete_intake = intake(
             "complete",
             complete_request,
-            complete_raw.clone(),
+            &complete_raw,
             AcquisitionOutcome::Response,
         );
         let complete = derive_case(&complete_intake, &complete_raw);
@@ -1531,7 +1531,7 @@ mod tests {
             let request = request(suffix);
             let source_report = report(&request, status);
             let raw = response_bytes(&HelperResponse::report(&request, source_report.clone()));
-            let intake = intake(suffix, request, raw.clone(), AcquisitionOutcome::Response);
+            let intake = intake(suffix, request, &raw, AcquisitionOutcome::Response);
             let derivation = derive_case(&intake, &raw);
             let artifact = &derivation.artifact;
             assert_eq!(artifact.outcome.derivation, DiagnosticDerivationV1::Partial);
@@ -1573,7 +1573,7 @@ mod tests {
         let helper_intake = intake(
             "helper-refusal",
             helper_request,
-            helper_raw.clone(),
+            &helper_raw,
             AcquisitionOutcome::Response,
         );
         let helper = derive_case(&helper_intake, &helper_raw);
@@ -1595,7 +1595,7 @@ mod tests {
         let protocol_intake = intake(
             "protocol-rejection",
             protocol_request,
-            protocol_raw.clone(),
+            &protocol_raw,
             AcquisitionOutcome::Response,
         );
         let protocol = derive_case(&protocol_intake, &protocol_raw);
@@ -1618,7 +1618,7 @@ mod tests {
         let profile_intake = intake(
             "profile-refusal",
             profile_request,
-            profile_raw.clone(),
+            &profile_raw,
             AcquisitionOutcome::Response,
         );
         let profile = derive_case(&profile_intake, &profile_raw);
@@ -1642,7 +1642,7 @@ mod tests {
         let no_bytes_intake = intake(
             "no-bytes",
             no_bytes_request,
-            no_bytes.clone(),
+            &no_bytes,
             AcquisitionOutcome::Eof,
         );
         let unavailable = derive_case(&no_bytes_intake, &no_bytes);
@@ -1668,7 +1668,7 @@ mod tests {
         let failed_before_response_intake = intake(
             "no-retained-bytes",
             failed_before_response_request,
-            failed_before_response_raw.clone(),
+            &failed_before_response_raw,
             AcquisitionOutcome::SpawnFailed {
                 message: "bounded spawn failure".to_owned(),
             },
@@ -1692,7 +1692,7 @@ mod tests {
         let retained_intake = intake(
             "retained-bytes",
             retained_request,
-            retained_raw.clone(),
+            &retained_raw,
             AcquisitionOutcome::IoFailed {
                 message: "bounded read failure".to_owned(),
             },

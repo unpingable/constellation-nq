@@ -486,29 +486,47 @@ fn recovery_refuses_coherent_sql_publication_substitution() {
         ..
     } = fixture;
     let mut engine = CollectionEngine::open(&config).expect("SQL-hostile engine");
-    engine
+    let failpoint_error = engine
         .execute_prepared_governed_conformance_with_failpoint(
             prepared,
             GovernedProjectionFailpoint::AfterSqlBeforeIndexMark,
         )
         .expect_err("SQL-hostile fixture stops after commit");
+    assert!(
+        matches!(failpoint_error, EngineError::Invariant(ref message)
+            if message.contains("test failpoint: after SQL projection before index mark")),
+        "unexpected initial failpoint: {failpoint_error}"
+    );
     drop(engine);
 
     let hostile = rusqlite::Connection::open(&config.database_path).expect("hostile SQL writer");
+    // Preserve the exact trigger bytes: schema fingerprinting must see an
+    // unchanged schema so the intended projection-capsule comparison is the
+    // first integrity boundary reached by startup recovery.
+    let trigger_sql: String = hostile
+        .query_row(
+            "SELECT sql FROM sqlite_schema
+             WHERE type = 'trigger' AND name = 'immutable_status_events_update'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("exact immutable_status_events_update trigger SQL");
     hostile
-        .execute_batch(
-            "DROP TRIGGER immutable_status_events_update;
-             UPDATE status_events SET observed_at = '2026-07-29T00:00:01Z';
-             CREATE TRIGGER immutable_status_events_update
-             BEFORE UPDATE ON status_events
-             BEGIN SELECT RAISE(ABORT, 'append-only table'); END;",
+        .execute_batch("DROP TRIGGER immutable_status_events_update;")
+        .expect("drop trigger before substitution");
+    hostile
+        .execute(
+            "UPDATE status_events SET observed_at = '2026-07-29T00:00:01Z'",
+            [],
         )
         .expect("substitute one coherent status publication field");
+    hostile
+        .execute_batch(&trigger_sql)
+        .expect("recreate the exact trigger SQL verbatim");
     drop(hostile);
 
-    let error = match CollectionEngine::open(&config) {
-        Ok(_) => panic!("substituted SQL publication must refuse startup recovery"),
-        Err(error) => error,
+    let Err(error) = CollectionEngine::open(&config) else {
+        panic!("substituted SQL publication must refuse startup recovery");
     };
     assert!(
         error
