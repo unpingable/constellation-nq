@@ -4146,11 +4146,34 @@ fn derive_physical_prelaunch_requirements(
             "operation-authorization reference differs across request, decision, and launch",
         ));
     }
-    let operation_authorizations = reservation_checkpoint_records
+    // Operation authorizations are classified by their closed purpose and
+    // scope, not by schema membership alone: a valid full topology closure
+    // also carries administrative and sensitive-read authorizations, which
+    // remain visible as noncontributors. Exactly one invocation-purpose
+    // candidate is required; any authorization outside the closed purpose
+    // vocabulary, and any additional invocation-purpose authority, refuses.
+    let mut invocation_authorizations = Vec::new();
+    for authorization_record in reservation_checkpoint_records
         .iter()
         .filter(|record| record.record_schema == "nq.operation_authorization.v1")
-        .collect::<Vec<_>>();
-    let [operation_authorization_record] = operation_authorizations.as_slice() else {
+    {
+        let authorization = exact_json_value(reservation_record_id, authorization_record)?;
+        let scope = authorization.get("scope").and_then(Value::as_str);
+        let operation = authorization.get("operation").and_then(Value::as_str);
+        match (scope, operation) {
+            (Some("diagnostic_invocation"), Some("diagnostic.invoke")) => {
+                invocation_authorizations.push(authorization_record);
+            }
+            (Some("administrative_lifecycle" | "sensitive_read"), _) => {}
+            _ => {
+                return Err(projection_integrity(
+                    reservation_record_id,
+                    "reservation checkpoint operation authorization carries no closed purpose",
+                ));
+            }
+        }
+    }
+    let [operation_authorization_record] = invocation_authorizations.as_slice() else {
         return Err(projection_integrity(
             reservation_record_id,
             "reservation checkpoint requires exactly one materialized operation authorization",

@@ -17038,6 +17038,8 @@ mod tests {
             "nq.operation_authorization.v1",
             json!({
                 "schema": "nq.operation_authorization.v1",
+                "scope": "diagnostic_invocation",
+                "operation": "diagnostic.invoke",
                 "fixture": format!("native-prelaunch-authorization-{suffix}"),
             }),
         );
@@ -17246,6 +17248,7 @@ mod tests {
         R0bOperationAuthorizationMissing,
         R0bOperationAuthorizationDuplicate,
         R0bOperationAuthorizationBytesMismatch,
+        R0bAdministrativeAuthorizationNoncontributor,
         R0bRequestLaunchAuthenticationMismatch,
         R0bRequestDecisionAuthenticationMismatch,
         R0bRequestLaunchAuthorizationMismatch,
@@ -18188,6 +18191,9 @@ mod tests {
                 Self::R0bOperationAuthorizationBytesMismatch => {
                     "r0b-operation-authorization-bytes-mismatch"
                 }
+                Self::R0bAdministrativeAuthorizationNoncontributor => {
+                    "r0b-administrative-authorization-noncontributor"
+                }
                 Self::R0bRequestLaunchAuthenticationMismatch => {
                     "r0b-request-launch-authentication-mismatch"
                 }
@@ -18231,6 +18237,9 @@ mod tests {
                 "r0b-operation-authorization-duplicate" => Self::R0bOperationAuthorizationDuplicate,
                 "r0b-operation-authorization-bytes-mismatch" => {
                     Self::R0bOperationAuthorizationBytesMismatch
+                }
+                "r0b-administrative-authorization-noncontributor" => {
+                    Self::R0bAdministrativeAuthorizationNoncontributor
                 }
                 "r0b-request-launch-authentication-mismatch" => {
                     Self::R0bRequestLaunchAuthenticationMismatch
@@ -19232,6 +19241,8 @@ mod tests {
             "nq.operation_authorization.v1",
             json!({
                 "schema": "nq.operation_authorization.v1",
+                "scope": "diagnostic_invocation",
+                "operation": "diagnostic.invoke",
                 "fixture": "native-prelaunch-authorization",
             }),
         );
@@ -19240,6 +19251,8 @@ mod tests {
             "nq.operation_authorization.v1",
             json!({
                 "schema": "nq.operation_authorization.v1",
+                "scope": "diagnostic_invocation",
+                "operation": "diagnostic.invoke",
                 "fixture": "alternate-native-prelaunch-authorization",
             }),
         );
@@ -19723,6 +19736,8 @@ mod tests {
                             "nq.operation_authorization.v1",
                             json!({
                                 "schema": "nq.operation_authorization.v1",
+                                "scope": "diagnostic_invocation",
+                                "operation": "diagnostic.invoke",
                                 "fixture": "substituted-native-prelaunch-authorization",
                             }),
                         )
@@ -19740,6 +19755,21 @@ mod tests {
                 profile_qualification,
                 native_clock_qualification,
             ]);
+            if matches!(
+                spec.physical_source_mutation,
+                PendingV3PhysicalSourceMutation::R0bAdministrativeAuthorizationNoncontributor
+            ) {
+                reservation_records.push(governed_runtime_record(
+                    typed_digest("administrative-governed-authorization"),
+                    "nq.operation_authorization.v1",
+                    json!({
+                        "schema": "nq.operation_authorization.v1",
+                        "scope": "administrative_lifecycle",
+                        "operation": "rekey",
+                        "fixture": "administrative-lifecycle-authorization",
+                    }),
+                ));
+            }
             if matches!(
                 mode,
                 GovernedProjectionFixtureMode::NativePrelaunchCrossSourceSubstitution(
@@ -22097,6 +22127,7 @@ mod tests {
             | PendingV3PhysicalSourceMutation::R0bOperationAuthorizationMissing
             | PendingV3PhysicalSourceMutation::R0bOperationAuthorizationDuplicate
             | PendingV3PhysicalSourceMutation::R0bOperationAuthorizationBytesMismatch
+            | PendingV3PhysicalSourceMutation::R0bAdministrativeAuthorizationNoncontributor
             | PendingV3PhysicalSourceMutation::R0bRequestLaunchAuthenticationMismatch
             | PendingV3PhysicalSourceMutation::R0bRequestDecisionAuthenticationMismatch
             | PendingV3PhysicalSourceMutation::R0bRequestLaunchAuthorizationMismatch
@@ -23738,6 +23769,64 @@ mod tests {
                     case.expected_reason
                 );
             }
+        }
+    }
+
+    #[test]
+    fn r0b_administrative_authorization_is_a_visible_noncontributor() {
+        const STOP_AFTER_PRE_EFFECT_GATE: &str = "r0b-administrative-stop-after-pre-effect";
+
+        let mut observed = None;
+        let fixture_result = governed_projection_fixture_with_spec_and_pre_effect_hook(
+            PendingV3FixtureSpec {
+                physical_source_mutation:
+                    PendingV3PhysicalSourceMutation::R0bAdministrativeAuthorizationNoncontributor,
+                ..PendingV3FixtureSpec::exact_native()
+            },
+            |store, reservation, launch_checkpoint_id| {
+                let provider_rows: i64 = store.connection.query_row(
+                    "SELECT COUNT(*) FROM provider_intake_attempts",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(
+                    provider_rows, 0,
+                    "administrative noncontributor fixture reached the source gate after a provider effect"
+                );
+                let mut attempts = Vec::new();
+                for _ in 0..2 {
+                    attempts.push((
+                        store.verify_governed_execution_custody_closure_v2_capacity(
+                            reservation,
+                            launch_checkpoint_id,
+                        ),
+                        store.verify_governed_execution_custody_closure_v3_capacity(
+                            reservation,
+                            launch_checkpoint_id,
+                        ),
+                    ));
+                }
+                observed = Some(attempts);
+                Err(StoreError::Invariant(STOP_AFTER_PRE_EFFECT_GATE.to_owned()))
+            },
+        );
+        assert!(
+            matches!(fixture_result, Err(StoreError::Invariant(ref message))
+                if message == STOP_AFTER_PRE_EFFECT_GATE),
+            "administrative noncontributor fixture did not stop at the pre-effect capacity boundary"
+        );
+        let attempts = observed.take().unwrap_or_else(|| {
+            panic!("administrative noncontributor fixture did not run the pre-effect hook")
+        });
+        for (attempt, (v2, v3)) in attempts.into_iter().enumerate() {
+            assert!(
+                v2.is_ok(),
+                "C/V2 attempt {attempt} rejected one exact invocation authorization accompanied by an administrative noncontributor: {v2:?}"
+            );
+            assert!(
+                v3.is_ok(),
+                "C/V3 attempt {attempt} rejected one exact invocation authorization accompanied by an administrative noncontributor: {v3:?}"
+            );
         }
     }
 
