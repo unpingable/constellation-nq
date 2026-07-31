@@ -232,7 +232,11 @@ fn only_committed_admitted_reports_advance_the_next_request_checkpoint() {
 
     let profile = resolve_profile("nq.conformance", 1).expect("compiled conformance profile");
     let mut store = Store::initialize(&database).expect("initialize test store");
-    append_profile_descriptor(&mut store, profile).expect("append profile descriptor");
+    append_profile_descriptor(
+        &mut store.begin_writer_session().expect("writer session"),
+        profile,
+    )
+    .expect("append profile descriptor");
     drop(store);
 
     let watcher = config

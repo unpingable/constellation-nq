@@ -574,9 +574,9 @@ fn reseal_local_run_only_refusal_chain(database: &Path, original_bytes: &[u8]) -
     }
     drop(connection);
 
-    let store =
+    let mut store =
         Store::open_read_only(database).expect("coherently resealed store stays structural");
-    nq_core::engine::validate_diagnostic_artifact_history(&store)
+    nq_core::engine::validate_diagnostic_artifact_history(&mut store)
         .expect("artifact-only reopening trusts the coherently resealed downstream result");
     let provider_error = nq_core::engine::validate_provider_intake_history(&store)
         .expect_err("raw provider interpretation must reject the downstream substitution");
@@ -902,6 +902,8 @@ fn backup_and_restore_report_preserved_artifact_custody_without_claiming_full_re
     let mut store = nq_store::Store::open(&database).expect("open artifact store");
     let unavailable_id = nq_protocol::sha256_bytes(b"supported-unavailable-artifact");
     store
+        .begin_writer_session()
+        .expect("begin writer session")
         .import_unavailable_diagnostic_artifact(
             &nq_store::UnavailableDiagnosticArtifactImportInput {
                 import_id: "import:supported-unavailable".to_owned(),
@@ -934,6 +936,8 @@ fn backup_and_restore_report_preserved_artifact_custody_without_claiming_full_re
     }))
     .expect("canonical unsupported artifact");
     store
+        .begin_writer_session()
+        .expect("begin writer session")
         .import_diagnostic_artifact(&nq_store::DiagnosticArtifactImportInput {
             import_id: "import:unsupported-available".to_owned(),
             artifact_id: unsupported_id,

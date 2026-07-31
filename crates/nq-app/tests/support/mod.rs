@@ -126,6 +126,8 @@ pub fn append_typed_admission(
         .expect("typed fixture admission lock validates");
     let digest = |label: &str| nq_protocol::sha256_bytes(format!("{label}-{suffix}").as_bytes());
     store
+        .begin_writer_session()
+        .expect("begin writer session")
         .append_admission(&AdmissionInput {
             admission_id: admission_id.clone(),
             instance_id: instance_id.to_owned(),
@@ -257,6 +259,8 @@ pub fn provider_collection(
     let event_id = uuid::Uuid::new_v4().to_string();
     let operation_id = uuid::Uuid::new_v4().to_string();
     store
+        .begin_writer_session()
+        .expect("begin writer session")
         .begin_binding_transition(
             &BindingEventInput {
                 binding_event_id: event_id.clone(),
@@ -280,6 +284,8 @@ pub fn provider_collection(
         )
         .expect("activate fixture provider admission");
     store
+        .begin_writer_session()
+        .expect("begin writer session")
         .complete_binding_materialization(&BindingMaterializationInput {
             materialization_event_id: uuid::Uuid::new_v4().to_string(),
             operation_id,

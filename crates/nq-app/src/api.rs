@@ -884,6 +884,8 @@ mod tests {
             .is_none()
         {
             store
+                .begin_writer_session()
+                .expect("begin writer session")
                 .append_profile_descriptor(&ProfileDescriptorInput {
                     profile_id: profile_id.to_owned(),
                     profile_version: version.to_string(),
@@ -933,6 +935,8 @@ mod tests {
         let admission_id = uuid::Uuid::new_v4().to_string();
         let digest = |label: &str| nq_protocol::sha256_bytes(label.as_bytes());
         store
+            .begin_writer_session()
+            .expect("begin writer session")
             .append_admission(&AdmissionInput {
                 admission_id: admission_id.clone(),
                 instance_id: instance_id.to_owned(),
@@ -997,6 +1001,8 @@ mod tests {
         let event_id = uuid::Uuid::new_v4().to_string();
         let operation_id = uuid::Uuid::new_v4().to_string();
         store
+            .begin_writer_session()
+            .expect("begin writer session")
             .begin_binding_transition(
                 &BindingEventInput {
                     binding_event_id: event_id.clone(),
@@ -1020,6 +1026,8 @@ mod tests {
             )
             .expect("activate fixture provider admission");
         store
+            .begin_writer_session()
+            .expect("begin writer session")
             .complete_binding_materialization(&BindingMaterializationInput {
                 materialization_event_id: uuid::Uuid::new_v4().to_string(),
                 operation_id,
@@ -1229,6 +1237,8 @@ mod tests {
         };
         if with_prior_finding {
             store
+                .begin_writer_session()
+                .expect("begin writer session")
                 .commit_evaluation(
                     &EvaluationInput {
                         evaluation_id: present_id,
@@ -1310,6 +1320,8 @@ mod tests {
             result: refused,
         };
         store
+            .begin_writer_session()
+            .expect("begin writer session")
             .commit_evaluation(
                 &EvaluationInput {
                     evaluation_id: refused_id,
@@ -1447,6 +1459,8 @@ mod tests {
             })),
         );
         store
+            .begin_writer_session()
+            .expect("begin writer session")
             .commit_non_success_collection(
                 &collection,
                 &RunResultStatusInput {
@@ -1505,6 +1519,8 @@ mod tests {
         let collection =
             fixture_provider_collection(store, run, None, "unavailable", document(&Value::Null));
         store
+            .begin_writer_session()
+            .expect("begin writer session")
             .commit_non_success_collection(
                 &collection,
                 &RunResultStatusInput {
@@ -1525,6 +1541,8 @@ mod tests {
 
     fn seed_admission_refusal_status(store: &mut Store, outcome: &CollectionOutcome) {
         store
+            .begin_writer_session()
+            .expect("begin writer session")
             .record_status(&StatusEventInput {
                 status_event_id: uuid::Uuid::new_v4().to_string(),
                 component_kind: "instance".to_owned(),

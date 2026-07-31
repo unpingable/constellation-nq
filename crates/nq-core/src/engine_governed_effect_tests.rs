@@ -164,7 +164,11 @@ fn admitted_effect_fixture_with_profile(
     let config = effect_config(root, &helper_path, &marker);
     let profile: &'static dyn ProfileModule = &nq_profiles::conformance::MODULE;
     let mut store = Store::initialize(&config.database_path).expect("initialize store");
-    append_profile_descriptor(&mut store, profile).expect("append profile descriptor");
+    append_profile_descriptor(
+        &mut store.begin_writer_session().expect("writer session"),
+        profile,
+    )
+    .expect("append profile descriptor");
     drop(store);
 
     let watcher = config
@@ -240,6 +244,8 @@ fn admitted_effect_fixture_with_profile(
 
     let mut store = Store::open(&config.database_path).expect("reopen store for runtime");
     store
+        .begin_writer_session()
+        .expect("writer session")
         .establish_runtime_dependency_trust_root(&fixture.dependency_anchor_id)
         .expect("establish fixture trust root");
     let mut runtime =
@@ -320,7 +326,7 @@ fn actual_helper_complete_persists_reopens_and_indexes_exact_v2() {
     let run_id = artifact.run_id.as_str().to_owned();
     drop(engine);
 
-    let store = Store::open(&fixture.config.database_path).expect("reopen exact store");
+    let mut store = Store::open(&fixture.config.database_path).expect("reopen exact store");
     let status_identity = assert_exact_run_scoped_status(
         &store,
         &run_id,
@@ -345,6 +351,8 @@ fn actual_helper_complete_persists_reopens_and_indexes_exact_v2() {
     };
     assert_eq!(reopened.as_bytes(), canonical_bytes);
     let projection = store
+        .begin_writer_session()
+        .expect("writer session")
         .verify_governed_projection_and_mark_indexed(&fixture.reservation_record_id)
         .expect("reverify governed projection");
     assert_eq!(
@@ -445,6 +453,8 @@ fn assert_recovery_failpoint(failpoint: GovernedProjectionFailpoint) {
         .len();
     assert_eq!(status_count, 1, "recovery duplicated the run status");
     let second = store
+        .begin_writer_session()
+        .expect("writer session")
         .recover_governed_projection_and_mark_indexed(&fixture.reservation_record_id)
         .expect("idempotent exact capsule recovery");
     assert!(matches!(

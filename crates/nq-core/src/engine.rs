@@ -37,7 +37,7 @@ use nq_store::{
     GovernedAcquisitionCustodyInput, GovernedProjectionCapsule, GovernedProjectionCapsuleInput,
     GovernedProjectionCapsuleMode, GovernedProtectedTerminalClass,
     GovernedProtectedTerminalDeadlineCompliance, GovernedProtectedTerminalInput,
-    GovernedProtectedTerminalReason, ObservationInput, ProfileDescriptorInput,
+    GovernedProtectedTerminalReason, ObservationInput, ProfileDescriptorInput, StoreWriterSession,
     ProviderIntakeCommit, ProviderIntakeInput, ProviderIntakePreflight, RefusalInput,
     ReportErrorInput, ReportInput, RunInput, RunResultStatusInput, StatusEventInput, Store,
     SubmissionDisposition, SubmissionInput,
@@ -3091,6 +3091,7 @@ fn bounded_governed_terminal_detail(detail: &str) -> String {
 }
 
 fn terminalize_native_pre_effect_refusal(
+    session: &mut StoreWriterSession<'_>,
     prepared: &mut PreparedGovernedInvocation,
     refusal: NativeGovernedPreEffectRefusal,
 ) -> EngineError {
@@ -3104,7 +3105,7 @@ fn terminalize_native_pre_effect_refusal(
     );
     match input.and_then(|input| {
         prepared
-            .terminalize_immediate_launch(input)
+            .terminalize_immediate_launch(session, input)
             .map(|_| ())
             .map_err(EngineError::from)
     }) {
@@ -3116,6 +3117,7 @@ fn terminalize_native_pre_effect_refusal(
 }
 
 fn terminalize_native_postlaunch_failure(
+    session: &mut StoreWriterSession<'_>,
     prepared: &mut PreparedGovernedInvocation,
     stage: &'static str,
     failure: EngineError,
@@ -3129,7 +3131,7 @@ fn terminalize_native_postlaunch_failure(
     );
     match input.and_then(|input| {
         prepared
-            .terminalize_immediate_launch(input)
+            .terminalize_immediate_launch(session, input)
             .map(|_| ())
             .map_err(EngineError::from)
     }) {
@@ -3141,12 +3143,13 @@ fn terminalize_native_postlaunch_failure(
 }
 
 fn handle_native_governed_publication_failure(
+    session: &mut StoreWriterSession<'_>,
     prepared: &mut PreparedGovernedInvocation,
     failure: EngineError,
 ) -> EngineError {
     let state = match prepared.live_custody_state() {
         Ok(state) => state,
-        Err(initial_error) => match prepared.reopen_custody_state_after_indeterminate_write() {
+        Err(initial_error) => match prepared.reopen_custody_state_after_indeterminate_write(session) {
             Ok(state) => state,
             Err(reopen_error) => {
                 return EngineError::Invariant(format!(
@@ -3160,7 +3163,12 @@ fn handle_native_governed_publication_failure(
         | nq_store::GovernedCustodyState::LaunchClaimed
         | nq_store::GovernedCustodyState::AcquisitionSealed
         | nq_store::GovernedCustodyState::DerivationClaimed => {
-            terminalize_native_postlaunch_failure(prepared, "final_projection_publication", failure)
+            terminalize_native_postlaunch_failure(
+                session,
+                prepared,
+                "final_projection_publication",
+                failure,
+            )
         }
         nq_store::GovernedCustodyState::FinalSealIntent
         | nq_store::GovernedCustodyState::FinalClosureIndexPending
@@ -4084,9 +4092,11 @@ impl CollectionEngine {
     /// Returns a version, integrity, or database-opening error.
     pub fn open(config: &NqConfig) -> Result<Self, EngineError> {
         let mut store = Store::open(&config.database_path)?;
-        let startup_projection_recovery = store.recover_pending_governed_projections()?;
+        let startup_projection_recovery = store
+            .begin_writer_session()?
+            .recover_pending_governed_projections()?;
         validate_provider_intake_history(&store)?;
-        validate_diagnostic_artifact_history(&store)?;
+        validate_diagnostic_artifact_history(&mut store)?;
         Ok(Self {
             config: config.clone(),
             store,
@@ -4107,9 +4117,11 @@ impl CollectionEngine {
         evaluator_identity: Result<EvaluatorRuntimeIdentity, String>,
     ) -> Result<Self, EngineError> {
         let mut store = Store::open(&config.database_path)?;
-        let startup_projection_recovery = store.recover_pending_governed_projections()?;
+        let startup_projection_recovery = store
+            .begin_writer_session()?
+            .recover_pending_governed_projections()?;
         validate_provider_intake_history(&store)?;
-        validate_diagnostic_artifact_history(&store)?;
+        validate_diagnostic_artifact_history(&mut store)?;
         Ok(Self {
             config: config.clone(),
             store,
@@ -4733,10 +4745,14 @@ impl CollectionEngine {
             NativeGovernedPreEffectOutcome::Refused {
                 mut prepared,
                 refusal,
-            } => Err(terminalize_native_pre_effect_refusal(
-                &mut prepared,
-                refusal,
-            )),
+            } => {
+                let mut session = self.store.begin_writer_session()?;
+                Err(terminalize_native_pre_effect_refusal(
+                    &mut session,
+                    &mut prepared,
+                    refusal,
+                ))
+            }
         }
     }
 
@@ -4785,16 +4801,16 @@ impl CollectionEngine {
                     NativeGovernedPreEffectRefusalCode::NativeClockCorrespondenceUnavailable,
                     "the runtime-owned monotonic execution window widened after pre-effect qualification",
                 );
-                return Err(terminalize_native_pre_effect_refusal(
-                    &mut prepared,
-                    refusal,
-                ));
+                return Err({
+                        let mut session = self.store.begin_writer_session()?;
+                        terminalize_native_pre_effect_refusal(&mut session, &mut prepared, refusal)
+                    });
             }
             Err(refusal) => {
-                return Err(terminalize_native_pre_effect_refusal(
-                    &mut prepared,
-                    refusal,
-                ));
+                return Err({
+                        let mut session = self.store.begin_writer_session()?;
+                        terminalize_native_pre_effect_refusal(&mut session, &mut prepared, refusal)
+                    });
             }
         };
         if fresh_remaining > StdDuration::from_millis(watcher.invocation.deadline_ms) {
@@ -4802,10 +4818,10 @@ impl CollectionEngine {
                 NativeGovernedPreEffectRefusalCode::DeadlineExpired,
                 "the final runtime-owned watchdog broadens the admitted watcher deadline",
             );
-            return Err(terminalize_native_pre_effect_refusal(
-                &mut prepared,
-                refusal,
-            ));
+            return Err({
+                    let mut session = self.store.begin_writer_session()?;
+                    terminalize_native_pre_effect_refusal(&mut session, &mut prepared, refusal)
+                });
         }
 
         match self.store.provider_intake(&provider_attempt.intake_id) {
@@ -4815,20 +4831,20 @@ impl CollectionEngine {
                     NativeGovernedPreEffectRefusalCode::NativeCustodyCorrespondenceUnavailable,
                     "the exact governed provider-intake occurrence already exists; provider replay is forbidden",
                 );
-                return Err(terminalize_native_pre_effect_refusal(
-                    &mut prepared,
-                    refusal,
-                ));
+                return Err({
+                        let mut session = self.store.begin_writer_session()?;
+                        terminalize_native_pre_effect_refusal(&mut session, &mut prepared, refusal)
+                    });
             }
             Err(error) => {
                 let refusal = native_governed_refusal(
                     NativeGovernedPreEffectRefusalCode::NativeCustodyCorrespondenceUnavailable,
                     error.to_string(),
                 );
-                return Err(terminalize_native_pre_effect_refusal(
-                    &mut prepared,
-                    refusal,
-                ));
+                return Err({
+                        let mut session = self.store.begin_writer_session()?;
+                        terminalize_native_pre_effect_refusal(&mut session, &mut prepared, refusal)
+                    });
             }
         }
 
@@ -4839,10 +4855,10 @@ impl CollectionEngine {
                     NativeGovernedPreEffectRefusalCode::NativeCustodyCorrespondenceUnavailable,
                     error.to_string(),
                 );
-                return Err(terminalize_native_pre_effect_refusal(
-                    &mut prepared,
-                    refusal,
-                ));
+                return Err({
+                        let mut session = self.store.begin_writer_session()?;
+                        terminalize_native_pre_effect_refusal(&mut session, &mut prepared, refusal)
+                    });
             }
         };
         let evaluator_artifact_digest = verified_provider
@@ -4866,10 +4882,10 @@ impl CollectionEngine {
                     NativeGovernedPreEffectRefusalCode::NativeCustodyCorrespondenceUnavailable,
                     error.to_string(),
                 );
-                return Err(terminalize_native_pre_effect_refusal(
-                    &mut prepared,
-                    refusal,
-                ));
+                return Err({
+                        let mut session = self.store.begin_writer_session()?;
+                        terminalize_native_pre_effect_refusal(&mut session, &mut prepared, refusal)
+                    });
             }
         };
 
@@ -4882,12 +4898,14 @@ impl CollectionEngine {
             native_boottime_expiry_ns,
             &watcher.resources,
         );
+        let mut custody_session = self.store.begin_writer_session()?;
         macro_rules! postlaunch {
             ($stage:literal, $expression:expr) => {
                 match $expression {
                     Ok(value) => value,
                     Err(error) => {
                         return Err(terminalize_native_postlaunch_failure(
+                            &mut custody_session,
                             &mut prepared,
                             $stage,
                             error,
@@ -4960,7 +4978,7 @@ impl CollectionEngine {
         let sealed_acquisition = postlaunch!(
             "acquisition_custody",
             prepared
-                .seal_acquisition(GovernedAcquisitionCustodyInput {
+                .seal_acquisition(&mut custody_session, GovernedAcquisitionCustodyInput {
                     execution_launch_record_id: prepared.execution_launch().record_id.clone(),
                     provider_intake_record_id: provider_record_id.clone(),
                     exact_provider_intake_bytes: exact_provider_intake_bytes.clone(),
@@ -4974,6 +4992,7 @@ impl CollectionEngine {
             || sealed_acquisition.exact_raw_provider_bytes != intake.raw_bytes()
         {
             return Err(terminalize_native_postlaunch_failure(
+                &mut custody_session,
                 &mut prepared,
                 "acquisition_reopen",
                 EngineError::Invariant(
@@ -5002,6 +5021,7 @@ impl CollectionEngine {
             .is_none_or(|length| length > artifact_capacity.canonical_artifact_bytes)
         {
             return Err(terminalize_native_postlaunch_failure(
+                &mut custody_session,
                 &mut prepared,
                 "diagnostic_capacity",
                 EngineError::Invariant(
@@ -5035,7 +5055,7 @@ impl CollectionEngine {
         postlaunch!(
             "derivation_custody",
             prepared
-                .claim_derivation(derivation_claim.clone())
+                .claim_derivation(&mut custody_session, derivation_claim.clone())
                 .map_err(EngineError::from)
         );
         let projection = postlaunch!(
@@ -5141,8 +5161,7 @@ impl CollectionEngine {
                     status,
                     expected_semantic_digest,
                 } => {
-                    let committed = self
-                        .store
+                    let committed = custody_session
                         .commit_governed_admitted_run_level_diagnostic_with_publication(
                             collection,
                             |receipt| {
@@ -5186,8 +5205,7 @@ impl CollectionEngine {
                     outcome,
                     result,
                 } => {
-                    let committed = self
-                        .store
+                    let committed = custody_session
                         .commit_governed_non_success_run_level_diagnostic_with_publication(
                             collection,
                             result,
@@ -5226,12 +5244,14 @@ impl CollectionEngine {
                 }
                 Err(error) => {
                     return Err(handle_native_governed_publication_failure(
+                        &mut custody_session,
                         &mut prepared,
                         error,
                     ));
                 }
             }
         };
+        drop(custody_session);
         let closure_id = sealed_closure_id.ok_or_else(|| {
             EngineError::Invariant(
                 "governed SQL publication completed without sealing its exact final closure"
@@ -5248,6 +5268,7 @@ impl CollectionEngine {
         drop(prepared);
         let indexed = self
             .store
+            .begin_writer_session()?
             .verify_governed_projection_and_mark_indexed(&reservation_record_id)?;
         if indexed.closure_id != closure_id
             || indexed.diagnostic_artifact_id != *artifact.artifact_id.as_digest()
@@ -5424,7 +5445,7 @@ impl CollectionEngine {
         // store borrow. This refuses (fail closed) when the running evaluator
         // identity is unavailable, rather than admitting under a fabricated one.
         let identity = self.admission_identity(profile, &lock)?;
-        self.store.append_admission(&AdmissionInput {
+        self.store.begin_writer_session()?.append_admission(&AdmissionInput {
             admission_id: lock.admission_id.clone(),
             instance_id: lock.instance_id.clone(),
             identity,
@@ -6001,7 +6022,7 @@ impl CollectionEngine {
                             run,
                             submission: Some(submission),
                         };
-                        let committed = self.store.commit_admitted_collection(
+                        let committed = self.store.begin_writer_session()?.commit_admitted_collection(
                             &collection,
                             |view, receipt| {
                                 let snapshot = view.evidence_snapshot(std::slice::from_ref(
@@ -6298,11 +6319,14 @@ impl CollectionEngine {
             occurred_at,
             detail: plan_document.clone(),
         };
-        self.store.begin_binding_transition(&event, &intent)?;
+        self.store
+            .begin_writer_session()?
+            .begin_binding_transition(&event, &intent)?;
         // From this point onward SQLite is authoritative. A failure or process
         // death leaves the intent pending for the next lock holder to replay.
         self.apply_binding_materialization(&plan)?;
         self.store
+            .begin_writer_session()?
             .complete_binding_materialization(&binding_materialization_completion(
                 &plan,
                 &plan_document,
@@ -6337,6 +6361,7 @@ impl CollectionEngine {
         }
         self.apply_binding_materialization(&plan)?;
         self.store
+            .begin_writer_session()?
             .complete_binding_materialization(&binding_materialization_completion(
                 &plan, &document,
             )?)?;
@@ -6682,7 +6707,7 @@ impl CollectionEngine {
             )));
         }
         let status = instance_status_event(watcher, outcome)?;
-        self.store.record_status(&status)?;
+        self.store.begin_writer_session()?.record_status(&status)?;
         Ok(())
     }
 
@@ -6729,7 +6754,7 @@ impl CollectionEngine {
                 })
             })
             .transpose()?;
-        let completion = self.store.commit_non_success_collection_with_artifact(
+        let completion = self.store.begin_writer_session()?.commit_non_success_collection_with_artifact(
             &CollectionInput {
                 intake,
                 run,
@@ -6847,7 +6872,7 @@ pub struct DiagnosticArtifactHistoryVerification {
 /// inconsistency, or count overflow.
 #[allow(clippy::too_many_lines)] // Keep one exhaustive fail-closed audit over every byte-state branch.
 pub fn validate_diagnostic_artifact_history(
-    store: &Store,
+    store: &mut Store,
 ) -> Result<DiagnosticArtifactHistoryVerification, EngineError> {
     let mut verification = DiagnosticArtifactHistoryVerification {
         commitments: 0,
@@ -7604,7 +7629,7 @@ fn validate_governed_run_level_v2_origin_shape(
 
 #[allow(clippy::too_many_lines)]
 fn validate_governed_run_level_v2_history(
-    store: &Store,
+    store: &mut Store,
     artifact: &DiagnosticExecutionV2,
     run: &nq_store::WatcherRunOutcomeRow,
     binding: &nq_store::DiagnosticArtifactExecutionBinding,
@@ -7916,7 +7941,9 @@ fn validate_governed_run_level_v2_history(
             "production run-level diagnostic artifact {artifact_id} governed custody is not one already-indexed exact launch closure"
         )));
     }
-    let projection = store.verify_governed_projection_and_mark_indexed(&reservation_id)?;
+    let projection = store
+        .begin_writer_session()?
+        .verify_governed_projection_and_mark_indexed(&reservation_id)?;
     if projection.disposition != nq_store::GovernedProjectionVerificationDisposition::AlreadyIndexed
         || projection.diagnostic_artifact_id != artifact.artifact_id.0
     {
@@ -11410,11 +11437,11 @@ fn parse_timestamp(value: &str) -> Result<DateTime<Utc>, EngineError> {
 ///
 /// Returns a canonicalization or storage error.
 pub fn append_profile_descriptor(
-    store: &mut Store,
+    session: &mut StoreWriterSession<'_>,
     module: &dyn ProfileModule,
 ) -> Result<(), EngineError> {
     let descriptor = module.descriptor();
-    store.append_profile_descriptor(&ProfileDescriptorInput {
+    session.append_profile_descriptor(&ProfileDescriptorInput {
         profile_id: descriptor.profile.id.clone(),
         profile_version: descriptor.profile.version.to_string(),
         descriptor: canonical(descriptor)?,
@@ -11429,8 +11456,11 @@ pub fn append_profile_descriptor(
 /// # Errors
 ///
 /// Returns a canonicalization or storage error.
-pub fn append_genesis(store: &mut Store, legacy_digest: Option<String>) -> Result<(), EngineError> {
-    store.append_genesis(&GenesisInput {
+pub fn append_genesis(
+    session: &mut StoreWriterSession<'_>,
+    legacy_digest: Option<String>,
+) -> Result<(), EngineError> {
+    session.append_genesis(&GenesisInput {
         genesis_id: Uuid::new_v4().to_string(),
         legacy_manifest_digest: legacy_digest,
         created_at: timestamp(Utc::now()),
@@ -11450,7 +11480,7 @@ pub fn append_genesis(store: &mut Store, legacy_digest: Option<String>) -> Resul
 /// violates the storage contract, or a caller tries to emit a legacy
 /// scheduler/notification kind that NQ no longer owns.
 pub fn record_component_status(
-    store: &mut Store,
+    session: &mut StoreWriterSession<'_>,
     component_kind: &str,
     component_id: &str,
     state: &str,
@@ -11462,7 +11492,7 @@ pub fn record_component_status(
             "{component_kind} status is legacy decode-only; current NQ cannot emit it"
         )));
     }
-    store.record_status(&StatusEventInput {
+    session.record_status(&StatusEventInput {
         status_event_id: Uuid::new_v4().to_string(),
         component_kind: component_kind.to_owned(),
         component_id: component_id.to_owned(),
@@ -11479,11 +11509,11 @@ pub fn record_component_status(
 /// # Errors
 ///
 /// Returns when the source, backup, or verification step fails.
-pub fn backup_store(store: &Store, destination: &Path) -> Result<(), EngineError> {
+pub fn backup_store(store: &mut Store, destination: &Path) -> Result<(), EngineError> {
     validate_semantic_history(store)?;
     let _artifact = store.backup_verified(destination)?;
-    let reopened = Store::open(destination)?;
-    validate_semantic_history(&reopened)?;
+    let mut reopened = Store::open(destination)?;
+    validate_semantic_history(&mut reopened)?;
     Ok(())
 }
 
@@ -11503,7 +11533,7 @@ pub fn backup_store(store: &Store, destination: &Path) -> Result<(), EngineError
 /// Returns when any persisted history plane is incomplete, corrupt, or does
 /// not correspond exactly to the plane from which it was derived.
 pub fn validate_semantic_history(
-    store: &Store,
+    store: &mut Store,
 ) -> Result<DiagnosticArtifactHistoryVerification, EngineError> {
     validate_admitted_report_history(store)?;
     validate_watcher_run_history(store)?;
@@ -14427,12 +14457,18 @@ sys.stdout.write("\n")
             .expect("profile descriptor lookup")
             .is_none()
         {
-            append_profile_descriptor(store, profile).expect("append compiled descriptor");
+            append_profile_descriptor(
+                &mut store.begin_writer_session().expect("writer session"),
+                profile,
+            )
+            .expect("append compiled descriptor");
         }
         let admission_id = Uuid::new_v4().to_string();
         let typed = |label: &str| nq_protocol::sha256_bytes(format!("{label}-{suffix}").as_bytes());
         let lock = fixture_admission_lock(profile, instance_id, suffix, &admission_id);
         store
+            .begin_writer_session()
+            .expect("writer session")
             .append_admission(&AdmissionInput {
                 admission_id: admission_id.clone(),
                 instance_id: instance_id.to_owned(),
@@ -14483,6 +14519,8 @@ sys.stdout.write("\n")
         let detail =
             canonical(&json!({"fixture": "provider-intake-binding"})).expect("binding detail");
         store
+            .begin_writer_session()
+            .expect("writer session")
             .begin_binding_transition(
                 &BindingEventInput {
                     binding_event_id: binding_event_id.clone(),
@@ -14506,6 +14544,8 @@ sys.stdout.write("\n")
             )
             .expect("begin provider-intake fixture binding");
         store
+            .begin_writer_session()
+            .expect("writer session")
             .complete_binding_materialization(&BindingMaterializationInput {
                 materialization_event_id: Uuid::new_v4().to_string(),
                 operation_id,
@@ -15097,6 +15137,8 @@ sys.stdout.write("\n")
             suffix,
         );
         let committed = store
+            .begin_writer_session()
+            .expect("writer session")
             .commit_admitted_collection(&collection, |view, receipt| {
                 let snapshot =
                     view.evidence_snapshot(std::slice::from_ref(&watcher.instance_id))?;
@@ -15172,7 +15214,10 @@ sys.stdout.write("\n")
         mutate(&mut context);
         changed_collection.intake.context =
             canonical(&context).expect("canonical changed replay context");
-        let Err(error) = store.commit_admitted_collection(
+        let Err(error) = store
+            .begin_writer_session()
+            .expect("writer session")
+            .commit_admitted_collection(
             &changed_collection,
             |_, _| -> Result<AdmittedCollectionCompletion<()>, EngineError> {
                 panic!("changed {field} replay must fail before evaluation")
@@ -15225,6 +15270,8 @@ sys.stdout.write("\n")
         let mut reopened = Store::open(&database).expect("reopen provider replay store");
         let completion_calls = std::cell::Cell::new(0_u32);
         let replay = reopened
+            .begin_writer_session()
+            .expect("writer session")
             .commit_admitted_collection(
                 &collection,
                 |_, _| -> Result<AdmittedCollectionCompletion<()>, EngineError> {
@@ -15572,6 +15619,8 @@ sys.stdout.write("\n")
         };
         let collection = test_collection(store, run, submission, suffix);
         let committed = store
+            .begin_writer_session()
+            .expect("writer session")
             .commit_non_success_collection(&collection, &result)
             .expect("commit atomic non-success fixture");
         let ProviderIntakeCommit::Committed { receipt, .. } = committed else {
@@ -15800,9 +15849,14 @@ sys.stdout.write("\n")
     ) -> Option<(CollectionEngine, WatcherConfig, PathBuf)> {
         let (config, watcher, mode) = host_diagnostic_fixture(root);
         let mut store = Store::initialize(&config.database_path).expect("initialize store");
-        append_profile_descriptor(&mut store, resolve(&watcher).expect("host profile"))
-            .expect("profile descriptor");
+        append_profile_descriptor(
+            &mut store.begin_writer_session().expect("writer session"),
+            resolve(&watcher).expect("host profile"),
+        )
+        .expect("profile descriptor");
         store
+            .begin_writer_session()
+            .expect("writer session")
             .append_genesis(&GenesisInput {
                 genesis_id: genesis_id.to_owned(),
                 legacy_manifest_digest: None,
@@ -15984,8 +16038,14 @@ sys.stdout.write("\n")
         let (config, watcher, lock) = binding_recovery_fixture(directory.path());
         let profile = resolve(&watcher).expect("profile");
         let mut store = Store::initialize(&config.database_path).expect("initialize store");
-        append_profile_descriptor(&mut store, profile).expect("descriptor");
+        append_profile_descriptor(
+            &mut store.begin_writer_session().expect("writer session"),
+            profile,
+        )
+        .expect("descriptor");
         store
+            .begin_writer_session()
+            .expect("writer session")
             .append_admission(&AdmissionInput {
                 admission_id: lock.admission_id.clone(),
                 instance_id: lock.instance_id.clone(),
@@ -16040,6 +16100,8 @@ sys.stdout.write("\n")
         let plan_document = canonical(&plan).expect("plan JSON");
         engine
             .store
+            .begin_writer_session()
+            .expect("writer session")
             .begin_binding_transition(
                 &BindingEventInput {
                     binding_event_id: binding_event_id.clone(),
@@ -17206,9 +17268,13 @@ sys.stdout.write("\n")
             Store::initialize(directory.path().join("nq.db")).expect("runtime history store");
         let dependency = test_runtime_dependency("history-exact-checkpoint");
         store
+            .begin_writer_session()
+            .expect("writer session")
             .establish_runtime_dependency_trust_root(&dependency.trust_anchor_id)
             .expect("establish test runtime dependency root");
         let first_checkpoint = store
+            .begin_writer_session()
+            .expect("writer session")
             .append_runtime_records(&nq_store::RuntimeRecordBatchInput {
                 checkpoint_id: first_checkpoint_id.clone(),
                 expected_predecessor_checkpoint_id: None,
@@ -17218,6 +17284,8 @@ sys.stdout.write("\n")
             })
             .expect("append first exact runtime checkpoint");
         store
+            .begin_writer_session()
+            .expect("writer session")
             .append_runtime_records(&nq_store::RuntimeRecordBatchInput {
                 checkpoint_id: later_checkpoint_id,
                 expected_predecessor_checkpoint_id: Some(first_checkpoint.checkpoint.checkpoint_id),
@@ -17502,9 +17570,13 @@ sys.stdout.write("\n")
             Store::initialize(directory.path().join("nq.db")).expect("runtime history store");
         let runtime_dependency = test_runtime_dependency("production-history");
         store
+            .begin_writer_session()
+            .expect("writer session")
             .establish_runtime_dependency_trust_root(&runtime_dependency.trust_anchor_id)
             .expect("establish test runtime dependency root");
         store
+            .begin_writer_session()
+            .expect("writer session")
             .append_runtime_records(&nq_store::RuntimeRecordBatchInput {
                 checkpoint_id: digest('c'),
                 expected_predecessor_checkpoint_id: None,
@@ -17589,6 +17661,8 @@ sys.stdout.write("\n")
             .expect("runtime frontier")
             .expect("nonempty runtime frontier");
         store
+            .begin_writer_session()
+            .expect("writer session")
             .append_runtime_records(&nq_store::RuntimeRecordBatchInput {
                 checkpoint_id: digest('0'),
                 expected_predecessor_checkpoint_id: Some(first_frontier.checkpoint_id),
@@ -17645,6 +17719,8 @@ sys.stdout.write("\n")
             .expect("hostile binding frontier")
             .expect("nonempty frontier");
         store
+            .begin_writer_session()
+            .expect("writer session")
             .append_runtime_records(&nq_store::RuntimeRecordBatchInput {
                 checkpoint_id: digest('5'),
                 expected_predecessor_checkpoint_id: Some(frontier.checkpoint_id),
@@ -17671,9 +17747,14 @@ sys.stdout.write("\n")
         let directory = tempfile::tempdir().expect("temporary directory");
         let (config, watcher, _mode) = host_diagnostic_fixture(directory.path());
         let mut store = Store::initialize(&config.database_path).expect("initialize store");
-        append_profile_descriptor(&mut store, resolve(&watcher).expect("host profile"))
-            .expect("profile descriptor");
+        append_profile_descriptor(
+            &mut store.begin_writer_session().expect("writer session"),
+            resolve(&watcher).expect("host profile"),
+        )
+        .expect("profile descriptor");
         store
+            .begin_writer_session()
+            .expect("writer session")
             .append_genesis(&GenesisInput {
                 genesis_id: "diagnostic-test-genesis".to_owned(),
                 legacy_manifest_digest: None,
@@ -17759,7 +17840,7 @@ sys.stdout.write("\n")
                 .expect("durable artifact bytes"),
             original
         );
-        validate_diagnostic_artifact_history(&engine.store)
+        validate_diagnostic_artifact_history(&mut engine.store)
             .expect("evaluated diagnostic history preserves exact semantics");
 
         let intakes = engine
@@ -17861,9 +17942,14 @@ sys.stdout.write("\n")
         let directory = tempfile::tempdir().expect("temporary directory");
         let (config, watcher, mode) = host_diagnostic_fixture(directory.path());
         let mut store = Store::initialize(&config.database_path).expect("initialize store");
-        append_profile_descriptor(&mut store, resolve(&watcher).expect("host profile"))
-            .expect("profile descriptor");
+        append_profile_descriptor(
+            &mut store.begin_writer_session().expect("writer session"),
+            resolve(&watcher).expect("host profile"),
+        )
+        .expect("profile descriptor");
         store
+            .begin_writer_session()
+            .expect("writer session")
             .append_genesis(&GenesisInput {
                 genesis_id: "diagnostic-refusal-test-genesis".to_owned(),
                 legacy_manifest_digest: None,
@@ -17941,7 +18027,7 @@ sys.stdout.write("\n")
                 .expect("refusal artifact committed"),
             artifact_id
         );
-        validate_diagnostic_artifact_history(&engine.store)
+        validate_diagnostic_artifact_history(&mut engine.store)
             .expect("evaluated refusal history preserves exact semantics");
         drop(engine);
         let reopened_store =
@@ -18024,11 +18110,12 @@ sys.stdout.write("\n")
         ));
         let original = artifact.canonical_bytes().expect("canonical refusal bytes");
         let artifact_id = artifact.artifact_id.0.clone();
-        validate_diagnostic_artifact_history(&engine.store)
+        validate_diagnostic_artifact_history(&mut engine.store)
             .expect("run-only refusal history verifies semantically");
 
         drop(engine);
-        let reopened = Store::open_read_only(directory.path().join("nq.db")).expect("reopen store");
+        let mut reopened =
+            Store::open_read_only(directory.path().join("nq.db")).expect("reopen store");
         assert_eq!(
             reopen_diagnostic_artifact(&reopened, &artifact_id)
                 .expect("reopen input refusal")
@@ -18036,7 +18123,7 @@ sys.stdout.write("\n")
                 .expect("canonical reopened bytes"),
             original
         );
-        validate_diagnostic_artifact_history(&reopened)
+        validate_diagnostic_artifact_history(&mut reopened)
             .expect("restart verification preserves exact refusal");
     }
 
@@ -18130,11 +18217,12 @@ sys.stdout.write("\n")
         ));
         let original = artifact.canonical_bytes().expect("canonical failure bytes");
         let artifact_id = artifact.artifact_id.0.clone();
-        validate_diagnostic_artifact_history(&engine.store)
+        validate_diagnostic_artifact_history(&mut engine.store)
             .expect("run-only failure history verifies semantically");
 
         drop(engine);
-        let reopened = Store::open_read_only(directory.path().join("nq.db")).expect("reopen store");
+        let mut reopened =
+            Store::open_read_only(directory.path().join("nq.db")).expect("reopen store");
         assert_eq!(
             reopen_diagnostic_artifact(&reopened, &artifact_id)
                 .expect("reopen provider no-response")
@@ -18142,7 +18230,7 @@ sys.stdout.write("\n")
                 .expect("canonical reopened bytes"),
             original
         );
-        validate_diagnostic_artifact_history(&reopened)
+        validate_diagnostic_artifact_history(&mut reopened)
             .expect("restart verification preserves exact provider failure");
     }
 
@@ -18192,7 +18280,7 @@ sys.stdout.write("\n")
             artifact.outcome.refusals.as_slice(),
             std::slice::from_ref(&refused.refusal)
         );
-        validate_diagnostic_artifact_history(&engine.store)
+        validate_diagnostic_artifact_history(&mut engine.store)
             .expect("partial-byte refusal preserves exact semantic history");
     }
 
@@ -18201,9 +18289,14 @@ sys.stdout.write("\n")
         let directory = tempfile::tempdir().expect("temporary directory");
         let (config, watcher, _mode) = host_diagnostic_fixture(directory.path());
         let mut store = Store::initialize(&config.database_path).expect("initialize store");
-        append_profile_descriptor(&mut store, resolve(&watcher).expect("host profile"))
-            .expect("profile descriptor");
+        append_profile_descriptor(
+            &mut store.begin_writer_session().expect("writer session"),
+            resolve(&watcher).expect("host profile"),
+        )
+        .expect("profile descriptor");
         store
+            .begin_writer_session()
+            .expect("writer session")
             .append_genesis(&GenesisInput {
                 genesis_id: "diagnostic-admission-refusal-test-genesis".to_owned(),
                 legacy_manifest_digest: None,
@@ -18271,8 +18364,11 @@ sys.stdout.write("\n")
         config.watchers = vec![watcher.clone()];
 
         let mut store = Store::initialize(&config.database_path).expect("initialize store");
-        append_profile_descriptor(&mut store, resolve(&watcher).expect("profile"))
-            .expect("profile descriptor");
+        append_profile_descriptor(
+            &mut store.begin_writer_session().expect("writer session"),
+            resolve(&watcher).expect("profile"),
+        )
+        .expect("profile descriptor");
         drop(store);
         let evaluator = EvaluatorRuntimeIdentity::for_test(nq_protocol::sha256_bytes(
             b"semantic-transport-evaluator",
@@ -18483,6 +18579,8 @@ sys.stdout.write("\n")
         let descriptor = doc(json!({"profile": "verify.fixture"}));
         let profile_digest = descriptor.digest().to_owned();
         store
+            .begin_writer_session()
+            .expect("writer session")
             .append_profile_descriptor(&ProfileDescriptorInput {
                 profile_id: "verify.fixture".to_owned(),
                 profile_version: "1".to_owned(),
@@ -18515,6 +18613,8 @@ sys.stdout.write("\n")
         };
         let binding = canonical(&lock).expect("admission binding");
         store
+            .begin_writer_session()
+            .expect("writer session")
             .append_admission(&AdmissionInput {
                 admission_id: ADMISSION_ID.to_owned(),
                 instance_id: "inst-1".to_owned(),
@@ -18657,6 +18757,8 @@ sys.stdout.write("\n")
             "verify-admitted",
         );
         store
+            .begin_writer_session()
+            .expect("writer session")
             .commit_admitted_collection(&collection, |_view, receipt| {
                 let outcome = CollectionOutcome::admitted(
                     "inst-1".to_owned(),
@@ -18983,7 +19085,7 @@ sys.stdout.write("\n")
         for kind in ["scheduler", "notification"] {
             assert!(matches!(
                 record_component_status(
-                    &mut store,
+                    &mut store.begin_writer_session().expect("writer session"),
                     kind,
                     "legacy",
                     "healthy",
@@ -18996,6 +19098,8 @@ sys.stdout.write("\n")
                     )
             ));
             store
+                .begin_writer_session()
+                .expect("writer session")
                 .record_status(&StatusEventInput {
                     status_event_id: format!("legacy-{kind}"),
                     component_kind: kind.to_owned(),
@@ -19038,6 +19142,8 @@ sys.stdout.write("\n")
 
         for index in 0..nq_store::MAX_PUBLIC_QUERY_ROWS {
             store
+                .begin_writer_session()
+                .expect("writer session")
                 .record_status(&StatusEventInput {
                     status_event_id: format!("legacy-notification-{index:04}"),
                     component_kind: "notification".to_owned(),
@@ -19050,7 +19156,7 @@ sys.stdout.write("\n")
                 .expect("saturate legacy status prefix");
         }
         record_component_status(
-            &mut store,
+            &mut store.begin_writer_session().expect("writer session"),
             "profile_catalog",
             "compiled",
             "healthy",
@@ -19114,6 +19220,8 @@ sys.stdout.write("\n")
         for (suffix, outcome) in [("transient", &transient), ("permanent", &permanent)] {
             let projection = instance_status_projection(outcome).expect("projection");
             store
+                .begin_writer_session()
+                .expect("writer session")
                 .record_status(&StatusEventInput {
                     status_event_id: format!("status-admission-{suffix}"),
                     component_kind: "instance".to_owned(),
@@ -19189,7 +19297,11 @@ sys.stdout.write("\n")
         let observed_at = parse_timestamp("2026-07-20T12:00:00.000Z").expect("report time");
 
         let mut store = Store::initialize(&live).expect("evaluation store");
-        append_profile_descriptor(&mut store, profile).expect("compiled profile descriptor");
+        append_profile_descriptor(
+            &mut store.begin_writer_session().expect("writer session"),
+            profile,
+        )
+        .expect("compiled profile descriptor");
         let commit_result = |store: &mut Store,
                              evaluation_id: &str,
                              refusal_id: &str,
@@ -19242,6 +19354,8 @@ sys.stdout.write("\n")
                 result: governed_result,
             };
             store
+                .begin_writer_session()
+                .expect("writer session")
                 .commit_evaluation(
                     &EvaluationInput {
                         evaluation_id: evaluation_id.to_owned(),
@@ -19383,7 +19497,11 @@ sys.stdout.write("\n")
     fn exhaustive_history_pagination_crosses_one_row_pages_and_checks_late_rows() {
         let mut store = Store::initialize_in_memory().expect("pagination store");
         let profile: &'static dyn ProfileModule = &nq_profiles::host::MODULE;
-        append_profile_descriptor(&mut store, profile).expect("compiled profile descriptor");
+        append_profile_descriptor(
+            &mut store.begin_writer_session().expect("writer session"),
+            profile,
+        )
+        .expect("compiled profile descriptor");
         let profile_descriptor = profile.descriptor();
         let profile_digest = profile_descriptor.digest().expect("profile digest");
         let semantic_id = profile_semantic_id(profile_descriptor).expect("profile semantic id");
@@ -19442,6 +19560,8 @@ sys.stdout.write("\n")
                 result,
             };
             store
+                .begin_writer_session()
+                .expect("writer session")
                 .commit_evaluation(
                     &EvaluationInput {
                         evaluation_id,
@@ -19496,6 +19616,8 @@ sys.stdout.write("\n")
             watermark: EvidenceWatermark(0),
         };
         store
+            .begin_writer_session()
+            .expect("writer session")
             .commit_evaluation(
                 &EvaluationInput {
                     evaluation_id: "evaluation-page-v1-unwrapped".to_owned(),
@@ -19571,6 +19693,8 @@ sys.stdout.write("\n")
         ));
 
         store
+            .begin_writer_session()
+            .expect("writer session")
             .record_status(&StatusEventInput {
                 status_event_id: "status-page-valid".to_owned(),
                 component_kind: "database".to_owned(),
@@ -19582,6 +19706,8 @@ sys.stdout.write("\n")
             })
             .expect("valid first status page");
         store
+            .begin_writer_session()
+            .expect("writer session")
             .record_status(&StatusEventInput {
                 status_event_id: "status-page-malformed-late".to_owned(),
                 component_kind: "instance".to_owned(),
@@ -19604,7 +19730,11 @@ sys.stdout.write("\n")
     fn public_evaluation_history_crosses_the_maximum_page_without_silent_truncation() {
         let mut store = Store::initialize_in_memory().expect("pagination store");
         let profile: &'static dyn ProfileModule = &nq_profiles::host::MODULE;
-        append_profile_descriptor(&mut store, profile).expect("compiled profile descriptor");
+        append_profile_descriptor(
+            &mut store.begin_writer_session().expect("writer session"),
+            profile,
+        )
+        .expect("compiled profile descriptor");
         let profile_descriptor = profile.descriptor();
         let profile_digest = profile_descriptor.digest().expect("profile digest");
         let semantic_id = profile_semantic_id(profile_descriptor).expect("profile semantic id");
@@ -19664,6 +19794,8 @@ sys.stdout.write("\n")
                 result,
             };
             store
+                .begin_writer_session()
+                .expect("writer session")
                 .commit_evaluation(
                     &EvaluationInput {
                         evaluation_id,
@@ -19844,7 +19976,7 @@ sys.stdout.write("\n")
             );
         };
         assert_pair(&store);
-        backup_store(&store, &backup).expect("semantic backup");
+        backup_store(&mut store, &backup).expect("semantic backup");
         drop(store);
         let reopened = Store::open(&backup).expect("reopen protocol backup");
         assert_pair(&reopened);
@@ -20041,6 +20173,8 @@ sys.stdout.write("\n")
         )
         .expect("typed timeout");
         store
+            .begin_writer_session()
+            .expect("writer session")
             .record_status(&StatusEventInput {
                 status_event_id: "status-substituted".to_owned(),
                 component_kind: "instance".to_owned(),
@@ -20230,7 +20364,10 @@ sys.stdout.write("\n")
         let rejected_collection =
             test_collection(&mut store, rejected_by_api, None, "z-borrowed-api");
         assert!(matches!(
-            store.commit_non_success_collection(
+            store
+                .begin_writer_session()
+                .expect("writer session")
+                .commit_non_success_collection(
                 &rejected_collection,
                 &RunResultStatusInput {
                     run_id: borrower_run.run_id.clone(),
@@ -20336,6 +20473,8 @@ sys.stdout.write("\n")
         let mut store = Store::initialize(directory.path().join("history.db")).expect("store");
         let observed_at = timestamp(Utc::now());
         store
+            .begin_writer_session()
+            .expect("writer session")
             .record_status(&StatusEventInput {
                 status_event_id: "status-legacy".to_owned(),
                 component_kind: "instance".to_owned(),
@@ -20440,6 +20579,8 @@ sys.stdout.write("\n")
             GovernedRefusal::helper("refusal-stable".to_owned(), helper_refusal(false, "ENODEV")),
         );
         store
+            .begin_writer_session()
+            .expect("writer session")
             .record_status(&StatusEventInput {
                 status_event_id: "status-refusal-substituted".to_owned(),
                 component_kind: "instance".to_owned(),

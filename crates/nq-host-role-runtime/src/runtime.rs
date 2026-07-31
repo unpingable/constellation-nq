@@ -251,7 +251,9 @@ impl HostRoleRuntime {
     pub fn initialize(path: impl AsRef<Path>, dependencies: RuntimeDependencies) -> Result<Self> {
         let mut store = Store::initialize(path)?;
         let trust_root = dependencies.custody().trust_anchor_id()?;
-        store.establish_runtime_dependency_trust_root(&trust_root)?;
+        store
+            .begin_writer_session()?
+            .establish_runtime_dependency_trust_root(&trust_root)?;
         Self::from_store(store, dependencies)
     }
 
@@ -443,7 +445,10 @@ impl HostRoleRuntime {
                 .map(Self::store_input)
                 .collect::<Result<Vec<_>>>()?,
         };
-        let receipt = self.store.append_runtime_records(&batch)?;
+        let receipt = self
+            .store
+            .begin_writer_session()?
+            .append_runtime_records(&batch)?;
         let reopened = Self::reopen_state(&self.store, &self.dependencies)?;
         self.install_reopened(reopened);
         Ok(AppendResult {
@@ -814,6 +819,7 @@ impl HostRoleRuntime {
         };
         let mut physical_custody = self
             .store
+            .begin_writer_session()?
             .reserve_governed_custody(reservation_spec.clone(), &dependency_custody_bytes)?;
 
         let reservation_result = self.append_custody_only(&request.reservation_custody)?;
@@ -842,7 +848,8 @@ impl HostRoleRuntime {
         {
             return Err(RuntimeError::PrelaunchCheckpointMismatch);
         }
-        physical_custody.claim_launch(
+        self.store.begin_writer_session()?.claim_custody_launch(
+            &mut physical_custody,
             request.execution_launch_record_id.clone(),
             preflight.launched_at.clone(),
         )?;
@@ -1165,7 +1172,10 @@ impl HostRoleRuntime {
                 .map(Self::store_input)
                 .collect::<Result<Vec<_>>>()?,
         };
-        let receipt = self.store.append_runtime_records(&batch)?;
+        let receipt = self
+            .store
+            .begin_writer_session()?
+            .append_runtime_records(&batch)?;
         if receipt.disposition != RuntimeRecordAppendDisposition::Replayed {
             return Err(RuntimeError::ReplayBatchMismatch);
         }
@@ -2827,9 +2837,13 @@ mod tests {
             .prepare_governed_invocation(first.request)
             .expect("prepared");
         let launch_id = prepared.execution_launch().record_id.clone();
+        let mut session_store = Store::open(&first_database).expect("session store");
+        let mut session = session_store
+            .begin_writer_session()
+            .expect("writer session");
         let substituted_launch = sha256_bytes(b"another exact launch occurrence");
         let error = prepared
-            .terminalize_immediate_launch(GovernedProtectedTerminalInput {
+            .terminalize_immediate_launch(&mut session, GovernedProtectedTerminalInput {
                 execution_launch_record_id: substituted_launch,
                 terminal_class: GovernedProtectedTerminalClass::PreEffectRefusal,
                 reason: GovernedProtectedTerminalReason {
@@ -2863,7 +2877,7 @@ mod tests {
             deadline_compliance: GovernedProtectedTerminalDeadlineCompliance::WithinDeadline,
         };
         let terminalized = prepared
-            .terminalize_immediate_launch(terminal_input)
+            .terminalize_immediate_launch(&mut session, terminal_input)
             .expect("owned immediate terminal");
         assert_eq!(
             terminalized.disposition,
@@ -2886,23 +2900,28 @@ mod tests {
         drop(second_prepared);
         drop(second_runtime);
 
-        let store = Store::open(&second_database).expect("store");
+        let mut store = Store::open(&second_database).expect("store");
         let mut reopened = store
             .open_governed_custody(reservation)
             .expect("reopened nonterminal launch");
-        let error = reopened
-            .terminalize_immediate_launch(GovernedProtectedTerminalInput {
-                execution_launch_record_id: launch_id,
-                terminal_class: GovernedProtectedTerminalClass::PreEffectRefusal,
-                reason: GovernedProtectedTerminalReason {
-                    code: "hostile.reopened_terminal".to_owned(),
-                    detail: "reopened custody must not mint no-further-execution authority"
-                        .to_owned(),
+        let error = store
+            .begin_writer_session()
+            .expect("writer session")
+            .terminalize_custody_immediate_launch(
+                &mut reopened,
+                GovernedProtectedTerminalInput {
+                    execution_launch_record_id: launch_id,
+                    terminal_class: GovernedProtectedTerminalClass::PreEffectRefusal,
+                    reason: GovernedProtectedTerminalReason {
+                        code: "hostile.reopened_terminal".to_owned(),
+                        detail: "reopened custody must not mint no-further-execution authority"
+                            .to_owned(),
+                    },
+                    launch_attempt_deadline: "2026-07-28T22:02:32Z".to_owned(),
+                    terminalized_at: "2026-07-28T22:02:03Z".to_owned(),
+                    deadline_compliance: GovernedProtectedTerminalDeadlineCompliance::WithinDeadline,
                 },
-                launch_attempt_deadline: "2026-07-28T22:02:32Z".to_owned(),
-                terminalized_at: "2026-07-28T22:02:03Z".to_owned(),
-                deadline_compliance: GovernedProtectedTerminalDeadlineCompliance::WithinDeadline,
-            })
+            )
             .expect_err("reopened launch has no immediate terminal authority");
         assert!(
             error
@@ -2928,10 +2947,14 @@ mod tests {
             .expect("prepared");
         let exact_launch = prepared.execution_launch().record_id.clone();
         let reservation = prepared.custody_reservation_spec().clone();
+        let mut session_store = Store::open(&database).expect("session store");
+        let mut session = session_store
+            .begin_writer_session()
+            .expect("writer session");
 
         let wrong_launch = sha256_bytes(b"foreign launch occurrence");
         let error = prepared
-            .seal_acquisition(GovernedAcquisitionCustodyInput {
+            .seal_acquisition(&mut session, GovernedAcquisitionCustodyInput {
                 execution_launch_record_id: wrong_launch,
                 provider_intake_record_id: sha256_bytes(b"foreign provider intake"),
                 exact_provider_intake_bytes: b"{\"schema\":\"nq.provider_intake.v1\"}".to_vec(),
@@ -2964,7 +2987,7 @@ mod tests {
             .expect("clock qualification identity"),
         };
         assert!(
-            prepared.claim_derivation(claim.clone()).is_err(),
+            prepared.claim_derivation(&mut session, claim.clone()).is_err(),
             "derivation cannot skip acquisition custody"
         );
         assert_eq!(
@@ -2973,7 +2996,7 @@ mod tests {
         );
 
         let acquisition = prepared
-            .seal_acquisition(GovernedAcquisitionCustodyInput {
+            .seal_acquisition(&mut session, GovernedAcquisitionCustodyInput {
                 execution_launch_record_id: exact_launch.clone(),
                 provider_intake_record_id: sha256_bytes(b"ordered provider intake"),
                 exact_provider_intake_bytes: b"{\"schema\":\"nq.provider_intake.v1\"}".to_vec(),
@@ -2987,7 +3010,7 @@ mod tests {
         );
         assert!(
             prepared
-                .seal_acquisition(GovernedAcquisitionCustodyInput {
+                .seal_acquisition(&mut session, GovernedAcquisitionCustodyInput {
                     execution_launch_record_id: exact_launch,
                     provider_intake_record_id: sha256_bytes(b"second provider intake"),
                     exact_provider_intake_bytes: b"{\"schema\":\"nq.provider_intake.v1\"}".to_vec(),
@@ -3004,14 +3027,14 @@ mod tests {
         );
 
         prepared
-            .claim_derivation(claim.clone())
+            .claim_derivation(&mut session, claim.clone())
             .expect("derivation follows acquisition");
         assert_eq!(
             prepared.live_custody_state().expect("derivation state"),
             GovernedCustodyState::DerivationClaimed
         );
         assert!(
-            prepared.claim_derivation(claim).is_err(),
+            prepared.claim_derivation(&mut session, claim).is_err(),
             "derivation claim is one-use"
         );
         assert_eq!(

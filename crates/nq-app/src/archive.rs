@@ -141,7 +141,7 @@ struct HistoricalSemanticCounts {
     diagnostic_artifacts: nq_core::DiagnosticArtifactHistoryVerification,
 }
 
-fn validate_historical_semantics(store: &Store) -> Result<HistoricalSemanticCounts> {
+fn validate_historical_semantics(store: &mut Store) -> Result<HistoricalSemanticCounts> {
     let admitted_reports = nq_core::engine::validate_admitted_report_history(store)
         .context("reopen admitted-report semantics")?;
     let status_events = nq_core::engine::validate_status_history_v2(store)
@@ -325,12 +325,12 @@ fn build_staging(config: &NqConfig, config_path: &Path, staging: &Path) -> Resul
     // backed up verified; one that open() refuses is still preserved, but its
     // historical meaning is not verifiable under this format.
     let db = staging.join("db/nq.db");
-    let source_openable = if let Ok(store) = Store::open(&config.database_path) {
-        validate_historical_semantics(&store)
+    let source_openable = if let Ok(mut store) = Store::open(&config.database_path) {
+        validate_historical_semantics(&mut store)
             .context("validate source database semantics before archiving")?;
         store.backup_verified(&db)?;
-        let archived_copy = Store::open(&db).context("open archive database backup for freeze")?;
-        validate_historical_semantics(&archived_copy)
+        let mut archived_copy = Store::open(&db).context("open archive database backup for freeze")?;
+        validate_historical_semantics(&mut archived_copy)
             .context("validate copied database semantics before sealing")?;
         archived_copy
             .prepare_archive_copy()
@@ -506,8 +506,8 @@ pub fn verify_archive(archive: &Path) -> Result<VerifyReport> {
         metadata.source_openable,
         Store::open_immutable(archive.join("db/nq.db")),
     ) {
-        (true, Ok(store)) => {
-            let counts = validate_historical_semantics(&store)?;
+        (true, Ok(mut store)) => {
+            let counts = validate_historical_semantics(&mut store)?;
             Some(counts)
         }
         (true, Err(error)) => {
@@ -657,6 +657,8 @@ mod tests {
         let descriptor = canonical(profile.descriptor());
         let profile_digest = descriptor.digest().to_owned();
         store
+            .begin_writer_session()
+            .expect("begin writer session")
             .append_profile_descriptor(&nq_store::ProfileDescriptorInput {
                 profile_id: "nq.conformance".to_owned(),
                 profile_version: "1".to_owned(),
@@ -750,6 +752,8 @@ mod tests {
             },
         });
         store
+            .begin_writer_session()
+            .expect("begin writer session")
             .append_admission(&nq_store::AdmissionInput {
                 admission_id: admission_id.to_owned(),
                 instance_id: instance_id.to_owned(),
@@ -775,6 +779,8 @@ mod tests {
         let binding_event_id = "00000000-0000-4000-8000-000000000102";
         let operation_id = "00000000-0000-4000-8000-000000000103";
         store
+            .begin_writer_session()
+            .expect("begin writer session")
             .begin_binding_transition(
                 &nq_store::BindingEventInput {
                     binding_event_id: binding_event_id.to_owned(),
@@ -798,6 +804,8 @@ mod tests {
             )
             .expect("activate archive fixture provider admission");
         store
+            .begin_writer_session()
+            .expect("begin writer session")
             .complete_binding_materialization(&nq_store::BindingMaterializationInput {
                 materialization_event_id: "00000000-0000-4000-8000-000000000105".to_owned(),
                 operation_id: operation_id.to_owned(),
@@ -1024,6 +1032,8 @@ mod tests {
             }),
         };
         store
+            .begin_writer_session()
+            .expect("begin writer session")
             .commit_non_success_collection(
                 &collection,
                 &nq_store::RunResultStatusInput {
@@ -1088,6 +1098,8 @@ mod tests {
         let diagnostic = nq_core::DiagnosticExecutionV1::decode_canonical(document.as_bytes())
             .expect("positive diagnostic fixture reopens");
         store
+            .begin_writer_session()
+            .expect("begin writer session")
             .import_diagnostic_artifact(&nq_store::DiagnosticArtifactImportInput {
                 import_id: "archive-current-available".to_owned(),
                 artifact_id: diagnostic.artifact_id.0,
@@ -1104,6 +1116,8 @@ mod tests {
             "artifact_id": future_id,
         }));
         store
+            .begin_writer_session()
+            .expect("begin writer session")
             .import_diagnostic_artifact(&nq_store::DiagnosticArtifactImportInput {
                 import_id: "archive-future-available".to_owned(),
                 artifact_id: future_id,
@@ -1114,6 +1128,8 @@ mod tests {
             .expect("import unsupported available artifact");
 
         store
+            .begin_writer_session()
+            .expect("begin writer session")
             .import_unavailable_diagnostic_artifact(
                 &nq_store::UnavailableDiagnosticArtifactImportInput {
                     import_id: "archive-current-unavailable".to_owned(),
@@ -1129,6 +1145,8 @@ mod tests {
             )
             .expect("commit unavailable current artifact");
         store
+            .begin_writer_session()
+            .expect("begin writer session")
             .import_unavailable_diagnostic_artifact(
                 &nq_store::UnavailableDiagnosticArtifactImportInput {
                     import_id: "archive-future-unavailable".to_owned(),
@@ -1923,8 +1941,9 @@ mod tests {
         let archive = valid_archive(dir.path());
         let database = archive.join("db/nq.db");
         let mut store = Store::open(&database).expect("open archived store");
+        let mut session = store.begin_writer_session().expect("begin writer session");
         nq_core::engine::record_component_status(
-            &mut store,
+            &mut session,
             "instance",
             "legacy-instance",
             "failed",
@@ -1943,7 +1962,7 @@ mod tests {
         )
         .expect("construct current typed result");
         nq_core::engine::record_component_status(
-            &mut store,
+            &mut session,
             "instance",
             "legacy-instance",
             "failed",
@@ -1951,6 +1970,7 @@ mod tests {
             &serde_json::to_value(current).expect("typed result serializes"),
         )
         .expect("append current typed status");
+        drop(session);
         store
             .validate()
             .expect("generic store validation accepts canonical legacy detail");

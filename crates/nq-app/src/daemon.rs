@@ -48,7 +48,7 @@ pub async fn run(options: Nqd) -> Result<()> {
         .context("provider-intake history failed typed startup verification")?;
     validate_catalog(&config)?;
     nq_core::engine::record_component_status(
-        &mut store,
+        &mut store.begin_writer_session()?,
         "daemon",
         "nqd",
         "unknown",
@@ -69,7 +69,7 @@ pub async fn run(options: Nqd) -> Result<()> {
     };
     let mut ready_store = nq_store::Store::open(&config.database_path)?;
     nq_core::engine::record_component_status(
-        &mut ready_store,
+        &mut ready_store.begin_writer_session()?,
         "daemon",
         "nqd",
         "healthy",
@@ -113,7 +113,7 @@ pub async fn run(options: Nqd) -> Result<()> {
     while services.join_next().await.is_some() {}
     let mut stopped_store = nq_store::Store::open(&config.database_path)?;
     nq_core::engine::record_component_status(
-        &mut stopped_store,
+        &mut stopped_store.begin_writer_session()?,
         "daemon",
         "nqd",
         "unknown",

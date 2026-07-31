@@ -406,17 +406,18 @@ fn initialize(config_path: &Path, arguments: InitArgs, json_output: bool) -> Res
     })?;
     let mut store = Store::initialize(&config.database_path)
         .with_context(|| format!("cannot initialize {}", config.database_path.display()))?;
+    let mut init_session = store.begin_writer_session()?;
     for module in all_profiles() {
-        append_descriptor_if_supported(&mut store, module)?;
+        append_descriptor_if_supported(&mut init_session, module)?;
     }
     if let Some(digest) = arguments.legacy_manifest_digest {
         validate_sha256(&digest)?;
-        append_genesis_if_supported(&mut store, Some(digest))?;
+        append_genesis_if_supported(&mut init_session, Some(digest))?;
     } else {
-        append_genesis_if_supported(&mut store, None)?;
+        append_genesis_if_supported(&mut init_session, None)?;
     }
     nq_core::engine::record_component_status(
-        &mut store,
+        &mut init_session,
         "database",
         "local",
         "healthy",
@@ -424,13 +425,14 @@ fn initialize(config_path: &Path, arguments: InitArgs, json_output: bool) -> Res
         &json!({"schema_version": nq_store::SCHEMA_VERSION}),
     )?;
     nq_core::engine::record_component_status(
-        &mut store,
+        &mut init_session,
         "profile_catalog",
         "compiled",
         "healthy",
         "catalog_loaded",
         &json!({"profile_count": all_profiles().len()}),
     )?;
+    drop(init_session);
     print_value(
         &json!({
             "initialized": true,
@@ -569,7 +571,7 @@ fn diagnostics_command(
 fn diagnostic_inspect(config_path: &Path, artifact_id: &str, json_output: bool) -> Result<()> {
     let config = NqConfig::load(config_path)?;
     let artifact_id = nq_protocol::Sha256Digest::parse(artifact_id.to_owned())?;
-    let store = Store::open_read_only(&config.database_path)?;
+    let mut store = Store::open(&config.database_path)?;
     if matches!(
         store.diagnostic_artifact(
             &artifact_id,
@@ -583,7 +585,7 @@ fn diagnostic_inspect(config_path: &Path, artifact_id: &str, json_output: bool) 
             ..
         })
     ) {
-        nq_core::engine::validate_semantic_history(&store)?;
+        nq_core::engine::validate_semantic_history(&mut store)?;
     }
     print_value(
         &diagnostic_artifact_access_value(&store, &artifact_id)?,
@@ -594,7 +596,7 @@ fn diagnostic_inspect(config_path: &Path, artifact_id: &str, json_output: bool) 
 fn diagnostic_export(config_path: &Path, artifact_id: &str) -> Result<()> {
     let config = NqConfig::load(config_path)?;
     let artifact_id = nq_protocol::Sha256Digest::parse(artifact_id.to_owned())?;
-    let store = Store::open_read_only(&config.database_path)?;
+    let mut store = Store::open(&config.database_path)?;
     let DiagnosticArtifactLookup::Found(access) = store.diagnostic_artifact(
         &artifact_id,
         nq_core::SUPPORTED_DIAGNOSTIC_EXECUTION_SCHEMAS,
@@ -606,7 +608,7 @@ fn diagnostic_export(config_path: &Path, artifact_id: &str) -> Result<()> {
         access.commitment.origin,
         DiagnosticArtifactOrigin::Local { .. }
     ) {
-        nq_core::engine::validate_semantic_history(&store)?;
+        nq_core::engine::validate_semantic_history(&mut store)?;
     }
     match access.byte_state {
         DiagnosticArtifactByteState::VerifiedAvailable { canonical_bytes } => {
@@ -679,7 +681,7 @@ fn diagnostic_import(
     let imported_at = chrono::Utc::now().to_rfc3339();
     let import_id = import_id.map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_owned);
     let mut store = Store::open(&config.database_path)?;
-    let receipt = store.import_diagnostic_artifact(&DiagnosticArtifactImportInput {
+    let receipt = store.begin_writer_session()?.import_diagnostic_artifact(&DiagnosticArtifactImportInput {
         import_id,
         artifact_id,
         contract_schema: contract_schema.clone(),
@@ -879,12 +881,12 @@ fn diagnostic_artifact_access_value(
 fn doctor(config_path: &Path, json_output: bool) -> Result<()> {
     let config = NqConfig::load(config_path)?;
     validate_compiled_profiles(&config)?;
-    let store = Store::open_read_only(&config.database_path)?;
+    let mut store = Store::open(&config.database_path)?;
     store.validate()?;
     nq_core::engine::validate_provider_intake_history(&store)?;
     let mut diagnostic_artifacts = diagnostic_artifact_custody_summary(&store)?;
     let semantic_artifact_error = if diagnostic_artifacts.first_corruption.is_none() {
-        match nq_core::engine::validate_diagnostic_artifact_history(&store) {
+        match nq_core::engine::validate_diagnostic_artifact_history(&mut store) {
             Ok(verified) => {
                 diagnostic_artifacts = DiagnosticArtifactCustodySummary::from(verified);
                 None
@@ -974,9 +976,9 @@ fn doctor(config_path: &Path, json_output: bool) -> Result<()> {
 
 fn backup(config_path: &Path, destination: &Path, json_output: bool) -> Result<()> {
     let config = NqConfig::load(config_path)?;
-    let store = Store::open(&config.database_path)?;
+    let mut store = Store::open(&config.database_path)?;
     store.validate()?;
-    let source_artifacts = nq_core::engine::validate_diagnostic_artifact_history(&store)?;
+    let source_artifacts = nq_core::engine::validate_diagnostic_artifact_history(&mut store)?;
     if destination.exists() {
         bail!(
             "backup destination already exists: {}",
@@ -988,10 +990,10 @@ fn backup(config_path: &Path, destination: &Path, json_output: bool) -> Result<(
     }
     // SQLite's online backup API is used by the store so WAL state is captured
     // consistently; a filesystem copy is not sufficient.
-    store_backup_if_supported(&store, destination)?;
-    let backup_store = Store::open(destination)?;
+    store_backup_if_supported(&mut store, destination)?;
+    let mut backup_store = Store::open(destination)?;
     backup_store.validate()?;
-    let backup_artifacts = nq_core::engine::validate_diagnostic_artifact_history(&backup_store)?;
+    let backup_artifacts = nq_core::engine::validate_diagnostic_artifact_history(&mut backup_store)?;
     if backup_artifacts != source_artifacts {
         bail!("backup did not preserve the exact diagnostic artifact custody counts");
     }
@@ -1014,9 +1016,9 @@ fn restore(backup: &Path, destination: &Path, json_output: bool) -> Result<()> {
             destination.display()
         );
     }
-    let source = Store::open_read_only(backup)?;
+    let mut source = Store::open(backup)?;
     source.validate()?;
-    let source_artifacts = nq_core::engine::validate_diagnostic_artifact_history(&source)?;
+    let source_artifacts = nq_core::engine::validate_diagnostic_artifact_history(&mut source)?;
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -1032,10 +1034,10 @@ fn restore(backup: &Path, destination: &Path, json_output: bool) -> Result<()> {
         uuid::Uuid::new_v4()
     ));
     let restore_result = (|| {
-        store_backup_if_supported(&source, &temporary)?;
-        let restored = Store::open_read_only(&temporary)?;
+        store_backup_if_supported(&mut source, &temporary)?;
+        let mut restored = Store::open(&temporary)?;
         restored.validate()?;
-        let restored_artifacts = nq_core::engine::validate_diagnostic_artifact_history(&restored)?;
+        let restored_artifacts = nq_core::engine::validate_diagnostic_artifact_history(&mut restored)?;
         if restored_artifacts != source_artifacts {
             bail!("restore did not preserve the exact diagnostic artifact custody counts");
         }
@@ -1267,7 +1269,7 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                     // pre-operation backup. Route it through the complete
                     // typed history verifier, including provider-intake
                     // context/raw correspondence, before calling it verified.
-                    store_backup_if_supported(&store, &temporary_backup)?;
+                    store_backup_if_supported(&mut store, &temporary_backup)?;
                     let backup_digest = digest_file(&temporary_backup)?;
                     let backup = finalize_upgrade_backup(
                         &temporary_backup,
@@ -1276,7 +1278,7 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                     )?;
                     Store::open(&backup)?.validate()?;
                     let finished_at = chrono::Utc::now();
-                    store.append_upgrade_receipt(&UpgradeReceiptInput {
+                    store.begin_writer_session()?.append_upgrade_receipt(&UpgradeReceiptInput {
                         receipt_id: uuid::Uuid::new_v4().to_string(),
                         from_schema_version: u32::try_from(nq_store::SCHEMA_VERSION)?,
                         to_schema_version: u32::try_from(nq_store::SCHEMA_VERSION)?,
@@ -1797,17 +1799,20 @@ fn print_canonical_value(value: &impl Serialize) -> Result<()> {
 // They are filled by the store integration once its independently tested slice
 // lands.
 fn append_descriptor_if_supported(
-    store: &mut Store,
+    session: &mut nq_store::StoreWriterSession<'_>,
     module: &&dyn nq_profiles::ProfileModule,
 ) -> Result<()> {
-    Ok(nq_core::engine::append_profile_descriptor(store, *module)?)
+    Ok(nq_core::engine::append_profile_descriptor(session, *module)?)
 }
 
-fn append_genesis_if_supported(store: &mut Store, digest: Option<String>) -> Result<()> {
-    Ok(nq_core::engine::append_genesis(store, digest)?)
+fn append_genesis_if_supported(
+    session: &mut nq_store::StoreWriterSession<'_>,
+    digest: Option<String>,
+) -> Result<()> {
+    Ok(nq_core::engine::append_genesis(session, digest)?)
 }
 
-fn store_backup_if_supported(store: &Store, destination: &Path) -> Result<()> {
+fn store_backup_if_supported(store: &mut Store, destination: &Path) -> Result<()> {
     Ok(nq_core::engine::backup_store(store, destination)?)
 }
 
@@ -2113,6 +2118,8 @@ helper_runtime_dir = "/run/nq/helpers"
         .expect("canonical malformed fixture");
         let mut store = Store::initialize(&database).expect("initialize store");
         store
+            .begin_writer_session()
+            .expect("begin writer session")
             .import_diagnostic_artifact(&DiagnosticArtifactImportInput {
                 import_id: "import:semantic-corruption".to_owned(),
                 artifact_id: artifact_id.clone(),

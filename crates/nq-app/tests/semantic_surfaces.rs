@@ -239,6 +239,8 @@ fn append_fixture_descriptor(store: &mut Store, profile_id: &str, version: u32) 
     );
     let digest = descriptor.digest().to_owned();
     store
+        .begin_writer_session()
+        .expect("begin writer session")
         .append_profile_descriptor(&ProfileDescriptorInput {
             profile_id: profile_id.to_owned(),
             profile_version: version.to_string(),
@@ -385,6 +387,8 @@ fn seed_result(
         TEST_TIME,
     );
     store
+        .begin_writer_session()
+        .expect("begin writer session")
         .commit_non_success_collection(
             &collection,
             &RunResultStatusInput {
@@ -441,6 +445,8 @@ fn seed_acquisition_result(
         TEST_TIME,
     );
     store
+        .begin_writer_session()
+        .expect("begin writer session")
         .commit_non_success_collection(
             &collection,
             &RunResultStatusInput {
@@ -650,6 +656,8 @@ fn seed_profile_result(
         TEST_TIME,
     );
     store
+        .begin_writer_session()
+        .expect("begin writer session")
         .commit_non_success_collection(
             &collection,
             &RunResultStatusInput {

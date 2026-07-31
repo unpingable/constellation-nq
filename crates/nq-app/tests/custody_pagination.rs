@@ -69,6 +69,8 @@ fn append_profile(store: &mut Store) -> String {
     let descriptor = document(profile.descriptor());
     let digest = descriptor.digest().to_owned();
     store
+        .begin_writer_session()
+        .expect("begin writer session")
         .append_profile_descriptor(&ProfileDescriptorInput {
             profile_id: PROFILE_ID.to_owned(),
             profile_version: "1".to_owned(),
@@ -178,6 +180,8 @@ fn seed_helper_refusal(
         TEST_TIME,
     );
     store
+        .begin_writer_session()
+        .expect("begin writer session")
         .commit_non_success_collection(
             &collection,
             &RunResultStatusInput {

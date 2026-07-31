@@ -100,7 +100,11 @@ fn bound_collection_and_revocation_are_serialized_without_a_shipped_bypass() {
         .expect("helper runtime mode");
     let profile = resolve_profile("nq.conformance", 1).expect("compiled profile");
     let mut store = Store::initialize(root.join("nq.db")).expect("initialize store");
-    append_profile_descriptor(&mut store, profile).expect("append profile descriptor");
+    append_profile_descriptor(
+        &mut store.begin_writer_session().expect("writer session"),
+        profile,
+    )
+    .expect("append profile descriptor");
     drop(store);
 
     let watcher = config

@@ -101,6 +101,8 @@ fn append_descriptor(
         .is_none()
     {
         store
+            .begin_writer_session()
+            .expect("begin writer session")
             .append_profile_descriptor(&ProfileDescriptorInput {
                 profile_id: profile_id.clone(),
                 profile_version,
@@ -269,6 +271,8 @@ fn commit_present_then_cannot_evaluate(
     };
     let present_revision = if with_prior_finding {
         let receipt = store
+            .begin_writer_session()
+            .expect("begin writer session")
             .commit_evaluation(
                 &EvaluationInput {
                     evaluation_id: present_id.clone(),
@@ -341,6 +345,8 @@ fn commit_present_then_cannot_evaluate(
         result: refused,
     };
     let receipt = store
+        .begin_writer_session()
+        .expect("begin writer session")
         .commit_evaluation(
             &EvaluationInput {
                 evaluation_id: refused_id.clone(),

@@ -17,7 +17,7 @@ use nq_store::{
     GovernedCustodyReservation, GovernedCustodyState, GovernedDerivationCustodyClaim,
     GovernedProtectedTerminalInput, GovernedProtectedTerminalization,
     RuntimeCheckpointDependencyInput, RuntimeLedgerCheckpoint, RuntimeRecordBatchInput,
-    RuntimeRecordInput, runtime_record_batch_digest,
+    RuntimeRecordInput, StoreWriterSession, runtime_record_batch_digest,
 };
 use serde_json::{Value, json};
 
@@ -403,9 +403,10 @@ impl PreparedGovernedInvocation {
     /// custody frontier.
     pub fn reopen_custody_state_after_indeterminate_write(
         &mut self,
+        session: &mut StoreWriterSession<'_>,
     ) -> Result<GovernedCustodyState> {
-        self.live_custody
-            .reopen_state_after_indeterminate_write()
+        session
+            .reopen_custody_state_after_indeterminate_write(&mut self.live_custody)
             .map_err(Into::into)
     }
 
@@ -637,11 +638,12 @@ impl PreparedGovernedInvocation {
     /// failure.
     pub fn seal_acquisition(
         &mut self,
+        session: &mut StoreWriterSession<'_>,
         input: GovernedAcquisitionCustodyInput,
     ) -> Result<CustodiedAcquisition> {
         self.require_exact_launch(&input.execution_launch_record_id)?;
-        self.live_custody
-            .seal_acquisition(input)
+        session
+            .seal_custody_acquisition(&mut self.live_custody, input)
             .map_err(Into::into)
     }
 
@@ -654,9 +656,13 @@ impl PreparedGovernedInvocation {
     ///
     /// Refuses a missing/substituted acquisition, replay, or persistence
     /// failure.
-    pub fn claim_derivation(&mut self, claim: GovernedDerivationCustodyClaim) -> Result<()> {
-        self.live_custody
-            .claim_derivation(claim)
+    pub fn claim_derivation(
+        &mut self,
+        session: &mut StoreWriterSession<'_>,
+        claim: GovernedDerivationCustodyClaim,
+    ) -> Result<()> {
+        session
+            .claim_custody_derivation(&mut self.live_custody, claim)
             .map_err(Into::into)
     }
 
@@ -694,11 +700,12 @@ impl PreparedGovernedInvocation {
     /// nonterminal handle reopened after restart, or persistence failure.
     pub fn terminalize_immediate_launch(
         &mut self,
+        session: &mut StoreWriterSession<'_>,
         input: GovernedProtectedTerminalInput,
     ) -> Result<GovernedProtectedTerminalization> {
         self.require_exact_launch(&input.execution_launch_record_id)?;
-        self.live_custody
-            .terminalize_immediate_launch(input)
+        session
+            .terminalize_custody_immediate_launch(&mut self.live_custody, input)
             .map_err(Into::into)
     }
 }
