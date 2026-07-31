@@ -445,7 +445,7 @@ fn require_qualified_batch_correspondence(
 /// checkpoint or dependency mismatch, a diagnostic exceeding its pre-effect
 /// bound, provider/diagnostic mismatch, derivation mismatch, or a Store
 /// closure-shape violation.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn construct_governed_custody_projection_v2(
     prepared: &PreparedGovernedInvocation,
     qualified: &QualifiedGovernedFinalBatch,
