@@ -1,16 +1,16 @@
 error[E0061]: this method takes 0 arguments but 1 argument was supplied
- --> tests/ui/r0b/forged_pending_recovery_resolver.rs:4:19
+ --> tests/ui/r0b/forged_pending_recovery_resolver.rs:7:10
   |
-4 |     let _ = store.recover_pending_governed_projections(forged_resolution);
-  |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ----------------- unexpected argument of type `()`
+7 |         .recover_pending_governed_projections(forged_resolution);
+  |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ----------------- unexpected argument of type `()`
   |
 note: method defined here
- --> src/governed_custody.rs
+ --> src/writer_session.rs
   |
   |     pub fn recover_pending_governed_projections(
   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 help: remove the extra argument
   |
-4 -     let _ = store.recover_pending_governed_projections(forged_resolution);
-4 +     let _ = store.recover_pending_governed_projections();
+7 -         .recover_pending_governed_projections(forged_resolution);
+7 +         .recover_pending_governed_projections();
   |

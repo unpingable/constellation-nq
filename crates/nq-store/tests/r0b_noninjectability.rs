@@ -75,6 +75,7 @@ fn governed_store_apis_retain_zero_resolver_signatures() {
     use nq_store::{
         GovernedCustodyReservation, GovernedExecutionCustodyClosureV2Capacity,
         GovernedProjectionRecovery, GovernedProjectionVerification, Store, StoreError,
+        StoreWriterSession,
     };
 
     let _: fn(
@@ -89,10 +90,35 @@ fn governed_store_apis_retain_zero_resolver_signatures() {
         &Sha256Digest,
     ) -> Result<GovernedExecutionCustodyClosureV2Capacity, StoreError> =
         Store::verify_governed_execution_custody_closure_v3_capacity;
-    let _: fn(&mut Store) -> Result<Vec<GovernedProjectionRecovery>, StoreError> =
-        Store::recover_pending_governed_projections;
-    let _: fn(&mut Store, &Sha256Digest) -> Result<GovernedProjectionRecovery, StoreError> =
-        Store::recover_governed_projection_and_mark_indexed;
-    let _: fn(&Store, &Sha256Digest) -> Result<GovernedProjectionVerification, StoreError> =
-        Store::verify_governed_projection_and_mark_indexed;
+    // Session methods borrow the session for its own store lifetime, so the
+    // receiver and the `StoreWriterSession<'_>` parameter share one region.
+    // That shape only coerces in argument position against a named lifetime,
+    // not into a `let`-bound fn-pointer type.
+    fn assert_recover_pending_signature<'session>(
+        _: fn(
+            &'session mut StoreWriterSession<'session>,
+        ) -> Result<Vec<GovernedProjectionRecovery>, StoreError>,
+    ) {
+    }
+    fn assert_recover_and_mark_indexed_signature<'session>(
+        _: fn(
+            &'session mut StoreWriterSession<'session>,
+            &Sha256Digest,
+        ) -> Result<GovernedProjectionRecovery, StoreError>,
+    ) {
+    }
+    fn assert_verify_and_mark_indexed_signature<'session>(
+        _: fn(
+            &'session mut StoreWriterSession<'session>,
+            &Sha256Digest,
+        ) -> Result<GovernedProjectionVerification, StoreError>,
+    ) {
+    }
+    assert_recover_pending_signature(StoreWriterSession::recover_pending_governed_projections);
+    assert_recover_and_mark_indexed_signature(
+        StoreWriterSession::recover_governed_projection_and_mark_indexed,
+    );
+    assert_verify_and_mark_indexed_signature(
+        StoreWriterSession::verify_governed_projection_and_mark_indexed,
+    );
 }

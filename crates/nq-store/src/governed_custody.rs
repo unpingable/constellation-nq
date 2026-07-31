@@ -1615,7 +1615,7 @@ impl GovernedCustody {
     /// This grants no provider retry, derivation, projection, or diagnostic
     /// authority. It permits the original launch owner to distinguish a
     /// pre-final frontier from a committed final-seal frontier.
-    pub fn reopen_state_after_indeterminate_write(
+    pub(crate) fn reopen_state_after_indeterminate_write(
         &mut self,
     ) -> Result<GovernedCustodyState, StoreError> {
         self.arena
@@ -1633,7 +1633,7 @@ impl GovernedCustody {
     }
 
     /// Durably claim one exact launch identity.
-    pub fn claim_launch(
+    pub(crate) fn claim_launch(
         &mut self,
         execution_launch_record_id: Sha256Digest,
         claimed_at: String,
@@ -1646,7 +1646,7 @@ impl GovernedCustody {
     }
 
     /// Seal and immediately reopen exact opaque provider-intake and raw bytes.
-    pub fn seal_acquisition(
+    pub(crate) fn seal_acquisition(
         &mut self,
         input: GovernedAcquisitionCustodyInput,
     ) -> Result<CustodiedAcquisition, StoreError> {
@@ -1676,7 +1676,7 @@ impl GovernedCustody {
 
     /// Durably claim that core has completed one derivation over the reopened
     /// acquisition. This operation assigns no semantic standing itself.
-    pub fn claim_derivation(
+    pub(crate) fn claim_derivation(
         &mut self,
         claim: GovernedDerivationCustodyClaim,
     ) -> Result<(), StoreError> {
@@ -1770,7 +1770,7 @@ impl GovernedCustody {
     /// authority, and storage alone cannot prove that no prior executor can
     /// still perform work. Exact replay of an already committed terminal is
     /// idempotent because it performs no new transition.
-    pub fn terminalize_immediate_launch(
+    pub(crate) fn terminalize_immediate_launch(
         &mut self,
         input: GovernedProtectedTerminalInput,
     ) -> Result<GovernedProtectedTerminalization, StoreError> {
@@ -1885,7 +1885,7 @@ impl GovernedCustody {
 
 impl Store {
     /// Physically reserve exact-byte custody before any provider launch.
-    pub fn reserve_governed_custody(
+    pub(crate) fn reserve_governed_custody(
         &self,
         reservation: GovernedCustodyReservation,
         exact_dependency_closure_bytes: &[u8],
@@ -2310,7 +2310,7 @@ impl Store {
     /// existing atomic Store commit.  It never invokes a provider, profile, or
     /// evaluator and never changes a diagnostic result.
     #[allow(clippy::too_many_lines)]
-    pub fn recover_governed_projection_and_mark_indexed(
+    pub(crate) fn recover_governed_projection_and_mark_indexed(
         &mut self,
         reservation_record_id: &Sha256Digest,
     ) -> Result<GovernedProjectionRecovery, StoreError> {
@@ -2381,7 +2381,7 @@ impl Store {
     /// Every attempted recovery is Store-owned and therefore cannot invoke a
     /// provider, profile, evaluator, schedule, or external consumer.
     #[allow(clippy::too_many_lines)] // Recovery keeps the one locked replay/terminalization transaction legible.
-    pub fn recover_pending_governed_projections(
+    pub(crate) fn recover_pending_governed_projections(
         &mut self,
     ) -> Result<Vec<GovernedProjectionRecovery>, StoreError> {
         let database_path = self.path().map(Path::to_path_buf).ok_or_else(|| {
@@ -2531,7 +2531,7 @@ impl Store {
     /// responsible for native provider, evaluator, profile, and diagnostic
     /// semantic validation before sealing the closure.
     #[allow(clippy::too_many_lines)] // One closed comparison keeps omissions auditable.
-    pub fn verify_governed_projection_and_mark_indexed(
+    pub(crate) fn verify_governed_projection_and_mark_indexed(
         &self,
         reservation_record_id: &Sha256Digest,
     ) -> Result<GovernedProjectionVerification, StoreError> {

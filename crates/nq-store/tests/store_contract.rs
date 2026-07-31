@@ -41,6 +41,8 @@ fn seed_descriptor(store: &mut Store) -> String {
     let descriptor = doc(json!({ "profile": PROFILE }));
     let profile_digest = descriptor.digest().to_owned();
     store
+        .begin_writer_session()
+        .expect("begin writer session")
         .append_profile_descriptor(&ProfileDescriptorInput {
             profile_id: PROFILE.to_owned(),
             profile_version: "1".to_owned(),
@@ -208,6 +210,8 @@ fn provider_collection(
     let binding_event_id = uuid::Uuid::new_v4().to_string();
     let operation_id = uuid::Uuid::new_v4().to_string();
     store
+        .begin_writer_session()
+        .expect("begin writer session")
         .begin_binding_transition(
             &BindingEventInput {
                 binding_event_id: binding_event_id.clone(),
@@ -231,6 +235,8 @@ fn provider_collection(
         )
         .expect("activate provider admission");
     store
+        .begin_writer_session()
+        .expect("begin writer session")
         .complete_binding_materialization(&BindingMaterializationInput {
             materialization_event_id: uuid::Uuid::new_v4().to_string(),
             operation_id,
@@ -344,6 +350,7 @@ fn commit_admitted_fixture(
         SubmissionDisposition::Rejected { .. } => panic!("admitted fixture disposition"),
     };
     store
+        .begin_writer_session()?
         .commit_admitted_collection(collection, |_view, receipt| {
             Ok::<_, StoreError>(AdmittedCollectionCompletion {
                 value: (),
@@ -379,6 +386,8 @@ fn seed_admitted(store: &mut Store, suffix: &str) -> (String, String, String) {
     let profile_digest = seed_descriptor(store);
     let admission_id = uuid::Uuid::new_v4().to_string();
     store
+        .begin_writer_session()
+        .expect("begin writer session")
         .append_admission(&admission_input(&admission_id, &profile_digest))
         .expect("append admission");
     let submission_id = format!("submission-{suffix}");
@@ -413,6 +422,8 @@ fn rejected_custody_is_byte_exact_and_is_not_a_report() {
     let profile_digest = seed_descriptor(&mut store);
     let admission_id = uuid::Uuid::new_v4().to_string();
     store
+        .begin_writer_session()
+        .expect("begin writer session")
         .append_admission(&admission_input(&admission_id, &profile_digest))
         .expect("append provider admission");
     let raw = b"exact rejected helper bytes".to_vec();
@@ -452,6 +463,8 @@ fn rejected_custody_is_byte_exact_and_is_not_a_report() {
     };
     let receipt = committed_receipt(
         store
+            .begin_writer_session()
+            .expect("begin writer session")
             .commit_non_success_collection(&collection, &result)
             .expect("commit rejected collection"),
     );
@@ -515,10 +528,14 @@ fn an_admission_identity_is_append_only() {
     let mut store = Store::initialize_in_memory().expect("initialize");
     let profile_digest = seed_descriptor(&mut store);
     store
+        .begin_writer_session()
+        .expect("begin writer session")
         .append_admission(&admission_input("admission-x", &profile_digest))
         .expect("first admission");
     assert!(
         store
+            .begin_writer_session()
+            .expect("begin writer session")
             .append_admission(&admission_input("admission-x", &profile_digest))
             .is_err(),
         "an admission identity cannot be reused or overwritten"
@@ -531,6 +548,8 @@ fn an_admitted_report_requires_a_run_bound_to_an_admission() {
     let profile_digest = seed_descriptor(&mut store);
     let admission_id = uuid::Uuid::new_v4().to_string();
     store
+        .begin_writer_session()
+        .expect("begin writer session")
         .append_admission(&admission_input(&admission_id, &profile_digest))
         .expect("append provider admission");
     let mut collection = provider_collection(
@@ -589,6 +608,8 @@ fn diagnostic_artifact_custody_round_trips_without_collapsing_identity_or_availa
     {
         let mut store = Store::initialize(&database).expect("initialize artifact store");
         let receipt = store
+            .begin_writer_session()
+            .expect("begin writer session")
             .import_diagnostic_artifact(&DiagnosticArtifactImportInput {
                 import_id: "contract-import".to_owned(),
                 artifact_id: artifact_id.clone(),
@@ -630,6 +651,8 @@ fn diagnostic_artifact_custody_round_trips_without_collapsing_identity_or_availa
         "artifact_id": unavailable_id.as_str(),
     }));
     reopened
+        .begin_writer_session()
+        .expect("begin writer session")
         .import_unavailable_diagnostic_artifact(&UnavailableDiagnosticArtifactImportInput {
             import_id: "contract-unavailable-import".to_owned(),
             artifact_id: unavailable_id.clone(),

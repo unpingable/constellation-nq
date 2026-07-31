@@ -33,6 +33,9 @@ mod governed_custody;
 #[cfg(test)]
 mod governed_projection_capacity;
 mod governed_projection_capsule;
+mod writer_session;
+
+pub use writer_session::StoreWriterSession;
 
 pub use custody_capacity_model::{
     AppendExtentGeometryV1, CAPACITY_IJSON_SAFE_INTEGER_MAX_V1, CUSTODY_CAPACITY_ALIGNMENT_V1,
@@ -403,6 +406,14 @@ pub enum StoreError {
         refusal_id: Sha256Digest,
         reason: String,
     },
+    /// The store generation is write-fenced: no session may be created and
+    /// no session method may run.
+    #[error("store writes are fenced: {0}")]
+    WriteFenced(String),
+    /// Another writer session for this store path is alive in this process;
+    /// the process write lock is non-reentrant.
+    #[error("writer session unavailable: {0}")]
+    WriterSessionUnavailable(String),
 }
 
 /// A canonical JSON document and its SHA-256 semantic digest.
@@ -2128,6 +2139,7 @@ pub struct PendingBindingMaterializationRow {
 pub struct Store {
     connection: Connection,
     path: Option<PathBuf>,
+    writer_key: PathBuf,
 }
 
 impl Store {
@@ -2172,6 +2184,7 @@ impl Store {
         let store = Self {
             connection,
             path: Some(path.to_path_buf()),
+            writer_key: writer_session::writer_key_for_path(Some(path)),
         };
         store.validate()?;
         Ok(store)
@@ -2192,6 +2205,7 @@ impl Store {
         let store = Self {
             connection,
             path: Some(path.to_path_buf()),
+            writer_key: writer_session::writer_key_for_path(Some(path)),
         };
         store.validate()?;
         configure_connection(&store.connection, true)?;
@@ -2214,6 +2228,7 @@ impl Store {
         let store = Self {
             connection,
             path: Some(path.to_path_buf()),
+            writer_key: writer_session::writer_key_for_path(Some(path)),
         };
         store.validate()?;
         Ok(store)
@@ -2249,7 +2264,8 @@ impl Store {
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         let store = Self {
             connection,
-            path: Some(canonical_path),
+            path: Some(canonical_path.clone()),
+            writer_key: writer_session::writer_key_for_path(Some(&canonical_path)),
         };
         store.validate()?;
         Ok(store)
@@ -2274,6 +2290,7 @@ impl Store {
         let store = Self {
             connection,
             path: Some(path.to_path_buf()),
+            writer_key: writer_session::writer_key_for_path(Some(path)),
         };
         store.validate_v3_upgrade_source()?;
         Ok(store)
@@ -2299,6 +2316,7 @@ impl Store {
         let store = Self {
             connection,
             path: Some(path.to_path_buf()),
+            writer_key: writer_session::writer_key_for_path(Some(path)),
         };
         validate_v4_upgrade_source_connection(&store.connection)?;
         Ok(store)
@@ -2320,6 +2338,7 @@ impl Store {
         let store = Self {
             connection,
             path: Some(path.to_path_buf()),
+            writer_key: writer_session::writer_key_for_path(Some(path)),
         };
         validate_v5_upgrade_source_connection(&store.connection)?;
         Ok(store)
@@ -2341,6 +2360,7 @@ impl Store {
         let store = Self {
             connection,
             path: Some(path.to_path_buf()),
+            writer_key: writer_session::writer_key_for_path(Some(path)),
         };
         validate_v6_upgrade_source_connection(&store.connection)?;
         Ok(store)
@@ -2379,6 +2399,7 @@ impl Store {
         let store = Self {
             connection,
             path: None,
+            writer_key: writer_session::writer_key_for_path(None),
         };
         store.validate()?;
         Ok(store)
@@ -2486,7 +2507,7 @@ impl Store {
     }
 
     /// Append a compiled descriptor snapshot. Its digest is over canonical bytes.
-    pub fn append_profile_descriptor(
+    pub(crate) fn append_profile_descriptor(
         &mut self,
         descriptor: &ProfileDescriptorInput,
     ) -> Result<(), StoreError> {
@@ -2536,7 +2557,7 @@ impl Store {
 
     /// Append a fully validated admission record. The store derives
     /// `admission_context_digest` from the typed identity; it is never supplied.
-    pub fn append_admission(&mut self, admission: &AdmissionInput) -> Result<(), StoreError> {
+    pub(crate) fn append_admission(&mut self, admission: &AdmissionInput) -> Result<(), StoreError> {
         validate_digest("profile_digest", &admission.profile_digest)?;
         let identity = &admission.identity;
         let context_digest = identity.context_digest()?;
@@ -2924,7 +2945,7 @@ impl Store {
     /// A process crash can therefore leave either no transition at all or a
     /// queryable pending intent; it cannot commit a binding event that has no
     /// recovery description.
-    pub fn begin_binding_transition(
+    pub(crate) fn begin_binding_transition(
         &mut self,
         event: &BindingEventInput,
         intent: &BindingMaterializationInput,
@@ -2966,7 +2987,7 @@ impl Store {
 
     /// Append proof that one pending active-lock materialization reached
     /// durable filesystem state.
-    pub fn complete_binding_materialization(
+    pub(crate) fn complete_binding_materialization(
         &mut self,
         completion: &BindingMaterializationInput,
     ) -> Result<(), StoreError> {
@@ -3061,7 +3082,7 @@ impl Store {
     /// Completed non-success and admitted collections must use their atomic
     /// APIs so a watcher run can never become durable without one canonical
     /// result.
-    pub fn commit_collection(
+    pub(crate) fn commit_collection(
         &mut self,
         collection: &CollectionInput,
     ) -> Result<CollectionReceipt, StoreError> {
@@ -3109,7 +3130,7 @@ impl Store {
     /// Repeating the same checkpoint identity and exact batch is idempotent.
     /// Reusing either a checkpoint or record identity for different bytes is a
     /// collision, never an update.
-    pub fn append_runtime_records(
+    pub(crate) fn append_runtime_records(
         &mut self,
         batch: &RuntimeRecordBatchInput,
     ) -> Result<RuntimeRecordAppendReceipt, StoreError> {
@@ -3125,7 +3146,7 @@ impl Store {
     /// replay with the same identity is harmless; selecting another identity
     /// or attempting late establishment after dependency generations exist
     /// refuses.
-    pub fn establish_runtime_dependency_trust_root(
+    pub(crate) fn establish_runtime_dependency_trust_root(
         &mut self,
         trust_anchor_id: &Sha256Digest,
     ) -> Result<(), StoreError> {
@@ -3246,7 +3267,7 @@ impl Store {
 
     /// Rebuild the disposable runtime-record lookup projection from the
     /// canonical append-only ledger.
-    pub fn rebuild_runtime_record_lookup(
+    pub(crate) fn rebuild_runtime_record_lookup(
         &mut self,
     ) -> Result<RuntimeRecordLookupStatus, StoreError> {
         // This is the one deliberately recovery-safe maintenance path for a
@@ -3283,7 +3304,7 @@ impl Store {
     /// globally blocks governed recovery, so the ordinary writer path cannot
     /// be the repair entrance. Canonical status sequence and allocator state
     /// are validated before the disposable table is touched.
-    pub fn rebuild_status_current_projection(&mut self) -> Result<(), StoreError> {
+    pub(crate) fn rebuild_status_current_projection(&mut self) -> Result<(), StoreError> {
         let transaction = self.immediate_recovery_transaction()?;
         validate_status_sequence_lower_bound(&transaction)?;
         let _ = dense_governed_publication_frontier(
@@ -3452,7 +3473,7 @@ impl Store {
     /// commit. A later exact import must match the committed full-byte digest
     /// and length before the payload can be materialized.
     #[allow(clippy::too_many_lines)]
-    pub fn import_unavailable_diagnostic_artifact(
+    pub(crate) fn import_unavailable_diagnostic_artifact(
         &mut self,
         input: &UnavailableDiagnosticArtifactImportInput,
     ) -> Result<DiagnosticArtifactImportReceipt, StoreError> {
@@ -3579,7 +3600,7 @@ impl Store {
     /// commitment whose bytes became unavailable may be rematerialized only by
     /// bytes matching its original length and complete-byte digest.
     #[allow(clippy::too_many_lines)]
-    pub fn import_diagnostic_artifact(
+    pub(crate) fn import_diagnostic_artifact(
         &mut self,
         input: &DiagnosticArtifactImportInput,
     ) -> Result<DiagnosticArtifactImportReceipt, StoreError> {
@@ -3722,7 +3743,7 @@ impl Store {
     /// The builder runs after the report sequence is allocated inside the
     /// transaction, so evaluation watermarks can name that exact occurrence.
     /// Any builder or insertion failure rolls the entire collection back.
-    pub fn commit_admitted_collection<T, E, F>(
+    pub(crate) fn commit_admitted_collection<T, E, F>(
         &mut self,
         collection: &CollectionInput,
         build: F,
@@ -3749,7 +3770,7 @@ impl Store {
     /// must carry `evaluation_id = None` and one exact production execution
     /// binding committed in the same transaction. Existing detector-oriented
     /// callers remain governed by [`Self::commit_admitted_collection`].
-    pub fn commit_admitted_run_level_diagnostic<T, E, F>(
+    pub(crate) fn commit_admitted_run_level_diagnostic<T, E, F>(
         &mut self,
         collection: &CollectionInput,
         build: F,
@@ -3786,7 +3807,7 @@ impl Store {
     /// caller to physically seal the exact restart capsule before SQL commit;
     /// it grants no diagnostic, reliance, authorization, or action semantics.
     #[allow(clippy::too_many_lines)] // One transaction owns build, seal, publication, and replay correspondence.
-    pub fn commit_governed_admitted_run_level_diagnostic_with_publication<T, E, F, G, H>(
+    pub(crate) fn commit_governed_admitted_run_level_diagnostic_with_publication<T, E, F, G, H>(
         &mut self,
         collection: &CollectionInput,
         build: F,
@@ -4118,7 +4139,7 @@ impl Store {
     /// Atomically append one run-bearing non-success collection and its exact
     /// canonical instance result. A process interruption can expose neither
     /// half without the other.
-    pub fn commit_non_success_collection(
+    pub(crate) fn commit_non_success_collection(
         &mut self,
         collection: &CollectionInput,
         result: &RunResultStatusInput,
@@ -4133,7 +4154,7 @@ impl Store {
     /// A replay returns the artifact identity already bound to the original
     /// run. It never invokes evaluation and never adds an artifact to a
     /// previously completed attempt.
-    pub fn commit_non_success_collection_with_artifact(
+    pub(crate) fn commit_non_success_collection_with_artifact(
         &mut self,
         collection: &CollectionInput,
         result: &RunResultStatusInput,
@@ -4154,7 +4175,7 @@ impl Store {
     /// The mandatory status is keyed to the exact run under the
     /// `diagnostic_execution` component kind. It remains an immutable
     /// processing result and cannot replace the host/watcher instance status.
-    pub fn commit_governed_non_success_run_level_diagnostic(
+    pub(crate) fn commit_governed_non_success_run_level_diagnostic(
         &mut self,
         collection: &CollectionInput,
         result: &RunResultStatusInput,
@@ -4172,7 +4193,7 @@ impl Store {
     /// Atomically publish one governed non-success diagnostic while exposing
     /// its exact database publication identities before SQL commit.
     #[allow(clippy::too_many_lines)] // One transaction owns non-success custody and publication correspondence.
-    pub fn commit_governed_non_success_run_level_diagnostic_with_publication<E, G, H>(
+    pub(crate) fn commit_governed_non_success_run_level_diagnostic_with_publication<E, G, H>(
         &mut self,
         collection: &CollectionInput,
         result: &RunResultStatusInput,
@@ -4977,7 +4998,7 @@ impl Store {
     }
 
     /// Rebuild the two mutable current-state pointers from immutable event history.
-    pub fn rebuild_current_projections(&mut self) -> Result<(), StoreError> {
+    pub(crate) fn rebuild_current_projections(&mut self) -> Result<(), StoreError> {
         let transaction = self.immediate_transaction()?;
         transaction.execute("DELETE FROM finding_current", [])?;
         transaction.execute(
@@ -7489,6 +7510,7 @@ impl Store {
         let mut store = Self {
             connection,
             path: Some(path.to_path_buf()),
+            writer_key: writer_session::writer_key_for_path(Some(path)),
         };
         store.validate_v3_upgrade_source()?;
         {
@@ -7648,6 +7670,7 @@ impl Store {
         let mut store = Self {
             connection,
             path: Some(path.to_path_buf()),
+            writer_key: writer_session::writer_key_for_path(Some(path)),
         };
         validate_v4_upgrade_source_connection(&store.connection)?;
         {
@@ -7770,6 +7793,7 @@ impl Store {
         let mut store = Self {
             connection,
             path: Some(path.to_path_buf()),
+            writer_key: writer_session::writer_key_for_path(Some(path)),
         };
         validate_v5_upgrade_source_connection(&store.connection)?;
         {
@@ -7894,6 +7918,7 @@ impl Store {
         let mut store = Self {
             connection,
             path: Some(path.to_path_buf()),
+            writer_key: writer_session::writer_key_for_path(Some(path)),
         };
         validate_v6_upgrade_source_connection(&store.connection)?;
         {
@@ -8123,7 +8148,7 @@ impl Store {
 
     /// Commit an evaluation, its consistent watermark, optional refusal, and finding event.
     #[allow(clippy::too_many_lines)]
-    pub fn commit_evaluation(
+    pub(crate) fn commit_evaluation(
         &mut self,
         evaluation: &EvaluationInput,
         finding: Option<&FindingEventInput>,
@@ -8203,7 +8228,7 @@ impl Store {
     }
 
     /// Append a status event and atomically advance only its rebuildable pointer.
-    pub fn record_status(&mut self, status: &StatusEventInput) -> Result<(), StoreError> {
+    pub(crate) fn record_status(&mut self, status: &StatusEventInput) -> Result<(), StoreError> {
         let transaction = self.immediate_transaction()?;
         insert_status_event(&transaction, status, None)?;
         transaction.commit()?;
@@ -8662,7 +8687,7 @@ impl Store {
     }
 
     /// Enqueue a notification with an application-level idempotency key.
-    pub fn enqueue_notification(
+    pub(crate) fn enqueue_notification(
         &mut self,
         notification: &NotificationInput,
     ) -> Result<(), StoreError> {
@@ -8688,7 +8713,7 @@ impl Store {
     }
 
     /// Append a bounded notification delivery attempt.
-    pub fn append_notification_attempt(
+    pub(crate) fn append_notification_attempt(
         &mut self,
         attempt: &NotificationAttemptInput,
     ) -> Result<(), StoreError> {
@@ -8712,7 +8737,7 @@ impl Store {
     }
 
     /// Append a logical retention tombstone without refreshing or rewriting evidence.
-    pub fn append_retention_tombstone(
+    pub(crate) fn append_retention_tombstone(
         &mut self,
         tombstone: &RetentionTombstoneInput,
     ) -> Result<(), StoreError> {
@@ -8740,7 +8765,7 @@ impl Store {
     }
 
     /// Append the genesis link for a fresh store.
-    pub fn append_genesis(&mut self, genesis: &GenesisInput) -> Result<(), StoreError> {
+    pub(crate) fn append_genesis(&mut self, genesis: &GenesisInput) -> Result<(), StoreError> {
         if let Some(digest) = &genesis.legacy_manifest_digest {
             validate_digest("legacy_manifest_digest", digest)?;
         }
@@ -8786,8 +8811,45 @@ impl Store {
         }
     }
 
+    /// Begin the sole writer session for this store.
+    ///
+    /// Every production mutator of Store state requires this capability in
+    /// its type signature. Construction acquires the per-store-path process
+    /// write lock (non-reentrant) and refuses while the store is fenced. The
+    /// session carries no trust root, activation, capacity, or receipts.
+    ///
+    /// # Errors
+    ///
+    /// Refuses when the store is fenced, when another session for this store
+    /// path is alive in this process, or when the genesis identity is empty
+    /// or ambiguous.
+    pub fn begin_writer_session(&mut self) -> Result<StoreWriterSession<'_>, StoreError> {
+        StoreWriterSession::begin(self)
+    }
+
+    /// The sole genesis identity for session binding, when exactly one
+    /// exists; absence is permitted, emptiness or multiplicity refuses.
+    pub(crate) fn genesis_for_writer_session(&self) -> Result<Option<String>, StoreError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT genesis_id FROM genesis_records ORDER BY genesis_id LIMIT 2")?;
+        let identities = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        match identities.as_slice() {
+            [] => Ok(None),
+            [identity] if !identity.is_empty() => Ok(Some(identity.clone())),
+            [_] => Err(StoreError::Invariant(
+                "initialized store has an empty genesis identity".into(),
+            )),
+            _ => Err(StoreError::Invariant(
+                "initialized store has more than one genesis identity".into(),
+            )),
+        }
+    }
+
     /// Append an opaque historical reference; it cannot create current finding state.
-    pub fn append_legacy_reference(
+    pub(crate) fn append_legacy_reference(
         &mut self,
         reference: &LegacyReferenceInput,
     ) -> Result<(), StoreError> {
@@ -8814,7 +8876,7 @@ impl Store {
     }
 
     /// Append an explicit upgrade receipt. Upgrade orchestration remains outside this crate.
-    pub fn append_upgrade_receipt(
+    pub(crate) fn append_upgrade_receipt(
         &mut self,
         receipt: &UpgradeReceiptInput,
     ) -> Result<(), StoreError> {

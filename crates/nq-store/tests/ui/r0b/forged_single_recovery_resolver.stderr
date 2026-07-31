@@ -1,16 +1,16 @@
 error[E0061]: this method takes 1 argument but 2 arguments were supplied
- --> tests/ui/r0b/forged_single_recovery_resolver.rs:5:19
+ --> tests/ui/r0b/forged_single_recovery_resolver.rs:8:10
   |
-5 |     let _ = store.recover_governed_projection_and_mark_indexed(reservation, forged_resolution);
-  |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^              ----------------- unexpected argument #2 of type `()`
+8 |         .recover_governed_projection_and_mark_indexed(reservation, forged_resolution);
+  |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^              ----------------- unexpected argument #2 of type `()`
   |
 note: method defined here
- --> src/governed_custody.rs
+ --> src/writer_session.rs
   |
   |     pub fn recover_governed_projection_and_mark_indexed(
   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 help: remove the extra argument
   |
-5 -     let _ = store.recover_governed_projection_and_mark_indexed(reservation, forged_resolution);
-5 +     let _ = store.recover_governed_projection_and_mark_indexed(reservation);
+8 -         .recover_governed_projection_and_mark_indexed(reservation, forged_resolution);
+8 +         .recover_governed_projection_and_mark_indexed(reservation);
   |
