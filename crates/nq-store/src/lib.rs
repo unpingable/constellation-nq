@@ -17248,6 +17248,8 @@ mod tests {
         R0bOperationAuthorizationMissing,
         R0bOperationAuthorizationDuplicate,
         R0bOperationAuthorizationBytesMismatch,
+        R0bOperationAuthorizationUnknownScope,
+        R0bOperationAuthorizationOperationMismatch,
         R0bAdministrativeAuthorizationNoncontributor,
         R0bRequestLaunchAuthenticationMismatch,
         R0bRequestDecisionAuthenticationMismatch,
@@ -18191,6 +18193,12 @@ mod tests {
                 Self::R0bOperationAuthorizationBytesMismatch => {
                     "r0b-operation-authorization-bytes-mismatch"
                 }
+                Self::R0bOperationAuthorizationUnknownScope => {
+                    "r0b-operation-authorization-unknown-scope"
+                }
+                Self::R0bOperationAuthorizationOperationMismatch => {
+                    "r0b-operation-authorization-operation-mismatch"
+                }
                 Self::R0bAdministrativeAuthorizationNoncontributor => {
                     "r0b-administrative-authorization-noncontributor"
                 }
@@ -18237,6 +18245,12 @@ mod tests {
                 "r0b-operation-authorization-duplicate" => Self::R0bOperationAuthorizationDuplicate,
                 "r0b-operation-authorization-bytes-mismatch" => {
                     Self::R0bOperationAuthorizationBytesMismatch
+                }
+                "r0b-operation-authorization-unknown-scope" => {
+                    Self::R0bOperationAuthorizationUnknownScope
+                }
+                "r0b-operation-authorization-operation-mismatch" => {
+                    Self::R0bOperationAuthorizationOperationMismatch
                 }
                 "r0b-administrative-authorization-noncontributor" => {
                     Self::R0bAdministrativeAuthorizationNoncontributor
@@ -18383,6 +18397,16 @@ mod tests {
             id: "O04",
             mutation: PendingV3PhysicalSourceMutation::R0bOperationAuthorizationBytesMismatch,
             expected_reason: "materialized operation authorization differs from the exact physical reference",
+        },
+        R0bPhysicalCase {
+            id: "O05",
+            mutation: PendingV3PhysicalSourceMutation::R0bOperationAuthorizationUnknownScope,
+            expected_reason: "reservation checkpoint operation authorization carries no closed purpose",
+        },
+        R0bPhysicalCase {
+            id: "O06",
+            mutation: PendingV3PhysicalSourceMutation::R0bOperationAuthorizationOperationMismatch,
+            expected_reason: "reservation checkpoint operation authorization carries no closed purpose",
         },
         R0bPhysicalCase {
             id: "P01",
@@ -19739,6 +19763,36 @@ mod tests {
                                 "scope": "diagnostic_invocation",
                                 "operation": "diagnostic.invoke",
                                 "fixture": "substituted-native-prelaunch-authorization",
+                            }),
+                        )
+                    } else if matches!(
+                        spec.physical_source_mutation,
+                        PendingV3PhysicalSourceMutation::R0bOperationAuthorizationUnknownScope
+                    ) {
+                        governed_runtime_record(
+                            Sha256Digest::parse(invocation_authorization.record_id.clone())
+                                .expect("operation-authorization record identity"),
+                            "nq.operation_authorization.v1",
+                            json!({
+                                "schema": "nq.operation_authorization.v1",
+                                "scope": "unregistered_purpose",
+                                "operation": "diagnostic.invoke",
+                                "fixture": "unknown-scope-native-prelaunch-authorization",
+                            }),
+                        )
+                    } else if matches!(
+                        spec.physical_source_mutation,
+                        PendingV3PhysicalSourceMutation::R0bOperationAuthorizationOperationMismatch
+                    ) {
+                        governed_runtime_record(
+                            Sha256Digest::parse(invocation_authorization.record_id.clone())
+                                .expect("operation-authorization record identity"),
+                            "nq.operation_authorization.v1",
+                            json!({
+                                "schema": "nq.operation_authorization.v1",
+                                "scope": "diagnostic_invocation",
+                                "operation": "diagnostic.export",
+                                "fixture": "operation-mismatch-native-prelaunch-authorization",
                             }),
                         )
                     } else {
@@ -22127,6 +22181,8 @@ mod tests {
             | PendingV3PhysicalSourceMutation::R0bOperationAuthorizationMissing
             | PendingV3PhysicalSourceMutation::R0bOperationAuthorizationDuplicate
             | PendingV3PhysicalSourceMutation::R0bOperationAuthorizationBytesMismatch
+            | PendingV3PhysicalSourceMutation::R0bOperationAuthorizationUnknownScope
+            | PendingV3PhysicalSourceMutation::R0bOperationAuthorizationOperationMismatch
             | PendingV3PhysicalSourceMutation::R0bAdministrativeAuthorizationNoncontributor
             | PendingV3PhysicalSourceMutation::R0bRequestLaunchAuthenticationMismatch
             | PendingV3PhysicalSourceMutation::R0bRequestDecisionAuthenticationMismatch
