@@ -1,0 +1,14 @@
+error[E0624]: method `claim_launch` is private
+ --> tests/ui/writer/custody_without_session.rs:4:21
+  |
+4 |       let _ = custody.claim_launch(
+  |                       ^^^^^^^^^^^^ private method
+  |
+ ::: src/governed_custody.rs
+  |
+  | /     pub(crate) fn claim_launch(
+  | |         &mut self,
+  | |         execution_launch_record_id: Sha256Digest,
+  | |         claimed_at: String,
+  | |     ) -> Result<(), StoreError> {
+  | |_______________________________- private method defined here

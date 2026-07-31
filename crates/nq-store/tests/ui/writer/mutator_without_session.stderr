@@ -1,0 +1,13 @@
+error[E0624]: method `commit_collection` is private
+ --> tests/ui/writer/mutator_without_session.rs:4:19
+  |
+4 |       let _ = store.commit_collection(collection);
+  |                     ^^^^^^^^^^^^^^^^^ private method
+  |
+ ::: src/lib.rs
+  |
+  | /     pub(crate) fn commit_collection(
+  | |         &mut self,
+  | |         collection: &CollectionInput,
+  | |     ) -> Result<CollectionReceipt, StoreError> {
+  | |______________________________________________- private method defined here
