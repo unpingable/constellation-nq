@@ -1,13 +1,10 @@
-error[E0624]: method `commit_collection` is private
+error[E0624]: method `append_genesis` is private
  --> tests/ui/writer/mutator_without_session.rs:4:19
   |
-4 |       let _ = store.commit_collection(collection);
-  |                     ^^^^^^^^^^^^^^^^^ private method
+4 |     let _ = store.append_genesis(genesis);
+  |                   ^^^^^^^^^^^^^^ private method
   |
  ::: src/lib.rs
   |
-  | /     pub(crate) fn commit_collection(
-  | |         &mut self,
-  | |         collection: &CollectionInput,
-  | |     ) -> Result<CollectionReceipt, StoreError> {
-  | |______________________________________________- private method defined here
+  |     pub(crate) fn append_genesis(&mut self, genesis: &GenesisInput) -> Result<(), StoreError> {
+  |     ----------------------------------------------------------------------------------------- private method defined here

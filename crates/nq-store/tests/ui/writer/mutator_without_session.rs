@@ -1,7 +1,7 @@
-use nq_store::{CollectionInput, Store};
+use nq_store::{GenesisInput, Store};
 
-fn bypass(store: &mut Store, collection: &CollectionInput) {
-    let _ = store.commit_collection(collection);
+fn bypass(store: &mut Store, genesis: &GenesisInput) {
+    let _ = store.append_genesis(genesis);
 }
 
 fn main() {}
