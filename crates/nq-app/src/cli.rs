@@ -681,13 +681,15 @@ fn diagnostic_import(
     let imported_at = chrono::Utc::now().to_rfc3339();
     let import_id = import_id.map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_owned);
     let mut store = Store::open(&config.database_path)?;
-    let receipt = store.begin_writer_session()?.import_diagnostic_artifact(&DiagnosticArtifactImportInput {
-        import_id,
-        artifact_id,
-        contract_schema: contract_schema.clone(),
-        canonical_bytes: document,
-        imported_at,
-    })?;
+    let receipt = store.begin_writer_session()?.import_diagnostic_artifact(
+        &DiagnosticArtifactImportInput {
+            import_id,
+            artifact_id,
+            contract_schema: contract_schema.clone(),
+            canonical_bytes: document,
+            imported_at,
+        },
+    )?;
     let disposition = match receipt.disposition {
         DiagnosticArtifactImportDisposition::Committed => "committed",
         DiagnosticArtifactImportDisposition::CommittedUnavailable => "committed_unavailable",
@@ -993,7 +995,8 @@ fn backup(config_path: &Path, destination: &Path, json_output: bool) -> Result<(
     store_backup_if_supported(&mut store, destination)?;
     let mut backup_store = Store::open(destination)?;
     backup_store.validate()?;
-    let backup_artifacts = nq_core::engine::validate_diagnostic_artifact_history(&mut backup_store)?;
+    let backup_artifacts =
+        nq_core::engine::validate_diagnostic_artifact_history(&mut backup_store)?;
     if backup_artifacts != source_artifacts {
         bail!("backup did not preserve the exact diagnostic artifact custody counts");
     }
@@ -1037,7 +1040,8 @@ fn restore(backup: &Path, destination: &Path, json_output: bool) -> Result<()> {
         store_backup_if_supported(&mut source, &temporary)?;
         let mut restored = Store::open(&temporary)?;
         restored.validate()?;
-        let restored_artifacts = nq_core::engine::validate_diagnostic_artifact_history(&mut restored)?;
+        let restored_artifacts =
+            nq_core::engine::validate_diagnostic_artifact_history(&mut restored)?;
         if restored_artifacts != source_artifacts {
             bail!("restore did not preserve the exact diagnostic artifact custody counts");
         }
@@ -1802,7 +1806,9 @@ fn append_descriptor_if_supported(
     session: &mut nq_store::StoreWriterSession<'_>,
     module: &&dyn nq_profiles::ProfileModule,
 ) -> Result<()> {
-    Ok(nq_core::engine::append_profile_descriptor(session, *module)?)
+    Ok(nq_core::engine::append_profile_descriptor(
+        session, *module,
+    )?)
 }
 
 fn append_genesis_if_supported(

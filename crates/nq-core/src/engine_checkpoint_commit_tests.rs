@@ -200,6 +200,7 @@ fn assert_checkpoint_sequence(log: &Path) {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One ordered commit-checkpoint sequence is intentional.
 fn only_committed_admitted_reports_advance_the_next_request_checkpoint() {
     let directory = tempfile::tempdir().expect("temporary test directory");
     let root = directory.path();

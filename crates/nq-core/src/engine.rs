@@ -37,10 +37,10 @@ use nq_store::{
     GovernedAcquisitionCustodyInput, GovernedProjectionCapsule, GovernedProjectionCapsuleInput,
     GovernedProjectionCapsuleMode, GovernedProtectedTerminalClass,
     GovernedProtectedTerminalDeadlineCompliance, GovernedProtectedTerminalInput,
-    GovernedProtectedTerminalReason, ObservationInput, ProfileDescriptorInput, StoreWriterSession,
+    GovernedProtectedTerminalReason, ObservationInput, ProfileDescriptorInput,
     ProviderIntakeCommit, ProviderIntakeInput, ProviderIntakePreflight, RefusalInput,
     ReportErrorInput, ReportInput, RunInput, RunResultStatusInput, StatusEventInput, Store,
-    SubmissionDisposition, SubmissionInput,
+    StoreWriterSession, SubmissionDisposition, SubmissionInput,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -3149,14 +3149,16 @@ fn handle_native_governed_publication_failure(
 ) -> EngineError {
     let state = match prepared.live_custody_state() {
         Ok(state) => state,
-        Err(initial_error) => match prepared.reopen_custody_state_after_indeterminate_write(session) {
-            Ok(state) => state,
-            Err(reopen_error) => {
-                return EngineError::Invariant(format!(
-                    "governed publication failed and its durable custody frontier could not be reopened: initial state error: {initial_error}; reopen error: {reopen_error}; publication failure: {failure}"
-                ));
+        Err(initial_error) => {
+            match prepared.reopen_custody_state_after_indeterminate_write(session) {
+                Ok(state) => state,
+                Err(reopen_error) => {
+                    return EngineError::Invariant(format!(
+                        "governed publication failed and its durable custody frontier could not be reopened: initial state error: {initial_error}; reopen error: {reopen_error}; publication failure: {failure}"
+                    ));
+                }
             }
-        },
+        }
     };
     match state {
         nq_store::GovernedCustodyState::Reserved
@@ -4802,15 +4804,15 @@ impl CollectionEngine {
                     "the runtime-owned monotonic execution window widened after pre-effect qualification",
                 );
                 return Err({
-                        let mut session = self.store.begin_writer_session()?;
-                        terminalize_native_pre_effect_refusal(&mut session, &mut prepared, refusal)
-                    });
+                    let mut session = self.store.begin_writer_session()?;
+                    terminalize_native_pre_effect_refusal(&mut session, &mut prepared, refusal)
+                });
             }
             Err(refusal) => {
                 return Err({
-                        let mut session = self.store.begin_writer_session()?;
-                        terminalize_native_pre_effect_refusal(&mut session, &mut prepared, refusal)
-                    });
+                    let mut session = self.store.begin_writer_session()?;
+                    terminalize_native_pre_effect_refusal(&mut session, &mut prepared, refusal)
+                });
             }
         };
         if fresh_remaining > StdDuration::from_millis(watcher.invocation.deadline_ms) {
@@ -4819,9 +4821,9 @@ impl CollectionEngine {
                 "the final runtime-owned watchdog broadens the admitted watcher deadline",
             );
             return Err({
-                    let mut session = self.store.begin_writer_session()?;
-                    terminalize_native_pre_effect_refusal(&mut session, &mut prepared, refusal)
-                });
+                let mut session = self.store.begin_writer_session()?;
+                terminalize_native_pre_effect_refusal(&mut session, &mut prepared, refusal)
+            });
         }
 
         match self.store.provider_intake(&provider_attempt.intake_id) {
@@ -4832,9 +4834,9 @@ impl CollectionEngine {
                     "the exact governed provider-intake occurrence already exists; provider replay is forbidden",
                 );
                 return Err({
-                        let mut session = self.store.begin_writer_session()?;
-                        terminalize_native_pre_effect_refusal(&mut session, &mut prepared, refusal)
-                    });
+                    let mut session = self.store.begin_writer_session()?;
+                    terminalize_native_pre_effect_refusal(&mut session, &mut prepared, refusal)
+                });
             }
             Err(error) => {
                 let refusal = native_governed_refusal(
@@ -4842,9 +4844,9 @@ impl CollectionEngine {
                     error.to_string(),
                 );
                 return Err({
-                        let mut session = self.store.begin_writer_session()?;
-                        terminalize_native_pre_effect_refusal(&mut session, &mut prepared, refusal)
-                    });
+                    let mut session = self.store.begin_writer_session()?;
+                    terminalize_native_pre_effect_refusal(&mut session, &mut prepared, refusal)
+                });
             }
         }
 
@@ -4856,9 +4858,9 @@ impl CollectionEngine {
                     error.to_string(),
                 );
                 return Err({
-                        let mut session = self.store.begin_writer_session()?;
-                        terminalize_native_pre_effect_refusal(&mut session, &mut prepared, refusal)
-                    });
+                    let mut session = self.store.begin_writer_session()?;
+                    terminalize_native_pre_effect_refusal(&mut session, &mut prepared, refusal)
+                });
             }
         };
         let evaluator_artifact_digest = verified_provider
@@ -4883,9 +4885,9 @@ impl CollectionEngine {
                     error.to_string(),
                 );
                 return Err({
-                        let mut session = self.store.begin_writer_session()?;
-                        terminalize_native_pre_effect_refusal(&mut session, &mut prepared, refusal)
-                    });
+                    let mut session = self.store.begin_writer_session()?;
+                    terminalize_native_pre_effect_refusal(&mut session, &mut prepared, refusal)
+                });
             }
         };
 
@@ -4978,12 +4980,15 @@ impl CollectionEngine {
         let sealed_acquisition = postlaunch!(
             "acquisition_custody",
             prepared
-                .seal_acquisition(&mut custody_session, GovernedAcquisitionCustodyInput {
-                    execution_launch_record_id: prepared.execution_launch().record_id.clone(),
-                    provider_intake_record_id: provider_record_id.clone(),
-                    exact_provider_intake_bytes: exact_provider_intake_bytes.clone(),
-                    exact_raw_provider_bytes: intake.raw_bytes().to_vec(),
-                })
+                .seal_acquisition(
+                    &mut custody_session,
+                    GovernedAcquisitionCustodyInput {
+                        execution_launch_record_id: prepared.execution_launch().record_id.clone(),
+                        provider_intake_record_id: provider_record_id.clone(),
+                        exact_provider_intake_bytes: exact_provider_intake_bytes.clone(),
+                        exact_raw_provider_bytes: intake.raw_bytes().to_vec(),
+                    }
+                )
                 .map_err(EngineError::from)
         );
         if sealed_acquisition.execution_launch_record_id != prepared.execution_launch().record_id
@@ -5445,20 +5450,22 @@ impl CollectionEngine {
         // store borrow. This refuses (fail closed) when the running evaluator
         // identity is unavailable, rather than admitting under a fabricated one.
         let identity = self.admission_identity(profile, &lock)?;
-        self.store.begin_writer_session()?.append_admission(&AdmissionInput {
-            admission_id: lock.admission_id.clone(),
-            instance_id: lock.instance_id.clone(),
-            identity,
-            execution_chain: canonical(&lock.execution)?,
-            profile_id: lock.profile.id.clone(),
-            profile_version: lock.profile.version.to_string(),
-            profile_digest: lock.profile.digest.clone(),
-            capability_grant: canonical(&lock.granted_capabilities)?,
-            conformance: canonical(&lock.conformance)?,
-            lock: canonical(&lock)?,
-            admitted_at: timestamp(lock.admitted_at),
-            operator_identity: canonical(&lock.operator)?,
-        })?;
+        self.store
+            .begin_writer_session()?
+            .append_admission(&AdmissionInput {
+                admission_id: lock.admission_id.clone(),
+                instance_id: lock.instance_id.clone(),
+                identity,
+                execution_chain: canonical(&lock.execution)?,
+                profile_id: lock.profile.id.clone(),
+                profile_version: lock.profile.version.to_string(),
+                profile_digest: lock.profile.digest.clone(),
+                capability_grant: canonical(&lock.granted_capabilities)?,
+                conformance: canonical(&lock.conformance)?,
+                lock: canonical(&lock)?,
+                admitted_at: timestamp(lock.admitted_at),
+                operator_identity: canonical(&lock.operator)?,
+            })?;
 
         let archived = previous.is_some();
         let lock_path =
@@ -6754,15 +6761,18 @@ impl CollectionEngine {
                 })
             })
             .transpose()?;
-        let completion = self.store.begin_writer_session()?.commit_non_success_collection_with_artifact(
-            &CollectionInput {
-                intake,
-                run,
-                submission,
-            },
-            &result,
-            artifact_commit.as_ref(),
-        )?;
+        let completion = self
+            .store
+            .begin_writer_session()?
+            .commit_non_success_collection_with_artifact(
+                &CollectionInput {
+                    intake,
+                    run,
+                    submission,
+                },
+                &result,
+                artifact_commit.as_ref(),
+            )?;
         let stored_outcome = match &completion.intake {
             ProviderIntakeCommit::Committed { .. } => outcome,
             ProviderIntakeCommit::Replayed {
@@ -15218,11 +15228,12 @@ sys.stdout.write("\n")
             .begin_writer_session()
             .expect("writer session")
             .commit_admitted_collection(
-            &changed_collection,
-            |_, _| -> Result<AdmittedCollectionCompletion<()>, EngineError> {
-                panic!("changed {field} replay must fail before evaluation")
-            },
-        ) else {
+                &changed_collection,
+                |_, _| -> Result<AdmittedCollectionCompletion<()>, EngineError> {
+                    panic!("changed {field} replay must fail before evaluation")
+                },
+            )
+        else {
             panic!("changed {field} replay unexpectedly passed")
         };
         assert!(

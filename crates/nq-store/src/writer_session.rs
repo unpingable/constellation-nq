@@ -30,29 +30,83 @@ static IN_MEMORY_WRITER_KEYS: AtomicU64 = AtomicU64::new(1);
 fn path_lock_state(key: &Path) -> &'static PathLockState {
     let mut registry = STORE_WRITER_LOCKS
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    registry
-        .entry(key.to_path_buf())
-        .or_insert_with(|| {
-            Box::leak(Box::new(PathLockState {
-                write_mutex: Mutex::new(()),
-                fenced: AtomicBool::new(false),
-            }))
-        })
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    registry.entry(key.to_path_buf()).or_insert_with(|| {
+        Box::leak(Box::new(PathLockState {
+            write_mutex: Mutex::new(()),
+            fenced: AtomicBool::new(false),
+        }))
+    })
 }
 
 /// Derive the writer key for a store: the canonical path, or a unique
 /// in-memory identity.
 pub(crate) fn writer_key_for_path(path: Option<&Path>) -> PathBuf {
     match path {
-        Some(path) => {
-            std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-        }
+        Some(path) => canonicalize_for_writer_key(path),
         None => PathBuf::from(format!(
             "in-memory://{}",
             IN_MEMORY_WRITER_KEYS.fetch_add(1, Ordering::Relaxed)
         )),
     }
+}
+
+/// Canonicalize a store path for lock-key purposes. The database file may
+/// not exist yet (initialize), so fall back to the nearest existing
+/// ancestor and reattach the remaining suffix: two spellings of one store
+/// must resolve to one lock, never two.
+fn canonicalize_for_writer_key(path: &Path) -> PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
+    }
+    let mut ancestor = path;
+    loop {
+        match std::fs::canonicalize(ancestor) {
+            Ok(canonical_ancestor) => {
+                return match path.strip_prefix(ancestor) {
+                    Ok(suffix) => {
+                        let mut key = canonical_ancestor;
+                        key.push(suffix);
+                        key
+                    }
+                    Err(_) => canonical_ancestor,
+                };
+            }
+            Err(_) => match ancestor.parent() {
+                Some(parent) => ancestor = parent,
+                None => return path.to_path_buf(),
+            },
+        }
+    }
+}
+
+/// Acquire the per-path process write lock for the maintenance class
+/// (schema migrations and backup/preservation paths), which operate on
+/// closed paths under their own exclusive recovery transactions. Keys
+/// are deduplicated and acquired in sorted order.
+pub(crate) fn acquire_maintenance_locks(
+    paths: &[&Path],
+) -> Result<Vec<MutexGuard<'static, ()>>, StoreError> {
+    let mut keys = paths
+        .iter()
+        .map(|path| writer_key_for_path(Some(path)))
+        .collect::<Vec<_>>();
+    keys.sort();
+    keys.dedup();
+    let mut guards = Vec::with_capacity(keys.len());
+    for key in keys {
+        let state = path_lock_state(&key);
+        if state.fenced.load(Ordering::SeqCst) {
+            return Err(StoreError::WriteFenced(key.display().to_string()));
+        }
+        guards.push(
+            state
+                .write_mutex
+                .try_lock()
+                .map_err(|_| StoreError::WriterSessionUnavailable(key.display().to_string()))?,
+        );
+    }
+    Ok(guards)
 }
 
 /// Test and future-C2 fence control: fence a store path so all session
@@ -81,7 +135,9 @@ impl<'store> StoreWriterSession<'store> {
     pub(crate) fn begin(store: &'store mut Store) -> Result<Self, StoreError> {
         let state = path_lock_state(&store.writer_key);
         if state.fenced.load(Ordering::SeqCst) {
-            return Err(StoreError::WriteFenced(store.writer_key.display().to_string()));
+            return Err(StoreError::WriteFenced(
+                store.writer_key.display().to_string(),
+            ));
         }
         let guard = state.write_mutex.try_lock().map_err(|_| {
             StoreError::WriterSessionUnavailable(store.writer_key.display().to_string())
@@ -111,7 +167,9 @@ impl<'store> StoreWriterSession<'store> {
 
     fn check_fence(&self) -> Result<(), StoreError> {
         if self.state.fenced.load(Ordering::SeqCst) {
-            return Err(StoreError::WriteFenced(self.store_key.display().to_string()));
+            return Err(StoreError::WriteFenced(
+                self.store_key.display().to_string(),
+            ));
         }
         Ok(())
     }
@@ -126,8 +184,8 @@ impl<'store> StoreWriterSession<'store> {
 use crate::governed_custody::{
     CustodiedAcquisition, GovernedAcquisitionCustodyInput, GovernedCustody,
     GovernedCustodyReservation, GovernedCustodyState, GovernedDerivationCustodyClaim,
-    GovernedProtectedTerminalInput, GovernedProtectedTerminalization,
-    GovernedProjectionRecovery, GovernedProjectionVerification,
+    GovernedProjectionRecovery, GovernedProjectionVerification, GovernedProtectedTerminalInput,
+    GovernedProtectedTerminalization,
 };
 use crate::{
     AdmissionInput, AdmittedCollectionCompletion, AdmittedCollectionView,
@@ -136,9 +194,9 @@ use crate::{
     DiagnosticArtifactImportInput, DiagnosticArtifactImportReceipt, EvaluationInput,
     EvaluationReceipt, FindingEventInput, GenesisInput, GovernedCustodyCommitment,
     GovernedProjectionPublication, LegacyReferenceInput, NonSuccessCollectionArtifactCommit,
-    ProfileDescriptorInput, ProviderIntakeCommit, RunResultStatusInput,
-    RuntimeRecordAppendReceipt, RuntimeRecordBatchInput, StatusEventInput,
-    UnavailableDiagnosticArtifactImportInput, UpgradeReceiptInput,
+    ProfileDescriptorInput, ProviderIntakeCommit, RunResultStatusInput, RuntimeRecordAppendReceipt,
+    RuntimeRecordBatchInput, StatusEventInput, UnavailableDiagnosticArtifactImportInput,
+    UpgradeReceiptInput,
 };
 use nq_protocol::Sha256Digest;
 
@@ -185,7 +243,7 @@ impl StoreWriterSession<'_> {
         collection: &CollectionInput,
     ) -> Result<CollectionReceipt, StoreError> {
         self.check_fence()?;
-        self.store.commit_collection(collection)
+        Store::commit_collection(collection)
     }
 
     /// Append one runtime-ledger batch with its checkpoint.
@@ -485,6 +543,7 @@ impl StoreWriterSession<'_> {
 
 impl StoreWriterSession<'_> {
     /// The sole genesis identity this session is bound to, when present.
+    #[must_use]
     pub fn bound_generation(&self) -> Option<&str> {
         self.genesis.as_deref()
     }

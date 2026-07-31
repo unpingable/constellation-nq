@@ -2826,6 +2826,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One fail-closed custody-authority sequence is intentional.
     fn exact_prepared_owns_terminal_authority_but_reopened_launch_does_not() {
         let directory = tempdir().expect("directory");
 
@@ -2843,17 +2844,22 @@ mod tests {
             .expect("writer session");
         let substituted_launch = sha256_bytes(b"another exact launch occurrence");
         let error = prepared
-            .terminalize_immediate_launch(&mut session, GovernedProtectedTerminalInput {
-                execution_launch_record_id: substituted_launch,
-                terminal_class: GovernedProtectedTerminalClass::PreEffectRefusal,
-                reason: GovernedProtectedTerminalReason {
-                    code: "hostile.launch_substitution".to_owned(),
-                    detail: "a prepared occurrence cannot terminalize another launch".to_owned(),
+            .terminalize_immediate_launch(
+                &mut session,
+                GovernedProtectedTerminalInput {
+                    execution_launch_record_id: substituted_launch,
+                    terminal_class: GovernedProtectedTerminalClass::PreEffectRefusal,
+                    reason: GovernedProtectedTerminalReason {
+                        code: "hostile.launch_substitution".to_owned(),
+                        detail: "a prepared occurrence cannot terminalize another launch"
+                            .to_owned(),
+                    },
+                    launch_attempt_deadline: "2026-07-28T22:02:32Z".to_owned(),
+                    terminalized_at: "2026-07-28T22:02:03Z".to_owned(),
+                    deadline_compliance:
+                        GovernedProtectedTerminalDeadlineCompliance::WithinDeadline,
                 },
-                launch_attempt_deadline: "2026-07-28T22:02:32Z".to_owned(),
-                terminalized_at: "2026-07-28T22:02:03Z".to_owned(),
-                deadline_compliance: GovernedProtectedTerminalDeadlineCompliance::WithinDeadline,
-            })
+            )
             .expect_err("prepared occurrence is exact-launch bound");
         assert!(matches!(
             error,
@@ -2919,7 +2925,8 @@ mod tests {
                     },
                     launch_attempt_deadline: "2026-07-28T22:02:32Z".to_owned(),
                     terminalized_at: "2026-07-28T22:02:03Z".to_owned(),
-                    deadline_compliance: GovernedProtectedTerminalDeadlineCompliance::WithinDeadline,
+                    deadline_compliance:
+                        GovernedProtectedTerminalDeadlineCompliance::WithinDeadline,
                 },
             )
             .expect_err("reopened launch has no immediate terminal authority");
@@ -2954,12 +2961,15 @@ mod tests {
 
         let wrong_launch = sha256_bytes(b"foreign launch occurrence");
         let error = prepared
-            .seal_acquisition(&mut session, GovernedAcquisitionCustodyInput {
-                execution_launch_record_id: wrong_launch,
-                provider_intake_record_id: sha256_bytes(b"foreign provider intake"),
-                exact_provider_intake_bytes: b"{\"schema\":\"nq.provider_intake.v1\"}".to_vec(),
-                exact_raw_provider_bytes: b"foreign raw bytes".to_vec(),
-            })
+            .seal_acquisition(
+                &mut session,
+                GovernedAcquisitionCustodyInput {
+                    execution_launch_record_id: wrong_launch,
+                    provider_intake_record_id: sha256_bytes(b"foreign provider intake"),
+                    exact_provider_intake_bytes: b"{\"schema\":\"nq.provider_intake.v1\"}".to_vec(),
+                    exact_raw_provider_bytes: b"foreign raw bytes".to_vec(),
+                },
+            )
             .expect_err("another launch cannot use this prepared custody");
         assert!(matches!(
             error,
@@ -2987,7 +2997,9 @@ mod tests {
             .expect("clock qualification identity"),
         };
         assert!(
-            prepared.claim_derivation(&mut session, claim.clone()).is_err(),
+            prepared
+                .claim_derivation(&mut session, claim.clone())
+                .is_err(),
             "derivation cannot skip acquisition custody"
         );
         assert_eq!(
@@ -2996,12 +3008,15 @@ mod tests {
         );
 
         let acquisition = prepared
-            .seal_acquisition(&mut session, GovernedAcquisitionCustodyInput {
-                execution_launch_record_id: exact_launch.clone(),
-                provider_intake_record_id: sha256_bytes(b"ordered provider intake"),
-                exact_provider_intake_bytes: b"{\"schema\":\"nq.provider_intake.v1\"}".to_vec(),
-                exact_raw_provider_bytes: b"ordered raw bytes".to_vec(),
-            })
+            .seal_acquisition(
+                &mut session,
+                GovernedAcquisitionCustodyInput {
+                    execution_launch_record_id: exact_launch.clone(),
+                    provider_intake_record_id: sha256_bytes(b"ordered provider intake"),
+                    exact_provider_intake_bytes: b"{\"schema\":\"nq.provider_intake.v1\"}".to_vec(),
+                    exact_raw_provider_bytes: b"ordered raw bytes".to_vec(),
+                },
+            )
             .expect("exact launch acquisition seals");
         assert_eq!(acquisition.execution_launch_record_id, exact_launch);
         assert_eq!(
@@ -3010,12 +3025,16 @@ mod tests {
         );
         assert!(
             prepared
-                .seal_acquisition(&mut session, GovernedAcquisitionCustodyInput {
-                    execution_launch_record_id: exact_launch,
-                    provider_intake_record_id: sha256_bytes(b"second provider intake"),
-                    exact_provider_intake_bytes: b"{\"schema\":\"nq.provider_intake.v1\"}".to_vec(),
-                    exact_raw_provider_bytes: b"second raw bytes".to_vec(),
-                })
+                .seal_acquisition(
+                    &mut session,
+                    GovernedAcquisitionCustodyInput {
+                        execution_launch_record_id: exact_launch,
+                        provider_intake_record_id: sha256_bytes(b"second provider intake"),
+                        exact_provider_intake_bytes: b"{\"schema\":\"nq.provider_intake.v1\"}"
+                            .to_vec(),
+                        exact_raw_provider_bytes: b"second raw bytes".to_vec(),
+                    }
+                )
                 .is_err(),
             "acquisition seals exactly once"
         );

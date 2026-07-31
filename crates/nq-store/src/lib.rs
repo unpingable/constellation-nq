@@ -2369,6 +2369,8 @@ impl Store {
     /// Checkpoint a writable backup copy and leave it in rollback-journal mode
     /// before archive inventory and sealing.
     pub fn prepare_archive_copy(&self) -> Result<(), StoreError> {
+        let _maintenance_guards =
+            writer_session::acquire_maintenance_locks(&[self.writer_key.as_path()])?;
         let checkpoint: (i64, i64, i64) =
             self.connection
                 .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
@@ -2557,7 +2559,10 @@ impl Store {
 
     /// Append a fully validated admission record. The store derives
     /// `admission_context_digest` from the typed identity; it is never supplied.
-    pub(crate) fn append_admission(&mut self, admission: &AdmissionInput) -> Result<(), StoreError> {
+    pub(crate) fn append_admission(
+        &mut self,
+        admission: &AdmissionInput,
+    ) -> Result<(), StoreError> {
         validate_digest("profile_digest", &admission.profile_digest)?;
         let identity = &admission.identity;
         let context_digest = identity.context_digest()?;
@@ -3083,7 +3088,6 @@ impl Store {
     /// APIs so a watcher run can never become durable without one canonical
     /// result.
     pub(crate) fn commit_collection(
-        &mut self,
         collection: &CollectionInput,
     ) -> Result<CollectionReceipt, StoreError> {
         validate_collection(collection)?;
@@ -7253,6 +7257,10 @@ impl Store {
         &self,
         destination: impl AsRef<Path>,
     ) -> Result<BackupArtifact, StoreError> {
+        let _maintenance_guards = writer_session::acquire_maintenance_locks(&[
+            self.writer_key.as_path(),
+            destination.as_ref(),
+        ])?;
         self.validate()?;
         let destination = destination.as_ref();
         if destination.exists() {
@@ -7304,6 +7312,8 @@ impl Store {
         source: impl AsRef<Path>,
         destination: impl AsRef<Path>,
     ) -> Result<BackupArtifact, StoreError> {
+        let _maintenance_guards =
+            writer_session::acquire_maintenance_locks(&[source.as_ref(), destination.as_ref()])?;
         let source_store = Self::open_v3_upgrade_source_read_only(source)?;
         let destination = destination.as_ref();
         if destination.exists() {
@@ -7345,6 +7355,8 @@ impl Store {
         source: impl AsRef<Path>,
         destination: impl AsRef<Path>,
     ) -> Result<BackupArtifact, StoreError> {
+        let _maintenance_guards =
+            writer_session::acquire_maintenance_locks(&[source.as_ref(), destination.as_ref()])?;
         let source_store = Self::open_v4_upgrade_source_read_only(source)?;
         let destination = destination.as_ref();
         if destination.exists() {
@@ -7386,6 +7398,8 @@ impl Store {
         source: impl AsRef<Path>,
         destination: impl AsRef<Path>,
     ) -> Result<BackupArtifact, StoreError> {
+        let _maintenance_guards =
+            writer_session::acquire_maintenance_locks(&[source.as_ref(), destination.as_ref()])?;
         let source_store = Self::open_v5_upgrade_source_read_only(source)?;
         let destination = destination.as_ref();
         if destination.exists() {
@@ -7427,6 +7441,8 @@ impl Store {
         source: impl AsRef<Path>,
         destination: impl AsRef<Path>,
     ) -> Result<BackupArtifact, StoreError> {
+        let _maintenance_guards =
+            writer_session::acquire_maintenance_locks(&[source.as_ref(), destination.as_ref()])?;
         let source_store = Self::open_v6_upgrade_source_read_only(source)?;
         let destination = destination.as_ref();
         if destination.exists() {
@@ -7472,6 +7488,7 @@ impl Store {
         path: impl AsRef<Path>,
         receipt: &UpgradeReceiptInput,
     ) -> Result<(), StoreError> {
+        let _maintenance_guards = writer_session::acquire_maintenance_locks(&[path.as_ref()])?;
         let path = path.as_ref();
         validate_v3_to_v4_receipt(receipt)?;
         let backup_path = Path::new(&receipt.backup_location);
@@ -7632,6 +7649,7 @@ impl Store {
         path: impl AsRef<Path>,
         receipt: &UpgradeReceiptInput,
     ) -> Result<(), StoreError> {
+        let _maintenance_guards = writer_session::acquire_maintenance_locks(&[path.as_ref()])?;
         let path = path.as_ref();
         validate_v4_to_v5_receipt(receipt)?;
         let backup_path = Path::new(&receipt.backup_location);
@@ -7755,6 +7773,7 @@ impl Store {
         path: impl AsRef<Path>,
         receipt: &UpgradeReceiptInput,
     ) -> Result<(), StoreError> {
+        let _maintenance_guards = writer_session::acquire_maintenance_locks(&[path.as_ref()])?;
         let path = path.as_ref();
         validate_v5_to_v6_receipt(receipt)?;
         let backup_path = Path::new(&receipt.backup_location);
@@ -7880,6 +7899,7 @@ impl Store {
         path: impl AsRef<Path>,
         receipt: &UpgradeReceiptInput,
     ) -> Result<Self, StoreError> {
+        let _maintenance_guards = writer_session::acquire_maintenance_locks(&[path.as_ref()])?;
         let path = path.as_ref();
         validate_v6_to_v7_receipt(receipt)?;
         let backup_path = Path::new(&receipt.backup_location);
@@ -8042,6 +8062,8 @@ impl Store {
         source: impl AsRef<Path>,
         destination: impl AsRef<Path>,
     ) -> Result<BackupArtifact, StoreError> {
+        let _maintenance_guards =
+            writer_session::acquire_maintenance_locks(&[source.as_ref(), destination.as_ref()])?;
         let source = source.as_ref();
         if !source.is_file() || std::fs::metadata(source)?.len() == 0 {
             return Err(StoreError::NotInitialized(source.to_path_buf()));
@@ -29923,7 +29945,7 @@ mod tests {
         );
         let incomplete = fixture_collection(&mut store, incomplete_run, None);
         assert!(matches!(
-            store.commit_collection(&incomplete),
+            Store::commit_collection(&incomplete),
             Err(StoreError::Invariant(message))
                 if message.contains("completed response requires an exact pre-admission interpretation")
         ));
@@ -29931,7 +29953,7 @@ mod tests {
         let ordinary =
             rejected_fixture_collection(&mut store, "fixture-a", "ordinary", &profile_digest);
         assert!(matches!(
-            store.commit_collection(&ordinary),
+            Store::commit_collection(&ordinary),
             Err(StoreError::Invariant(message))
                 if message.contains("commit_non_success_collection")
         ));
@@ -34844,5 +34866,68 @@ mod tests {
             "migration synthesized artifacts from schema-v4 absence"
         );
         validate_v5_upgrade_source_connection(&migrated.connection).expect("migrated v5 validates");
+    }
+
+    #[test]
+    fn writer_sessions_are_non_reentrant_and_fencing_refuses_construction_and_use() {
+        let directory = tempfile::tempdir().expect("writer-session directory");
+        let database = directory.path().join("nq.db");
+        let mut store = Store::initialize(&database).expect("initialize store");
+
+        let first = store.begin_writer_session().expect("first writer session");
+        assert_eq!(
+            first.store_key(),
+            crate::writer_session::writer_key_for_path(Some(database.as_path())).as_path(),
+            "session binds the exact store key"
+        );
+        assert_eq!(first.genesis(), None, "fresh store carries no genesis");
+        let mut second_handle = Store::open(&database).expect("second handle on the same path");
+        assert!(
+            matches!(
+                second_handle.begin_writer_session(),
+                Err(StoreError::WriterSessionUnavailable(_))
+            ),
+            "a second session for the same store path must refuse while one is alive"
+        );
+        drop(first);
+
+        let second = store
+            .begin_writer_session()
+            .expect("session after the first is released");
+        drop(second);
+        drop(second_handle);
+
+        crate::writer_session::fence_store_writes_for_test(&store.writer_key);
+        assert!(
+            matches!(
+                store.begin_writer_session(),
+                Err(StoreError::WriteFenced(_))
+            ),
+            "construction must refuse once the store path is fenced"
+        );
+
+        // A session begun before the fence must refuse every method after it.
+        let other_directory = tempfile::tempdir().expect("second writer-session directory");
+        let other_database = other_directory.path().join("nq.db");
+        let mut other_store = Store::initialize(&other_database).expect("initialize second store");
+        let other_key = other_store.writer_key.clone();
+        let mut held = other_store
+            .begin_writer_session()
+            .expect("pre-fence writer session");
+        crate::writer_session::fence_store_writes_for_test(&other_key);
+        assert!(
+            matches!(
+                held.append_genesis(&GenesisInput {
+                    genesis_id: "post-fence".to_owned(),
+                    legacy_manifest_digest: None,
+                    created_at: "2026-07-30T00:00:00Z".to_owned(),
+                    detail: CanonicalDocument::from_canonical_bytes(b"{}".as_slice().to_vec())
+                        .expect("genesis detail"),
+                }),
+                Err(StoreError::WriteFenced(_))
+            ),
+            "every session method must refuse after the fence"
+        );
+        drop(held);
     }
 }

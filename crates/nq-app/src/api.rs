@@ -1364,6 +1364,7 @@ mod tests {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_lines)] // One fail-closed fixture assembly is intentional.
     fn seed_rejected_result(
         store: &mut Store,
         profile_id: &str,

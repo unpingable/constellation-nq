@@ -329,7 +329,8 @@ fn build_staging(config: &NqConfig, config_path: &Path, staging: &Path) -> Resul
         validate_historical_semantics(&mut store)
             .context("validate source database semantics before archiving")?;
         store.backup_verified(&db)?;
-        let mut archived_copy = Store::open(&db).context("open archive database backup for freeze")?;
+        let mut archived_copy =
+            Store::open(&db).context("open archive database backup for freeze")?;
         validate_historical_semantics(&mut archived_copy)
             .context("validate copied database semantics before sealing")?;
         archived_copy

@@ -71,49 +71,27 @@ fn store_owned_callgraph_and_dependency_direction_are_static() {
 #[test]
 #[allow(clippy::type_complexity)]
 fn governed_store_apis_retain_zero_resolver_signatures() {
-    use nq_protocol::Sha256Digest;
     use nq_store::{
-        GovernedCustodyReservation, GovernedExecutionCustodyClosureV2Capacity,
-        GovernedProjectionRecovery, GovernedProjectionVerification, Store, StoreError,
+        GovernedCustodyReservation, GovernedExecutionCustodyClosureV2Capacity, Store, StoreError,
         StoreWriterSession,
     };
 
     let _: fn(
         &Store,
         &GovernedCustodyReservation,
-        &Sha256Digest,
+        &nq_protocol::Sha256Digest,
     ) -> Result<GovernedExecutionCustodyClosureV2Capacity, StoreError> =
         Store::verify_governed_execution_custody_closure_v2_capacity;
     let _: fn(
         &Store,
         &GovernedCustodyReservation,
-        &Sha256Digest,
+        &nq_protocol::Sha256Digest,
     ) -> Result<GovernedExecutionCustodyClosureV2Capacity, StoreError> =
         Store::verify_governed_execution_custody_closure_v3_capacity;
     // Session methods borrow the session for its own store lifetime, so the
     // receiver and the `StoreWriterSession<'_>` parameter share one region.
     // That shape only coerces in argument position against a named lifetime,
     // not into a `let`-bound fn-pointer type.
-    fn assert_recover_pending_signature<'session>(
-        _: fn(
-            &'session mut StoreWriterSession<'session>,
-        ) -> Result<Vec<GovernedProjectionRecovery>, StoreError>,
-    ) {
-    }
-    fn assert_recover_and_mark_indexed_signature<'session>(
-        _: fn(
-            &'session mut StoreWriterSession<'session>,
-            &Sha256Digest,
-        ) -> Result<GovernedProjectionRecovery, StoreError>,
-    ) {
-    }
-    fn assert_verify_and_mark_indexed_signature<'session>(
-        _: fn(
-            &'session mut StoreWriterSession<'session>,
-            &Sha256Digest,
-        ) -> Result<GovernedProjectionVerification, StoreError>,
-    ) {
-    }
     assert_recover_pending_signature(StoreWriterSession::recover_pending_governed_projections);
     assert_recover_and_mark_indexed_signature(
         StoreWriterSession::recover_governed_projection_and_mark_indexed,
@@ -121,4 +99,27 @@ fn governed_store_apis_retain_zero_resolver_signatures() {
     assert_verify_and_mark_indexed_signature(
         StoreWriterSession::verify_governed_projection_and_mark_indexed,
     );
+}
+
+fn assert_recover_pending_signature<'session>(
+    _: fn(
+        &'session mut nq_store::StoreWriterSession<'session>,
+    ) -> Result<Vec<nq_store::GovernedProjectionRecovery>, nq_store::StoreError>,
+) {
+}
+
+fn assert_recover_and_mark_indexed_signature<'session>(
+    _: fn(
+        &'session mut nq_store::StoreWriterSession<'session>,
+        &nq_protocol::Sha256Digest,
+    ) -> Result<nq_store::GovernedProjectionRecovery, nq_store::StoreError>,
+) {
+}
+
+fn assert_verify_and_mark_indexed_signature<'session>(
+    _: fn(
+        &'session mut nq_store::StoreWriterSession<'session>,
+        &nq_protocol::Sha256Digest,
+    ) -> Result<nq_store::GovernedProjectionVerification, nq_store::StoreError>,
+) {
 }
