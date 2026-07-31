@@ -1,11 +1,11 @@
 {
   "schema": "nq.v3_projection_capsule_bound_qualification.v1",
-  "qualification_id": "sha256:8007777842ee58d2e9fc28516b439122c1d5ef7cd57afacf255e14925a803d8b",
+  "qualification_id": "sha256:6eed8895ab6a45a046726db9fef20378d5d6f85b3d715df36e80dd6bd3c7b8d5",
   "gate": "CAP-H14",
   "status": "qualified",
   "qualification_basis": {
     "projection_identity": "nq.v3_projection_capsule_bound_qualification_basis.v1",
-    "digest": "sha256:019d12c8f910b3b74b5a91b049719d424f605cbdafd539ca2b8848aa3514fd33"
+    "digest": "sha256:c8557b9ff37534b3e189d117a9e04cf78617cddc2cf30c48802204acf6501e3b"
   },
   "policy_bindings": {
     "operator_decision": {
@@ -54,8 +54,8 @@
       "identity": "nq.host-role-runtime-seam.physical-capacity-c1-post-acceptance-rereview.v3",
       "path": "audits/nq-host-role-runtime-seam-v1/reviews/physical-capacity-c1-post-acceptance-rereview-v3.md",
       "sha256": "sha256:6e4ac4c136386e4a8379ca76ca9d42fd145d5de71e98ea877dab40b3a1c0d8c1",
-      "qualification_basis_sha256": "sha256:019d12c8f910b3b74b5a91b049719d424f605cbdafd539ca2b8848aa3514fd33",
-      "pre_review_projection_sha256": "sha256:ba08d7644485d9313135545fd7eb7980bec5557b82fd8ce338d97519ea2428b7"
+      "qualification_basis_sha256": "sha256:c8557b9ff37534b3e189d117a9e04cf78617cddc2cf30c48802204acf6501e3b",
+      "pre_review_projection_sha256": "sha256:805b5c2e9bef5d2c6e32c44f5af63316f1ada83210ac9ac3dd71338f7923467a"
     }
   },
   "qualification_budget": {

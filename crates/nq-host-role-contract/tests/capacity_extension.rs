@@ -661,7 +661,7 @@ fn exact_capacity_package_preserves_blocked_v1_and_qualifies_additive_v2() {
         .expect("presence-based positive v2 pair");
     assert_eq!(
         qualified.qualification_basis_sha256.as_str(),
-        "sha256:019d12c8f910b3b74b5a91b049719d424f605cbdafd539ca2b8848aa3514fd33"
+        "sha256:c8557b9ff37534b3e189d117a9e04cf78617cddc2cf30c48802204acf6501e3b"
     );
 }
 
