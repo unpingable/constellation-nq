@@ -2271,7 +2271,7 @@ fn require_native_clock_correspondence(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn governed_conformance_artifact_context(
     prepared: &PreparedGovernedInvocation,
     selection: &LaunchCorrespondenceSelection,
@@ -2836,7 +2836,7 @@ fn governed_persistence_occurrence_id(
     .map_err(|error| EngineError::Canonical(error.to_string()))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn prepare_native_governed_sql_commit(
     watcher: &WatcherConfig,
     profile: &'static dyn ProfileModule,
@@ -3052,12 +3052,13 @@ fn governed_protected_terminal_input(
     reason_code: String,
     detail: impl Into<String>,
 ) -> Result<GovernedProtectedTerminalInput, EngineError> {
+    let detail: String = detail.into();
     Ok(GovernedProtectedTerminalInput {
         execution_launch_record_id: prepared.execution_launch().record_id.clone(),
         terminal_class,
         reason: GovernedProtectedTerminalReason {
             code: reason_code,
-            detail: bounded_governed_terminal_detail(detail.into()),
+            detail: bounded_governed_terminal_detail(&detail),
         },
         launch_attempt_deadline: governed_launch_attempt_deadline(prepared)?,
         terminalized_at: timestamp(Utc::now()),
@@ -3069,7 +3070,7 @@ fn governed_protected_terminal_input(
     })
 }
 
-fn bounded_governed_terminal_detail(detail: String) -> String {
+fn bounded_governed_terminal_detail(detail: &str) -> String {
     const MAX_BYTES: usize = 2_048;
     const SUFFIX: &str = "[truncated]";
 
@@ -3093,8 +3094,8 @@ fn terminalize_native_pre_effect_refusal(
     prepared: &mut PreparedGovernedInvocation,
     refusal: NativeGovernedPreEffectRefusal,
 ) -> EngineError {
-    let code = refusal.code;
-    let detail = bounded_governed_terminal_detail(refusal.detail);
+    let NativeGovernedPreEffectRefusal { code, detail } = refusal;
+    let detail = bounded_governed_terminal_detail(&detail);
     let input = governed_protected_terminal_input(
         prepared,
         GovernedProtectedTerminalClass::PreEffectRefusal,
@@ -3119,7 +3120,7 @@ fn terminalize_native_postlaunch_failure(
     stage: &'static str,
     failure: EngineError,
 ) -> EngineError {
-    let detail = bounded_governed_terminal_detail(failure.to_string());
+    let detail = bounded_governed_terminal_detail(&failure.to_string());
     let input = governed_protected_terminal_input(
         prepared,
         GovernedProtectedTerminalClass::PostlaunchFailure,
@@ -4739,7 +4740,12 @@ impl CollectionEngine {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
+    // The `&mut after_final_seal` reborrow at each publication attempt is
+    // load-bearing: the Store takes the callback as a by-value `FnOnce`
+    // generic, and the recovery-retry loop below must be able to publish
+    // again after `GovernedProjectionRecoveryRequired`. Passing the closure
+    // itself would move it on the first attempt.
+    #[allow(clippy::too_many_lines, clippy::needless_borrows_for_generic_args)]
     fn execute_native_governed_conformance_plan(
         &mut self,
         plan: NativeGovernedExecutionPlan,
@@ -4870,7 +4876,7 @@ impl CollectionEngine {
         // This is the only provider effect in the path. Every fallible step
         // below must either reach a complete final closure or terminalize this
         // exact launch as a postlaunch custody failure.
-        let capture = self.runner.run_verified_until_boottime(
+        let capture = StdioRunner::run_verified_until_boottime(
             &verified_launch,
             &request_json,
             native_boottime_expiry_ns,
@@ -5219,7 +5225,6 @@ impl CollectionEngine {
                     // already-derived plan; never invoke the provider again.
                 }
                 Err(error) => {
-                    drop(publish);
                     return Err(handle_native_governed_publication_failure(
                         &mut prepared,
                         error,
@@ -5227,8 +5232,6 @@ impl CollectionEngine {
                 }
             }
         };
-        drop(publish);
-        drop(build_final_closure);
         let closure_id = sealed_closure_id.ok_or_else(|| {
             EngineError::Invariant(
                 "governed SQL publication completed without sealing its exact final closure"
@@ -11388,7 +11391,7 @@ fn timestamp(value: DateTime<Utc>) -> String {
 }
 
 fn deadline_timestamp(value: DateTime<Utc>) -> String {
-    if value.timestamp_subsec_nanos() % 1_000_000 == 0 {
+    if value.timestamp_subsec_nanos().is_multiple_of(1_000_000) {
         timestamp(value)
     } else {
         value.to_rfc3339_opts(SecondsFormat::Nanos, true)
@@ -13638,8 +13641,7 @@ fn status_component_v2(
         } else {
             if result.run_id.as_deref() != Some(component_id.as_str()) {
                 return Err(EngineError::Invariant(format!(
-                    "diagnostic-execution status {} embeds another run identity",
-                    component_id
+                    "diagnostic-execution status {component_id} embeds another run identity",
                 )));
             }
             governed_execution_status_projection(&result)?

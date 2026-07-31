@@ -247,7 +247,7 @@ impl StdioRunner {
         limits: &ResourceLimits,
     ) -> RunCapture {
         let started = Instant::now();
-        self.run_verified_with_deadline(
+        Self::run_verified_with_deadline(
             launch,
             request_json,
             ExecutionDeadline::Relative {
@@ -265,13 +265,12 @@ impl StdioRunner {
     /// pre-spawn work, and suspended time remains part of the budget.
     #[must_use]
     pub(crate) fn run_verified_until_boottime(
-        &self,
         launch: &VerifiedLaunch,
         request_json: &[u8],
         expires_at_ns: u64,
         limits: &ResourceLimits,
     ) -> RunCapture {
-        self.run_verified_with_deadline(
+        Self::run_verified_with_deadline(
             launch,
             request_json,
             ExecutionDeadline::LinuxBoottime { expires_at_ns },
@@ -281,7 +280,6 @@ impl StdioRunner {
 
     #[allow(clippy::too_many_lines)]
     fn run_verified_with_deadline(
-        &self,
         launch: &VerifiedLaunch,
         request_json: &[u8],
         deadline: ExecutionDeadline,
@@ -876,8 +874,12 @@ mod tests {
         let launch = VerifiedLaunch::open(&command).expect("qualify helper");
         let already_expired = linux_boottime_ns().expect("CLOCK_BOOTTIME");
 
-        let result =
-            StdioRunner.run_verified_until_boottime(&launch, b"{}", already_expired, &limits(1024));
+        let result = StdioRunner::run_verified_until_boottime(
+            &launch,
+            b"{}",
+            already_expired,
+            &limits(1024),
+        );
 
         assert_eq!(result.outcome, AcquisitionOutcome::Timeout);
         assert!(

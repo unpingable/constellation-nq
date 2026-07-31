@@ -1424,7 +1424,7 @@ fn timestamp(value: DateTime<Utc>) -> String {
 }
 
 fn deadline_timestamp(value: DateTime<Utc>) -> String {
-    if value.timestamp_subsec_nanos() % 1_000_000 == 0 {
+    if value.timestamp_subsec_nanos().is_multiple_of(1_000_000) {
         timestamp(value)
     } else {
         value.to_rfc3339_opts(SecondsFormat::Nanos, true)
