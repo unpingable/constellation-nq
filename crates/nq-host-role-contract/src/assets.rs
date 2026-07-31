@@ -1135,17 +1135,17 @@ fn validate_v3_projection_capsule_bound_manifest(value: &serde_json::Value) -> R
         (
             semantic_outcome_variants,
             50,
-            "sha256:93dbb78dbe5d71c40265f6205eb97e8c874240bbce89fdf2080ecf75df3f4bf3",
+            "sha256:3aa5484d8dbe94a2b12120e2f1601ad61e5b4651787f5f77fc3766a7a79e781b",
         ),
         (
             semantic_exclusions,
             9,
-            "sha256:b0e46c4e1fd6d6bf970950ea613dafdd62fde4795e7d32975e8bdd43614b4006",
+            "sha256:bd63df7ad3f6354245c8728d06c120646879a71bbb029d0ef6321dfc702d19f6",
         ),
         (
             descriptor_governed_open_semantics,
             276,
-            "sha256:71f3a5f29e452943fc718badec607ef79743c16449f91d7d307a633af7de6817",
+            "sha256:255bbe99f95b04fe879911e2eff388e97527529fb88caf6d1e3e870d34aa9f97",
         ),
     ];
     for (rows, expected_len, expected_digest) in exact_semantic_sections {
@@ -1161,11 +1161,11 @@ fn validate_v3_projection_capsule_bound_manifest(value: &serde_json::Value) -> R
     let expected_semantic_source_closure = [
         (
             "crates/nq-core/src/engine.rs",
-            "sha256:8255049756a8d769ec51823cf21dcb74bd32ffaccd0b1aeb89283b3d01b18709",
+            "sha256:87d86ce45da5c5830a9d83342d621e3194072e6a38107ba92108f08ebcaf3110",
         ),
         (
             "crates/nq-core/src/governed_custody_projection.rs",
-            "sha256:1612b232929caa775cf43d616a5dbac76308ccce908f93bdbd85b468c4c8b737",
+            "sha256:57f29f1b56b315f36b4a14b987e6955139e95c8386adf353323662bc5593dcab",
         ),
         (
             "crates/nq-core/src/governed_execution_binding.rs",
@@ -1177,11 +1177,11 @@ fn validate_v3_projection_capsule_bound_manifest(value: &serde_json::Value) -> R
         ),
         (
             "crates/nq-core/src/provider_intake.rs",
-            "sha256:37da7b2a816302991adffe4b58bcc0bed130bc2eb29cbf13a3ed80885de439ba",
+            "sha256:9e70cb179351714ac24675965662447aa2824999b41a51c72aa3666ffce93f86",
         ),
         (
             "crates/nq-core/src/runner.rs",
-            "sha256:412d1fc22299f672d18028ac4a6c65bf6b49431e00148355af7732fdc97057a8",
+            "sha256:6846b67e1223481053e462b5da3d773257d9131442c9aaf6cf62925423c3b74a",
         ),
         (
             "crates/nq-core/src/runtime.rs",
@@ -2432,7 +2432,7 @@ fn expected_capacity_static_assets()
             (
                 "nq.v3_projection_capsule_bound_manifest.v1",
                 "nq.v3_projection_capsule_bound_manifest.v1.json",
-                "sha256:99dcd05461f73757bfdbb51b58b0669b7a642191d15fadee9798eebfd4aab79f",
+                "sha256:e3c8b4e0aae7822e44fec6abe9e7026ccb942049ea7f1311503763b1d8a852d4",
             ),
         ),
         (
@@ -2440,7 +2440,7 @@ fn expected_capacity_static_assets()
             (
                 "nq.v3_projection_capsule_bound_manifest.v2",
                 "nq.v3_projection_capsule_bound_manifest.v2.json",
-                "sha256:d8888e795aac1542aadbcfce7cca92ad93c665bde9a50fd136a0d3e59e086d48",
+                "sha256:93b3c6a65a018924537a3d3902f6e5d7839507af3cde27fd351a0da3ad341a45",
             ),
         ),
         (
@@ -2448,7 +2448,7 @@ fn expected_capacity_static_assets()
             (
                 "nq.v3_projection_capsule_bound_qualification.v1",
                 "nq.v3_projection_capsule_bound_qualification.v1.json",
-                "sha256:b2c50192b4d63d7a7b3961c3a1a9963d56489c044633e8f0e883b41d22d4a3e3",
+                "sha256:d85fe12062727c827c2d08ccd2f62728c62c2749cb875c22dccdfbdabd26f6ab",
             ),
         ),
     ]
@@ -2665,7 +2665,7 @@ mod tests {
             .expect("exact v2 manifest and separate qualification carrier");
         assert_eq!(
             qualified.qualification_basis_sha256.as_str(),
-            "sha256:b6b2935ea1b9d103d6a4c53eacd3078829727d1680461ff2231aa9f3deec287b"
+            "sha256:e43a2d68b0b83503419cd5e1737a74c6ca0360688c30fc4e08a0372bb545e4df"
         );
 
         let historical = require_qualified_v3_projection_capsule_bound_manifest()
