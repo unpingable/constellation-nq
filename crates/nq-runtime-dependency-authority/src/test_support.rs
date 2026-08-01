@@ -367,7 +367,7 @@ impl RawAuthorityFixture {
     }
 
     /// Builds an unverified operator-signed schema-v7 cardinality disposition
-    /// over an exact zero-or-multiple sorted genesis identity set.
+    /// over an exact absent, singleton-empty, or multiple sorted genesis census.
     ///
     /// The constructor deliberately performs no cardinality, sorting, or
     /// disposition validation so hostile tests can emit invalid raw inputs.
@@ -813,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_digest_is_independent_of_cross_table_enumeration_order() {
+    fn candidate_digest_preserves_cross_table_enumeration_order() {
         let mut fixture = RawAuthorityFixture::fresh_genesis();
         fixture.append_operator_rotation();
         fixture.append_activation_successor();
@@ -821,21 +821,10 @@ mod tests {
         let mut reversed = fixture.presented.clone();
         reversed.reverse();
         let reversed = PresentedAuthoritySet::new(reversed);
-        assert_eq!(
+        assert_ne!(
             digest_presented_authority_set(&forward),
             digest_presented_authority_set(&reversed)
         );
-        let custody = fixture.custody();
-        assert!(with_verification_brand(|brand| {
-            verify_for_establishment(
-                &brand,
-                &custody,
-                &reversed,
-                None,
-                &fixture.activation_expectations(),
-            )
-            .is_ok()
-        }));
     }
 
     #[test]
@@ -1781,12 +1770,13 @@ mod tests {
     }
 
     #[test]
-    fn v7_zero_and_multiple_genesis_dispositions_are_sealed_nonmigratable_evidence() {
+    fn v7_absent_empty_and_multiple_genesis_dispositions_are_sealed_nonmigratable_evidence() {
         let fixture = RawAuthorityFixture::fresh_genesis();
         let source_digest = sha256_bytes(b"locked schema-v7 source logical state");
         let declaration = Some(sha256_bytes(b"official restore declaration"));
         for genesis_identities in [
             Vec::new(),
+            vec![String::new()],
             vec!["genesis/a".to_owned(), "genesis/b".to_owned()],
         ] {
             for disposition in [

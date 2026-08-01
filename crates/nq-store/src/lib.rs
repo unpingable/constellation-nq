@@ -621,7 +621,7 @@ pub enum StoreError {
     /// A migration classification conflicts with an existing freeze fact.
     #[error("runtime authority migration classification conflicts with the retained freeze")]
     AuthorityMigrationDispositionConflict,
-    /// A zero-or-multiple-genesis classification conflicts with its exact
+    /// An absent, singleton-empty, or multiple-genesis classification conflicts with its exact
     /// Store-derived cardinality, source, root, or retained carrier.
     #[error("runtime authority cardinality classification conflicts with the retained freeze")]
     AuthorityCardinalityDispositionConflict,
@@ -651,14 +651,14 @@ pub struct RuntimeAuthorityMigrationFreezeReceipt {
     pub classified_at: String,
 }
 
-/// Durable result of an explicit zero-or-multiple-genesis disposition.
+/// Durable result of an explicit absent, singleton-empty, or multiple-genesis disposition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeAuthorityCardinalityFreezeReceipt {
     /// Exact operator-signed disposition identity.
     pub disposition_digest: Sha256Digest,
     /// Exact non-accepted disposition.
     pub disposition: MigrationDisposition,
-    /// Number of exact Store genesis identities frozen (zero or at least two).
+    /// Number of exact Store genesis rows frozen (zero, one empty, or at least two).
     pub genesis_count: usize,
     /// Store commit time; historical only and never authority.
     pub classified_at: String,
@@ -2573,7 +2573,7 @@ impl Store {
     /// can never become a Gen4 authoritative occurrence. The only governed
     /// fresh lifecycle is `HostRoleRuntime::initialize`.
     pub fn initialize_unqualified_storage(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        Self::initialize_storage(path)
+        Self::initialize_storage(path, false)
     }
 
     /// Test-support compatibility spelling for historical storage fixtures.
@@ -2591,10 +2591,13 @@ impl Store {
     pub(crate) fn initialize_runtime_authority_candidate(
         path: impl AsRef<Path>,
     ) -> Result<Self, StoreError> {
-        Self::initialize_storage(path)
+        Self::initialize_storage(path, true)
     }
 
-    fn initialize_storage(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+    fn initialize_storage(
+        path: impl AsRef<Path>,
+        runtime_authority_initialization_candidate: bool,
+    ) -> Result<Self, StoreError> {
         let path = path.as_ref();
         let existed = path.exists();
         let existing_len = if existed {
@@ -2625,7 +2628,7 @@ impl Store {
             path: Some(path.to_path_buf()),
             writer_key: writer_session::writer_key_for_path(Some(path)),
             v7_authority_migration: None,
-            runtime_authority_initialization_candidate: true,
+            runtime_authority_initialization_candidate,
         };
         store.validate()?;
         Ok(store)
@@ -2947,6 +2950,25 @@ impl Store {
 
     /// Construct an initialized in-memory store, primarily for conformance tests.
     pub fn initialize_in_memory() -> Result<Self, StoreError> {
+        let mut connection = Connection::open_in_memory()?;
+        configure_connection(&connection, false)?;
+        initialize_connection(&mut connection)?;
+        let store = Self {
+            connection,
+            path: None,
+            writer_key: writer_session::writer_key_for_path(None),
+            v7_authority_migration: None,
+            runtime_authority_initialization_candidate: false,
+        };
+        store.validate()?;
+        Ok(store)
+    }
+
+    /// Construct an in-memory fresh-authority candidate for compile-confined
+    /// Store unit tests. Production callers must use the named runtime
+    /// initializer and cannot reach this constructor.
+    #[cfg(test)]
+    fn initialize_runtime_authority_candidate_in_memory() -> Result<Self, StoreError> {
         let mut connection = Connection::open_in_memory()?;
         configure_connection(&connection, false)?;
         initialize_connection(&mut connection)?;
@@ -4071,8 +4093,8 @@ impl Store {
         })
     }
 
-    /// Persist an authentic disposition for a schema-v7 source whose zero or
-    /// multiple genesis identities make in-place migration impossible.
+    /// Persist an authentic disposition for a schema-v7 source whose absent,
+    /// singleton-empty, or multiple genesis census makes migration impossible.
     pub(crate) fn freeze_v7_cardinality_disposition_bare(
         &mut self,
         evidence: &VerifiedV7CardinalityDisposition<'_>,
@@ -4383,9 +4405,9 @@ impl Store {
         })
     }
 
-    /// Derive the exact Store facts for an explicit zero-or-multiple-genesis
-    /// schema-v7 disposition.  A sole occurrence is deliberately rejected and
-    /// must use the ordinary migration law instead.
+    /// Derive the exact Store facts for an explicit absent, singleton-empty,
+    /// or multiple-genesis schema-v7 disposition. A sole nonempty occurrence
+    /// is deliberately rejected and must use the ordinary migration law.
     pub fn runtime_authority_cardinality_disposition_expectations(
         &self,
         domain: &str,
@@ -10133,10 +10155,11 @@ impl Store {
         StoreWriterSession::begin(self)
     }
 
-    /// Require the exact, unconsumed in-process handle returned by fresh Store
-    /// initialization.  This bit is intentionally not persisted: closing and
-    /// reopening a rootless Store cannot recreate genesis-initialization
-    /// standing and must instead follow the explicit migration/disposition
+    /// Require the exact, unconsumed in-process handle returned by the private
+    /// runtime-authority candidate initializer. This bit is intentionally not
+    /// persisted: public storage initialization and closing/reopening a
+    /// rootless Store cannot create genesis-initialization standing and must
+    /// instead follow the named initialize or explicit migration/disposition
     /// law.
     pub(crate) fn require_runtime_authority_initialization_candidate(
         &self,
@@ -14343,7 +14366,7 @@ fn genesis_identities_on_connection(connection: &Connection) -> Result<Vec<Strin
         .collect::<Result<Vec<_>, _>>()?;
     if identities
         .iter()
-        .any(|identity| identity.is_empty() || identity.chars().any(char::is_control))
+        .any(|identity| identity.chars().any(char::is_control))
         || identities.windows(2).any(|pair| pair[0] >= pair[1])
     {
         return Err(StoreError::AuthorityCardinalityDispositionConflict);
@@ -14634,7 +14657,8 @@ fn runtime_v7_cardinality_disposition_freeze_on_connection(
         CanonicalDocument::from_canonical_bytes(genesis_identities_bytes.clone())?;
     let genesis_identities: Vec<String> = serde_json::from_slice(genesis_document.as_bytes())
         .map_err(|_| StoreError::AuthorityCardinalityDispositionConflict)?;
-    if genesis_identities.len() == 1 || genesis_identities.windows(2).any(|pair| pair[0] >= pair[1])
+    if matches!(genesis_identities.as_slice(), [identity] if !identity.is_empty())
+        || genesis_identities.windows(2).any(|pair| pair[0] >= pair[1])
     {
         return Err(conflict());
     }
@@ -14779,7 +14803,7 @@ fn v7_cardinality_disposition_expectations_on_connection(
     policy_floor: u64,
 ) -> Result<V7CardinalityDispositionExpectations, StoreError> {
     let genesis_identities = genesis_identities_on_connection(connection)?;
-    if genesis_identities.len() == 1 {
+    if matches!(genesis_identities.as_slice(), [identity] if !identity.is_empty()) {
         return Err(StoreError::GenesisCardinality { found: 1 });
     }
     let source_logical_digest = Sha256Digest::parse(v7_logical_state_digest(connection)?)
@@ -18887,7 +18911,7 @@ mod tests {
     use tempfile::tempdir;
 
     use nq_runtime_dependency_authority::{
-        OperatorAuthorityRecord, resolve_for_restart,
+        OperatorAuthorityRecord, PresentedAuthoritySet, resolve_for_restart,
         test_support::{FIXTURE_DOMAIN, FIXTURE_OCCURRENCE_ID, RawAuthorityFixture},
         verify_activation_revocation, verify_for_establishment,
         verify_nonaccepted_migration_classification, verify_operator_authority_rotation,
@@ -36418,10 +36442,43 @@ mod tests {
     }
 
     #[test]
+    fn gen4_public_storage_initializers_carry_no_authority_candidate_standing() {
+        let directory = tempdir().expect("storage-only initializer directory");
+        let database = directory.path().join("unqualified.db");
+        let unqualified =
+            Store::initialize_unqualified_storage(&database).expect("unqualified Store");
+        let before = authority_file_family(&database);
+        assert!(matches!(
+            unqualified.require_runtime_authority_initialization_candidate(),
+            Err(StoreError::AuthorityInitializationCandidateRequired)
+        ));
+        drop(unqualified);
+        assert_eq!(authority_file_family(&database), before);
+
+        let in_memory = Store::initialize_in_memory().expect("in-memory storage-only Store");
+        assert!(matches!(
+            in_memory.require_runtime_authority_initialization_candidate(),
+            Err(StoreError::AuthorityInitializationCandidateRequired)
+        ));
+
+        let mut compile_confined = Store::initialize_runtime_authority_candidate_in_memory()
+            .expect("compile-confined authority candidate");
+        compile_confined
+            .require_runtime_authority_initialization_candidate()
+            .expect("private candidate has one-use standing");
+        compile_confined.consume_runtime_authority_initialization_candidate();
+        assert!(matches!(
+            compile_confined.require_runtime_authority_initialization_candidate(),
+            Err(StoreError::AuthorityInitializationCandidateRequired)
+        ));
+    }
+
+    #[test]
     fn gen4_fresh_establishment_is_atomic_receipt_pinned_and_replay_is_byte_read_only() {
         let directory = tempdir().expect("authority directory");
         let database = directory.path().join("fresh-authority.db");
-        let mut store = Store::initialize_unqualified_storage(&database).expect("fresh Store");
+        let mut store = Store::initialize_runtime_authority_candidate(&database)
+            .expect("fresh authority candidate");
         let fixture = RawAuthorityFixture::fresh_genesis();
         let receipt = establish_authority_fixture(&mut store, &fixture)
             .expect("fresh authority establishment");
@@ -36473,8 +36530,8 @@ mod tests {
             ("authority-candidate", 3_u8),
         ] {
             let database = directory.path().join(format!("replay-{label}.db"));
-            let mut store =
-                Store::initialize_unqualified_storage(&database).expect("fresh replay Store");
+            let mut store = Store::initialize_runtime_authority_candidate(&database)
+                .expect("fresh replay authority candidate");
             let fixture = RawAuthorityFixture::fresh_genesis();
             establish_authority_fixture(&mut store, &fixture).expect("establish replay fixture");
             let mut candidate_fixture = RawAuthorityFixture::fresh_genesis();
@@ -36615,10 +36672,11 @@ mod tests {
     }
 
     #[test]
-    fn gen4_zero_and_multiple_genesis_dispositions_freeze_without_migration() {
+    fn gen4_absent_empty_and_multiple_genesis_dispositions_freeze_without_migration() {
         let directory = tempdir().expect("cardinality disposition directory");
         for (cardinality_label, genesis_ids) in [
             ("zero", Vec::<&str>::new()),
+            ("empty", vec![""]),
             (
                 "multiple",
                 vec![
@@ -36677,6 +36735,164 @@ mod tests {
                     "frozen cardinality source changed after writer refusal"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn gen4_empty_genesis_observed_freeze_preserves_root_and_refuses_replay() {
+        let directory = tempdir().expect("empty rooted disposition directory");
+        let anchor = sha256_bytes(b"empty-genesis historical root");
+        let (source, backup) = exact_v7_authority_source(
+            directory.path(),
+            "empty-rooted-observed",
+            &[""],
+            Some(&anchor),
+        );
+        let fixture = RawAuthorityFixture::fresh_genesis();
+        let mut store = Store::open_v7_runtime_authority_migration_source(&source, &backup)
+            .expect("open empty rooted source");
+        let root_before: (String, String) = store
+            .connection
+            .query_row(
+                "SELECT trust_anchor_id, established_at
+                 FROM runtime_dependency_trust_roots WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("historical root row");
+        let expectations = store
+            .runtime_authority_cardinality_disposition_expectations(FIXTURE_DOMAIN, 1)
+            .expect("derive singleton-empty facts");
+        assert_eq!(expectations.genesis_identities, vec![String::new()]);
+        assert_eq!(
+            expectations.old_root_state,
+            OldRootState::Rooted {
+                trust_anchor_id: anchor,
+            }
+        );
+        classify_cardinality_authority_fixture(
+            &mut store,
+            &fixture,
+            MigrationDisposition::Observed,
+        )
+        .expect("observed disposition freezes singleton-empty source");
+        let root_after: (String, String) = store
+            .connection
+            .query_row(
+                "SELECT trust_anchor_id, established_at
+                 FROM runtime_dependency_trust_roots WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("frozen historical root row");
+        assert_eq!(root_after, root_before);
+        store.validate().expect("empty rooted freeze validates");
+
+        let frozen = authority_file_family(&source);
+        assert!(matches!(
+            classify_cardinality_authority_fixture(
+                &mut store,
+                &fixture,
+                MigrationDisposition::Observed,
+            ),
+            Err(StoreError::AuthorityMigrationPreflightMissing)
+        ));
+        assert!(matches!(
+            store.begin_writer_session(),
+            Err(StoreError::AuthorityEvidenceFrozen(_))
+        ));
+        drop(store);
+        assert_eq!(authority_file_family(&source), frozen);
+
+        let mut reopened = Store::open(&source).expect("reopen frozen empty source");
+        let reopened_before = authority_file_family(&source);
+        assert!(matches!(
+            reopened.begin_writer_session(),
+            Err(StoreError::AuthorityEvidenceFrozen(_))
+        ));
+        drop(reopened);
+        assert_eq!(authority_file_family(&source), reopened_before);
+    }
+
+    #[test]
+    fn gen4_declared_restore_empty_genesis_observed_freezes_without_writes() {
+        let directory = tempdir().expect("restored empty disposition directory");
+        let (_source, backup) =
+            exact_v7_authority_source(directory.path(), "restored-empty-observed", &[""], None);
+        let restored = directory.path().join("restored-empty.db");
+        Store::backup_v7_verified(&backup.path, &restored)
+            .expect("copy exact empty-genesis v7 bytes");
+        let declaration = publish_test_restore_declaration(&backup.path, &restored);
+        let fixture = RawAuthorityFixture::fresh_genesis();
+        let mut store = Store::open_v7_runtime_authority_migration_source(&restored, &backup)
+            .expect("open declared restored empty source");
+        let expectations = store
+            .runtime_authority_cardinality_disposition_expectations(FIXTURE_DOMAIN, 1)
+            .expect("derive restored singleton-empty facts");
+        assert_eq!(expectations.genesis_identities, vec![String::new()]);
+        assert_eq!(
+            expectations.restore_declaration_digest,
+            Some(declaration.declaration_digest)
+        );
+        classify_cardinality_authority_fixture(
+            &mut store,
+            &fixture,
+            MigrationDisposition::Observed,
+        )
+        .expect("freeze declared restored empty source");
+        store.validate().expect("restored empty freeze validates");
+        let frozen = authority_file_family(&restored);
+        assert!(matches!(
+            store.begin_writer_session(),
+            Err(StoreError::AuthorityEvidenceFrozen(_))
+        ));
+        drop(store);
+        assert!(matches!(
+            Store::open_v7_runtime_authority_migration_source(&restored, &backup),
+            Err(StoreError::SchemaVersionMismatch { .. })
+        ));
+        assert_eq!(authority_file_family(&restored), frozen);
+    }
+
+    #[test]
+    fn gen4_v7_genesis_census_distinguishes_absent_empty_sole_and_multiple() {
+        let directory = tempdir().expect("genesis census directory");
+        for (label, genesis_ids, expected) in [
+            ("absent", Vec::<&str>::new(), Some(Vec::<String>::new())),
+            ("empty", vec![""], Some(vec![String::new()])),
+            ("sole", vec![FIXTURE_OCCURRENCE_ID], None),
+            (
+                "multiple",
+                vec![FIXTURE_OCCURRENCE_ID, "store-occurrence/second"],
+                Some(vec![
+                    FIXTURE_OCCURRENCE_ID.to_owned(),
+                    "store-occurrence/second".to_owned(),
+                ]),
+            ),
+        ] {
+            let (source, backup) =
+                exact_v7_authority_source(directory.path(), label, &genesis_ids, None);
+            let before = authority_file_family(&source);
+            let store = Store::open_v7_runtime_authority_migration_source(&source, &backup)
+                .expect("open exact census source");
+            let actual = store
+                .runtime_authority_cardinality_disposition_expectations(FIXTURE_DOMAIN, 1)
+                .map(|facts| facts.genesis_identities);
+            match expected {
+                Some(expected) => {
+                    assert_eq!(actual.expect("classifiable census"), expected, "{label}");
+                }
+                None => assert!(matches!(
+                    actual,
+                    Err(StoreError::GenesisCardinality { found: 1 })
+                )),
+            }
+            drop(store);
+            assert_eq!(
+                authority_file_family(&source),
+                before,
+                "{label} census wrote the source"
+            );
         }
     }
 
@@ -37479,7 +37695,8 @@ mod tests {
     fn gen4_establishment_receipt_failure_rolls_back_genesis_root_and_receipt() {
         let directory = tempdir().expect("authority directory");
         let database = directory.path().join("rollback-authority.db");
-        let mut store = Store::initialize_unqualified_storage(&database).expect("fresh Store");
+        let mut store = Store::initialize_runtime_authority_candidate(&database)
+            .expect("fresh authority candidate");
         store
             .connection
             .execute_batch(
@@ -37522,7 +37739,8 @@ mod tests {
 
     #[test]
     fn gen4_root_and_receipt_boundary_refuses_orphaned_either_side() {
-        let mut missing_receipt = Store::initialize_in_memory().expect("receipt fixture");
+        let mut missing_receipt =
+            Store::initialize_runtime_authority_candidate_in_memory().expect("receipt fixture");
         establish_authority_fixture(&mut missing_receipt, &RawAuthorityFixture::fresh_genesis())
             .expect("establish receipt fixture");
         missing_receipt
@@ -37537,7 +37755,8 @@ mod tests {
             Err(StoreError::EstablishmentReceiptMissing)
         ));
 
-        let mut missing_root = Store::initialize_in_memory().expect("root fixture");
+        let mut missing_root =
+            Store::initialize_runtime_authority_candidate_in_memory().expect("root fixture");
         establish_authority_fixture(&mut missing_root, &RawAuthorityFixture::fresh_genesis())
             .expect("establish root fixture");
         missing_root
@@ -37558,7 +37777,8 @@ mod tests {
 
     #[test]
     fn gen4_verified_authority_events_are_family_resident_and_restart_resolved() {
-        let mut store = Store::initialize_in_memory().expect("authority Store");
+        let mut store =
+            Store::initialize_runtime_authority_candidate_in_memory().expect("authority Store");
         let mut fixture = RawAuthorityFixture::fresh_genesis();
         establish_authority_fixture(&mut store, &fixture).expect("authority establishment");
         let custody = fixture.custody();
@@ -37647,7 +37867,8 @@ mod tests {
             ("revocation", "runtime_activation_revocations", 2_u8),
         ] {
             let database = directory.path().join(format!("restart-race-{label}.db"));
-            let mut store = Store::initialize_unqualified_storage(&database).expect("race Store");
+            let mut store = Store::initialize_runtime_authority_candidate(&database)
+                .expect("race authority candidate");
             store
                 .connection
                 .pragma_update(None, "journal_mode", "WAL")
@@ -37696,7 +37917,8 @@ mod tests {
     fn gen4_stale_verified_event_refuses_after_store_reenumeration_without_appending() {
         let directory = tempdir().expect("stale evidence directory");
         let database = directory.path().join("stale-evidence.db");
-        let mut store = Store::initialize_unqualified_storage(&database).expect("authority Store");
+        let mut store = Store::initialize_runtime_authority_candidate(&database)
+            .expect("authority candidate Store");
         let base = RawAuthorityFixture::fresh_genesis();
         establish_authority_fixture(&mut store, &base).expect("authority establishment");
 
@@ -37765,8 +37987,93 @@ mod tests {
     }
 
     #[test]
+    fn gen4_reordered_candidate_correspondence_refuses_without_writes() {
+        let directory = tempdir().expect("ordered correspondence directory");
+        let database = directory.path().join("ordered-correspondence.db");
+        let mut store = Store::initialize_runtime_authority_candidate(&database)
+            .expect("ordered authority candidate");
+        let mut fixture = RawAuthorityFixture::fresh_genesis();
+        establish_authority_fixture(&mut store, &fixture).expect("authority establishment");
+        let custody = fixture.custody();
+        let expectations = fixture.activation_expectations();
+
+        let current = store.runtime_authority_presented_set().expect("empty set");
+        let rotation = fixture.append_operator_rotation();
+        store
+            .with_runtime_authority_writer_session(|brand, session| {
+                let verified = verify_operator_authority_rotation(
+                    brand,
+                    &custody,
+                    &current,
+                    &rotation,
+                    None,
+                    &expectations,
+                )?;
+                session.append_runtime_operator_authority_rotation(&verified)
+            })
+            .expect("append rotation");
+
+        let current = store
+            .runtime_authority_presented_set()
+            .expect("rotation set");
+        let successor = fixture.append_activation_successor();
+        store
+            .with_runtime_authority_writer_session(|brand, session| {
+                let verified = verify_resident_activation_successor(
+                    brand,
+                    &custody,
+                    &current,
+                    &successor,
+                    None,
+                    &expectations,
+                )?;
+                session.append_runtime_resident_activation_successor(&verified)
+            })
+            .expect("append successor");
+
+        let current = store
+            .runtime_authority_presented_set()
+            .expect("canonical mixed-family order");
+        assert_eq!(current.records().len(), 2);
+        let mut reversed = current.records().to_vec();
+        reversed.reverse();
+        let reversed = PresentedAuthoritySet::new(reversed);
+        let proposed = fixture.append_operator_rotation();
+        let before = authority_file_family(&database);
+        let result = store.with_runtime_authority_writer_session(|brand, session| {
+            let verified = verify_operator_authority_rotation(
+                brand,
+                &custody,
+                &reversed,
+                &proposed,
+                None,
+                &expectations,
+            )?;
+            session.append_runtime_operator_authority_rotation(&verified)
+        });
+        assert!(matches!(
+            result,
+            Err(StoreError::AuthorityEventCorrespondenceMismatch)
+        ));
+        assert_eq!(
+            store
+                .runtime_authority_presented_set()
+                .expect("unchanged canonical enumeration")
+                .records()
+                .len(),
+            2
+        );
+        assert_eq!(
+            authority_file_family(&database),
+            before,
+            "reordered sealed evidence changed Store bytes or sidecars"
+        );
+    }
+
+    #[test]
     fn runtime_checkpoint_cannot_select_or_replace_the_store_bootstrap_root() {
-        let mut store = Store::initialize_in_memory().expect("store initializes");
+        let mut store = Store::initialize_runtime_authority_candidate_in_memory()
+            .expect("authority candidate initializes");
         let batch = initial_runtime_batch(vec![runtime_record(
             "root-required",
             "nq.provider_intake.v1",
@@ -37813,7 +38120,8 @@ mod tests {
 
     #[test]
     fn runtime_ledger_is_globally_sequenced_replayable_and_snapshot_pinned() {
-        let mut store = Store::initialize_in_memory().expect("store initializes");
+        let mut store = Store::initialize_runtime_authority_candidate_in_memory()
+            .expect("authority candidate initializes");
         let batch = initial_runtime_batch(vec![
             runtime_record(
                 "request",
@@ -37876,7 +38184,8 @@ mod tests {
 
     #[test]
     fn runtime_checkpoint_lookup_is_exact_and_never_falls_forward() {
-        let mut store = Store::initialize_in_memory().expect("store initializes");
+        let mut store = Store::initialize_runtime_authority_candidate_in_memory()
+            .expect("authority candidate initializes");
         let first = initial_runtime_batch(vec![runtime_record(
             "checkpoint-exact-first",
             "nq.provider_intake.v1",
@@ -37926,7 +38235,8 @@ mod tests {
 
     #[test]
     fn checkpoint_dependency_closure_is_deduplicated_and_exactly_reopened() {
-        let mut store = Store::initialize_in_memory().expect("store initializes");
+        let mut store = Store::initialize_runtime_authority_candidate_in_memory()
+            .expect("authority candidate initializes");
         let first = initial_runtime_batch(vec![runtime_record(
             "dependency-dedupe-first",
             "nq.provider_intake.v1",
@@ -37989,7 +38299,8 @@ mod tests {
 
     #[test]
     fn checkpoint_dependency_bytes_preserve_unavailable_and_corrupt_states() {
-        let mut unavailable = Store::initialize_in_memory().expect("unavailable store");
+        let mut unavailable = Store::initialize_runtime_authority_candidate_in_memory()
+            .expect("unavailable authority candidate");
         let unavailable_batch = initial_runtime_batch(vec![runtime_record(
             "dependency-unavailable",
             "nq.provider_intake.v1",
@@ -38040,7 +38351,8 @@ mod tests {
             Some(RuntimeDependencyGenerationByteState::CommittedUnavailable)
         ));
 
-        let mut corrupt = Store::initialize_in_memory().expect("corrupt store");
+        let mut corrupt = Store::initialize_runtime_authority_candidate_in_memory()
+            .expect("corrupt authority candidate");
         let corrupt_batch = initial_runtime_batch(vec![runtime_record(
             "dependency-corrupt",
             "nq.provider_intake.v1",
@@ -38116,7 +38428,8 @@ mod tests {
 
     #[test]
     fn missing_dependency_commitment_and_new_anchor_binding_substitution_fail_closed() {
-        let mut missing = Store::initialize_in_memory().expect("missing store");
+        let mut missing = Store::initialize_runtime_authority_candidate_in_memory()
+            .expect("missing authority candidate");
         let missing_batch = initial_runtime_batch(vec![runtime_record(
             "dependency-missing",
             "nq.provider_intake.v1",
@@ -38166,7 +38479,8 @@ mod tests {
         ));
         assert!(missing.validate().is_err());
 
-        let mut substituted = Store::initialize_in_memory().expect("substitution store");
+        let mut substituted = Store::initialize_runtime_authority_candidate_in_memory()
+            .expect("substitution authority candidate");
         let first = initial_runtime_batch(vec![runtime_record(
             "anchor-substitution-first",
             "nq.provider_intake.v1",
@@ -38258,7 +38572,8 @@ mod tests {
             );
         }
 
-        let mut store = Store::initialize_in_memory().expect("store initializes");
+        let mut store = Store::initialize_runtime_authority_candidate_in_memory()
+            .expect("authority candidate initializes");
         let admitted = initial_runtime_batch(
             CORRESPONDENCE_SCHEMAS
                 .into_iter()
@@ -38315,7 +38630,8 @@ mod tests {
 
     #[test]
     fn runtime_ledger_refuses_schema_and_identity_collisions_atomically() {
-        let mut store = Store::initialize_in_memory().expect("store initializes");
+        let mut store = Store::initialize_runtime_authority_candidate_in_memory()
+            .expect("authority candidate initializes");
         let first = initial_runtime_batch(vec![runtime_record(
             "request",
             "nq.diagnostic_invocation_request.v1",
@@ -38425,7 +38741,8 @@ mod tests {
 
     #[test]
     fn runtime_lookup_is_disposable_detectable_and_rebuildable() {
-        let mut store = Store::initialize_in_memory().expect("store initializes");
+        let mut store = Store::initialize_runtime_authority_candidate_in_memory()
+            .expect("authority candidate initializes");
         let batch = initial_runtime_batch(vec![runtime_record(
             "role",
             "nq.role_manifest.v1",
@@ -38475,7 +38792,8 @@ mod tests {
 
     #[test]
     fn runtime_ledger_detects_root_or_canonical_byte_substitution() {
-        let mut store = Store::initialize_in_memory().expect("store initializes");
+        let mut store = Store::initialize_runtime_authority_candidate_in_memory()
+            .expect("authority candidate initializes");
         let batch = initial_runtime_batch(vec![runtime_record(
             "request",
             "nq.diagnostic_invocation_request.v1",

@@ -382,6 +382,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "nq-host-role-runtime"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ed25519-dalek",
+ "hex",
+ "nix",
+ "nq-host-role-contract",
+ "nq-host-role-dependency-custody",
+ "nq-protocol",
+ "nq-runtime-dependency-authority",
+ "nq-store",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "nq-protocol"
 version = "0.1.0"
 dependencies = [
@@ -431,6 +449,7 @@ dependencies = [
 name = "nq-store-gen4-default-surface"
 version = "0.0.0"
 dependencies = [
+ "nq-host-role-runtime",
  "nq-runtime-dependency-authority",
  "nq-store",
 ]

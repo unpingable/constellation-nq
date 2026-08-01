@@ -186,7 +186,7 @@ impl PresentedAuthorityRecord {
     }
 }
 
-/// Complete, order-independent authority records presented by Store enumeration.
+/// Complete authority records in the Store's exact canonical enumeration order.
 #[derive(Debug, Default)]
 pub struct PresentedAuthoritySet {
     records: Vec<PresentedAuthorityRecord>,
@@ -199,8 +199,9 @@ impl PresentedAuthoritySet {
         Self { records }
     }
 
-    /// Returns the presented post-genesis records. Input order carries no
-    /// authority meaning; digesting and resolution canonicalize independently.
+    /// Returns the presented post-genesis records in their exact bound order.
+    /// Resolution never uses this order to select authority, but Store
+    /// correspondence refuses reordered canonical content.
     #[must_use]
     pub fn records(&self) -> &[PresentedAuthorityRecord] {
         &self.records
@@ -842,7 +843,7 @@ impl MigrationReceipt {
     }
 }
 
-/// Computes the exact order-independent candidate-set binding over Store-resident
+/// Computes the exact order-sensitive candidate-set binding over Store-resident
 /// post-genesis records only.
 ///
 /// This function deliberately makes no validity or completeness claim.  The
@@ -856,7 +857,7 @@ impl MigrationReceipt {
 pub fn digest_presented_authority_set(
     presented: &PresentedAuthoritySet,
 ) -> Result<Sha256Digest, AuthorityError> {
-    let mut canonical_items = Vec::new();
+    let mut framed_items = Vec::new();
     for record in presented.records() {
         let item = framed_bytes(
             PRESENTED_ITEM_DOMAIN,
@@ -866,11 +867,6 @@ pub fn digest_presented_authority_set(
                 ("canonical_bytes", record.bytes()),
             ],
         )?;
-        canonical_items.push(item);
-    }
-    canonical_items.sort_unstable();
-    let mut framed_items = Vec::new();
-    for item in canonical_items {
         let length = u64::try_from(item.len()).map_err(|_| AuthorityError::FramingOverflow)?;
         framed_items.extend_from_slice(&length.to_be_bytes());
         framed_items.extend_from_slice(&item);

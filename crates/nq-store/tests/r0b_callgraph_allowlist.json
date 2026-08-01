@@ -79,7 +79,7 @@
       {
         "path": "crates/nq-host-role-runtime/src/runtime.rs",
         "owner": "HostRoleRuntime",
-        "name": "initialize_from_unqualified_store"
+        "name": "initialize"
       },
       {
         "path": "crates/nq-host-role-runtime/src/runtime.rs",
@@ -91,7 +91,7 @@
       {
         "path": "crates/nq-host-role-runtime/src/runtime.rs",
         "owner": "HostRoleRuntime",
-        "name": "initialize_from_unqualified_store"
+        "name": "initialize"
       },
       {
         "path": "crates/nq-host-role-runtime/src/runtime.rs",
@@ -137,6 +137,16 @@
       "path": "crates/nq-store/src/lib.rs",
       "owner": "Store",
       "name": "initialize_unqualified_storage"
+    },
+    "in_memory_storage_initializer": {
+      "path": "crates/nq-store/src/lib.rs",
+      "owner": "Store",
+      "name": "initialize_in_memory"
+    },
+    "storage_initializer_backend": {
+      "path": "crates/nq-store/src/lib.rs",
+      "owner": "Store",
+      "name": "initialize_storage"
     },
     "evidence_type": "ResolvedControllingActivation",
     "bounded_evidence_verifiers": [

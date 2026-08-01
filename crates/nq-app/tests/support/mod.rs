@@ -65,18 +65,6 @@ pub fn initialize_gen4_test_store(config_path: &Path) {
     )
     .expect("helper runtime mode");
 
-    let mut store = Store::initialize_unqualified_storage(&config.database_path)
-        .expect("initialize Gen4 test Store");
-    {
-        let mut session = store
-            .begin_writer_session()
-            .expect("profile writer session");
-        for profile in nq_profiles::all_profiles() {
-            nq_core::engine::append_profile_descriptor(&mut session, *profile)
-                .expect("compiled profile descriptor");
-        }
-    }
-
     let dependencies =
         authenticated_runtime_dependencies(83, Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let authority = RawAuthorityFixture::fresh_genesis_with_anchor(
@@ -94,13 +82,19 @@ pub fn initialize_gen4_test_store(config_path: &Path) {
         domain: FIXTURE_DOMAIN.to_owned(),
         policy_floor: 1,
     };
-    HostRoleRuntime::initialize_from_unqualified_store(
-        &mut store,
-        &dependencies,
-        &custody,
-        &resident,
-    )
-    .expect("establish Gen4 test authority");
+    let mut store =
+        HostRoleRuntime::initialize(&config.database_path, dependencies, &custody, &resident)
+            .expect("initialize governed Gen4 test Store")
+            .into_store();
+    {
+        let mut session = store
+            .begin_writer_session()
+            .expect("profile writer session");
+        for profile in nq_profiles::all_profiles() {
+            nq_core::engine::append_profile_descriptor(&mut session, *profile)
+                .expect("compiled profile descriptor");
+        }
+    }
 
     let mut session = store.begin_writer_session().expect("status writer session");
     nq_core::engine::record_component_status(

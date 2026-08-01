@@ -73,6 +73,7 @@ REQUIRED_GROUP_PATHS = {
             "Cargo.lock",
             "Cargo.toml",
             "crates/nq-app/Cargo.toml",
+            "crates/nq-app/src/archive.rs",
             "crates/nq-app/src/cli.rs",
             "crates/nq-core/Cargo.toml",
             "crates/nq-core/src/lib.rs",
@@ -80,7 +81,10 @@ REQUIRED_GROUP_PATHS = {
             "crates/nq-host-role-contract/src/assets.rs",
             "crates/nq-host-role-runtime/Cargo.toml",
             "crates/nq-host-role-runtime/src/dependency.rs",
+            "crates/nq-host-role-runtime/src/facade.rs",
+            "crates/nq-host-role-runtime/src/inspector.rs",
             "crates/nq-host-role-runtime/src/lib.rs",
+            "crates/nq-host-role-runtime/src/prelaunch.rs",
             "crates/nq-host-role-runtime/src/runtime.rs",
             "crates/nq-runtime-dependency-authority/Cargo.toml",
             "crates/nq-store/Cargo.toml",
@@ -113,6 +117,12 @@ REQUIRED_GROUP_PATHS = {
 }
 
 REQUIRED_CLOSED_PREFIXES = {
+    "host-role-runtime-all-rust-sources": {
+        "prefix": "crates/nq-host-role-runtime/src/",
+        "suffixes": (".rs",),
+        "minimum_files": 7,
+        "paired_extensions": False,
+    },
     "authority-crate-all-rust-sources": {
         "prefix": "crates/nq-runtime-dependency-authority/src/",
         "suffixes": (".rs",),
@@ -142,6 +152,12 @@ REQUIRED_CLOSED_PREFIXES = {
         "suffixes": (".rs", ".stderr"),
         "minimum_files": 2,
         "paired_extensions": True,
+    },
+    "isolated-gen4-surfaces": {
+        "prefix": "crates/nq-store/tests/isolated/gen4-",
+        "suffixes": (),
+        "minimum_files": 6,
+        "paired_extensions": False,
     },
     "isolated-r0b-surfaces": {
         "prefix": "crates/nq-store/tests/isolated/r0b-",
@@ -611,7 +627,49 @@ def expand_pin_set(
     unavailable = sorted(set(pins) - set(available))
     if unavailable:
         refuse(f"required pin paths are unavailable: {unavailable}")
+    assert_semantic_pin_closure(pins, available)
     return pins
+
+
+def semantic_required_paths(available_paths: Iterable[str]) -> set[str]:
+    """Discover known semantic closures independently of manifest groups.
+
+    This second line of defense prevents a self-consistent manifest/policy edit
+    from omitting separately stored runtime modules, the archive migration
+    specimen, or either external Gen4 feature surface.
+    """
+    available = set(available_paths)
+    runtime_sources = {
+        path
+        for path in available
+        if path.startswith("crates/nq-host-role-runtime/src/")
+        and path.endswith(".rs")
+    }
+    required_runtime_root = "crates/nq-host-role-runtime/src/facade.rs"
+    if required_runtime_root not in runtime_sources or len(runtime_sources) < 7:
+        refuse("semantic runtime-source discovery is incomplete")
+
+    archive_specimen = "crates/nq-app/src/archive.rs"
+    if archive_specimen not in available:
+        refuse("semantic archive/restore specimen is unavailable")
+
+    isolated_surfaces = {
+        path
+        for path in available
+        if path.startswith("crates/nq-store/tests/isolated/gen4-")
+    }
+    if len(isolated_surfaces) < 6:
+        refuse("semantic Gen4 isolated-surface discovery is incomplete")
+
+    return runtime_sources | {archive_specimen} | isolated_surfaces
+
+
+def assert_semantic_pin_closure(
+    pins: Mapping[str, set[str]], available_paths: Iterable[str]
+) -> None:
+    missing = sorted(semantic_required_paths(available_paths) - set(pins))
+    if missing:
+        refuse(f"semantic pin closure omits required paths: {missing}")
 
 
 def assert_resolver_continuity(data: bytes) -> str:

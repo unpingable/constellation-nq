@@ -1,8 +1,43 @@
+use std::path::Path;
+
+use nq_host_role_runtime::{
+    GenesisAuthorityCustody as RuntimeGenesisAuthorityCustody, HostRoleRuntime,
+    RuntimeAuthorityResidentBinding, RuntimeDependencies,
+};
 use nq_runtime_dependency_authority::{
     ActivationExpectations, GenesisAuthorityCustody, PresentedAuthoritySet, VerificationBrand,
     test_support::RawAuthorityFixture, verify_for_establishment,
 };
 use nq_store::{Store, StoreError, StoreWriterSession};
+
+fn attempt_unqualified_two_step(
+    path: &Path,
+    dependencies: &RuntimeDependencies,
+    custody: &RuntimeGenesisAuthorityCustody,
+    resident: &RuntimeAuthorityResidentBinding,
+) {
+    let mut store = Store::initialize_unqualified_storage(path).unwrap();
+    let _ = HostRoleRuntime::initialize_from_unqualified_store(
+        &mut store,
+        dependencies,
+        custody,
+        resident,
+    );
+}
+
+fn attempt_in_memory_two_step(
+    dependencies: &RuntimeDependencies,
+    custody: &RuntimeGenesisAuthorityCustody,
+    resident: &RuntimeAuthorityResidentBinding,
+) {
+    let mut store = Store::initialize_in_memory().unwrap();
+    let _ = HostRoleRuntime::initialize_from_unqualified_store(
+        &mut store,
+        dependencies,
+        custody,
+        resident,
+    );
+}
 
 fn attempt_feature_fixture_establishment<'store, 'id>(
     brand: &VerificationBrand<'id>,

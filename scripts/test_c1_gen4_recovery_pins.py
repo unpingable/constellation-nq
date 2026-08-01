@@ -105,10 +105,42 @@ class C1Gen4RecoveryPinAuditorTest(unittest.TestCase):
                 "crates/nq-store/tests/ui/writer/paired.rs",
                 "crates/nq-store/tests/ui/writer/paired.stderr",
                 "crates/nq-store/tests/isolated/r0b-control/Cargo.toml",
+                "crates/nq-store/tests/isolated/gen4-default-surface/Cargo.lock",
+                "crates/nq-store/tests/isolated/gen4-default-surface/Cargo.toml",
+                "crates/nq-store/tests/isolated/gen4-default-surface/src/main.rs",
+                "crates/nq-store/tests/isolated/gen4-all-features-surface/Cargo.lock",
+                "crates/nq-store/tests/isolated/gen4-all-features-surface/Cargo.toml",
+                "crates/nq-store/tests/isolated/gen4-all-features-surface/src/main.rs",
             }
         )
         with self.assertRaisesRegex(auditor.Refusal, "incomplete diagnostic pair"):
             auditor.expand_pin_set(inventory, available)
+
+    def test_semantic_runtime_source_omission_refuses_independently(self) -> None:
+        inventory = auditor.validate_inventory(raw_inventory())
+        available = auditor.worktree_paths(ROOT)
+        pins = auditor.expand_pin_set(inventory, available)
+        del pins["crates/nq-host-role-runtime/src/facade.rs"]
+        with self.assertRaisesRegex(auditor.Refusal, "semantic pin closure omits"):
+            auditor.assert_semantic_pin_closure(pins, available)
+
+    def test_semantic_archive_specimen_omission_refuses_independently(self) -> None:
+        inventory = auditor.validate_inventory(raw_inventory())
+        available = auditor.worktree_paths(ROOT)
+        pins = auditor.expand_pin_set(inventory, available)
+        del pins["crates/nq-app/src/archive.rs"]
+        with self.assertRaisesRegex(auditor.Refusal, "semantic pin closure omits"):
+            auditor.assert_semantic_pin_closure(pins, available)
+
+    def test_semantic_gen4_isolated_omission_refuses_independently(self) -> None:
+        inventory = auditor.validate_inventory(raw_inventory())
+        available = auditor.worktree_paths(ROOT)
+        pins = auditor.expand_pin_set(inventory, available)
+        del pins[
+            "crates/nq-store/tests/isolated/gen4-default-surface/src/main.rs"
+        ]
+        with self.assertRaisesRegex(auditor.Refusal, "semantic pin closure omits"):
+            auditor.assert_semantic_pin_closure(pins, available)
 
     def test_resolver_mutation_is_a_stop_not_a_repin(self) -> None:
         with self.assertRaisesRegex(auditor.Refusal, "resolver continuity STOP"):

@@ -288,12 +288,32 @@ impl HostRoleRuntime {
         let established = (|| -> Result<Store> {
             let mut store = Store::initialize_runtime_authority_candidate(&path)?;
             created = true;
-            Self::initialize_from_unqualified_store(
-                &mut store,
-                &dependencies,
-                authority_custody,
-                resident,
+            store.require_runtime_authority_initialization_candidate()?;
+            let trust_root = dependencies.custody().trust_anchor_id()?;
+            let expectations = fresh_authority_expectations(resident, trust_root);
+            let presented = PresentedAuthoritySet::default();
+
+            // Cryptographic and tuple refusal occurs before any authority
+            // write. Store repeats exact verification against its own
+            // enumeration inside the establishment transaction.
+            with_verification_brand(|brand| {
+                verify_for_establishment(&brand, authority_custody, &presented, None, &expectations)
+                    .map(drop)
+            })?;
+            store.with_runtime_authority_writer_session(
+                |brand, session| -> std::result::Result<(), StoreError> {
+                    let resolved = verify_for_establishment(
+                        brand,
+                        authority_custody,
+                        &presented,
+                        None,
+                        &expectations,
+                    )?;
+                    session.establish_runtime_dependency_trust_root(&resolved)?;
+                    Ok(())
+                },
             )?;
+            store.consume_runtime_authority_initialization_candidate();
             Ok(store)
         })();
         let store = match established {
@@ -306,56 +326,6 @@ impl HostRoleRuntime {
             }
         };
         Self::from_store(store, dependencies, authority_custody, resident)
-    }
-
-    /// Establishes genesis authority on the exact unconsumed Store handle
-    /// returned by fresh storage initialization.
-    ///
-    /// This is the single shared governed initialization implementation used
-    /// by [`Self::initialize`] and by downstream qualification fixtures that
-    /// must populate non-authority Store state before establishment.  It
-    /// requires the complete authenticated dependency closure, genesis
-    /// custody, and resident tuple; it exposes no brand, writer session, or
-    /// verified evidence.  A closed-and-reopened rootless Store cannot call
-    /// this route because fresh initialization standing is intentionally
-    /// in-memory and one-use.
-    ///
-    /// # Errors
-    ///
-    /// Refuses a reopened or consumed Store handle, dependency substitution,
-    /// invalid genesis custody, resident mismatch, or any atomic
-    /// genesis/root/receipt establishment failure.
-    pub fn initialize_from_unqualified_store(
-        store: &mut Store,
-        dependencies: &RuntimeDependencies,
-        authority_custody: &GenesisAuthorityCustody,
-        resident: &RuntimeAuthorityResidentBinding,
-    ) -> Result<()> {
-        store.require_runtime_authority_initialization_candidate()?;
-        let trust_root = dependencies.custody().trust_anchor_id()?;
-        let expectations = fresh_authority_expectations(resident, trust_root);
-        let presented = PresentedAuthoritySet::default();
-
-        // Cryptographic and tuple refusal occurs before any authority write.
-        with_verification_brand(|brand| {
-            verify_for_establishment(&brand, authority_custody, &presented, None, &expectations)
-                .map(drop)
-        })?;
-        store.with_runtime_authority_writer_session(
-            |brand, session| -> std::result::Result<(), StoreError> {
-                let resolved = verify_for_establishment(
-                    brand,
-                    authority_custody,
-                    &presented,
-                    None,
-                    &expectations,
-                )?;
-                session.establish_runtime_dependency_trust_root(&resolved)?;
-                Ok(())
-            },
-        )?;
-        store.consume_runtime_authority_initialization_candidate();
-        Ok(())
     }
 
     /// Opens an existing established schema-v8 Store and resolves authority
@@ -490,7 +460,8 @@ impl HostRoleRuntime {
     }
 
     /// Authenticates and durably freezes an explicit disposition for a
-    /// schema-v7 source with zero or multiple genesis identities.
+    /// schema-v7 source with an absent, singleton-empty, or multiple genesis
+    /// census.
     ///
     /// This path uses only the exogenous genesis A1 key from custody.  It does
     /// not inspect A2 as Store occurrence standing and cannot establish or

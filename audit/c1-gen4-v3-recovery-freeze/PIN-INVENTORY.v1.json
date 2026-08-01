@@ -69,6 +69,7 @@
         "Cargo.lock",
         "Cargo.toml",
         "crates/nq-app/Cargo.toml",
+        "crates/nq-app/src/archive.rs",
         "crates/nq-app/src/cli.rs",
         "crates/nq-core/Cargo.toml",
         "crates/nq-core/src/lib.rs",
@@ -76,7 +77,10 @@
         "crates/nq-host-role-contract/src/assets.rs",
         "crates/nq-host-role-runtime/Cargo.toml",
         "crates/nq-host-role-runtime/src/dependency.rs",
+        "crates/nq-host-role-runtime/src/facade.rs",
+        "crates/nq-host-role-runtime/src/inspector.rs",
         "crates/nq-host-role-runtime/src/lib.rs",
+        "crates/nq-host-role-runtime/src/prelaunch.rs",
         "crates/nq-host-role-runtime/src/runtime.rs",
         "crates/nq-runtime-dependency-authority/Cargo.toml",
         "crates/nq-store/Cargo.toml",
@@ -120,6 +124,16 @@
     }
   ],
   "closed_prefixes": [
+    {
+      "id": "host-role-runtime-all-rust-sources",
+      "purpose": "Every production and inline-test Rust source in the Store-owned runtime implementation and its actual public facade root.",
+      "prefix": "crates/nq-host-role-runtime/src/",
+      "suffixes": [
+        ".rs"
+      ],
+      "minimum_files": 7,
+      "paired_extensions": false
+    },
     {
       "id": "authority-crate-all-rust-sources",
       "purpose": "Every Rust source file in the new evidence and activation crate, including test support and private resolution tests.",
@@ -172,6 +186,14 @@
       ],
       "minimum_files": 2,
       "paired_extensions": true
+    },
+    {
+      "id": "isolated-gen4-surfaces",
+      "purpose": "Complete default and all-feature external Cargo surfaces proving no alternate Gen4 establishment composition.",
+      "prefix": "crates/nq-store/tests/isolated/gen4-",
+      "suffixes": [],
+      "minimum_files": 6,
+      "paired_extensions": false
     },
     {
       "id": "isolated-r0b-surfaces",

@@ -7,5 +7,6 @@ publish = false
 [workspace]
 
 [dependencies]
+nq-host-role-runtime = { path = "../../../../nq-host-role-runtime" }
 nq-runtime-dependency-authority = { path = "../../../../nq-runtime-dependency-authority" }
 nq-store = { path = "../../../../nq-store" }

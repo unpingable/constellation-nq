@@ -1,0 +1,45 @@
+error[E0599]: no function or associated item named `initialize_from_unqualified_store` found for struct `HostRoleRuntime` in the current scope
+  --> tests/ui/gen4/in_memory_store_to_runtime_establishment.rs:15:30
+   |
+15 |     let _ = HostRoleRuntime::initialize_from_unqualified_store(
+   |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ function or associated item not found in `HostRoleRuntime`
+   |
+note: if you're trying to build a new `HostRoleRuntime` consider using one of the following associated functions:
+      HostRoleRuntime::initialize
+      HostRoleRuntime::open
+      HostRoleRuntime::migrate_v7_runtime_authority
+      HostRoleRuntime::from_store
+  --> src/../../nq-host-role-runtime/src/runtime.rs
+   |
+   | /     pub fn initialize(
+   | |         path: impl AsRef<Path>,
+   | |         dependencies: RuntimeDependencies,
+   | |         authority_custody: &GenesisAuthorityCustody,
+   | |         resident: &RuntimeAuthorityResidentBinding,
+   | |     ) -> Result<Self> {
+   | |_____________________^
+...
+   | /     pub fn open(
+   | |         path: impl AsRef<Path>,
+   | |         dependencies: RuntimeDependencies,
+   | |         authority_custody: &GenesisAuthorityCustody,
+   | |         resident: &RuntimeAuthorityResidentBinding,
+   | |     ) -> Result<Self> {
+   | |_____________________^
+...
+   | /     pub fn migrate_v7_runtime_authority(
+   | |         path: impl AsRef<Path>,
+   | |         backup: &BackupArtifact,
+   | |         dependencies: RuntimeDependencies,
+...  |
+   | |         resident: &RuntimeAuthorityResidentBinding,
+   | |     ) -> Result<Self> {
+   | |_____________________^
+...
+   | /     pub fn from_store(
+   | |         mut store: Store,
+   | |         dependencies: RuntimeDependencies,
+   | |         authority_custody: &GenesisAuthorityCustody,
+   | |         resident: &RuntimeAuthorityResidentBinding,
+   | |     ) -> Result<Self> {
+   | |_____________________^

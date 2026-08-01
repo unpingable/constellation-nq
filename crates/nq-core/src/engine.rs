@@ -14162,10 +14162,10 @@ mod tests {
         (dependency, dependencies)
     }
 
-    fn establish_test_runtime_authority(
-        store: &mut Store,
+    fn initialize_test_runtime_authority(
+        path: impl AsRef<Path>,
         dependencies: &nq_host_role_runtime::RuntimeDependencies,
-    ) {
+    ) -> Store {
         let fixture = RawAuthorityFixture::fresh_genesis_with_anchor(
             dependencies
                 .custody()
@@ -14181,13 +14181,9 @@ mod tests {
             domain: FIXTURE_DOMAIN.to_owned(),
             policy_floor: 1,
         };
-        HostRoleRuntime::initialize_from_unqualified_store(
-            store,
-            dependencies,
-            &custody,
-            &resident,
-        )
-        .expect("establish test runtime authority");
+        HostRoleRuntime::initialize(path, dependencies.clone(), &custody, &resident)
+            .expect("initialize test runtime authority")
+            .into_store()
     }
 
     const SEMANTIC_TRANSPORT_HELPER: &str = r#"import datetime
@@ -15871,14 +15867,14 @@ sys.stdout.write("\n")
         evaluator_label: &[u8],
     ) -> Option<(CollectionEngine, WatcherConfig, PathBuf)> {
         let (config, watcher, mode) = host_diagnostic_fixture(root);
-        let mut store = Store::initialize(&config.database_path).expect("initialize store");
+        let (_authority_dependency, authority_dependencies) = test_runtime_dependency(genesis_id);
+        let mut store =
+            initialize_test_runtime_authority(&config.database_path, &authority_dependencies);
         append_profile_descriptor(
             &mut store.begin_writer_session().expect("writer session"),
             resolve(&watcher).expect("host profile"),
         )
         .expect("profile descriptor");
-        let (_authority_dependency, authority_dependencies) = test_runtime_dependency(genesis_id);
-        establish_test_runtime_authority(&mut store, &authority_dependencies);
         drop(store);
         let evaluator =
             EvaluatorRuntimeIdentity::for_test(nq_protocol::sha256_bytes(evaluator_label));
@@ -17278,11 +17274,12 @@ sys.stdout.write("\n")
         let later_checkpoint_id =
             nq_protocol::sha256_bytes(b"history-latest-checkpoint").to_string();
         let directory = tempfile::tempdir().expect("store directory");
-        let mut store =
-            Store::initialize(directory.path().join("nq.db")).expect("runtime history store");
         let (dependency, authority_dependencies) =
             test_runtime_dependency("history-exact-checkpoint");
-        establish_test_runtime_authority(&mut store, &authority_dependencies);
+        let mut store = initialize_test_runtime_authority(
+            directory.path().join("nq.db"),
+            &authority_dependencies,
+        );
         let first_checkpoint = store
             .begin_writer_session()
             .expect("writer session")
@@ -17577,11 +17574,12 @@ sys.stdout.write("\n")
             }),
         );
         let directory = tempfile::tempdir().expect("store directory");
-        let mut store =
-            Store::initialize(directory.path().join("nq.db")).expect("runtime history store");
         let (runtime_dependency, authority_dependencies) =
             test_runtime_dependency("production-history");
-        establish_test_runtime_authority(&mut store, &authority_dependencies);
+        let mut store = initialize_test_runtime_authority(
+            directory.path().join("nq.db"),
+            &authority_dependencies,
+        );
         store
             .begin_writer_session()
             .expect("writer session")
@@ -17754,15 +17752,15 @@ sys.stdout.write("\n")
     fn diagnostic_execute_emits_exact_artifact_from_committed_host_evaluation() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let (config, watcher, _mode) = host_diagnostic_fixture(directory.path());
-        let mut store = Store::initialize(&config.database_path).expect("initialize store");
+        let (_authority_dependency, authority_dependencies) =
+            test_runtime_dependency("diagnostic-test-genesis");
+        let mut store =
+            initialize_test_runtime_authority(&config.database_path, &authority_dependencies);
         append_profile_descriptor(
             &mut store.begin_writer_session().expect("writer session"),
             resolve(&watcher).expect("host profile"),
         )
         .expect("profile descriptor");
-        let (_authority_dependency, authority_dependencies) =
-            test_runtime_dependency("diagnostic-test-genesis");
-        establish_test_runtime_authority(&mut store, &authority_dependencies);
         drop(store);
 
         let evaluator = EvaluatorRuntimeIdentity::for_test(nq_protocol::sha256_bytes(
@@ -17941,15 +17939,15 @@ sys.stdout.write("\n")
     fn diagnostic_execute_preserves_a_live_detector_refusal() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let (config, watcher, mode) = host_diagnostic_fixture(directory.path());
-        let mut store = Store::initialize(&config.database_path).expect("initialize store");
+        let (_authority_dependency, authority_dependencies) =
+            test_runtime_dependency("diagnostic-refusal-test-genesis");
+        let mut store =
+            initialize_test_runtime_authority(&config.database_path, &authority_dependencies);
         append_profile_descriptor(
             &mut store.begin_writer_session().expect("writer session"),
             resolve(&watcher).expect("host profile"),
         )
         .expect("profile descriptor");
-        let (_authority_dependency, authority_dependencies) =
-            test_runtime_dependency("diagnostic-refusal-test-genesis");
-        establish_test_runtime_authority(&mut store, &authority_dependencies);
         drop(store);
 
         let evaluator = EvaluatorRuntimeIdentity::for_test(nq_protocol::sha256_bytes(
@@ -18280,15 +18278,15 @@ sys.stdout.write("\n")
     fn diagnostic_execute_keeps_pre_run_admission_refusal_outside_artifact_history() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let (config, watcher, _mode) = host_diagnostic_fixture(directory.path());
-        let mut store = Store::initialize(&config.database_path).expect("initialize store");
+        let (_authority_dependency, authority_dependencies) =
+            test_runtime_dependency("diagnostic-admission-refusal-test-genesis");
+        let mut store =
+            initialize_test_runtime_authority(&config.database_path, &authority_dependencies);
         append_profile_descriptor(
             &mut store.begin_writer_session().expect("writer session"),
             resolve(&watcher).expect("host profile"),
         )
         .expect("profile descriptor");
-        let (_authority_dependency, authority_dependencies) =
-            test_runtime_dependency("diagnostic-admission-refusal-test-genesis");
-        establish_test_runtime_authority(&mut store, &authority_dependencies);
         drop(store);
 
         let evaluator = EvaluatorRuntimeIdentity::for_test(nq_protocol::sha256_bytes(

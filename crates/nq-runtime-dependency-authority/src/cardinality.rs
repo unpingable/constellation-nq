@@ -57,7 +57,8 @@ impl V7CardinalityDispositionBytes {
 /// enumerated the Store completely or computed its logical digest correctly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct V7CardinalityDispositionExpectations {
-    /// Exact byte-lexicographically sorted genesis identities: zero or at least two.
+    /// Exact byte-lexicographically sorted genesis census: zero rows, one
+    /// empty identity, or at least two rows.
     pub genesis_identities: Vec<String>,
     /// Exact logical digest of the locked schema-v7 source.
     pub source_logical_digest: Sha256Digest,
@@ -161,7 +162,7 @@ impl<'id> VerifiedV7CardinalityDisposition<'id> {
         self.fields.disposition
     }
 
-    /// Returns the exact sorted zero-or-multiple genesis identity set.
+    /// Returns the exact sorted absent, singleton-empty, or multiple genesis census.
     #[must_use]
     pub fn genesis_identities(&self) -> &[String] {
         &self.fields.genesis_identities
@@ -211,7 +212,7 @@ impl<'id> VerifiedV7CardinalityDisposition<'id> {
 }
 
 /// Verifies an explicit operator-signed disposition for a schema-v7 source
-/// that has zero or multiple genesis identities.
+/// that has zero rows, one empty genesis identity, or multiple genesis rows.
 ///
 /// The exogenous genesis A1 authenticates the classification act. Its A2, if
 /// any, is deliberately not accepted or inspected by this path. Successful
@@ -221,8 +222,9 @@ impl<'id> VerifiedV7CardinalityDisposition<'id> {
 /// # Errors
 ///
 /// Refuses malformed/noncanonical bytes, invalid digests or signatures, a
-/// non-genesis A1, one/unsorted/duplicate genesis identities, `accepted`, an
-/// unsupported policy or source version, and every expectation mismatch.
+/// non-genesis A1, one nonempty/unsorted/duplicate genesis identities,
+/// `accepted`, an unsupported policy or source version, and every expectation
+/// mismatch.
 pub fn verify_v7_cardinality_disposition<'id>(
     brand: &VerificationBrand<'id>,
     genesis_operator_authority_bytes: &[u8],
@@ -358,11 +360,13 @@ fn validate_genesis_a1(
 }
 
 fn validate_genesis_identities(identities: &[String]) -> Result<(), AuthorityError> {
-    if identities.len() == 1 {
+    if matches!(identities, [identity] if !identity.is_empty()) {
         return Err(AuthorityError::V7CardinalityInvalid);
     }
     for identity in identities {
-        validate_identity(identity)?;
+        if identity.len() > MAX_IDENTITY_BYTES || identity.chars().any(char::is_control) {
+            return Err(AuthorityError::IdentityMalformed);
+        }
     }
     if identities.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(AuthorityError::V7CardinalityInvalid);

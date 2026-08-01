@@ -186,9 +186,11 @@ fn admitted_effect_fixture_with_profile(
         .expect("helper runtime mode");
 
     let config = effect_config(root, &helper_path, &marker);
+    let mut admission_config = config.clone();
+    admission_config.database_path = root.join("admission-stage.db");
     let profile: &'static dyn ProfileModule = &nq_profiles::conformance::MODULE;
-    let mut store =
-        Store::initialize_unqualified_storage(&config.database_path).expect("initialize store");
+    let mut store = Store::initialize_unqualified_storage(&admission_config.database_path)
+        .expect("initialize admission staging Store");
     append_profile_descriptor(
         &mut store.begin_writer_session().expect("writer session"),
         profile,
@@ -199,8 +201,8 @@ fn admitted_effect_fixture_with_profile(
         .watcher("governed.effect")
         .expect("configured watcher")
         .clone();
-    let mut admission_engine =
-        collection_engine_from_fresh_store(&config, store).expect("admission engine");
+    let mut admission_engine = collection_engine_from_fresh_store(&admission_config, store)
+        .expect("admission staging engine");
     let evaluator = admission_engine
         .require_evaluator_identity()
         .expect("evaluator identity")
@@ -262,7 +264,7 @@ fn admitted_effect_fixture_with_profile(
         },
         maximum_execution_ms,
     });
-    let mut store = admission_engine.store;
+    drop(admission_engine);
     if marker.exists() {
         fs::remove_file(&marker).expect("clear admission spawn marker");
     }
@@ -278,13 +280,19 @@ fn admitted_effect_fixture_with_profile(
         domain: FIXTURE_DOMAIN.to_owned(),
         policy_floor: 1,
     };
-    HostRoleRuntime::initialize_from_unqualified_store(
-        &mut store,
-        &fixture.dependencies,
+    let initialized = HostRoleRuntime::initialize(
+        &config.database_path,
+        fixture.dependencies.clone(),
         &custody,
         &resident,
     )
-    .expect("establish fixture runtime authority");
+    .expect("initialize governed effect Store");
+    let mut store = initialized.into_store();
+    append_profile_descriptor(
+        &mut store.begin_writer_session().expect("writer session"),
+        profile,
+    )
+    .expect("append governed Store profile descriptor");
     let mut runtime = HostRoleRuntime::from_store(store, fixture.dependencies, &custody, &resident)
         .expect("host-role runtime");
     let prepared = runtime

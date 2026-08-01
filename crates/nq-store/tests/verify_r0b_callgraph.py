@@ -1096,6 +1096,16 @@ def verify_gen4(
         settings["unqualified_storage_initializer"],
         "unqualified_storage_initializer",
     )
+    in_memory_storage_initializer = selector_function(
+        functions,
+        settings["in_memory_storage_initializer"],
+        "in_memory_storage_initializer",
+    )
+    storage_initializer_backend = selector_function(
+        functions,
+        settings["storage_initializer_backend"],
+        "storage_initializer_backend",
+    )
     require(bare.trait_owner is None, "bare Store helper is supplied by a trait")
     require(
         session.trait_owner is None,
@@ -1192,6 +1202,41 @@ def verify_gen4(
         and unqualified_storage_initializer.visibility == "pub",
         "explicit storage-only initialization is not the public unqualified lifecycle",
     )
+    require(
+        in_memory_storage_initializer.trait_owner is None
+        and in_memory_storage_initializer.visibility == "pub",
+        "in-memory storage-only initialization is not a public inherent lifecycle",
+    )
+    require(
+        storage_initializer_backend.trait_owner is None
+        and storage_initializer_backend.visibility == "private",
+        "shared storage initializer backend is not private inherent plumbing",
+    )
+    require_compact(
+        authority_candidate_initializer,
+        "Self::initialize_storage(path,true)",
+        "private authority candidate does not explicitly request candidate standing",
+    )
+    require_compact(
+        unqualified_storage_initializer,
+        "Self::initialize_storage(path,false)",
+        "public unqualified initialization can acquire candidate standing",
+    )
+    require_compact(
+        storage_initializer_backend,
+        "runtime_authority_initialization_candidate:bool",
+        "storage initializer backend does not carry an explicit standing parameter",
+    )
+    require_compact(
+        storage_initializer_backend,
+        "runtime_authority_initialization_candidate,",
+        "storage initializer backend does not store the exact standing parameter",
+    )
+    require_compact(
+        in_memory_storage_initializer,
+        "runtime_authority_initialization_candidate:false",
+        "public in-memory initialization can acquire candidate standing",
+    )
     candidate_calls = direct_callers(functions, authority_candidate_initializer.name)
     candidate_initializer_caller = selector_function(
         functions,
@@ -1205,7 +1250,12 @@ def verify_gen4(
         "private runtime-authority candidate initializer must have exactly one production caller, HostRoleRuntime::initialize; found "
         + (", ".join(caller.location for caller, _ in candidate_calls) or "none"),
     )
-    for initializer in (authority_candidate_initializer, unqualified_storage_initializer):
+    for initializer in (
+        authority_candidate_initializer,
+        unqualified_storage_initializer,
+        in_memory_storage_initializer,
+        storage_initializer_backend,
+    ):
         reached = {
             call.name
             for call in initializer.calls()
@@ -1263,6 +1313,45 @@ def verify_gen4(
             ),
             "feature-only Store::initialize is not a one-hop storage-only alias",
         )
+
+    expected_store_initializers = {
+        function_identity(authority_candidate_initializer),
+        function_identity(unqualified_storage_initializer),
+        function_identity(in_memory_storage_initializer),
+        function_identity(storage_initializer_backend),
+        *(function_identity(function) for function in raw_store_initializers),
+    }
+    observed_store_initializers = {
+        function_identity(function)
+        for function in functions
+        if function.owner == "Store" and function.name.startswith("initialize")
+    }
+    require(
+        observed_store_initializers == expected_store_initializers,
+        "Store initializer census differs from the closed authority/storage law: "
+        + ", ".join(
+            sorted(
+                function.location
+                for function in functions
+                if function_identity(function)
+                in observed_store_initializers ^ expected_store_initializers
+            )
+        ),
+    )
+
+    public_runtime_initializers = [
+        function
+        for function in functions
+        if function.owner == "HostRoleRuntime"
+        and function.visibility == "pub"
+        and function.name.startswith("initialize")
+    ]
+    require(
+        {function_identity(function) for function in public_runtime_initializers}
+        == {function_identity(candidate_initializer_caller)},
+        "public HostRoleRuntime initialization surface is not exactly the named initialize route: "
+        + (", ".join(function.location for function in public_runtime_initializers) or "none"),
+    )
 
     protected_definitions = [
         function
@@ -1358,6 +1447,14 @@ def verify_gen4(
     allowed_establishment_identities = {
         function_identity(function) for function in allowed_establishment_callers
     }
+    require(
+        {(function.owner, function.name) for function in allowed_establishment_callers}
+        == {
+            ("HostRoleRuntime", "initialize"),
+            ("HostRoleRuntime", "migrate_v7_runtime_authority"),
+        },
+        "establishment allowlist is not the frozen named initialize/migration pair",
+    )
     session_calls = [
         (caller, call)
         for caller, call in direct_callers(functions, session.name)
@@ -1640,8 +1737,10 @@ def verify_gen4(
         functions,
         protected_override=(bare, session, bare_receiver),
     )
-    storage_only_identities = {function_identity(unqualified_storage_initializer)} | {
-        function_identity(function) for function in raw_store_initializers
+    storage_only_identities = {
+        function_identity(unqualified_storage_initializer),
+        function_identity(in_memory_storage_initializer),
+        *(function_identity(function) for function in raw_store_initializers),
     }
     for protected_target in (
         bare,

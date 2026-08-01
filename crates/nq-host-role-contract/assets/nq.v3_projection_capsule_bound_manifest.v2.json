@@ -38,7 +38,7 @@
       "variant_family": "acquisition_failure_class",
       "source_identity": "nq.core.AcquisitionFailureClass.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "representation_location": "nested_runtime_record_bytes",
       "variant_count": 14,
       "variants": [
@@ -101,7 +101,7 @@
       "variant_family": "collection_outcome_schema",
       "source_identity": "nq.core.CollectionOutcomeSchema.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "representation_location": "nested_runtime_record_bytes",
       "variant_count": 2,
       "variants": [
@@ -113,7 +113,7 @@
       "variant_family": "collection_result",
       "source_identity": "nq.core.CollectionResult.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "representation_location": "capsule_branch_selector",
       "variant_count": 4,
       "variants": [
@@ -151,7 +151,7 @@
       "variant_family": "governed_execution_status_code_projection",
       "source_identity": "nq.core.governed_execution_status_projection.code.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "representation_location": "capsule_branch_selector",
       "variant_count": 3,
       "variants": [
@@ -164,7 +164,7 @@
       "variant_family": "governed_execution_status_state_projection",
       "source_identity": "nq.core.governed_execution_status_projection.state.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "representation_location": "capsule_branch_selector",
       "variant_count": 1,
       "variants": [
@@ -175,7 +175,7 @@
       "variant_family": "governed_refusal_boundary_projection",
       "source_identity": "nq.core.governed_refusal_projections.boundary_union.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "representation_location": "capsule_branch_selector",
       "variant_count": 16,
       "variants": [
@@ -201,7 +201,7 @@
       "variant_family": "governed_refusal_code_projection",
       "source_identity": "nq.core.governed_refusal_projections.code_union.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "representation_location": "capsule_branch_selector",
       "variant_count": 48,
       "variants": [
@@ -259,7 +259,7 @@
       "variant_family": "governed_refusal_origin",
       "source_identity": "nq.core.GovernedRefusalOrigin.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "representation_location": "nested_runtime_record_bytes",
       "variant_count": 4,
       "variants": [
@@ -273,7 +273,7 @@
       "variant_family": "governed_refusal_schema",
       "source_identity": "nq.core.GovernedRefusalSchema.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "representation_location": "nested_runtime_record_bytes",
       "variant_count": 1,
       "variants": [
@@ -284,7 +284,7 @@
       "variant_family": "governed_refusal_source_kind_projection",
       "source_identity": "nq.core.governed_refusal_projections.source_kind.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "representation_location": "capsule_branch_selector",
       "variant_count": 3,
       "variants": [
@@ -383,7 +383,7 @@
       "variant_family": "json_error_category",
       "source_identity": "nq.core.JsonErrorCategory.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "representation_location": "nested_runtime_record_bytes",
       "variant_count": 4,
       "variants": [
@@ -477,7 +477,7 @@
       "variant_family": "projected_acquisition_outcome",
       "source_identity": "nq.core.ProjectedAcquisitionOutcome.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "representation_location": "capsule_branch_selector",
       "variant_count": 15,
       "variants": [
@@ -502,7 +502,7 @@
       "variant_family": "projected_semantic_coverage_state",
       "source_identity": "nq.core.semantic_coverage_state_projection.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "representation_location": "capsule_branch_selector",
       "variant_count": 3,
       "variants": [
@@ -515,7 +515,7 @@
       "variant_family": "projected_semantic_report_status",
       "source_identity": "nq.core.semantic_report_status_projection.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "representation_location": "capsule_branch_selector",
       "variant_count": 3,
       "variants": [
@@ -528,7 +528,7 @@
       "variant_family": "protocol_canonicalization_failure",
       "source_identity": "nq.core.ProtocolCanonicalizationFailure.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "representation_location": "nested_runtime_record_bytes",
       "variant_count": 2,
       "variants": [
@@ -553,7 +553,7 @@
       "variant_family": "protocol_outcome_projection",
       "source_identity": "nq.core.NativeGovernedSqlCommitPlan.protocol_outcome.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "representation_location": "capsule_branch_selector",
       "variant_count": 4,
       "variants": [
@@ -567,7 +567,7 @@
       "variant_family": "protocol_rejection_boundary",
       "source_identity": "nq.core.ProtocolRejectionBoundary.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "representation_location": "nested_runtime_record_bytes",
       "variant_count": 1,
       "variants": [
@@ -578,7 +578,7 @@
       "variant_family": "protocol_rejection_code",
       "source_identity": "nq.core.ProtocolRejectionCode.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "representation_location": "nested_runtime_record_bytes",
       "variant_count": 1,
       "variants": [
@@ -589,7 +589,7 @@
       "variant_family": "protocol_rejection_failure",
       "source_identity": "nq.core.ProtocolRejectionFailure.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "representation_location": "nested_runtime_record_bytes",
       "variant_count": 5,
       "variants": [
@@ -617,7 +617,7 @@
       "variant_family": "protocol_validation_failure",
       "source_identity": "nq.core.ProtocolValidationFailure.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "representation_location": "nested_runtime_record_bytes",
       "variant_count": 8,
       "variants": [
@@ -718,7 +718,7 @@
       "variant_family": "retry_disposition",
       "source_identity": "nq.core.RetryDisposition.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "representation_location": "nested_runtime_record_bytes",
       "variant_count": 3,
       "variants": [
@@ -731,7 +731,7 @@
       "variant_family": "run_resource_outcome_schema",
       "source_identity": "nq.core.RunResourceOutcomeSchema.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "representation_location": "nested_runtime_record_bytes",
       "variant_count": 1,
       "variants": [
@@ -858,7 +858,7 @@
     {
       "source_identity": "nq.core.AdmissionRefusalBoundary.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "excluded_variants": [
         "active_binding",
         "execution_identity",
@@ -876,7 +876,7 @@
     {
       "source_identity": "nq.core.AdmissionRefusalCode.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "excluded_variants": [
         "missing_active_binding",
         "binary_identity_invalid",
@@ -902,7 +902,7 @@
     {
       "source_identity": "nq.core.AdmissionRefusalDetails.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "excluded_variants": [
         "none",
         "binary_identity",
@@ -929,7 +929,7 @@
     {
       "source_identity": "nq.core.CollectionResult.admitted.evaluations.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "excluded_variants": [
         "nonempty"
       ],
@@ -938,7 +938,7 @@
     {
       "source_identity": "nq.core.CollectionResult.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "excluded_variants": [
         "admission_refused"
       ],
@@ -956,7 +956,7 @@
     {
       "source_identity": "nq.core.GovernedExecutionRefusalCode.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "excluded_variants": [
         "prepared_closure_invalid",
         "outer_request_substitution",
@@ -994,7 +994,7 @@
     {
       "source_identity": "nq.core.governed_execution_status_projection.code.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "excluded_variants": [
         "diagnostic_execution_admission_refused"
       ],
@@ -1382,7 +1382,7 @@
       "descriptor_key": "provider_intake_interpretation",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/rejection/failure/error/actual",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1390,7 +1390,7 @@
       "descriptor_key": "provider_intake_interpretation",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/rejection/failure/error/diagnostic",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1398,7 +1398,7 @@
       "descriptor_key": "provider_intake_interpretation",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/rejection/failure/error/document",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1406,7 +1406,7 @@
       "descriptor_key": "provider_intake_interpretation",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/rejection/failure/error/error/diagnostic",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1414,7 +1414,7 @@
       "descriptor_key": "provider_intake_interpretation",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/rejection/failure/error/expected",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1422,7 +1422,7 @@
       "descriptor_key": "provider_intake_interpretation",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/rejection/failure/error/field",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1430,7 +1430,7 @@
       "descriptor_key": "provider_intake_interpretation",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/rejection/failure/error/reason",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1438,7 +1438,7 @@
       "descriptor_key": "provider_intake_interpretation",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/rejection/failure/error/source/error/diagnostic",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1446,7 +1446,7 @@
       "descriptor_key": "provider_intake_interpretation",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/rejection/failure/error/source/value",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1454,7 +1454,7 @@
       "descriptor_key": "provider_intake_interpretation",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/rejection/failure/error/value",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1462,7 +1462,7 @@
       "descriptor_key": "provider_intake_interpretation",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/rejection/responsible_instance_id",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1774,7 +1774,7 @@
       "descriptor_key": "provider_intake_native_outcome",
       "source_identity": "nq.core.RunResourceOutcomeV1.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/stderr_hex",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1782,7 +1782,7 @@
       "descriptor_key": "refusal_detail",
       "source_identity": "nq.core.GovernedRefusal.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/origin/payload/failure/outcome/message",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1790,7 +1790,7 @@
       "descriptor_key": "refusal_detail",
       "source_identity": "nq.core.GovernedRefusal.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/origin/payload/message",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1798,7 +1798,7 @@
       "descriptor_key": "refusal_detail",
       "source_identity": "nq.core.GovernedRefusal.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/origin/payload/refusal/instance_id",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1806,7 +1806,7 @@
       "descriptor_key": "refusal_detail",
       "source_identity": "nq.core.GovernedRefusal.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/origin/payload/refusal/message",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1814,7 +1814,7 @@
       "descriptor_key": "refusal_detail",
       "source_identity": "nq.core.GovernedRefusal.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/origin/payload/responsible_instance_id",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1822,7 +1822,7 @@
       "descriptor_key": "refusal_detail",
       "source_identity": "nq.core.GovernedRefusal.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/refusal_id",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1830,7 +1830,7 @@
       "descriptor_key": "refusal_detail",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/origin/payload/failure/error/actual",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1838,7 +1838,7 @@
       "descriptor_key": "refusal_detail",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/origin/payload/failure/error/diagnostic",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1846,7 +1846,7 @@
       "descriptor_key": "refusal_detail",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/origin/payload/failure/error/document",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1854,7 +1854,7 @@
       "descriptor_key": "refusal_detail",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/origin/payload/failure/error/error/diagnostic",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1862,7 +1862,7 @@
       "descriptor_key": "refusal_detail",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/origin/payload/failure/error/expected",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1870,7 +1870,7 @@
       "descriptor_key": "refusal_detail",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/origin/payload/failure/error/field",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1878,7 +1878,7 @@
       "descriptor_key": "refusal_detail",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/origin/payload/failure/error/reason",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1886,7 +1886,7 @@
       "descriptor_key": "refusal_detail",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/origin/payload/failure/error/source/error/diagnostic",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1894,7 +1894,7 @@
       "descriptor_key": "refusal_detail",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/origin/payload/failure/error/source/value",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1902,7 +1902,7 @@
       "descriptor_key": "refusal_detail",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/origin/payload/failure/error/value",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1910,7 +1910,7 @@
       "descriptor_key": "refusal_detail",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/origin/payload/responsible_instance_id",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -2158,7 +2158,7 @@
       "descriptor_key": "run_resource_outcome",
       "source_identity": "nq.core.RunResourceOutcomeV1.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/stderr_hex",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -2390,7 +2390,7 @@
       "descriptor_key": "runtime_record_canonical_bytes",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/interpretation/rejection/failure/error/actual",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -2398,7 +2398,7 @@
       "descriptor_key": "runtime_record_canonical_bytes",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/interpretation/rejection/failure/error/diagnostic",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -2406,7 +2406,7 @@
       "descriptor_key": "runtime_record_canonical_bytes",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/interpretation/rejection/failure/error/document",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -2414,7 +2414,7 @@
       "descriptor_key": "runtime_record_canonical_bytes",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/interpretation/rejection/failure/error/error/diagnostic",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -2422,7 +2422,7 @@
       "descriptor_key": "runtime_record_canonical_bytes",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/interpretation/rejection/failure/error/expected",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -2430,7 +2430,7 @@
       "descriptor_key": "runtime_record_canonical_bytes",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/interpretation/rejection/failure/error/field",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -2438,7 +2438,7 @@
       "descriptor_key": "runtime_record_canonical_bytes",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/interpretation/rejection/failure/error/reason",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -2446,7 +2446,7 @@
       "descriptor_key": "runtime_record_canonical_bytes",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/interpretation/rejection/failure/error/source/error/diagnostic",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -2454,7 +2454,7 @@
       "descriptor_key": "runtime_record_canonical_bytes",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/interpretation/rejection/failure/error/source/value",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -2462,7 +2462,7 @@
       "descriptor_key": "runtime_record_canonical_bytes",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/interpretation/rejection/failure/error/value",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -2470,7 +2470,7 @@
       "descriptor_key": "runtime_record_canonical_bytes",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/interpretation/rejection/responsible_instance_id",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -2958,7 +2958,7 @@
       "descriptor_key": "status_detail",
       "source_identity": "nq.core.CollectionOutcome.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/instance_id",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -2966,7 +2966,7 @@
       "descriptor_key": "status_detail",
       "source_identity": "nq.core.CollectionOutcome.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/result/failure/outcome/message",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -2974,7 +2974,7 @@
       "descriptor_key": "status_detail",
       "source_identity": "nq.core.CollectionOutcome.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/result/refusal/origin/payload/failure/outcome/message",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -2982,7 +2982,7 @@
       "descriptor_key": "status_detail",
       "source_identity": "nq.core.CollectionOutcome.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/result/refusal/origin/payload/message",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -2990,7 +2990,7 @@
       "descriptor_key": "status_detail",
       "source_identity": "nq.core.CollectionOutcome.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/result/refusal/origin/payload/refusal/instance_id",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -2998,7 +2998,7 @@
       "descriptor_key": "status_detail",
       "source_identity": "nq.core.CollectionOutcome.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/result/refusal/origin/payload/refusal/message",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -3006,7 +3006,7 @@
       "descriptor_key": "status_detail",
       "source_identity": "nq.core.CollectionOutcome.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/result/refusal/origin/payload/responsible_instance_id",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -3014,7 +3014,7 @@
       "descriptor_key": "status_detail",
       "source_identity": "nq.core.CollectionOutcome.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/result/refusal/refusal_id",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -3022,7 +3022,7 @@
       "descriptor_key": "status_detail",
       "source_identity": "nq.core.CollectionOutcome.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/result/report_id",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -3030,7 +3030,7 @@
       "descriptor_key": "status_detail",
       "source_identity": "nq.core.CollectionOutcome.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/run_id",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -3038,7 +3038,7 @@
       "descriptor_key": "status_detail",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/result/refusal/origin/payload/failure/error/actual",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -3046,7 +3046,7 @@
       "descriptor_key": "status_detail",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/result/refusal/origin/payload/failure/error/diagnostic",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -3054,7 +3054,7 @@
       "descriptor_key": "status_detail",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/result/refusal/origin/payload/failure/error/document",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -3062,7 +3062,7 @@
       "descriptor_key": "status_detail",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/result/refusal/origin/payload/failure/error/error/diagnostic",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -3070,7 +3070,7 @@
       "descriptor_key": "status_detail",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/result/refusal/origin/payload/failure/error/expected",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -3078,7 +3078,7 @@
       "descriptor_key": "status_detail",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/result/refusal/origin/payload/failure/error/field",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -3086,7 +3086,7 @@
       "descriptor_key": "status_detail",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/result/refusal/origin/payload/failure/error/reason",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -3094,7 +3094,7 @@
       "descriptor_key": "status_detail",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/result/refusal/origin/payload/failure/error/source/error/diagnostic",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -3102,7 +3102,7 @@
       "descriptor_key": "status_detail",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/result/refusal/origin/payload/failure/error/source/value",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -3110,7 +3110,7 @@
       "descriptor_key": "status_detail",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/result/refusal/origin/payload/failure/error/value",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -3118,7 +3118,7 @@
       "descriptor_key": "status_detail",
       "source_identity": "nq.core.ProtocolRejection.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/engine.rs",
-      "source_sha256": "sha256:cf5a4462d5e0168edc80bf1be8f2137808abce7363d7352f656c8f1a13beac65",
+      "source_sha256": "sha256:3cd147fd850fc21916f40622025fca96f492c45333f72d51ba3cf9a7c3cc467b",
       "json_pointer": "/result/refusal/origin/payload/responsible_instance_id",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -4241,11 +4241,11 @@
   ],
   "qualification_basis": {
     "projection_identity": "nq.v3_projection_capsule_bound_qualification_basis.v1",
-    "digest": "sha256:1ad515126fa0ca058ecfc770d00553f0d0ea65d908cf4165c0783fffded840e1"
+    "digest": "sha256:de440ec2fe3141d794bbb28c778eb273fc209a007691413953198d94ced669e3"
   },
   "cap_h14_qualification": {
     "schema": "nq.v3_projection_capsule_bound_qualification.v1",
-    "qualification_id": "sha256:5c1f8e001c9b92cdba0ef7ea13bc7c645c436daa6ea341a9e267f9aa58e87759",
-    "canonical_bytes_sha256": "sha256:b6d7c4fd9f21c815b7487ac5e18ad53505e51d0d1e68fa0373febb1d98ce16b4"
+    "qualification_id": "sha256:ddd1f9c4bccd28cf585661b99a4ce58e9d995f6c00644a41efe6a5b6867c6f18",
+    "canonical_bytes_sha256": "sha256:9674f7416bf86cd74bdbe58263ea4cf4d806f417f8866e909fd77ce6fc3ac8cc"
   }
 }

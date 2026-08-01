@@ -177,7 +177,7 @@ impl<'store, 'id> StoreWriterSession<'store, VerificationBrand<'id>> {
         self.store.freeze_runtime_authority_migration_bare(evidence)
     }
 
-    /// Persist an authentic zero-or-multiple-genesis disposition and freeze
+    /// Persist an authentic absent, singleton-empty, or multiple-genesis disposition and freeze
     /// the non-migratable schema-v7 predecessor without establishing it.
     pub fn classify_v7_cardinality_disposition(
         &mut self,

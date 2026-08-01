@@ -30,6 +30,8 @@ const GEN4_COMPILE_FAIL_CASES: &[&str] = &[
     "tests/ui/gen4/use_after_writer_fence.rs",
     "tests/ui/gen4/direct_bare_store_mutation.rs",
     "tests/ui/gen4/raw_store_initialize_unavailable.rs",
+    "tests/ui/gen4/unqualified_store_to_runtime_establishment.rs",
+    "tests/ui/gen4/in_memory_store_to_runtime_establishment.rs",
     "tests/ui/gen4/private_authority_candidate_initializer.rs",
     "tests/ui/gen4/private_branded_session_scope.rs",
     "tests/ui/gen4/r0b_forged_complete_resolver_to_establishment.rs",
@@ -42,7 +44,7 @@ const GEN4_COMPILE_FAIL_CASES: &[&str] = &[
 
 const DEFAULT_ONLY_RAW_INITIALIZER_CASE: &str = "tests/ui/gen4/raw_store_initialize_unavailable.rs";
 
-fn assert_isolated_compile_failure(relative_manifest: &str, expected: &[&str]) {
+fn assert_isolated_compile_failure(relative_manifest: &str, expected: &[&str]) -> String {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_manifest);
     let target = tempfile::tempdir().expect("isolated Gen4 compile-fail target");
     let output = std::process::Command::new(env!("CARGO"))
@@ -67,6 +69,7 @@ fn assert_isolated_compile_failure(relative_manifest: &str, expected: &[&str]) {
             "{relative_manifest} stderr lacks {fragment:?}:\n{stderr}"
         );
     }
+    stderr
 }
 
 #[test]
@@ -105,22 +108,38 @@ fn runtime_authority_evidence_and_session_cannot_be_forged_or_crossed() {
 
 #[test]
 fn default_feature_surface_exposes_no_authority_fixture_support() {
-    assert_isolated_compile_failure(
+    let stderr = assert_isolated_compile_failure(
         "tests/isolated/gen4-default-surface/Cargo.toml",
         &[
             "could not find `test_support`",
             "no function or associated item named `initialize`",
+            "no function or associated item named `initialize_from_unqualified_store`",
         ],
+    );
+    assert!(
+        stderr
+            .matches("no function or associated item named `initialize_from_unqualified_store`")
+            .count()
+            >= 2,
+        "default surface did not refuse both unqualified and in-memory two-step routes:\n{stderr}"
     );
 }
 
 #[test]
 fn all_feature_fixture_inputs_cannot_enter_the_private_store_scope() {
-    assert_isolated_compile_failure(
+    let stderr = assert_isolated_compile_failure(
         "tests/isolated/gen4-all-features-surface/Cargo.toml",
         &[
             "method `with_runtime_authority_writer_session` is private",
             "private method defined here",
+            "no function or associated item named `initialize_from_unqualified_store`",
         ],
+    );
+    assert!(
+        stderr
+            .matches("no function or associated item named `initialize_from_unqualified_store`")
+            .count()
+            >= 2,
+        "all-feature surface did not refuse both unqualified and in-memory two-step routes:\n{stderr}"
     );
 }
