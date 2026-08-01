@@ -2331,6 +2331,7 @@ mod tests {
         FIXTURE_DOMAIN, FIXTURE_HOST_ROLE, FIXTURE_RESIDENT_GENERATION, FIXTURE_RESIDENT_ID,
         FIXTURE_ROLE_MANIFEST_GENERATION, RawAuthorityFixture,
     };
+    use nq_runtime_dependency_authority::verify_resident_activation_successor;
     use nq_store::{
         GovernedAcquisitionCustodyInput, GovernedCustodyInventoryEntry,
         GovernedCustodyRecoveryClass, GovernedCustodyReservationLedgerBinding,
@@ -2581,6 +2582,137 @@ mod tests {
             runtime_store_file_family(&database),
             before,
             "invalid resident authority was filtered, repaired, or wrote a refusal artifact"
+        );
+    }
+
+    #[test]
+    fn gen4_open_refuses_sql_identity_substitution_for_each_native_family_without_writing() {
+        let directory = tempdir().expect("native identity hostile directory");
+        for (label, table, expected_family, family) in [
+            (
+                "operator",
+                "runtime_operator_authority_rotations",
+                "operator_authority_rotation",
+                0_u8,
+            ),
+            (
+                "activation",
+                "runtime_resident_activation_successors",
+                "resident_activation_successor",
+                1_u8,
+            ),
+            (
+                "revocation",
+                "runtime_activation_revocations",
+                "activation_revocation",
+                2_u8,
+            ),
+        ] {
+            let database = directory
+                .path()
+                .join(format!("sql-identity-{label}.sqlite"));
+            let runtime_fixture = fixture();
+            let mut authority = establish_runtime_authority_fixture(
+                &database,
+                runtime_fixture.dependencies.clone(),
+            );
+            let bytes = match family {
+                0 => authority.append_operator_rotation(),
+                1 => authority.append_activation_successor(),
+                2 => authority.append_current_activation_revocation(),
+                _ => unreachable!("closed native authority family"),
+            };
+            let malicious_id = sha256_bytes(format!("malicious SQL identity/{label}").as_bytes());
+            {
+                let connection = rusqlite::Connection::open(&database).expect("hostile fixture");
+                connection
+                    .execute(
+                        &format!(
+                            "INSERT INTO {table} (
+                                record_id, canonical_bytes, canonical_bytes_sha256,
+                                canonical_bytes_length, committed_at
+                             ) VALUES (?1, ?2, ?3, ?4, '2026-08-01T00:00:00Z')"
+                        ),
+                        rusqlite::params![
+                            malicious_id.as_str(),
+                            &bytes,
+                            sha256_bytes(&bytes).as_str(),
+                            i64::try_from(bytes.len()).expect("native hostile length"),
+                        ],
+                    )
+                    .expect("insert exact bytes under substituted SQL identity");
+            }
+            let before = runtime_store_file_family(&database);
+            assert!(matches!(
+                HostRoleRuntime::open(
+                    &database,
+                    runtime_fixture.dependencies,
+                    &authority.custody(),
+                    &test_resident_binding(),
+                ),
+                Err(RuntimeError::Store(
+                    StoreError::AuthorityNativeRecordIdentityMismatch { family, .. }
+                )) if family == expected_family
+            ));
+            assert_eq!(
+                runtime_store_file_family(&database),
+                before,
+                "{label} SQL identity refusal changed Store bytes or sidecars"
+            );
+        }
+    }
+
+    #[test]
+    fn gen4_runtime_reopens_after_a_lawful_activation_successor() {
+        let directory = tempdir().expect("successor reopen directory");
+        let database = directory.path().join("successor-reopen.sqlite");
+        let runtime_fixture = fixture();
+        let dependencies = runtime_fixture.dependencies;
+        let anchor = dependencies
+            .custody()
+            .trust_anchor_id()
+            .expect("successor dependency anchor");
+        let mut authority = RawAuthorityFixture::fresh_genesis_with_anchor(anchor);
+        let custody = authority.custody();
+        let runtime = HostRoleRuntime::initialize(
+            &database,
+            dependencies.clone(),
+            &custody,
+            &test_resident_binding(),
+        )
+        .expect("initialize successor runtime");
+        let mut store = runtime.into_store();
+        let current = store
+            .runtime_authority_presented_set()
+            .expect("genesis candidate set");
+        let successor = authority.append_activation_successor();
+        let expectations = authority.activation_expectations();
+        store
+            .with_runtime_authority_writer_session(|brand, session| {
+                let verified = verify_resident_activation_successor(
+                    brand,
+                    &custody,
+                    &current,
+                    &successor,
+                    None,
+                    &expectations,
+                )?;
+                session.append_runtime_resident_activation_successor(&verified)
+            })
+            .expect("append lawful activation successor");
+        drop(store);
+
+        let reopened =
+            HostRoleRuntime::open(&database, dependencies, &custody, &test_resident_binding())
+                .expect("production restart resolves successor tip");
+        assert_eq!(
+            reopened
+                .into_store()
+                .runtime_authority_presented_set()
+                .expect("reopened authority set")
+                .records()
+                .len(),
+            1
         );
     }
 

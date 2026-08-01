@@ -4297,6 +4297,32 @@ impl Store {
     where
         E: From<StoreError>,
     {
+        self.with_runtime_authority_restart_snapshot_hook(|| Ok(()), operation)
+    }
+
+    /// Test-only deterministic race seam.  The hook runs after root, receipt,
+    /// and occurrence have been read but before native authority families are
+    /// enumerated, while the same deferred read transaction remains open.
+    #[cfg(test)]
+    fn with_runtime_authority_restart_snapshot_test_hook<R, E>(
+        &mut self,
+        hook: impl FnOnce() -> Result<(), E>,
+        operation: impl FnOnce(RuntimeAuthorityRestartSnapshot) -> Result<R, E>,
+    ) -> Result<R, E>
+    where
+        E: From<StoreError>,
+    {
+        self.with_runtime_authority_restart_snapshot_hook(hook, operation)
+    }
+
+    fn with_runtime_authority_restart_snapshot_hook<R, E>(
+        &mut self,
+        hook: impl FnOnce() -> Result<(), E>,
+        operation: impl FnOnce(RuntimeAuthorityRestartSnapshot) -> Result<R, E>,
+    ) -> Result<R, E>
+    where
+        E: From<StoreError>,
+    {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
@@ -4312,6 +4338,7 @@ impl Store {
         let occurrence_id = sole_genesis_on_connection(&transaction)?
             .ok_or(StoreError::GenesisCardinality { found: 0 })
             .map_err(E::from)?;
+        hook()?;
         let presented = presented_runtime_authority_set_on_connection(&transaction)?;
         let migration_receipt = runtime_migration_receipt_bytes_on_connection(&transaction)?;
         let result = operation(RuntimeAuthorityRestartSnapshot {
@@ -19437,6 +19464,86 @@ mod tests {
                 verify_for_establishment(brand, &custody, &presented, None, &expectations)?;
             session.establish_runtime_dependency_trust_root(&resolved)
         })
+    }
+
+    fn native_authority_record_id(family: u8, bytes: &[u8]) -> Sha256Digest {
+        match family {
+            0 => OperatorAuthorityRecord::from_canonical_bytes(bytes)
+                .expect("canonical A1 rotation")
+                .record_digest()
+                .clone(),
+            1 => ResidentActivationRecord::from_canonical_bytes(bytes)
+                .expect("canonical A2 successor")
+                .activation_digest()
+                .clone(),
+            2 => ActivationRevocationRecord::from_canonical_bytes(bytes)
+                .expect("canonical activation revocation")
+                .record_digest()
+                .clone(),
+            _ => unreachable!("closed native authority family"),
+        }
+    }
+
+    fn insert_native_authority_record(
+        connection: &Connection,
+        table: &str,
+        record_id: &Sha256Digest,
+        bytes: &[u8],
+    ) -> Result<(), StoreError> {
+        connection.execute(
+            &format!(
+                "INSERT INTO {table} (
+                    record_id, canonical_bytes, canonical_bytes_sha256,
+                    canonical_bytes_length, committed_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)"
+            ),
+            params![
+                record_id.as_str(),
+                bytes,
+                sha256_bytes(bytes).as_str(),
+                i64::try_from(bytes.len()).expect("native authority record length"),
+                TIME,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn assert_establishment_replay_mutation_is_read_only(
+        store: &mut Store,
+        path: &Path,
+        fixture: &RawAuthorityFixture,
+        mutate: impl FnOnce(&Connection) -> Result<(), StoreError>,
+    ) {
+        let custody = fixture.custody();
+        let presented = fixture.presented_set();
+        let migration_receipt = fixture.migration_receipt();
+        let expectations = fixture.activation_expectations();
+        let mut mutated_family = None;
+        let result = store.with_runtime_authority_writer_session(|brand, session| {
+            let resolved = verify_for_establishment(
+                brand,
+                &custody,
+                &presented,
+                migration_receipt.as_ref(),
+                &expectations,
+            )?;
+            let connection = Connection::open(path)?;
+            mutate(&connection)?;
+            drop(connection);
+            mutated_family = Some(authority_file_family(path));
+            session
+                .establish_runtime_dependency_trust_root(&resolved)
+                .map(drop)
+        });
+        assert!(
+            result.is_err(),
+            "mutated exact replay unexpectedly succeeded"
+        );
+        assert_eq!(
+            authority_file_family(path),
+            mutated_family.expect("mutation captured exact file family"),
+            "replay refusal changed the already-mutated Store or a sidecar"
+        );
     }
 
     fn authority_file_family(path: &Path) -> Vec<(String, Vec<u8>)> {
@@ -36363,6 +36470,87 @@ mod tests {
         );
     }
 
+    #[test]
+    fn gen4_exact_replay_refuses_every_mutated_store_binding_without_writes() {
+        let directory = tempdir().expect("replay mutation directory");
+
+        for (label, mutation) in [
+            ("root", 0_u8),
+            ("genesis", 1_u8),
+            ("receipt", 2_u8),
+            ("authority-candidate", 3_u8),
+        ] {
+            let database = directory.path().join(format!("replay-{label}.db"));
+            let mut store =
+                Store::initialize_unqualified_storage(&database).expect("fresh replay Store");
+            let fixture = RawAuthorityFixture::fresh_genesis();
+            establish_authority_fixture(&mut store, &fixture).expect("establish replay fixture");
+            let mut candidate_fixture = RawAuthorityFixture::fresh_genesis();
+            let candidate = candidate_fixture.append_operator_rotation();
+            let candidate_id = native_authority_record_id(0, &candidate);
+            assert_establishment_replay_mutation_is_read_only(
+                &mut store,
+                &database,
+                &fixture,
+                move |connection| {
+                    match mutation {
+                        0 => connection.execute_batch(
+                            "DROP TRIGGER immutable_runtime_dependency_trust_roots_update;
+                             UPDATE runtime_dependency_trust_roots
+                             SET trust_anchor_id = 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+                             WHERE singleton = 1;",
+                        )?,
+                        1 => connection.execute_batch(
+                            "DROP TRIGGER immutable_genesis_records_update;
+                             UPDATE genesis_records
+                             SET genesis_id = 'store-occurrence/replay-substitution';",
+                        )?,
+                        2 => connection.execute_batch(
+                            "DROP TRIGGER immutable_runtime_dependency_establishment_receipts_update;
+                             UPDATE runtime_dependency_establishment_receipts
+                             SET receipt_id = 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+                             WHERE singleton = 1;",
+                        )?,
+                        3 => insert_native_authority_record(
+                            connection,
+                            "runtime_operator_authority_rotations",
+                            &candidate_id,
+                            &candidate,
+                        )?,
+                        _ => unreachable!("closed replay mutation"),
+                    }
+                    Ok(())
+                },
+            );
+        }
+
+        let (source, backup) = exact_v7_authority_source(
+            directory.path(),
+            "replay-migration",
+            &[FIXTURE_OCCURRENCE_ID],
+            None,
+        );
+        let mut store = Store::open_v7_runtime_authority_migration_source(&source, &backup)
+            .expect("open migration replay Store");
+        let fixture = RawAuthorityFixture::accepted_migration(OldRootState::Rootless, None);
+        establish_migration_authority_fixture(&mut store, &fixture)
+            .expect("establish migration replay fixture");
+        assert_establishment_replay_mutation_is_read_only(
+            &mut store,
+            &source,
+            &fixture,
+            |connection| {
+                connection.execute_batch(
+                    "PRAGMA foreign_keys = OFF;
+                     DROP TRIGGER immutable_runtime_migration_receipt_consumptions_update;
+                     UPDATE runtime_migration_receipt_consumptions
+                     SET migration_receipt_digest = 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc';",
+                )?;
+                Ok(())
+            },
+        );
+    }
+
     fn establish_migration_authority_fixture(
         store: &mut Store,
         fixture: &RawAuthorityFixture,
@@ -36800,6 +36988,98 @@ mod tests {
     }
 
     #[test]
+    fn gen4_declared_restore_requires_exact_bindings_then_migrates_end_to_end() {
+        let directory = tempdir().expect("accepted declared restore directory");
+        let proof = restore_proof_runtime_record(
+            FIXTURE_OCCURRENCE_ID,
+            "eligible_enrolled_inactive",
+            "accepted-end-to-end",
+        );
+        let proof_id =
+            Sha256Digest::parse(proof.record_id.clone()).expect("restore proof identity");
+        let (_source, backup, dependency) = exact_v7_restored_authority_source(
+            directory.path(),
+            "accepted-declared-restore",
+            vec![proof],
+        );
+        let restored = directory.path().join("accepted-declared-restored.db");
+        Store::backup_v7_verified(&backup.path, &restored).expect("restore exact v7 bytes");
+        let declaration = publish_test_restore_declaration(&backup.path, &restored);
+        let mut store = Store::open_v7_runtime_authority_migration_source(&restored, &backup)
+            .expect("open accepted declared restore");
+        let expectations = store
+            .runtime_authority_migration_expectations()
+            .expect("derive exact restore bindings");
+        let old_root_state = OldRootState::Rooted {
+            trust_anchor_id: dependency.trust_anchor_id.clone(),
+        };
+        assert_eq!(expectations.old_root_state, old_root_state);
+        assert_eq!(
+            expectations.restore_declaration_digest,
+            Some(declaration.declaration_digest.clone())
+        );
+        assert_eq!(expectations.restore_proof_digest, Some(proof_id.clone()));
+
+        let missing = RawAuthorityFixture::accepted_migration_with_anchor_and_restore_bindings(
+            dependency.trust_anchor_id.clone(),
+            old_root_state.clone(),
+            None,
+            None,
+        );
+        let before_missing = authority_file_family(&restored);
+        assert!(matches!(
+            establish_migration_authority_fixture(&mut store, &missing),
+            Err(StoreError::AuthorityRestoreQuarantine)
+        ));
+        assert_eq!(authority_file_family(&restored), before_missing);
+
+        let mismatched = RawAuthorityFixture::accepted_migration_with_anchor_and_restore_bindings(
+            dependency.trust_anchor_id.clone(),
+            old_root_state.clone(),
+            Some(sha256_bytes(b"substituted restore declaration")),
+            Some(sha256_bytes(b"substituted restore proof")),
+        );
+        let before_mismatch = authority_file_family(&restored);
+        assert!(matches!(
+            establish_migration_authority_fixture(&mut store, &mismatched),
+            Err(StoreError::AuthorityRestoreQuarantine)
+        ));
+        assert_eq!(authority_file_family(&restored), before_mismatch);
+
+        let exact = RawAuthorityFixture::accepted_migration_with_anchor_and_restore_bindings(
+            dependency.trust_anchor_id.clone(),
+            old_root_state,
+            Some(declaration.declaration_digest.clone()),
+            Some(proof_id.clone()),
+        );
+        let receipt = establish_migration_authority_fixture(&mut store, &exact)
+            .expect("exact declared restore migrates");
+        assert_eq!(receipt.transcript.arm(), EstablishmentArm::Migration);
+        assert_eq!(
+            store
+                .runtime_dependency_trust_root()
+                .expect("restored root"),
+            Some(dependency.trust_anchor_id)
+        );
+        let migration = MigrationReceipt::from_canonical_bytes(
+            store
+                .runtime_authority_migration_receipt()
+                .expect("migration receipt query")
+                .expect("migration receipt retained")
+                .as_bytes(),
+        )
+        .expect("parse retained restore migration receipt");
+        assert_eq!(
+            migration.restore_declaration_digest(),
+            Some(&declaration.declaration_digest)
+        );
+        assert_eq!(migration.restore_proof_digest(), Some(&proof_id));
+        store.validate().expect("declared restored Store validates");
+        drop(store);
+        Store::open_read_only(&restored).expect("declared restored Store reopens read-only");
+    }
+
+    #[test]
     fn gen4_v7_rootless_authority_migration_establishes_exact_occurrence_and_receipts() {
         let directory = tempdir().expect("rootless migration directory");
         let (source, backup) = exact_v7_authority_source(
@@ -36967,8 +37247,8 @@ mod tests {
                     ),
                     found => matches!(
                         &establishment,
-                        Err(StoreError::Invariant(message))
-                            if found > 1 && message.contains("more than one genesis identity")
+                        Err(StoreError::GenesisCardinality { found: actual })
+                            if found > 1 && *actual == found
                     ),
                 },
                 "unexpected {label} establishment result: {establishment:?}"
@@ -37364,6 +37644,60 @@ mod tests {
         store
             .validate()
             .expect("native authority families validate structurally");
+    }
+
+    #[test]
+    fn gen4_restart_snapshot_is_coherent_across_each_native_family_write_race() {
+        let directory = tempdir().expect("restart snapshot race directory");
+        for (label, table, family) in [
+            ("operator", "runtime_operator_authority_rotations", 0_u8),
+            ("activation", "runtime_resident_activation_successors", 1_u8),
+            ("revocation", "runtime_activation_revocations", 2_u8),
+        ] {
+            let database = directory.path().join(format!("restart-race-{label}.db"));
+            let mut store = Store::initialize_unqualified_storage(&database).expect("race Store");
+            store
+                .connection
+                .pragma_update(None, "journal_mode", "WAL")
+                .expect("enable WAL for concurrent restart snapshot fixture");
+            let mut fixture = RawAuthorityFixture::fresh_genesis();
+            establish_authority_fixture(&mut store, &fixture).expect("race establishment");
+            let bytes = match family {
+                0 => fixture.append_operator_rotation(),
+                1 => fixture.append_activation_successor(),
+                2 => fixture.append_current_activation_revocation(),
+                _ => unreachable!("closed native authority family"),
+            };
+            let record_id = native_authority_record_id(family, &bytes);
+            let database_for_hook = database.clone();
+
+            let snapshot_count = store
+                .with_runtime_authority_restart_snapshot_test_hook(
+                    || -> Result<(), StoreError> {
+                        let connection = Connection::open(&database_for_hook)?;
+                        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+                        insert_native_authority_record(&connection, table, &record_id, &bytes)
+                    },
+                    |snapshot| -> Result<usize, StoreError> {
+                        assert_eq!(snapshot.occurrence_id, FIXTURE_OCCURRENCE_ID);
+                        Ok(snapshot.presented.records().len())
+                    },
+                )
+                .expect("coherent restart snapshot");
+            assert_eq!(
+                snapshot_count, 0,
+                "{label} write leaked into an already-established read snapshot"
+            );
+            assert_eq!(
+                store
+                    .runtime_authority_presented_set()
+                    .expect("post-race Store enumeration")
+                    .records()
+                    .len(),
+                1,
+                "{label} write was not visible after releasing the read snapshot"
+            );
+        }
     }
 
     #[test]
