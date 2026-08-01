@@ -270,8 +270,7 @@ pub fn verify_operator_authority_rotation<'id>(
     let parsed = OperatorAuthorityRecord::from_canonical_bytes(canonical_rotation)?;
     let digest = parsed.record_digest().clone();
     let current_candidate_set_digest = digest_presented_authority_set(current)?;
-    let resulting = with_added_record(
-        current,
+    let resulting = current.with_record_in_store_enumeration_order(
         PresentedAuthorityRecord::OperatorAuthorityRotation(canonical_rotation.to_vec()),
     );
     let fields = resolve_fields(
@@ -326,8 +325,7 @@ pub fn verify_resident_activation_successor<'id>(
     let parsed = ResidentActivationRecord::from_canonical_bytes(canonical_successor)?;
     let digest = parsed.activation_digest().clone();
     let current_candidate_set_digest = digest_presented_authority_set(current)?;
-    let resulting = with_added_record(
-        current,
+    let resulting = current.with_record_in_store_enumeration_order(
         PresentedAuthorityRecord::ResidentActivationSuccessor(canonical_successor.to_vec()),
     );
     let fields = resolve_fields(
@@ -382,8 +380,7 @@ pub fn verify_activation_revocation<'id>(
     let parsed = ActivationRevocationRecord::from_canonical_bytes(canonical_revocation)?;
     let digest = parsed.record_digest().clone();
     let current_candidate_set_digest = digest_presented_authority_set(current)?;
-    let resulting = with_added_record(
-        current,
+    let resulting = current.with_record_in_store_enumeration_order(
         PresentedAuthorityRecord::ActivationRevocation(canonical_revocation.to_vec()),
     );
     let fields = resolve_fields(
@@ -589,7 +586,7 @@ fn reverify_event(
         &context.expectations,
         current_tip_requirement,
     )?;
-    let resulting = with_added_record(store_presented, proposed);
+    let resulting = store_presented.with_record_in_store_enumeration_order(proposed);
     let reverified = resolve_fields(
         &context.custody,
         &resulting,
@@ -601,15 +598,6 @@ fn reverify_event(
         return Err(AuthorityError::PresentedSetCorrespondenceMismatch);
     }
     Ok(())
-}
-
-fn with_added_record(
-    current: &PresentedAuthoritySet,
-    record: PresentedAuthorityRecord,
-) -> PresentedAuthoritySet {
-    let mut records = current.records().to_vec();
-    records.push(record);
-    PresentedAuthoritySet::new(records)
 }
 
 #[derive(Clone, Copy)]

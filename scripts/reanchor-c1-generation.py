@@ -20,7 +20,7 @@ import copy
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import signal
 import stat
@@ -53,6 +53,18 @@ MANIFEST_V2_PATH = f"{ASSET_DIR}/nq.v3_projection_capsule_bound_manifest.v2.json
 CARRIER_PATH = f"{ASSET_DIR}/nq.v3_projection_capsule_bound_qualification.v1.json"
 ASSETS_RS_PATH = "crates/nq-host-role-contract/src/assets.rs"
 CAPACITY_TEST_PATH = "crates/nq-host-role-contract/tests/capacity_extension.rs"
+REVIEW_BINDING_PATH = "audit/c1-gen4-cap-h14-review-binding.v1.json"
+REVIEW_BINDING_SCHEMA = "nq.c1_gen4_cap_h14_review_binding.v1"
+REVIEW_BINDING_STATUS = "accepted-independent-review"
+REVIEW_VERDICT = "PASS-PURE-C1"
+EVALUATOR_PATH = "crates/nq-store/src/governed_projection_capacity.rs"
+SERIALIZER_PATH = "crates/nq-store/src/governed_projection_capsule.rs"
+LEGACY_REVIEW_IDENTITY = (
+    "nq.host-role-runtime-seam.physical-capacity-c1-post-acceptance-rereview.v3"
+)
+LEGACY_REVIEW_SHA256 = (
+    "sha256:6e4ac4c136386e4a8379ca76ca9d42fd145d5de71e98ea877dab40b3a1c0d8c1"
+)
 OUTPUT_PATHS = (
     EXTENSION_PATH,
     MANIFEST_V1_PATH,
@@ -295,6 +307,157 @@ def object_member(value: Any, name: str, label: str) -> dict[str, Any]:
     return require_object(parent[name], f"{label}.{name}")
 
 
+def require_exact_keys(
+    value: Mapping[str, Any], expected: Iterable[str], label: str
+) -> None:
+    actual = frozenset(value)
+    required = frozenset(expected)
+    if actual != required:
+        refuse(
+            f"{label} key set differs: missing={sorted(required - actual)}, "
+            f"unexpected={sorted(actual - required)}"
+        )
+
+
+def require_string(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        refuse(f"{label} must be a nonempty string")
+    return value
+
+
+def require_sha256(value: Any, label: str) -> str:
+    digest = require_string(value, label)
+    if SHA256_RE.fullmatch(digest) is None or not digest.startswith("sha256:"):
+        refuse(f"{label} must be a canonical sha256: digest")
+    return digest
+
+
+def safe_relative_path(value: Any, label: str) -> str:
+    path = require_string(value, label)
+    if "\\" in path or "\x00" in path or path.endswith("/"):
+        refuse(f"{label} is not a canonical repository-relative path")
+    pure = PurePosixPath(path)
+    if pure.is_absolute() or pure.as_posix() != path:
+        refuse(f"{label} is not a canonical repository-relative path")
+    if any(part in ("", ".", "..") for part in pure.parts):
+        refuse(f"{label} contains a forbidden path component")
+    return path
+
+
+def validate_review_binding(
+    value: Any, qualification_basis_sha256: str, pre_review_projection_sha256: str
+) -> dict[str, Any]:
+    binding = require_object(value, "CAP-H14 review binding")
+    require_exact_keys(
+        binding,
+        (
+            "schema",
+            "status",
+            "generation",
+            "authority_effect",
+            "reviewed_source",
+            "records_repository",
+            "review_receipt",
+        ),
+        "CAP-H14 review binding",
+    )
+    if binding.get("schema") != REVIEW_BINDING_SCHEMA:
+        refuse("CAP-H14 review binding schema differs")
+    if binding.get("status") != REVIEW_BINDING_STATUS:
+        refuse("CAP-H14 review binding is not accepted")
+    if binding.get("generation") != "c1.generation.4":
+        refuse("CAP-H14 review binding generation differs")
+    if binding.get("authority_effect") != "none":
+        refuse("CAP-H14 review binding attempts an authority effect")
+
+    source = object_member(binding, "reviewed_source", "CAP-H14 review binding")
+    require_exact_keys(
+        source,
+        (
+            "commit",
+            "tree",
+            "qualification_basis_sha256",
+            "pre_review_projection_sha256",
+            "evaluator_path",
+            "evaluator_sha256",
+            "canonical_serializer_path",
+            "canonical_serializer_sha256",
+        ),
+        "CAP-H14 reviewed source",
+    )
+    for field in ("commit", "tree"):
+        object_id = require_string(source.get(field), f"reviewed source {field}")
+        if GIT_OBJECT_RE.fullmatch(object_id) is None:
+            refuse(f"reviewed source {field} is not a Git object identity")
+    if source.get("qualification_basis_sha256") != qualification_basis_sha256:
+        refuse("fresh review does not state the generated qualification basis")
+    if source.get("pre_review_projection_sha256") != pre_review_projection_sha256:
+        refuse("fresh review does not state the generated pre-review projection")
+    if (
+        safe_relative_path(source.get("evaluator_path"), "reviewed evaluator path")
+        != EVALUATOR_PATH
+    ):
+        refuse("fresh review evaluator path differs")
+    if (
+        safe_relative_path(
+            source.get("canonical_serializer_path"),
+            "reviewed canonical serializer path",
+        )
+        != SERIALIZER_PATH
+    ):
+        refuse("fresh review canonical serializer path differs")
+    require_sha256(source.get("evaluator_sha256"), "reviewed evaluator digest")
+    require_sha256(
+        source.get("canonical_serializer_sha256"),
+        "reviewed canonical serializer digest",
+    )
+
+    records = object_member(binding, "records_repository", "CAP-H14 review binding")
+    require_exact_keys(records, ("commit", "tree"), "records repository binding")
+    for field in ("commit", "tree"):
+        object_id = require_string(records.get(field), f"records {field}")
+        if GIT_OBJECT_RE.fullmatch(object_id) is None:
+            refuse(f"records {field} is not a Git object identity")
+
+    receipt = object_member(binding, "review_receipt", "CAP-H14 review binding")
+    require_exact_keys(
+        receipt,
+        (
+            "identity",
+            "verdict",
+            "receipt_path",
+            "receipt_sha256",
+            "report_path",
+            "report_sha256",
+        ),
+        "CAP-H14 review receipt binding",
+    )
+    identity = require_string(receipt.get("identity"), "review identity")
+    if identity == LEGACY_REVIEW_IDENTITY:
+        refuse("unchanged Gen3 review identity cannot bind a successor cut")
+    if receipt.get("verdict") != REVIEW_VERDICT:
+        refuse("fresh CAP-H14 review verdict is not PASS-PURE-C1")
+    safe_relative_path(receipt.get("receipt_path"), "review receipt path")
+    safe_relative_path(receipt.get("report_path"), "review report path")
+    require_sha256(receipt.get("receipt_sha256"), "review receipt digest")
+    report_sha256 = require_sha256(receipt.get("report_sha256"), "review report digest")
+    if report_sha256 == LEGACY_REVIEW_SHA256:
+        refuse("unchanged Gen3 review bytes cannot bind a successor cut")
+    return binding
+
+
+def carrier_review_from_binding(binding: Mapping[str, Any]) -> dict[str, Any]:
+    source = require_object(binding["reviewed_source"], "reviewed source")
+    receipt = require_object(binding["review_receipt"], "review receipt")
+    return {
+        "identity": receipt["identity"],
+        "path": receipt["report_path"],
+        "sha256": receipt["report_sha256"],
+        "qualification_basis_sha256": source["qualification_basis_sha256"],
+        "pre_review_projection_sha256": source["pre_review_projection_sha256"],
+    }
+
+
 def engine_binding_nodes(value: Any) -> list[dict[str, Any]]:
     found: list[dict[str, Any]] = []
 
@@ -392,7 +555,11 @@ def static_asset_rows(extension: Any) -> dict[str, dict[str, Any]]:
 
 
 def verify_chain(
-    bundle: Mapping[str, bytes], engine_digest: str, *, label: str
+    bundle: Mapping[str, bytes],
+    engine_digest: str,
+    *,
+    label: str,
+    review_binding: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     missing = sorted(set(OUTPUT_PATHS) - set(bundle))
     if missing:
@@ -432,10 +599,17 @@ def verify_chain(
         carrier_object, "implementation_bindings", f"{label} carrier"
     )
     review = object_member(bindings, "post_acceptance_review", f"{label} bindings")
-    if review.get("qualification_basis_sha256") != basis:
-        refuse(f"{label} review does not bind the qualification basis")
-    if review.get("pre_review_projection_sha256") != pre_review:
-        refuse(f"{label} review pre-review projection digest differs")
+    if review_binding is None:
+        if review.get("qualification_basis_sha256") != basis:
+            refuse(f"{label} review does not bind the qualification basis")
+        if review.get("pre_review_projection_sha256") != pre_review:
+            refuse(f"{label} review pre-review projection digest differs")
+    else:
+        validated_review_binding = validate_review_binding(
+            review_binding, basis, pre_review
+        )
+        if review != carrier_review_from_binding(validated_review_binding):
+            refuse(f"{label} carrier review differs from the fresh review binding")
 
     identity = qualification_identity(carrier)
     if carrier_object.get("qualification_id") != identity:
@@ -473,6 +647,14 @@ def verify_chain(
         exact_text_pin(assets_rs, digest, 1, f"{label} assets.rs {Path(path).name} pin")
     exact_text_pin(assets_rs, basis, 1, f"{label} assets.rs basis pin")
     exact_text_pin(capacity_test, basis, 1, f"{label} capacity test basis pin")
+    for field in ("identity", "path", "sha256"):
+        value = require_string(review.get(field), f"{label} review {field}")
+        exact_text_pin(
+            assets_rs,
+            value,
+            1,
+            f"{label} assets.rs post-acceptance review {field} pin",
+        )
 
     return {
         "engine_binding_replacements": {
@@ -483,6 +665,10 @@ def verify_chain(
         **sections,
         "qualification_basis_sha256": basis,
         "pre_review_projection_sha256": pre_review,
+        "post_acceptance_review": copy.deepcopy(review),
+        "review_binding_path": REVIEW_BINDING_PATH
+        if review_binding is not None
+        else None,
         "qualification_id": identity,
         "manifest_v1_bytes_sha256": file_digests[MANIFEST_V1_PATH],
         "manifest_v2_bytes_sha256": file_digests[MANIFEST_V2_PATH],
@@ -533,7 +719,10 @@ def replace_exact(text: str, old: str, new: str, expected: int, label: str) -> s
 
 
 def reanchor_bundle(
-    baseline: Mapping[str, bytes], old_engine_digest: str, new_engine_digest: str
+    baseline: Mapping[str, bytes],
+    old_engine_digest: str,
+    new_engine_digest: str,
+    review_binding: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, bytes], dict[str, Any]]:
     old_receipt = verify_chain(baseline, old_engine_digest, label="baseline")
 
@@ -556,9 +745,26 @@ def reanchor_bundle(
     new_basis = qualification_basis(manifest_v2)
     carrier_object = require_object(carrier, "generated carrier")
     carrier_object["qualification_basis"]["digest"] = new_basis
-    review = carrier_object["implementation_bindings"]["post_acceptance_review"]
-    review["qualification_basis_sha256"] = new_basis
-    review["pre_review_projection_sha256"] = pre_review_projection(carrier)
+    old_review = copy.deepcopy(
+        carrier_object["implementation_bindings"]["post_acceptance_review"]
+    )
+    generated_pre_review = pre_review_projection(carrier)
+    if review_binding is None:
+        if (
+            new_basis != old_receipt["qualification_basis_sha256"]
+            or generated_pre_review != old_receipt["pre_review_projection_sha256"]
+        ):
+            refuse(
+                "qualification basis or pre-review projection changed without a fresh "
+                "independent review binding"
+            )
+        new_review = old_review
+    else:
+        validated_review_binding = validate_review_binding(
+            review_binding, new_basis, generated_pre_review
+        )
+        new_review = carrier_review_from_binding(validated_review_binding)
+    carrier_object["implementation_bindings"]["post_acceptance_review"] = new_review
     carrier_object["qualification_id"] = qualification_identity(carrier)
     carrier_bytes = pretty_json(carrier)
 
@@ -618,6 +824,14 @@ def reanchor_bundle(
         1,
         "assets.rs qualification-basis pin",
     )
+    for field in ("identity", "path", "sha256"):
+        assets_rs = replace_exact(
+            assets_rs,
+            require_string(old_review.get(field), f"baseline review {field}"),
+            require_string(new_review.get(field), f"generated review {field}"),
+            1,
+            f"assets.rs post-acceptance review {field} pin",
+        )
     capacity_test = baseline[CAPACITY_TEST_PATH].decode("utf-8", "strict")
     capacity_test = replace_exact(
         capacity_test,
@@ -635,7 +849,12 @@ def reanchor_bundle(
         ASSETS_RS_PATH: assets_rs.encode("utf-8"),
         CAPACITY_TEST_PATH: capacity_test.encode("utf-8"),
     }
-    receipt = verify_chain(generated, new_engine_digest, label="generated")
+    receipt = verify_chain(
+        generated,
+        new_engine_digest,
+        label="generated",
+        review_binding=review_binding,
+    )
     return generated, receipt
 
 
@@ -655,6 +874,35 @@ def read_worktree_file(repo: Path, relative: str) -> bytes:
 
 def read_worktree_bundle(repo: Path) -> dict[str, bytes]:
     return {path: read_worktree_file(repo, path) for path in OUTPUT_PATHS}
+
+
+def load_worktree_review_binding(repo: Path, relative: Path) -> dict[str, Any]:
+    path = safe_relative_path(relative.as_posix(), "--review-binding")
+    if path != REVIEW_BINDING_PATH:
+        refuse(f"--review-binding must name exact campaign path {REVIEW_BINDING_PATH}")
+    value = load_json(read_worktree_file(repo, path), "CAP-H14 review binding")
+    return require_object(value, "CAP-H14 review binding")
+
+
+def validate_reviewed_worktree_sources(
+    repo: Path, review_binding: Mapping[str, Any]
+) -> None:
+    source = require_object(review_binding["reviewed_source"], "reviewed source")
+    for path_field, digest_field, label in (
+        ("evaluator_path", "evaluator_sha256", "reviewed evaluator"),
+        (
+            "canonical_serializer_path",
+            "canonical_serializer_sha256",
+            "reviewed canonical serializer",
+        ),
+    ):
+        path = safe_relative_path(source[path_field], f"{label} path")
+        observed = sha256_bytes(read_worktree_file(repo, path))
+        if observed != source[digest_field]:
+            refuse(
+                f"worktree {label} differs from fresh review: "
+                f"expected {source[digest_field]}, observed {observed}"
+            )
 
 
 def compare_bundle(
@@ -792,6 +1040,14 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
         "--new-engine-sha256",
         help="requested engine.rs SHA-256; defaults to the baseline engine digest",
     )
+    parser.add_argument(
+        "--review-binding",
+        type=Path,
+        help=(
+            "exact repository-relative fresh CAP-H14 binding; required whenever "
+            "the qualification basis or pre-review projection changes"
+        ),
+    )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true", help="verify only; never write")
     mode.add_argument(
@@ -825,18 +1081,37 @@ def main(arguments: list[str] | None = None) -> int:
             refuse(
                 f"worktree {ENGINE_PATH} is {actual_engine}; requested engine digest is {requested}"
             )
+        review_binding = None
+        if args.review_binding is not None:
+            review_binding = load_worktree_review_binding(repo, args.review_binding)
+            source = require_object(
+                review_binding["reviewed_source"], "reviewed source"
+            )
+            validate_review_binding(
+                review_binding,
+                require_sha256(
+                    source.get("qualification_basis_sha256"),
+                    "reviewed qualification basis",
+                ),
+                require_sha256(
+                    source.get("pre_review_projection_sha256"),
+                    "reviewed pre-review projection",
+                ),
+            )
+            validate_reviewed_worktree_sources(repo, review_binding)
         generated, receipt = reanchor_bundle(
-            baseline, baseline_engine_digest, requested
+            baseline,
+            baseline_engine_digest,
+            requested,
+            review_binding=review_binding,
         )
 
         if args.check:
             compare_bundle(read_worktree_bundle(repo), generated, "check: worktree")
             mode = "check"
         else:
-            if requested == baseline_engine_digest:
-                refuse(
-                    "--write refuses a no-op re-anchor; use --check for baseline reproduction"
-                )
+            if all(generated[path] == baseline[path] for path in OUTPUT_PATHS):
+                refuse("--write refuses a no-op re-anchor or review rebinding")
             write_bundle_atomically(repo, baseline, generated)
             mode = "write"
         document = receipt_document(

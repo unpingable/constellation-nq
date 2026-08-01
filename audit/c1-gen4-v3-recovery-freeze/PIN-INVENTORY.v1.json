@@ -98,6 +98,23 @@
       ]
     },
     {
+      "id": "qualification-identity-and-review-binding",
+      "purpose": "Exact pure-C1 capacity qualification assets, fresh independent-review binding, target/external-receipt identity verifier, deterministic re-anchor tool, and their focused controls.",
+      "paths": [
+        "audit/c1-gen4-cap-h14-review-binding.v1.json",
+        "scripts/reanchor-c1-generation.py",
+        "scripts/verify-c1-generation-identity.py",
+        "scripts/test_c1_generation_identity.py",
+        "crates/nq-host-role-contract/assets/custody-capacity-extension-manifest.v1.json",
+        "crates/nq-host-role-contract/assets/nq.v3_projection_capsule_bound_manifest.v1.json",
+        "crates/nq-host-role-contract/assets/nq.v3_projection_capsule_bound_manifest.v2.json",
+        "crates/nq-host-role-contract/assets/nq.v3_projection_capsule_bound_qualification.v1.json",
+        "crates/nq-host-role-contract/tests/capacity_extension.rs",
+        "crates/nq-store/src/governed_projection_capacity.rs",
+        "crates/nq-store/src/governed_projection_capsule.rs"
+      ]
+    },
+    {
       "id": "gen4-and-gen3-proof-harnesses",
       "purpose": "Gen4 noninjectability, Gen3 sole-writer regression, migration/restore contract, and restart-oriented test harnesses outside inline source tests.",
       "paths": [

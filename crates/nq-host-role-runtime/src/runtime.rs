@@ -2302,7 +2302,10 @@ mod tests {
         FIXTURE_DOMAIN, FIXTURE_HOST_ROLE, FIXTURE_RESIDENT_GENERATION, FIXTURE_RESIDENT_ID,
         FIXTURE_ROLE_MANIFEST_GENERATION, RawAuthorityFixture,
     };
-    use nq_runtime_dependency_authority::verify_resident_activation_successor;
+    use nq_runtime_dependency_authority::{
+        verify_activation_revocation, verify_operator_authority_rotation,
+        verify_resident_activation_successor,
+    };
     use nq_store::{
         GovernedAcquisitionCustodyInput, GovernedCustodyInventoryEntry,
         GovernedCustodyRecoveryClass, GovernedCustodyReservationLedgerBinding,
@@ -2671,6 +2674,60 @@ mod tests {
                 session.append_runtime_resident_activation_successor(&verified)
             })
             .expect("append lawful activation successor");
+
+        let current = store
+            .runtime_authority_presented_set()
+            .expect("successor candidate set");
+        let rotation = authority.append_operator_rotation();
+        store
+            .with_runtime_authority_writer_session(|brand, session| {
+                let verified = verify_operator_authority_rotation(
+                    brand,
+                    &custody,
+                    &current,
+                    &rotation,
+                    None,
+                    &expectations,
+                )?;
+                session.append_runtime_operator_authority_rotation(&verified)
+            })
+            .expect("append lawful operator rotation after resident successor");
+
+        let current = store
+            .runtime_authority_presented_set()
+            .expect("rotation candidate set");
+        let revocation = authority.append_current_activation_revocation();
+        store
+            .with_runtime_authority_writer_session(|brand, session| {
+                let verified = verify_activation_revocation(
+                    brand,
+                    &custody,
+                    &current,
+                    &revocation,
+                    None,
+                    &expectations,
+                )?;
+                session.append_runtime_activation_revocation(&verified)
+            })
+            .expect("append lawful activation revocation");
+
+        let current = store
+            .runtime_authority_presented_set()
+            .expect("revoked candidate set");
+        let successor_after_revocation = authority.append_activation_successor();
+        store
+            .with_runtime_authority_writer_session(|brand, session| {
+                let verified = verify_resident_activation_successor(
+                    brand,
+                    &custody,
+                    &current,
+                    &successor_after_revocation,
+                    None,
+                    &expectations,
+                )?;
+                session.append_runtime_resident_activation_successor(&verified)
+            })
+            .expect("append lawful successor after revocation");
         drop(store);
 
         let reopened =
@@ -2683,7 +2740,7 @@ mod tests {
                 .expect("reopened authority set")
                 .records()
                 .len(),
-            1
+            4
         );
     }
 

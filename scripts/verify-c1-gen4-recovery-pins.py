@@ -33,6 +33,22 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 INVENTORY_PATH = "audit/c1-gen4-v3-recovery-freeze/PIN-INVENTORY.v1.json"
 VERIFIER_PATH = "scripts/verify-c1-gen4-recovery-pins.py"
 TEST_PATH = "scripts/test_c1_gen4_recovery_pins.py"
+CAP_H14_REVIEW_BINDING_PATH = "audit/c1-gen4-cap-h14-review-binding.v1.json"
+QUALIFICATION_IDENTITY_PATHS = frozenset(
+    (
+        CAP_H14_REVIEW_BINDING_PATH,
+        "scripts/reanchor-c1-generation.py",
+        "scripts/verify-c1-generation-identity.py",
+        "scripts/test_c1_generation_identity.py",
+        "crates/nq-host-role-contract/assets/custody-capacity-extension-manifest.v1.json",
+        "crates/nq-host-role-contract/assets/nq.v3_projection_capsule_bound_manifest.v1.json",
+        "crates/nq-host-role-contract/assets/nq.v3_projection_capsule_bound_manifest.v2.json",
+        "crates/nq-host-role-contract/assets/nq.v3_projection_capsule_bound_qualification.v1.json",
+        "crates/nq-host-role-contract/tests/capacity_extension.rs",
+        "crates/nq-store/src/governed_projection_capacity.rs",
+        "crates/nq-store/src/governed_projection_capsule.rs",
+    )
+)
 
 INVENTORY_SCHEMA = "nq.c1_gen4_v3_recovery_pin_inventory.v1"
 INVENTORY_STATUS = "INVENTORY-SPECIFICATION-NOT-A-FREEZE"
@@ -99,6 +115,7 @@ REQUIRED_GROUP_PATHS = {
             "crates/nq-store/tests/rust_source_scan.py",
         )
     ),
+    "qualification-identity-and-review-binding": QUALIFICATION_IDENTITY_PATHS,
     "gen4-and-gen3-proof-harnesses": frozenset(
         (
             "crates/nq-app/tests/admin_lifecycle.rs",
@@ -642,8 +659,7 @@ def semantic_required_paths(available_paths: Iterable[str]) -> set[str]:
     runtime_sources = {
         path
         for path in available
-        if path.startswith("crates/nq-host-role-runtime/src/")
-        and path.endswith(".rs")
+        if path.startswith("crates/nq-host-role-runtime/src/") and path.endswith(".rs")
     }
     required_runtime_root = "crates/nq-host-role-runtime/src/facade.rs"
     if required_runtime_root not in runtime_sources or len(runtime_sources) < 7:
@@ -661,7 +677,17 @@ def semantic_required_paths(available_paths: Iterable[str]) -> set[str]:
     if len(isolated_surfaces) < 6:
         refuse("semantic Gen4 isolated-surface discovery is incomplete")
 
-    return runtime_sources | {archive_specimen} | isolated_surfaces
+    qualification_paths = QUALIFICATION_IDENTITY_PATHS
+    unavailable_qualification = sorted(qualification_paths - available)
+    if unavailable_qualification:
+        refuse(
+            "semantic qualification/review-binding discovery is incomplete: "
+            f"{unavailable_qualification}"
+        )
+
+    return (
+        runtime_sources | {archive_specimen} | isolated_surfaces | qualification_paths
+    )
 
 
 def assert_semantic_pin_closure(

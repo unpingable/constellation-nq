@@ -4214,7 +4214,6 @@ impl Store {
         }
         let current = presented_runtime_authority_set_on_connection(&transaction)?;
         reverify(&current).map_err(|_| StoreError::AuthorityEventCorrespondenceMismatch)?;
-        let mut records = current.records().to_vec();
         let proposed = match table {
             "runtime_operator_authority_rotations" => {
                 PresentedAuthorityRecord::OperatorAuthorityRotation(canonical_bytes.to_vec())
@@ -4231,9 +4230,8 @@ impl Store {
                 ));
             }
         };
-        records.push(proposed);
-        if digest_presented_authority_set(&PresentedAuthoritySet::new(records))?
-            != *expected_resulting_candidate_set_digest
+        let prospective = current.with_record_in_store_enumeration_order(proposed);
+        if digest_presented_authority_set(&prospective)? != *expected_resulting_candidate_set_digest
         {
             return Err(StoreError::AuthorityEventCorrespondenceMismatch);
         }
@@ -37777,8 +37775,10 @@ mod tests {
 
     #[test]
     fn gen4_verified_authority_events_are_family_resident_and_restart_resolved() {
+        let directory = tempdir().expect("authority event directory");
+        let database = directory.path().join("authority-events.sqlite");
         let mut store =
-            Store::initialize_runtime_authority_candidate_in_memory().expect("authority Store");
+            Store::initialize_runtime_authority_candidate(&database).expect("authority Store");
         let mut fixture = RawAuthorityFixture::fresh_genesis();
         establish_authority_fixture(&mut store, &fixture).expect("authority establishment");
         let custody = fixture.custody();
@@ -37787,24 +37787,6 @@ mod tests {
         let current = store
             .runtime_authority_presented_set()
             .expect("empty current set");
-        let rotation = fixture.append_operator_rotation();
-        store
-            .with_runtime_authority_writer_session(|brand, session| {
-                let verified = verify_operator_authority_rotation(
-                    brand,
-                    &custody,
-                    &current,
-                    &rotation,
-                    None,
-                    &expectations,
-                )?;
-                session.append_runtime_operator_authority_rotation(&verified)
-            })
-            .expect("append verified A1 rotation");
-
-        let current = store
-            .runtime_authority_presented_set()
-            .expect("rotation set");
         let successor = fixture.append_activation_successor();
         store
             .with_runtime_authority_writer_session(|brand, session| {
@@ -37823,6 +37805,24 @@ mod tests {
         let current = store
             .runtime_authority_presented_set()
             .expect("successor set");
+        let rotation = fixture.append_operator_rotation();
+        store
+            .with_runtime_authority_writer_session(|brand, session| {
+                let verified = verify_operator_authority_rotation(
+                    brand,
+                    &custody,
+                    &current,
+                    &rotation,
+                    None,
+                    &expectations,
+                )?;
+                session.append_runtime_operator_authority_rotation(&verified)
+            })
+            .expect("append verified A1 rotation after resident successor");
+
+        let current = store
+            .runtime_authority_presented_set()
+            .expect("cross-family successor and rotation set");
         let snapshot =
             resolve_for_restart(&custody, &current, None, &fixture.restart_expectations())
                 .expect("restart resolves successor");
@@ -37853,9 +37853,54 @@ mod tests {
             resolve_for_restart(&custody, &stored, None, &fixture.restart_expectations()),
             Err(nq_runtime_dependency_authority::AuthorityError::ControllingActivationRevoked)
         ));
+
+        let successor_after_revocation = fixture.append_activation_successor();
+        store
+            .with_runtime_authority_writer_session(|brand, session| {
+                let verified = verify_resident_activation_successor(
+                    brand,
+                    &custody,
+                    &stored,
+                    &successor_after_revocation,
+                    None,
+                    &expectations,
+                )?;
+                session.append_runtime_resident_activation_successor(&verified)
+            })
+            .expect("append verified successor after resident revocation");
+        let stored = store
+            .runtime_authority_presented_set()
+            .expect("complete cross-family set");
+        assert!(matches!(
+            stored.records(),
+            [
+                PresentedAuthorityRecord::OperatorAuthorityRotation(_),
+                PresentedAuthorityRecord::ResidentActivationSuccessor(_),
+                PresentedAuthorityRecord::ResidentActivationSuccessor(_),
+                PresentedAuthorityRecord::ActivationRevocation(_),
+            ]
+        ));
         store
             .validate()
             .expect("native authority families validate structurally");
+        drop(store);
+
+        let mut reopened = Store::open(&database).expect("reopen authority Store");
+        let resolved = reopened
+            .with_runtime_authority_restart_snapshot(|snapshot| -> Result<_, StoreError> {
+                resolve_for_restart(
+                    &custody,
+                    &snapshot.presented,
+                    snapshot.migration_receipt.as_ref(),
+                    &fixture.restart_expectations(),
+                )
+                .map_err(StoreError::from)
+            })
+            .expect("Store-backed restart resolves post-revocation successor");
+        assert_eq!(
+            resolved.controlling_tip_activation_digest(),
+            fixture.current_activation_digest()
+        );
     }
 
     #[test]

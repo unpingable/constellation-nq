@@ -56,13 +56,13 @@
       "identity": "nq.v3_projection_capsule_bound_manifest.v2",
       "schema": "nq.v3_projection_capsule_bound_manifest.v2",
       "source_path": "nq.v3_projection_capsule_bound_manifest.v2.json",
-      "sha256": "sha256:2ab4cf80ee2d97ad2ab19276eab824c95e4bf9380ffdea685c02e249c233f202"
+      "sha256": "sha256:0283108385e35bc8f922a940428533a8a81fbd2735ea0457901717fe03c06d01"
     },
     {
       "identity": "nq.v3_projection_capsule_bound_qualification.v1",
       "schema": "nq.v3_projection_capsule_bound_qualification.v1",
       "source_path": "nq.v3_projection_capsule_bound_qualification.v1.json",
-      "sha256": "sha256:9674f7416bf86cd74bdbe58263ea4cf4d806f417f8866e909fd77ce6fc3ac8cc"
+      "sha256": "sha256:94500eb36b9652b80fdd3eacf242eadd1a1ae8118d0de5c9b37bc2cd2b337c15"
     }
   ],
   "qualification_gaps": [

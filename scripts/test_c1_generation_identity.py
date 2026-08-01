@@ -40,6 +40,49 @@ class C1GenerationIdentityTest(unittest.TestCase):
             reanchor.git_object(cls.repo, cls.gen3, reanchor.ENGINE_PATH)
         )
 
+    def synthetic_review_binding(self, new_engine: str) -> dict:
+        manifest = reanchor.load_json(
+            self.baseline[reanchor.MANIFEST_V2_PATH], "synthetic review manifest"
+        )
+        manifest = reanchor.copy.deepcopy(manifest)
+        reanchor.replace_engine_bindings(
+            manifest, self.old_engine, new_engine, "synthetic review manifest"
+        )
+        basis = reanchor.qualification_basis(manifest)
+        carrier = reanchor.load_json(
+            self.baseline[reanchor.CARRIER_PATH], "synthetic review carrier"
+        )
+        carrier = reanchor.copy.deepcopy(carrier)
+        carrier["qualification_basis"]["digest"] = basis
+        pre_review = reanchor.pre_review_projection(carrier)
+        return {
+            "schema": reanchor.REVIEW_BINDING_SCHEMA,
+            "status": reanchor.REVIEW_BINDING_STATUS,
+            "generation": "c1.generation.4",
+            "authority_effect": "none",
+            "reviewed_source": {
+                "commit": "1" * 40,
+                "tree": "2" * 40,
+                "qualification_basis_sha256": basis,
+                "pre_review_projection_sha256": pre_review,
+                "evaluator_path": reanchor.EVALUATOR_PATH,
+                "evaluator_sha256": reanchor.sha256_bytes(b"synthetic evaluator"),
+                "canonical_serializer_path": reanchor.SERIALIZER_PATH,
+                "canonical_serializer_sha256": reanchor.sha256_bytes(
+                    b"synthetic serializer"
+                ),
+            },
+            "records_repository": {"commit": "3" * 40, "tree": "4" * 40},
+            "review_receipt": {
+                "identity": "nq.c1-gen4.synthetic-cap-h14-review.v1",
+                "verdict": reanchor.REVIEW_VERDICT,
+                "receipt_path": "audits/synthetic-review.v1.json",
+                "receipt_sha256": reanchor.sha256_bytes(b"synthetic receipt"),
+                "report_path": "audits/synthetic-review.md",
+                "report_sha256": reanchor.sha256_bytes(b"synthetic report"),
+            },
+        }
+
     def test_exact_gen3_chain_reproduces_known_receipt(self) -> None:
         receipt = reanchor.verify_chain(
             self.baseline, self.old_engine, label="test Gen3"
@@ -63,8 +106,12 @@ class C1GenerationIdentityTest(unittest.TestCase):
 
     def test_synthetic_successor_matches_independent_formulas(self) -> None:
         new_engine = reanchor.sha256_bytes(b"nq.c1.test-successor-engine.v1")
+        review_binding = self.synthetic_review_binding(new_engine)
         generated, receipt = reanchor.reanchor_bundle(
-            self.baseline, self.old_engine, new_engine
+            self.baseline,
+            self.old_engine,
+            new_engine,
+            review_binding=review_binding,
         )
         manifest_v1 = verifier.load_json(
             generated[verifier.MANIFEST_V1_PATH], "generated manifest v1"
@@ -94,6 +141,11 @@ class C1GenerationIdentityTest(unittest.TestCase):
             "generated pair",
         )
 
+        self.assertEqual(
+            carrier["implementation_bindings"]["post_acceptance_review"],
+            reanchor.carrier_review_from_binding(review_binding),
+        )
+
         extension = verifier.load_json(
             generated[verifier.EXTENSION_PATH], "generated extension"
         )
@@ -102,6 +154,13 @@ class C1GenerationIdentityTest(unittest.TestCase):
             self.assertEqual(
                 rows[identity]["sha256"], verifier.sha256_bytes(generated[path])
             )
+
+    def test_changed_cut_cannot_retarget_unchanged_review(self) -> None:
+        new_engine = reanchor.sha256_bytes(b"nq.c1.stale-review-control.v1")
+        with self.assertRaisesRegex(
+            reanchor.Refusal, "without a fresh independent review binding"
+        ):
+            reanchor.reanchor_bundle(self.baseline, self.old_engine, new_engine)
 
     def test_check_mode_selects_no_write_path(self) -> None:
         def baseline_file(_repo: Path, relative: str) -> bytes:

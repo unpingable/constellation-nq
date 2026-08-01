@@ -257,6 +257,14 @@ impl RawAuthorityFixture {
         PresentedAuthoritySet::new(self.presented.clone())
     }
 
+    fn append_presented_record(&mut self, record: PresentedAuthorityRecord) {
+        let current = PresentedAuthoritySet::new(std::mem::take(&mut self.presented));
+        self.presented = current
+            .with_record_in_store_enumeration_order(record)
+            .records()
+            .to_vec();
+    }
+
     /// Returns establishment expectations matching the fixture.
     #[must_use]
     pub fn activation_expectations(&self) -> ActivationExpectations {
@@ -444,10 +452,9 @@ impl RawAuthorityFixture {
         set_a1_signature(&mut wire, hex::encode(signature.to_bytes()));
         let digest = a1_digest_for(&wire);
         let bytes = a1_bytes(wire);
-        self.presented
-            .push(PresentedAuthorityRecord::OperatorAuthorityRotation(
-                bytes.clone(),
-            ));
+        self.append_presented_record(PresentedAuthorityRecord::OperatorAuthorityRotation(
+            bytes.clone(),
+        ));
         self.current_signing_key = new_key;
         self.current_a1_digest = digest.clone();
         self.current_a1_generation = generation;
@@ -479,10 +486,9 @@ impl RawAuthorityFixture {
         set_a2_signature(&mut wire, hex::encode(signature.to_bytes()));
         let digest = a2_digest_for(&wire);
         let bytes = a2_bytes(wire);
-        self.presented
-            .push(PresentedAuthorityRecord::ResidentActivationSuccessor(
-                bytes.clone(),
-            ));
+        self.append_presented_record(PresentedAuthorityRecord::ResidentActivationSuccessor(
+            bytes.clone(),
+        ));
         self.current_a2_digest = digest.clone();
         self.last_event_digest = digest;
         self.next_sequence += 1;
@@ -505,10 +511,9 @@ impl RawAuthorityFixture {
         set_revocation_signature(&mut wire, hex::encode(signature.to_bytes()));
         let digest = revocation_digest_for(&wire);
         let bytes = revocation_bytes(wire);
-        self.presented
-            .push(PresentedAuthorityRecord::ActivationRevocation(
-                bytes.clone(),
-            ));
+        self.append_presented_record(PresentedAuthorityRecord::ActivationRevocation(
+            bytes.clone(),
+        ));
         self.last_event_digest = digest;
         self.next_sequence += 1;
         bytes
@@ -631,9 +636,9 @@ mod tests {
         fixture: &RawAuthorityFixture,
         candidate: PresentedAuthorityRecord,
     ) -> PresentedAuthoritySet {
-        let mut records = fixture.presented.clone();
-        records.push(candidate);
-        PresentedAuthoritySet::new(records)
+        fixture
+            .presented_set()
+            .with_record_in_store_enumeration_order(candidate)
     }
 
     fn migration_competing_event(
@@ -824,6 +829,32 @@ mod tests {
         assert_ne!(
             digest_presented_authority_set(&forward),
             digest_presented_authority_set(&reversed)
+        );
+    }
+
+    #[test]
+    fn prospective_records_use_store_family_order_without_changing_event_topology() {
+        let mut fixture = RawAuthorityFixture::fresh_genesis();
+        fixture.append_activation_successor();
+        fixture.append_operator_rotation();
+        fixture.append_current_activation_revocation();
+        fixture.append_activation_successor();
+
+        let presented = fixture.presented_set();
+        assert!(matches!(
+            presented.records(),
+            [
+                PresentedAuthorityRecord::OperatorAuthorityRotation(_),
+                PresentedAuthorityRecord::ResidentActivationSuccessor(_),
+                PresentedAuthorityRecord::ResidentActivationSuccessor(_),
+                PresentedAuthorityRecord::ActivationRevocation(_),
+            ]
+        ));
+        assert_eq!(
+            restart(&fixture)
+                .expect("event-predecessor topology remains authoritative")
+                .controlling_tip_activation_digest(),
+            fixture.current_activation_digest()
         );
     }
 

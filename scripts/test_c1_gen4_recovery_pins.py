@@ -136,9 +136,15 @@ class C1Gen4RecoveryPinAuditorTest(unittest.TestCase):
         inventory = auditor.validate_inventory(raw_inventory())
         available = auditor.worktree_paths(ROOT)
         pins = auditor.expand_pin_set(inventory, available)
-        del pins[
-            "crates/nq-store/tests/isolated/gen4-default-surface/src/main.rs"
-        ]
+        del pins["crates/nq-store/tests/isolated/gen4-default-surface/src/main.rs"]
+        with self.assertRaisesRegex(auditor.Refusal, "semantic pin closure omits"):
+            auditor.assert_semantic_pin_closure(pins, available)
+
+    def test_semantic_fresh_review_binding_omission_refuses_independently(self) -> None:
+        inventory = auditor.validate_inventory(raw_inventory())
+        available = auditor.worktree_paths(ROOT)
+        pins = auditor.expand_pin_set(inventory, available)
+        del pins[auditor.CAP_H14_REVIEW_BINDING_PATH]
         with self.assertRaisesRegex(auditor.Refusal, "semantic pin closure omits"):
             auditor.assert_semantic_pin_closure(pins, available)
 

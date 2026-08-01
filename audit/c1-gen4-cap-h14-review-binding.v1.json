@@ -1,0 +1,28 @@
+{
+  "schema": "nq.c1_gen4_cap_h14_review_binding.v1",
+  "status": "accepted-independent-review",
+  "generation": "c1.generation.4",
+  "authority_effect": "none",
+  "reviewed_source": {
+    "commit": "8732b679db0c13a7599c94e9f99eab8a97ff93b8",
+    "tree": "3d34719d4e25305755d6a75cdb1da9c05e1fda48",
+    "qualification_basis_sha256": "sha256:de440ec2fe3141d794bbb28c778eb273fc209a007691413953198d94ced669e3",
+    "pre_review_projection_sha256": "sha256:1c6e70f0e03ec7cab27e425a1ef740c3007c74c88f05aaa2924722db41be44c3",
+    "evaluator_path": "crates/nq-store/src/governed_projection_capacity.rs",
+    "evaluator_sha256": "sha256:71378ee4d6203b1cd1c7db841e856d9e42a26a14c07e30f6d9d9945c55624cf1",
+    "canonical_serializer_path": "crates/nq-store/src/governed_projection_capsule.rs",
+    "canonical_serializer_sha256": "sha256:033b57efb16437a2379307dba0ea495810891bbaeb378462f9b8cf054b5011d3"
+  },
+  "records_repository": {
+    "commit": "07e03c91ba4cb181079013e612a5aed5361d2d59",
+    "tree": "3ed13d28d163d241d8a72d2ff50d7cb2efd439c0"
+  },
+  "review_receipt": {
+    "identity": "nq.host-role-runtime-seam.cap-h14-gen4-post-acceptance-review.v1",
+    "verdict": "PASS-PURE-C1",
+    "receipt_path": "audits/nq-host-role-runtime-seam-v1/c1-gen4-r2-enrolled-activation/CAP-H14-GEN4-POST-ACCEPTANCE-REVIEW.v1.json",
+    "receipt_sha256": "sha256:460335b7cd4cced4787a4db9a67aa4ebc30015038b17905626880beb47e98608",
+    "report_path": "audits/nq-host-role-runtime-seam-v1/c1-gen4-r2-enrolled-activation/CAP-H14-GEN4-POST-ACCEPTANCE-REVIEW.md",
+    "report_sha256": "sha256:bd6aba457cef42e456a829b611b8b36ee830a195f8290a5c15517b23aefb6d3e"
+  }
+}

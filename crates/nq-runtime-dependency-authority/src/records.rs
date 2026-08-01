@@ -184,6 +184,14 @@ impl PresentedAuthorityRecord {
             Self::ActivationRevocation(_) => "revocation",
         }
     }
+
+    const fn store_enumeration_rank(&self) -> u8 {
+        match self {
+            Self::OperatorAuthorityRotation(_) => 0,
+            Self::ResidentActivationSuccessor(_) => 1,
+            Self::ActivationRevocation(_) => 2,
+        }
+    }
 }
 
 /// Complete authority records in the Store's exact canonical enumeration order.
@@ -205,6 +213,25 @@ impl PresentedAuthoritySet {
     #[must_use]
     pub fn records(&self) -> &[PresentedAuthorityRecord] {
         &self.records
+    }
+
+    /// Returns the prospective set obtained by inserting one native record at
+    /// the end of its family in the Store's canonical family enumeration.
+    ///
+    /// This is a shape-only operation shared by bounded evidence verification
+    /// and Store transaction correspondence. It does not validate the current
+    /// records, prove Store completeness, or select controlling authority.
+    #[must_use]
+    pub fn with_record_in_store_enumeration_order(&self, record: PresentedAuthorityRecord) -> Self {
+        let rank = record.store_enumeration_rank();
+        let insertion = self
+            .records
+            .iter()
+            .position(|current| current.store_enumeration_rank() > rank)
+            .unwrap_or(self.records.len());
+        let mut records = self.records.clone();
+        records.insert(insertion, record);
+        Self::new(records)
     }
 }
 
