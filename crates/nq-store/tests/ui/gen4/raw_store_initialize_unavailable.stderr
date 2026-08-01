@@ -1,0 +1,30 @@
+error[E0599]: no function or associated item named `initialize` found for struct `nq_store::Store` in the current scope
+ --> tests/ui/gen4/raw_store_initialize_unavailable.rs:4:20
+  |
+4 |     let _ = Store::initialize("ungoverned.db");
+  |                    ^^^^^^^^^^ function or associated item not found in `nq_store::Store`
+  |
+note: if you're trying to build a new `nq_store::Store` consider using one of the following associated functions:
+      nq_store::Store::initialize_unqualified_storage
+      nq_store::Store::open
+      nq_store::Store::open_read_only
+      nq_store::Store::open_immutable
+      and $N others
+ --> src/lib.rs
+  |
+  |     pub fn initialize_unqualified_storage(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+  |     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+  |     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+  |     pub fn open_immutable(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: there is an associated function `initialize_in_memory` with a similar name
+ --> src/lib.rs
+  |
+  |     pub fn initialize_in_memory() -> Result<Self, StoreError> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

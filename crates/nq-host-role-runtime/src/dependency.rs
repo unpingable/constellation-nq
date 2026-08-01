@@ -20,7 +20,7 @@ pub use nq_host_role_dependency_custody::{
     RuntimeDependencyGenerationCustody, SignedAdmissionReceiptSet,
 };
 
-use crate::RuntimeError;
+use super::RuntimeError;
 
 impl From<DependencyCustodyError> for RuntimeError {
     #[allow(clippy::too_many_lines)] // Exhaustive one-to-one mapping is intentionally auditable.

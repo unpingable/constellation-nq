@@ -529,7 +529,7 @@ fn same_code_evaluation_refusals_survive_backup_cli_and_cold_archive() {
     let root = directory.path();
     let database = root.join("nq.db");
     let config = write_config(root, "live", &database);
-    let mut store = Store::initialize(&database).expect("initialize store");
+    let mut store = Store::initialize_unqualified_storage(&database).expect("initialize store");
 
     let fixtures = [
         fixture(

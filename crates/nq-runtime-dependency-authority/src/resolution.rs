@@ -12,8 +12,11 @@ use crate::{
     OldRootState, OperatorAuthorityRecord, PresentedAuthorityRecord, PresentedAuthoritySet,
     RUNTIME_DEPENDENCY_ADMISSION_SCOPE, ResidentActivationRecord, ResolvedControllingActivation,
     RestartExpectations, VerificationBrand, VerifiedActivationRevocation,
-    VerifiedOperatorAuthorityRotation, VerifiedResidentActivationSuccessor,
-    brand::{ResolutionFields, VerifiedEventFields},
+    VerifiedMigrationClassification, VerifiedOperatorAuthorityRotation,
+    VerifiedResidentActivationSuccessor,
+    brand::{
+        MigrationClassificationFields, ResolutionFields, ReverificationContext, VerifiedEventFields,
+    },
     digest_genesis_authority_custody, digest_presented_authority_set,
     records::{AUTHORITY_POLICY_VERSION, MAX_IDENTITY_BYTES},
 };
@@ -43,7 +46,47 @@ pub fn verify_for_establishment<'id>(
         expectations,
         TipRequirement::UniqueLive,
     )?;
-    Ok(ResolvedControllingActivation::new(fields, brand))
+    let reverification = ReverificationContext::capture(custody, migration_receipt, expectations);
+    Ok(ResolvedControllingActivation::new(
+        fields,
+        reverification,
+        brand,
+    ))
+}
+
+/// Authenticates one exact non-accepted migration disposition and mints a
+/// sealed evidence-freeze classification under the supplied Store brand.
+///
+/// `observed`, `superseded`, and `refused` receipts can be classified by this
+/// path. `accepted` is deliberately excluded because it must proceed through
+/// full establishment verification and cannot be converted from this type.
+/// The result makes no activation-standing or old-state-validity claim.
+///
+/// # Errors
+///
+/// Refuses malformed or noncanonical carriers, invalid signatures, tuple or
+/// old-state mismatches, incomplete restore bindings, invalid cut topology,
+/// and an `accepted` disposition.
+pub fn verify_nonaccepted_migration_classification<'id>(
+    brand: &VerificationBrand<'id>,
+    custody: &GenesisAuthorityCustody,
+    presented: &PresentedAuthoritySet,
+    migration_receipt: &MigrationReceiptBytes,
+    expectations: &ActivationExpectations,
+) -> Result<VerifiedMigrationClassification<'id>, AuthorityError> {
+    let fields = resolve_migration_classification_fields(
+        custody,
+        presented,
+        migration_receipt,
+        expectations,
+    )?;
+    let reverification =
+        ReverificationContext::capture(custody, Some(migration_receipt), expectations);
+    Ok(VerifiedMigrationClassification::new(
+        fields,
+        reverification,
+        brand,
+    ))
 }
 
 /// Resolves the exact Store-enumerated authority set for read-only restart.
@@ -74,14 +117,88 @@ pub fn resolve_for_restart(
     if fields.custody_digest != expectations.expected_custody_digest {
         return Err(AuthorityError::CustodyDigestMismatch);
     }
-    let parsed = parse_authority(custody, presented)?;
-    if !parsed
-        .a2
-        .contains_key(&expectations.expected_establishment_tip_digest)
+    if fields.genesis_operator_authority_digest
+        != expectations.expected_genesis_operator_authority_digest
+    {
+        return Err(AuthorityError::A1IdentityMismatch);
+    }
+    if fields.genesis_operator_key_generation
+        != expectations.expected_genesis_operator_key_generation
+    {
+        return Err(AuthorityError::A1GenerationMismatch);
+    }
+
+    let empty_presented = PresentedAuthoritySet::new(Vec::new());
+    if expectations.expected_establishment_tip_digest
+        != expectations.expected_chain_root_activation_digest
     {
         return Err(AuthorityError::EstablishmentTipMismatch);
     }
+    if expectations.expected_establishment_candidate_set_digest
+        != digest_presented_authority_set(&empty_presented)?
+    {
+        return Err(AuthorityError::PresentedSetCorrespondenceMismatch);
+    }
+    let historical_presented = presented_at_or_before_cut(
+        presented,
+        expectations.expected_establishment_cut.sequence(),
+    )?;
+    if digest_presented_authority_set(&historical_presented)?
+        != expectations.expected_establishment_candidate_set_digest
+    {
+        return Err(AuthorityError::PresentedSetCorrespondenceMismatch);
+    }
+    let historical = resolve_fields(
+        custody,
+        &historical_presented,
+        migration_receipt,
+        &effective,
+        TipRequirement::UniqueLive,
+    )?;
+    if historical.controlling_tip_activation_digest
+        != expectations.expected_establishment_tip_digest
+    {
+        return Err(AuthorityError::EstablishmentTipMismatch);
+    }
+    if historical.verification_cut != expectations.expected_establishment_cut
+        || historical.establishment_cut != expectations.expected_establishment_cut
+    {
+        return Err(AuthorityError::EstablishmentCutMismatch);
+    }
+    if historical.policy_version != expectations.expected_establishment_policy_version {
+        return Err(AuthorityError::EstablishmentPolicyMismatch);
+    }
     Ok(ControllingActivationSnapshot::new(fields))
+}
+
+fn presented_at_or_before_cut(
+    presented: &PresentedAuthoritySet,
+    sequence: u64,
+) -> Result<PresentedAuthoritySet, AuthorityError> {
+    let mut historical = Vec::new();
+    for record in presented.records() {
+        let record_sequence = match record {
+            PresentedAuthorityRecord::OperatorAuthorityRotation(bytes) => {
+                OperatorAuthorityRecord::from_canonical_bytes(bytes)?
+                    .cut()
+                    .sequence()
+            }
+            PresentedAuthorityRecord::ResidentActivationSuccessor(bytes) => {
+                ResidentActivationRecord::from_canonical_bytes(bytes)?
+                    .cut()
+                    .sequence()
+            }
+            PresentedAuthorityRecord::ActivationRevocation(bytes) => {
+                ActivationRevocationRecord::from_canonical_bytes(bytes)?
+                    .cut()
+                    .sequence()
+            }
+        };
+        if record_sequence <= sequence {
+            historical.push(record.clone());
+        }
+    }
+    Ok(PresentedAuthoritySet::new(historical))
 }
 
 fn restart_expectations(
@@ -107,6 +224,7 @@ fn restart_expectations(
             }
             Some(crate::MigrationExpectations {
                 old_root_state: retained.old_root_state().clone(),
+                restore_declaration_digest: retained.restore_declaration_digest().cloned(),
                 restore_proof_digest: retained.restore_proof_digest().cloned(),
             })
         }
@@ -151,6 +269,7 @@ pub fn verify_operator_authority_rotation<'id>(
     )?;
     let parsed = OperatorAuthorityRecord::from_canonical_bytes(canonical_rotation)?;
     let digest = parsed.record_digest().clone();
+    let current_candidate_set_digest = digest_presented_authority_set(current)?;
     let resulting = with_added_record(
         current,
         PresentedAuthorityRecord::OperatorAuthorityRotation(canonical_rotation.to_vec()),
@@ -166,7 +285,13 @@ pub fn verify_operator_authority_rotation<'id>(
         VerifiedEventFields {
             canonical_bytes: canonical_rotation.to_vec(),
             record_digest: digest,
+            current_candidate_set_digest,
             resulting_candidate_set_digest: fields.candidate_set_digest,
+            reverification: ReverificationContext::capture(
+                custody,
+                migration_receipt,
+                expectations,
+            ),
         },
         brand,
     ))
@@ -200,6 +325,7 @@ pub fn verify_resident_activation_successor<'id>(
     )?;
     let parsed = ResidentActivationRecord::from_canonical_bytes(canonical_successor)?;
     let digest = parsed.activation_digest().clone();
+    let current_candidate_set_digest = digest_presented_authority_set(current)?;
     let resulting = with_added_record(
         current,
         PresentedAuthorityRecord::ResidentActivationSuccessor(canonical_successor.to_vec()),
@@ -215,7 +341,13 @@ pub fn verify_resident_activation_successor<'id>(
         VerifiedEventFields {
             canonical_bytes: canonical_successor.to_vec(),
             record_digest: digest,
+            current_candidate_set_digest,
             resulting_candidate_set_digest: fields.candidate_set_digest,
+            reverification: ReverificationContext::capture(
+                custody,
+                migration_receipt,
+                expectations,
+            ),
         },
         brand,
     ))
@@ -249,6 +381,7 @@ pub fn verify_activation_revocation<'id>(
     )?;
     let parsed = ActivationRevocationRecord::from_canonical_bytes(canonical_revocation)?;
     let digest = parsed.record_digest().clone();
+    let current_candidate_set_digest = digest_presented_authority_set(current)?;
     let resulting = with_added_record(
         current,
         PresentedAuthorityRecord::ActivationRevocation(canonical_revocation.to_vec()),
@@ -264,10 +397,210 @@ pub fn verify_activation_revocation<'id>(
         VerifiedEventFields {
             canonical_bytes: canonical_revocation.to_vec(),
             record_digest: digest,
+            current_candidate_set_digest,
             resulting_candidate_set_digest: fields.candidate_set_digest,
+            reverification: ReverificationContext::capture(
+                custody,
+                migration_receipt,
+                expectations,
+            ),
         },
         brand,
     ))
+}
+
+pub(crate) fn reverify_establishment(
+    evidence: &ResolvedControllingActivation<'_>,
+    store_presented: &PresentedAuthoritySet,
+) -> Result<(), AuthorityError> {
+    if digest_presented_authority_set(store_presented)? != evidence.fields.candidate_set_digest {
+        return Err(AuthorityError::PresentedSetCorrespondenceMismatch);
+    }
+    let context = &evidence.reverification;
+    let reverified = resolve_fields(
+        &context.custody,
+        store_presented,
+        context.migration_receipt.as_ref(),
+        &context.expectations,
+        TipRequirement::UniqueLive,
+    )?;
+    if reverified != evidence.fields {
+        return Err(AuthorityError::PresentedSetCorrespondenceMismatch);
+    }
+    Ok(())
+}
+
+pub(crate) fn reverify_migration_classification(
+    classification: &VerifiedMigrationClassification<'_>,
+    store_presented: &PresentedAuthoritySet,
+) -> Result<(), AuthorityError> {
+    if digest_presented_authority_set(store_presented)?
+        != classification.fields.candidate_set_digest
+    {
+        return Err(AuthorityError::PresentedSetCorrespondenceMismatch);
+    }
+    let context = &classification.reverification;
+    let receipt = context
+        .migration_receipt
+        .as_ref()
+        .ok_or(AuthorityError::MigrationReceiptRequired)?;
+    let reverified = resolve_migration_classification_fields(
+        &context.custody,
+        store_presented,
+        receipt,
+        &context.expectations,
+    )?;
+    if reverified != classification.fields {
+        return Err(AuthorityError::PresentedSetCorrespondenceMismatch);
+    }
+    Ok(())
+}
+
+fn resolve_migration_classification_fields(
+    custody: &GenesisAuthorityCustody,
+    presented: &PresentedAuthoritySet,
+    migration_receipt_bytes: &MigrationReceiptBytes,
+    expectations: &ActivationExpectations,
+) -> Result<MigrationClassificationFields, AuthorityError> {
+    validate_expectations(expectations, Some(migration_receipt_bytes))?;
+    let parsed = parse_authority(custody, presented)?;
+    let genesis_a2 = parsed
+        .a2
+        .get(&parsed.genesis_a2_digest)
+        .ok_or(AuthorityError::ActivationGap)?;
+    let verifying_keys = verify_a1_chain(&parsed, expectations)?;
+    verify_activations(&parsed, expectations, &verifying_keys)?;
+    verify_revocations(&parsed, expectations, &verifying_keys)?;
+    let activation_tips = verify_activation_chain(&parsed)?;
+    let activation_tip_refs: Vec<_> = activation_tips.iter().collect();
+    select_unique_tip(&activation_tip_refs)?;
+    let receipt = verify_migration(
+        Some(migration_receipt_bytes),
+        expectations,
+        genesis_a2,
+        &parsed,
+        &verifying_keys,
+        MigrationReceiptUse::EvidenceFreeze,
+    )?
+    .ok_or(AuthorityError::MigrationReceiptRequired)?;
+    let event_order = verify_global_event_chain(&parsed, Some(&receipt))?;
+    let event_positions: BTreeMap<_, _> = event_order
+        .iter()
+        .enumerate()
+        .map(|(position, digest)| (digest.clone(), position))
+        .collect();
+    verify_event_temporal_correspondence(&parsed, &event_positions)?;
+    verify_migration_temporal_correspondence(Some(&receipt), genesis_a2, &event_positions)?;
+
+    Ok(MigrationClassificationFields {
+        canonical_receipt_bytes: receipt.canonical_bytes().to_vec(),
+        receipt_digest: receipt.receipt_digest().clone(),
+        disposition: receipt.disposition(),
+        occurrence_id: receipt.occurrence_id().to_owned(),
+        domain: receipt.domain().to_owned(),
+        old_root_state: receipt.old_root_state().clone(),
+        chain_root_activation_digest: receipt.new_chain_root_activation_digest().clone(),
+        trust_anchor_id: receipt.new_trust_anchor_id().clone(),
+        cut: receipt.cut().clone(),
+        policy_version: receipt.policy_version(),
+        operator_authority_digest: receipt.operator_authority_digest().clone(),
+        operator_key_generation: receipt.operator_key_generation(),
+        restore_declaration_digest: receipt.restore_declaration_digest().cloned(),
+        restore_proof_digest: receipt.restore_proof_digest().cloned(),
+        custody_digest: digest_genesis_authority_custody(custody)?,
+        candidate_set_digest: digest_presented_authority_set(presented)?,
+    })
+}
+
+pub(crate) fn reverify_operator_authority_rotation(
+    event: &VerifiedOperatorAuthorityRotation<'_>,
+    store_presented: &PresentedAuthoritySet,
+) -> Result<(), AuthorityError> {
+    reverify_event(
+        &event.fields,
+        store_presented,
+        PresentedAuthorityRecord::OperatorAuthorityRotation(event.fields.canonical_bytes.clone()),
+        TipRequirement::UniqueLive,
+        TipRequirement::UniqueLive,
+    )
+}
+
+pub(crate) fn reverify_resident_activation_successor(
+    event: &VerifiedResidentActivationSuccessor<'_>,
+    store_presented: &PresentedAuthoritySet,
+) -> Result<(), AuthorityError> {
+    reverify_event(
+        &event.fields,
+        store_presented,
+        PresentedAuthorityRecord::ResidentActivationSuccessor(event.fields.canonical_bytes.clone()),
+        TipRequirement::AllowTerminalNonLive,
+        TipRequirement::UniqueLive,
+    )
+}
+
+pub(crate) fn reverify_activation_revocation(
+    event: &VerifiedActivationRevocation<'_>,
+    store_presented: &PresentedAuthoritySet,
+) -> Result<(), AuthorityError> {
+    reverify_event(
+        &event.fields,
+        store_presented,
+        PresentedAuthorityRecord::ActivationRevocation(event.fields.canonical_bytes.clone()),
+        TipRequirement::UniqueLive,
+        TipRequirement::AllowTerminalNonLive,
+    )
+}
+
+fn reverify_event(
+    event: &VerifiedEventFields,
+    store_presented: &PresentedAuthoritySet,
+    proposed: PresentedAuthorityRecord,
+    current_tip_requirement: TipRequirement,
+    resulting_tip_requirement: TipRequirement,
+) -> Result<(), AuthorityError> {
+    if digest_presented_authority_set(store_presented)? != event.current_candidate_set_digest {
+        return Err(AuthorityError::PresentedSetCorrespondenceMismatch);
+    }
+    let exact_record_digest = match &proposed {
+        PresentedAuthorityRecord::OperatorAuthorityRotation(bytes) => {
+            OperatorAuthorityRecord::from_canonical_bytes(bytes)?
+                .record_digest()
+                .clone()
+        }
+        PresentedAuthorityRecord::ResidentActivationSuccessor(bytes) => {
+            ResidentActivationRecord::from_canonical_bytes(bytes)?
+                .activation_digest()
+                .clone()
+        }
+        PresentedAuthorityRecord::ActivationRevocation(bytes) => {
+            ActivationRevocationRecord::from_canonical_bytes(bytes)?
+                .record_digest()
+                .clone()
+        }
+    };
+    if exact_record_digest != event.record_digest {
+        return Err(AuthorityError::PresentedSetCorrespondenceMismatch);
+    }
+    let context = &event.reverification;
+    resolve_fields(
+        &context.custody,
+        store_presented,
+        context.migration_receipt.as_ref(),
+        &context.expectations,
+        current_tip_requirement,
+    )?;
+    let resulting = with_added_record(store_presented, proposed);
+    let reverified = resolve_fields(
+        &context.custody,
+        &resulting,
+        context.migration_receipt.as_ref(),
+        &context.expectations,
+        resulting_tip_requirement,
+    )?;
+    if reverified.candidate_set_digest != event.resulting_candidate_set_digest {
+        return Err(AuthorityError::PresentedSetCorrespondenceMismatch);
+    }
+    Ok(())
 }
 
 fn with_added_record(
@@ -314,29 +647,43 @@ fn resolve_fields(
     let verifying_keys = verify_a1_chain(&parsed, expectations)?;
     verify_activations(&parsed, expectations, &verifying_keys)?;
     verify_revocations(&parsed, expectations, &verifying_keys)?;
-    let event_order = verify_global_event_chain(&parsed)?;
-    let event_positions: BTreeMap<_, _> = event_order
-        .iter()
-        .enumerate()
-        .map(|(position, digest)| (digest.clone(), position))
-        .collect();
-    verify_event_temporal_correspondence(&parsed, &event_positions)?;
-    let activation_order = verify_activation_chain(&parsed)?;
-
+    let activation_tips = verify_activation_chain(&parsed)?;
     let migration_receipt = verify_migration(
         migration_receipt_bytes,
         expectations,
         genesis_a2,
         &parsed,
         &verifying_keys,
+        MigrationReceiptUse::Establishment,
+    )?;
+    let event_order = verify_global_event_chain(&parsed, migration_receipt.as_ref())?;
+    let event_positions: BTreeMap<_, _> = event_order
+        .iter()
+        .enumerate()
+        .map(|(position, digest)| (digest.clone(), position))
+        .collect();
+    verify_event_temporal_correspondence(&parsed, &event_positions)?;
+    verify_migration_temporal_correspondence(
+        migration_receipt.as_ref(),
+        genesis_a2,
         &event_positions,
     )?;
 
     let terminal_event_digest = event_order
         .last()
         .ok_or(AuthorityError::AuthorityEventGap)?;
-    let terminal_cut = event_cut(&parsed, terminal_event_digest)?.clone();
-    let tip_digest = select_structural_tip(&activation_order)?;
+    let terminal_cut = if let Some(receipt) = migration_receipt.as_ref()
+        && receipt.receipt_digest() == terminal_event_digest
+    {
+        receipt.cut().clone()
+    } else {
+        event_cut(&parsed, terminal_event_digest)?.clone()
+    };
+    let establishment_cut = migration_receipt
+        .as_ref()
+        .map_or_else(|| terminal_cut.clone(), |receipt| receipt.cut().clone());
+    let activation_tip_refs: Vec<_> = activation_tips.iter().collect();
+    let tip_digest = select_unique_tip(&activation_tip_refs)?;
     let tip = parsed
         .a2
         .get(tip_digest)
@@ -383,6 +730,7 @@ fn resolve_fields(
         role_manifest_generation: tip.role_manifest_generation(),
         policy_version: tip.policy_version(),
         verification_cut: terminal_cut,
+        establishment_cut,
         custody_digest,
         candidate_set_digest,
         genesis_context: genesis_a2.context(),
@@ -416,6 +764,15 @@ fn validate_expectations(
                 || migration_receipt.is_none()
             {
                 return Err(AuthorityError::MigrationReceiptRequired);
+            }
+            let migration = expectations
+                .migration
+                .as_ref()
+                .ok_or(AuthorityError::MigrationReceiptRequired)?;
+            if migration.restore_declaration_digest.is_some()
+                != migration.restore_proof_digest.is_some()
+            {
+                return Err(AuthorityError::RestoreBindingIncomplete);
             }
         }
         ActivationContext::Successor => return Err(AuthorityError::A2GenesisShapeMismatch),
@@ -579,6 +936,7 @@ fn validate_a1_common(
 
 fn verify_global_event_chain(
     parsed: &ParsedAuthority,
+    migration_receipt: Option<&MigrationReceipt>,
 ) -> Result<Vec<Sha256Digest>, AuthorityError> {
     let mut nodes = BTreeMap::new();
     for record in parsed.a1.values() {
@@ -590,9 +948,17 @@ fn verify_global_event_chain(
     for record in parsed.revocations.values() {
         insert_event_node(&mut nodes, record.record_digest(), record.cut())?;
     }
+    if let Some(receipt) = migration_receipt {
+        insert_event_node(&mut nodes, receipt.receipt_digest(), receipt.cut())?;
+    }
     let order = walk_linked_chain(&nodes, &parsed.genesis_a1_digest, ChainKind::AuthorityEvent)?;
     if order.get(1) != Some(&parsed.genesis_a2_digest) {
         return Err(AuthorityError::A2GenesisShapeMismatch);
+    }
+    if let Some(receipt) = migration_receipt
+        && order.get(2) != Some(receipt.receipt_digest())
+    {
+        return Err(AuthorityError::AuthorityEventGap);
     }
     Ok(order)
 }
@@ -819,7 +1185,58 @@ fn verify_activation_chain(parsed: &ParsedAuthority) -> Result<Vec<Sha256Digest>
             )
         })
         .collect();
-    walk_linked_chain(&nodes, &parsed.genesis_a2_digest, ChainKind::Activation)
+    let root = nodes
+        .get(&parsed.genesis_a2_digest)
+        .ok_or(AuthorityError::ActivationGap)?;
+    if root.predecessor.is_some() {
+        return Err(AuthorityError::ActivationGap);
+    }
+    if graph_has_cycle(&nodes) {
+        return Err(AuthorityError::ActivationCycle);
+    }
+
+    let mut successors: BTreeMap<Sha256Digest, Vec<Sha256Digest>> = BTreeMap::new();
+    for (digest, node) in &nodes {
+        if digest == &parsed.genesis_a2_digest {
+            continue;
+        }
+        let predecessor = node
+            .predecessor
+            .as_ref()
+            .ok_or(AuthorityError::ActivationGap)?;
+        let predecessor_node = nodes
+            .get(predecessor)
+            .ok_or(AuthorityError::ActivationGap)?;
+        if node.sequence <= predecessor_node.sequence {
+            return Err(AuthorityError::AuthorityCutNotLater);
+        }
+        successors
+            .entry(predecessor.clone())
+            .or_default()
+            .push(digest.clone());
+    }
+
+    for children in successors.values().filter(|children| children.len() > 1) {
+        let mut event_predecessors = BTreeSet::new();
+        for child in children {
+            let record = parsed.a2.get(child).ok_or(AuthorityError::ActivationGap)?;
+            if !event_predecessors.insert(record.cut().predecessor_event_digest()) {
+                return Err(AuthorityError::ActivationFork);
+            }
+        }
+    }
+
+    Ok(nodes
+        .keys()
+        .filter(|digest| !successors.contains_key(*digest))
+        .cloned()
+        .collect())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MigrationReceiptUse {
+    Establishment,
+    EvidenceFreeze,
 }
 
 fn verify_migration(
@@ -828,7 +1245,7 @@ fn verify_migration(
     genesis_a2: &ResidentActivationRecord,
     parsed: &ParsedAuthority,
     keys: &BTreeMap<Sha256Digest, VerifyingKey>,
-    event_positions: &BTreeMap<Sha256Digest, usize>,
+    receipt_use: MigrationReceiptUse,
 ) -> Result<Option<MigrationReceipt>, AuthorityError> {
     match expectations.genesis_context {
         ActivationContext::FreshGenesis => {
@@ -848,8 +1265,15 @@ fn verify_migration(
             if receipt.signature_algorithm() != ED25519_SIGNATURE_ALGORITHM {
                 return Err(AuthorityError::MigrationReceiptSignatureAlgorithmUnsupported);
             }
-            if receipt.disposition() != MigrationDisposition::Accepted {
-                return Err(AuthorityError::MigrationDispositionMismatch);
+            match (receipt_use, receipt.disposition()) {
+                (MigrationReceiptUse::Establishment, MigrationDisposition::Accepted)
+                | (
+                    MigrationReceiptUse::EvidenceFreeze,
+                    MigrationDisposition::Observed
+                    | MigrationDisposition::Superseded
+                    | MigrationDisposition::Refused,
+                ) => {}
+                _ => return Err(AuthorityError::MigrationDispositionMismatch),
             }
             if receipt.occurrence_id() != genesis_a2.occurrence_id() {
                 return Err(AuthorityError::OccurrenceMismatch);
@@ -868,13 +1292,23 @@ fn verify_migration(
             if receipt.old_root_state() != &expected.old_root_state {
                 return Err(AuthorityError::MigrationOldRootMismatch);
             }
-            if let OldRootState::Rooted { trust_anchor_id } = receipt.old_root_state()
+            if receipt_use == MigrationReceiptUse::Establishment
+                && let OldRootState::Rooted { trust_anchor_id } = receipt.old_root_state()
                 && trust_anchor_id != genesis_a2.trust_anchor_id()
             {
                 return Err(AuthorityError::MigrationOldRootMismatch);
             }
             if receipt.restore_proof_digest() != expected.restore_proof_digest.as_ref() {
                 return Err(AuthorityError::RestoreProofMismatch);
+            }
+            if receipt.restore_declaration_digest() != expected.restore_declaration_digest.as_ref()
+            {
+                return Err(AuthorityError::RestoreDeclarationMismatch);
+            }
+            if receipt.restore_declaration_digest().is_some()
+                != receipt.restore_proof_digest().is_some()
+            {
+                return Err(AuthorityError::RestoreBindingIncomplete);
             }
             validate_policy(receipt.policy_version(), expectations.policy_floor)?;
             receipt.cut().validate_integer()?;
@@ -890,15 +1324,6 @@ fn verify_migration(
             if named_a1.key_generation() != receipt.operator_key_generation() {
                 return Err(AuthorityError::A1GenerationMismatch);
             }
-            let a1_position = event_positions
-                .get(named_a1.record_digest())
-                .ok_or(AuthorityError::A1IdentityMismatch)?;
-            let root_position = event_positions
-                .get(genesis_a2.activation_digest())
-                .ok_or(AuthorityError::AuthorityEventGap)?;
-            if a1_position >= root_position {
-                return Err(AuthorityError::A1NotYetEffective);
-            }
             let key = keys
                 .get(receipt.operator_authority_digest())
                 .ok_or(AuthorityError::A1IdentityMismatch)?;
@@ -912,6 +1337,29 @@ fn verify_migration(
             Ok(Some(receipt))
         }
     }
+}
+
+fn verify_migration_temporal_correspondence(
+    receipt: Option<&MigrationReceipt>,
+    genesis_a2: &ResidentActivationRecord,
+    event_positions: &BTreeMap<Sha256Digest, usize>,
+) -> Result<(), AuthorityError> {
+    let Some(receipt) = receipt else {
+        return Ok(());
+    };
+    let a1_position = event_positions
+        .get(receipt.operator_authority_digest())
+        .ok_or(AuthorityError::A1IdentityMismatch)?;
+    let root_position = event_positions
+        .get(genesis_a2.activation_digest())
+        .ok_or(AuthorityError::AuthorityEventGap)?;
+    let receipt_position = event_positions
+        .get(receipt.receipt_digest())
+        .ok_or(AuthorityError::AuthorityEventGap)?;
+    if a1_position >= root_position || root_position >= receipt_position {
+        return Err(AuthorityError::A1NotYetEffective);
+    }
+    Ok(())
 }
 
 fn ensure_a1_precedes_event(
@@ -955,6 +1403,7 @@ struct LinkNode {
 }
 
 #[derive(Clone, Copy)]
+#[allow(dead_code)] // Activation is retained for cfg(test) structural branch coverage.
 enum ChainKind {
     A1,
     Activation,
@@ -1064,11 +1513,6 @@ const fn chain_not_later(kind: ChainKind) -> AuthorityError {
         ChainKind::A1 => AuthorityError::A1CutNotLater,
         ChainKind::Activation | ChainKind::AuthorityEvent => AuthorityError::AuthorityCutNotLater,
     }
-}
-
-fn select_structural_tip(order: &[Sha256Digest]) -> Result<&Sha256Digest, AuthorityError> {
-    let tips: Vec<_> = order.last().into_iter().collect();
-    select_unique_tip(&tips)
 }
 
 fn select_unique_tip<'a>(tips: &[&'a Sha256Digest]) -> Result<&'a Sha256Digest, AuthorityError> {

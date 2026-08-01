@@ -1,11 +1,13 @@
-error[E0451]: fields `fields` and `_invariant` of struct `ResolvedControllingActivation` are private
+error[E0451]: fields `fields`, `reverification` and `_invariant` of struct `ResolvedControllingActivation` are private
  --> tests/ui/gen4/evidence_public_construction.rs:7:9
   |
 6 |     let _: ResolvedControllingActivation<'static> = ResolvedControllingActivation {
   |                                                     ----------------------------- in this type
 7 |         fields: todo!(),
   |         ^^^^^^ private field
-8 |         _invariant: todo!(),
+8 |         reverification: todo!(),
+  |         ^^^^^^^^^^^^^^ private field
+9 |         _invariant: todo!(),
   |         ^^^^^^^^^^ private field
 
 error: type `nq_runtime_dependency_authority::brand::ResolutionFields` is private
@@ -13,5 +15,13 @@ error: type `nq_runtime_dependency_authority::brand::ResolutionFields` is privat
   |
 7 |         fields: todo!(),
   |                 ^^^^^^^ private type
+  |
+  = note: this error originates in the macro `todo` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: type `nq_runtime_dependency_authority::brand::ReverificationContext` is private
+ --> tests/ui/gen4/evidence_public_construction.rs:8:25
+  |
+8 |         reverification: todo!(),
+  |                         ^^^^^^^ private type
   |
   = note: this error originates in the macro `todo` (in Nightly builds, run with -Z macro-backtrace for more info)

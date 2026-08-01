@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/ui/gen4/boolean_to_session_establishment.rs:8:61
+  |
+8 |     let _ = session.establish_runtime_dependency_trust_root(boolean_authority);
+  |                     --------------------------------------- ^^^^^^^^^^^^^^^^^ expected `&ResolvedControllingActivation<'_>`, found `&bool`
+  |                     |
+  |                     arguments to this method are incorrect
+  |
+  = note: expected reference `&ResolvedControllingActivation<'_>`
+             found reference `&bool`
+note: method defined here
+ --> src/writer_session.rs
+  |
+  |     pub fn establish_runtime_dependency_trust_root(
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -17,7 +17,8 @@ use std::sync::{LazyLock, Mutex, MutexGuard};
 use crate::{Store, StoreError};
 use nq_runtime_dependency_authority::{
     ResolvedControllingActivation, VerificationBrand, VerifiedActivationRevocation,
-    VerifiedOperatorAuthorityRotation, VerifiedResidentActivationSuccessor,
+    VerifiedMigrationClassification, VerifiedOperatorAuthorityRotation,
+    VerifiedResidentActivationSuccessor, VerifiedV7CardinalityDisposition,
 };
 
 /// Shared per-store-path writer state: one process-local non-reentrant
@@ -139,7 +140,7 @@ pub struct StoreWriterSession<'store, Brand = ()> {
 
 impl<'store> StoreWriterSession<'store, ()> {
     pub(crate) fn begin(store: &'store mut Store) -> Result<Self, StoreError> {
-        Self::begin_with_brand(store, true)
+        Self::begin_with_brand(store, true, true)
     }
 }
 
@@ -148,7 +149,10 @@ impl<'store, 'id> StoreWriterSession<'store, VerificationBrand<'id>> {
         store: &'store mut Store,
         _brand: &VerificationBrand<'id>,
     ) -> Result<Self, StoreError> {
-        Self::begin_with_brand(store, false)
+        // Authority operations derive and recheck their exact occurrence or
+        // zero/multiple cardinality inside their own Store transaction.  The
+        // session therefore must not preselect a genesis identity.
+        Self::begin_with_brand(store, false, false)
     }
 
     /// Atomically establish the occurrence-bound immutable dependency root
@@ -163,6 +167,26 @@ impl<'store, 'id> StoreWriterSession<'store, VerificationBrand<'id>> {
             .establish_runtime_dependency_trust_root_bare(evidence)
     }
 
+    /// Persist an authentic non-accepted migration disposition and permanently
+    /// evidence-freeze the predecessor occurrence without establishing a root.
+    pub fn classify_runtime_authority_migration(
+        &mut self,
+        evidence: &VerifiedMigrationClassification<'id>,
+    ) -> Result<crate::RuntimeAuthorityMigrationFreezeReceipt, StoreError> {
+        self.check_fence()?;
+        self.store.freeze_runtime_authority_migration_bare(evidence)
+    }
+
+    /// Persist an authentic zero-or-multiple-genesis disposition and freeze
+    /// the non-migratable schema-v7 predecessor without establishing it.
+    pub fn classify_v7_cardinality_disposition(
+        &mut self,
+        evidence: &VerifiedV7CardinalityDisposition<'id>,
+    ) -> Result<crate::RuntimeAuthorityCardinalityFreezeReceipt, StoreError> {
+        self.check_fence()?;
+        self.store.freeze_v7_cardinality_disposition_bare(evidence)
+    }
+
     /// Append one verified Store-resident A1 rotation.
     pub fn append_runtime_operator_authority_rotation(
         &mut self,
@@ -174,6 +198,7 @@ impl<'store, 'id> StoreWriterSession<'store, VerificationBrand<'id>> {
             event.record_digest(),
             event.canonical_bytes(),
             event.resulting_candidate_set_digest(),
+            |current| event.reverify_store_owned_presented_set(current),
         )
     }
 
@@ -188,6 +213,7 @@ impl<'store, 'id> StoreWriterSession<'store, VerificationBrand<'id>> {
             event.record_digest(),
             event.canonical_bytes(),
             event.resulting_candidate_set_digest(),
+            |current| event.reverify_store_owned_presented_set(current),
         )
     }
 
@@ -202,6 +228,7 @@ impl<'store, 'id> StoreWriterSession<'store, VerificationBrand<'id>> {
             event.record_digest(),
             event.canonical_bytes(),
             event.resulting_candidate_set_digest(),
+            |current| event.reverify_store_owned_presented_set(current),
         )
     }
 }
@@ -210,7 +237,9 @@ impl<'store, Brand> StoreWriterSession<'store, Brand> {
     fn begin_with_brand(
         store: &'store mut Store,
         prepare_persistent_writer: bool,
+        bind_unambiguous_genesis: bool,
     ) -> Result<Self, StoreError> {
+        store.ensure_runtime_authority_not_frozen()?;
         let state = path_lock_state(&store.writer_key);
         if state.fenced.load(Ordering::SeqCst) {
             return Err(StoreError::WriteFenced(
@@ -220,7 +249,11 @@ impl<'store, Brand> StoreWriterSession<'store, Brand> {
         let guard = state.write_mutex.try_lock().map_err(|_| {
             StoreError::WriterSessionUnavailable(store.writer_key.display().to_string())
         })?;
-        let genesis = store.genesis_for_writer_session()?;
+        let genesis = if bind_unambiguous_genesis {
+            store.genesis_for_writer_session()?
+        } else {
+            None
+        };
         if prepare_persistent_writer {
             store.prepare_writer_connection()?;
         }

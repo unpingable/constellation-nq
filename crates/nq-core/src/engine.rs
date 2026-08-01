@@ -14108,9 +14108,13 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use nq_helper_sandbox::ExecutionAccount;
-    use nq_runtime_dependency_authority::{
-        test_support::{FIXTURE_OCCURRENCE_ID, RawAuthorityFixture},
-        verify_for_establishment,
+    use nq_host_role_runtime::{
+        HostRoleRuntime, RuntimeAuthorityResidentBinding,
+        test_support::authenticated_runtime_dependencies,
+    };
+    use nq_runtime_dependency_authority::test_support::{
+        FIXTURE_DOMAIN, FIXTURE_HOST_ROLE, FIXTURE_OCCURRENCE_ID, FIXTURE_RESIDENT_GENERATION,
+        FIXTURE_RESIDENT_ID, FIXTURE_ROLE_MANIFEST_GENERATION, RawAuthorityFixture,
     };
 
     use crate::admission::{ADMISSION_SCHEMA, AdmittedProfile, OperatorIdentity};
@@ -14125,55 +14129,65 @@ mod tests {
 
     use super::*;
 
-    fn test_runtime_dependency(label: &str) -> nq_store::RuntimeCheckpointDependencyInput {
-        let anchor = CanonicalDocument::from_serializable(&json!({
-            "schema": "nq.test_dependency_anchor.v1",
-            "label": label,
-        }))
-        .expect("test dependency anchor");
-        let trust_anchor_id =
-            Sha256Digest::parse(anchor.digest().to_owned()).expect("test anchor digest");
-        let generation = CanonicalDocument::from_serializable(&json!({
-            "schema": "nq.test_runtime_dependency_generation.v1",
-            "label": label,
-            "trust_anchor_id": trust_anchor_id,
-        }))
-        .expect("test dependency generation");
-        let dependency_generation_id =
-            Sha256Digest::parse(generation.digest().to_owned()).expect("test generation digest");
-        let canonical_custody = CanonicalDocument::from_serializable(&json!({
-            "schema": "nq.host_role_runtime_dependency_generation_custody.v1",
-            "generation_id": dependency_generation_id,
-            "generation_canonical_bytes": hex::encode(generation.as_bytes()),
-            "identity_catalog_canonical_bytes": "",
-            "external_dependency_canonical_bytes": "",
-            "authority_admission_canonical_bytes": "",
-            "trust_anchor_canonical_bytes": hex::encode(anchor.as_bytes()),
-            "admission_receipt_set_canonical_bytes": "",
-        }))
-        .expect("test dependency custody");
-        nq_store::RuntimeCheckpointDependencyInput {
-            dependency_generation_id,
-            trust_anchor_id,
-            canonical_custody,
-        }
+    fn test_runtime_dependency(
+        label: &str,
+    ) -> (
+        nq_store::RuntimeCheckpointDependencyInput,
+        nq_host_role_runtime::RuntimeDependencies,
+    ) {
+        let seed = label.as_bytes().iter().fold(0_u8, |state, byte| {
+            state.wrapping_mul(31).wrapping_add(*byte)
+        });
+        let dependencies = authenticated_runtime_dependencies(
+            seed,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let dependency = nq_store::RuntimeCheckpointDependencyInput {
+            dependency_generation_id: dependencies.generation_id().clone(),
+            trust_anchor_id: dependencies
+                .custody()
+                .trust_anchor_id()
+                .expect("test dependency anchor"),
+            canonical_custody: CanonicalDocument::from_canonical_bytes(
+                dependencies
+                    .custody()
+                    .canonical_closure_bytes()
+                    .expect("test dependency custody"),
+            )
+            .expect("canonical test dependency custody"),
+        };
+        (dependency, dependencies)
     }
 
-    fn establish_test_runtime_authority(store: &mut Store, trust_anchor_id: &Sha256Digest) {
-        let fixture = RawAuthorityFixture::fresh_genesis_with_anchor(trust_anchor_id.clone());
+    fn establish_test_runtime_authority(
+        store: &mut Store,
+        dependencies: &nq_host_role_runtime::RuntimeDependencies,
+    ) {
+        let fixture = RawAuthorityFixture::fresh_genesis_with_anchor(
+            dependencies
+                .custody()
+                .trust_anchor_id()
+                .expect("test dependency anchor"),
+        );
         let custody = fixture.custody();
-        let presented = fixture.presented_set();
-        let expectations = fixture.activation_expectations();
-        store
-            .with_runtime_authority_writer_session(
-                |brand, session| -> Result<(), nq_store::StoreError> {
-                    let resolved =
-                        verify_for_establishment(brand, &custody, &presented, None, &expectations)?;
-                    session.establish_runtime_dependency_trust_root(&resolved)?;
-                    Ok(())
-                },
-            )
-            .expect("establish test runtime authority");
+        let resident = RuntimeAuthorityResidentBinding {
+            resident_identity: FIXTURE_RESIDENT_ID.to_owned(),
+            resident_generation: FIXTURE_RESIDENT_GENERATION,
+            host_role: FIXTURE_HOST_ROLE.to_owned(),
+            role_manifest_generation: FIXTURE_ROLE_MANIFEST_GENERATION,
+            domain: FIXTURE_DOMAIN.to_owned(),
+            policy_floor: 1,
+        };
+        HostRoleRuntime::initialize_from_unqualified_store(
+            store,
+            dependencies,
+            &custody,
+            &resident,
+        )
+        .expect("establish test runtime authority");
     }
 
     const SEMANTIC_TRANSPORT_HELPER: &str = r#"import datetime
@@ -15863,8 +15877,8 @@ sys.stdout.write("\n")
             resolve(&watcher).expect("host profile"),
         )
         .expect("profile descriptor");
-        let authority_dependency = test_runtime_dependency(genesis_id);
-        establish_test_runtime_authority(&mut store, &authority_dependency.trust_anchor_id);
+        let (_authority_dependency, authority_dependencies) = test_runtime_dependency(genesis_id);
+        establish_test_runtime_authority(&mut store, &authority_dependencies);
         drop(store);
         let evaluator =
             EvaluatorRuntimeIdentity::for_test(nq_protocol::sha256_bytes(evaluator_label));
@@ -17266,8 +17280,9 @@ sys.stdout.write("\n")
         let directory = tempfile::tempdir().expect("store directory");
         let mut store =
             Store::initialize(directory.path().join("nq.db")).expect("runtime history store");
-        let dependency = test_runtime_dependency("history-exact-checkpoint");
-        establish_test_runtime_authority(&mut store, &dependency.trust_anchor_id);
+        let (dependency, authority_dependencies) =
+            test_runtime_dependency("history-exact-checkpoint");
+        establish_test_runtime_authority(&mut store, &authority_dependencies);
         let first_checkpoint = store
             .begin_writer_session()
             .expect("writer session")
@@ -17564,8 +17579,9 @@ sys.stdout.write("\n")
         let directory = tempfile::tempdir().expect("store directory");
         let mut store =
             Store::initialize(directory.path().join("nq.db")).expect("runtime history store");
-        let runtime_dependency = test_runtime_dependency("production-history");
-        establish_test_runtime_authority(&mut store, &runtime_dependency.trust_anchor_id);
+        let (runtime_dependency, authority_dependencies) =
+            test_runtime_dependency("production-history");
+        establish_test_runtime_authority(&mut store, &authority_dependencies);
         store
             .begin_writer_session()
             .expect("writer session")
@@ -17744,8 +17760,9 @@ sys.stdout.write("\n")
             resolve(&watcher).expect("host profile"),
         )
         .expect("profile descriptor");
-        let authority_dependency = test_runtime_dependency("diagnostic-test-genesis");
-        establish_test_runtime_authority(&mut store, &authority_dependency.trust_anchor_id);
+        let (_authority_dependency, authority_dependencies) =
+            test_runtime_dependency("diagnostic-test-genesis");
+        establish_test_runtime_authority(&mut store, &authority_dependencies);
         drop(store);
 
         let evaluator = EvaluatorRuntimeIdentity::for_test(nq_protocol::sha256_bytes(
@@ -17930,8 +17947,9 @@ sys.stdout.write("\n")
             resolve(&watcher).expect("host profile"),
         )
         .expect("profile descriptor");
-        let authority_dependency = test_runtime_dependency("diagnostic-refusal-test-genesis");
-        establish_test_runtime_authority(&mut store, &authority_dependency.trust_anchor_id);
+        let (_authority_dependency, authority_dependencies) =
+            test_runtime_dependency("diagnostic-refusal-test-genesis");
+        establish_test_runtime_authority(&mut store, &authority_dependencies);
         drop(store);
 
         let evaluator = EvaluatorRuntimeIdentity::for_test(nq_protocol::sha256_bytes(
@@ -18268,9 +18286,9 @@ sys.stdout.write("\n")
             resolve(&watcher).expect("host profile"),
         )
         .expect("profile descriptor");
-        let authority_dependency =
+        let (_authority_dependency, authority_dependencies) =
             test_runtime_dependency("diagnostic-admission-refusal-test-genesis");
-        establish_test_runtime_authority(&mut store, &authority_dependency.trust_anchor_id);
+        establish_test_runtime_authority(&mut store, &authority_dependencies);
         drop(store);
 
         let evaluator = EvaluatorRuntimeIdentity::for_test(nq_protocol::sha256_bytes(

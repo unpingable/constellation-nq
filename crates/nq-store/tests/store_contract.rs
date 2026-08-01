@@ -578,7 +578,7 @@ fn a_verified_backup_round_trips_the_evidence() {
     let live = directory.path().join("live.db");
     let backup = directory.path().join("backup.db");
     let (_submission, report_id, _admission) = {
-        let mut store = Store::initialize(&live).expect("initialize on disk");
+        let mut store = Store::initialize_unqualified_storage(&live).expect("initialize on disk");
         let ids = seed_admitted(&mut store, "b");
         store.backup_verified(&backup).expect("verified backup");
         ids
@@ -606,7 +606,8 @@ fn diagnostic_artifact_custody_round_trips_without_collapsing_identity_or_availa
     }));
     assert_ne!(artifact_id.as_str(), artifact.digest());
     {
-        let mut store = Store::initialize(&database).expect("initialize artifact store");
+        let mut store =
+            Store::initialize_unqualified_storage(&database).expect("initialize artifact store");
         let receipt = store
             .begin_writer_session()
             .expect("begin writer session")

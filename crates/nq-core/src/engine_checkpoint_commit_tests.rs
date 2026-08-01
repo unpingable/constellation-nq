@@ -232,7 +232,8 @@ fn only_committed_admitted_reports_advance_the_next_request_checkpoint() {
     .expect("helper runtime root mode");
 
     let profile = resolve_profile("nq.conformance", 1).expect("compiled conformance profile");
-    let mut store = Store::initialize(&database).expect("initialize test store");
+    let mut store =
+        Store::initialize_unqualified_storage(&database).expect("initialize test store");
     append_profile_descriptor(
         &mut store.begin_writer_session().expect("writer session"),
         profile,

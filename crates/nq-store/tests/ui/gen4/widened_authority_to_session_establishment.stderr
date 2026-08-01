@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+  --> tests/ui/gen4/widened_authority_to_session_establishment.rs:15:61
+   |
+15 |     let _ = session.establish_runtime_dependency_trust_root(widened);
+   |                     --------------------------------------- ^^^^^^^ expected `&ResolvedControllingActivation<'_>`, found `&WidenedAuthority`
+   |                     |
+   |                     arguments to this method are incorrect
+   |
+   = note: expected reference `&ResolvedControllingActivation<'_>`
+              found reference `&WidenedAuthority`
+note: method defined here
+  --> src/writer_session.rs
+   |
+   |     pub fn establish_runtime_dependency_trust_root(
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

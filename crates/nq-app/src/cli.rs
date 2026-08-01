@@ -967,9 +967,14 @@ fn restore(backup: &Path, destination: &Path, json_output: bool) -> Result<()> {
             destination.display()
         );
     }
-    let mut source = Store::open(backup)?;
-    source.validate()?;
-    let source_artifacts = nq_core::engine::validate_diagnostic_artifact_history(&mut source)?;
+    let declaration_destination = Store::restore_declaration_path(destination);
+    if declaration_destination.exists() {
+        bail!(
+            "restore declaration destination already exists: {}",
+            declaration_destination.display()
+        );
+    }
+    let source_version = Store::database_schema_version(backup)?;
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -984,32 +989,81 @@ fn restore(backup: &Path, destination: &Path, json_output: bool) -> Result<()> {
             .unwrap_or("nq"),
         uuid::Uuid::new_v4()
     ));
+    let temporary_declaration = Store::restore_declaration_path(&temporary);
     let restore_result = (|| {
-        store_backup_if_supported(&mut source, &temporary)?;
-        let mut restored = Store::open(&temporary)?;
-        restored.validate()?;
-        let restored_artifacts =
-            nq_core::engine::validate_diagnostic_artifact_history(&mut restored)?;
-        if restored_artifacts != source_artifacts {
-            bail!("restore did not preserve the exact diagnostic artifact custody counts");
-        }
-        fs::hard_link(&temporary, destination).with_context(|| {
+        let restored_artifacts = match source_version {
+            nq_store::SCHEMA_VERSION => {
+                let mut source = Store::open(backup)?;
+                source.validate()?;
+                let source_artifacts =
+                    nq_core::engine::validate_diagnostic_artifact_history(&mut source)?;
+                store_backup_if_supported(&mut source, &temporary)?;
+                let mut restored = Store::open(&temporary)?;
+                restored.validate()?;
+                let restored_artifacts =
+                    nq_core::engine::validate_diagnostic_artifact_history(&mut restored)?;
+                if restored_artifacts != source_artifacts {
+                    bail!("restore did not preserve the exact diagnostic artifact custody counts");
+                }
+                Some(restored_artifacts)
+            }
+            7 => {
+                drop(Store::open_v7_upgrade_source_read_only(backup)?);
+                Store::backup_v7_verified(backup, &temporary)?;
+                drop(Store::open_v7_upgrade_source_read_only(&temporary)?);
+                None
+            }
+            found => {
+                bail!(
+                    "restore source schema {found} is unsupported; expected schema 7 or {}",
+                    nq_store::SCHEMA_VERSION
+                );
+            }
+        };
+        let declaration = Store::build_restore_declaration(backup, &temporary)?;
+        let mut declaration_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary_declaration)?;
+        declaration_file.write_all(&declaration.canonical_bytes)?;
+        declaration_file.sync_all()?;
+        drop(declaration_file);
+
+        // Publish the classifier first.  If publishing the Store fails, remove
+        // only the declaration this invocation just linked.
+        fs::hard_link(&temporary_declaration, &declaration_destination).with_context(|| {
             format!(
-                "publish validated restore {} without replacing another path",
-                destination.display()
+                "publish restore declaration {} without replacing another path",
+                declaration_destination.display()
             )
         })?;
-        Ok::<_, anyhow::Error>(restored_artifacts)
+        if let Err(error) = fs::hard_link(&temporary, destination) {
+            let _ = fs::remove_file(&declaration_destination);
+            return Err(error).with_context(|| {
+                format!(
+                    "publish validated restore {} without replacing another path",
+                    destination.display()
+                )
+            });
+        }
+        Ok::<_, anyhow::Error>((restored_artifacts, declaration))
     })();
     let _ = fs::remove_file(&temporary);
-    let restored_artifacts = restore_result?;
+    let _ = fs::remove_file(&temporary_declaration);
+    let (restored_artifacts, declaration) = restore_result?;
     print_value(
         &json!({
             "restored": true,
             "destination": destination,
-            "sha256": digest_file(destination)?,
-            "diagnostic_artifacts":
-                diagnostic_artifact_preservation_value(&restored_artifacts),
+            "sha256": declaration.restored_store_sha256,
+            "schema_version": source_version,
+            "restore_declaration": declaration_destination,
+            "restore_declaration_digest": declaration.declaration_digest,
+            "diagnostic_artifacts": restored_artifacts
+                .as_ref()
+                .map(diagnostic_artifact_preservation_value),
+            "grants_authority": false,
         }),
         json_output,
     )
@@ -2060,7 +2114,7 @@ helper_runtime_dir = "/run/nq/helpers"
             "outcome": "not-a-diagnostic-outcome",
         }))
         .expect("canonical malformed fixture");
-        let mut store = Store::initialize(&database).expect("initialize store");
+        let mut store = Store::initialize_unqualified_storage(&database).expect("initialize store");
         store
             .begin_writer_session()
             .expect("begin writer session")

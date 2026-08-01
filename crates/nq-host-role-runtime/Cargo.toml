@@ -8,11 +8,13 @@ license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 
+[lib]
+path = "src/facade.rs"
+
 [features]
 default = []
 test-support = [
-    "nq-host-role-dependency-custody/test-support",
-    "nq-runtime-dependency-authority/test-support",
+    "nq-store/test-support",
 ]
 
 [dependencies]

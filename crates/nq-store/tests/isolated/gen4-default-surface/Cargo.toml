@@ -1,0 +1,11 @@
+[package]
+name = "nq-store-gen4-default-surface"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+nq-runtime-dependency-authority = { path = "../../../../nq-runtime-dependency-authority" }
+nq-store = { path = "../../../../nq-store" }

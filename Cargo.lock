@@ -599,6 +599,7 @@ dependencies = [
  "nq-build-info",
  "nq-core",
  "nq-helper-sandbox",
+ "nq-host-role-runtime",
  "nq-profiles",
  "nq-protocol",
  "nq-runtime-dependency-authority",
@@ -761,6 +762,7 @@ name = "nq-store"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "ed25519-dalek",
  "hex",
  "libc",
  "nix",

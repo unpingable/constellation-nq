@@ -1,0 +1,15 @@
+error[E0061]: this method takes 1 argument but 0 arguments were supplied
+ --> tests/ui/gen4/session_establishment_missing_evidence.rs:7:21
+  |
+7 |     let _ = session.establish_runtime_dependency_trust_root();
+  |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^-- argument #1 of type `&ResolvedControllingActivation<'_>` is missing
+  |
+note: method defined here
+ --> src/writer_session.rs
+  |
+  |     pub fn establish_runtime_dependency_trust_root(
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: provide the argument
+  |
+7 |     let _ = session.establish_runtime_dependency_trust_root(/* &ResolvedControllingActivation<'_> */);
+  |                                                             ++++++++++++++++++++++++++++++++++++++++

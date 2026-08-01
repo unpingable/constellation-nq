@@ -8,6 +8,7 @@
 //! completeness testimony.
 
 mod brand;
+mod cardinality;
 mod error;
 mod framing;
 mod records;
@@ -18,8 +19,14 @@ pub mod test_support;
 
 pub use brand::{
     ControllingActivationSnapshot, ResolvedControllingActivation, VerificationBrand,
-    VerifiedActivationRevocation, VerifiedOperatorAuthorityRotation,
-    VerifiedResidentActivationSuccessor, with_verification_brand,
+    VerifiedActivationRevocation, VerifiedMigrationClassification,
+    VerifiedOperatorAuthorityRotation, VerifiedResidentActivationSuccessor,
+    with_verification_brand,
+};
+pub use cardinality::{
+    CARDINALITY_DISPOSITION_SOURCE_SCHEMA_VERSION, V7_CARDINALITY_DISPOSITION_SCHEMA,
+    V7CardinalityDispositionBytes, V7CardinalityDispositionExpectations,
+    VerifiedV7CardinalityDisposition, verify_v7_cardinality_disposition,
 };
 pub use error::AuthorityError;
 pub use records::{
@@ -35,5 +42,6 @@ pub use records::{
 };
 pub use resolution::{
     resolve_for_restart, verify_activation_revocation, verify_for_establishment,
-    verify_operator_authority_rotation, verify_resident_activation_successor,
+    verify_nonaccepted_migration_classification, verify_operator_authority_rotation,
+    verify_resident_activation_successor,
 };

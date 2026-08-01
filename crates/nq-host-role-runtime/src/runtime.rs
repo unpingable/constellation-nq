@@ -15,19 +15,23 @@ use nq_host_role_contract::{
 use nq_protocol::{Sha256Digest, canonical_json_bytes, semantic_digest, sha256_bytes};
 use nq_runtime_dependency_authority::{
     ActivationContext, ActivationExpectations, EstablishmentArm, GenesisAuthorityCustody,
-    MigrationReceiptBytes, PresentedAuthoritySet, RestartExpectations, resolve_for_restart,
-    verify_for_establishment, with_verification_brand,
+    MigrationReceiptBytes, PresentedAuthoritySet, RestartExpectations,
+    V7CardinalityDispositionBytes, resolve_for_restart, verify_for_establishment,
+    verify_nonaccepted_migration_classification, verify_v7_cardinality_disposition,
+    with_verification_brand,
 };
 use nq_store::{
     BackupArtifact, CanonicalDocument, GovernedCustodyInventoryEntry, GovernedCustodyReservation,
-    GovernedProtectedFailureAccess, MAX_PUBLIC_QUERY_ROWS, RuntimeCheckpointDependencyBinding,
-    RuntimeCheckpointDependencyInput, RuntimeDependencyGenerationByteState,
-    RuntimeLedgerCheckpoint, RuntimeRecordAppendDisposition, RuntimeRecordBatchInput,
-    RuntimeRecordInput, RuntimeRecordRow, Store, StoreError, runtime_record_batch_digest,
+    GovernedProtectedFailureAccess, MAX_PUBLIC_QUERY_ROWS,
+    RuntimeAuthorityCardinalityFreezeReceipt, RuntimeAuthorityMigrationFreezeReceipt,
+    RuntimeCheckpointDependencyBinding, RuntimeCheckpointDependencyInput,
+    RuntimeDependencyGenerationByteState, RuntimeLedgerCheckpoint, RuntimeRecordAppendDisposition,
+    RuntimeRecordBatchInput, RuntimeRecordInput, RuntimeRecordRow, Store, StoreError,
+    runtime_record_batch_digest,
 };
 use serde_json::{Value, json};
 
-use crate::{
+use super::{
     AuthenticatedRuntimeDependencyClosure, DependencyCustodyError, ExactDependencyCustodyBinding,
     ExternalDependencyAvailability, GovernedPrelaunchRequest, InspectorPage, InspectorProjection,
     InspectorProjectionState, NativeDeadlinePrelaunchRequest, NativeDeadlineProvenance,
@@ -187,7 +191,7 @@ struct ReopenedState {
 
 struct GovernedPreflight {
     request_id: String,
-    production: crate::GovernedProductionIdentity,
+    production: super::GovernedProductionIdentity,
     outer_request: RecordRef,
     invocation_decision: RecordRef,
     custody_reservation: RecordRef,
@@ -280,30 +284,15 @@ impl HostRoleRuntime {
         resident: &RuntimeAuthorityResidentBinding,
     ) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let trust_root = dependencies.custody().trust_anchor_id()?;
-        let expectations = fresh_authority_expectations(resident, trust_root);
-        let presented = PresentedAuthoritySet::default();
         let mut created = false;
-        // Cryptographic and tuple refusal occurs before a file is created.
-        with_verification_brand(|brand| {
-            verify_for_establishment(&brand, authority_custody, &presented, None, &expectations)
-                .map(drop)
-        })?;
         let established = (|| -> Result<Store> {
-            let mut store = Store::initialize(&path)?;
+            let mut store = Store::initialize_runtime_authority_candidate(&path)?;
             created = true;
-            store.with_runtime_authority_writer_session(
-                |brand, session| -> std::result::Result<(), StoreError> {
-                    let resolved = verify_for_establishment(
-                        brand,
-                        authority_custody,
-                        &presented,
-                        None,
-                        &expectations,
-                    )?;
-                    session.establish_runtime_dependency_trust_root(&resolved)?;
-                    Ok(())
-                },
+            Self::initialize_from_unqualified_store(
+                &mut store,
+                &dependencies,
+                authority_custody,
+                resident,
             )?;
             Ok(store)
         })();
@@ -317,6 +306,56 @@ impl HostRoleRuntime {
             }
         };
         Self::from_store(store, dependencies, authority_custody, resident)
+    }
+
+    /// Establishes genesis authority on the exact unconsumed Store handle
+    /// returned by fresh storage initialization.
+    ///
+    /// This is the single shared governed initialization implementation used
+    /// by [`Self::initialize`] and by downstream qualification fixtures that
+    /// must populate non-authority Store state before establishment.  It
+    /// requires the complete authenticated dependency closure, genesis
+    /// custody, and resident tuple; it exposes no brand, writer session, or
+    /// verified evidence.  A closed-and-reopened rootless Store cannot call
+    /// this route because fresh initialization standing is intentionally
+    /// in-memory and one-use.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a reopened or consumed Store handle, dependency substitution,
+    /// invalid genesis custody, resident mismatch, or any atomic
+    /// genesis/root/receipt establishment failure.
+    pub fn initialize_from_unqualified_store(
+        store: &mut Store,
+        dependencies: &RuntimeDependencies,
+        authority_custody: &GenesisAuthorityCustody,
+        resident: &RuntimeAuthorityResidentBinding,
+    ) -> Result<()> {
+        store.require_runtime_authority_initialization_candidate()?;
+        let trust_root = dependencies.custody().trust_anchor_id()?;
+        let expectations = fresh_authority_expectations(resident, trust_root);
+        let presented = PresentedAuthoritySet::default();
+
+        // Cryptographic and tuple refusal occurs before any authority write.
+        with_verification_brand(|brand| {
+            verify_for_establishment(&brand, authority_custody, &presented, None, &expectations)
+                .map(drop)
+        })?;
+        store.with_runtime_authority_writer_session(
+            |brand, session| -> std::result::Result<(), StoreError> {
+                let resolved = verify_for_establishment(
+                    brand,
+                    authority_custody,
+                    &presented,
+                    None,
+                    &expectations,
+                )?;
+                session.establish_runtime_dependency_trust_root(&resolved)?;
+                Ok(())
+            },
+        )?;
+        store.consume_runtime_authority_initialization_candidate();
+        Ok(())
     }
 
     /// Opens an existing established schema-v8 Store and resolves authority
@@ -401,6 +440,88 @@ impl HostRoleRuntime {
         Self::from_store(store, dependencies, authority_custody, resident)
     }
 
+    /// Authenticates and durably freezes an explicit non-accepted disposition
+    /// for one exact schema-v7 predecessor occurrence.
+    ///
+    /// This migration operation never establishes a root or returns a runtime.
+    /// `observed`, `superseded`, and `refused` all make the predecessor
+    /// permanently read-only; `accepted` is confined to
+    /// [`Self::migrate_v7_runtime_authority`].
+    pub fn classify_v7_runtime_authority(
+        path: impl AsRef<Path>,
+        backup: &BackupArtifact,
+        dependencies: RuntimeDependencies,
+        authority_custody: &GenesisAuthorityCustody,
+        migration_receipt: &MigrationReceiptBytes,
+        resident: &RuntimeAuthorityResidentBinding,
+    ) -> Result<RuntimeAuthorityMigrationFreezeReceipt> {
+        let path = path.as_ref();
+        let mut store = Store::open_v7_runtime_authority_migration_source(path, backup)?;
+        let occurrence = store.sole_genesis_id()?;
+        let trust_root = dependencies.custody().trust_anchor_id()?;
+        let migration = store.runtime_authority_migration_expectations()?;
+        let expectations = ActivationExpectations {
+            genesis_context: ActivationContext::MigrationGenesis,
+            expected_occurrence_id: Some(occurrence),
+            resident_identity: resident.resident_identity.clone(),
+            resident_generation: resident.resident_generation,
+            host_role: resident.host_role.clone(),
+            role_manifest_generation: resident.role_manifest_generation,
+            trust_anchor_id: trust_root,
+            domain: resident.domain.clone(),
+            policy_floor: resident.policy_floor,
+            migration: Some(migration),
+        };
+        let presented = PresentedAuthoritySet::default();
+        store
+            .with_runtime_authority_writer_session(
+                |brand, session| -> std::result::Result<_, StoreError> {
+                    let classification = verify_nonaccepted_migration_classification(
+                        brand,
+                        authority_custody,
+                        &presented,
+                        migration_receipt,
+                        &expectations,
+                    )?;
+                    session.classify_runtime_authority_migration(&classification)
+                },
+            )
+            .map_err(Into::into)
+    }
+
+    /// Authenticates and durably freezes an explicit disposition for a
+    /// schema-v7 source with zero or multiple genesis identities.
+    ///
+    /// This path uses only the exogenous genesis A1 key from custody.  It does
+    /// not inspect A2 as Store occurrence standing and cannot establish or
+    /// migrate the source.
+    pub fn classify_v7_nonmigratable_cardinality(
+        path: impl AsRef<Path>,
+        backup: &BackupArtifact,
+        authority_custody: &GenesisAuthorityCustody,
+        signed_disposition: &V7CardinalityDispositionBytes,
+        resident: &RuntimeAuthorityResidentBinding,
+    ) -> Result<RuntimeAuthorityCardinalityFreezeReceipt> {
+        let mut store = Store::open_v7_runtime_authority_migration_source(path, backup)?;
+        let expectations = store.runtime_authority_cardinality_disposition_expectations(
+            &resident.domain,
+            resident.policy_floor,
+        )?;
+        store
+            .with_runtime_authority_writer_session(
+                |brand, session| -> std::result::Result<_, StoreError> {
+                    let classification = verify_v7_cardinality_disposition(
+                        brand,
+                        authority_custody.genesis_a1_bytes(),
+                        signed_disposition,
+                        &expectations,
+                    )?;
+                    session.classify_v7_cardinality_disposition(&classification)
+                },
+            )
+            .map_err(Into::into)
+    }
+
     /// Opens an already constructed store.
     ///
     /// This is useful for bounded in-memory qualification while retaining the
@@ -410,13 +531,13 @@ impl HostRoleRuntime {
     ///
     /// Refuses every condition described by [`Self::open`].
     pub fn from_store(
-        store: Store,
+        mut store: Store,
         dependencies: RuntimeDependencies,
         authority_custody: &GenesisAuthorityCustody,
         resident: &RuntimeAuthorityResidentBinding,
     ) -> Result<Self> {
         store.validate()?;
-        resolve_store_runtime_authority(&store, &dependencies, authority_custody, resident)?;
+        resolve_store_runtime_authority(&mut store, &dependencies, authority_custody, resident)?;
         let custody_frontiers = store.governed_custody_inventory()?;
         let reopened = Self::reopen_state(&store, &dependencies)?;
         Ok(Self {
@@ -437,6 +558,16 @@ impl HostRoleRuntime {
     #[must_use]
     pub const fn dependencies(&self) -> &RuntimeDependencies {
         &self.dependencies
+    }
+
+    /// Consume this already established runtime and return its governed Store.
+    ///
+    /// This does not expose the Store-private authority-session factory. The
+    /// returned Store already carries the immutable root and establishment
+    /// receipt produced by one of the two named runtime lifecycle routes.
+    #[must_use]
+    pub fn into_store(self) -> Store {
+        self.store
     }
 
     /// Captures the current immutable ledger/dependency frontier.
@@ -1732,70 +1863,75 @@ fn fresh_authority_expectations(
 }
 
 fn resolve_store_runtime_authority(
-    store: &Store,
+    store: &mut Store,
     dependencies: &RuntimeDependencies,
     custody: &GenesisAuthorityCustody,
     resident: &RuntimeAuthorityResidentBinding,
 ) -> Result<()> {
-    let receipt = store
-        .runtime_dependency_establishment_receipt()?
-        .ok_or(nq_store::StoreError::EstablishmentReceiptMissing)?;
-    let root = store
-        .runtime_dependency_trust_root()?
-        .ok_or(nq_store::StoreError::EstablishmentRootMissing)?;
-    let occurrence = store.sole_genesis_id()?;
     let dependency_anchor = dependencies.custody().trust_anchor_id()?;
-    if root != dependency_anchor {
-        return Err(RuntimeError::DependencyTrustAnchorSubstitution {
-            expected: root,
-            observed: dependency_anchor,
-        });
-    }
-    let transcript = &receipt.transcript;
-    if transcript.occurrence_id() != occurrence
-        || transcript.trust_anchor_id() != &root
-        || transcript.domain() != resident.domain
-    {
-        return Err(nq_store::StoreError::EstablishmentTranscriptMismatch.into());
-    }
-    let (genesis_context, expected_migration_receipt_digest) = match transcript.arm() {
-        EstablishmentArm::Genesis => (ActivationContext::FreshGenesis, None),
-        EstablishmentArm::Migration => (
-            ActivationContext::MigrationGenesis,
-            Some(
-                transcript
-                    .migration_receipt_digest()
-                    .ok_or(nq_store::StoreError::EstablishmentMigrationMismatch)?
-                    .clone(),
+    store.with_runtime_authority_restart_snapshot(|snapshot| {
+        let receipt = snapshot.receipt;
+        let root = snapshot.root;
+        let occurrence = snapshot.occurrence_id;
+        if root != dependency_anchor {
+            return Err(RuntimeError::DependencyTrustAnchorSubstitution {
+                expected: root,
+                observed: dependency_anchor,
+            });
+        }
+        let transcript = &receipt.transcript;
+        if transcript.occurrence_id() != occurrence
+            || transcript.trust_anchor_id() != &root
+            || transcript.domain() != resident.domain
+        {
+            return Err(nq_store::StoreError::EstablishmentTranscriptMismatch.into());
+        }
+        let (genesis_context, expected_migration_receipt_digest) = match transcript.arm() {
+            EstablishmentArm::Genesis => (ActivationContext::FreshGenesis, None),
+            EstablishmentArm::Migration => (
+                ActivationContext::MigrationGenesis,
+                Some(
+                    transcript
+                        .migration_receipt_digest()
+                        .ok_or(nq_store::StoreError::EstablishmentMigrationMismatch)?
+                        .clone(),
+                ),
             ),
-        ),
-    };
-    let presented = store.runtime_authority_presented_set()?;
-    let retained_migration = store.runtime_authority_migration_receipt()?;
-    let expectations = RestartExpectations {
-        genesis_context,
-        expected_occurrence_id: occurrence,
-        expected_chain_root_activation_digest: transcript.chain_root_activation_digest().clone(),
-        expected_establishment_tip_digest: transcript
-            .controlling_tip_digest_at_establishment()
-            .clone(),
-        resident_identity: resident.resident_identity.clone(),
-        resident_generation: resident.resident_generation,
-        host_role: resident.host_role.clone(),
-        role_manifest_generation: resident.role_manifest_generation,
-        trust_anchor_id: root,
-        domain: resident.domain.clone(),
-        policy_floor: resident.policy_floor,
-        expected_custody_digest: transcript.custody_digest().clone(),
-        expected_migration_receipt_digest,
-    };
-    let _snapshot = resolve_for_restart(
-        custody,
-        &presented,
-        retained_migration.as_ref(),
-        &expectations,
-    )?;
-    Ok(())
+        };
+        let expectations = RestartExpectations {
+            genesis_context,
+            expected_occurrence_id: occurrence,
+            expected_chain_root_activation_digest: transcript
+                .chain_root_activation_digest()
+                .clone(),
+            expected_establishment_tip_digest: transcript
+                .controlling_tip_digest_at_establishment()
+                .clone(),
+            expected_genesis_operator_authority_digest: transcript
+                .genesis_operator_authority_digest()
+                .clone(),
+            expected_genesis_operator_key_generation: transcript.genesis_operator_key_generation(),
+            expected_establishment_cut: transcript.establishment_cut().clone(),
+            expected_establishment_policy_version: transcript.policy_version(),
+            expected_establishment_candidate_set_digest: transcript.candidate_set_digest().clone(),
+            resident_identity: resident.resident_identity.clone(),
+            resident_generation: resident.resident_generation,
+            host_role: resident.host_role.clone(),
+            role_manifest_generation: resident.role_manifest_generation,
+            trust_anchor_id: root,
+            domain: resident.domain.clone(),
+            policy_floor: resident.policy_floor,
+            expected_custody_digest: transcript.custody_digest().clone(),
+            expected_migration_receipt_digest,
+        };
+        let _resolved = resolve_for_restart(
+            custody,
+            &snapshot.presented,
+            snapshot.migration_receipt.as_ref(),
+            &expectations,
+        )?;
+        Ok(())
+    })
 }
 
 fn remove_failed_fresh_store(path: &Path) {
@@ -2206,10 +2342,10 @@ mod tests {
     use serde_json::{Map, Value, json};
     use tempfile::tempdir;
 
-    use super::*;
-    use crate::{
+    use super::super::{
         GovernedPrelaunchRequest, RuntimeError, dependency::tests::authenticated_runtime_fixture,
     };
+    use super::*;
 
     const RECORDS: &str =
         include_str!("../../nq-host-role-contract/assets/host-role-runtime-records.v1.json");

@@ -17,17 +17,14 @@ use nq_host_role_runtime::{
         native_engine_fixture,
     },
 };
-use nq_runtime_dependency_authority::{
-    test_support::{
-        FIXTURE_DOMAIN, FIXTURE_HOST_ROLE, FIXTURE_RESIDENT_GENERATION, FIXTURE_RESIDENT_ID,
-        FIXTURE_ROLE_MANIFEST_GENERATION, RawAuthorityFixture,
-    },
-    verify_for_establishment,
+use nq_runtime_dependency_authority::test_support::{
+    FIXTURE_DOMAIN, FIXTURE_HOST_ROLE, FIXTURE_RESIDENT_GENERATION, FIXTURE_RESIDENT_ID,
+    FIXTURE_ROLE_MANIFEST_GENERATION, RawAuthorityFixture,
 };
 use nq_store::{
     DiagnosticArtifactByteState, DiagnosticArtifactLookup, DiagnosticArtifactSchemaSupport,
     GovernedCustodyInventoryEntry, GovernedCustodyRecoveryClass, GovernedProjectionRecovery,
-    GovernedProjectionVerificationDisposition, GovernedProtectedFailureAccess, StoreError,
+    GovernedProjectionVerificationDisposition, GovernedProtectedFailureAccess,
 };
 use tempfile::TempDir;
 
@@ -48,6 +45,26 @@ struct EffectFixture {
     prepared: PreparedGovernedInvocation,
     reservation_record_id: Sha256Digest,
     marker: PathBuf,
+}
+
+fn collection_engine_from_fresh_store(
+    config: &NqConfig,
+    mut store: Store,
+) -> Result<CollectionEngine, EngineError> {
+    let startup_projection_recovery = store
+        .begin_writer_session()?
+        .recover_pending_governed_projections()?;
+    validate_provider_intake_history(&store)?;
+    validate_diagnostic_artifact_history(&mut store)?;
+    Ok(CollectionEngine {
+        config: config.clone(),
+        store,
+        startup_projection_recovery,
+        admission: AdmissionManager,
+        runner: StdioRunner,
+        unix_runners: BTreeMap::new(),
+        evaluator_identity: crate::evaluator_identity::resolved(),
+    })
 }
 
 fn helper_source(mode: HelperMode) -> String {
@@ -170,19 +187,20 @@ fn admitted_effect_fixture_with_profile(
 
     let config = effect_config(root, &helper_path, &marker);
     let profile: &'static dyn ProfileModule = &nq_profiles::conformance::MODULE;
-    let mut store = Store::initialize(&config.database_path).expect("initialize store");
+    let mut store =
+        Store::initialize_unqualified_storage(&config.database_path).expect("initialize store");
     append_profile_descriptor(
         &mut store.begin_writer_session().expect("writer session"),
         profile,
     )
     .expect("append profile descriptor");
-    drop(store);
 
     let watcher = config
         .watcher("governed.effect")
         .expect("configured watcher")
         .clone();
-    let mut admission_engine = CollectionEngine::open(&config).expect("admission engine");
+    let mut admission_engine =
+        collection_engine_from_fresh_store(&config, store).expect("admission engine");
     let evaluator = admission_engine
         .require_evaluator_identity()
         .expect("evaluator identity")
@@ -244,27 +262,14 @@ fn admitted_effect_fixture_with_profile(
         },
         maximum_execution_ms,
     });
-    drop(admission_engine);
+    let mut store = admission_engine.store;
     if marker.exists() {
         fs::remove_file(&marker).expect("clear admission spawn marker");
     }
 
-    let mut store = Store::open(&config.database_path).expect("reopen store for runtime");
     let authority =
         RawAuthorityFixture::fresh_genesis_with_anchor(fixture.dependency_anchor_id.clone());
     let custody = authority.custody();
-    let presented = authority.presented_set();
-    let expectations = authority.activation_expectations();
-    store
-        .with_runtime_authority_writer_session(
-            |brand, session| -> std::result::Result<(), StoreError> {
-                let resolved =
-                    verify_for_establishment(brand, &custody, &presented, None, &expectations)?;
-                session.establish_runtime_dependency_trust_root(&resolved)?;
-                Ok(())
-            },
-        )
-        .expect("establish fixture runtime authority");
     let resident = RuntimeAuthorityResidentBinding {
         resident_identity: FIXTURE_RESIDENT_ID.to_owned(),
         resident_generation: FIXTURE_RESIDENT_GENERATION,
@@ -273,6 +278,13 @@ fn admitted_effect_fixture_with_profile(
         domain: FIXTURE_DOMAIN.to_owned(),
         policy_floor: 1,
     };
+    HostRoleRuntime::initialize_from_unqualified_store(
+        &mut store,
+        &fixture.dependencies,
+        &custody,
+        &resident,
+    )
+    .expect("establish fixture runtime authority");
     let mut runtime = HostRoleRuntime::from_store(store, fixture.dependencies, &custody, &resident)
         .expect("host-role runtime");
     let prepared = runtime

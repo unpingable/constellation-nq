@@ -35,6 +35,11 @@ mod governed_projection_capacity;
 mod governed_projection_capsule;
 mod writer_session;
 
+extern crate self as nq_store;
+
+#[path = "../../nq-host-role-runtime/src/lib.rs"]
+pub mod host_role_runtime;
+
 pub use writer_session::StoreWriterSession;
 
 pub use custody_capacity_model::{
@@ -91,15 +96,17 @@ use chrono::{SecondsFormat, Utc};
 use nq_host_role_contract::ValidatedRuntimeRecord;
 use nq_protocol::{Sha256Digest, sha256_bytes};
 use nq_runtime_dependency_authority::{
-    ActivationContext, EstablishmentArm, EstablishmentReceiptTranscript, MigrationDisposition,
-    MigrationExpectations, MigrationReceipt, MigrationReceiptBytes, OldRootState,
-    PresentedAuthorityRecord, PresentedAuthoritySet, ResolvedControllingActivation,
-    VerificationBrand, digest_presented_authority_set, with_verification_brand,
+    ActivationContext, ActivationRevocationRecord, EstablishmentArm,
+    EstablishmentReceiptTranscript, MigrationDisposition, MigrationExpectations, MigrationReceipt,
+    MigrationReceiptBytes, OldRootState, OperatorAuthorityRecord, PresentedAuthorityRecord,
+    PresentedAuthoritySet, ResidentActivationRecord, ResolvedControllingActivation,
+    V7CardinalityDispositionExpectations, VerificationBrand, VerifiedMigrationClassification,
+    VerifiedV7CardinalityDisposition, digest_presented_authority_set, with_verification_brand,
 };
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -451,6 +458,10 @@ fn expected_schema_v7_fingerprint() -> Result<String, String> {
 /// The only schema version understood by this crate.
 pub const SCHEMA_VERSION: i64 = 8;
 
+/// Exact sidecar schema emitted by the official restore path.  The sidecar
+/// declares the restore act without changing the restored Store bytes.
+pub const RESTORE_DECLARATION_SCHEMA: &str = "nq.restore_declaration.v1";
+
 /// Hard ceiling for one page returned through the public read model helpers.
 pub const MAX_PUBLIC_QUERY_ROWS: u32 = 1_000;
 
@@ -553,6 +564,16 @@ pub enum StoreError {
         family: &'static str,
         record_id: String,
     },
+    /// A native authority row's SQL identity differs from its exact canonical
+    /// record identity.
+    #[error(
+        "runtime authority {family} SQL identity {stored_record_id} differs from canonical identity {canonical_record_id}"
+    )]
+    AuthorityNativeRecordIdentityMismatch {
+        family: &'static str,
+        stored_record_id: String,
+        canonical_record_id: Sha256Digest,
+    },
     /// The retained establishment transcript no longer hashes to its stored digest.
     #[error("runtime dependency establishment receipt transcript digest mismatch")]
     EstablishmentTranscriptMismatch,
@@ -569,6 +590,11 @@ pub enum StoreError {
     /// exact Store state or schema transition.
     #[error("runtime authority establishment context does not match the Store state")]
     AuthorityEstablishmentContextMismatch,
+    /// Fresh genesis establishment was attempted through a reopened,
+    /// migrated, or already-consumed Store handle rather than the exact
+    /// in-process handle returned by fresh storage initialization.
+    #[error("runtime authority genesis requires the unconsumed fresh initialization handle")]
+    AuthorityInitializationCandidateRequired,
     /// Schema-v7 migration was not opened through the backup-verified bounded
     /// migration source path.
     #[error("schema-v7 authority migration lacks its exact verified-source preflight")]
@@ -588,6 +614,17 @@ pub enum StoreError {
     /// Store set before or after append.
     #[error("verified runtime authority event does not correspond to the Store-resident set")]
     AuthorityEventCorrespondenceMismatch,
+    /// A valid non-accepted migration disposition permanently evidence-froze
+    /// this occurrence; no writer or establishment path may reactivate it.
+    #[error("runtime authority occurrence is evidence-frozen by migration disposition {0}")]
+    AuthorityEvidenceFrozen(String),
+    /// A migration classification conflicts with an existing freeze fact.
+    #[error("runtime authority migration classification conflicts with the retained freeze")]
+    AuthorityMigrationDispositionConflict,
+    /// A zero-or-multiple-genesis classification conflicts with its exact
+    /// Store-derived cardinality, source, root, or retained carrier.
+    #[error("runtime authority cardinality classification conflicts with the retained freeze")]
+    AuthorityCardinalityDispositionConflict,
 }
 
 /// One immutable Store-side Gen4 establishment fact.
@@ -599,6 +636,79 @@ pub struct RuntimeDependencyEstablishmentReceipt {
     pub transcript: EstablishmentReceiptTranscript,
     /// Store commit time; historical only and never a source of authority.
     pub established_at: String,
+}
+
+/// Durable result of a valid non-accepted migration classification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeAuthorityMigrationFreezeReceipt {
+    /// Exact signed migration receipt identity.
+    pub migration_receipt_digest: Sha256Digest,
+    /// Exact non-accepted disposition.
+    pub disposition: MigrationDisposition,
+    /// Exact Store occurrence frozen by the classification.
+    pub occurrence_id: String,
+    /// Store commit time; historical only and never authority.
+    pub classified_at: String,
+}
+
+/// Durable result of an explicit zero-or-multiple-genesis disposition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeAuthorityCardinalityFreezeReceipt {
+    /// Exact operator-signed disposition identity.
+    pub disposition_digest: Sha256Digest,
+    /// Exact non-accepted disposition.
+    pub disposition: MigrationDisposition,
+    /// Number of exact Store genesis identities frozen (zero or at least two).
+    pub genesis_count: usize,
+    /// Store commit time; historical only and never authority.
+    pub classified_at: String,
+}
+
+/// Sealed declaration produced for an exact Store restored by the official
+/// restore workflow.  It is a quarantine classifier, never authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreDeclarationArtifact {
+    /// Domain-separated identity of the exact declaration fields.
+    pub declaration_digest: Sha256Digest,
+    /// Canonical sidecar bytes to publish before the restored database.
+    pub canonical_bytes: Vec<u8>,
+    /// Exact physical digest of the restored Store named by the declaration.
+    pub restored_store_sha256: Sha256Digest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct RestoreDeclarationV1 {
+    schema: String,
+    declaration_digest: Sha256Digest,
+    source_backup_sha256: Sha256Digest,
+    restored_store_sha256: Sha256Digest,
+    store_schema_version: i64,
+    source_logical_digest: Option<Sha256Digest>,
+    restored_logical_digest: Option<Sha256Digest>,
+    grants_authority: bool,
+}
+
+#[derive(Serialize)]
+struct RestoreDeclarationPreimage<'a> {
+    domain: &'static str,
+    schema: &'a str,
+    source_backup_sha256: &'a Sha256Digest,
+    restored_store_sha256: &'a Sha256Digest,
+    store_schema_version: i64,
+    source_logical_digest: Option<&'a Sha256Digest>,
+    restored_logical_digest: Option<&'a Sha256Digest>,
+    grants_authority: bool,
+}
+
+/// One coherent Store-owned read snapshot used only while ordinary runtime
+/// authority resolution is executing.
+pub(crate) struct RuntimeAuthorityRestartSnapshot {
+    pub(crate) root: Sha256Digest,
+    pub(crate) occurrence_id: String,
+    pub(crate) receipt: RuntimeDependencyEstablishmentReceipt,
+    pub(crate) presented: PresentedAuthoritySet,
+    pub(crate) migration_receipt: Option<MigrationReceiptBytes>,
 }
 
 /// A canonical JSON document and its SHA-256 semantic digest.
@@ -2326,13 +2436,16 @@ pub struct Store {
     path: Option<PathBuf>,
     writer_key: PathBuf,
     v7_authority_migration: Option<V7AuthorityMigrationPreflight>,
+    runtime_authority_initialization_candidate: bool,
 }
 
 #[derive(Clone)]
 struct V7AuthorityMigrationPreflight {
+    source_path: PathBuf,
     backup_path: PathBuf,
     backup_sha256: String,
     source_logical_digest: String,
+    restore_declaration_digest: Option<Sha256Digest>,
 }
 
 impl Store {
@@ -2350,8 +2463,138 @@ impl Store {
         pragma_i64(&connection, "user_version")
     }
 
-    /// Explicitly create a current schema-v4 store. Existing schemas are never overwritten.
+    /// Deterministic sidecar path for the sealed restore declaration belonging
+    /// to one database path.  The declaration is published before the Store so
+    /// an official restore is never visible without its quarantine carrier.
+    #[must_use]
+    pub fn restore_declaration_path(database_path: impl AsRef<Path>) -> PathBuf {
+        let database_path = database_path.as_ref();
+        let mut file_name = database_path
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("nq.db"))
+            .to_os_string();
+        file_name.push(".restore-declaration.v1.json");
+        database_path.with_file_name(file_name)
+    }
+
+    /// Build the exact sealed declaration for a verified restored Store.
+    ///
+    /// The declaration changes no Store byte and grants no authority.  A
+    /// schema-v7 declaration additionally binds the exact logical source and
+    /// restored state so the later migration transaction can recheck it.
+    pub fn build_restore_declaration(
+        source_backup: impl AsRef<Path>,
+        restored_store: impl AsRef<Path>,
+    ) -> Result<RestoreDeclarationArtifact, StoreError> {
+        let source_backup = source_backup.as_ref();
+        let restored_store = restored_store.as_ref();
+        let source_version = Self::database_schema_version(source_backup)?;
+        let restored_version = Self::database_schema_version(restored_store)?;
+        if source_version != restored_version {
+            return Err(StoreError::Invariant(format!(
+                "restore source schema {source_version} differs from restored schema {restored_version}"
+            )));
+        }
+        let source_metadata = std::fs::metadata(source_backup)?;
+        let restored_metadata = std::fs::metadata(restored_store)?;
+        if (source_metadata.dev(), source_metadata.ino())
+            == (restored_metadata.dev(), restored_metadata.ino())
+        {
+            return Err(StoreError::Invariant(
+                "restore declaration requires distinct source and restored Store files".into(),
+            ));
+        }
+
+        let (source_logical_digest, restored_logical_digest) = match source_version {
+            7 => {
+                let source = Self::open_v7_upgrade_source_read_only(source_backup)?;
+                let restored = Self::open_v7_upgrade_source_read_only(restored_store)?;
+                let source_digest = Sha256Digest::parse(v7_logical_state_digest(
+                    &source.connection,
+                )?)
+                .map_err(|_| StoreError::Invariant("invalid v7 source logical digest".into()))?;
+                let restored_digest = Sha256Digest::parse(v7_logical_state_digest(
+                    &restored.connection,
+                )?)
+                .map_err(|_| StoreError::Invariant("invalid v7 restored logical digest".into()))?;
+                if source_digest != restored_digest {
+                    return Err(StoreError::Invariant(
+                        "restored schema-v7 Store differs from its verified source".into(),
+                    ));
+                }
+                (Some(source_digest), Some(restored_digest))
+            }
+            SCHEMA_VERSION => {
+                drop(Self::open_read_only(source_backup)?);
+                drop(Self::open_read_only(restored_store)?);
+                (None, None)
+            }
+            found => {
+                return Err(StoreError::SchemaVersionMismatch {
+                    found,
+                    supported: SCHEMA_VERSION,
+                });
+            }
+        };
+        let source_backup_sha256 = Sha256Digest::parse(sha256_file(source_backup)?)
+            .map_err(|_| StoreError::Invariant("invalid restore source digest".into()))?;
+        let restored_store_sha256 = Sha256Digest::parse(sha256_file(restored_store)?)
+            .map_err(|_| StoreError::Invariant("invalid restored Store digest".into()))?;
+        let declaration_digest = restore_declaration_digest(
+            &source_backup_sha256,
+            &restored_store_sha256,
+            source_version,
+            source_logical_digest.as_ref(),
+            restored_logical_digest.as_ref(),
+        )?;
+        let declaration = RestoreDeclarationV1 {
+            schema: RESTORE_DECLARATION_SCHEMA.to_owned(),
+            declaration_digest: declaration_digest.clone(),
+            source_backup_sha256,
+            restored_store_sha256: restored_store_sha256.clone(),
+            store_schema_version: source_version,
+            source_logical_digest,
+            restored_logical_digest,
+            grants_authority: false,
+        };
+        let canonical_bytes = nq_protocol::canonical_json_bytes(&declaration)
+            .map_err(|error| StoreError::CanonicalJson(error.to_string()))?;
+        validate_document_size(canonical_bytes.len())?;
+        Ok(RestoreDeclarationArtifact {
+            declaration_digest,
+            canonical_bytes,
+            restored_store_sha256,
+        })
+    }
+
+    /// Explicitly create an unqualified storage-only Store.
+    ///
+    /// This lifecycle cannot obtain the private runtime-authority session and
+    /// can never become a Gen4 authoritative occurrence. The only governed
+    /// fresh lifecycle is `HostRoleRuntime::initialize`.
+    pub fn initialize_unqualified_storage(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        Self::initialize_storage(path)
+    }
+
+    /// Test-support compatibility spelling for historical storage fixtures.
+    ///
+    /// This feature-gated alias creates only an unqualified storage Store.  It
+    /// cannot obtain the private branded authority session and therefore
+    /// cannot establish a Gen4 occurrence.
+    #[cfg(feature = "test-support")]
     pub fn initialize(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        Self::initialize_unqualified_storage(path)
+    }
+
+    /// Create the transaction candidate used only by the named governed
+    /// runtime initialization path in this crate.
+    pub(crate) fn initialize_runtime_authority_candidate(
+        path: impl AsRef<Path>,
+    ) -> Result<Self, StoreError> {
+        Self::initialize_storage(path)
+    }
+
+    fn initialize_storage(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref();
         let existed = path.exists();
         let existing_len = if existed {
@@ -2382,6 +2625,7 @@ impl Store {
             path: Some(path.to_path_buf()),
             writer_key: writer_session::writer_key_for_path(Some(path)),
             v7_authority_migration: None,
+            runtime_authority_initialization_candidate: true,
         };
         store.validate()?;
         Ok(store)
@@ -2404,6 +2648,7 @@ impl Store {
             path: Some(path.to_path_buf()),
             writer_key: writer_session::writer_key_for_path(Some(path)),
             v7_authority_migration: None,
+            runtime_authority_initialization_candidate: false,
         };
         // Persistent journal configuration is delayed until a writer session
         // has been successfully acquired.  Host-role authority resolution can
@@ -2431,6 +2676,7 @@ impl Store {
             path: Some(path.to_path_buf()),
             writer_key: writer_session::writer_key_for_path(Some(path)),
             v7_authority_migration: None,
+            runtime_authority_initialization_candidate: false,
         };
         store.validate()?;
         Ok(store)
@@ -2469,6 +2715,7 @@ impl Store {
             path: Some(canonical_path.clone()),
             writer_key: writer_session::writer_key_for_path(Some(&canonical_path)),
             v7_authority_migration: None,
+            runtime_authority_initialization_candidate: false,
         };
         store.validate()?;
         Ok(store)
@@ -2495,6 +2742,7 @@ impl Store {
             path: Some(path.to_path_buf()),
             writer_key: writer_session::writer_key_for_path(Some(path)),
             v7_authority_migration: None,
+            runtime_authority_initialization_candidate: false,
         };
         store.validate_v3_upgrade_source()?;
         Ok(store)
@@ -2522,6 +2770,7 @@ impl Store {
             path: Some(path.to_path_buf()),
             writer_key: writer_session::writer_key_for_path(Some(path)),
             v7_authority_migration: None,
+            runtime_authority_initialization_candidate: false,
         };
         validate_v4_upgrade_source_connection(&store.connection)?;
         Ok(store)
@@ -2545,6 +2794,7 @@ impl Store {
             path: Some(path.to_path_buf()),
             writer_key: writer_session::writer_key_for_path(Some(path)),
             v7_authority_migration: None,
+            runtime_authority_initialization_candidate: false,
         };
         validate_v5_upgrade_source_connection(&store.connection)?;
         Ok(store)
@@ -2568,6 +2818,7 @@ impl Store {
             path: Some(path.to_path_buf()),
             writer_key: writer_session::writer_key_for_path(Some(path)),
             v7_authority_migration: None,
+            runtime_authority_initialization_candidate: false,
         };
         validate_v6_upgrade_source_connection(&store.connection)?;
         Ok(store)
@@ -2592,6 +2843,7 @@ impl Store {
             path: Some(path.to_path_buf()),
             writer_key: writer_session::writer_key_for_path(Some(path)),
             v7_authority_migration: None,
+            runtime_authority_initialization_candidate: false,
         };
         validate_v7_upgrade_source_connection(&store.connection)?;
         Ok(store)
@@ -2641,6 +2893,8 @@ impl Store {
         }
         drop(source);
         drop(backup_store);
+        let restore_declaration_digest =
+            v7_restore_declaration_for_database(path, &source_logical_digest)?;
 
         let connection = Connection::open_with_flags(
             path,
@@ -2653,16 +2907,20 @@ impl Store {
             path: Some(path.to_path_buf()),
             writer_key: writer_session::writer_key_for_path(Some(path)),
             v7_authority_migration: Some(V7AuthorityMigrationPreflight {
+                source_path: path.to_path_buf(),
                 backup_path: backup_path.to_path_buf(),
                 backup_sha256: backup.sha256.clone(),
                 source_logical_digest,
+                restore_declaration_digest,
             }),
+            runtime_authority_initialization_candidate: false,
         })
     }
 
     /// Checkpoint a writable backup copy and leave it in rollback-journal mode
     /// before archive inventory and sealing.
     pub fn prepare_archive_copy(&self) -> Result<(), StoreError> {
+        self.ensure_runtime_authority_not_frozen()?;
         let _maintenance_guards =
             writer_session::acquire_maintenance_locks(&[self.writer_key.as_path()])?;
         let checkpoint: (i64, i64, i64) =
@@ -2697,6 +2955,7 @@ impl Store {
             path: None,
             writer_key: writer_session::writer_key_for_path(None),
             v7_authority_migration: None,
+            runtime_authority_initialization_candidate: true,
         };
         store.validate()?;
         Ok(store)
@@ -3451,25 +3710,37 @@ impl Store {
         let requested_receipt_id = transcript.receipt_id()?;
         let starting_version = pragma_i64(&self.connection, "user_version")?;
 
-        // Exact replay is observationally read-only.  In particular, it does
-        // not begin an IMMEDIATE transaction merely to rediscover immutable
-        // state, so copied exact bytes gain no new write side effect.
-        if starting_version == SCHEMA_VERSION
-            && let Some(existing) =
-                runtime_dependency_establishment_receipt_on_connection(&self.connection)?
-        {
-            let stored_migration = runtime_migration_receipt_bytes_on_connection(&self.connection)?;
-            let requested_migration = evidence.migration_receipt_canonical_bytes();
-            if existing.receipt_id == requested_receipt_id
-                && existing.transcript == transcript
-                && stored_migration
-                    .as_ref()
-                    .map(MigrationReceiptBytes::as_bytes)
-                    == requested_migration
+        // Exact replay is observationally read-only but still rechecks every
+        // Store-owned binding from one coherent SQLite read snapshot.
+        if starting_version == SCHEMA_VERSION {
+            let replay = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Deferred)?;
+            if let Some(existing) = runtime_dependency_establishment_receipt_on_connection(&replay)?
             {
+                validate_runtime_authority_invariants(&replay)?;
+                let stored_migration = runtime_migration_receipt_bytes_on_connection(&replay)?;
+                let requested_migration = evidence.migration_receipt_canonical_bytes();
+                let stored_root = runtime_dependency_trust_root_on_connection(&replay)?;
+                let stored_occurrence = sole_genesis_on_connection(&replay)?;
+                let stored_presented = presented_runtime_authority_set_on_connection(&replay)?;
+                let exact = existing.receipt_id == requested_receipt_id
+                    && existing.transcript == transcript
+                    && stored_root.as_ref() == Some(evidence.trust_anchor_id())
+                    && stored_occurrence.as_deref() == Some(evidence.occurrence_id())
+                    && stored_migration
+                        .as_ref()
+                        .map(MigrationReceiptBytes::as_bytes)
+                        == requested_migration
+                    && evidence
+                        .reverify_store_owned_presented_set(&stored_presented)
+                        .is_ok();
+                if !exact {
+                    return Err(StoreError::AuthorityEstablishmentReplayConflict);
+                }
+                replay.commit()?;
                 return Ok(existing);
             }
-            return Err(StoreError::AuthorityEstablishmentReplayConflict);
         }
 
         let migration_preflight = self.v7_authority_migration.clone();
@@ -3495,6 +3766,7 @@ impl Store {
         }
 
         let presented = presented_runtime_authority_set_on_connection(&transaction)?;
+        evidence.reverify_store_owned_presented_set(&presented)?;
         if digest_presented_authority_set(&presented)? != *evidence.candidate_set_digest() {
             return Err(StoreError::AuthorityCandidateSetMismatch);
         }
@@ -3512,6 +3784,7 @@ impl Store {
                 if starting_version != SCHEMA_VERSION
                     || migration_preflight.is_some()
                     || old_root.is_some()
+                    || !presented.records().is_empty()
                     || evidence.migration_receipt_digest().is_some()
                     || evidence.migration_receipt_canonical_bytes().is_some()
                 {
@@ -3596,7 +3869,14 @@ impl Store {
                 }
                 let restore_proof =
                     eligible_restore_proof_for_occurrence(&transaction, evidence.occurrence_id())?;
-                if restore_proof.as_ref() != migration.restore_proof_digest() {
+                let preflight = migration_preflight
+                    .as_ref()
+                    .ok_or(StoreError::AuthorityMigrationPreflightMissing)?;
+                if migration.restore_declaration_digest()
+                    != preflight.restore_declaration_digest.as_ref()
+                    || restore_proof.as_ref() != migration.restore_proof_digest()
+                    || (preflight.restore_declaration_digest.is_some() && restore_proof.is_none())
+                {
                     return Err(StoreError::AuthorityRestoreQuarantine);
                 }
             }
@@ -3695,20 +3975,224 @@ impl Store {
         })
     }
 
-    pub(crate) fn append_verified_runtime_authority_event(
+    /// Persist one authentic non-accepted migration disposition and
+    /// permanently evidence-freeze the predecessor occurrence.
+    pub(crate) fn freeze_runtime_authority_migration_bare(
+        &mut self,
+        evidence: &VerifiedMigrationClassification<'_>,
+    ) -> Result<RuntimeAuthorityMigrationFreezeReceipt, StoreError> {
+        let starting_version = pragma_i64(&self.connection, "user_version")?;
+        if starting_version != 7 {
+            return Err(StoreError::AuthorityMigrationDispositionConflict);
+        }
+        let preflight = self
+            .v7_authority_migration
+            .clone()
+            .ok_or(StoreError::AuthorityMigrationPreflightMissing)?;
+        let transaction = self.runtime_authority_transaction()?;
+        validate_locked_v7_authority_migration_source(&transaction, &preflight)?;
+        upgrade_v7_to_v8_authority_schema(&transaction)?;
+
+        let presented = presented_runtime_authority_set_on_connection(&transaction)?;
+        evidence.reverify_store_owned_presented_set(&presented)?;
+        if digest_presented_authority_set(&presented)? != *evidence.candidate_set_digest() {
+            return Err(StoreError::AuthorityCandidateSetMismatch);
+        }
+        let genesis = sole_genesis_on_connection(&transaction)?;
+        if genesis.as_deref() != Some(evidence.occurrence_id()) {
+            return Err(StoreError::EstablishmentOccurrenceMismatch);
+        }
+        let old_root = runtime_dependency_trust_root_on_connection(&transaction)?;
+        match (evidence.old_root_state(), old_root.as_ref()) {
+            (OldRootState::Rootless, None) => {}
+            (OldRootState::Rooted { trust_anchor_id }, Some(existing))
+                if trust_anchor_id == existing => {}
+            _ => return Err(StoreError::AuthorityMigrationOldRootMismatch),
+        }
+        if runtime_dependency_establishment_receipt_on_connection(&transaction)?.is_some()
+            || runtime_migration_disposition_freeze_on_connection(&transaction)?.is_some()
+        {
+            return Err(StoreError::AuthorityMigrationDispositionConflict);
+        }
+        let restore_proof =
+            eligible_restore_proof_for_occurrence(&transaction, evidence.occurrence_id())?;
+        if evidence.restore_declaration_digest() != preflight.restore_declaration_digest.as_ref()
+            || evidence.restore_proof_digest() != restore_proof.as_ref()
+            || (preflight.restore_declaration_digest.is_some() && restore_proof.is_none())
+        {
+            return Err(StoreError::AuthorityRestoreQuarantine);
+        }
+        let disposition = match evidence.disposition() {
+            MigrationDisposition::Observed => "observed",
+            MigrationDisposition::Superseded => "superseded",
+            MigrationDisposition::Refused => "refused",
+            MigrationDisposition::Accepted => {
+                return Err(StoreError::AuthorityMigrationDispositionConflict);
+            }
+        };
+        let canonical_bytes = evidence.canonical_receipt_bytes();
+        let canonical_bytes_sha256 = sha256_bytes(canonical_bytes);
+        let canonical_bytes_length = i64::try_from(canonical_bytes.len()).map_err(|_| {
+            StoreError::Invariant("migration classification exceeds SQLite length capacity".into())
+        })?;
+        let classified_at = now_utc();
+        transaction.execute(
+            "INSERT INTO runtime_migration_disposition_freezes (
+                singleton, migration_receipt_digest, occurrence_id, disposition,
+                source_logical_digest, candidate_set_digest,
+                restore_declaration_digest, restore_proof_digest,
+                canonical_bytes, canonical_bytes_sha256,
+                canonical_bytes_length, classified_at
+             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                evidence.receipt_digest().as_str(),
+                evidence.occurrence_id(),
+                disposition,
+                preflight.source_logical_digest,
+                evidence.candidate_set_digest().as_str(),
+                evidence
+                    .restore_declaration_digest()
+                    .map(Sha256Digest::as_str),
+                evidence.restore_proof_digest().map(Sha256Digest::as_str),
+                canonical_bytes,
+                canonical_bytes_sha256.as_str(),
+                canonical_bytes_length,
+                classified_at,
+            ],
+        )?;
+        validate_runtime_authority_invariants(&transaction)?;
+        transaction.commit()?;
+        self.v7_authority_migration = None;
+        Ok(RuntimeAuthorityMigrationFreezeReceipt {
+            migration_receipt_digest: evidence.receipt_digest().clone(),
+            disposition: evidence.disposition(),
+            occurrence_id: evidence.occurrence_id().to_owned(),
+            classified_at,
+        })
+    }
+
+    /// Persist an authentic disposition for a schema-v7 source whose zero or
+    /// multiple genesis identities make in-place migration impossible.
+    pub(crate) fn freeze_v7_cardinality_disposition_bare(
+        &mut self,
+        evidence: &VerifiedV7CardinalityDisposition<'_>,
+    ) -> Result<RuntimeAuthorityCardinalityFreezeReceipt, StoreError> {
+        if pragma_i64(&self.connection, "user_version")? != 7 {
+            return Err(StoreError::AuthorityCardinalityDispositionConflict);
+        }
+        let preflight = self
+            .v7_authority_migration
+            .clone()
+            .ok_or(StoreError::AuthorityMigrationPreflightMissing)?;
+        let transaction = self.runtime_authority_transaction()?;
+        validate_locked_v7_authority_migration_source(&transaction, &preflight)?;
+        let expectations = v7_cardinality_disposition_expectations_on_connection(
+            &transaction,
+            &preflight,
+            evidence.domain(),
+            evidence.policy_version(),
+        )?;
+        evidence.reverify_exact_expectations(&expectations)?;
+        upgrade_v7_to_v8_authority_schema(&transaction)?;
+
+        if runtime_dependency_establishment_receipt_on_connection(&transaction)?.is_some()
+            || runtime_migration_disposition_freeze_on_connection(&transaction)?.is_some()
+            || runtime_v7_cardinality_disposition_freeze_on_connection(&transaction)?.is_some()
+            || !presented_runtime_authority_set_on_connection(&transaction)?
+                .records()
+                .is_empty()
+        {
+            return Err(StoreError::AuthorityCardinalityDispositionConflict);
+        }
+        let genesis_identities = nq_protocol::canonical_json_bytes(&evidence.genesis_identities())
+            .map_err(|error| StoreError::CanonicalJson(error.to_string()))?;
+        let (old_root_kind, old_root_digest) = match evidence.old_root_state() {
+            OldRootState::Rootless => ("rootless", None),
+            OldRootState::Rooted { trust_anchor_id } => ("rooted", Some(trust_anchor_id.as_str())),
+        };
+        let disposition = match evidence.disposition() {
+            MigrationDisposition::Observed => "observed",
+            MigrationDisposition::Superseded => "superseded",
+            MigrationDisposition::Refused => "refused",
+            MigrationDisposition::Accepted => {
+                return Err(StoreError::AuthorityCardinalityDispositionConflict);
+            }
+        };
+        let canonical_bytes = evidence.canonical_bytes();
+        let canonical_bytes_sha256 = sha256_bytes(canonical_bytes);
+        let canonical_bytes_length = i64::try_from(canonical_bytes.len()).map_err(|_| {
+            StoreError::Invariant(
+                "v7 cardinality disposition exceeds SQLite length capacity".into(),
+            )
+        })?;
+        let policy_version = i64::try_from(evidence.policy_version())
+            .map_err(|_| StoreError::AuthorityCardinalityDispositionConflict)?;
+        let operator_key_generation = i64::try_from(evidence.operator_key_generation())
+            .map_err(|_| StoreError::AuthorityCardinalityDispositionConflict)?;
+        let classified_at = now_utc();
+        transaction.execute(
+            "INSERT INTO runtime_v7_cardinality_disposition_freezes (
+                singleton, disposition_digest, disposition, genesis_identities,
+                source_logical_digest, old_root_kind, old_root_digest,
+                domain, policy_version, operator_authority_digest,
+                operator_key_generation, restore_declaration_digest,
+                canonical_bytes, canonical_bytes_sha256,
+                canonical_bytes_length, classified_at
+             ) VALUES (
+                1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                ?11, ?12, ?13, ?14, ?15
+             )",
+            params![
+                evidence.disposition_digest().as_str(),
+                disposition,
+                genesis_identities,
+                evidence.source_logical_digest().as_str(),
+                old_root_kind,
+                old_root_digest,
+                evidence.domain(),
+                policy_version,
+                evidence.operator_authority_digest().as_str(),
+                operator_key_generation,
+                evidence
+                    .restore_declaration_digest()
+                    .map(Sha256Digest::as_str),
+                canonical_bytes,
+                canonical_bytes_sha256.as_str(),
+                canonical_bytes_length,
+                classified_at,
+            ],
+        )?;
+        validate_runtime_authority_invariants(&transaction)?;
+        transaction.commit()?;
+        self.v7_authority_migration = None;
+        Ok(RuntimeAuthorityCardinalityFreezeReceipt {
+            disposition_digest: evidence.disposition_digest().clone(),
+            disposition: evidence.disposition(),
+            genesis_count: evidence.genesis_identities().len(),
+            classified_at,
+        })
+    }
+
+    pub(crate) fn append_verified_runtime_authority_event<F>(
         &mut self,
         table: &'static str,
         record_id: &Sha256Digest,
         canonical_bytes: &[u8],
         expected_resulting_candidate_set_digest: &Sha256Digest,
-    ) -> Result<(), StoreError> {
+        reverify: F,
+    ) -> Result<(), StoreError>
+    where
+        F: FnOnce(
+            &PresentedAuthoritySet,
+        ) -> Result<(), nq_runtime_dependency_authority::AuthorityError>,
+    {
         let transaction = self.runtime_authority_transaction()?;
         if runtime_dependency_establishment_receipt_on_connection(&transaction)?.is_none() {
             return Err(StoreError::EstablishmentReceiptMissing);
         }
-        let mut records = presented_runtime_authority_set_on_connection(&transaction)?
-            .records()
-            .to_vec();
+        let current = presented_runtime_authority_set_on_connection(&transaction)?;
+        reverify(&current).map_err(|_| StoreError::AuthorityEventCorrespondenceMismatch)?;
+        let mut records = current.records().to_vec();
         let proposed = match table {
             "runtime_operator_authority_rotations" => {
                 PresentedAuthorityRecord::OperatorAuthorityRotation(canonical_bytes.to_vec())
@@ -3800,15 +4284,61 @@ impl Store {
         runtime_migration_receipt_bytes_on_connection(&self.connection)
     }
 
+    /// Run ordinary authority correspondence and resolution over one coherent
+    /// read-only SQLite snapshot.
+    ///
+    /// Root, receipt, occurrence, retained migration evidence, and every
+    /// native authority family are read after the deferred transaction begins.
+    /// The supplied operation completes before that snapshot is released.
+    pub(crate) fn with_runtime_authority_restart_snapshot<R, E>(
+        &mut self,
+        operation: impl FnOnce(RuntimeAuthorityRestartSnapshot) -> Result<R, E>,
+    ) -> Result<R, E>
+    where
+        E: From<StoreError>,
+    {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(StoreError::from)
+            .map_err(E::from)?;
+        validate_runtime_authority_invariants(&transaction).map_err(E::from)?;
+        let root = runtime_dependency_trust_root_on_connection(&transaction)?
+            .ok_or(StoreError::EstablishmentRootMissing)
+            .map_err(E::from)?;
+        let receipt = runtime_dependency_establishment_receipt_on_connection(&transaction)?
+            .ok_or(StoreError::EstablishmentReceiptMissing)
+            .map_err(E::from)?;
+        let occurrence_id = sole_genesis_on_connection(&transaction)?
+            .ok_or(StoreError::GenesisCardinality { found: 0 })
+            .map_err(E::from)?;
+        let presented = presented_runtime_authority_set_on_connection(&transaction)?;
+        let migration_receipt = runtime_migration_receipt_bytes_on_connection(&transaction)?;
+        let result = operation(RuntimeAuthorityRestartSnapshot {
+            root,
+            occurrence_id,
+            receipt,
+            presented,
+            migration_receipt,
+        })?;
+        transaction
+            .commit()
+            .map_err(StoreError::from)
+            .map_err(E::from)?;
+        Ok(result)
+    }
+
     /// Derive the exact old-root and restore-quarantine correspondence for a
     /// backup-verified schema-v7 migration source.  Callers cannot supply or
     /// override either historical fact.
     pub fn runtime_authority_migration_expectations(
         &self,
     ) -> Result<MigrationExpectations, StoreError> {
-        if self.v7_authority_migration.is_none()
-            || pragma_i64(&self.connection, "user_version")? != 7
-        {
+        let preflight = self
+            .v7_authority_migration
+            .as_ref()
+            .ok_or(StoreError::AuthorityMigrationPreflightMissing)?;
+        if pragma_i64(&self.connection, "user_version")? != 7 {
             return Err(StoreError::AuthorityMigrationPreflightMissing);
         }
         let occurrence = sole_genesis_on_connection(&self.connection)?
@@ -3821,8 +4351,32 @@ impl Store {
             eligible_restore_proof_for_occurrence(&self.connection, &occurrence)?;
         Ok(MigrationExpectations {
             old_root_state,
+            restore_declaration_digest: preflight.restore_declaration_digest.clone(),
             restore_proof_digest,
         })
+    }
+
+    /// Derive the exact Store facts for an explicit zero-or-multiple-genesis
+    /// schema-v7 disposition.  A sole occurrence is deliberately rejected and
+    /// must use the ordinary migration law instead.
+    pub fn runtime_authority_cardinality_disposition_expectations(
+        &self,
+        domain: &str,
+        policy_floor: u64,
+    ) -> Result<V7CardinalityDispositionExpectations, StoreError> {
+        let preflight = self
+            .v7_authority_migration
+            .as_ref()
+            .ok_or(StoreError::AuthorityMigrationPreflightMissing)?;
+        if pragma_i64(&self.connection, "user_version")? != 7 {
+            return Err(StoreError::AuthorityMigrationPreflightMissing);
+        }
+        v7_cardinality_disposition_expectations_on_connection(
+            &self.connection,
+            preflight,
+            domain,
+            policy_floor,
+        )
     }
 
     /// Reopen one exact runtime record by its immutable identity.
@@ -5752,6 +6306,7 @@ impl Store {
 
     #[allow(clippy::too_many_lines)] // Opening the publication fence also adjudicates all pending physical custody.
     fn immediate_transaction(&mut self) -> Result<Transaction<'_>, StoreError> {
+        self.ensure_runtime_authority_not_frozen()?;
         let Some(database_path) = self.path().map(Path::to_path_buf) else {
             return self
                 .connection
@@ -5870,6 +6425,7 @@ impl Store {
     }
 
     fn immediate_recovery_transaction(&mut self) -> Result<Transaction<'_>, StoreError> {
+        self.ensure_runtime_authority_not_frozen()?;
         self.connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StoreError::from)
@@ -7870,10 +8426,33 @@ impl AdmittedCollectionView<'_, '_> {
 }
 
 impl Store {
+    fn ensure_runtime_authority_not_frozen(&self) -> Result<(), StoreError> {
+        if pragma_i64(&self.connection, "user_version")? == SCHEMA_VERSION {
+            if let Some(freeze) =
+                runtime_migration_disposition_freeze_on_connection(&self.connection)?
+            {
+                return Err(StoreError::AuthorityEvidenceFrozen(format!(
+                    "{:?}",
+                    freeze.receipt.disposition()
+                )));
+            }
+            if let Some(freeze) =
+                runtime_v7_cardinality_disposition_freeze_on_connection(&self.connection)?
+            {
+                return Err(StoreError::AuthorityEvidenceFrozen(format!(
+                    "{:?}",
+                    freeze.disposition
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Begin the bounded Gen4 authority transaction without invoking governed
     /// projection recovery or any other maintenance/reconciliation path.
     /// Only evidence-typed writer-session authority methods may call this.
     fn runtime_authority_transaction(&mut self) -> Result<Transaction<'_>, StoreError> {
+        self.ensure_runtime_authority_not_frozen()?;
         self.connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StoreError::from)
@@ -8199,6 +8778,7 @@ impl Store {
             path: Some(path.to_path_buf()),
             writer_key: writer_session::writer_key_for_path(Some(path)),
             v7_authority_migration: None,
+            runtime_authority_initialization_candidate: false,
         };
         store.validate_v3_upgrade_source()?;
         {
@@ -8361,6 +8941,7 @@ impl Store {
             path: Some(path.to_path_buf()),
             writer_key: writer_session::writer_key_for_path(Some(path)),
             v7_authority_migration: None,
+            runtime_authority_initialization_candidate: false,
         };
         validate_v4_upgrade_source_connection(&store.connection)?;
         {
@@ -8486,6 +9067,7 @@ impl Store {
             path: Some(path.to_path_buf()),
             writer_key: writer_session::writer_key_for_path(Some(path)),
             v7_authority_migration: None,
+            runtime_authority_initialization_candidate: false,
         };
         validate_v5_upgrade_source_connection(&store.connection)?;
         {
@@ -8613,6 +9195,7 @@ impl Store {
             path: Some(path.to_path_buf()),
             writer_key: writer_session::writer_key_for_path(Some(path)),
             v7_authority_migration: None,
+            runtime_authority_initialization_candidate: false,
         };
         validate_v6_upgrade_source_connection(&store.connection)?;
         {
@@ -9523,13 +10106,34 @@ impl Store {
         StoreWriterSession::begin(self)
     }
 
+    /// Require the exact, unconsumed in-process handle returned by fresh Store
+    /// initialization.  This bit is intentionally not persisted: closing and
+    /// reopening a rootless Store cannot recreate genesis-initialization
+    /// standing and must instead follow the explicit migration/disposition
+    /// law.
+    pub(crate) fn require_runtime_authority_initialization_candidate(
+        &self,
+    ) -> Result<(), StoreError> {
+        if self.runtime_authority_initialization_candidate {
+            Ok(())
+        } else {
+            Err(StoreError::AuthorityInitializationCandidateRequired)
+        }
+    }
+
+    /// Consume the in-process fresh-initialization standing after the atomic
+    /// genesis/root/receipt transaction succeeds.
+    pub(crate) fn consume_runtime_authority_initialization_candidate(&mut self) {
+        self.runtime_authority_initialization_candidate = false;
+    }
+
     /// Runs one bounded authority operation with a fresh invariant brand and
     /// a writer session bound to this exact Store.
     ///
     /// The higher-ranked closure prevents the brand, evidence, or branded
     /// session from escaping.  In particular, a caller cannot reuse a brand
     /// to obtain sessions for two Stores.
-    pub fn with_runtime_authority_writer_session<R>(
+    pub(crate) fn with_runtime_authority_writer_session<R>(
         &mut self,
         operation: impl for<'id> FnOnce(
             &VerificationBrand<'id>,
@@ -13623,6 +14227,8 @@ fn validate_required_objects(connection: &Connection) -> Result<(), StoreError> 
         "runtime_activation_revocations",
         "runtime_dependency_establishment_receipts",
         "runtime_migration_receipt_consumptions",
+        "runtime_migration_disposition_freezes",
+        "runtime_v7_cardinality_disposition_freezes",
         "runtime_dependency_generation_commitments",
         "runtime_dependency_generation_payloads",
         "runtime_checkpoint_dependency_bindings",
@@ -13702,6 +14308,22 @@ fn sole_genesis_on_connection(connection: &Connection) -> Result<Option<String>,
     }
 }
 
+fn genesis_identities_on_connection(connection: &Connection) -> Result<Vec<String>, StoreError> {
+    let mut statement =
+        connection.prepare("SELECT genesis_id FROM genesis_records ORDER BY genesis_id")?;
+    let identities = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if identities
+        .iter()
+        .any(|identity| identity.is_empty() || identity.chars().any(char::is_control))
+        || identities.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(StoreError::AuthorityCardinalityDispositionConflict);
+    }
+    Ok(identities)
+}
+
 fn presented_runtime_authority_set_on_connection(
     connection: &Connection,
 ) -> Result<PresentedAuthoritySet, StoreError> {
@@ -13723,17 +14345,50 @@ fn presented_runtime_authority_set_on_connection(
             2_u8,
         ),
     ] {
-        let sql = format!("SELECT canonical_bytes FROM {table} ORDER BY {sequence}");
+        let sql = format!("SELECT record_id, canonical_bytes FROM {table} ORDER BY {sequence}");
         let mut statement = connection.prepare(&sql)?;
         let rows = statement
-            .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?
             .collect::<Result<Vec<_>, _>>()?;
-        records.extend(rows.into_iter().map(|bytes| match family {
-            0 => PresentedAuthorityRecord::OperatorAuthorityRotation(bytes),
-            1 => PresentedAuthorityRecord::ResidentActivationSuccessor(bytes),
-            2 => PresentedAuthorityRecord::ActivationRevocation(bytes),
-            _ => unreachable!("closed native authority family"),
-        }));
+        for (stored_record_id, bytes) in rows {
+            let (family_name, canonical_record_id, record) = match family {
+                0 => {
+                    let parsed = OperatorAuthorityRecord::from_canonical_bytes(&bytes)?;
+                    (
+                        "operator_authority_rotation",
+                        parsed.record_digest().clone(),
+                        PresentedAuthorityRecord::OperatorAuthorityRotation(bytes),
+                    )
+                }
+                1 => {
+                    let parsed = ResidentActivationRecord::from_canonical_bytes(&bytes)?;
+                    (
+                        "resident_activation_successor",
+                        parsed.activation_digest().clone(),
+                        PresentedAuthorityRecord::ResidentActivationSuccessor(bytes),
+                    )
+                }
+                2 => {
+                    let parsed = ActivationRevocationRecord::from_canonical_bytes(&bytes)?;
+                    (
+                        "activation_revocation",
+                        parsed.record_digest().clone(),
+                        PresentedAuthorityRecord::ActivationRevocation(bytes),
+                    )
+                }
+                _ => unreachable!("closed native authority family"),
+            };
+            if stored_record_id != canonical_record_id.as_str() {
+                return Err(StoreError::AuthorityNativeRecordIdentityMismatch {
+                    family: family_name,
+                    stored_record_id,
+                    canonical_record_id,
+                });
+            }
+            records.push(record);
+        }
     }
     Ok(PresentedAuthoritySet::new(records))
 }
@@ -13795,6 +14450,335 @@ fn runtime_migration_receipt_bytes_on_connection(
     }
 }
 
+struct StoredRuntimeAuthorityMigrationFreeze {
+    receipt: MigrationReceipt,
+    source_logical_digest: Sha256Digest,
+    candidate_set_digest: Sha256Digest,
+}
+
+fn runtime_migration_disposition_freeze_on_connection(
+    connection: &Connection,
+) -> Result<Option<StoredRuntimeAuthorityMigrationFreeze>, StoreError> {
+    let stored = connection
+        .query_row(
+            "SELECT migration_receipt_digest, occurrence_id, disposition,
+                    source_logical_digest, candidate_set_digest,
+                    restore_declaration_digest, restore_proof_digest,
+                    canonical_bytes, canonical_bytes_sha256
+             FROM runtime_migration_disposition_freezes
+             WHERE singleton = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Vec<u8>>(7)?,
+                    row.get::<_, String>(8)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        receipt_digest,
+        occurrence_id,
+        disposition,
+        source_logical_digest,
+        candidate_set_digest,
+        restore_declaration_digest,
+        restore_proof_digest,
+        canonical_bytes,
+        canonical_bytes_sha256,
+    )) = stored
+    else {
+        return Ok(None);
+    };
+    if sha256_digest(&canonical_bytes) != canonical_bytes_sha256 {
+        return Err(StoreError::AuthorityRecordDigestMismatch {
+            family: "migration-disposition-freeze",
+            record_id: receipt_digest,
+        });
+    }
+    let receipt = MigrationReceipt::from_canonical_bytes(&canonical_bytes)?;
+    let expected_disposition = match receipt.disposition() {
+        MigrationDisposition::Observed => "observed",
+        MigrationDisposition::Superseded => "superseded",
+        MigrationDisposition::Refused => "refused",
+        MigrationDisposition::Accepted => {
+            return Err(StoreError::AuthorityMigrationDispositionConflict);
+        }
+    };
+    let restore_declaration = restore_declaration_digest
+        .map(Sha256Digest::parse)
+        .transpose()
+        .map_err(|_| StoreError::AuthorityMigrationDispositionConflict)?;
+    let restore_proof = restore_proof_digest
+        .map(Sha256Digest::parse)
+        .transpose()
+        .map_err(|_| StoreError::AuthorityMigrationDispositionConflict)?;
+    if receipt.receipt_digest().as_str() != receipt_digest
+        || receipt.occurrence_id() != occurrence_id
+        || disposition != expected_disposition
+        || receipt.restore_declaration_digest() != restore_declaration.as_ref()
+        || receipt.restore_proof_digest() != restore_proof.as_ref()
+    {
+        return Err(StoreError::AuthorityMigrationDispositionConflict);
+    }
+    Ok(Some(StoredRuntimeAuthorityMigrationFreeze {
+        receipt,
+        source_logical_digest: Sha256Digest::parse(source_logical_digest)
+            .map_err(|_| StoreError::AuthorityMigrationDispositionConflict)?,
+        candidate_set_digest: Sha256Digest::parse(candidate_set_digest)
+            .map_err(|_| StoreError::AuthorityMigrationDispositionConflict)?,
+    }))
+}
+
+struct StoredRuntimeAuthorityCardinalityFreeze {
+    disposition_digest: Sha256Digest,
+    disposition: MigrationDisposition,
+    genesis_identities: Vec<String>,
+    source_logical_digest: Sha256Digest,
+    old_root_state: OldRootState,
+}
+
+#[allow(clippy::too_many_lines)]
+fn runtime_v7_cardinality_disposition_freeze_on_connection(
+    connection: &Connection,
+) -> Result<Option<StoredRuntimeAuthorityCardinalityFreeze>, StoreError> {
+    let stored = connection
+        .query_row(
+            "SELECT disposition_digest, disposition, genesis_identities,
+                    source_logical_digest, old_root_kind, old_root_digest,
+                    domain, policy_version, operator_authority_digest,
+                    operator_key_generation, restore_declaration_digest,
+                    canonical_bytes, canonical_bytes_sha256
+             FROM runtime_v7_cardinality_disposition_freezes
+             WHERE singleton = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, i64>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, Vec<u8>>(11)?,
+                    row.get::<_, String>(12)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        disposition_digest,
+        disposition,
+        genesis_identities_bytes,
+        source_logical_digest,
+        old_root_kind,
+        old_root_digest,
+        domain,
+        policy_version,
+        operator_authority_digest,
+        operator_key_generation,
+        restore_declaration_digest,
+        canonical_bytes,
+        canonical_bytes_sha256,
+    )) = stored
+    else {
+        return Ok(None);
+    };
+    let conflict = || StoreError::AuthorityCardinalityDispositionConflict;
+    if sha256_digest(&canonical_bytes) != canonical_bytes_sha256 {
+        return Err(StoreError::AuthorityRecordDigestMismatch {
+            family: "v7-cardinality-disposition-freeze",
+            record_id: disposition_digest,
+        });
+    }
+    let canonical = CanonicalDocument::from_canonical_bytes(canonical_bytes)?;
+    let carrier: Value = serde_json::from_slice(canonical.as_bytes())
+        .map_err(|_| StoreError::AuthorityCardinalityDispositionConflict)?;
+    let genesis_document =
+        CanonicalDocument::from_canonical_bytes(genesis_identities_bytes.clone())?;
+    let genesis_identities: Vec<String> = serde_json::from_slice(genesis_document.as_bytes())
+        .map_err(|_| StoreError::AuthorityCardinalityDispositionConflict)?;
+    if genesis_identities.len() == 1 || genesis_identities.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(conflict());
+    }
+    let disposition_value = match disposition.as_str() {
+        "observed" => MigrationDisposition::Observed,
+        "superseded" => MigrationDisposition::Superseded,
+        "refused" => MigrationDisposition::Refused,
+        _ => return Err(conflict()),
+    };
+    let old_root_state = match (old_root_kind.as_str(), old_root_digest) {
+        ("rootless", None) => OldRootState::Rootless,
+        ("rooted", Some(digest)) => OldRootState::Rooted {
+            trust_anchor_id: Sha256Digest::parse(digest).map_err(|_| conflict())?,
+        },
+        _ => return Err(conflict()),
+    };
+    let restore_declaration = restore_declaration_digest
+        .map(Sha256Digest::parse)
+        .transpose()
+        .map_err(|_| conflict())?;
+    let parsed_disposition_digest =
+        Sha256Digest::parse(disposition_digest).map_err(|_| conflict())?;
+    let parsed_source_digest =
+        Sha256Digest::parse(source_logical_digest).map_err(|_| conflict())?;
+    let parsed_policy = u64::try_from(policy_version).map_err(|_| conflict())?;
+    let parsed_key_generation = u64::try_from(operator_key_generation).map_err(|_| conflict())?;
+    let parsed_genesis: Vec<String> = serde_json::from_value(
+        carrier
+            .get("genesis_identities")
+            .cloned()
+            .ok_or_else(conflict)?,
+    )
+    .map_err(|_| conflict())?;
+    let parsed_old_root: OldRootState = serde_json::from_value(
+        carrier
+            .get("old_root_state")
+            .cloned()
+            .ok_or_else(conflict)?,
+    )
+    .map_err(|_| conflict())?;
+    let parsed_restore: Option<Sha256Digest> = serde_json::from_value(
+        carrier
+            .get("restore_declaration_digest")
+            .cloned()
+            .ok_or_else(conflict)?,
+    )
+    .map_err(|_| conflict())?;
+    if carrier.get("disposition_digest").and_then(Value::as_str)
+        != Some(parsed_disposition_digest.as_str())
+        || carrier.get("disposition").and_then(Value::as_str) != Some(disposition.as_str())
+        || parsed_genesis != genesis_identities
+        || carrier.get("source_logical_digest").and_then(Value::as_str)
+            != Some(parsed_source_digest.as_str())
+        || parsed_old_root != old_root_state
+        || carrier.get("domain").and_then(Value::as_str) != Some(domain.as_str())
+        || carrier.get("policy_version").and_then(Value::as_u64) != Some(parsed_policy)
+        || carrier
+            .get("operator_authority_digest")
+            .and_then(Value::as_str)
+            != Some(operator_authority_digest.as_str())
+        || carrier
+            .get("operator_key_generation")
+            .and_then(Value::as_u64)
+            != Some(parsed_key_generation)
+        || parsed_restore != restore_declaration
+    {
+        return Err(conflict());
+    }
+    Ok(Some(StoredRuntimeAuthorityCardinalityFreeze {
+        disposition_digest: parsed_disposition_digest,
+        disposition: disposition_value,
+        genesis_identities,
+        source_logical_digest: parsed_source_digest,
+        old_root_state,
+    }))
+}
+
+fn restore_declaration_digest(
+    source_backup_sha256: &Sha256Digest,
+    restored_store_sha256: &Sha256Digest,
+    store_schema_version: i64,
+    source_logical_digest: Option<&Sha256Digest>,
+    restored_logical_digest: Option<&Sha256Digest>,
+) -> Result<Sha256Digest, StoreError> {
+    let bytes = nq_protocol::canonical_json_bytes(&RestoreDeclarationPreimage {
+        domain: "nq.restore_declaration.identity.v1",
+        schema: RESTORE_DECLARATION_SCHEMA,
+        source_backup_sha256,
+        restored_store_sha256,
+        store_schema_version,
+        source_logical_digest,
+        restored_logical_digest,
+        grants_authority: false,
+    })
+    .map_err(|error| StoreError::CanonicalJson(error.to_string()))?;
+    Ok(sha256_bytes(&bytes))
+}
+
+fn v7_restore_declaration_for_database(
+    database_path: &Path,
+    current_logical_digest: &str,
+) -> Result<Option<Sha256Digest>, StoreError> {
+    let declaration_path = Store::restore_declaration_path(database_path);
+    if !declaration_path.exists() {
+        return Ok(None);
+    }
+    let metadata = std::fs::symlink_metadata(&declaration_path)?;
+    if !metadata.file_type().is_file()
+        || usize::try_from(metadata.len()).map_or(true, |length| length > MAX_STORED_JSON_BYTES)
+    {
+        return Err(StoreError::AuthorityRestoreQuarantine);
+    }
+    let canonical = CanonicalDocument::from_canonical_bytes(std::fs::read(&declaration_path)?)?;
+    let declaration: RestoreDeclarationV1 = serde_json::from_slice(canonical.as_bytes())
+        .map_err(|error| StoreError::CanonicalJson(error.to_string()))?;
+    let current_store_sha256 = Sha256Digest::parse(sha256_file(database_path)?)
+        .map_err(|_| StoreError::AuthorityRestoreQuarantine)?;
+    let current_logical_digest = Sha256Digest::parse(current_logical_digest.to_owned())
+        .map_err(|_| StoreError::AuthorityRestoreQuarantine)?;
+    let expected_digest = restore_declaration_digest(
+        &declaration.source_backup_sha256,
+        &declaration.restored_store_sha256,
+        declaration.store_schema_version,
+        declaration.source_logical_digest.as_ref(),
+        declaration.restored_logical_digest.as_ref(),
+    )?;
+    if declaration.schema != RESTORE_DECLARATION_SCHEMA
+        || declaration.store_schema_version != 7
+        || declaration.grants_authority
+        || declaration.declaration_digest != expected_digest
+        || declaration.restored_store_sha256 != current_store_sha256
+        || declaration.source_logical_digest.as_ref() != Some(&current_logical_digest)
+        || declaration.restored_logical_digest.as_ref() != Some(&current_logical_digest)
+    {
+        return Err(StoreError::AuthorityRestoreQuarantine);
+    }
+    Ok(Some(declaration.declaration_digest))
+}
+
+fn v7_cardinality_disposition_expectations_on_connection(
+    connection: &Connection,
+    preflight: &V7AuthorityMigrationPreflight,
+    domain: &str,
+    policy_floor: u64,
+) -> Result<V7CardinalityDispositionExpectations, StoreError> {
+    let genesis_identities = genesis_identities_on_connection(connection)?;
+    if genesis_identities.len() == 1 {
+        return Err(StoreError::GenesisCardinality { found: 1 });
+    }
+    let source_logical_digest = Sha256Digest::parse(v7_logical_state_digest(connection)?)
+        .map_err(|_| StoreError::AuthorityCardinalityDispositionConflict)?;
+    if source_logical_digest.as_str() != preflight.source_logical_digest {
+        return Err(StoreError::AuthorityMigrationPreflightMissing);
+    }
+    let old_root_state = match runtime_dependency_trust_root_on_connection(connection)? {
+        Some(trust_anchor_id) => OldRootState::Rooted { trust_anchor_id },
+        None => OldRootState::Rootless,
+    };
+    Ok(V7CardinalityDispositionExpectations {
+        genesis_identities,
+        source_logical_digest,
+        old_root_state,
+        domain: domain.to_owned(),
+        policy_floor,
+        restore_declaration_digest: preflight.restore_declaration_digest.clone(),
+    })
+}
+
 fn validate_locked_v7_authority_migration_source(
     transaction: &Transaction<'_>,
     preflight: &V7AuthorityMigrationPreflight,
@@ -13804,6 +14788,8 @@ fn validate_locked_v7_authority_migration_source(
     if source_digest != preflight.source_logical_digest
         || !preflight.backup_path.is_file()
         || sha256_file(&preflight.backup_path)? != preflight.backup_sha256
+        || v7_restore_declaration_for_database(&preflight.source_path, &source_digest)?
+            != preflight.restore_declaration_digest
     {
         return Err(StoreError::AuthorityMigrationPreflightMissing);
     }
@@ -13922,6 +14908,71 @@ fn validate_runtime_authority_invariants(connection: &Connection) -> Result<(), 
             },
         )
         .optional()?;
+
+    let migration_freeze = runtime_migration_disposition_freeze_on_connection(connection)?;
+    let cardinality_freeze = runtime_v7_cardinality_disposition_freeze_on_connection(connection)?;
+    if migration_freeze.is_some() && cardinality_freeze.is_some() {
+        return Err(StoreError::AuthorityCardinalityDispositionConflict);
+    }
+    if let Some(freeze) = cardinality_freeze {
+        if receipt.is_some() {
+            return Err(StoreError::AuthorityCardinalityDispositionConflict);
+        }
+        let presented = presented_runtime_authority_set_on_connection(connection)?;
+        let migration_consumptions: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM runtime_migration_receipt_consumptions",
+            [],
+            |row| row.get(0),
+        )?;
+        let actual_genesis = genesis_identities_on_connection(connection)?;
+        if !presented.records().is_empty()
+            || migration_consumptions != 0
+            || actual_genesis != freeze.genesis_identities
+        {
+            return Err(StoreError::AuthorityCardinalityDispositionConflict);
+        }
+        match (&freeze.old_root_state, root.as_deref()) {
+            (OldRootState::Rootless, None) => {}
+            (OldRootState::Rooted { trust_anchor_id }, Some(existing))
+                if trust_anchor_id.as_str() == existing => {}
+            _ => return Err(StoreError::AuthorityMigrationOldRootMismatch),
+        }
+        let _historical_source_digest = freeze.source_logical_digest;
+        let _signed_disposition_digest = freeze.disposition_digest;
+        return Ok(());
+    }
+
+    if let Some(freeze) = migration_freeze {
+        if receipt.is_some() {
+            return Err(StoreError::AuthorityMigrationDispositionConflict);
+        }
+        let presented = presented_runtime_authority_set_on_connection(connection)?;
+        if !presented.records().is_empty()
+            || digest_presented_authority_set(&presented)? != freeze.candidate_set_digest
+        {
+            return Err(StoreError::AuthorityMigrationDispositionConflict);
+        }
+        let migration_consumptions: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM runtime_migration_receipt_consumptions",
+            [],
+            |row| row.get(0),
+        )?;
+        if migration_consumptions != 0 {
+            return Err(StoreError::AuthorityMigrationDispositionConflict);
+        }
+        let genesis = sole_genesis_on_connection(connection)?;
+        if genesis.as_deref() != Some(freeze.receipt.occurrence_id()) {
+            return Err(StoreError::EstablishmentOccurrenceMismatch);
+        }
+        match (freeze.receipt.old_root_state(), root.as_deref()) {
+            (OldRootState::Rootless, None) => {}
+            (OldRootState::Rooted { trust_anchor_id }, Some(existing))
+                if trust_anchor_id.as_str() == existing => {}
+            _ => return Err(StoreError::AuthorityMigrationOldRootMismatch),
+        }
+        let _source_identity = freeze.source_logical_digest;
+        return Ok(());
+    }
 
     match (&root, &receipt) {
         (Some(_), None) => return Err(StoreError::EstablishmentReceiptMissing),
@@ -17818,9 +18869,10 @@ mod tests {
 
     use nq_runtime_dependency_authority::{
         OperatorAuthorityRecord, resolve_for_restart,
-        test_support::{FIXTURE_OCCURRENCE_ID, RawAuthorityFixture},
-        verify_activation_revocation, verify_for_establishment, verify_operator_authority_rotation,
-        verify_resident_activation_successor,
+        test_support::{FIXTURE_DOMAIN, FIXTURE_OCCURRENCE_ID, RawAuthorityFixture},
+        verify_activation_revocation, verify_for_establishment,
+        verify_nonaccepted_migration_classification, verify_operator_authority_rotation,
+        verify_resident_activation_successor, verify_v7_cardinality_disposition,
     };
 
     use super::*;
@@ -18449,6 +19501,123 @@ mod tests {
         let backup =
             Store::backup_v7_verified(&source, &v7_backup_path).expect("verified v7 backup");
         (source, backup)
+    }
+
+    fn restore_proof_runtime_record(
+        occurrence_id: &str,
+        decision: &str,
+        label: &str,
+    ) -> RuntimeRecordInput {
+        let corpus: Value = serde_json::from_str(include_str!(
+            "../../nq-host-role-contract/assets/host-role-runtime-records.v1.json"
+        ))
+        .expect("host-role runtime specimen corpus");
+        let mut proof = corpus["records"]["restore_proof"].clone();
+        let proof_id = sha256_bytes(format!("restore-proof/{label}").as_bytes());
+        proof["proof_id"] = Value::String(proof_id.to_string());
+        proof["restored_store_genesis_id"] = Value::String(occurrence_id.to_owned());
+        proof["decision"] = Value::String(decision.to_owned());
+        if decision == "eligible_enrolled_inactive" {
+            for field in [
+                "closure_verification",
+                "prior_occurrence_fencing",
+                "identity_uniqueness",
+                "key_revalidation",
+                "binding_revalidation",
+            ] {
+                proof[field]["status"] = Value::String("established".to_owned());
+            }
+            proof["new_key_event"] = json!({
+                "schema": "nq.node_key_lifecycle_event.v1",
+                "record_id": sha256_bytes(format!("restore-key-event/{label}").as_bytes()),
+                "bytes_digest": sha256_bytes(format!("restore-key-event-bytes/{label}").as_bytes()),
+            });
+            proof["activation_candidate"] = json!({
+                "schema": "nq.runtime_activation.v1",
+                "record_id": sha256_bytes(format!("restore-activation/{label}").as_bytes()),
+                "bytes_digest": sha256_bytes(format!("restore-activation-bytes/{label}").as_bytes()),
+            });
+        } else {
+            proof["new_key_event"] = Value::Null;
+            proof["activation_candidate"] = Value::Null;
+        }
+        let canonical_bytes =
+            nq_protocol::canonical_json_bytes(&proof).expect("canonical restore-proof fixture");
+        let validated = ValidatedRuntimeRecord::decode_canonical(&canonical_bytes)
+            .expect("locally valid restore-proof fixture");
+        assert_eq!(validated.record_id(), &proof_id);
+        RuntimeRecordInput {
+            record_id: proof_id.to_string(),
+            record_schema: "nq.restore_activation_proof.v1".to_owned(),
+            canonical_bytes: CanonicalDocument::from_canonical_bytes(canonical_bytes)
+                .expect("canonical restore-proof document"),
+            committed_at: TIME.to_owned(),
+        }
+    }
+
+    fn exact_v7_restored_authority_source(
+        directory: &Path,
+        label: &str,
+        proofs: Vec<RuntimeRecordInput>,
+    ) -> (PathBuf, BackupArtifact, RuntimeCheckpointDependencyInput) {
+        let source = directory.join(format!("{label}-source-v7.db"));
+        let v5_backup_path = directory.join(format!("{label}-backup-v5.db"));
+        let v6_backup_path = directory.join(format!("{label}-backup-v6.db"));
+        let v7_backup_path = directory.join(format!("{label}-backup-v7.db"));
+        write_empty_exact_v5(&source);
+        let v5_backup =
+            Store::backup_v5_verified(&source, &v5_backup_path).expect("verified v5 backup");
+        Store::upgrade_v5_to_v6(&source, &exact_v5_to_v6_receipt(&v5_backup))
+            .expect("exact v5 upgrades to v6");
+        let v6_backup =
+            Store::backup_v6_verified(&source, &v6_backup_path).expect("verified v6 backup");
+        let mut v7 = Store::upgrade_v6_to_v7(&source, &exact_v6_to_v7_receipt(&v6_backup))
+            .expect("exact v6 upgrades to v7");
+        v7.append_genesis(&GenesisInput {
+            genesis_id: FIXTURE_OCCURRENCE_ID.to_owned(),
+            legacy_manifest_digest: None,
+            created_at: TIME.to_owned(),
+            detail: document(json!({"source": "declared restore fixture"})),
+        })
+        .expect("restored fixture genesis");
+        let dependency = runtime_dependency(label);
+        v7.connection
+            .execute(
+                "INSERT INTO runtime_dependency_trust_roots (
+                    singleton, trust_anchor_id, established_at
+                 ) VALUES (1, ?1, '2026-07-29T12:34:56.000Z')",
+                [dependency.trust_anchor_id.as_str()],
+            )
+            .expect("restored fixture old root");
+        if !proofs.is_empty() {
+            v7.append_runtime_records(&RuntimeRecordBatchInput {
+                checkpoint_id: digest(&format!("restore-proof-checkpoint/{label}")),
+                expected_predecessor_checkpoint_id: None,
+                expected_predecessor_ledger_root: None,
+                dependency: dependency.clone(),
+                records: proofs,
+            })
+            .expect("append restore-proof fixture batch");
+        }
+        validate_v7_upgrade_source_connection(&v7.connection).expect("exact restored v7 source");
+        drop(v7);
+        let backup =
+            Store::backup_v7_verified(&source, &v7_backup_path).expect("verified v7 backup");
+        (source, backup, dependency)
+    }
+
+    fn publish_test_restore_declaration(
+        source_backup: &Path,
+        restored_store: &Path,
+    ) -> RestoreDeclarationArtifact {
+        let declaration = Store::build_restore_declaration(source_backup, restored_store)
+            .expect("build sealed restore declaration");
+        std::fs::write(
+            Store::restore_declaration_path(restored_store),
+            &declaration.canonical_bytes,
+        )
+        .expect("publish test restore declaration");
+        declaration
     }
 
     fn establish_runtime_root(store: &mut Store, dependency: &RuntimeCheckpointDependencyInput) {
@@ -20594,7 +21763,8 @@ mod tests {
         );
         let directory = tempdir().expect("governed fixture directory");
         let database = directory.path().join("nq.db");
-        let mut store = Store::initialize(&database).expect("governed fixture store");
+        let mut store =
+            Store::initialize_unqualified_storage(&database).expect("governed fixture store");
         let profile_digest = append_fixture_descriptor(&mut store);
         let collection =
             rejected_fixture_collection(&mut store, "fixture-a", "governed", &profile_digest);
@@ -28973,7 +30143,7 @@ mod tests {
     fn admitted_run_level_diagnostic_commits_reopens_and_replays_exactly() {
         let directory = tempdir().expect("run-level directory");
         let database = directory.path().join("nq.db");
-        let mut store = Store::initialize(&database).expect("run-level store");
+        let mut store = Store::initialize_unqualified_storage(&database).expect("run-level store");
         let profile_digest = append_fixture_descriptor(&mut store);
         let collection =
             admitted_run_level_collection(&mut store, "run-level-positive", &profile_digest);
@@ -31068,9 +32238,9 @@ mod tests {
         ));
 
         let path = directory.path().join("nq.db");
-        let store = Store::initialize(&path).expect("explicit init works");
+        let store = Store::initialize_unqualified_storage(&path).expect("explicit init works");
         assert!(matches!(
-            Store::initialize(&path),
+            Store::initialize_unqualified_storage(&path),
             Err(StoreError::AlreadyInitialized { .. })
         ));
         store
@@ -31100,14 +32270,15 @@ mod tests {
 
         let empty_path = directory.path().join("empty.db");
         std::fs::File::create(&empty_path).expect("empty file");
-        Store::initialize(&empty_path).expect("zero-byte placeholder can be initialized");
+        Store::initialize_unqualified_storage(&empty_path)
+            .expect("zero-byte placeholder can be initialized");
     }
 
     #[test]
     fn immutable_open_preserves_prepared_archive_bytes_and_file_inventory() {
         let directory = tempdir().expect("temp dir");
         let path = directory.path().join("sealed.db");
-        let store = Store::initialize(&path).expect("initialize sealed store");
+        let store = Store::initialize_unqualified_storage(&path).expect("initialize sealed store");
         store
             .prepare_archive_copy()
             .expect("checkpoint and freeze archive copy");
@@ -31604,7 +32775,8 @@ mod tests {
         let directory = tempdir().expect("temporary directory");
         let live = directory.path().join("ordered-evaluations.db");
         let backup = directory.path().join("ordered-evaluations-backup.db");
-        let mut store = Store::initialize(&live).expect("ordered store initializes");
+        let mut store =
+            Store::initialize_unqualified_storage(&live).expect("ordered store initializes");
         let profile_digest = append_fixture_descriptor(&mut store);
         let first_detector = digest("ordered-detector-a");
         let second_detector = digest("ordered-detector-b");
@@ -31824,7 +32996,7 @@ mod tests {
     fn historical_reopen_rejects_omitted_admission_detector_suite() {
         let directory = tempdir().expect("temporary directory");
         let path = directory.path().join("omitted-suite.db");
-        let mut store = Store::initialize(&path).expect("historical store");
+        let mut store = Store::initialize_unqualified_storage(&path).expect("historical store");
         let profile_digest = append_fixture_descriptor(&mut store);
         let required_detector = digest("historical-required-detector");
         let mut identity = fixture_identity();
@@ -31897,7 +33069,7 @@ mod tests {
     fn historical_reopen_rejects_substituted_admission_evaluator_artifact() {
         let directory = tempdir().expect("temporary directory");
         let path = directory.path().join("substituted-evaluator.db");
-        let mut store = Store::initialize(&path).expect("historical store");
+        let mut store = Store::initialize_unqualified_storage(&path).expect("historical store");
         let profile_digest = append_fixture_descriptor(&mut store);
         let required_detector = digest("historical-evaluator-detector");
         let expected_evaluator = typed_digest("historical-expected-evaluator");
@@ -32105,7 +33277,7 @@ mod tests {
         let directory = tempdir().expect("temp dir");
         let live = directory.path().join("live.db");
         let backup = directory.path().join("backup.db");
-        let mut store = Store::initialize(&live).expect("store initializes");
+        let mut store = Store::initialize_unqualified_storage(&live).expect("store initializes");
         let profile_digest = append_fixture_descriptor(&mut store);
 
         let transient_detail = document(json!({
@@ -32766,7 +33938,7 @@ mod tests {
     fn binding_event_and_recovery_intent_are_atomic_and_survive_process_restart() {
         let directory = tempdir().expect("temp dir");
         let database = directory.path().join("binding.db");
-        let mut store = Store::initialize(&database).expect("initialize");
+        let mut store = Store::initialize_unqualified_storage(&database).expect("initialize");
         let descriptor = document(json!({
             "profile_id": "fixture.health",
             "profile_version": "1",
@@ -33069,7 +34241,7 @@ mod tests {
         let directory = tempdir().expect("temp dir");
         let source = directory.path().join("source.db");
         let backup = directory.path().join("backup.db");
-        let store = Store::initialize(&source).expect("initialize");
+        let store = Store::initialize_unqualified_storage(&source).expect("initialize");
         let artifact = store.backup_verified(&backup).expect("verified backup");
         assert_eq!(artifact.path, backup);
         assert!(artifact.size_bytes > 0);
@@ -33087,7 +34259,8 @@ mod tests {
         ));
 
         let altered = directory.path().join("altered.db");
-        let altered_store = Store::initialize(&altered).expect("initialize altered fixture");
+        let altered_store =
+            Store::initialize_unqualified_storage(&altered).expect("initialize altered fixture");
         altered_store
             .connection
             .execute_batch(
@@ -34278,7 +35451,8 @@ mod tests {
     fn diagnostic_artifact_import_preserves_commitment_availability_and_corruption_states() {
         let directory = tempdir().expect("temporary directory");
         let database = directory.path().join("artifact.db");
-        let mut store = Store::initialize(&database).expect("store initializes");
+        let mut store =
+            Store::initialize_unqualified_storage(&database).expect("store initializes");
         let artifact_id = typed_digest("artifact-identity-not-full-byte-digest");
         let artifact = document(json!({
             "schema": "nq.diagnostic_execution.v1",
@@ -34528,7 +35702,8 @@ mod tests {
         for mutation in mutations {
             let directory = tempdir().expect("temporary directory");
             let database = directory.path().join(format!("{mutation}.db"));
-            let mut store = Store::initialize(&database).expect("store initializes");
+            let mut store =
+                Store::initialize_unqualified_storage(&database).expect("store initializes");
             let primary_artifact_id = typed_digest(&format!("{mutation}-artifact-a"));
             let artifact_a = document(json!({
                 "schema": "nq.diagnostic_execution.v1",
@@ -34657,7 +35832,8 @@ mod tests {
     fn local_artifact_completion_accepts_equivalent_rfc3339_spelling_only() {
         let directory = tempdir().expect("temporary directory");
         let database = directory.path().join("equivalent-completion-time.db");
-        let mut store = Store::initialize(&database).expect("store initializes");
+        let mut store =
+            Store::initialize_unqualified_storage(&database).expect("store initializes");
         let profile_digest = append_fixture_descriptor(&mut store);
         let collection =
             rejected_fixture_collection(&mut store, "fixture-a", "exact-second", &profile_digest);
@@ -34711,7 +35887,8 @@ mod tests {
     fn run_only_diagnostic_artifact_preserves_provenance_and_replay_identity() {
         let directory = tempdir().expect("temporary directory");
         let database = directory.path().join("run-only-artifact.db");
-        let mut store = Store::initialize(&database).expect("store initializes");
+        let mut store =
+            Store::initialize_unqualified_storage(&database).expect("store initializes");
         let profile_digest = append_fixture_descriptor(&mut store);
         let collection =
             rejected_fixture_collection(&mut store, "fixture-a", "run-only", &profile_digest);
@@ -35145,7 +36322,7 @@ mod tests {
     fn gen4_fresh_establishment_is_atomic_receipt_pinned_and_replay_is_byte_read_only() {
         let directory = tempdir().expect("authority directory");
         let database = directory.path().join("fresh-authority.db");
-        let mut store = Store::initialize(&database).expect("fresh Store");
+        let mut store = Store::initialize_unqualified_storage(&database).expect("fresh Store");
         let fixture = RawAuthorityFixture::fresh_genesis();
         let receipt = establish_authority_fixture(&mut store, &fixture)
             .expect("fresh authority establishment");
@@ -35206,6 +36383,420 @@ mod tests {
             )?;
             session.establish_runtime_dependency_trust_root(&resolved)
         })
+    }
+
+    fn classify_migration_authority_fixture(
+        store: &mut Store,
+        fixture: &RawAuthorityFixture,
+        disposition: MigrationDisposition,
+    ) -> Result<RuntimeAuthorityMigrationFreezeReceipt, StoreError> {
+        let custody = fixture.custody();
+        let presented = fixture.presented_set();
+        let migration_receipt = fixture
+            .migration_receipt_with_disposition(disposition)
+            .expect("migration fixture carries a signed disposition receipt");
+        let expectations = fixture.activation_expectations();
+        store.with_runtime_authority_writer_session(|brand, session| {
+            let classification = verify_nonaccepted_migration_classification(
+                brand,
+                &custody,
+                &presented,
+                &migration_receipt,
+                &expectations,
+            )?;
+            session.classify_runtime_authority_migration(&classification)
+        })
+    }
+
+    fn classify_cardinality_authority_fixture(
+        store: &mut Store,
+        fixture: &RawAuthorityFixture,
+        disposition: MigrationDisposition,
+    ) -> Result<RuntimeAuthorityCardinalityFreezeReceipt, StoreError> {
+        let expectations =
+            store.runtime_authority_cardinality_disposition_expectations(FIXTURE_DOMAIN, 1)?;
+        let raw = fixture.v7_cardinality_disposition(
+            disposition,
+            expectations.genesis_identities.clone(),
+            expectations.source_logical_digest.clone(),
+            expectations.old_root_state.clone(),
+            expectations.restore_declaration_digest.clone(),
+        );
+        let custody = fixture.custody();
+        store.with_runtime_authority_writer_session(|brand, session| {
+            let verified = verify_v7_cardinality_disposition(
+                brand,
+                custody.genesis_a1_bytes(),
+                &raw,
+                &expectations,
+            )?;
+            session.classify_v7_cardinality_disposition(&verified)
+        })
+    }
+
+    #[test]
+    fn gen4_zero_and_multiple_genesis_dispositions_freeze_without_migration() {
+        let directory = tempdir().expect("cardinality disposition directory");
+        for (cardinality_label, genesis_ids) in [
+            ("zero", Vec::<&str>::new()),
+            (
+                "multiple",
+                vec![
+                    "store-occurrence/cardinality-a",
+                    "store-occurrence/cardinality-b",
+                ],
+            ),
+        ] {
+            for disposition in [
+                MigrationDisposition::Observed,
+                MigrationDisposition::Superseded,
+                MigrationDisposition::Refused,
+            ] {
+                let label =
+                    format!("cardinality-{cardinality_label}-{disposition:?}").to_lowercase();
+                let (source, backup) =
+                    exact_v7_authority_source(directory.path(), &label, &genesis_ids, None);
+                let fixture = RawAuthorityFixture::fresh_genesis();
+                let mut store = Store::open_v7_runtime_authority_migration_source(&source, &backup)
+                    .expect("open non-migratable cardinality source");
+                let frozen =
+                    classify_cardinality_authority_fixture(&mut store, &fixture, disposition)
+                        .expect("classify non-migratable cardinality");
+                assert_eq!(frozen.disposition, disposition);
+                assert_eq!(frozen.genesis_count, genesis_ids.len());
+                assert_eq!(
+                    genesis_identities_on_connection(&store.connection)
+                        .expect("retained genesis identity set"),
+                    genesis_ids
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    store
+                        .runtime_dependency_trust_root()
+                        .expect("cardinality root"),
+                    None
+                );
+                assert_eq!(
+                    store
+                        .runtime_dependency_establishment_receipt()
+                        .expect("cardinality establishment receipt"),
+                    None
+                );
+                store.validate().expect("cardinality freeze validates");
+                let before_refusal = authority_file_family(&source);
+                assert!(matches!(
+                    store.begin_writer_session(),
+                    Err(StoreError::AuthorityEvidenceFrozen(_))
+                ));
+                drop(store);
+                assert_eq!(
+                    authority_file_family(&source),
+                    before_refusal,
+                    "frozen cardinality source changed after writer refusal"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gen4_cardinality_accepted_and_sole_genesis_are_refused_without_writes() {
+        let directory = tempdir().expect("cardinality refusal directory");
+        let (source, backup) =
+            exact_v7_authority_source(directory.path(), "cardinality-accepted", &[], None);
+        let before = authority_file_family(&source);
+        let fixture = RawAuthorityFixture::fresh_genesis();
+        let mut store = Store::open_v7_runtime_authority_migration_source(&source, &backup)
+            .expect("open accepted cardinality hostile");
+        assert!(
+            classify_cardinality_authority_fixture(
+                &mut store,
+                &fixture,
+                MigrationDisposition::Accepted,
+            )
+            .is_err()
+        );
+        drop(store);
+        assert_eq!(
+            Store::database_schema_version(&source).expect("refused source schema"),
+            7
+        );
+        assert_eq!(authority_file_family(&source), before);
+
+        let (sole, sole_backup) = exact_v7_authority_source(
+            directory.path(),
+            "cardinality-sole",
+            &[FIXTURE_OCCURRENCE_ID],
+            None,
+        );
+        let sole_store = Store::open_v7_runtime_authority_migration_source(&sole, &sole_backup)
+            .expect("open sole source");
+        assert!(matches!(
+            sole_store.runtime_authority_cardinality_disposition_expectations(FIXTURE_DOMAIN, 1,),
+            Err(StoreError::GenesisCardinality { found: 1 })
+        ));
+    }
+
+    #[test]
+    fn gen4_nonaccepted_migration_dispositions_evidence_freeze_without_establishment() {
+        let directory = tempdir().expect("nonaccepted migration directory");
+        for disposition in [
+            MigrationDisposition::Observed,
+            MigrationDisposition::Superseded,
+            MigrationDisposition::Refused,
+        ] {
+            let label = format!("nonaccepted-{disposition:?}").to_lowercase();
+            let (source, backup) =
+                exact_v7_authority_source(directory.path(), &label, &[FIXTURE_OCCURRENCE_ID], None);
+            let fixture = RawAuthorityFixture::accepted_migration(OldRootState::Rootless, None);
+            let mut store = Store::open_v7_runtime_authority_migration_source(&source, &backup)
+                .expect("open nonaccepted migration source");
+            let receipt = classify_migration_authority_fixture(&mut store, &fixture, disposition)
+                .expect("classify nonaccepted migration");
+            assert_eq!(receipt.disposition, disposition);
+            assert_eq!(receipt.occurrence_id, FIXTURE_OCCURRENCE_ID);
+            assert_eq!(
+                Store::database_schema_version(&source).expect("frozen schema version"),
+                SCHEMA_VERSION
+            );
+            assert_eq!(
+                store.runtime_dependency_trust_root().expect("frozen root"),
+                None
+            );
+            assert_eq!(
+                store
+                    .runtime_dependency_establishment_receipt()
+                    .expect("frozen establishment receipt"),
+                None
+            );
+            assert_eq!(
+                store
+                    .connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM runtime_migration_disposition_freezes",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .expect("freeze count"),
+                1
+            );
+            store
+                .validate()
+                .expect("frozen occurrence validates historically");
+            let frozen = authority_file_family(&source);
+            assert!(matches!(
+                store.begin_writer_session(),
+                Err(StoreError::AuthorityEvidenceFrozen(_))
+            ));
+            assert!(matches!(
+                store.with_runtime_authority_writer_session(|_, _| Ok::<_, StoreError>(())),
+                Err(StoreError::AuthorityEvidenceFrozen(_))
+            ));
+            drop(store);
+            assert_eq!(
+                authority_file_family(&source),
+                frozen,
+                "write refusal changed {disposition:?} freeze bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn gen4_superseded_migration_preserves_predecessor_root_row_byte_exactly() {
+        let directory = tempdir().expect("superseded rooted migration directory");
+        let anchor = sha256_bytes(b"superseded immutable predecessor anchor");
+        let (source, backup) = exact_v7_authority_source(
+            directory.path(),
+            "superseded-rooted",
+            &[FIXTURE_OCCURRENCE_ID],
+            Some(&anchor),
+        );
+        let fixture = RawAuthorityFixture::accepted_migration_with_anchor(
+            anchor.clone(),
+            OldRootState::Rooted {
+                trust_anchor_id: anchor,
+            },
+            None,
+        );
+        let mut store = Store::open_v7_runtime_authority_migration_source(&source, &backup)
+            .expect("open rooted superseded source");
+        let root_before: (String, String) = store
+            .connection
+            .query_row(
+                "SELECT trust_anchor_id, established_at
+                 FROM runtime_dependency_trust_roots WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("predecessor root row");
+        classify_migration_authority_fixture(
+            &mut store,
+            &fixture,
+            MigrationDisposition::Superseded,
+        )
+        .expect("superseded freezes rooted predecessor");
+        let root_after: (String, String) = store
+            .connection
+            .query_row(
+                "SELECT trust_anchor_id, established_at
+                 FROM runtime_dependency_trust_roots WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("frozen predecessor root row");
+        assert_eq!(root_after, root_before);
+        assert!(matches!(
+            store.begin_writer_session(),
+            Err(StoreError::AuthorityEvidenceFrozen(_))
+        ));
+    }
+
+    #[test]
+    fn gen4_declared_restore_preflight_binds_sidecar_and_restore_proof_cardinality() {
+        let directory = tempdir().expect("declared restore directory");
+
+        for (label, proofs, expected) in [
+            ("restore-missing-proof", Vec::new(), Ok(None)),
+            (
+                "restore-mismatched-proof",
+                vec![restore_proof_runtime_record(
+                    "store-occurrence/not-the-restored-store",
+                    "eligible_enrolled_inactive",
+                    "mismatched",
+                )],
+                Ok(None),
+            ),
+            (
+                "restore-quarantined-proof",
+                vec![restore_proof_runtime_record(
+                    FIXTURE_OCCURRENCE_ID,
+                    "recovery_quarantined",
+                    "quarantined",
+                )],
+                Err(()),
+            ),
+            (
+                "restore-duplicate-proof",
+                vec![
+                    restore_proof_runtime_record(
+                        FIXTURE_OCCURRENCE_ID,
+                        "eligible_enrolled_inactive",
+                        "duplicate-a",
+                    ),
+                    restore_proof_runtime_record(
+                        FIXTURE_OCCURRENCE_ID,
+                        "eligible_enrolled_inactive",
+                        "duplicate-b",
+                    ),
+                ],
+                Err(()),
+            ),
+        ] {
+            let (_source, backup, _) =
+                exact_v7_restored_authority_source(directory.path(), label, proofs);
+            let restored = directory.path().join(format!("{label}-restored.db"));
+            Store::backup_v7_verified(&backup.path, &restored)
+                .expect("publish exact restored Store bytes");
+            let declaration = publish_test_restore_declaration(&backup.path, &restored);
+            let before = authority_file_family(&restored);
+            let store = Store::open_v7_runtime_authority_migration_source(&restored, &backup)
+                .expect("open declared restored migration source");
+            let actual = store.runtime_authority_migration_expectations();
+            match expected {
+                Ok(expected_proof) => {
+                    let expectations = actual.expect("derive declared restore expectations");
+                    assert_eq!(
+                        expectations.restore_declaration_digest,
+                        Some(declaration.declaration_digest)
+                    );
+                    assert_eq!(
+                        expectations.restore_proof_digest.as_ref().map(|_| ()),
+                        expected_proof
+                    );
+                }
+                Err(()) => assert!(matches!(
+                    actual,
+                    Err(StoreError::AuthorityRestoreQuarantine)
+                )),
+            }
+            drop(store);
+            assert_eq!(
+                authority_file_family(&restored),
+                before,
+                "declared restore preflight classification wrote {label}"
+            );
+        }
+
+        let eligible = restore_proof_runtime_record(
+            FIXTURE_OCCURRENCE_ID,
+            "eligible_enrolled_inactive",
+            "eligible",
+        );
+        let eligible_id = Sha256Digest::parse(eligible.record_id.clone()).expect("proof digest");
+        let (_, backup, _) = exact_v7_restored_authority_source(
+            directory.path(),
+            "restore-eligible-proof",
+            vec![eligible],
+        );
+        let restored = directory.path().join("restore-eligible-restored.db");
+        Store::backup_v7_verified(&backup.path, &restored).expect("restore eligible source");
+        let declaration = publish_test_restore_declaration(&backup.path, &restored);
+        let store = Store::open_v7_runtime_authority_migration_source(&restored, &backup)
+            .expect("open eligible declared restore");
+        let expectations = store
+            .runtime_authority_migration_expectations()
+            .expect("eligible proof closes preflight correspondence");
+        assert_eq!(
+            expectations.restore_declaration_digest,
+            Some(declaration.declaration_digest)
+        );
+        assert_eq!(expectations.restore_proof_digest, Some(eligible_id));
+    }
+
+    #[test]
+    fn gen4_restore_declaration_substitution_refuses_before_migration_writes() {
+        let directory = tempdir().expect("restore declaration hostile directory");
+        let (_source, backup) = exact_v7_authority_source(
+            directory.path(),
+            "restore-declaration-hostile",
+            &[FIXTURE_OCCURRENCE_ID],
+            None,
+        );
+        let restored = directory.path().join("declared-restored.db");
+        Store::backup_v7_verified(&backup.path, &restored).expect("restore exact v7 Store");
+        let declaration = publish_test_restore_declaration(&backup.path, &restored);
+        let declaration_path = Store::restore_declaration_path(&restored);
+        let original_declaration = std::fs::read(&declaration_path).expect("declaration bytes");
+        let before = authority_file_family(&restored);
+
+        let mut substituted: Value =
+            serde_json::from_slice(&original_declaration).expect("declaration JSON");
+        substituted["restored_store_sha256"] =
+            Value::String(sha256_bytes(b"substituted restored bytes").to_string());
+        std::fs::write(
+            &declaration_path,
+            nq_protocol::canonical_json_bytes(&substituted).expect("canonical substitution"),
+        )
+        .expect("substitute declaration");
+        assert!(Store::open_v7_runtime_authority_migration_source(&restored, &backup).is_err());
+        assert_eq!(
+            authority_file_family(&restored),
+            before,
+            "substituted declaration changed restored Store bytes"
+        );
+
+        std::fs::write(&declaration_path, original_declaration)
+            .expect("restore exact declaration bytes");
+        let store = Store::open_v7_runtime_authority_migration_source(&restored, &backup)
+            .expect("exact declaration reopens");
+        assert_eq!(
+            store
+                .runtime_authority_migration_expectations()
+                .expect("exact declared restore expectations")
+                .restore_declaration_digest,
+            Some(declaration.declaration_digest)
+        );
     }
 
     #[test]
@@ -35597,7 +37188,8 @@ mod tests {
         let fresh_database = directory.path().join("migration-on-fresh-v8.db");
         let fresh_before;
         {
-            let mut fresh_store = Store::initialize(&fresh_database).expect("fresh v8 Store");
+            let mut fresh_store =
+                Store::initialize_unqualified_storage(&fresh_database).expect("fresh v8 Store");
             fresh_before = authority_file_family(&fresh_database);
             assert!(matches!(
                 establish_migration_authority_fixture(&mut fresh_store, &migration),
@@ -35615,7 +37207,7 @@ mod tests {
     fn gen4_establishment_receipt_failure_rolls_back_genesis_root_and_receipt() {
         let directory = tempdir().expect("authority directory");
         let database = directory.path().join("rollback-authority.db");
-        let mut store = Store::initialize(&database).expect("fresh Store");
+        let mut store = Store::initialize_unqualified_storage(&database).expect("fresh Store");
         store
             .connection
             .execute_batch(
@@ -35778,7 +37370,7 @@ mod tests {
     fn gen4_stale_verified_event_refuses_after_store_reenumeration_without_appending() {
         let directory = tempdir().expect("stale evidence directory");
         let database = directory.path().join("stale-evidence.db");
-        let mut store = Store::initialize(&database).expect("authority Store");
+        let mut store = Store::initialize_unqualified_storage(&database).expect("authority Store");
         let base = RawAuthorityFixture::fresh_genesis();
         establish_authority_fixture(&mut store, &base).expect("authority establishment");
 
@@ -36606,7 +38198,8 @@ mod tests {
         let directory = tempdir().expect("temporary directory");
         let source = directory.path().join("runtime.db");
         let backup = directory.path().join("runtime-backup.db");
-        let mut store = Store::initialize(&source).expect("initialize file store");
+        let mut store =
+            Store::initialize_unqualified_storage(&source).expect("initialize file store");
         let batch = initial_runtime_batch(vec![runtime_record(
             "provider-intake",
             "nq.provider_intake.v1",
@@ -36844,7 +38437,7 @@ mod tests {
     fn writer_sessions_are_non_reentrant_and_fencing_refuses_construction_and_use() {
         let directory = tempfile::tempdir().expect("writer-session directory");
         let database = directory.path().join("nq.db");
-        let mut store = Store::initialize(&database).expect("initialize store");
+        let mut store = Store::initialize_unqualified_storage(&database).expect("initialize store");
 
         let first = store.begin_writer_session().expect("first writer session");
         assert_eq!(
@@ -36881,7 +38474,8 @@ mod tests {
         // A session begun before the fence must refuse every method after it.
         let other_directory = tempfile::tempdir().expect("second writer-session directory");
         let other_database = other_directory.path().join("nq.db");
-        let mut other_store = Store::initialize(&other_database).expect("initialize second store");
+        let mut other_store = Store::initialize_unqualified_storage(&other_database)
+            .expect("initialize second store");
         let other_key = other_store.writer_key.clone();
         let mut held = other_store
             .begin_writer_session()

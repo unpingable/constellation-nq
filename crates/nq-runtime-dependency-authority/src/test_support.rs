@@ -11,13 +11,19 @@ use nq_protocol::{Sha256Digest, sha256_bytes};
 use crate::{
     ActivationContext, ActivationExpectations, GenesisAuthorityCustody, MigrationExpectations,
     MigrationReceipt, MigrationReceiptBytes, OldRootState, PresentedAuthorityRecord,
-    PresentedAuthoritySet, RestartExpectations,
+    PresentedAuthoritySet, ResidentActivationRecord, RestartExpectations,
+    V7CardinalityDispositionBytes,
+    cardinality::fixture_access::{
+        bytes as cardinality_bytes, set_signature as set_cardinality_signature,
+        signature_preimage as cardinality_signature_preimage, wire as cardinality_wire,
+    },
     records::fixture_access::{
         a1_bytes, a1_digest_for, a1_signature_preimage_for, a1_wire, a2_bytes, a2_digest_for,
-        a2_signature_preimage_for, a2_wire, cut, migration_bytes, migration_signature_preimage_for,
-        migration_wire, revocation_bytes, revocation_digest_for, revocation_signature_preimage_for,
-        revocation_wire, set_a1_signature, set_a2_signature, set_migration_signature,
-        set_revocation_anchor, set_revocation_signature,
+        a2_signature_preimage_for, a2_wire, cut, migration_bytes, migration_digest_for,
+        migration_signature_preimage_for, migration_wire, revocation_bytes, revocation_digest_for,
+        revocation_signature_preimage_for, revocation_wire, set_a1_signature, set_a2_signature,
+        set_migration_disposition, set_migration_signature, set_revocation_anchor,
+        set_revocation_signature,
     },
 };
 
@@ -96,11 +102,62 @@ impl RawAuthorityFixture {
         old_root_state: OldRootState,
         restore_proof_digest: Option<Sha256Digest>,
     ) -> Self {
+        let restore_declaration_digest = restore_proof_digest
+            .as_ref()
+            .map(|_| sha256_bytes(b"fixture restore declaration"));
+        Self::accepted_migration_with_anchor_and_restore_bindings(
+            trust_anchor_id,
+            old_root_state,
+            restore_declaration_digest,
+            restore_proof_digest,
+        )
+    }
+
+    /// Builds an accepted migration fixture with independently supplied exact
+    /// official-restore declaration and proof bindings.
+    ///
+    /// # Panics
+    ///
+    /// Panics when exactly one binding is present, because a declared restore
+    /// requires the declaration and proof as one complete pair.
+    #[must_use]
+    pub fn accepted_migration_with_restore_bindings(
+        old_root_state: OldRootState,
+        restore_declaration_digest: Option<Sha256Digest>,
+        restore_proof_digest: Option<Sha256Digest>,
+    ) -> Self {
+        Self::accepted_migration_with_anchor_and_restore_bindings(
+            fixture_trust_anchor_id(),
+            old_root_state,
+            restore_declaration_digest,
+            restore_proof_digest,
+        )
+    }
+
+    /// Anchor-parameterized form of
+    /// [`Self::accepted_migration_with_restore_bindings`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when exactly one restore binding is present.
+    #[must_use]
+    pub fn accepted_migration_with_anchor_and_restore_bindings(
+        trust_anchor_id: Sha256Digest,
+        old_root_state: OldRootState,
+        restore_declaration_digest: Option<Sha256Digest>,
+        restore_proof_digest: Option<Sha256Digest>,
+    ) -> Self {
+        assert_eq!(
+            restore_declaration_digest.is_some(),
+            restore_proof_digest.is_some(),
+            "restore declaration and proof must be supplied together"
+        );
         Self::build(
             ActivationContext::MigrationGenesis,
             trust_anchor_id,
             Some(MigrationExpectations {
                 old_root_state,
+                restore_declaration_digest,
                 restore_proof_digest,
             }),
         )
@@ -172,6 +229,7 @@ impl RawAuthorityFixture {
             cut(3, Some(self.current_a2_digest.clone())),
             self.current_a1_digest.clone(),
             self.current_a1_generation,
+            expected.restore_declaration_digest.clone(),
             expected.restore_proof_digest.clone(),
             empty_signature(),
         );
@@ -179,10 +237,11 @@ impl RawAuthorityFixture {
             .current_signing_key
             .sign(&migration_signature_preimage_for(&wire));
         set_migration_signature(&mut wire, hex::encode(signature.to_bytes()));
+        self.last_event_digest = migration_digest_for(&wire);
         self.migration_receipt = Some(migration_bytes(wire));
-        // The migration receipt is not a Store-ledger authority event. Leave
-        // the event predecessor at genesis A2, while avoiding ordinal reuse in
-        // subsequent signed fixture records.
+        // The retained migration receipt is the migration establishment event
+        // in the global authority-cut topology. Every later Store-ledger event
+        // must name it as its exact authority-event predecessor.
         self.next_sequence = 4;
     }
 
@@ -224,17 +283,32 @@ impl RawAuthorityFixture {
     /// longer decodes, which indicates a defect in test-support construction.
     #[must_use]
     pub fn restart_expectations(&self) -> RestartExpectations {
-        let migration_digest = self.migration_receipt.as_ref().map(|bytes| {
-            MigrationReceipt::from_canonical_bytes(bytes)
-                .expect("fixture migration receipt")
-                .receipt_digest()
-                .clone()
+        let migration = self.migration_receipt.as_ref().map(|bytes| {
+            MigrationReceipt::from_canonical_bytes(bytes).expect("fixture migration receipt")
         });
+        let migration_digest = migration
+            .as_ref()
+            .map(|receipt| receipt.receipt_digest().clone());
+        let genesis_a1 = crate::OperatorAuthorityRecord::from_canonical_bytes(&self.genesis_a1)
+            .expect("fixture genesis A1");
+        let genesis_a2 = ResidentActivationRecord::from_canonical_bytes(&self.genesis_a2)
+            .expect("fixture genesis A2");
+        let expected_establishment_cut = migration
+            .as_ref()
+            .map_or_else(|| genesis_a2.cut().clone(), |receipt| receipt.cut().clone());
         RestartExpectations {
             genesis_context: self.genesis_context,
             expected_occurrence_id: FIXTURE_OCCURRENCE_ID.to_owned(),
             expected_chain_root_activation_digest: self.genesis_a2_digest.clone(),
             expected_establishment_tip_digest: self.genesis_a2_digest.clone(),
+            expected_genesis_operator_authority_digest: genesis_a1.record_digest().clone(),
+            expected_genesis_operator_key_generation: genesis_a1.key_generation(),
+            expected_establishment_cut,
+            expected_establishment_policy_version: 1,
+            expected_establishment_candidate_set_digest: crate::digest_presented_authority_set(
+                &PresentedAuthoritySet::new(Vec::new()),
+            )
+            .expect("empty fixture candidate set"),
             resident_identity: FIXTURE_RESIDENT_ID.to_owned(),
             resident_generation: FIXTURE_RESIDENT_GENERATION,
             host_role: FIXTURE_HOST_ROLE.to_owned(),
@@ -254,6 +328,81 @@ impl RawAuthorityFixture {
         self.migration_receipt
             .as_ref()
             .map(|bytes| MigrationReceiptBytes::new(bytes.clone()))
+    }
+
+    /// Returns a freshly signed receipt over this migration fixture with the
+    /// requested explicit disposition.
+    ///
+    /// This emits only unverified raw input and is unavailable for a fresh
+    /// genesis fixture.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if this fixture's internally generated genesis A1 no longer
+    /// decodes, which indicates a defect in test-support construction.
+    #[must_use]
+    pub fn migration_receipt_with_disposition(
+        &self,
+        disposition: crate::MigrationDisposition,
+    ) -> Option<MigrationReceiptBytes> {
+        let expected = self.migration_expectations.as_ref()?;
+        let genesis_a1 = crate::OperatorAuthorityRecord::from_canonical_bytes(&self.genesis_a1)
+            .expect("fixture genesis A1");
+        let genesis_signing_key = SigningKey::from_bytes(&[1_u8; 32]);
+        let mut wire = migration_wire(
+            expected.old_root_state.clone(),
+            self.genesis_a2_digest.clone(),
+            self.anchor.clone(),
+            cut(3, Some(self.genesis_a2_digest.clone())),
+            genesis_a1.record_digest().clone(),
+            genesis_a1.key_generation(),
+            expected.restore_declaration_digest.clone(),
+            expected.restore_proof_digest.clone(),
+            empty_signature(),
+        );
+        set_migration_disposition(&mut wire, disposition);
+        let signature = genesis_signing_key.sign(&migration_signature_preimage_for(&wire));
+        set_migration_signature(&mut wire, hex::encode(signature.to_bytes()));
+        Some(MigrationReceiptBytes::new(migration_bytes(wire)))
+    }
+
+    /// Builds an unverified operator-signed schema-v7 cardinality disposition
+    /// over an exact zero-or-multiple sorted genesis identity set.
+    ///
+    /// The constructor deliberately performs no cardinality, sorting, or
+    /// disposition validation so hostile tests can emit invalid raw inputs.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if this fixture's internally generated genesis A1 no longer
+    /// decodes, which indicates a test-support construction defect.
+    #[must_use]
+    pub fn v7_cardinality_disposition(
+        &self,
+        disposition: crate::MigrationDisposition,
+        genesis_identities: Vec<String>,
+        source_logical_digest: Sha256Digest,
+        old_root_state: OldRootState,
+        restore_declaration_digest: Option<Sha256Digest>,
+    ) -> V7CardinalityDispositionBytes {
+        let genesis_a1 = crate::OperatorAuthorityRecord::from_canonical_bytes(&self.genesis_a1)
+            .expect("fixture genesis A1");
+        let genesis_signing_key = SigningKey::from_bytes(&[1_u8; 32]);
+        let mut wire = cardinality_wire(
+            disposition,
+            genesis_identities,
+            source_logical_digest,
+            old_root_state,
+            FIXTURE_DOMAIN.to_owned(),
+            1,
+            genesis_a1.record_digest().clone(),
+            genesis_a1.key_generation(),
+            restore_declaration_digest,
+            empty_signature(),
+        );
+        let signature = genesis_signing_key.sign(&cardinality_signature_preimage(&wire));
+        set_cardinality_signature(&mut wire, hex::encode(signature.to_bytes()));
+        V7CardinalityDispositionBytes::new(cardinality_bytes(wire))
     }
 
     /// Returns the fixture's immutable trust anchor.
@@ -390,9 +539,11 @@ mod tests {
     use crate::{
         AuthorityError, EstablishmentArm, EstablishmentReceiptTranscript,
         RUNTIME_DEPENDENCY_ADMISSION_SCOPE, ResidentActivationRecord,
-        digest_presented_authority_set, resolve_for_restart, verify_activation_revocation,
-        verify_for_establishment, verify_operator_authority_rotation,
-        verify_resident_activation_successor, with_verification_brand,
+        V7CardinalityDispositionExpectations, digest_presented_authority_set, resolve_for_restart,
+        verify_activation_revocation, verify_for_establishment,
+        verify_nonaccepted_migration_classification, verify_operator_authority_rotation,
+        verify_resident_activation_successor, verify_v7_cardinality_disposition,
+        with_verification_brand,
     };
 
     #[derive(Clone, Copy)]
@@ -410,6 +561,13 @@ mod tests {
         UnsupportedPolicy,
         UnsupportedSignatureAlgorithm,
         WrongSignature,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum NativeEventFamily {
+        OperatorRotation,
+        ActivationSuccessor,
+        Revocation,
     }
 
     fn successor_candidate(
@@ -478,6 +636,56 @@ mod tests {
         PresentedAuthoritySet::new(records)
     }
 
+    fn migration_competing_event(
+        fixture: &RawAuthorityFixture,
+        family: NativeEventFamily,
+        sequence: u64,
+    ) -> PresentedAuthorityRecord {
+        let event_predecessor = fixture.genesis_a2_digest.clone();
+        match family {
+            NativeEventFamily::OperatorRotation => {
+                let new_key = SigningKey::from_bytes(&[2_u8; 32]);
+                let mut wire = a1_wire(
+                    "operator/principal-a".to_owned(),
+                    hex::encode(new_key.verifying_key().as_bytes()),
+                    2,
+                    cut(sequence, Some(event_predecessor)),
+                    Some(fixture.current_a1_digest.clone()),
+                    Some(empty_signature()),
+                );
+                let signature = fixture
+                    .current_signing_key
+                    .sign(&a1_signature_preimage_for(&wire));
+                set_a1_signature(&mut wire, hex::encode(signature.to_bytes()));
+                PresentedAuthorityRecord::OperatorAuthorityRotation(a1_bytes(wire))
+            }
+            NativeEventFamily::ActivationSuccessor => {
+                PresentedAuthorityRecord::ResidentActivationSuccessor(successor_candidate(
+                    fixture,
+                    sequence,
+                    event_predecessor,
+                    fixture.current_a2_digest.clone(),
+                    SuccessorMutation::None,
+                ))
+            }
+            NativeEventFamily::Revocation => {
+                let mut wire = revocation_wire(
+                    fixture.current_a2_digest.clone(),
+                    cut(sequence, Some(event_predecessor)),
+                    fixture.current_a1_digest.clone(),
+                    fixture.current_a1_generation,
+                    empty_signature(),
+                );
+                set_revocation_anchor(&mut wire, fixture.anchor.clone());
+                let signature = fixture
+                    .current_signing_key
+                    .sign(&revocation_signature_preimage_for(&wire));
+                set_revocation_signature(&mut wire, hex::encode(signature.to_bytes()));
+                PresentedAuthorityRecord::ActivationRevocation(revocation_bytes(wire))
+            }
+        }
+    }
+
     fn restart(
         fixture: &RawAuthorityFixture,
     ) -> Result<crate::ControllingActivationSnapshot, AuthorityError> {
@@ -490,6 +698,54 @@ mod tests {
             receipt.as_ref(),
             &fixture.restart_expectations(),
         )
+    }
+
+    fn cardinality_expectations(
+        genesis_identities: Vec<String>,
+        source_logical_digest: Sha256Digest,
+        old_root_state: OldRootState,
+        restore_declaration_digest: Option<Sha256Digest>,
+    ) -> V7CardinalityDispositionExpectations {
+        V7CardinalityDispositionExpectations {
+            genesis_identities,
+            source_logical_digest,
+            old_root_state,
+            domain: FIXTURE_DOMAIN.to_owned(),
+            policy_floor: 1,
+            restore_declaration_digest,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn signed_cardinality_disposition(
+        fixture: &RawAuthorityFixture,
+        disposition: crate::MigrationDisposition,
+        genesis_identities: Vec<String>,
+        source_logical_digest: Sha256Digest,
+        old_root_state: OldRootState,
+        domain: &str,
+        policy_version: u64,
+        restore_declaration_digest: Option<Sha256Digest>,
+        signing_seed: u8,
+    ) -> V7CardinalityDispositionBytes {
+        let genesis_a1 =
+            crate::OperatorAuthorityRecord::from_canonical_bytes(&fixture.genesis_a1).unwrap();
+        let signing_key = SigningKey::from_bytes(&[signing_seed; 32]);
+        let mut wire = cardinality_wire(
+            disposition,
+            genesis_identities,
+            source_logical_digest,
+            old_root_state,
+            domain.to_owned(),
+            policy_version,
+            genesis_a1.record_digest().clone(),
+            genesis_a1.key_generation(),
+            restore_declaration_digest,
+            empty_signature(),
+        );
+        let signature = signing_key.sign(&cardinality_signature_preimage(&wire));
+        set_cardinality_signature(&mut wire, hex::encode(signature.to_bytes()));
+        V7CardinalityDispositionBytes::new(cardinality_bytes(wire))
     }
 
     #[test]
@@ -625,26 +881,29 @@ mod tests {
     #[test]
     fn candidate_binding_changes_when_previously_verified_evidence_becomes_stale() {
         let mut fixture = RawAuthorityFixture::fresh_genesis();
-        let before = with_verification_brand(|brand| {
-            verify_for_establishment(
+        let result = with_verification_brand(|brand| {
+            let original_set = fixture.presented_set();
+            let evidence = verify_for_establishment(
                 &brand,
                 &fixture.custody(),
-                &fixture.presented_set(),
+                &original_set,
                 None,
                 &fixture.activation_expectations(),
-            )
-            .unwrap()
-            .candidate_set_digest()
-            .clone()
+            )?;
+            evidence.reverify_store_owned_presented_set(&original_set)?;
+            let before = evidence.candidate_set_digest().clone();
+
+            fixture.append_operator_rotation();
+            let changed = fixture.presented_set();
+            let after = digest_presented_authority_set(&changed)?;
+            assert_ne!(before, after);
+            assert_eq!(
+                evidence.reverify_store_owned_presented_set(&changed),
+                Err(AuthorityError::PresentedSetCorrespondenceMismatch)
+            );
+            Ok::<_, AuthorityError>(())
         });
-
-        fixture.append_operator_rotation();
-        let after = digest_presented_authority_set(&fixture.presented_set()).unwrap();
-        assert_ne!(before, after);
-
-        // Refusing the stale sealed value is a Store transaction obligation:
-        // the Store must enumerate and compare this digest under its writer
-        // fence immediately before establishment.
+        assert_eq!(result, Ok(()));
     }
 
     #[test]
@@ -684,31 +943,47 @@ mod tests {
         let before_rotation = fixture.presented_set();
         let rotation = fixture.append_operator_rotation();
         let custody = fixture.custody();
-        assert!(with_verification_brand(|brand| {
-            verify_operator_authority_rotation(
-                &brand,
-                &custody,
-                &before_rotation,
-                &rotation,
-                None,
-                &fixture.activation_expectations(),
-            )
+        assert!(
+            with_verification_brand(|brand| {
+                let event = verify_operator_authority_rotation(
+                    &brand,
+                    &custody,
+                    &before_rotation,
+                    &rotation,
+                    None,
+                    &fixture.activation_expectations(),
+                )?;
+                event.reverify_store_owned_presented_set(&before_rotation)?;
+                assert_eq!(
+                    event.reverify_store_owned_presented_set(&fixture.presented_set()),
+                    Err(AuthorityError::PresentedSetCorrespondenceMismatch)
+                );
+                Ok::<_, AuthorityError>(())
+            })
             .is_ok()
-        }));
+        );
 
         let before_successor = fixture.presented_set();
         let successor = fixture.append_activation_successor();
-        assert!(with_verification_brand(|brand| {
-            verify_resident_activation_successor(
-                &brand,
-                &custody,
-                &before_successor,
-                &successor,
-                None,
-                &fixture.activation_expectations(),
-            )
+        assert!(
+            with_verification_brand(|brand| {
+                let event = verify_resident_activation_successor(
+                    &brand,
+                    &custody,
+                    &before_successor,
+                    &successor,
+                    None,
+                    &fixture.activation_expectations(),
+                )?;
+                event.reverify_store_owned_presented_set(&before_successor)?;
+                assert_eq!(
+                    event.reverify_store_owned_presented_set(&fixture.presented_set()),
+                    Err(AuthorityError::PresentedSetCorrespondenceMismatch)
+                );
+                Ok::<_, AuthorityError>(())
+            })
             .is_ok()
-        }));
+        );
         assert_eq!(
             restart(&fixture)
                 .unwrap()
@@ -723,17 +998,25 @@ mod tests {
         let before = fixture.presented_set();
         let revocation = fixture.append_current_activation_revocation();
         let custody = fixture.custody();
-        assert!(with_verification_brand(|brand| {
-            verify_activation_revocation(
-                &brand,
-                &custody,
-                &before,
-                &revocation,
-                None,
-                &fixture.activation_expectations(),
-            )
+        assert!(
+            with_verification_brand(|brand| {
+                let event = verify_activation_revocation(
+                    &brand,
+                    &custody,
+                    &before,
+                    &revocation,
+                    None,
+                    &fixture.activation_expectations(),
+                )?;
+                event.reverify_store_owned_presented_set(&before)?;
+                assert_eq!(
+                    event.reverify_store_owned_presented_set(&fixture.presented_set()),
+                    Err(AuthorityError::PresentedSetCorrespondenceMismatch)
+                );
+                Ok::<_, AuthorityError>(())
+            })
             .is_ok()
-        }));
+        );
         assert_eq!(
             restart(&fixture),
             Err(AuthorityError::ControllingActivationRevoked)
@@ -869,7 +1152,7 @@ mod tests {
     }
 
     #[test]
-    fn activation_gap_and_fork_refuse_without_selection() {
+    fn activation_gap_and_exact_predecessor_fork_refuse_without_selection() {
         let fixture = RawAuthorityFixture::fresh_genesis();
         let gap = successor_candidate(
             &fixture,
@@ -917,12 +1200,12 @@ mod tests {
                 None,
                 &fixture.restart_expectations(),
             ),
-            Err(AuthorityError::AuthorityEventFork)
+            Err(AuthorityError::ActivationFork)
         );
     }
 
     #[test]
-    fn activation_predecessor_fork_refuses_even_when_global_event_chain_is_linear() {
+    fn globally_linear_activation_branch_emits_multiple_live_activations() {
         let fixture = RawAuthorityFixture::fresh_genesis();
         let left = successor_candidate(
             &fixture,
@@ -953,7 +1236,7 @@ mod tests {
                 None,
                 &fixture.restart_expectations(),
             ),
-            Err(AuthorityError::ActivationFork)
+            Err(AuthorityError::MultipleLiveActivations)
         );
     }
 
@@ -1082,6 +1365,21 @@ mod tests {
             ),
             Err(AuthorityError::EstablishmentTipMismatch)
         );
+
+        let mut successor_history = RawAuthorityFixture::fresh_genesis();
+        successor_history.append_activation_successor();
+        let mut substituted_valid_tip = successor_history.restart_expectations();
+        substituted_valid_tip.expected_establishment_tip_digest =
+            successor_history.current_activation_digest().clone();
+        assert_eq!(
+            resolve_for_restart(
+                &successor_history.custody(),
+                &successor_history.presented_set(),
+                None,
+                &substituted_valid_tip,
+            ),
+            Err(AuthorityError::EstablishmentTipMismatch)
+        );
     }
 
     #[test]
@@ -1154,11 +1452,68 @@ mod tests {
                     evidence.establishment_receipt_transcript()?.arm(),
                     EstablishmentArm::Migration
                 );
+                let parsed_receipt = MigrationReceipt::from_canonical_bytes(receipt.as_bytes())?;
+                assert_eq!(
+                    evidence
+                        .establishment_receipt_transcript()?
+                        .establishment_cut(),
+                    parsed_receipt.cut()
+                );
                 Ok::<_, AuthorityError>(())
             });
             assert_eq!(result, Ok(()));
             assert!(restart(&fixture).is_ok());
         }
+    }
+
+    #[test]
+    fn migration_receipt_participates_in_every_native_event_collision_and_fork() {
+        for family in [
+            NativeEventFamily::OperatorRotation,
+            NativeEventFamily::ActivationSuccessor,
+            NativeEventFamily::Revocation,
+        ] {
+            let fixture = RawAuthorityFixture::accepted_migration(OldRootState::Rootless, None);
+            let collision =
+                PresentedAuthoritySet::new(vec![migration_competing_event(&fixture, family, 3)]);
+            assert_eq!(
+                resolve_for_restart(
+                    &fixture.custody(),
+                    &collision,
+                    fixture.migration_receipt().as_ref(),
+                    &fixture.restart_expectations(),
+                ),
+                Err(AuthorityError::AuthorityCutCollision),
+                "migration collision for {family:?} must refuse"
+            );
+
+            let fork =
+                PresentedAuthoritySet::new(vec![migration_competing_event(&fixture, family, 4)]);
+            assert_eq!(
+                resolve_for_restart(
+                    &fixture.custody(),
+                    &fork,
+                    fixture.migration_receipt().as_ref(),
+                    &fixture.restart_expectations(),
+                ),
+                Err(AuthorityError::AuthorityEventFork),
+                "migration fork for {family:?} must refuse"
+            );
+        }
+    }
+
+    #[test]
+    fn first_post_migration_event_names_consumed_receipt_as_predecessor() {
+        let mut fixture = RawAuthorityFixture::accepted_migration(OldRootState::Rootless, None);
+        let receipt = fixture.migration_receipt().unwrap();
+        let receipt = MigrationReceipt::from_canonical_bytes(receipt.as_bytes()).unwrap();
+        let successor = fixture.append_activation_successor();
+        let successor = ResidentActivationRecord::from_canonical_bytes(&successor).unwrap();
+        assert_eq!(
+            successor.cut().predecessor_event_digest(),
+            Some(receipt.receipt_digest())
+        );
+        assert!(restart(&fixture).is_ok());
     }
 
     #[test]
@@ -1273,6 +1628,7 @@ mod tests {
             cut(3, Some(fixture.current_a2_digest.clone())),
             fixture.current_a1_digest.clone(),
             fixture.current_a1_generation,
+            Some(sha256_bytes(b"fixture restore declaration")),
             Some(sha256_bytes(b"restore proof")),
             empty_signature(),
         );
@@ -1293,6 +1649,404 @@ mod tests {
             .map(|_| ())),
             Err(AuthorityError::MigrationDispositionMismatch)
         );
+
+        let mut wrong_declaration = fixture.activation_expectations();
+        wrong_declaration
+            .migration
+            .as_mut()
+            .unwrap()
+            .restore_declaration_digest = Some(sha256_bytes(b"other restore declaration"));
+        assert_eq!(
+            with_verification_brand(|brand| verify_for_establishment(
+                &brand,
+                &fixture.custody(),
+                &fixture.presented_set(),
+                Some(&receipt),
+                &wrong_declaration,
+            )
+            .map(|_| ())),
+            Err(AuthorityError::RestoreDeclarationMismatch)
+        );
+
+        let mut incomplete = fixture.activation_expectations();
+        incomplete
+            .migration
+            .as_mut()
+            .unwrap()
+            .restore_declaration_digest = None;
+        assert_eq!(
+            with_verification_brand(|brand| verify_for_establishment(
+                &brand,
+                &fixture.custody(),
+                &fixture.presented_set(),
+                Some(&receipt),
+                &incomplete,
+            )
+            .map(|_| ())),
+            Err(AuthorityError::RestoreBindingIncomplete)
+        );
+
+        let exact_declaration = sha256_bytes(b"independently supplied declaration");
+        let exact_proof = sha256_bytes(b"independently supplied proof");
+        let exact = RawAuthorityFixture::accepted_migration_with_restore_bindings(
+            OldRootState::Rootless,
+            Some(exact_declaration.clone()),
+            Some(exact_proof.clone()),
+        );
+        let exact_expectations = exact.activation_expectations().migration.unwrap();
+        assert_eq!(
+            exact_expectations.restore_declaration_digest,
+            Some(exact_declaration)
+        );
+        assert_eq!(exact_expectations.restore_proof_digest, Some(exact_proof));
+        assert!(restart(&exact).is_ok());
+    }
+
+    #[test]
+    fn nonaccepted_migration_dispositions_mint_only_sealed_freeze_classification() {
+        let fixture = RawAuthorityFixture::accepted_migration(
+            OldRootState::Rootless,
+            Some(sha256_bytes(b"restore proof")),
+        );
+        let expected_declaration = fixture
+            .activation_expectations()
+            .migration
+            .unwrap()
+            .restore_declaration_digest;
+        for disposition in [
+            crate::MigrationDisposition::Observed,
+            crate::MigrationDisposition::Superseded,
+            crate::MigrationDisposition::Refused,
+        ] {
+            let receipt = fixture
+                .migration_receipt_with_disposition(disposition)
+                .unwrap();
+            let verified = with_verification_brand(|brand| {
+                verify_nonaccepted_migration_classification(
+                    &brand,
+                    &fixture.custody(),
+                    &fixture.presented_set(),
+                    &receipt,
+                    &fixture.activation_expectations(),
+                )
+                .map(|classification| {
+                    assert_eq!(classification.disposition(), disposition);
+                    assert_eq!(classification.occurrence_id(), FIXTURE_OCCURRENCE_ID);
+                    assert_eq!(classification.old_root_state(), &OldRootState::Rootless);
+                    assert_eq!(
+                        classification.restore_declaration_digest(),
+                        expected_declaration.as_ref()
+                    );
+                    assert!(classification.restore_proof_digest().is_some());
+                    classification.reverify_store_owned_presented_set(&fixture.presented_set())?;
+                    Ok::<_, AuthorityError>(())
+                })?
+            });
+            assert_eq!(verified, Ok(()));
+        }
+
+        let accepted = fixture.migration_receipt().unwrap();
+        assert_eq!(
+            with_verification_brand(|brand| verify_nonaccepted_migration_classification(
+                &brand,
+                &fixture.custody(),
+                &fixture.presented_set(),
+                &accepted,
+                &fixture.activation_expectations(),
+            )
+            .map(|_| ())),
+            Err(AuthorityError::MigrationDispositionMismatch)
+        );
+
+        let superseded_anchor_change = RawAuthorityFixture::accepted_migration(
+            OldRootState::Rooted {
+                trust_anchor_id: sha256_bytes(b"evidence-frozen predecessor anchor"),
+            },
+            None,
+        );
+        let superseded = superseded_anchor_change
+            .migration_receipt_with_disposition(crate::MigrationDisposition::Superseded)
+            .unwrap();
+        assert!(
+            with_verification_brand(|brand| verify_nonaccepted_migration_classification(
+                &brand,
+                &superseded_anchor_change.custody(),
+                &superseded_anchor_change.presented_set(),
+                &superseded,
+                &superseded_anchor_change.activation_expectations(),
+            )
+            .map(|_| ()))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn v7_zero_and_multiple_genesis_dispositions_are_sealed_nonmigratable_evidence() {
+        let fixture = RawAuthorityFixture::fresh_genesis();
+        let source_digest = sha256_bytes(b"locked schema-v7 source logical state");
+        let declaration = Some(sha256_bytes(b"official restore declaration"));
+        for genesis_identities in [
+            Vec::new(),
+            vec!["genesis/a".to_owned(), "genesis/b".to_owned()],
+        ] {
+            for disposition in [
+                crate::MigrationDisposition::Observed,
+                crate::MigrationDisposition::Superseded,
+                crate::MigrationDisposition::Refused,
+            ] {
+                let expectations = cardinality_expectations(
+                    genesis_identities.clone(),
+                    source_digest.clone(),
+                    OldRootState::Rootless,
+                    declaration.clone(),
+                );
+                let raw = fixture.v7_cardinality_disposition(
+                    disposition,
+                    genesis_identities.clone(),
+                    source_digest.clone(),
+                    OldRootState::Rootless,
+                    declaration.clone(),
+                );
+                let result = with_verification_brand(|brand| {
+                    let verified = verify_v7_cardinality_disposition(
+                        &brand,
+                        fixture.custody().genesis_a1_bytes(),
+                        &raw,
+                        &expectations,
+                    )?;
+                    assert_eq!(verified.disposition(), disposition);
+                    assert_eq!(verified.genesis_identities(), genesis_identities);
+                    assert_eq!(verified.source_logical_digest(), &source_digest);
+                    assert_eq!(verified.restore_declaration_digest(), declaration.as_ref());
+                    verified.reverify_exact_expectations(&expectations)?;
+                    Ok::<_, AuthorityError>(())
+                });
+                assert_eq!(result, Ok(()));
+            }
+        }
+    }
+
+    #[test]
+    fn v7_cardinality_and_accepted_shapes_refuse() {
+        let fixture = RawAuthorityFixture::fresh_genesis();
+        let source_digest = sha256_bytes(b"schema-v7 source");
+        let root = OldRootState::Rootless;
+
+        let one = vec!["genesis/only".to_owned()];
+        let one_raw = fixture.v7_cardinality_disposition(
+            crate::MigrationDisposition::Observed,
+            one.clone(),
+            source_digest.clone(),
+            root.clone(),
+            None,
+        );
+        assert_eq!(
+            with_verification_brand(|brand| verify_v7_cardinality_disposition(
+                &brand,
+                fixture.custody().genesis_a1_bytes(),
+                &one_raw,
+                &cardinality_expectations(one, source_digest.clone(), root.clone(), None),
+            )
+            .map(|_| ())),
+            Err(AuthorityError::V7CardinalityInvalid)
+        );
+
+        let unsorted = vec!["genesis/b".to_owned(), "genesis/a".to_owned()];
+        let unsorted_raw = fixture.v7_cardinality_disposition(
+            crate::MigrationDisposition::Observed,
+            unsorted.clone(),
+            source_digest.clone(),
+            root.clone(),
+            None,
+        );
+        assert_eq!(
+            with_verification_brand(|brand| verify_v7_cardinality_disposition(
+                &brand,
+                fixture.custody().genesis_a1_bytes(),
+                &unsorted_raw,
+                &V7CardinalityDispositionExpectations {
+                    genesis_identities: unsorted,
+                    source_logical_digest: source_digest.clone(),
+                    old_root_state: root.clone(),
+                    domain: FIXTURE_DOMAIN.to_owned(),
+                    policy_floor: 1,
+                    restore_declaration_digest: None,
+                },
+            )
+            .map(|_| ())),
+            Err(AuthorityError::V7CardinalityInvalid)
+        );
+
+        let multiple = vec!["genesis/a".to_owned(), "genesis/b".to_owned()];
+        let accepted = fixture.v7_cardinality_disposition(
+            crate::MigrationDisposition::Accepted,
+            multiple.clone(),
+            source_digest.clone(),
+            root.clone(),
+            None,
+        );
+        assert_eq!(
+            with_verification_brand(|brand| verify_v7_cardinality_disposition(
+                &brand,
+                fixture.custody().genesis_a1_bytes(),
+                &accepted,
+                &cardinality_expectations(multiple, source_digest, root, None),
+            )
+            .map(|_| ())),
+            Err(AuthorityError::V7CardinalityAcceptedForbidden)
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn v7_cardinality_signature_digest_and_exact_fact_substitutions_refuse() {
+        let fixture = RawAuthorityFixture::fresh_genesis();
+        let identities = vec!["genesis/a".to_owned(), "genesis/b".to_owned()];
+        let source = sha256_bytes(b"schema-v7 exact logical digest");
+        let root = OldRootState::Rooted {
+            trust_anchor_id: sha256_bytes(b"historical root"),
+        };
+        let declaration = Some(sha256_bytes(b"official restore declaration"));
+        let expectations = cardinality_expectations(
+            identities.clone(),
+            source.clone(),
+            root.clone(),
+            declaration.clone(),
+        );
+        let verify = |raw: &V7CardinalityDispositionBytes| {
+            with_verification_brand(|brand| {
+                verify_v7_cardinality_disposition(
+                    &brand,
+                    fixture.custody().genesis_a1_bytes(),
+                    raw,
+                    &expectations,
+                )
+                .map(|_| ())
+            })
+        };
+
+        let invalid_signature = signed_cardinality_disposition(
+            &fixture,
+            crate::MigrationDisposition::Observed,
+            identities.clone(),
+            source.clone(),
+            root.clone(),
+            FIXTURE_DOMAIN,
+            1,
+            declaration.clone(),
+            99,
+        );
+        assert_eq!(
+            verify(&invalid_signature),
+            Err(AuthorityError::V7CardinalityDispositionSignatureInvalid)
+        );
+
+        let valid = fixture.v7_cardinality_disposition(
+            crate::MigrationDisposition::Observed,
+            identities.clone(),
+            source.clone(),
+            root.clone(),
+            declaration.clone(),
+        );
+        let mut digest_value: Value = serde_json::from_slice(valid.as_bytes()).unwrap();
+        digest_value["disposition_digest"] =
+            Value::String(sha256_bytes(b"substituted disposition digest").into_string());
+        let bad_digest =
+            V7CardinalityDispositionBytes::new(canonical_json_bytes(&digest_value).unwrap());
+        assert_eq!(
+            verify(&bad_digest),
+            Err(AuthorityError::V7CardinalityDispositionDigestMismatch)
+        );
+
+        let cases = [
+            (
+                signed_cardinality_disposition(
+                    &fixture,
+                    crate::MigrationDisposition::Observed,
+                    identities.clone(),
+                    sha256_bytes(b"other source"),
+                    root.clone(),
+                    FIXTURE_DOMAIN,
+                    1,
+                    declaration.clone(),
+                    1,
+                ),
+                AuthorityError::V7CardinalitySourceDigestMismatch,
+            ),
+            (
+                signed_cardinality_disposition(
+                    &fixture,
+                    crate::MigrationDisposition::Observed,
+                    identities.clone(),
+                    source.clone(),
+                    OldRootState::Rootless,
+                    FIXTURE_DOMAIN,
+                    1,
+                    declaration.clone(),
+                    1,
+                ),
+                AuthorityError::V7CardinalityOldRootMismatch,
+            ),
+            (
+                signed_cardinality_disposition(
+                    &fixture,
+                    crate::MigrationDisposition::Observed,
+                    identities.clone(),
+                    source.clone(),
+                    root.clone(),
+                    "other/backend",
+                    1,
+                    declaration.clone(),
+                    1,
+                ),
+                AuthorityError::DomainMismatch,
+            ),
+            (
+                signed_cardinality_disposition(
+                    &fixture,
+                    crate::MigrationDisposition::Observed,
+                    identities.clone(),
+                    source.clone(),
+                    root.clone(),
+                    FIXTURE_DOMAIN,
+                    2,
+                    declaration.clone(),
+                    1,
+                ),
+                AuthorityError::PolicyVersionUnsupported,
+            ),
+            (
+                signed_cardinality_disposition(
+                    &fixture,
+                    crate::MigrationDisposition::Observed,
+                    identities.clone(),
+                    source.clone(),
+                    root.clone(),
+                    FIXTURE_DOMAIN,
+                    1,
+                    Some(sha256_bytes(b"other declaration")),
+                    1,
+                ),
+                AuthorityError::RestoreDeclarationMismatch,
+            ),
+            (
+                signed_cardinality_disposition(
+                    &fixture,
+                    crate::MigrationDisposition::Observed,
+                    vec!["genesis/a".to_owned(), "genesis/c".to_owned()],
+                    source.clone(),
+                    root.clone(),
+                    FIXTURE_DOMAIN,
+                    1,
+                    declaration,
+                    1,
+                ),
+                AuthorityError::V7CardinalitySetMismatch,
+            ),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(verify(&raw), Err(expected));
+        }
     }
 
     #[test]

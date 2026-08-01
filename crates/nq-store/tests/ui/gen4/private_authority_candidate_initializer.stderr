@@ -1,0 +1,12 @@
+error[E0624]: associated function `initialize_runtime_authority_candidate` is private
+ --> tests/ui/gen4/private_authority_candidate_initializer.rs:4:20
+  |
+4 |       let _ = Store::initialize_runtime_authority_candidate("ungoverned.db");
+  |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private associated function
+  |
+ ::: src/lib.rs
+  |
+  | /     pub(crate) fn initialize_runtime_authority_candidate(
+  | |         path: impl AsRef<Path>,
+  | |     ) -> Result<Self, StoreError> {
+  | |_________________________________- private associated function defined here

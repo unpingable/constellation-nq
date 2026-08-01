@@ -8589,7 +8589,7 @@ mod tests {
     fn startup_inventory_and_protected_failure_read_preserve_terminal_bytes() {
         let directory = tempdir().expect("directory");
         let database = directory.path().join("nq.db");
-        let store = Store::initialize(&database).expect("store");
+        let store = Store::initialize_unqualified_storage(&database).expect("store");
         let dependencies = b"exact dependency closure";
         let reservation = reservation(dependencies);
         let launch = digest("launch");

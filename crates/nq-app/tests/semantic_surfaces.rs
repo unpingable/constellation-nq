@@ -694,7 +694,7 @@ struct TransportOutcomes {
 
 #[allow(clippy::too_many_lines)]
 fn seed_transport_store(database: &Path) -> TransportOutcomes {
-    let mut store = Store::initialize(database).expect("initialize store");
+    let mut store = Store::initialize_unqualified_storage(database).expect("initialize store");
     let profile_digest = append_fixture_descriptor(&mut store, PROFILE_ID, 1);
     let conformance_digest = profile_digest.clone();
     let host_digest = append_fixture_descriptor(&mut store, "nq.host", 1);

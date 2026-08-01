@@ -1756,7 +1756,7 @@ mod tests {
     async fn v3_findings_api_preserves_same_code_evaluation_refusals() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let database = directory.path().join("nq.db");
-        let mut store = Store::initialize(&database).expect("initialize store");
+        let mut store = Store::initialize_unqualified_storage(&database).expect("initialize store");
         let fixtures = [
             seed_present_then_refused_evaluation(
                 &mut store,
@@ -2006,7 +2006,7 @@ mod tests {
     async fn v2_api_preserves_same_code_refusals_and_v1_route_stays_v1() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let database = directory.path().join("nq.db");
-        let mut store = Store::initialize(&database).expect("initialize store");
+        let mut store = Store::initialize_unqualified_storage(&database).expect("initialize store");
         let profile_digest = append_fixture_descriptor(&mut store, "nq.conformance", 1);
         let conformance_digest = profile_digest.clone();
         let host_digest = append_fixture_descriptor(&mut store, "nq.host", 1);

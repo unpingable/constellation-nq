@@ -1,25 +1,33 @@
-error[E0521]: borrowed data escapes outside of closure
-  --> tests/ui/gen4/session_from_another_store.rs:16:13
+error: lifetime may not live long enough
+  --> tests/ui/gen4/session_from_another_store.rs:14:5
    |
-14 |     first_store.with_runtime_authority_writer_session(|_, first_session| {
-   |                                                           ------------- `first_session` declared here, outside of the closure body
-15 |         second_store.with_runtime_authority_writer_session(|second_brand, _| {
-   |                                                             ------------ `second_brand` is a reference that is only valid in the closure body
-16 |             require_same_store_brand(second_brand, first_session);
-   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `second_brand` escapes the closure body here
+10 | fn session_from_first_used_for_second<'store, 'first_store, 'second_store>(
+   |                                               ------------  ------------- lifetime `'second_store` defined here
+   |                                               |
+   |                                               lifetime `'first_store` defined here
+...
+14 |     require_same_store_brand(second_store_brand, first_session);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ argument requires that `'first_store` must outlive `'second_store`
    |
+   = help: consider adding the following bound: `'first_store: 'second_store`
+   = note: requirement occurs because of the type `VerificationBrand<'_>`, which makes the generic argument `'_` invariant
+   = note: the struct `VerificationBrand<'id>` is invariant over the parameter `'id`
+   = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance
+
+error: lifetime may not live long enough
+  --> tests/ui/gen4/session_from_another_store.rs:14:5
+   |
+10 | fn session_from_first_used_for_second<'store, 'first_store, 'second_store>(
+   |                                               ------------  ------------- lifetime `'second_store` defined here
+   |                                               |
+   |                                               lifetime `'first_store` defined here
+...
+14 |     require_same_store_brand(second_store_brand, first_session);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ argument requires that `'second_store` must outlive `'first_store`
+   |
+   = help: consider adding the following bound: `'second_store: 'first_store`
    = note: requirement occurs because of a mutable reference to `StoreWriterSession<'_, VerificationBrand<'_>>`
    = note: mutable references are invariant over their type parameter
    = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance
 
-error[E0521]: borrowed data escapes outside of closure
-  --> tests/ui/gen4/session_from_another_store.rs:16:13
-   |
-14 |     first_store.with_runtime_authority_writer_session(|_, first_session| {
-   |                                                        - has type `&VerificationBrand<'1>`
-15 |         second_store.with_runtime_authority_writer_session(|second_brand, _| {
-16 |             require_same_store_brand(second_brand, first_session);
-   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   |             |
-   |             a temporary borrow escapes the closure body here
-   |             argument requires that `'1` must outlive `'static`
+help: `'first_store` and `'second_store` must be the same: replace one with the other

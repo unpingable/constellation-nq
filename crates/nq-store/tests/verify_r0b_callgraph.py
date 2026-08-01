@@ -765,6 +765,208 @@ def evidence_construction_sites(
     return sites
 
 
+def require_additional_sealed_evidence(
+    *,
+    sources: Sequence[RustSource],
+    functions: Sequence[Function],
+    evidence_type: str,
+    verifier: Function,
+    macro_generated: bool = False,
+) -> None:
+    """Prove another authority result is privately minted by one verifier."""
+    definitions = [
+        (source, index)
+        for source in sources
+        for index, token in enumerate(source.tokens[:-1])
+        if token.value == "struct"
+        and source.tokens[index + 1].value == evidence_type
+    ]
+    if macro_generated:
+        require(
+            not definitions,
+            f"macro-generated sealed evidence {evidence_type} also has a direct struct definition",
+        )
+        macro_sources = [
+            source
+            for source in sources
+            if source.identifier_occurrences("verified_event_type")
+        ]
+        require(
+            len(macro_sources) == 1,
+            "verified event macro definition/invocations are absent or split across sources",
+        )
+        macro_code = compact_tokens(macro_sources[0].tokens)
+        require(
+            "macro_rules!verified_event_type" in macro_code
+            and "pubstruct$name<'id>" in macro_code
+            and "pub(crate)fnnew(" in macro_code
+            and "_invariant:PhantomData<fn(&'idmut())->&'idmut()>" in macro_code
+            and f"{evidence_type},re{verifier.name}" in macro_code,
+            f"{evidence_type} is not emitted by the sealed invariant verified-event macro",
+        )
+    else:
+        require(
+            len(definitions) == 1,
+            f"expected exactly one sealed evidence definition {evidence_type}; found {len(definitions)}",
+        )
+    if macro_generated:
+        definition_source = None
+        definition_index = None
+    else:
+        definition_source, definition_index = definitions[0]
+    if not macro_generated:
+        assert definition_source is not None and definition_index is not None
+        definition_depth = definition_source.depths[definition_index]
+        definition_open = next(
+            (
+                index
+                for index in range(definition_index + 2, len(definition_source.tokens))
+                if definition_source.depths[index] == definition_depth
+                and definition_source.tokens[index].value == "{"
+            ),
+            None,
+        )
+        require(definition_open is not None, f"{evidence_type} has no field body")
+        assert definition_open is not None
+        definition_close = definition_source.pairs[definition_open]
+        require(
+            not any(
+                definition_source.tokens[index].value == "pub"
+                and definition_source.depths[index] == definition_depth + 1
+                and not (
+                    index + 1 < definition_close
+                    and definition_source.tokens[index + 1].value == "("
+                )
+                for index in range(definition_open + 1, definition_close)
+            ),
+            f"{evidence_type} exposes a public field",
+        )
+
+    product_identities = {function_identity(function) for function in functions}
+    sites = [
+        site
+        for site in evidence_construction_sites(sources, evidence_type)
+        if site[1] is None or function_identity(site[1]) in product_identities
+    ]
+    require(sites, f"no production construction of {evidence_type} was found")
+    require(
+        all(
+            function is not None
+            and function_identity(function) == function_identity(verifier)
+            for _, function, _, _ in sites
+        ),
+        f"{evidence_type} construction escapes {verifier.qualified_name}: "
+        + ", ".join(
+            f"{source.path}:{line} {kind}" for source, _, line, kind in sites
+        ),
+    )
+    constructors = [
+        function
+        for function in functions
+        if function.owner == evidence_type
+        and function.name in ("new", "from", "from_parts", "build", "default", "unchecked")
+    ]
+    if macro_generated:
+        callers = [
+            caller
+            for caller, call in direct_callers(functions, "new")
+            if call.path == f"{evidence_type}::new"
+        ]
+        require(
+            callers
+            and all(
+                function_identity(caller) == function_identity(verifier)
+                for caller in callers
+            ),
+            f"macro-generated {evidence_type} constructor callers escape {verifier.qualified_name}: "
+            + (", ".join(caller.location for caller in callers) or "none"),
+        )
+    else:
+        require(constructors, f"{evidence_type} has no structurally visible constructor")
+        for constructor in constructors:
+            require(
+                constructor.name != "unchecked" and constructor.visibility != "pub",
+                f"{evidence_type} exposes forbidden constructor {constructor.qualified_name}",
+            )
+            callers = [
+                caller
+                for caller, call in direct_callers(functions, constructor.name)
+                if call.path == f"{evidence_type}::{constructor.name}"
+            ]
+            require(
+                callers
+                and all(
+                    function_identity(caller) == function_identity(verifier)
+                    for caller in callers
+                ),
+                f"{constructor.qualified_name} callers escape {verifier.qualified_name}: "
+                + (", ".join(caller.location for caller in callers) or "none"),
+            )
+    for forbidden_trait in ("Clone", "Copy", "Default", "Serialize", "Deserialize"):
+        require(
+            not any(
+                scope.owner == evidence_type and scope.trait_name == forbidden_trait
+                for source in sources
+                for scope in source.impl_scopes
+            ),
+            f"{evidence_type} implements forbidden trait {forbidden_trait}",
+        )
+        if not macro_generated:
+            assert definition_source is not None and definition_index is not None
+            require(
+                not any(
+                    forbidden_trait in attribute
+                    for attribute in definition_source.item_attributes(definition_index)
+                ),
+                f"{evidence_type} derives forbidden trait {forbidden_trait}",
+            )
+
+
+def require_test_support_confinement(
+    sources: Sequence[RustSource],
+    functions: Sequence[Function],
+    protected_call_names: set[str],
+    protected_signature_types: set[str],
+) -> None:
+    """Feature-enabled fixtures may expose raw inputs, never sealed standing."""
+    feature_sources = [
+        source
+        for source in sources
+        if source.path.name == "test_support.rs"
+        or "test_support" in source.path.parts
+    ]
+    for function in functions:
+        if function.source not in feature_sources or function.cfg_test:
+            continue
+        if function.visibility == "pub":
+            leaked = sorted(
+                name
+                for name in protected_signature_types
+                if name in function.signature_code
+            )
+            require(
+                not leaked,
+                f"feature test-support API {function.location} exposes sealed type(s): "
+                + ", ".join(leaked),
+            )
+        reached = sorted(
+            {call.name for call in function.calls() if call.name in protected_call_names}
+        )
+        require(
+            not reached,
+            f"feature test-support function {function.location} directly reaches protected authority operation(s): "
+            + ", ".join(reached),
+        )
+    for source in feature_sources:
+        for export in source.reexports:
+            leaked = sorted(set(export.names) & protected_signature_types)
+            require(
+                not leaked,
+                f"feature test-support re-export {export.location} exposes sealed type(s): "
+                + ", ".join(leaked),
+            )
+
+
 def verify_symbol_is_direct_only(
     sources: Sequence[RustSource],
     functions: Sequence[Function],
@@ -851,6 +1053,26 @@ def verify_gen4(
     session = selector_function(
         functions, settings["typed_session_method"], "typed_session_method"
     )
+    classification_bare = selector_function(
+        functions,
+        settings["bare_classification_helper"],
+        "bare_classification_helper",
+    )
+    classification_session = selector_function(
+        functions,
+        settings["typed_classification_method"],
+        "typed_classification_method",
+    )
+    cardinality_bare = selector_function(
+        functions,
+        settings["bare_cardinality_classification_helper"],
+        "bare_cardinality_classification_helper",
+    )
+    cardinality_session = selector_function(
+        functions,
+        settings["typed_cardinality_classification_method"],
+        "typed_cardinality_classification_method",
+    )
     branded_constructor = selector_function(
         functions,
         settings["branded_session_constructor"],
@@ -864,6 +1086,16 @@ def verify_gen4(
     brand_generator = selector_function(
         functions, settings["brand_generator"], "brand_generator"
     )
+    authority_candidate_initializer = selector_function(
+        functions,
+        settings["authority_candidate_initializer"],
+        "authority_candidate_initializer",
+    )
+    unqualified_storage_initializer = selector_function(
+        functions,
+        settings["unqualified_storage_initializer"],
+        "unqualified_storage_initializer",
+    )
     require(bare.trait_owner is None, "bare Store helper is supplied by a trait")
     require(
         session.trait_owner is None,
@@ -874,8 +1106,28 @@ def verify_gen4(
         "typed session establishment is not the public typed API",
     )
     require(
+        classification_session.trait_owner is None
+        and classification_session.visibility == "pub",
+        "typed migration classification is not a public inherent session API",
+    )
+    require(
+        cardinality_session.trait_owner is None
+        and cardinality_session.visibility == "pub",
+        "typed cardinality classification is not a public inherent session API",
+    )
+    require(
         bare.visibility in ("private", "pub(crate)"),
         "bare Store helper is externally public",
+    )
+    require(
+        classification_bare.trait_owner is None
+        and classification_bare.visibility in ("private", "pub(crate)"),
+        "bare migration classification helper is externally public or trait-supplied",
+    )
+    require(
+        cardinality_bare.trait_owner is None
+        and cardinality_bare.visibility in ("private", "pub(crate)"),
+        "bare cardinality classification helper is externally public or trait-supplied",
     )
     require(
         branded_constructor.trait_owner is None
@@ -883,8 +1135,8 @@ def verify_gen4(
         "branded StoreWriterSession construction is not crate-private inherent plumbing",
     )
     require(
-        branded_scope.trait_owner is None and branded_scope.visibility == "pub",
-        "Store-owned branded writer scope is not the public inherent API",
+        branded_scope.trait_owner is None and branded_scope.visibility == "pub(crate)",
+        "Store-owned branded writer scope is not crate-private inherent plumbing",
     )
     scope_signature_end = branded_scope.body_open_token or branded_scope.end_token + 1
     scope_signature = compact_tokens(
@@ -930,10 +1182,109 @@ def verify_gen4(
         "Store-owned HRTB scope must mint one fresh brand and exactly one branded session",
     )
 
-    protected_definitions = [
-        function for function in functions if function.name in (bare.name, session.name)
+    require(
+        authority_candidate_initializer.trait_owner is None
+        and authority_candidate_initializer.visibility == "pub(crate)",
+        "runtime-authority candidate initialization is not crate-private inherent plumbing",
+    )
+    require(
+        unqualified_storage_initializer.trait_owner is None
+        and unqualified_storage_initializer.visibility == "pub",
+        "explicit storage-only initialization is not the public unqualified lifecycle",
+    )
+    candidate_calls = direct_callers(functions, authority_candidate_initializer.name)
+    candidate_initializer_caller = selector_function(
+        functions,
+        settings["authority_candidate_initializer_caller"],
+        "authority_candidate_initializer_caller",
+    )
+    require(
+        len(candidate_calls) == 1
+        and function_identity(candidate_calls[0][0])
+        == function_identity(candidate_initializer_caller),
+        "private runtime-authority candidate initializer must have exactly one production caller, HostRoleRuntime::initialize; found "
+        + (", ".join(caller.location for caller, _ in candidate_calls) or "none"),
+    )
+    for initializer in (authority_candidate_initializer, unqualified_storage_initializer):
+        reached = {
+            call.name
+            for call in initializer.calls()
+            if call.name
+            in {
+                bare.name,
+                session.name,
+                classification_bare.name,
+                classification_session.name,
+                cardinality_bare.name,
+                cardinality_session.name,
+                branded_scope.name,
+                branded_constructor.name,
+            }
+        }
+        require(
+            not reached,
+            f"initializer {initializer.qualified_name} directly reaches authority establishment: "
+            + ", ".join(sorted(reached)),
+        )
+    raw_store_initializers = [
+        function
+        for function in functions
+        if function.owner == "Store" and function.name == "initialize"
     ]
-    expected_definitions = {function_identity(bare), function_identity(session)}
+    require(
+        len(raw_store_initializers) <= 1,
+        "Store exposes multiple raw initialize definitions",
+    )
+    if raw_store_initializers:
+        raw_initializer = raw_store_initializers[0]
+        compact_attributes = {
+            attribute.replace(" ", "") for attribute in raw_initializer.attributes
+        }
+        require(
+            raw_initializer.visibility == "pub"
+            and 'cfg(feature="test-support")' in compact_attributes,
+            "Store::initialize may exist only as an explicit test-support feature alias",
+        )
+        require(
+            len(raw_initializer.calls(unqualified_storage_initializer.name)) == 1
+            and not any(
+                raw_initializer.calls(name)
+                for name in (
+                    bare.name,
+                    session.name,
+                    classification_bare.name,
+                    classification_session.name,
+                    cardinality_bare.name,
+                    cardinality_session.name,
+                    branded_scope.name,
+                    branded_constructor.name,
+                    authority_candidate_initializer.name,
+                )
+            ),
+            "feature-only Store::initialize is not a one-hop storage-only alias",
+        )
+
+    protected_definitions = [
+        function
+        for function in functions
+        if function.name
+        in (
+            bare.name,
+            session.name,
+            classification_bare.name,
+            classification_session.name,
+            cardinality_bare.name,
+            cardinality_session.name,
+        )
+    ]
+    expected_definitions = {
+        function_identity(bare),
+        function_identity(session),
+        function_identity(classification_bare),
+        function_identity(classification_session),
+        function_identity(cardinality_bare),
+        function_identity(cardinality_session),
+    }
     require(
         {function_identity(function) for function in protected_definitions}
         == expected_definitions,
@@ -952,6 +1303,38 @@ def verify_gen4(
         "bare Store helper must have exactly one direct production caller, the typed session method; found "
         + (", ".join(caller.location for caller, _ in bare_calls) or "none"),
     )
+    classification_bare_calls = [
+        (caller, call)
+        for caller, call in direct_callers(functions, classification_bare.name)
+        if call.receiver == bare_receiver
+        or call.path.startswith(f"{classification_bare.owner}::")
+    ]
+    require(
+        len(classification_bare_calls) == 1
+        and function_identity(classification_bare_calls[0][0])
+        == function_identity(classification_session),
+        "bare migration classification helper must have exactly one production caller, the typed session method; found "
+        + (
+            ", ".join(caller.location for caller, _ in classification_bare_calls)
+            or "none"
+        ),
+    )
+    cardinality_bare_calls = [
+        (caller, call)
+        for caller, call in direct_callers(functions, cardinality_bare.name)
+        if call.receiver == bare_receiver
+        or call.path.startswith(f"{cardinality_bare.owner}::")
+    ]
+    require(
+        len(cardinality_bare_calls) == 1
+        and function_identity(cardinality_bare_calls[0][0])
+        == function_identity(cardinality_session),
+        "bare cardinality classification helper must have exactly one production caller, the typed session method; found "
+        + (
+            ", ".join(caller.location for caller, _ in cardinality_bare_calls)
+            or "none"
+        ),
+    )
     compile_confined_calls = [
         (function, call)
         for source in sources
@@ -966,11 +1349,15 @@ def verify_gen4(
         for call in function.calls(bare.name)
     )
 
-    allowed_callers = [
-        selector_function(functions, selector, f"allowed_session_callers[{index}]")
-        for index, selector in enumerate(settings["allowed_session_callers"])
+    allowed_establishment_callers = [
+        selector_function(
+            functions, selector, f"allowed_establishment_callers[{index}]"
+        )
+        for index, selector in enumerate(settings["allowed_establishment_callers"])
     ]
-    allowed_identities = {function_identity(function) for function in allowed_callers}
+    allowed_establishment_identities = {
+        function_identity(function) for function in allowed_establishment_callers
+    }
     session_calls = [
         (caller, call)
         for caller, call in direct_callers(functions, session.name)
@@ -978,11 +1365,11 @@ def verify_gen4(
     ]
     require(
         {function_identity(caller) for caller, _ in session_calls}
-        == allowed_identities,
+        == allowed_establishment_identities,
         "typed session establishment callers differ from named initialize/migration allowlist: "
         + (", ".join(caller.location for caller, _ in session_calls) or "none"),
     )
-    for caller in allowed_callers:
+    for caller in allowed_establishment_callers:
         require(
             sum(
                 function_identity(found) == function_identity(caller)
@@ -991,20 +1378,92 @@ def verify_gen4(
             == 1,
             f"named establishment caller {caller.qualified_name} must call the typed API exactly once",
         )
+    allowed_scope_callers = [
+        selector_function(
+            functions, selector, f"allowed_branded_scope_callers[{index}]"
+        )
+        for index, selector in enumerate(settings["allowed_branded_scope_callers"])
+    ]
+    allowed_scope_identities = {
+        function_identity(function) for function in allowed_scope_callers
+    }
     scope_calls = direct_callers(functions, branded_scope.name)
     require(
-        {function_identity(caller) for caller, _ in scope_calls} == allowed_identities,
-        "Store-owned HRTB scope callers differ from named initialize/migration allowlist: "
+        {function_identity(caller) for caller, _ in scope_calls}
+        == allowed_scope_identities,
+        "Store-owned HRTB scope callers differ from named initialize/migrate/classify allowlist: "
         + (", ".join(caller.location for caller, _ in scope_calls) or "none"),
     )
-    for caller in allowed_callers:
+    for caller in allowed_scope_callers:
         require(
             sum(
                 function_identity(found) == function_identity(caller)
                 for found, _ in scope_calls
             )
             == 1,
-            f"named establishment caller {caller.qualified_name} must enter the Store-owned HRTB scope exactly once",
+            f"named authority caller {caller.qualified_name} must enter the Store-owned HRTB scope exactly once",
+        )
+    allowed_classification_callers = [
+        selector_function(
+            functions, selector, f"allowed_classification_callers[{index}]"
+        )
+        for index, selector in enumerate(settings["allowed_classification_callers"])
+    ]
+    allowed_classification_identities = {
+        function_identity(function) for function in allowed_classification_callers
+    }
+    classification_calls = [
+        (caller, call)
+        for caller, call in direct_callers(functions, classification_session.name)
+        if function_identity(caller) != function_identity(classification_session)
+    ]
+    require(
+        {function_identity(caller) for caller, _ in classification_calls}
+        == allowed_classification_identities,
+        "typed migration classification callers differ from named classify allowlist: "
+        + (", ".join(caller.location for caller, _ in classification_calls) or "none"),
+    )
+    for caller in allowed_classification_callers:
+        require(
+            sum(
+                function_identity(found) == function_identity(caller)
+                for found, _ in classification_calls
+            )
+            == 1,
+            f"named classification caller {caller.qualified_name} must call the typed API exactly once",
+        )
+    allowed_cardinality_callers = [
+        selector_function(
+            functions,
+            selector,
+            f"allowed_cardinality_classification_callers[{index}]",
+        )
+        for index, selector in enumerate(
+            settings["allowed_cardinality_classification_callers"]
+        )
+    ]
+    allowed_cardinality_identities = {
+        function_identity(function) for function in allowed_cardinality_callers
+    }
+    cardinality_calls = [
+        (caller, call)
+        for caller, call in direct_callers(functions, cardinality_session.name)
+        if function_identity(caller) != function_identity(cardinality_session)
+    ]
+    require(
+        {function_identity(caller) for caller, _ in cardinality_calls}
+        == allowed_cardinality_identities,
+        "typed cardinality classification callers differ from named classify allowlist: "
+        + (", ".join(caller.location for caller, _ in cardinality_calls) or "none"),
+    )
+    for caller in allowed_cardinality_callers:
+        require(
+            sum(
+                function_identity(found) == function_identity(caller)
+                for found, _ in cardinality_calls
+            )
+            == 1,
+            f"named cardinality caller {caller.qualified_name} must call the typed API exactly once",
         )
 
     evidence_type = settings["evidence_type"]
@@ -1042,6 +1501,10 @@ def verify_gen4(
         )
         if token.value == "pub"
         and definition_source.depths[index] == definition_depth + 1
+        and not (
+            index + 1 < definition_close
+            and definition_source.tokens[index + 1].value == "("
+        )
     ]
     require(
         not public_fields,
@@ -1121,6 +1584,29 @@ def verify_gen4(
             ),
             f"{evidence_type} derives forbidden trait {forbidden_trait}",
         )
+    additional_sealed_verifiers: list[Function] = []
+    additional_sealed_types: set[str] = set()
+    for index, sealed in enumerate(settings["additional_sealed_evidence"]):
+        require(
+            isinstance(sealed, dict)
+            and isinstance(sealed.get("type"), str)
+            and isinstance(sealed.get("verifier"), dict),
+            f"additional_sealed_evidence[{index}] is malformed",
+        )
+        additional_verifier = selector_function(
+            functions,
+            sealed["verifier"],
+            f"additional_sealed_evidence[{index}].verifier",
+        )
+        require_additional_sealed_evidence(
+            sources=sources,
+            functions=functions,
+            evidence_type=sealed["type"],
+            verifier=additional_verifier,
+            macro_generated=sealed.get("macro_generated", False),
+        )
+        additional_sealed_verifiers.append(additional_verifier)
+        additional_sealed_types.add(sealed["type"])
 
     forging_identifiers = set(settings["forbidden_authority_forging_identifiers"])
     authority_prefixes = tuple(settings["authority_source_prefixes"])
@@ -1154,6 +1640,29 @@ def verify_gen4(
         functions,
         protected_override=(bare, session, bare_receiver),
     )
+    storage_only_identities = {function_identity(unqualified_storage_initializer)} | {
+        function_identity(function) for function in raw_store_initializers
+    }
+    for protected_target in (
+        bare,
+        classification_bare,
+        cardinality_bare,
+        branded_scope,
+        *family_helpers,
+    ):
+        protected_reachers = structural_reverse_reachable(
+            (protected_target,), reverse_edges
+        )
+        storage_reachers = [
+            function
+            for function in protected_reachers
+            if function_identity(function) in storage_only_identities
+        ]
+        require(
+            not storage_reachers,
+            f"storage-only initialization transitively reaches {protected_target.qualified_name}: "
+            + ", ".join(function.location for function in storage_reachers),
+        )
     for helper in family_helpers:
         require(
             helper.visibility in ("private", "pub(crate)"),
@@ -1199,7 +1708,7 @@ def verify_gen4(
         )
 
     reached = structural_reverse_reachable((bare,), reverse_edges)
-    allowed_reached = expected_definitions | allowed_identities
+    allowed_reached = expected_definitions | allowed_establishment_identities
     forbidden_fragments = settings["forbidden_reachability_name_fragments"]
     offenders = [
         function
@@ -1228,6 +1737,30 @@ def verify_gen4(
     verify_symbol_is_direct_only(
         sources,
         functions,
+        classification_bare.name,
+        compile_confined_paths,
+    )
+    verify_symbol_is_direct_only(
+        sources,
+        functions,
+        classification_session.name,
+        compile_confined_paths,
+    )
+    verify_symbol_is_direct_only(
+        sources,
+        functions,
+        cardinality_bare.name,
+        compile_confined_paths,
+    )
+    verify_symbol_is_direct_only(
+        sources,
+        functions,
+        cardinality_session.name,
+        compile_confined_paths,
+    )
+    verify_symbol_is_direct_only(
+        sources,
+        functions,
         branded_constructor.name,
         compile_confined_paths,
     )
@@ -1239,17 +1772,35 @@ def verify_gen4(
     )
     for source in sources:
         for export in source.reexports:
+            leaked = sorted(
+                set(export.names)
+                & {
+                    bare.name,
+                    classification_bare.name,
+                    cardinality_bare.name,
+                    branded_constructor.name,
+                    branded_scope.name,
+                    authority_candidate_initializer.name,
+                }
+            )
             require(
-                bare.name not in export.names,
-                f"establishment function is publicly re-exported at {export.location}",
+                not leaked,
+                f"private authority plumbing is publicly re-exported at {export.location}: "
+                + ", ".join(leaked),
             )
     for protected in (
         bare,
         session,
+        classification_bare,
+        classification_session,
+        cardinality_bare,
+        cardinality_session,
         branded_constructor,
         branded_scope,
         brand_generator,
+        authority_candidate_initializer,
         *verifiers,
+        *additional_sealed_verifiers,
         *family_helpers,
     ):
         signature = protected.signature_code
@@ -1269,9 +1820,14 @@ def verify_gen4(
     protected_names = {
         bare.name,
         session.name,
+        classification_bare.name,
+        classification_session.name,
+        cardinality_bare.name,
+        cardinality_session.name,
         branded_constructor.name,
         branded_scope.name,
         evidence_type,
+        *additional_sealed_types,
         *(helper.name for helper in family_helpers),
     }
     for package in packages:
@@ -1285,6 +1841,29 @@ def verify_gen4(
                     ),
                     f"{package.name} feature {feature} exposes an alternate establishment surface",
                 )
+
+    require_test_support_confinement(
+        sources,
+        functions,
+        {
+            bare.name,
+            session.name,
+            classification_bare.name,
+            classification_session.name,
+            cardinality_bare.name,
+            cardinality_session.name,
+            branded_constructor.name,
+            branded_scope.name,
+            authority_candidate_initializer.name,
+            *(helper.name for helper in family_helpers),
+        },
+        {
+            "VerificationBrand",
+            "StoreWriterSession",
+            evidence_type,
+            *additional_sealed_types,
+        },
+    )
 
     direction = settings["dependency_direction"]
     packages_by_name = {package.name: package for package in packages}
@@ -1303,7 +1882,40 @@ def verify_gen4(
                 forbidden not in dependencies,
                 f"dependency direction violation: {package_name} -> {forbidden}",
             )
-    return f"ACTIVE/PASS ({len(compile_confined_calls)} compile-confined direct test call(s))"
+    allowed_site_inventory = {
+        "bare_establishment": bare.location,
+        "bare_establishment_caller": session.location,
+        "establishment_callers": sorted(
+            function.location for function in allowed_establishment_callers
+        ),
+        "bare_migration_classification": classification_bare.location,
+        "bare_migration_classification_caller": classification_session.location,
+        "migration_classification_callers": sorted(
+            function.location for function in allowed_classification_callers
+        ),
+        "bare_cardinality_classification": cardinality_bare.location,
+        "bare_cardinality_classification_caller": cardinality_session.location,
+        "cardinality_classification_callers": sorted(
+            function.location for function in allowed_cardinality_callers
+        ),
+        "branded_scope": branded_scope.location,
+        "branded_scope_callers": sorted(
+            function.location for function in allowed_scope_callers
+        ),
+        "authority_candidate_initializer": authority_candidate_initializer.location,
+        "sealed_verifiers": sorted(
+            function.location for function in (*verifiers, *additional_sealed_verifiers)
+        ),
+    }
+    inventory_json = json.dumps(
+        allowed_site_inventory, sort_keys=True, separators=(",", ":")
+    )
+    inventory_digest = hashlib.sha256(inventory_json.encode("utf-8")).hexdigest()
+    return (
+        f"ACTIVE/PASS ({len(compile_confined_calls)} compile-confined direct test call(s); "
+        f"allowed-site-inventory-sha256={inventory_digest}; "
+        f"inventory={inventory_json})"
+    )
 
 
 def main() -> int:

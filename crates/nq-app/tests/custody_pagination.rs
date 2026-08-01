@@ -207,7 +207,7 @@ fn cli_pages_same_code_refusals_without_losing_payloads() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let database = directory.path().join("nq.db");
     let config = write_config(directory.path(), &database);
-    let mut store = Store::initialize(&database).expect("initialize store");
+    let mut store = Store::initialize_unqualified_storage(&database).expect("initialize store");
     let profile_digest = append_profile(&mut store);
     let transient = seed_helper_refusal(
         &mut store,

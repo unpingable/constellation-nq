@@ -5,11 +5,19 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+test-support = [
+    "nq-host-role-dependency-custody/test-support",
+    "nq-runtime-dependency-authority/test-support",
+]
+
 [dependencies]
 chrono.workspace = true
+ed25519-dalek.workspace = true
 hex.workspace = true
 libc.workspace = true
-nix.workspace = true
+nix = { workspace = true, features = ["time"] }
 nq-host-role-contract = { path = "../nq-host-role-contract" }
 nq-host-role-dependency-custody = { path = "../nq-host-role-dependency-custody" }
 nq-protocol = { path = "../nq-protocol" }

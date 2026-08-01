@@ -2,7 +2,7 @@
 //!
 //! This module is available only through the `test-support` feature. It
 //! constructs authenticated dependency material and then delegates opaque
-//! invocation preparation to [`crate::HostRoleRuntime`]. Nothing here grants
+//! invocation preparation to [`super::HostRoleRuntime`]. Nothing here grants
 //! production authority, bypasses graph validation, fabricates an opaque
 //! prepared token, or ships in the default feature set.
 
@@ -16,13 +16,54 @@ use nq_host_role_contract::{
 use nq_protocol::{Sha256Digest, canonical_json_bytes, semantic_digest, sha256_bytes};
 use serde_json::{Map, Value, json};
 
+use nq_runtime_dependency_authority::test_support::{
+    FIXTURE_DOMAIN, FIXTURE_HOST_ROLE, FIXTURE_RESIDENT_GENERATION, FIXTURE_RESIDENT_ID,
+    FIXTURE_ROLE_MANIFEST_GENERATION, RawAuthorityFixture,
+};
+use nq_store::Store;
+
 use super::{
-    AppendRecord, AppendRequest, NativeDeadlinePrelaunchRequest, PROVIDER_INTAKE_SCHEMA,
-    RuntimeDependencies, cohort_semantics_digest, seal_semantic_identity,
+    AppendRecord, AppendRequest, HostRoleRuntime, NativeDeadlinePrelaunchRequest,
+    PROVIDER_INTAKE_SCHEMA, RuntimeAuthorityResidentBinding, RuntimeDependencies,
+    cohort_semantics_digest, seal_semantic_identity,
 };
 const RECORDS: &str =
     include_str!("../../nq-host-role-contract/assets/host-role-runtime-records.v1.json");
 const FIXTURE_ANCHOR: &str = "2026-07-28T22:02:00Z";
+
+/// Initialize a fully governed Gen4 Store through the named
+/// [`HostRoleRuntime::initialize`] route, then return the established Store for
+/// downstream test operations.
+///
+/// This helper cannot expose the Store-private branded authority scope. Its
+/// self-consistent fixture bundle exercises the chartered fresh-file nonclaim
+/// and earns no predetermined-actor or estate-custody claim.
+///
+/// # Panics
+///
+/// Panics if the repository-owned authenticated dependency or authority
+/// fixtures no longer establish through the production runtime path.
+#[must_use]
+pub fn initialized_gen4_store(path: impl AsRef<std::path::Path>) -> Store {
+    let dependencies =
+        authenticated_runtime_dependencies(91, Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let anchor = dependencies
+        .custody()
+        .trust_anchor_id()
+        .expect("fixture trust anchor");
+    let authority = RawAuthorityFixture::fresh_genesis_with_anchor(anchor);
+    let resident = RuntimeAuthorityResidentBinding {
+        resident_identity: FIXTURE_RESIDENT_ID.to_owned(),
+        resident_generation: FIXTURE_RESIDENT_GENERATION,
+        host_role: FIXTURE_HOST_ROLE.to_owned(),
+        role_manifest_generation: FIXTURE_ROLE_MANIFEST_GENERATION,
+        domain: FIXTURE_DOMAIN.to_owned(),
+        policy_floor: 1,
+    };
+    HostRoleRuntime::initialize(path, dependencies, &authority.custody(), &resident)
+        .expect("named Gen4 runtime initialization")
+        .into_store()
+}
 
 /// Exact native compiled-profile fields required by the governed seam.
 #[derive(Clone, Debug)]
@@ -1187,7 +1228,12 @@ fn transitive_runtime_closure(
 }
 
 #[allow(clippy::too_many_lines)]
-fn authenticated_runtime_dependencies(
+/// Build one complete authenticated dependency closure for a downstream
+/// qualification fixture.  The returned closure carries no runtime authority;
+/// callers must still supply matching signed genesis custody through a named
+/// production initialization or migration path.
+#[must_use]
+pub fn authenticated_runtime_dependencies(
     seed: u8,
     runtime_identities: Vec<IdentityRef>,
     external_inputs: Vec<(RecordRef, Vec<u8>)>,

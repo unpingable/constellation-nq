@@ -1,11 +1,13 @@
-error[E0599]: no method named `begin_runtime_authority_writer_session` found for mutable reference `&mut Store` in the current scope
- --> tests/ui/gen4/external_brand_to_store_session.rs:8:25
+error[E0624]: associated function `begin_runtime_authority` is private
+ --> tests/ui/gen4/external_brand_to_store_session.rs:8:33
   |
-8 |     let _ = other_store.begin_runtime_authority_writer_session(brand_from_first_store);
-  |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+8 |       let _ = StoreWriterSession::begin_runtime_authority(other_store, brand_from_first_store);
+  |                                   ^^^^^^^^^^^^^^^^^^^^^^^ private associated function
   |
-help: there is a method `begin_writer_session` with a similar name, but with different arguments
- --> src/lib.rs
+ ::: src/writer_session.rs
   |
-  |     pub fn begin_writer_session(&mut self) -> Result<StoreWriterSession<'_>, StoreError> {
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  | /     pub(crate) fn begin_runtime_authority(
+  | |         store: &'store mut Store,
+  | |         _brand: &VerificationBrand<'id>,
+  | |     ) -> Result<Self, StoreError> {
+  | |_________________________________- private associated function defined here

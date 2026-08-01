@@ -30,6 +30,7 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+nq-host-role-runtime = { path = "../nq-host-role-runtime", features = ["test-support"] }
 nq-runtime-dependency-authority = { path = "../nq-runtime-dependency-authority", features = ["test-support"] }
 rusqlite.workspace = true
 tempfile.workspace = true

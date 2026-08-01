@@ -21,7 +21,7 @@ use nq_store::{
 };
 use serde_json::{Value, json};
 
-use crate::{
+use super::{
     ExternalDependencyAvailability, Result, RuntimeDependencies, RuntimeError,
     runtime::{AppendRecord, AppendRequest},
 };
@@ -256,7 +256,7 @@ pub struct PreparedGovernedInvocation {
 impl PreparedGovernedInvocation {
     fn require_exact_launch(&self, launch: &Sha256Digest) -> Result<()> {
         if launch != &self.execution_launch.record_id {
-            return Err(crate::RuntimeError::PreparedCustodyLaunchSubstitution);
+            return Err(super::RuntimeError::PreparedCustodyLaunchSubstitution);
         }
         Ok(())
     }

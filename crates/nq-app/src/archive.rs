@@ -614,10 +614,16 @@ fn verify_instructions() -> String {
 
 #[cfg(test)]
 mod tests {
+    use nq_host_role_runtime::{
+        HostRoleRuntime, RuntimeAuthorityResidentBinding,
+        test_support::authenticated_runtime_dependencies,
+    };
     use nq_runtime_dependency_authority::{
         OldRootState,
-        test_support::{FIXTURE_OCCURRENCE_ID, RawAuthorityFixture},
-        verify_for_establishment,
+        test_support::{
+            FIXTURE_DOMAIN, FIXTURE_HOST_ROLE, FIXTURE_OCCURRENCE_ID, FIXTURE_RESIDENT_GENERATION,
+            FIXTURE_RESIDENT_ID, FIXTURE_ROLE_MANIFEST_GENERATION, RawAuthorityFixture,
+        },
     };
 
     use super::*;
@@ -1089,7 +1095,7 @@ mod tests {
 
     fn valid_archive(root: &Path) -> PathBuf {
         let database = root.join("nq.db");
-        drop(Store::initialize(&database).expect("init store"));
+        drop(Store::initialize_unqualified_storage(&database).expect("init store"));
         let config = write_config(root, &database);
         let archive = root.join("archive");
         create_archive(&config, &archive).expect("create archive");
@@ -1098,7 +1104,7 @@ mod tests {
 
     fn diagnostic_artifact_archive(root: &Path) -> PathBuf {
         let database = root.join("nq.db");
-        let mut store = Store::initialize(&database).expect("init store");
+        let mut store = Store::initialize_unqualified_storage(&database).expect("init store");
         let bytes = include_bytes!("../../../diagnostic-contract/fixtures/valid/positive.json");
         let document = nq_store::CanonicalDocument::from_canonical_bytes(bytes.to_vec())
             .expect("positive diagnostic fixture is canonical");
@@ -1176,7 +1182,7 @@ mod tests {
 
     fn provider_archive(root: &Path) -> (PathBuf, nq_store::ProviderIntakeRow, Vec<u8>) {
         let database = root.join("nq.db");
-        drop(Store::initialize(&database).expect("init store"));
+        drop(Store::initialize_unqualified_storage(&database).expect("init store"));
         let expected = append_provider_intake_collection(&database, false);
         let raw_bytes = Store::open(&database)
             .expect("reopen provider source")
@@ -1638,28 +1644,37 @@ mod tests {
         let v7_backup =
             Store::backup_v7_verified(&database, root.join("nq-v7.pre-authority-migration.db"))
                 .expect("backup exact schema-v7 Store");
-        let authority = RawAuthorityFixture::accepted_migration(OldRootState::Rootless, None);
+        let dependencies =
+            authenticated_runtime_dependencies(72, Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let authority = RawAuthorityFixture::accepted_migration_with_anchor(
+            dependencies
+                .custody()
+                .trust_anchor_id()
+                .expect("archive migration dependency anchor"),
+            OldRootState::Rootless,
+            None,
+        );
         let custody = authority.custody();
-        let presented = authority.presented_set();
         let migration_receipt = authority
             .migration_receipt()
             .expect("accepted migration fixture");
-        let expectations = authority.activation_expectations();
-        let mut store = Store::open_v7_runtime_authority_migration_source(&database, &v7_backup)
-            .expect("open exact schema-v7 authority migration source");
-        store
-            .with_runtime_authority_writer_session(|brand, session| {
-                let resolved = verify_for_establishment(
-                    brand,
-                    &custody,
-                    &presented,
-                    Some(&migration_receipt),
-                    &expectations,
-                )?;
-                session.establish_runtime_dependency_trust_root(&resolved)?;
-                Ok(())
-            })
-            .expect("migrate legacy archive fixture into Gen4 authority law");
+        let resident = RuntimeAuthorityResidentBinding {
+            resident_identity: FIXTURE_RESIDENT_ID.to_owned(),
+            resident_generation: FIXTURE_RESIDENT_GENERATION,
+            host_role: FIXTURE_HOST_ROLE.to_owned(),
+            role_manifest_generation: FIXTURE_ROLE_MANIFEST_GENERATION,
+            domain: FIXTURE_DOMAIN.to_owned(),
+            policy_floor: 1,
+        };
+        let store = HostRoleRuntime::migrate_v7_runtime_authority(
+            &database,
+            &v7_backup,
+            dependencies,
+            &custody,
+            &migration_receipt,
+            &resident,
+        )
+        .expect("migrate legacy archive fixture into Gen4 authority law");
         drop(store);
         let config = write_config(root, &database);
         let archive = root.join("archive");
@@ -2417,7 +2432,7 @@ mod tests {
     fn an_existing_destination_is_refused() {
         let dir = tempfile::tempdir().expect("dir");
         let database = dir.path().join("nq.db");
-        drop(Store::initialize(&database).expect("init"));
+        drop(Store::initialize_unqualified_storage(&database).expect("init"));
         let config = write_config(dir.path(), &database);
         let archive = dir.path().join("archive");
         fs::create_dir(&archive).expect("pre-existing");

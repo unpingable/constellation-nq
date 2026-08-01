@@ -14,14 +14,19 @@ use nq_core::{
     ProviderIntakeSchema, ProviderKind, ProviderResponseInterpretationV1,
 };
 use nq_helper_sandbox::ExecutionAccount;
+use nq_host_role_runtime::{
+    HostRoleRuntime, RuntimeAuthorityResidentBinding,
+    test_support::authenticated_runtime_dependencies,
+};
 use nq_profiles::profile_semantic_id;
 use nq_protocol::{
     Capability, EvidenceReport, HelperRequest, HelperResponse, InstanceId, MonotonicClock,
     MonotonicDeadline, ProfileBinding, ProfileId, ProfileVersion, RequestId, ScopeBinding,
     ScopeKind, Sha256Digest, SubjectBinding, SubjectId, VantageBinding, VantageKind,
 };
-use nq_runtime_dependency_authority::{
-    test_support::RawAuthorityFixture, verify_for_establishment,
+use nq_runtime_dependency_authority::test_support::{
+    FIXTURE_DOMAIN, FIXTURE_HOST_ROLE, FIXTURE_RESIDENT_GENERATION, FIXTURE_RESIDENT_ID,
+    FIXTURE_ROLE_MANIFEST_GENERATION, RawAuthorityFixture,
 };
 use nq_store::{
     AdmissionIdentity, AdmissionInput, BindingEventInput, BindingMaterializationInput,
@@ -60,7 +65,8 @@ pub fn initialize_gen4_test_store(config_path: &Path) {
     )
     .expect("helper runtime mode");
 
-    let mut store = Store::initialize(&config.database_path).expect("initialize Gen4 test Store");
+    let mut store = Store::initialize_unqualified_storage(&config.database_path)
+        .expect("initialize Gen4 test Store");
     {
         let mut session = store
             .begin_writer_session()
@@ -71,20 +77,30 @@ pub fn initialize_gen4_test_store(config_path: &Path) {
         }
     }
 
-    let authority = RawAuthorityFixture::fresh_genesis();
+    let dependencies =
+        authenticated_runtime_dependencies(83, Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let authority = RawAuthorityFixture::fresh_genesis_with_anchor(
+        dependencies
+            .custody()
+            .trust_anchor_id()
+            .expect("test dependency anchor"),
+    );
     let custody = authority.custody();
-    let presented = authority.presented_set();
-    let expectations = authority.activation_expectations();
-    store
-        .with_runtime_authority_writer_session(
-            |brand, session| -> Result<(), nq_store::StoreError> {
-                let resolved =
-                    verify_for_establishment(brand, &custody, &presented, None, &expectations)?;
-                session.establish_runtime_dependency_trust_root(&resolved)?;
-                Ok(())
-            },
-        )
-        .expect("establish Gen4 test authority");
+    let resident = RuntimeAuthorityResidentBinding {
+        resident_identity: FIXTURE_RESIDENT_ID.to_owned(),
+        resident_generation: FIXTURE_RESIDENT_GENERATION,
+        host_role: FIXTURE_HOST_ROLE.to_owned(),
+        role_manifest_generation: FIXTURE_ROLE_MANIFEST_GENERATION,
+        domain: FIXTURE_DOMAIN.to_owned(),
+        policy_floor: 1,
+    };
+    HostRoleRuntime::initialize_from_unqualified_store(
+        &mut store,
+        &dependencies,
+        &custody,
+        &resident,
+    )
+    .expect("establish Gen4 test authority");
 
     let mut session = store.begin_writer_session().expect("status writer session");
     nq_core::engine::record_component_status(

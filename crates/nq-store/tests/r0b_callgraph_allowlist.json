@@ -39,6 +39,26 @@
       "owner": "StoreWriterSession",
       "name": "establish_runtime_dependency_trust_root"
     },
+    "bare_classification_helper": {
+      "path": "crates/nq-store/src/lib.rs",
+      "owner": "Store",
+      "name": "freeze_runtime_authority_migration_bare"
+    },
+    "typed_classification_method": {
+      "path": "crates/nq-store/src/writer_session.rs",
+      "owner": "StoreWriterSession",
+      "name": "classify_runtime_authority_migration"
+    },
+    "bare_cardinality_classification_helper": {
+      "path": "crates/nq-store/src/lib.rs",
+      "owner": "Store",
+      "name": "freeze_v7_cardinality_disposition_bare"
+    },
+    "typed_cardinality_classification_method": {
+      "path": "crates/nq-store/src/writer_session.rs",
+      "owner": "StoreWriterSession",
+      "name": "classify_v7_cardinality_disposition"
+    },
     "branded_session_constructor": {
       "path": "crates/nq-store/src/writer_session.rs",
       "owner": "StoreWriterSession",
@@ -55,11 +75,11 @@
       "name": "with_verification_brand"
     },
     "bare_helper_receiver": "self.store",
-    "allowed_session_callers": [
+    "allowed_establishment_callers": [
       {
         "path": "crates/nq-host-role-runtime/src/runtime.rs",
         "owner": "HostRoleRuntime",
-        "name": "initialize"
+        "name": "initialize_from_unqualified_store"
       },
       {
         "path": "crates/nq-host-role-runtime/src/runtime.rs",
@@ -67,12 +87,108 @@
         "name": "migrate_v7_runtime_authority"
       }
     ],
+    "allowed_branded_scope_callers": [
+      {
+        "path": "crates/nq-host-role-runtime/src/runtime.rs",
+        "owner": "HostRoleRuntime",
+        "name": "initialize_from_unqualified_store"
+      },
+      {
+        "path": "crates/nq-host-role-runtime/src/runtime.rs",
+        "owner": "HostRoleRuntime",
+        "name": "migrate_v7_runtime_authority"
+      },
+      {
+        "path": "crates/nq-host-role-runtime/src/runtime.rs",
+        "owner": "HostRoleRuntime",
+        "name": "classify_v7_runtime_authority"
+      },
+      {
+        "path": "crates/nq-host-role-runtime/src/runtime.rs",
+        "owner": "HostRoleRuntime",
+        "name": "classify_v7_nonmigratable_cardinality"
+      }
+    ],
+    "allowed_classification_callers": [
+      {
+        "path": "crates/nq-host-role-runtime/src/runtime.rs",
+        "owner": "HostRoleRuntime",
+        "name": "classify_v7_runtime_authority"
+      }
+    ],
+    "allowed_cardinality_classification_callers": [
+      {
+        "path": "crates/nq-host-role-runtime/src/runtime.rs",
+        "owner": "HostRoleRuntime",
+        "name": "classify_v7_nonmigratable_cardinality"
+      }
+    ],
+    "authority_candidate_initializer": {
+      "path": "crates/nq-store/src/lib.rs",
+      "owner": "Store",
+      "name": "initialize_runtime_authority_candidate"
+    },
+    "authority_candidate_initializer_caller": {
+      "path": "crates/nq-host-role-runtime/src/runtime.rs",
+      "owner": "HostRoleRuntime",
+      "name": "initialize"
+    },
+    "unqualified_storage_initializer": {
+      "path": "crates/nq-store/src/lib.rs",
+      "owner": "Store",
+      "name": "initialize_unqualified_storage"
+    },
     "evidence_type": "ResolvedControllingActivation",
     "bounded_evidence_verifiers": [
       {
         "path": "crates/nq-runtime-dependency-authority/src/resolution.rs",
         "owner": null,
         "name": "verify_for_establishment"
+      }
+    ],
+    "additional_sealed_evidence": [
+      {
+        "type": "VerifiedMigrationClassification",
+        "verifier": {
+          "path": "crates/nq-runtime-dependency-authority/src/resolution.rs",
+          "owner": null,
+          "name": "verify_nonaccepted_migration_classification"
+        }
+      },
+      {
+        "type": "VerifiedOperatorAuthorityRotation",
+        "macro_generated": true,
+        "verifier": {
+          "path": "crates/nq-runtime-dependency-authority/src/resolution.rs",
+          "owner": null,
+          "name": "verify_operator_authority_rotation"
+        }
+      },
+      {
+        "type": "VerifiedResidentActivationSuccessor",
+        "macro_generated": true,
+        "verifier": {
+          "path": "crates/nq-runtime-dependency-authority/src/resolution.rs",
+          "owner": null,
+          "name": "verify_resident_activation_successor"
+        }
+      },
+      {
+        "type": "VerifiedActivationRevocation",
+        "macro_generated": true,
+        "verifier": {
+          "path": "crates/nq-runtime-dependency-authority/src/resolution.rs",
+          "owner": null,
+          "name": "verify_activation_revocation"
+        }
+      },
+      {
+        "type": "VerifiedV7CardinalityDisposition",
+        "verifier": {
+          "path": "crates/nq-runtime-dependency-authority/src/cardinality.rs",
+          "owner": null,
+          "name": "verify_v7_cardinality_disposition"
+        }
       }
     ],
     "authority_family_insert_helpers": [

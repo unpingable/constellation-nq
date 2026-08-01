@@ -230,6 +230,8 @@ impl MigrationReceiptBytes {
 pub struct MigrationExpectations {
     /// Exact old rooted/rootless state observed by the Store.
     pub old_root_state: OldRootState,
+    /// Exact exogenous declaration identifying a restored source, otherwise absent.
+    pub restore_declaration_digest: Option<Sha256Digest>,
     /// Exact restore-proof digest for a declared restore, otherwise absent.
     pub restore_proof_digest: Option<Sha256Digest>,
 }
@@ -280,6 +282,16 @@ pub struct RestartExpectations {
     pub expected_chain_root_activation_digest: Sha256Digest,
     /// Historical controlling tip recorded at establishment.
     pub expected_establishment_tip_digest: Sha256Digest,
+    /// Exact custody genesis A1 identity retained by the receipt.
+    pub expected_genesis_operator_authority_digest: Sha256Digest,
+    /// Exact custody genesis A1 key generation retained by the receipt.
+    pub expected_genesis_operator_key_generation: u64,
+    /// Exact authority cut of the historical establishment act.
+    pub expected_establishment_cut: AuthorityCut,
+    /// Exact governing policy recorded for historical establishment.
+    pub expected_establishment_policy_version: u64,
+    /// Exact Store-resident candidate-set binding at establishment.
+    pub expected_establishment_candidate_set_digest: Sha256Digest,
     /// Exact enrolled resident identity.
     pub resident_identity: String,
     /// Exact enrolled resident generation.
@@ -801,6 +813,12 @@ impl MigrationReceipt {
         self.wire.restore_proof_digest.as_ref()
     }
 
+    /// Returns the exact exogenous restored-source declaration digest.
+    #[must_use]
+    pub const fn restore_declaration_digest(&self) -> Option<&Sha256Digest> {
+        self.wire.restore_declaration_digest.as_ref()
+    }
+
     /// Returns the exact canonical receipt bytes.
     #[must_use]
     pub fn canonical_bytes(&self) -> &[u8] {
@@ -1300,6 +1318,7 @@ pub(crate) struct MigrationReceiptWire {
     policy_version: u64,
     operator_authority_digest: Sha256Digest,
     operator_key_generation: u64,
+    restore_declaration_digest: Option<Sha256Digest>,
     restore_proof_digest: Option<Sha256Digest>,
     signature_algorithm: String,
     operator_signature: String,
@@ -1319,6 +1338,7 @@ struct MigrationReceiptUnsigned<'a> {
     policy_version: u64,
     operator_authority_digest: &'a Sha256Digest,
     operator_key_generation: u64,
+    restore_declaration_digest: Option<&'a Sha256Digest>,
     restore_proof_digest: Option<&'a Sha256Digest>,
     signature_algorithm: &'a str,
 }
@@ -1338,6 +1358,7 @@ impl MigrationReceiptWire {
             policy_version: self.policy_version,
             operator_authority_digest: &self.operator_authority_digest,
             operator_key_generation: self.operator_key_generation,
+            restore_declaration_digest: self.restore_declaration_digest.as_ref(),
             restore_proof_digest: self.restore_proof_digest.as_ref(),
             signature_algorithm: &self.signature_algorithm,
         }
@@ -1567,6 +1588,7 @@ pub(crate) mod fixture_access {
         cut: AuthorityCut,
         operator_authority_digest: Sha256Digest,
         operator_key_generation: u64,
+        restore_declaration_digest: Option<Sha256Digest>,
         restore_proof_digest: Option<Sha256Digest>,
         operator_signature: String,
     ) -> MigrationReceiptWire {
@@ -1584,6 +1606,7 @@ pub(crate) mod fixture_access {
             policy_version: AUTHORITY_POLICY_VERSION,
             operator_authority_digest,
             operator_key_generation,
+            restore_declaration_digest,
             restore_proof_digest,
             signature_algorithm: ED25519_SIGNATURE_ALGORITHM.to_owned(),
             operator_signature,

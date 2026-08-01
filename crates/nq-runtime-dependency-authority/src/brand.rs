@@ -5,8 +5,9 @@ use std::marker::PhantomData;
 use nq_protocol::Sha256Digest;
 
 use crate::{
-    ActivationContext, AuthorityCut, AuthorityError, EstablishmentArm,
-    EstablishmentReceiptTranscript,
+    ActivationContext, ActivationExpectations, AuthorityCut, AuthorityError, EstablishmentArm,
+    EstablishmentReceiptTranscript, GenesisAuthorityCustody, MigrationDisposition,
+    MigrationReceiptBytes, OldRootState, PresentedAuthoritySet,
 };
 
 /// One unforgeable, generative verification brand.
@@ -32,6 +33,7 @@ pub fn with_verification_brand<R>(
     })
 }
 
+#[derive(PartialEq, Eq)]
 pub(crate) struct ResolutionFields {
     pub(crate) occurrence_id: String,
     pub(crate) domain: String,
@@ -46,11 +48,181 @@ pub(crate) struct ResolutionFields {
     pub(crate) role_manifest_generation: u64,
     pub(crate) policy_version: u64,
     pub(crate) verification_cut: AuthorityCut,
+    pub(crate) establishment_cut: AuthorityCut,
     pub(crate) custody_digest: Sha256Digest,
     pub(crate) candidate_set_digest: Sha256Digest,
     pub(crate) genesis_context: ActivationContext,
     pub(crate) migration_receipt_digest: Option<Sha256Digest>,
     pub(crate) migration_receipt_canonical_bytes: Option<Vec<u8>>,
+}
+
+/// Exact unverified inputs retained solely so a Store can rerun the bounded
+/// verifier after opening its own transaction and enumerating its own set.
+///
+/// The context has no public constructor or getters and carries no standing by
+/// itself.  In particular, it cannot mint a brand or sealed result.
+pub(crate) struct ReverificationContext {
+    pub(crate) custody: GenesisAuthorityCustody,
+    pub(crate) migration_receipt: Option<MigrationReceiptBytes>,
+    pub(crate) expectations: ActivationExpectations,
+}
+
+#[derive(PartialEq, Eq)]
+pub(crate) struct MigrationClassificationFields {
+    pub(crate) canonical_receipt_bytes: Vec<u8>,
+    pub(crate) receipt_digest: Sha256Digest,
+    pub(crate) disposition: MigrationDisposition,
+    pub(crate) occurrence_id: String,
+    pub(crate) domain: String,
+    pub(crate) old_root_state: OldRootState,
+    pub(crate) chain_root_activation_digest: Sha256Digest,
+    pub(crate) trust_anchor_id: Sha256Digest,
+    pub(crate) cut: AuthorityCut,
+    pub(crate) policy_version: u64,
+    pub(crate) operator_authority_digest: Sha256Digest,
+    pub(crate) operator_key_generation: u64,
+    pub(crate) restore_declaration_digest: Option<Sha256Digest>,
+    pub(crate) restore_proof_digest: Option<Sha256Digest>,
+    pub(crate) custody_digest: Sha256Digest,
+    pub(crate) candidate_set_digest: Sha256Digest,
+}
+
+/// Sealed proof that one non-accepted migration disposition is authentic and
+/// exactly bound to the presented pre-R2 state.
+///
+/// This type carries no activation standing and has no conversion to
+/// [`ResolvedControllingActivation`]. Its only supported use is durable Store
+/// evidence-freeze classification followed by in-transaction re-verification.
+pub struct VerifiedMigrationClassification<'id> {
+    pub(crate) fields: MigrationClassificationFields,
+    pub(crate) reverification: ReverificationContext,
+    _invariant: PhantomData<fn(&'id mut ()) -> &'id mut ()>,
+}
+
+impl<'id> VerifiedMigrationClassification<'id> {
+    pub(crate) fn new(
+        fields: MigrationClassificationFields,
+        reverification: ReverificationContext,
+        _brand: &VerificationBrand<'id>,
+    ) -> Self {
+        Self {
+            fields,
+            reverification,
+            _invariant: PhantomData,
+        }
+    }
+
+    /// Reruns classification verification over Store-owned enumeration.
+    ///
+    /// # Errors
+    ///
+    /// Refuses any signature, topology, tuple, restore-binding, or exact-set
+    /// mismatch.
+    pub fn reverify_store_owned_presented_set(
+        &self,
+        store_presented: &PresentedAuthoritySet,
+    ) -> Result<(), AuthorityError> {
+        crate::resolution::reverify_migration_classification(self, store_presented)
+    }
+
+    /// Returns exact canonical signed migration-receipt bytes.
+    #[must_use]
+    pub fn canonical_receipt_bytes(&self) -> &[u8] {
+        &self.fields.canonical_receipt_bytes
+    }
+    /// Returns the exact signed migration receipt identity.
+    #[must_use]
+    pub const fn receipt_digest(&self) -> &Sha256Digest {
+        &self.fields.receipt_digest
+    }
+    /// Returns the exact non-accepted freeze disposition.
+    #[must_use]
+    pub const fn disposition(&self) -> MigrationDisposition {
+        self.fields.disposition
+    }
+    /// Returns the exact Store occurrence named by the receipt.
+    #[must_use]
+    pub fn occurrence_id(&self) -> &str {
+        &self.fields.occurrence_id
+    }
+    /// Returns the exact authority domain.
+    #[must_use]
+    pub fn domain(&self) -> &str {
+        &self.fields.domain
+    }
+    /// Returns the exact prior rooted/rootless state.
+    #[must_use]
+    pub const fn old_root_state(&self) -> &OldRootState {
+        &self.fields.old_root_state
+    }
+    /// Returns the proposed chain-root activation identity.
+    #[must_use]
+    pub const fn chain_root_activation_digest(&self) -> &Sha256Digest {
+        &self.fields.chain_root_activation_digest
+    }
+    /// Returns the proposed immutable anchor identity.
+    #[must_use]
+    pub const fn trust_anchor_id(&self) -> &Sha256Digest {
+        &self.fields.trust_anchor_id
+    }
+    /// Returns the signed classification cut.
+    #[must_use]
+    pub const fn cut(&self) -> &AuthorityCut {
+        &self.fields.cut
+    }
+    /// Returns the governing policy version.
+    #[must_use]
+    pub const fn policy_version(&self) -> u64 {
+        self.fields.policy_version
+    }
+    /// Returns the signing A1 identity.
+    #[must_use]
+    pub const fn operator_authority_digest(&self) -> &Sha256Digest {
+        &self.fields.operator_authority_digest
+    }
+    /// Returns the signing A1 key generation.
+    #[must_use]
+    pub const fn operator_key_generation(&self) -> u64 {
+        self.fields.operator_key_generation
+    }
+    /// Returns the exogenous restore declaration binding, when present.
+    #[must_use]
+    pub const fn restore_declaration_digest(&self) -> Option<&Sha256Digest> {
+        self.fields.restore_declaration_digest.as_ref()
+    }
+    /// Returns the exact restore proof binding, when present.
+    #[must_use]
+    pub const fn restore_proof_digest(&self) -> Option<&Sha256Digest> {
+        self.fields.restore_proof_digest.as_ref()
+    }
+    /// Returns the exact external-custody digest.
+    #[must_use]
+    pub const fn custody_digest(&self) -> &Sha256Digest {
+        &self.fields.custody_digest
+    }
+    /// Returns the exact presented-set digest sealed at classification.
+    #[must_use]
+    pub const fn candidate_set_digest(&self) -> &Sha256Digest {
+        &self.fields.candidate_set_digest
+    }
+}
+
+impl ReverificationContext {
+    pub(crate) fn capture(
+        custody: &GenesisAuthorityCustody,
+        migration_receipt: Option<&MigrationReceiptBytes>,
+        expectations: &ActivationExpectations,
+    ) -> Self {
+        Self {
+            custody: GenesisAuthorityCustody::new(
+                custody.genesis_a1_bytes().to_vec(),
+                custody.genesis_a2_bytes().to_vec(),
+            ),
+            migration_receipt: migration_receipt
+                .map(|receipt| MigrationReceiptBytes::new(receipt.as_bytes().to_vec())),
+            expectations: expectations.clone(),
+        }
+    }
 }
 
 /// Sealed proof that the exact presented authority material resolves to one
@@ -60,14 +232,20 @@ pub(crate) struct ResolutionFields {
 /// it deliberately does not testify that the set is complete.  Store-owned
 /// enumeration and exact digest correspondence remain mandatory.
 pub struct ResolvedControllingActivation<'id> {
-    fields: ResolutionFields,
+    pub(crate) fields: ResolutionFields,
+    pub(crate) reverification: ReverificationContext,
     _invariant: PhantomData<fn(&'id mut ()) -> &'id mut ()>,
 }
 
 impl<'id> ResolvedControllingActivation<'id> {
-    pub(crate) fn new(fields: ResolutionFields, _brand: &VerificationBrand<'id>) -> Self {
+    pub(crate) fn new(
+        fields: ResolutionFields,
+        reverification: ReverificationContext,
+        _brand: &VerificationBrand<'id>,
+    ) -> Self {
         Self {
             fields,
+            reverification,
             _invariant: PhantomData,
         }
     }
@@ -96,13 +274,32 @@ impl<'id> ResolvedControllingActivation<'id> {
             self.fields.genesis_operator_authority_digest.clone(),
             self.fields.genesis_operator_key_generation,
             self.fields.domain.clone(),
-            self.fields.verification_cut.clone(),
+            self.fields.establishment_cut.clone(),
             self.fields.policy_version,
             arm,
             self.fields.migration_receipt_digest.clone(),
             self.fields.custody_digest.clone(),
             self.fields.candidate_set_digest.clone(),
         ))
+    }
+
+    /// Reruns bounded establishment verification against the exact candidate
+    /// set enumerated by a Store while its establishment transaction is open.
+    ///
+    /// This operation reauthenticates the retained custody and migration
+    /// inputs and requires the new result to equal every field of this sealed
+    /// result. The method does not itself claim that `store_presented` is
+    /// complete; only the Store transaction can make that testimony.
+    ///
+    /// # Errors
+    ///
+    /// Refuses any cryptographic, topology, tuple, policy, cut, or exact-set
+    /// mismatch.
+    pub fn reverify_store_owned_presented_set(
+        &self,
+        store_presented: &PresentedAuthoritySet,
+    ) -> Result<(), AuthorityError> {
+        crate::resolution::reverify_establishment(self, store_presented)
     }
 }
 
@@ -171,14 +368,16 @@ impl From<ResolutionFields> for SnapshotFields {
 pub(crate) struct VerifiedEventFields {
     pub(crate) canonical_bytes: Vec<u8>,
     pub(crate) record_digest: Sha256Digest,
+    pub(crate) current_candidate_set_digest: Sha256Digest,
     pub(crate) resulting_candidate_set_digest: Sha256Digest,
+    pub(crate) reverification: ReverificationContext,
 }
 
 macro_rules! verified_event_type {
-    ($(#[$meta:meta])* $name:ident) => {
+    ($(#[$meta:meta])* $name:ident, $reverify:ident) => {
         $(#[$meta])*
         pub struct $name<'id> {
-            fields: VerifiedEventFields,
+            pub(crate) fields: VerifiedEventFields,
             _invariant: PhantomData<fn(&'id mut ()) -> &'id mut ()>,
         }
 
@@ -210,21 +409,42 @@ macro_rules! verified_event_type {
             pub const fn resulting_candidate_set_digest(&self) -> &Sha256Digest {
                 &self.fields.resulting_candidate_set_digest
             }
+
+            /// Reruns the family-specific verifier against the exact current
+            /// set enumerated by a Store inside its append transaction.
+            ///
+            /// The method rechecks the retained signature, predecessor,
+            /// occurrence, domain, anchor, policy, cut, and exact before/after
+            /// set bindings. Completeness remains testimony of the calling
+            /// Store transaction.
+            ///
+            /// # Errors
+            ///
+            /// Refuses any semantic or exact-set mismatch.
+            pub fn reverify_store_owned_presented_set(
+                &self,
+                store_presented: &PresentedAuthoritySet,
+            ) -> Result<(), AuthorityError> {
+                crate::resolution::$reverify(self, store_presented)
+            }
         }
     };
 }
 
 verified_event_type!(
     /// Sealed, brand-bound verification result for one A1 rotation.
-    VerifiedOperatorAuthorityRotation
+    VerifiedOperatorAuthorityRotation,
+    reverify_operator_authority_rotation
 );
 verified_event_type!(
     /// Sealed, brand-bound verification result for one A2 successor.
-    VerifiedResidentActivationSuccessor
+    VerifiedResidentActivationSuccessor,
+    reverify_resident_activation_successor
 );
 verified_event_type!(
     /// Sealed, brand-bound verification result for one prospective revocation.
-    VerifiedActivationRevocation
+    VerifiedActivationRevocation,
+    reverify_activation_revocation
 );
 
 macro_rules! resolved_getters {

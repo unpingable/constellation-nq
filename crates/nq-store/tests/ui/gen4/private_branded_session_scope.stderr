@@ -1,0 +1,16 @@
+error[E0624]: method `with_runtime_authority_writer_session` is private
+ --> tests/ui/gen4/private_branded_session_scope.rs:5:15
+  |
+5 |           store.with_runtime_authority_writer_session(|_brand, _session| Ok::<(), StoreError>(()));
+  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private method
+  |
+ ::: src/lib.rs
+  |
+  | /     pub(crate) fn with_runtime_authority_writer_session<R>(
+  | |         &mut self,
+  | |         operation: impl for<'id> FnOnce(
+  | |             &VerificationBrand<'id>,
+  | |             &mut StoreWriterSession<'_, VerificationBrand<'id>>,
+  | |         ) -> Result<R, StoreError>,
+  | |     ) -> Result<R, StoreError> {
+  | |______________________________- private method defined here

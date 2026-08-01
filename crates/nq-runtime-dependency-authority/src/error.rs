@@ -201,6 +201,58 @@ pub enum AuthorityError {
     /// A declared restore proof is absent or differs.
     #[error("migration restore-proof binding differs from the declared restore")]
     RestoreProofMismatch,
+    /// A restored-source declaration is absent or differs.
+    #[error("migration restore-declaration binding differs from the expected source")]
+    RestoreDeclarationMismatch,
+    /// Restore declaration and proof presence do not form one complete pair.
+    #[error("migration restore declaration and proof must both be present or both be absent")]
+    RestoreBindingIncomplete,
+
+    /// A v7 cardinality-disposition carrier was not decodable.
+    #[error("v7 cardinality disposition is malformed")]
+    V7CardinalityDispositionMalformed,
+    /// A decoded v7 cardinality disposition was not exact canonical JSON.
+    #[error("v7 cardinality disposition is not exact canonical JSON")]
+    V7CardinalityDispositionNonCanonical,
+    /// A v7 cardinality-disposition carrier named another schema.
+    #[error("v7 cardinality disposition schema is unsupported")]
+    V7CardinalityDispositionSchemaUnsupported,
+    /// A v7 cardinality-disposition carrier named another carrier version.
+    #[error("v7 cardinality disposition version is unsupported")]
+    V7CardinalityDispositionVersionUnsupported,
+    /// A v7 cardinality-disposition carrier did not name schema v7 as its source.
+    #[error("cardinality disposition does not classify a schema-v7 source")]
+    V7CardinalitySourceVersionMismatch,
+    /// A v7 cardinality-disposition digest did not match its canonical payload.
+    #[error("v7 cardinality disposition digest does not match its canonical payload")]
+    V7CardinalityDispositionDigestMismatch,
+    /// A cardinality disposition used an unsupported signature algorithm.
+    #[error("v7 cardinality disposition signature algorithm is unsupported")]
+    V7CardinalityDispositionSignatureAlgorithmUnsupported,
+    /// A cardinality-disposition signature was malformed.
+    #[error("v7 cardinality disposition signature is malformed")]
+    V7CardinalityDispositionSignatureMalformed,
+    /// A cardinality-disposition signature did not verify under custody A1.
+    #[error("v7 cardinality disposition signature is invalid")]
+    V7CardinalityDispositionSignatureInvalid,
+    /// The signed genesis identity set was not zero or at least two sorted identities.
+    #[error("v7 cardinality disposition requires zero or at least two sorted genesis identities")]
+    V7CardinalityInvalid,
+    /// The signed genesis identity set differs from the exact Store-derived set.
+    #[error("v7 cardinality disposition genesis identity set differs")]
+    V7CardinalitySetMismatch,
+    /// An accepted disposition tried to classify a non-migratable cardinality state.
+    #[error("accepted is forbidden for a non-migratable v7 cardinality disposition")]
+    V7CardinalityAcceptedForbidden,
+    /// The schema-v7 source logical digest differs from the exact expectation.
+    #[error("v7 cardinality disposition source logical digest differs")]
+    V7CardinalitySourceDigestMismatch,
+    /// The old rooted/rootless state differs from the exact expectation.
+    #[error("v7 cardinality disposition old-root state differs")]
+    V7CardinalityOldRootMismatch,
+    /// Re-verification differs from the originally sealed classification.
+    #[error("v7 cardinality disposition differs from sealed verification")]
+    V7CardinalityCorrespondenceMismatch,
 
     /// Store-side establishment receipt transcript bytes were malformed.
     #[error("establishment receipt transcript is malformed")]
@@ -245,9 +297,18 @@ pub enum AuthorityError {
     /// The receipt's historical establishment tip is absent from the chain.
     #[error("historical establishment-time tip is absent from the activation chain")]
     EstablishmentTipMismatch,
+    /// The receipt's historical establishment cut does not resolve exactly.
+    #[error("historical establishment cut differs from the resolved authority cut")]
+    EstablishmentCutMismatch,
+    /// The receipt's historical establishment policy differs.
+    #[error("historical establishment policy differs from the resolved activation policy")]
+    EstablishmentPolicyMismatch,
     /// Current external genesis custody differs from the receipt-bound custody.
     #[error("genesis authority custody differs from the retained receipt binding")]
     CustodyDigestMismatch,
+    /// Store-owned enumeration differs from the exact set sealed at verification.
+    #[error("Store-owned authority set differs from the sealed verification set")]
+    PresentedSetCorrespondenceMismatch,
     /// The immutable trust anchor differs within the occurrence.
     #[error("authority trust anchor differs within the Store occurrence")]
     AnchorMismatch,

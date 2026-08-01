@@ -1,4 +1,4 @@
-error[E0599]: no method named `establish_runtime_dependency_trust_root` found for mutable reference `&mut Store` in the current scope
+error[E0599]: no method named `establish_runtime_dependency_trust_root` found for mutable reference `&mut nq_store::Store` in the current scope
  --> tests/ui/gen4/no_session_establishment.rs:5:19
   |
 5 |     let _ = store.establish_runtime_dependency_trust_root(evidence);
