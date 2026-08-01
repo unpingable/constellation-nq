@@ -1,0 +1,15 @@
+error[E0382]: borrow of moved value: `session`
+ --> tests/ui/gen4/use_after_writer_fence.rs:5:13
+  |
+3 | fn use_after_fence(session: StoreWriterSession<'_>) {
+  |                    ------- move occurs because `session` has type `StoreWriterSession<'_>`, which does not implement the `Copy` trait
+4 |     let _ = session.finish();
+  |                     -------- `session` moved due to this method call
+5 |     let _ = session.bound_generation();
+  |             ^^^^^^^ value borrowed here after move
+  |
+note: `StoreWriterSession::<'store, Brand>::finish` takes ownership of the receiver `self`, which moves `session`
+ --> src/writer_session.rs
+  |
+  |     pub fn finish(self) -> Result<(), StoreError> {
+  |                   ^^^^

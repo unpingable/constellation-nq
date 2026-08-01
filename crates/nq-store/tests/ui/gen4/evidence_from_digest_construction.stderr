@@ -1,0 +1,5 @@
+error[E0599]: no function or associated item named `from_digest` found for struct `ResolvedControllingActivation<'id>` in the current scope
+ --> tests/ui/gen4/evidence_from_digest_construction.rs:6:40
+  |
+6 |         ResolvedControllingActivation::from_digest(digest);
+  |                                        ^^^^^^^^^^^ function or associated item not found in `ResolvedControllingActivation<'_>`

@@ -2,13 +2,16 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+#[cfg(test)]
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use nix::libc;
 use nq_core::config::{LoadedConfig, NqConfig};
+#[cfg(test)]
 use nq_helper_sandbox::{open_runtime_root, require_no_posix_acl};
 use nq_profiles::all_profiles;
 use nq_protocol::semantic_digest;
@@ -45,7 +48,7 @@ pub struct Nq {
 /// Operator workflows.
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Explicitly initialize an empty nq-ng database and directory layout.
+    /// Refuse the retired first-writer initialization surface.
     Init(InitArgs),
     /// Validate, compare, and atomically activate human intent.
     Config {
@@ -117,10 +120,10 @@ pub enum Command {
     Query(QueryArgs),
 }
 
-/// Initialization arguments.
+/// Retained parser shape for the retired initialization command.
 #[derive(Debug, Args)]
 pub struct InitArgs {
-    /// Optional digest of an immutable legacy-cut manifest.
+    /// Historical argument retained only so the command can refuse explicitly.
     #[arg(long)]
     pub legacy_manifest_digest: Option<String>,
 }
@@ -380,66 +383,11 @@ pub async fn run(options: Nq) -> Result<()> {
 }
 
 fn initialize(config_path: &Path, arguments: InitArgs, json_output: bool) -> Result<()> {
-    let config = NqConfig::load(config_path)
-        .with_context(|| format!("cannot load {}", config_path.display()))?;
-    validate_compiled_profiles(&config)?;
-    if let Some(parent) = config.database_path.parent() {
-        ensure_daemon_directory(parent, 0o700)?;
-    }
-    ensure_daemon_directory(&config.admissions_dir, 0o700)?;
-    let helper_parent = config
-        .helper_runtime_dir
-        .parent()
-        .context("helper runtime directory must have a parent")?;
-    ensure_daemon_directory(helper_parent, 0o751)?;
-    ensure_daemon_directory(&config.helper_runtime_dir, 0o711)?;
-    if let Some(socket_parent) = config.socket_path.parent()
-        && socket_parent != helper_parent
-    {
-        ensure_daemon_directory(socket_parent, 0o751)?;
-    }
-    open_runtime_root(&config.helper_runtime_dir).with_context(|| {
-        format!(
-            "helper runtime root {} is not a safe package-compatible directory",
-            config.helper_runtime_dir.display()
-        )
-    })?;
-    let mut store = Store::initialize(&config.database_path)
-        .with_context(|| format!("cannot initialize {}", config.database_path.display()))?;
-    let mut init_session = store.begin_writer_session()?;
-    for module in all_profiles() {
-        append_descriptor_if_supported(&mut init_session, module)?;
-    }
-    if let Some(digest) = arguments.legacy_manifest_digest {
-        validate_sha256(&digest)?;
-        append_genesis_if_supported(&mut init_session, Some(digest))?;
-    } else {
-        append_genesis_if_supported(&mut init_session, None)?;
-    }
-    nq_core::engine::record_component_status(
-        &mut init_session,
-        "database",
-        "local",
-        "healthy",
-        "initialized",
-        &json!({"schema_version": nq_store::SCHEMA_VERSION}),
-    )?;
-    nq_core::engine::record_component_status(
-        &mut init_session,
-        "profile_catalog",
-        "compiled",
-        "healthy",
-        "catalog_loaded",
-        &json!({"profile_count": all_profiles().len()}),
-    )?;
-    drop(init_session);
-    print_value(
-        &json!({
-            "initialized": true,
-            "database": config.database_path,
-            "schema_version": nq_store::SCHEMA_VERSION,
-        }),
-        json_output,
+    let _ = (config_path, arguments, json_output);
+    bail!(
+        "C1 Gen4 initialization requires the governed HostRoleRuntime authority path; \
+         this bounded campaign intentionally ships no production A2 adapter and the \
+         legacy CLI first-writer/UUID initialization path is disabled"
     )
 }
 
@@ -1200,7 +1148,7 @@ fn finalize_upgrade_backup(
     Ok(backup)
 }
 
-fn upgrade_v6_to_current(
+fn upgrade_v6_to_v7_authority_pending(
     database_path: &Path,
     backup_directory: &Path,
     binary_digest: &str,
@@ -1420,18 +1368,22 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                         }))?,
                     };
                     Store::upgrade_v5_to_v6(&config.database_path, &v5_receipt)?;
-                    let (store, v6_backup, v6_artifact) = upgrade_v6_to_current(
+                    let (store, v6_backup, v6_artifact) = upgrade_v6_to_v7_authority_pending(
                         &config.database_path,
                         &backup_directory,
                         &binary_digest,
                         &operator_identity,
                     )?;
-                    store.validate()?;
+                    drop(store);
+                    drop(Store::open_v7_upgrade_source_read_only(
+                        &config.database_path,
+                    )?);
                     print_value(
                         &json!({
-                            "result": "migrated",
+                            "result": "migrated_authority_pending",
                             "from_schema_version": 3,
-                            "schema_version": nq_store::SCHEMA_VERSION,
+                            "schema_version": 7,
+                            "authority_migration_required": true,
                             "v3_backup": v3_backup,
                             "v3_backup_digest": v3_artifact.sha256,
                             "v4_backup": v4_backup,
@@ -1516,18 +1468,22 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                         }))?,
                     };
                     Store::upgrade_v5_to_v6(&config.database_path, &v5_receipt)?;
-                    let (store, v6_backup, v6_artifact) = upgrade_v6_to_current(
+                    let (store, v6_backup, v6_artifact) = upgrade_v6_to_v7_authority_pending(
                         &config.database_path,
                         &backup_directory,
                         &binary_digest,
                         &operator_identity,
                     )?;
-                    store.validate()?;
+                    drop(store);
+                    drop(Store::open_v7_upgrade_source_read_only(
+                        &config.database_path,
+                    )?);
                     print_value(
                         &json!({
-                            "result": "migrated",
+                            "result": "migrated_authority_pending",
                             "from_schema_version": 4,
-                            "schema_version": nq_store::SCHEMA_VERSION,
+                            "schema_version": 7,
+                            "authority_migration_required": true,
                             "backup": backup,
                             "backup_digest": artifact.sha256,
                             "v5_backup": v5_backup,
@@ -1573,18 +1529,22 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                         }))?,
                     };
                     Store::upgrade_v5_to_v6(&config.database_path, &receipt)?;
-                    let (store, v6_backup, v6_artifact) = upgrade_v6_to_current(
+                    let (store, v6_backup, v6_artifact) = upgrade_v6_to_v7_authority_pending(
                         &config.database_path,
                         &backup_directory,
                         &binary_digest,
                         &operator_identity,
                     )?;
-                    store.validate()?;
+                    drop(store);
+                    drop(Store::open_v7_upgrade_source_read_only(
+                        &config.database_path,
+                    )?);
                     print_value(
                         &json!({
-                            "result": "migrated",
+                            "result": "migrated_authority_pending",
                             "from_schema_version": 5,
-                            "schema_version": nq_store::SCHEMA_VERSION,
+                            "schema_version": 7,
+                            "authority_migration_required": true,
                             "backup": backup,
                             "backup_digest": artifact.sha256,
                             "v6_backup": v6_backup,
@@ -1595,23 +1555,32 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                     )
                 }
                 6 => {
-                    let (store, backup, artifact) = upgrade_v6_to_current(
+                    let (store, backup, artifact) = upgrade_v6_to_v7_authority_pending(
                         &config.database_path,
                         &backup_directory,
                         &binary_digest,
                         &operator_identity,
                     )?;
-                    store.validate()?;
+                    drop(store);
+                    drop(Store::open_v7_upgrade_source_read_only(
+                        &config.database_path,
+                    )?);
                     print_value(
                         &json!({
-                            "result": "migrated",
+                            "result": "migrated_authority_pending",
                             "from_schema_version": 6,
-                            "schema_version": nq_store::SCHEMA_VERSION,
+                            "schema_version": 7,
+                            "authority_migration_required": true,
                             "backup": backup,
                             "backup_digest": artifact.sha256,
                             "historical_dependency_binding": "legacy_unbound",
                         }),
                         json_output,
+                    )
+                }
+                7 => {
+                    bail!(
+                        "schema-v7 Store requires the separately governed Gen4 authority migration path with operator-signed A1/A2 custody and a one-use migration receipt; the shipped CLI intentionally has no production A2 adapter"
                     )
                 }
                 _ => {
@@ -1768,19 +1737,6 @@ fn digest_file(path: &Path) -> Result<String> {
     Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
 }
 
-fn validate_sha256(digest: &str) -> Result<()> {
-    let valid = digest.strip_prefix("sha256:").is_some_and(|hex| {
-        hex.len() == 64
-            && hex
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    });
-    if !valid {
-        bail!("expected `sha256:` followed by 64 lowercase hexadecimal characters");
-    }
-    Ok(())
-}
-
 fn print_value(value: &impl Serialize, json_output: bool) -> Result<()> {
     if json_output {
         println!("{}", serde_json::to_string(value)?);
@@ -1797,25 +1753,6 @@ fn print_canonical_value(value: &impl Serialize) -> Result<()> {
         String::from_utf8(bytes).context("canonical JSON is not UTF-8")?
     );
     Ok(())
-}
-
-// These narrow adapters isolate application wiring from the generic store API.
-// They are filled by the store integration once its independently tested slice
-// lands.
-fn append_descriptor_if_supported(
-    session: &mut nq_store::StoreWriterSession<'_>,
-    module: &&dyn nq_profiles::ProfileModule,
-) -> Result<()> {
-    Ok(nq_core::engine::append_profile_descriptor(
-        session, *module,
-    )?)
-}
-
-fn append_genesis_if_supported(
-    session: &mut nq_store::StoreWriterSession<'_>,
-    digest: Option<String>,
-) -> Result<()> {
-    Ok(nq_core::engine::append_genesis(session, digest)?)
 }
 
 fn store_backup_if_supported(store: &mut Store, destination: &Path) -> Result<()> {
@@ -1929,6 +1866,7 @@ fn watcher_action_error_envelope<'a>(
     })
 }
 
+#[cfg(test)]
 fn ensure_daemon_directory(path: &Path, mode: u32) -> Result<()> {
     fs::create_dir_all(path)
         .with_context(|| format!("cannot create daemon directory {}", path.display()))?;

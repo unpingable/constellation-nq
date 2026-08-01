@@ -1,5 +1,5 @@
-error[E0599]: no function or associated item named `default` found for struct `StoreWriterSession<'store>` in the current scope
+error[E0599]: no function or associated item named `default` found for struct `StoreWriterSession<'store, Brand>` in the current scope
  --> tests/ui/writer/session_default_construct.rs:4:40
   |
 4 |     let _session = StoreWriterSession::default();
-  |                                        ^^^^^^^ function or associated item not found in `StoreWriterSession<'_>`
+  |                                        ^^^^^^^ function or associated item not found in `StoreWriterSession<'_, _>`

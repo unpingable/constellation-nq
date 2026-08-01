@@ -6,6 +6,7 @@ members = [
     "crates/nq-protocol",
     "crates/nq-host-role-contract",
     "crates/nq-host-role-dependency-custody",
+    "crates/nq-runtime-dependency-authority",
     "crates/nq-host-role-runtime",
     "crates/nq-system-contract",
     "crates/nq-profiles",

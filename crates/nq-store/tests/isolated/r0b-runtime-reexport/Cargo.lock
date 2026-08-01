@@ -392,6 +392,7 @@ dependencies = [
  "nq-host-role-contract",
  "nq-host-role-dependency-custody",
  "nq-protocol",
+ "nq-runtime-dependency-authority",
  "nq-store",
  "serde",
  "serde_json",
@@ -412,6 +413,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nq-runtime-dependency-authority"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "hex",
+ "nq-protocol",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "nq-store"
 version = "0.1.0"
 dependencies = [
@@ -422,6 +435,7 @@ dependencies = [
  "nq-host-role-contract",
  "nq-host-role-dependency-custody",
  "nq-protocol",
+ "nq-runtime-dependency-authority",
  "rusqlite",
  "serde",
  "serde_json",

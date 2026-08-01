@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+ --> tests/ui/gen4/evidence_clone.rs:6:5
+  |
+5 | ) -> ResolvedControllingActivation<'id> {
+  |      ---------------------------------- expected `ResolvedControllingActivation<'id>` because of return type
+6 |     evidence.clone()
+  |     ^^^^^^^^^^^^^^^^ expected `ResolvedControllingActivation<'_>`, found `&ResolvedControllingActivation<'_>`
+  |
+note: `ResolvedControllingActivation<'id>` does not implement `Clone`, so `&ResolvedControllingActivation<'id>` was cloned instead
+ --> tests/ui/gen4/evidence_clone.rs:6:5
+  |
+6 |     evidence.clone()
+  |     ^^^^^^^^

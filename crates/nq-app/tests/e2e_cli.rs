@@ -1,5 +1,7 @@
 //! Black-box contract tests through the shipped `nq` binary.
 
+mod support;
+
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -93,8 +95,14 @@ max_file_bytes = 67108864
     assert_eq!(corpus["schema"], "nq.protocol.conformance_receipt.v1");
     assert_eq!(corpus["fixtures_checked"], 12);
 
-    let initialized = success(run(nq, &config_path, &["init"]));
-    assert_eq!(initialized["initialized"], true);
+    let retired_init = run(nq, &config_path, &["init"]);
+    assert!(!retired_init.status.success());
+    assert!(
+        String::from_utf8_lossy(&retired_init.stderr)
+            .contains("requires the governed HostRoleRuntime authority path")
+    );
+    assert!(!database.exists(), "retired init must not create a Store");
+    support::initialize_gen4_test_store(&config_path);
 
     let tested_output = run(
         nq,

@@ -47,6 +47,7 @@ pub use dependency::{
     RuntimeDependencyGenerationCustody, SignedAdmissionReceiptSet,
 };
 pub use inspector::{InspectorEntry, InspectorPage, InspectorProjection, InspectorProjectionState};
+pub use nq_runtime_dependency_authority::{GenesisAuthorityCustody, MigrationReceiptBytes};
 pub(crate) use prelaunch::production_identity;
 pub use prelaunch::{
     GovernedPrelaunchRequest, GovernedProductionIdentity, NativeDeadlinePrelaunchRequest,
@@ -55,8 +56,8 @@ pub use prelaunch::{
 pub use runtime::{
     AppendDisposition as CustodyAppendDisposition, AppendRecord as CustodyRecord,
     AppendRequest as CustodyAppendRequest, AppendResult as CustodyAppendResult,
-    HistoricalMaterializedRecord, HistoricalTopology, HostRoleRuntime, RuntimeReadPage,
-    RuntimeSnapshot,
+    HistoricalMaterializedRecord, HistoricalTopology, HostRoleRuntime,
+    RuntimeAuthorityResidentBinding, RuntimeReadPage, RuntimeSnapshot,
 };
 
 use nq_protocol::Sha256Digest;
@@ -73,6 +74,10 @@ pub type Result<T> = std::result::Result<T, RuntimeError>;
 /// Typed refusal from the restart-safe host-role runtime boundary.
 #[derive(Debug, Error)]
 pub enum RuntimeError {
+    /// Enrolled resident authority verification refused the exact native
+    /// custody, chain, scope, cut, signature, or occurrence binding.
+    #[error(transparent)]
+    RuntimeAuthority(#[from] nq_runtime_dependency_authority::AuthorityError),
     /// The ratified contract carrier or full graph refused the input.
     #[error("host-role contract refusal: {0}")]
     Contract(#[from] nq_host_role_contract::ContractError),

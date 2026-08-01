@@ -997,7 +997,7 @@ fn structured_watcher_test_emits_the_canonical_typed_refusal() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let database = directory.path().join("refusal.db");
     let config = write_refusal_config(directory.path(), &database);
-    assert_eq!(success(run(nq, &config, &["init"]))["initialized"], true);
+    support::initialize_gen4_test_store(&config);
 
     let transient_output = run(nq, &config, &["watcher", "test", "dry-refusal"]);
     assert!(

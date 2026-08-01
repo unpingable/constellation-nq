@@ -1,5 +1,9 @@
+#![allow(dead_code)]
+
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use nq_core::admission::{ADMISSION_SCHEMA, AdmittedProfile, ConformanceReceipt, OperatorIdentity};
@@ -16,6 +20,9 @@ use nq_protocol::{
     MonotonicDeadline, ProfileBinding, ProfileId, ProfileVersion, RequestId, ScopeBinding,
     ScopeKind, Sha256Digest, SubjectBinding, SubjectId, VantageBinding, VantageKind,
 };
+use nq_runtime_dependency_authority::{
+    test_support::RawAuthorityFixture, verify_for_establishment,
+};
 use nq_store::{
     AdmissionIdentity, AdmissionInput, BindingEventInput, BindingMaterializationInput,
     CanonicalDocument, CollectionInput, ProviderIntakeInput, RunInput, Store,
@@ -31,6 +38,73 @@ fn timestamp(value: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(value)
         .expect("fixture timestamp is RFC3339")
         .with_timezone(&Utc)
+}
+
+/// Provision one test-only Gen4 Store through the same sealed authority and
+/// Store-owned transaction surfaces used by production runtime integration.
+/// This is intentionally not exposed by the shipped CLI: the bounded Gen4
+/// campaign has no production A2 adapter.
+#[allow(dead_code)]
+pub fn initialize_gen4_test_store(config_path: &Path) {
+    let config = nq_core::config::NqConfig::load(config_path).expect("load test configuration");
+    if let Some(parent) = config.database_path.parent() {
+        fs::create_dir_all(parent).expect("database parent");
+    }
+    fs::create_dir_all(&config.admissions_dir).expect("admissions directory");
+    fs::set_permissions(&config.admissions_dir, fs::Permissions::from_mode(0o700))
+        .expect("admissions mode");
+    fs::create_dir_all(&config.helper_runtime_dir).expect("helper runtime directory");
+    fs::set_permissions(
+        &config.helper_runtime_dir,
+        fs::Permissions::from_mode(0o711),
+    )
+    .expect("helper runtime mode");
+
+    let mut store = Store::initialize(&config.database_path).expect("initialize Gen4 test Store");
+    {
+        let mut session = store
+            .begin_writer_session()
+            .expect("profile writer session");
+        for profile in nq_profiles::all_profiles() {
+            nq_core::engine::append_profile_descriptor(&mut session, *profile)
+                .expect("compiled profile descriptor");
+        }
+    }
+
+    let authority = RawAuthorityFixture::fresh_genesis();
+    let custody = authority.custody();
+    let presented = authority.presented_set();
+    let expectations = authority.activation_expectations();
+    store
+        .with_runtime_authority_writer_session(
+            |brand, session| -> Result<(), nq_store::StoreError> {
+                let resolved =
+                    verify_for_establishment(brand, &custody, &presented, None, &expectations)?;
+                session.establish_runtime_dependency_trust_root(&resolved)?;
+                Ok(())
+            },
+        )
+        .expect("establish Gen4 test authority");
+
+    let mut session = store.begin_writer_session().expect("status writer session");
+    nq_core::engine::record_component_status(
+        &mut session,
+        "database",
+        "local",
+        "healthy",
+        "initialized",
+        &json!({"schema_version": nq_store::SCHEMA_VERSION}),
+    )
+    .expect("database status");
+    nq_core::engine::record_component_status(
+        &mut session,
+        "profile_catalog",
+        "compiled",
+        "healthy",
+        "catalog_loaded",
+        &json!({"profile_count": nq_profiles::all_profiles().len()}),
+    )
+    .expect("profile catalog status");
 }
 
 fn fixture_conformance() -> ConformanceReceipt {

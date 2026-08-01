@@ -50,19 +50,19 @@
       "identity": "nq.v3_projection_capsule_bound_manifest.v1",
       "schema": "nq.v3_projection_capsule_bound_manifest.v1",
       "source_path": "nq.v3_projection_capsule_bound_manifest.v1.json",
-      "sha256": "sha256:a0436b72669c427cae37335abe10ed9bc939181c75c28af427960404e664baec"
+      "sha256": "sha256:44f491ecce64e0aab9ba7dea40091d495d3cfc38dd3d2c811e926de8298a3855"
     },
     {
       "identity": "nq.v3_projection_capsule_bound_manifest.v2",
       "schema": "nq.v3_projection_capsule_bound_manifest.v2",
       "source_path": "nq.v3_projection_capsule_bound_manifest.v2.json",
-      "sha256": "sha256:f1c97c59181e10611413a42dd4d401c0db08298bd5513303aed81af000e25d98"
+      "sha256": "sha256:54f470aefed9a8f789ce0212f2e083ad6d5e3420506417b97042003b01a20f12"
     },
     {
       "identity": "nq.v3_projection_capsule_bound_qualification.v1",
       "schema": "nq.v3_projection_capsule_bound_qualification.v1",
       "source_path": "nq.v3_projection_capsule_bound_qualification.v1.json",
-      "sha256": "sha256:28b5580fffaf0b03525a202e063503b1934483b66d119cbd136280e0aa8da7f1"
+      "sha256": "sha256:62c6ea98fc9cfee38c1653cb895c164aaddf5fcc5439fa7c0c5efbbe0e5e2ed4"
     }
   ],
   "qualification_gaps": [

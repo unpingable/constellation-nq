@@ -13,12 +13,17 @@ use nq_host_role_contract::{
     RuntimeSchema, Timestamp, Token, ValidatedRuntimeRecord, ValidationContext,
 };
 use nq_protocol::{Sha256Digest, canonical_json_bytes, semantic_digest, sha256_bytes};
+use nq_runtime_dependency_authority::{
+    ActivationContext, ActivationExpectations, EstablishmentArm, GenesisAuthorityCustody,
+    MigrationReceiptBytes, PresentedAuthoritySet, RestartExpectations, resolve_for_restart,
+    verify_for_establishment, with_verification_brand,
+};
 use nq_store::{
-    CanonicalDocument, GovernedCustodyInventoryEntry, GovernedCustodyReservation,
+    BackupArtifact, CanonicalDocument, GovernedCustodyInventoryEntry, GovernedCustodyReservation,
     GovernedProtectedFailureAccess, MAX_PUBLIC_QUERY_ROWS, RuntimeCheckpointDependencyBinding,
     RuntimeCheckpointDependencyInput, RuntimeDependencyGenerationByteState,
     RuntimeLedgerCheckpoint, RuntimeRecordAppendDisposition, RuntimeRecordBatchInput,
-    RuntimeRecordInput, RuntimeRecordRow, Store, runtime_record_batch_digest,
+    RuntimeRecordInput, RuntimeRecordRow, Store, StoreError, runtime_record_batch_digest,
 };
 use serde_json::{Value, json};
 
@@ -204,6 +209,25 @@ struct NativeDeadlineSample {
     boot_epoch: Sha256Digest,
 }
 
+/// Exogenous enrolled-resident tuple against which native A2 authority is
+/// verified.  It carries no Store occurrence, root, migration, diagnostic,
+/// capacity, Docket, or effect authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeAuthorityResidentBinding {
+    /// Exact enrolled resident identity.
+    pub resident_identity: String,
+    /// Exact enrolled resident generation.
+    pub resident_generation: u64,
+    /// Exact host role.
+    pub host_role: String,
+    /// Exact host-role manifest generation.
+    pub role_manifest_generation: u64,
+    /// Closed runtime/backend authority domain.
+    pub domain: String,
+    /// Minimum supported governing policy version.
+    pub policy_floor: u64,
+}
+
 trait NativeDeadlineSource {
     fn read_boot_id(&mut self) -> Result<Vec<u8>>;
     fn realtime_ns(&mut self) -> Result<u64>;
@@ -242,29 +266,139 @@ pub struct HostRoleRuntime {
 }
 
 impl HostRoleRuntime {
-    /// Initializes a new schema-v7 store and opens an empty host-role runtime.
+    /// Initializes a new governed schema-v8 occurrence and opens an empty
+    /// host-role runtime.
     ///
     /// # Errors
     ///
     /// Refuses an existing database, invalid dependencies, or store
     /// initialization failure.
-    pub fn initialize(path: impl AsRef<Path>, dependencies: RuntimeDependencies) -> Result<Self> {
-        let mut store = Store::initialize(path)?;
+    pub fn initialize(
+        path: impl AsRef<Path>,
+        dependencies: RuntimeDependencies,
+        authority_custody: &GenesisAuthorityCustody,
+        resident: &RuntimeAuthorityResidentBinding,
+    ) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
         let trust_root = dependencies.custody().trust_anchor_id()?;
-        store
-            .begin_writer_session()?
-            .establish_runtime_dependency_trust_root(&trust_root)?;
-        Self::from_store(store, dependencies)
+        let expectations = fresh_authority_expectations(resident, trust_root);
+        let presented = PresentedAuthoritySet::default();
+        let mut created = false;
+        // Cryptographic and tuple refusal occurs before a file is created.
+        with_verification_brand(|brand| {
+            verify_for_establishment(&brand, authority_custody, &presented, None, &expectations)
+                .map(drop)
+        })?;
+        let established = (|| -> Result<Store> {
+            let mut store = Store::initialize(&path)?;
+            created = true;
+            store.with_runtime_authority_writer_session(
+                |brand, session| -> std::result::Result<(), StoreError> {
+                    let resolved = verify_for_establishment(
+                        brand,
+                        authority_custody,
+                        &presented,
+                        None,
+                        &expectations,
+                    )?;
+                    session.establish_runtime_dependency_trust_root(&resolved)?;
+                    Ok(())
+                },
+            )?;
+            Ok(store)
+        })();
+        let store = match established {
+            Ok(store) => store,
+            Err(error) => {
+                if created {
+                    remove_failed_fresh_store(&path);
+                }
+                return Err(error);
+            }
+        };
+        Self::from_store(store, dependencies, authority_custody, resident)
     }
 
-    /// Opens an existing schema-v7 store and validates the complete ledger.
+    /// Opens an existing established schema-v8 Store and resolves authority
+    /// read-only from the receipt-pinned genesis chain.
     ///
     /// # Errors
     ///
     /// Refuses corruption, dependency substitution, unsupported schemas,
     /// unresolved references, or any failed contract join.
-    pub fn open(path: impl AsRef<Path>, dependencies: RuntimeDependencies) -> Result<Self> {
-        Self::from_store(Store::open(path)?, dependencies)
+    pub fn open(
+        path: impl AsRef<Path>,
+        dependencies: RuntimeDependencies,
+        authority_custody: &GenesisAuthorityCustody,
+        resident: &RuntimeAuthorityResidentBinding,
+    ) -> Result<Self> {
+        Self::from_store(
+            Store::open(path)?,
+            dependencies,
+            authority_custody,
+            resident,
+        )
+    }
+
+    /// Migrate one exact backup-preserved schema-v7 occurrence through the
+    /// one-use accepted migration arm, then reopen it under the ordinary
+    /// read-only restart law.
+    ///
+    /// # Errors
+    ///
+    /// Refuses an inexact backup, an invalid or previously consumed migration
+    /// receipt, authority or occurrence mismatch, an invalid source graph, or
+    /// any failed contract join during the read-only reopen.
+    pub fn migrate_v7_runtime_authority(
+        path: impl AsRef<Path>,
+        backup: &BackupArtifact,
+        dependencies: RuntimeDependencies,
+        authority_custody: &GenesisAuthorityCustody,
+        migration_receipt: &MigrationReceiptBytes,
+        resident: &RuntimeAuthorityResidentBinding,
+    ) -> Result<Self> {
+        let path = path.as_ref();
+        {
+            let source = Store::open_v7_upgrade_source_read_only(path)?;
+            if source.runtime_dependency_trust_root()?.is_some()
+                || source.runtime_ledger_checkpoint()?.is_some()
+            {
+                // Re-earn the complete pre-R2 runtime graph semantics before
+                // migrating any rooted or ledger-bearing source.
+                let _ = Self::reopen_state(&source, &dependencies)?;
+            }
+        }
+        let mut store = Store::open_v7_runtime_authority_migration_source(path, backup)?;
+        let occurrence = store.sole_genesis_id()?;
+        let trust_root = dependencies.custody().trust_anchor_id()?;
+        let migration = store.runtime_authority_migration_expectations()?;
+        let expectations = ActivationExpectations {
+            genesis_context: ActivationContext::MigrationGenesis,
+            expected_occurrence_id: Some(occurrence),
+            resident_identity: resident.resident_identity.clone(),
+            resident_generation: resident.resident_generation,
+            host_role: resident.host_role.clone(),
+            role_manifest_generation: resident.role_manifest_generation,
+            trust_anchor_id: trust_root,
+            domain: resident.domain.clone(),
+            policy_floor: resident.policy_floor,
+            migration: Some(migration),
+        };
+        let presented = PresentedAuthoritySet::default();
+        store.with_runtime_authority_writer_session(
+            |brand, session| -> std::result::Result<(), StoreError> {
+                let resolved = verify_for_establishment(
+                    brand,
+                    authority_custody,
+                    &presented,
+                    Some(migration_receipt),
+                    &expectations,
+                )?;
+                session.establish_runtime_dependency_trust_root(&resolved)?;
+                Ok(())
+            },
+        )?;
+        Self::from_store(store, dependencies, authority_custody, resident)
     }
 
     /// Opens an already constructed store.
@@ -275,8 +409,14 @@ impl HostRoleRuntime {
     /// # Errors
     ///
     /// Refuses every condition described by [`Self::open`].
-    pub fn from_store(store: Store, dependencies: RuntimeDependencies) -> Result<Self> {
+    pub fn from_store(
+        store: Store,
+        dependencies: RuntimeDependencies,
+        authority_custody: &GenesisAuthorityCustody,
+        resident: &RuntimeAuthorityResidentBinding,
+    ) -> Result<Self> {
         store.validate()?;
+        resolve_store_runtime_authority(&store, &dependencies, authority_custody, resident)?;
         let custody_frontiers = store.governed_custody_inventory()?;
         let reopened = Self::reopen_state(&store, &dependencies)?;
         Ok(Self {
@@ -1573,6 +1713,100 @@ impl HostRoleRuntime {
     }
 }
 
+fn fresh_authority_expectations(
+    resident: &RuntimeAuthorityResidentBinding,
+    trust_anchor_id: Sha256Digest,
+) -> ActivationExpectations {
+    ActivationExpectations {
+        genesis_context: ActivationContext::FreshGenesis,
+        expected_occurrence_id: None,
+        resident_identity: resident.resident_identity.clone(),
+        resident_generation: resident.resident_generation,
+        host_role: resident.host_role.clone(),
+        role_manifest_generation: resident.role_manifest_generation,
+        trust_anchor_id,
+        domain: resident.domain.clone(),
+        policy_floor: resident.policy_floor,
+        migration: None,
+    }
+}
+
+fn resolve_store_runtime_authority(
+    store: &Store,
+    dependencies: &RuntimeDependencies,
+    custody: &GenesisAuthorityCustody,
+    resident: &RuntimeAuthorityResidentBinding,
+) -> Result<()> {
+    let receipt = store
+        .runtime_dependency_establishment_receipt()?
+        .ok_or(nq_store::StoreError::EstablishmentReceiptMissing)?;
+    let root = store
+        .runtime_dependency_trust_root()?
+        .ok_or(nq_store::StoreError::EstablishmentRootMissing)?;
+    let occurrence = store.sole_genesis_id()?;
+    let dependency_anchor = dependencies.custody().trust_anchor_id()?;
+    if root != dependency_anchor {
+        return Err(RuntimeError::DependencyTrustAnchorSubstitution {
+            expected: root,
+            observed: dependency_anchor,
+        });
+    }
+    let transcript = &receipt.transcript;
+    if transcript.occurrence_id() != occurrence
+        || transcript.trust_anchor_id() != &root
+        || transcript.domain() != resident.domain
+    {
+        return Err(nq_store::StoreError::EstablishmentTranscriptMismatch.into());
+    }
+    let (genesis_context, expected_migration_receipt_digest) = match transcript.arm() {
+        EstablishmentArm::Genesis => (ActivationContext::FreshGenesis, None),
+        EstablishmentArm::Migration => (
+            ActivationContext::MigrationGenesis,
+            Some(
+                transcript
+                    .migration_receipt_digest()
+                    .ok_or(nq_store::StoreError::EstablishmentMigrationMismatch)?
+                    .clone(),
+            ),
+        ),
+    };
+    let presented = store.runtime_authority_presented_set()?;
+    let retained_migration = store.runtime_authority_migration_receipt()?;
+    let expectations = RestartExpectations {
+        genesis_context,
+        expected_occurrence_id: occurrence,
+        expected_chain_root_activation_digest: transcript.chain_root_activation_digest().clone(),
+        expected_establishment_tip_digest: transcript
+            .controlling_tip_digest_at_establishment()
+            .clone(),
+        resident_identity: resident.resident_identity.clone(),
+        resident_generation: resident.resident_generation,
+        host_role: resident.host_role.clone(),
+        role_manifest_generation: resident.role_manifest_generation,
+        trust_anchor_id: root,
+        domain: resident.domain.clone(),
+        policy_floor: resident.policy_floor,
+        expected_custody_digest: transcript.custody_digest().clone(),
+        expected_migration_receipt_digest,
+    };
+    let _snapshot = resolve_for_restart(
+        custody,
+        &presented,
+        retained_migration.as_ref(),
+        &expectations,
+    )?;
+    Ok(())
+}
+
+fn remove_failed_fresh_store(path: &Path) {
+    let _ = fs::remove_file(path);
+    for suffix in ["-journal", "-wal", "-shm"] {
+        let mut sidecar = path.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        let _ = fs::remove_file(sidecar);
+    }
+}
+
 fn linux_clock_ns(clock_id: ClockId, name: &'static str) -> Result<u64> {
     let sample =
         clock_gettime(clock_id).map_err(|_| RuntimeError::NativeDeadlineClockUnavailable(name))?;
@@ -1956,6 +2190,11 @@ mod tests {
         IdentityId, IdentityKind, IdentityVersion, RuntimeSchema, ValidatedRuntimeRecord,
     };
     use nq_protocol::{canonical_json_bytes, semantic_digest, sha256_bytes};
+    use nq_runtime_dependency_authority::GenesisAuthorityCustody;
+    use nq_runtime_dependency_authority::test_support::{
+        FIXTURE_DOMAIN, FIXTURE_HOST_ROLE, FIXTURE_RESIDENT_GENERATION, FIXTURE_RESIDENT_ID,
+        FIXTURE_ROLE_MANIFEST_GENERATION, RawAuthorityFixture,
+    };
     use nq_store::{
         GovernedAcquisitionCustodyInput, GovernedCustodyInventoryEntry,
         GovernedCustodyRecoveryClass, GovernedCustodyReservationLedgerBinding,
@@ -1974,6 +2213,240 @@ mod tests {
 
     const RECORDS: &str =
         include_str!("../../nq-host-role-contract/assets/host-role-runtime-records.v1.json");
+
+    fn test_resident_binding() -> RuntimeAuthorityResidentBinding {
+        RuntimeAuthorityResidentBinding {
+            resident_identity: FIXTURE_RESIDENT_ID.to_owned(),
+            resident_generation: FIXTURE_RESIDENT_GENERATION,
+            host_role: FIXTURE_HOST_ROLE.to_owned(),
+            role_manifest_generation: FIXTURE_ROLE_MANIFEST_GENERATION,
+            domain: FIXTURE_DOMAIN.to_owned(),
+            policy_floor: 1,
+        }
+    }
+
+    fn initialize_test_runtime(
+        path: impl AsRef<Path>,
+        dependencies: RuntimeDependencies,
+    ) -> Result<HostRoleRuntime> {
+        let anchor = dependencies.custody().trust_anchor_id()?;
+        let authority = RawAuthorityFixture::fresh_genesis_with_anchor(anchor);
+        HostRoleRuntime::initialize(
+            path,
+            dependencies,
+            &authority.custody(),
+            &test_resident_binding(),
+        )
+    }
+
+    fn open_test_runtime(
+        path: impl AsRef<Path>,
+        dependencies: RuntimeDependencies,
+    ) -> Result<HostRoleRuntime> {
+        let anchor = dependencies.custody().trust_anchor_id()?;
+        let authority = RawAuthorityFixture::fresh_genesis_with_anchor(anchor);
+        HostRoleRuntime::open(
+            path,
+            dependencies,
+            &authority.custody(),
+            &test_resident_binding(),
+        )
+    }
+
+    fn runtime_store_file_family(path: &Path) -> Vec<(String, Option<Vec<u8>>)> {
+        std::iter::once("")
+            .chain(["-journal", "-wal", "-shm"])
+            .map(|suffix| {
+                let mut member = path.as_os_str().to_os_string();
+                member.push(suffix);
+                let member = std::path::PathBuf::from(member);
+                (
+                    suffix.to_owned(),
+                    member
+                        .exists()
+                        .then(|| std::fs::read(member).expect("Store family member")),
+                )
+            })
+            .collect()
+    }
+
+    fn establish_runtime_authority_fixture(
+        path: &Path,
+        dependencies: RuntimeDependencies,
+    ) -> RawAuthorityFixture {
+        let anchor = dependencies
+            .custody()
+            .trust_anchor_id()
+            .expect("fixture anchor");
+        let authority = RawAuthorityFixture::fresh_genesis_with_anchor(anchor);
+        drop(
+            HostRoleRuntime::initialize(
+                path,
+                dependencies,
+                &authority.custody(),
+                &test_resident_binding(),
+            )
+            .expect("Gen4 runtime establishes"),
+        );
+        authority
+    }
+
+    #[test]
+    fn gen4_invalid_genesis_authority_refuses_before_creating_store_bytes() {
+        let directory = tempdir().expect("temporary directory");
+        let database = directory.path().join("invalid-authority.sqlite");
+        let runtime_fixture = fixture();
+        let authority = RawAuthorityFixture::fresh_genesis_with_anchor(
+            runtime_fixture
+                .dependencies
+                .custody()
+                .trust_anchor_id()
+                .expect("fixture anchor"),
+        );
+        let valid = authority.custody();
+        let mut invalid_a2 = valid.genesis_a2_bytes().to_vec();
+        invalid_a2.push(b' ');
+        let invalid = GenesisAuthorityCustody::new(valid.genesis_a1_bytes().to_vec(), invalid_a2);
+
+        assert!(
+            HostRoleRuntime::initialize(
+                &database,
+                runtime_fixture.dependencies,
+                &invalid,
+                &test_resident_binding(),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            runtime_store_file_family(&database),
+            vec![
+                (String::new(), None),
+                ("-journal".to_owned(), None),
+                ("-wal".to_owned(), None),
+                ("-shm".to_owned(), None),
+            ],
+            "pre-establishment authority refusal created Store bytes"
+        );
+    }
+
+    #[test]
+    fn gen4_open_refuses_wrong_custody_and_resident_without_writing() {
+        let directory = tempdir().expect("temporary directory");
+        let database = directory.path().join("wrong-restart-authority.sqlite");
+        let runtime_fixture = fixture();
+        let correct =
+            establish_runtime_authority_fixture(&database, runtime_fixture.dependencies.clone());
+        let before = runtime_store_file_family(&database);
+        let wrong = RawAuthorityFixture::fresh_genesis_with_anchor(sha256_bytes(b"other anchor"));
+
+        assert!(
+            HostRoleRuntime::open(
+                &database,
+                runtime_fixture.dependencies.clone(),
+                &wrong.custody(),
+                &test_resident_binding(),
+            )
+            .is_err()
+        );
+        assert_eq!(runtime_store_file_family(&database), before);
+
+        let mut wrong_resident = test_resident_binding();
+        wrong_resident.resident_identity = "resident/attacker".to_owned();
+        assert!(
+            HostRoleRuntime::open(
+                &database,
+                runtime_fixture.dependencies,
+                &correct.custody(),
+                &wrong_resident,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            runtime_store_file_family(&database),
+            before,
+            "restart authority refusals changed Store bytes or sidecars"
+        );
+    }
+
+    #[test]
+    fn gen4_open_refuses_missing_receipt_without_repair_or_write() {
+        let directory = tempdir().expect("temporary directory");
+        let database = directory.path().join("missing-receipt.sqlite");
+        let runtime_fixture = fixture();
+        let authority =
+            establish_runtime_authority_fixture(&database, runtime_fixture.dependencies.clone());
+        {
+            let connection = rusqlite::Connection::open(&database).expect("tamper fixture");
+            connection
+                .execute_batch(
+                    "DROP TRIGGER immutable_runtime_dependency_establishment_receipts_delete;
+                     DELETE FROM runtime_dependency_establishment_receipts;
+                     CREATE TRIGGER immutable_runtime_dependency_establishment_receipts_delete BEFORE DELETE ON runtime_dependency_establishment_receipts BEGIN SELECT RAISE(ABORT, 'append-only table'); END;",
+                )
+                .expect("construct missing-receipt hostile Store");
+        }
+        let before = runtime_store_file_family(&database);
+
+        assert!(matches!(
+            HostRoleRuntime::open(
+                &database,
+                runtime_fixture.dependencies,
+                &authority.custody(),
+                &test_resident_binding(),
+            ),
+            Err(RuntimeError::Store(StoreError::EstablishmentReceiptMissing))
+        ));
+        assert_eq!(
+            runtime_store_file_family(&database),
+            before,
+            "ordinary restart repaired or wrote a missing receipt"
+        );
+    }
+
+    #[test]
+    fn gen4_open_refuses_malformed_store_resident_authority_without_filtering_or_write() {
+        let directory = tempdir().expect("temporary directory");
+        let database = directory.path().join("malformed-authority.sqlite");
+        let runtime_fixture = fixture();
+        let authority =
+            establish_runtime_authority_fixture(&database, runtime_fixture.dependencies.clone());
+        let malformed = b"{";
+        let malformed_digest = sha256_bytes(malformed);
+        {
+            let connection = rusqlite::Connection::open(&database).expect("hostile fixture");
+            connection
+                .execute(
+                    "INSERT INTO runtime_resident_activation_successors (
+                        record_id, canonical_bytes, canonical_bytes_sha256,
+                        canonical_bytes_length, committed_at
+                     ) VALUES (?1, ?2, ?3, ?4, '2026-08-01T00:00:00Z')",
+                    rusqlite::params![
+                        malformed_digest.as_str(),
+                        malformed,
+                        malformed_digest.as_str(),
+                        malformed.len(),
+                    ],
+                )
+                .expect("insert malformed but exactly digested resident record");
+        }
+        let before = runtime_store_file_family(&database);
+
+        assert!(matches!(
+            HostRoleRuntime::open(
+                &database,
+                runtime_fixture.dependencies,
+                &authority.custody(),
+                &test_resident_binding(),
+            ),
+            Err(RuntimeError::RuntimeAuthority(_)
+                | RuntimeError::Store(StoreError::RuntimeAuthority(_)))
+        ));
+        assert_eq!(
+            runtime_store_file_family(&database),
+            before,
+            "invalid resident authority was filtered, repaired, or wrote a refusal artifact"
+        );
+    }
 
     #[test]
     fn checkpoint_context_wraps_only_exact_binding_failures_as_corruption() {
@@ -2653,7 +3126,7 @@ mod tests {
         let directory = tempdir().expect("directory");
         let database = directory.path().join("native-deadline.db");
         let mut runtime =
-            HostRoleRuntime::initialize(&database, fixture.dependencies.clone()).expect("runtime");
+            initialize_test_runtime(&database, fixture.dependencies.clone()).expect("runtime");
         let mut source = ScriptedDeadlineSource::accepted();
         let prepared = runtime
             .prepare_native_deadline_invocation_with_source(native_request(&fixture), &mut source)
@@ -2713,7 +3186,7 @@ mod tests {
         let directory = tempdir().expect("directory");
         let emitted_database = directory.path().join("emitted.db");
         let mut emitted_runtime =
-            HostRoleRuntime::initialize(&emitted_database, emitted_fixture.dependencies.clone())
+            initialize_test_runtime(&emitted_database, emitted_fixture.dependencies.clone())
                 .expect("emitting runtime");
         let mut source = ScriptedDeadlineSource::accepted();
         let emitted = emitted_runtime
@@ -2758,7 +3231,7 @@ mod tests {
 
         let supplied_database = directory.path().join("supplied.db");
         let mut supplied_runtime =
-            HostRoleRuntime::initialize(&supplied_database, supplied_fixture.dependencies)
+            initialize_test_runtime(&supplied_database, supplied_fixture.dependencies)
                 .expect("supplied runtime");
         let prepared = supplied_runtime
             .prepare_governed_invocation(generic)
@@ -2784,8 +3257,8 @@ mod tests {
             let fixture = native_fixture();
             let directory = tempdir().expect("directory");
             let database = directory.path().join(format!("source-failure-{index}.db"));
-            let mut runtime = HostRoleRuntime::initialize(&database, fixture.dependencies.clone())
-                .expect("runtime");
+            let mut runtime =
+                initialize_test_runtime(&database, fixture.dependencies.clone()).expect("runtime");
             let mut source = ScriptedDeadlineSource::accepted();
             source.failure = Some(failure);
             assert!(
@@ -2812,7 +3285,7 @@ mod tests {
         let directory = tempdir().expect("directory");
         let database = directory.path().join("boot-rebind.db");
         let mut runtime =
-            HostRoleRuntime::initialize(&database, fixture.dependencies.clone()).expect("runtime");
+            initialize_test_runtime(&database, fixture.dependencies.clone()).expect("runtime");
         let mut source = ScriptedDeadlineSource::accepted();
         source.changed_boot_id = Some(b"fedcba98-7654-3210-fedc-ba9876543210\n".to_vec());
         assert!(matches!(
@@ -2833,7 +3306,7 @@ mod tests {
         let first = fixture();
         let first_database = directory.path().join("owned-terminal.db");
         let mut first_runtime =
-            HostRoleRuntime::initialize(&first_database, first.dependencies).expect("runtime");
+            initialize_test_runtime(&first_database, first.dependencies).expect("runtime");
         let mut prepared = first_runtime
             .prepare_governed_invocation(first.request)
             .expect("prepared");
@@ -2897,7 +3370,7 @@ mod tests {
         let second = fixture();
         let second_database = directory.path().join("reopened-terminal.db");
         let mut second_runtime =
-            HostRoleRuntime::initialize(&second_database, second.dependencies).expect("runtime");
+            initialize_test_runtime(&second_database, second.dependencies).expect("runtime");
         let second_prepared = second_runtime
             .prepare_governed_invocation(second.request)
             .expect("prepared");
@@ -2948,7 +3421,7 @@ mod tests {
         let directory = tempdir().expect("directory");
         let database = directory.path().join("ordered-forwarders.db");
         let mut runtime =
-            HostRoleRuntime::initialize(&database, fixture.dependencies).expect("runtime");
+            initialize_test_runtime(&database, fixture.dependencies).expect("runtime");
         let mut prepared = runtime
             .prepare_governed_invocation(fixture.request)
             .expect("prepared");
@@ -3071,7 +3544,7 @@ mod tests {
         let database = directory.path().join("nq.db");
         let reopened_dependencies = fixture.dependencies.clone();
         let mut runtime =
-            HostRoleRuntime::initialize(&database, fixture.dependencies).expect("runtime");
+            initialize_test_runtime(&database, fixture.dependencies).expect("runtime");
         let request = fixture.request.clone();
         let request_reservation_id = request.custody_reservation_record_id.clone();
         let prepared = runtime
@@ -3124,7 +3597,7 @@ mod tests {
         ));
         drop(runtime);
 
-        let reopened = HostRoleRuntime::open(&database, reopened_dependencies)
+        let reopened = open_test_runtime(&database, reopened_dependencies)
             .expect("restart classifies physical frontier");
         let [GovernedCustodyInventoryEntry::Verified(frontier)] = reopened.custody_frontiers()
         else {
@@ -3155,8 +3628,7 @@ mod tests {
         let first = fixture();
         let directory = tempdir().expect("directory");
         let database = directory.path().join("graph.db");
-        let mut runtime =
-            HostRoleRuntime::initialize(&database, first.dependencies).expect("runtime");
+        let mut runtime = initialize_test_runtime(&database, first.dependencies).expect("runtime");
         let mut request = first.request;
         let launch = &mut request.launch_custody.records[0];
         let mut value: Value =
@@ -3167,8 +3639,7 @@ mod tests {
 
         let second = fixture();
         let database = directory.path().join("capacity.db");
-        let mut runtime =
-            HostRoleRuntime::initialize(&database, second.dependencies).expect("runtime");
+        let mut runtime = initialize_test_runtime(&database, second.dependencies).expect("runtime");
         let mut request = second.request;
         let reservation = request
             .reservation_custody
@@ -3192,7 +3663,7 @@ mod tests {
     fn prepared_retains_diagnostic_capacity_separately_from_final_partition() {
         let directory = tempdir().expect("directory");
         let baseline = fixture();
-        let mut baseline_runtime = HostRoleRuntime::initialize(
+        let mut baseline_runtime = initialize_test_runtime(
             directory.path().join("diagnostic-capacity-baseline.db"),
             baseline.dependencies,
         )
@@ -3202,7 +3673,7 @@ mod tests {
             .expect("baseline prepared invocation");
 
         let one_under = diagnostic_capacity_one_under_fixture();
-        let mut one_under_runtime = HostRoleRuntime::initialize(
+        let mut one_under_runtime = initialize_test_runtime(
             directory.path().join("diagnostic-capacity-one-under.db"),
             one_under.dependencies,
         )
@@ -3241,7 +3712,7 @@ mod tests {
         let directory = tempdir().expect("directory");
         let database = directory.path().join("qualified-final-batch.db");
         let mut runtime =
-            HostRoleRuntime::initialize(&database, fixture.dependencies).expect("runtime");
+            initialize_test_runtime(&database, fixture.dependencies).expect("runtime");
         let prepared = runtime
             .prepare_governed_invocation(fixture.request)
             .expect("prepared invocation");
@@ -3306,7 +3777,7 @@ mod tests {
         let directory = tempdir().expect("directory");
         let database = directory.path().join("source-substitution.db");
         let mut runtime =
-            HostRoleRuntime::initialize(&database, fixture.dependencies).expect("runtime");
+            initialize_test_runtime(&database, fixture.dependencies).expect("runtime");
         let prepared = runtime
             .prepare_governed_invocation(fixture.request)
             .expect("prepared invocation");
@@ -3345,7 +3816,7 @@ mod tests {
         let directory = tempdir().expect("directory");
         let database = directory.path().join("missing-historical-source.db");
         let mut runtime =
-            HostRoleRuntime::initialize(&database, fixture.dependencies).expect("runtime");
+            initialize_test_runtime(&database, fixture.dependencies).expect("runtime");
         let mut prepared = runtime
             .prepare_governed_invocation(fixture.request)
             .expect("prepared invocation");
@@ -3391,7 +3862,7 @@ mod tests {
         let directory = tempdir().expect("directory");
         let database = directory.path().join("unselected-sources.db");
         let mut runtime =
-            HostRoleRuntime::initialize(&database, fixture.dependencies).expect("runtime");
+            initialize_test_runtime(&database, fixture.dependencies).expect("runtime");
         let prepared = runtime
             .prepare_governed_invocation(fixture.request)
             .expect("prepared invocation");
@@ -3413,7 +3884,7 @@ mod tests {
         let directory = tempdir().expect("directory");
         let database = directory.path().join("historical-binding-sources.db");
         let mut runtime =
-            HostRoleRuntime::initialize(&database, fixture.dependencies).expect("runtime");
+            initialize_test_runtime(&database, fixture.dependencies).expect("runtime");
         let mut prepared = runtime
             .prepare_governed_invocation(fixture.request)
             .expect("prepared invocation");
@@ -3496,7 +3967,7 @@ mod tests {
         let directory = tempdir().expect("directory");
         let database = directory.path().join("topology-changed-source-corpora.db");
         let mut runtime =
-            HostRoleRuntime::initialize(&database, current_dependencies).expect("current runtime");
+            initialize_test_runtime(&database, current_dependencies).expect("current runtime");
         let mut prepared = runtime
             .prepare_governed_invocation(fixture.request)
             .expect("current prepared invocation");
@@ -3560,14 +4031,14 @@ mod tests {
         let directory = tempdir().expect("directory");
         let database = directory.path().join("frozen-final-generation.db");
         let mut runtime =
-            HostRoleRuntime::initialize(&database, fixture.dependencies).expect("g1 runtime");
+            initialize_test_runtime(&database, fixture.dependencies).expect("g1 runtime");
         let prepared = runtime
             .prepare_governed_invocation(fixture.request)
             .expect("g1 prepared invocation");
         let g1_launch = prepared.launch_checkpoint().clone();
         drop(runtime);
 
-        let mut runtime = HostRoleRuntime::open(&database, g2.clone()).expect("g2 runtime");
+        let mut runtime = open_test_runtime(&database, g2.clone()).expect("g2 runtime");
         let g2_frontier = runtime
             .append_custody_only(&opaque_append(
                 "final-batch-g2-current",
@@ -3616,7 +4087,7 @@ mod tests {
         let directory = tempdir().expect("directory");
         let database = directory.path().join("inventory.db");
         let mut runtime =
-            HostRoleRuntime::initialize(&database, fixture.dependencies.clone()).expect("runtime");
+            initialize_test_runtime(&database, fixture.dependencies.clone()).expect("runtime");
         runtime
             .prepare_governed_invocation(fixture.request)
             .expect("prepared invocation");
@@ -3625,8 +4096,7 @@ mod tests {
         let root = database.with_file_name("inventory.db.nq-custody-v1");
         std::fs::write(root.join("unexpected-entry"), b"not an arena")
             .expect("hostile custody-root entry");
-        let reopened =
-            HostRoleRuntime::open(&database, fixture.dependencies).expect("runtime reopens");
+        let reopened = open_test_runtime(&database, fixture.dependencies).expect("runtime reopens");
         assert_eq!(reopened.custody_frontiers().len(), 2);
         assert!(reopened.custody_frontiers().iter().any(|entry| {
             matches!(
@@ -3646,7 +4116,7 @@ mod tests {
         let directory = tempdir().expect("directory");
         let database = directory.path().join("missing-arena.db");
         let mut runtime =
-            HostRoleRuntime::initialize(&database, fixture.dependencies).expect("runtime");
+            initialize_test_runtime(&database, fixture.dependencies).expect("runtime");
         let prepared = runtime
             .prepare_governed_invocation(fixture.request)
             .expect("prepared invocation");
@@ -3657,7 +4127,7 @@ mod tests {
         drop(prepared);
         drop(runtime);
         let inventory_runtime =
-            HostRoleRuntime::open(&database, dependencies.clone()).expect("inventory runtime");
+            open_test_runtime(&database, dependencies.clone()).expect("inventory runtime");
         let [GovernedCustodyInventoryEntry::Verified(frontier)] =
             inventory_runtime.custody_frontiers()
         else {
@@ -3670,7 +4140,7 @@ mod tests {
         std::fs::remove_file(arena_path).expect("remove disposable arena specimen");
 
         let reopened =
-            HostRoleRuntime::open(&database, dependencies).expect("ledger remains inspectable");
+            open_test_runtime(&database, dependencies).expect("ledger remains inspectable");
         assert_eq!(
             reopened.custody_frontiers(),
             &[
@@ -3697,7 +4167,7 @@ mod tests {
         let g1_only_identity = first.runtime_identities[0].clone();
         let g1_external = first.external_inputs[0].0.clone();
         let mut runtime =
-            HostRoleRuntime::initialize(&database, first.dependencies).expect("g1 runtime");
+            initialize_test_runtime(&database, first.dependencies).expect("g1 runtime");
         let prepared = runtime
             .prepare_governed_invocation(first.request)
             .expect("g1 governed invocation");
@@ -3726,7 +4196,7 @@ mod tests {
         );
 
         let mut runtime =
-            HostRoleRuntime::open(&database, g2.clone()).expect("g1 reopened under g2 current");
+            open_test_runtime(&database, g2.clone()).expect("g1 reopened under g2 current");
         assert_eq!(runtime.contract_record_count(), g1_record_count);
         let g2_append = opaque_append("g2-opaque", "2026-07-29T21:01:00Z");
         let g2_checkpoint = runtime
@@ -3735,7 +4205,7 @@ mod tests {
             .checkpoint;
         drop(runtime);
 
-        let runtime = HostRoleRuntime::open(&database, g2.clone()).expect("restart after g2");
+        let runtime = open_test_runtime(&database, g2.clone()).expect("restart after g2");
         assert_eq!(runtime.contract_record_count(), g1_record_count);
         assert_eq!(runtime.provider_intake_count(), 1);
         let store = Store::open(&database).expect("store");
@@ -3770,7 +4240,7 @@ mod tests {
         let database = directory.path().join("same-anchor-superset.db");
         let g1_generation = first.dependencies.generation_id().clone();
         let mut runtime =
-            HostRoleRuntime::initialize(&database, first.dependencies).expect("g1 runtime");
+            initialize_test_runtime(&database, first.dependencies).expect("g1 runtime");
         runtime
             .prepare_governed_invocation(first.request)
             .expect("g1 governed invocation");
@@ -3793,7 +4263,7 @@ mod tests {
         assert_ne!(g2.generation_id(), &g1_generation);
         assert!(g2.catalog_snapshot().identities.contains(&added));
 
-        let mut runtime = HostRoleRuntime::open(&database, g2.clone()).expect("g2 current");
+        let mut runtime = open_test_runtime(&database, g2.clone()).expect("g2 current");
         runtime
             .append_custody_only(&opaque_append(
                 "same-anchor-superset",
@@ -3801,7 +4271,7 @@ mod tests {
             ))
             .expect("g2 checkpoint");
         drop(runtime);
-        HostRoleRuntime::open(&database, g2).expect("both generations reopen after restart");
+        open_test_runtime(&database, g2).expect("both generations reopen after restart");
     }
 
     #[test]
@@ -3811,7 +4281,7 @@ mod tests {
         let database = directory.path().join("bootstrap-root-substitution.db");
         let expected_anchor = first.dependency_anchor_id.clone();
         let mut runtime =
-            HostRoleRuntime::initialize(&database, first.dependencies).expect("g1 runtime");
+            initialize_test_runtime(&database, first.dependencies).expect("g1 runtime");
         let prepared = runtime
             .prepare_governed_invocation(first.request)
             .expect("g1 governed invocation");
@@ -3828,7 +4298,7 @@ mod tests {
         );
         let observed_anchor = g2.custody().trust_anchor_id().expect("g2 anchor");
         assert_ne!(observed_anchor, expected_anchor);
-        let Err(error) = HostRoleRuntime::open(&database, g2) else {
+        let Err(error) = open_test_runtime(&database, g2) else {
             panic!("current dependency generation selected a new bootstrap root");
         };
         assert!(matches!(
@@ -3859,7 +4329,7 @@ mod tests {
         let directory = tempdir().expect("directory");
         let database = directory.path().join("identity-conflict.db");
         let mut runtime =
-            HostRoleRuntime::initialize(&database, first.dependencies).expect("g1 runtime");
+            initialize_test_runtime(&database, first.dependencies).expect("g1 runtime");
         let prepared = runtime
             .prepare_governed_invocation(first.request)
             .expect("g1 governed invocation");
@@ -3882,7 +4352,7 @@ mod tests {
             })
             .collect();
         let g2 = authenticated_runtime_fixture(41, g2_identities, vec![], vec![], vec![]);
-        let mut runtime = HostRoleRuntime::open(&database, g2).expect("g1 exact reopen");
+        let mut runtime = open_test_runtime(&database, g2).expect("g1 exact reopen");
         let error = runtime
             .append_custody_only(&opaque_append("conflicting-g2", "2026-07-29T21:03:00Z"))
             .expect_err("historical/current identity substitution must fail closed");

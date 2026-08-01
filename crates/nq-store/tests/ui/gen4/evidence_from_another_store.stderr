@@ -1,0 +1,33 @@
+error: lifetime may not live long enough
+ --> tests/ui/gen4/evidence_from_another_store.rs:8:13
+  |
+4 | fn cross_store_evidence<'store, 'session_id, 'evidence_id>(
+  |                                 -----------  ------------ lifetime `'evidence_id` defined here
+  |                                 |
+  |                                 lifetime `'session_id` defined here
+...
+8 |     let _ = session.establish_runtime_dependency_trust_root(evidence_from_another_store);
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ argument requires that `'session_id` must outlive `'evidence_id`
+  |
+  = help: consider adding the following bound: `'session_id: 'evidence_id`
+  = note: requirement occurs because of the type `ResolvedControllingActivation<'_>`, which makes the generic argument `'_` invariant
+  = note: the struct `ResolvedControllingActivation<'id>` is invariant over the parameter `'id`
+  = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance
+
+error: lifetime may not live long enough
+ --> tests/ui/gen4/evidence_from_another_store.rs:8:13
+  |
+4 | fn cross_store_evidence<'store, 'session_id, 'evidence_id>(
+  |                                 -----------  ------------ lifetime `'evidence_id` defined here
+  |                                 |
+  |                                 lifetime `'session_id` defined here
+...
+8 |     let _ = session.establish_runtime_dependency_trust_root(evidence_from_another_store);
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ argument requires that `'evidence_id` must outlive `'session_id`
+  |
+  = help: consider adding the following bound: `'evidence_id: 'session_id`
+  = note: requirement occurs because of a mutable reference to `StoreWriterSession<'_, VerificationBrand<'_>>`
+  = note: mutable references are invariant over their type parameter
+  = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance
+
+help: `'session_id` and `'evidence_id` must be the same: replace one with the other

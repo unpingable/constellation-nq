@@ -1,5 +1,5 @@
-error[E0599]: no function or associated item named `new` found for struct `StoreWriterSession<'store>` in the current scope
+error[E0599]: no function or associated item named `new` found for struct `StoreWriterSession<'store, Brand>` in the current scope
  --> tests/ui/writer/session_public_constructor.rs:2:43
   |
 2 |     let _ = nq_store::StoreWriterSession::new();
-  |                                           ^^^ function or associated item not found in `StoreWriterSession<'_>`
+  |                                           ^^^ function or associated item not found in `StoreWriterSession<'_, _>`

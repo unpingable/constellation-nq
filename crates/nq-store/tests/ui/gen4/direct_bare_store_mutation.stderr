@@ -1,0 +1,13 @@
+error[E0624]: method `establish_runtime_dependency_trust_root_bare` is private
+ --> tests/ui/gen4/direct_bare_store_mutation.rs:5:19
+  |
+5 |       let _ = store.establish_runtime_dependency_trust_root_bare(evidence);
+  |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private method
+  |
+ ::: src/lib.rs
+  |
+  | /     pub(crate) fn establish_runtime_dependency_trust_root_bare(
+  | |         &mut self,
+  | |         evidence: &ResolvedControllingActivation<'_>,
+  | |     ) -> Result<RuntimeDependencyEstablishmentReceipt, StoreError> {
+  | |__________________________________________________________________- private method defined here

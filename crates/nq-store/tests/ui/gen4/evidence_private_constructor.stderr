@@ -1,0 +1,10 @@
+error[E0624]: associated function `new` is private
+ --> tests/ui/gen4/evidence_private_constructor.rs:6:80
+  |
+6 |     let _: ResolvedControllingActivation<'id> = ResolvedControllingActivation::new(todo!(), brand);
+  |                                                                                ^^^ private associated function
+  |
+ ::: $WORKSPACE/crates/nq-runtime-dependency-authority/src/brand.rs
+  |
+  |     pub(crate) fn new(fields: ResolutionFields, _brand: &VerificationBrand<'id>) -> Self {
+  |     ------------------------------------------------------------------------------------ private associated function defined here

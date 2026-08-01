@@ -1,0 +1,11 @@
+error[E0599]: no method named `begin_runtime_authority_writer_session` found for mutable reference `&mut Store` in the current scope
+ --> tests/ui/gen4/external_brand_to_store_session.rs:8:25
+  |
+8 |     let _ = other_store.begin_runtime_authority_writer_session(brand_from_first_store);
+  |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+help: there is a method `begin_writer_session` with a similar name, but with different arguments
+ --> src/lib.rs
+  |
+  |     pub fn begin_writer_session(&mut self) -> Result<StoreWriterSession<'_>, StoreError> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

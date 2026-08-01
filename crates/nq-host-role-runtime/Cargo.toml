@@ -10,7 +10,10 @@ authors.workspace = true
 
 [features]
 default = []
-test-support = ["nq-host-role-dependency-custody/test-support"]
+test-support = [
+    "nq-host-role-dependency-custody/test-support",
+    "nq-runtime-dependency-authority/test-support",
+]
 
 [dependencies]
 chrono.workspace = true
@@ -20,6 +23,7 @@ nix = { workspace = true, features = ["time"] }
 nq-host-role-contract = { path = "../nq-host-role-contract" }
 nq-host-role-dependency-custody = { path = "../nq-host-role-dependency-custody" }
 nq-protocol = { path = "../nq-protocol" }
+nq-runtime-dependency-authority = { path = "../nq-runtime-dependency-authority" }
 nq-store = { path = "../nq-store" }
 serde.workspace = true
 serde_json.workspace = true
@@ -27,6 +31,8 @@ thiserror.workspace = true
 
 [dev-dependencies]
 nq-host-role-dependency-custody = { path = "../nq-host-role-dependency-custody", features = ["test-support"] }
+nq-runtime-dependency-authority = { path = "../nq-runtime-dependency-authority", features = ["test-support"] }
+rusqlite.workspace = true
 tempfile.workspace = true
 
 [lints]

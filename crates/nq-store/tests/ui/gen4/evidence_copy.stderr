@@ -1,0 +1,9 @@
+error[E0382]: use of moved value: `evidence`
+ --> tests/ui/gen4/evidence_copy.rs:5:19
+  |
+3 | fn copy_evidence(evidence: ResolvedControllingActivation<'_>) {
+  |                  -------- move occurs because `evidence` has type `ResolvedControllingActivation<'_>`, which does not implement the `Copy` trait
+4 |     let _first = evidence;
+  |                  -------- value moved here
+5 |     let _second = evidence;
+  |                   ^^^^^^^^ value used here after move

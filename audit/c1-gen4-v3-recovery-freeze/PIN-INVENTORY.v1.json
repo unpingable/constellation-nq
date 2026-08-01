@@ -1,0 +1,212 @@
+{
+  "schema": "nq.c1_gen4_v3_recovery_pin_inventory.v1",
+  "status": "INVENTORY-SPECIFICATION-NOT-A-FREEZE",
+  "generation": "c1.generation.4",
+  "authority_effect": "none",
+  "self_path": "audit/c1-gen4-v3-recovery-freeze/PIN-INVENTORY.v1.json",
+  "verifier_path": "scripts/verify-c1-gen4-recovery-pins.py",
+  "controlling_basis": {
+    "charter_commit": "7acff3d1017d8d3291bb09c830071d133ecdf5cc",
+    "charter_path": "c1-gen4-r2-charter/C1-GEN4-IMPLEMENTATION-CHARTER.md",
+    "charter_sections": [
+      "12",
+      "15",
+      "16",
+      "17",
+      "18"
+    ],
+    "binding_constraints_commit": "66bdf8dc9b57be5d326ea7125243ff235e1cd50c",
+    "binding_constraint": "BC-11",
+    "qualified_predecessor_commit": "47a66a70561580818dcd10ae2af07641acbada51",
+    "qualified_predecessor_tree": "370df7951d894b9bfe8e103e6fa18e918379a646",
+    "qualified_predecessor_identity": "sha256:6eed8895ab6a45a046726db9fef20378d5d6f85b3d715df36e80dd6bd3c7b8d5",
+    "historical_freeze_commit": "cf560bd88136f07c6e1e0376d372a0120f0c56df",
+    "historical_freeze_role": "context-only; never Gen4 evidence"
+  },
+  "resolver_continuity": {
+    "path": "crates/nq-host-role-dependency-custody/src/lib.rs",
+    "required_sha256": "sha256:fccda65babbc350d84866bb441058a24ff7f6c3fcf8692b54633d495810ae08d",
+    "condition": "PC-04 continuity survives only if the exact Git blob reproduces this digest; any mismatch is a campaign stop requiring re-adjudication"
+  },
+  "required_previous_nine": [
+    "crates/nq-store/src/governed_custody.rs",
+    "crates/nq-store/src/lib.rs",
+    "crates/nq-store/src/custody_arena.rs",
+    "crates/nq-store/src/schema.sql",
+    "crates/nq-store/tests/r0b_noninjectability.rs",
+    "crates/nq-store/tests/verify_r0b_callgraph.py",
+    "crates/nq-host-role-runtime/src/test_support.rs",
+    "crates/nq-core/src/engine.rs",
+    "crates/nq-core/src/engine_governed_effect_tests.rs"
+  ],
+  "pin_groups": [
+    {
+      "id": "previous-nine-current-forms",
+      "purpose": "Charter section 18 requires fresh Gen4 byte identities for every source in the historical nine-file freeze.",
+      "paths": [
+        "crates/nq-store/src/governed_custody.rs",
+        "crates/nq-store/src/lib.rs",
+        "crates/nq-store/src/custody_arena.rs",
+        "crates/nq-store/src/schema.sql",
+        "crates/nq-store/tests/r0b_noninjectability.rs",
+        "crates/nq-store/tests/verify_r0b_callgraph.py",
+        "crates/nq-host-role-runtime/src/test_support.rs",
+        "crates/nq-core/src/engine.rs",
+        "crates/nq-core/src/engine_governed_effect_tests.rs"
+      ]
+    },
+    {
+      "id": "resolver-continuity",
+      "purpose": "Fresh exact-byte PC-04 continuity check; this source must remain byte-identical to the historical resolver.",
+      "paths": [
+        "crates/nq-host-role-dependency-custody/src/lib.rs"
+      ]
+    },
+    {
+      "id": "gen4-production-resolution",
+      "purpose": "Gen4 establishment receipt, Store correspondence, initialize, migration, open, restart, and authority-resolution implementation.",
+      "paths": [
+        "Cargo.lock",
+        "Cargo.toml",
+        "crates/nq-app/Cargo.toml",
+        "crates/nq-app/src/cli.rs",
+        "crates/nq-core/Cargo.toml",
+        "crates/nq-core/src/lib.rs",
+        "crates/nq-host-role-contract/assets/schemas/nq.restore_activation_proof.v1.schema.json",
+        "crates/nq-host-role-contract/src/assets.rs",
+        "crates/nq-host-role-runtime/Cargo.toml",
+        "crates/nq-host-role-runtime/src/dependency.rs",
+        "crates/nq-host-role-runtime/src/lib.rs",
+        "crates/nq-host-role-runtime/src/runtime.rs",
+        "crates/nq-runtime-dependency-authority/Cargo.toml",
+        "crates/nq-store/Cargo.toml",
+        "crates/nq-store/src/schema_v6_to_v7_runtime_dependencies.sql",
+        "crates/nq-store/src/schema_v7_to_v8_runtime_authority.sql",
+        "crates/nq-store/src/writer_session.rs"
+      ]
+    },
+    {
+      "id": "call-graph-proof-closure",
+      "purpose": "Complete structural call-graph verifier implementation and its exact policy input.",
+      "paths": [
+        "crates/nq-store/tests/r0b_callgraph_allowlist.json",
+        "crates/nq-store/tests/rust_source_scan.py"
+      ]
+    },
+    {
+      "id": "gen4-and-gen3-proof-harnesses",
+      "purpose": "Gen4 noninjectability, Gen3 sole-writer regression, migration/restore contract, and restart-oriented test harnesses outside inline source tests.",
+      "paths": [
+        "crates/nq-app/tests/admin_lifecycle.rs",
+        "crates/nq-app/tests/e2e_cli.rs",
+        "crates/nq-app/tests/semantic_surfaces.rs",
+        "crates/nq-app/tests/support/mod.rs",
+        "crates/nq-core/src/engine_checkpoint_commit_tests.rs",
+        "crates/nq-store/tests/mutator_census_allowlist.json",
+        "crates/nq-store/tests/runtime_authority_noninjectability.rs",
+        "crates/nq-store/tests/store_contract.rs",
+        "crates/nq-store/tests/verify_mutator_census.py",
+        "crates/nq-store/tests/writer_session_noninjectability.rs"
+      ]
+    },
+    {
+      "id": "pin-proof-infrastructure",
+      "purpose": "The inventory identifying the complete pin set, its read-only verifier, and focused verifier controls.",
+      "paths": [
+        "audit/c1-gen4-v3-recovery-freeze/PIN-INVENTORY.v1.json",
+        "scripts/test_c1_gen4_recovery_pins.py",
+        "scripts/verify-c1-gen4-recovery-pins.py"
+      ]
+    }
+  ],
+  "closed_prefixes": [
+    {
+      "id": "authority-crate-all-rust-sources",
+      "purpose": "Every Rust source file in the new evidence and activation crate, including test support and private resolution tests.",
+      "prefix": "crates/nq-runtime-dependency-authority/src/",
+      "suffixes": [
+        ".rs"
+      ],
+      "minimum_files": 1,
+      "paired_extensions": false
+    },
+    {
+      "id": "custody-arena-recovery-submodules",
+      "purpose": "Every split custody-arena recovery source below the historically pinned parent module.",
+      "prefix": "crates/nq-store/src/custody_arena/",
+      "suffixes": [
+        ".rs"
+      ],
+      "minimum_files": 1,
+      "paired_extensions": false
+    },
+    {
+      "id": "gen4-compile-fail-specimens",
+      "purpose": "Complete Gen4 compile-fail source and checked-diagnostic population.",
+      "prefix": "crates/nq-store/tests/ui/gen4/",
+      "suffixes": [
+        ".rs",
+        ".stderr"
+      ],
+      "minimum_files": 2,
+      "paired_extensions": true
+    },
+    {
+      "id": "retained-r0b-compile-fail-specimens",
+      "purpose": "Every previously held R0b resolver noninjectability source and checked diagnostic.",
+      "prefix": "crates/nq-store/tests/ui/r0b/",
+      "suffixes": [
+        ".rs",
+        ".stderr"
+      ],
+      "minimum_files": 2,
+      "paired_extensions": true
+    },
+    {
+      "id": "retained-writer-compile-fail-specimens",
+      "purpose": "Every Gen3 writer-session regression source and checked diagnostic.",
+      "prefix": "crates/nq-store/tests/ui/writer/",
+      "suffixes": [
+        ".rs",
+        ".stderr"
+      ],
+      "minimum_files": 2,
+      "paired_extensions": true
+    },
+    {
+      "id": "isolated-r0b-surfaces",
+      "purpose": "Complete isolated Cargo surfaces used to prove absence of alternate resolver and runtime re-export paths.",
+      "prefix": "crates/nq-store/tests/isolated/r0b-",
+      "suffixes": [],
+      "minimum_files": 1,
+      "paired_extensions": false
+    }
+  ],
+  "required_evidence_functions": [
+    "GEN4-CALL-GRAPH-PROOF",
+    "GEN4-HOSTILE-RESULTS-H09-THROUGH-H19",
+    "GEN4-MIGRATION-RESULTS",
+    "GEN4-RESTART-RECOVERY",
+    "GEN4-V3-RECOVERY-FREEZE",
+    "GEN4-INDEPENDENT-ACCEPTANCE",
+    "EXACT-HASH-REPLAY"
+  ],
+  "freeze_preconditions": [
+    "one exact committed NQ candidate and tree",
+    "clean detached worktree at that candidate",
+    "all pin paths resolved as regular Git blobs",
+    "resolver continuity digest reproduced exactly",
+    "H-09 through H-19 and every charter section 12 guarantee executed at the candidate hash",
+    "all previously held recovery specimens retained and green",
+    "fresh implementation and semantic reviews accepted",
+    "separately authored acceptance names the exact candidate and pin receipt"
+  ],
+  "nonclaims": [
+    "this inventory is not a source freeze, qualification receipt, certificate, or acceptance",
+    "Campaign 3B exit-gate conditions 1 through 6 remain unearned",
+    "H-RCV-01 remains unearned",
+    "PC-04 continuity is conditional on exact resolver byte identity and complete fresh replay",
+    "Gen1, Gen2, and Gen3 recovery records remain immutable historical evidence",
+    "no C2, C3, deployment, packaging, launch, or operational authority is created"
+  ]
+}

@@ -1135,17 +1135,17 @@ fn validate_v3_projection_capsule_bound_manifest(value: &serde_json::Value) -> R
         (
             semantic_outcome_variants,
             50,
-            "sha256:d27c6f0c19472bb3825b9d17ac1f82eb674daf8b31469597c0e67dfe8aa3ea0f",
+            "sha256:16da85a78e5da4354f27ead4129e6376289b9553b018a741eaf939ed04ec9228",
         ),
         (
             semantic_exclusions,
             9,
-            "sha256:c26b949145f9864c907cd248c93f0de4929e1a6b6e14fec823b33c0a48bbba9d",
+            "sha256:00df705bd8893f7fde63d8f4e4ff21e8b793be463bb9090a3ac78b4729b6afd5",
         ),
         (
             descriptor_governed_open_semantics,
             276,
-            "sha256:2c885bf666fca9b77cfd1f6dbb3a29425ab78408b8a0af00290a84eb5d535b57",
+            "sha256:231c90182fe2d518c174809d541dd98d88c96eaf2917803b5b39fbd6de75ec75",
         ),
     ];
     for (rows, expected_len, expected_digest) in exact_semantic_sections {
@@ -1161,7 +1161,7 @@ fn validate_v3_projection_capsule_bound_manifest(value: &serde_json::Value) -> R
     let expected_semantic_source_closure = [
         (
             "crates/nq-core/src/engine.rs",
-            "sha256:0e54c22342a3d2fa9e599299b4b49d8509b11b53610d1b2c0f3dc43476f0177c",
+            "sha256:d2a209d84218b1836b6ac5e705dfdac8c4f5974d80c8b50c93a53326e30b2aea",
         ),
         (
             "crates/nq-core/src/governed_custody_projection.rs",
@@ -2432,7 +2432,7 @@ fn expected_capacity_static_assets()
             (
                 "nq.v3_projection_capsule_bound_manifest.v1",
                 "nq.v3_projection_capsule_bound_manifest.v1.json",
-                "sha256:a0436b72669c427cae37335abe10ed9bc939181c75c28af427960404e664baec",
+                "sha256:44f491ecce64e0aab9ba7dea40091d495d3cfc38dd3d2c811e926de8298a3855",
             ),
         ),
         (
@@ -2440,7 +2440,7 @@ fn expected_capacity_static_assets()
             (
                 "nq.v3_projection_capsule_bound_manifest.v2",
                 "nq.v3_projection_capsule_bound_manifest.v2.json",
-                "sha256:f1c97c59181e10611413a42dd4d401c0db08298bd5513303aed81af000e25d98",
+                "sha256:54f470aefed9a8f789ce0212f2e083ad6d5e3420506417b97042003b01a20f12",
             ),
         ),
         (
@@ -2448,7 +2448,7 @@ fn expected_capacity_static_assets()
             (
                 "nq.v3_projection_capsule_bound_qualification.v1",
                 "nq.v3_projection_capsule_bound_qualification.v1.json",
-                "sha256:28b5580fffaf0b03525a202e063503b1934483b66d119cbd136280e0aa8da7f1",
+                "sha256:62c6ea98fc9cfee38c1653cb895c164aaddf5fcc5439fa7c0c5efbbe0e5e2ed4",
             ),
         ),
     ]
@@ -2665,7 +2665,7 @@ mod tests {
             .expect("exact v2 manifest and separate qualification carrier");
         assert_eq!(
             qualified.qualification_basis_sha256.as_str(),
-            "sha256:c8557b9ff37534b3e189d117a9e04cf78617cddc2cf30c48802204acf6501e3b"
+            "sha256:f2f90fba7be1601c0749def3d7fd2fa843a05d174249fb73d52b234a5bcf9b8c"
         );
 
         let historical = require_qualified_v3_projection_capsule_bound_manifest()

@@ -33,14 +33,13 @@ use nq_store::{
     DiagnosticArtifactByteState, DiagnosticArtifactCommitInput, DiagnosticArtifactLocalOriginInput,
     DiagnosticArtifactLookup, DiagnosticArtifactOrigin, DiagnosticArtifactSchemaSupport,
     EvaluationCommitInput, EvaluationInput, EvaluationProfileBinding, EvidenceSnapshot,
-    FindingEventInput, FindingEvidenceInput, FindingSnapshotRow, GenesisInput,
-    GovernedAcquisitionCustodyInput, GovernedProjectionCapsule, GovernedProjectionCapsuleInput,
-    GovernedProjectionCapsuleMode, GovernedProtectedTerminalClass,
-    GovernedProtectedTerminalDeadlineCompliance, GovernedProtectedTerminalInput,
-    GovernedProtectedTerminalReason, ObservationInput, ProfileDescriptorInput,
-    ProviderIntakeCommit, ProviderIntakeInput, ProviderIntakePreflight, RefusalInput,
-    ReportErrorInput, ReportInput, RunInput, RunResultStatusInput, StatusEventInput, Store,
-    StoreWriterSession, SubmissionDisposition, SubmissionInput,
+    FindingEventInput, FindingEvidenceInput, FindingSnapshotRow, GovernedAcquisitionCustodyInput,
+    GovernedProjectionCapsule, GovernedProjectionCapsuleInput, GovernedProjectionCapsuleMode,
+    GovernedProtectedTerminalClass, GovernedProtectedTerminalDeadlineCompliance,
+    GovernedProtectedTerminalInput, GovernedProtectedTerminalReason, ObservationInput,
+    ProfileDescriptorInput, ProviderIntakeCommit, ProviderIntakeInput, ProviderIntakePreflight,
+    RefusalInput, ReportErrorInput, ReportInput, RunInput, RunResultStatusInput, StatusEventInput,
+    Store, StoreWriterSession, SubmissionDisposition, SubmissionInput,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -11460,28 +11459,6 @@ pub fn append_profile_descriptor(
     Ok(())
 }
 
-/// Append the fresh-store genesis record. This never imports active legacy
-/// state.
-///
-/// # Errors
-///
-/// Returns a canonicalization or storage error.
-pub fn append_genesis(
-    session: &mut StoreWriterSession<'_>,
-    legacy_digest: Option<String>,
-) -> Result<(), EngineError> {
-    session.append_genesis(&GenesisInput {
-        genesis_id: Uuid::new_v4().to_string(),
-        legacy_manifest_digest: legacy_digest,
-        created_at: timestamp(Utc::now()),
-        detail: canonical(&json!({
-            "schema": "nq.genesis.v1",
-            "legacy_state_imported": false,
-        }))?,
-    })?;
-    Ok(())
-}
-
 /// Append and project one bounded component-health event.
 ///
 /// # Errors
@@ -14131,6 +14108,10 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use nq_helper_sandbox::ExecutionAccount;
+    use nq_runtime_dependency_authority::{
+        test_support::{FIXTURE_OCCURRENCE_ID, RawAuthorityFixture},
+        verify_for_establishment,
+    };
 
     use crate::admission::{ADMISSION_SCHEMA, AdmittedProfile, OperatorIdentity};
     use crate::config::{
@@ -14176,6 +14157,23 @@ mod tests {
             trust_anchor_id,
             canonical_custody,
         }
+    }
+
+    fn establish_test_runtime_authority(store: &mut Store, trust_anchor_id: &Sha256Digest) {
+        let fixture = RawAuthorityFixture::fresh_genesis_with_anchor(trust_anchor_id.clone());
+        let custody = fixture.custody();
+        let presented = fixture.presented_set();
+        let expectations = fixture.activation_expectations();
+        store
+            .with_runtime_authority_writer_session(
+                |brand, session| -> Result<(), nq_store::StoreError> {
+                    let resolved =
+                        verify_for_establishment(brand, &custody, &presented, None, &expectations)?;
+                    session.establish_runtime_dependency_trust_root(&resolved)?;
+                    Ok(())
+                },
+            )
+            .expect("establish test runtime authority");
     }
 
     const SEMANTIC_TRANSPORT_HELPER: &str = r#"import datetime
@@ -15865,17 +15863,8 @@ sys.stdout.write("\n")
             resolve(&watcher).expect("host profile"),
         )
         .expect("profile descriptor");
-        store
-            .begin_writer_session()
-            .expect("writer session")
-            .append_genesis(&GenesisInput {
-                genesis_id: genesis_id.to_owned(),
-                legacy_manifest_digest: None,
-                created_at: "2026-07-28T12:00:00.000Z".to_owned(),
-                detail: canonical(&json!({"source": "diagnostic-non-success-test"}))
-                    .expect("genesis detail"),
-            })
-            .expect("append genesis");
+        let authority_dependency = test_runtime_dependency(genesis_id);
+        establish_test_runtime_authority(&mut store, &authority_dependency.trust_anchor_id);
         drop(store);
         let evaluator =
             EvaluatorRuntimeIdentity::for_test(nq_protocol::sha256_bytes(evaluator_label));
@@ -17278,11 +17267,7 @@ sys.stdout.write("\n")
         let mut store =
             Store::initialize(directory.path().join("nq.db")).expect("runtime history store");
         let dependency = test_runtime_dependency("history-exact-checkpoint");
-        store
-            .begin_writer_session()
-            .expect("writer session")
-            .establish_runtime_dependency_trust_root(&dependency.trust_anchor_id)
-            .expect("establish test runtime dependency root");
+        establish_test_runtime_authority(&mut store, &dependency.trust_anchor_id);
         let first_checkpoint = store
             .begin_writer_session()
             .expect("writer session")
@@ -17580,11 +17565,7 @@ sys.stdout.write("\n")
         let mut store =
             Store::initialize(directory.path().join("nq.db")).expect("runtime history store");
         let runtime_dependency = test_runtime_dependency("production-history");
-        store
-            .begin_writer_session()
-            .expect("writer session")
-            .establish_runtime_dependency_trust_root(&runtime_dependency.trust_anchor_id)
-            .expect("establish test runtime dependency root");
+        establish_test_runtime_authority(&mut store, &runtime_dependency.trust_anchor_id);
         store
             .begin_writer_session()
             .expect("writer session")
@@ -17763,17 +17744,8 @@ sys.stdout.write("\n")
             resolve(&watcher).expect("host profile"),
         )
         .expect("profile descriptor");
-        store
-            .begin_writer_session()
-            .expect("writer session")
-            .append_genesis(&GenesisInput {
-                genesis_id: "diagnostic-test-genesis".to_owned(),
-                legacy_manifest_digest: None,
-                created_at: "2026-07-28T12:00:00.000Z".to_owned(),
-                detail: canonical(&json!({"source": "diagnostic-execution-test"}))
-                    .expect("genesis detail"),
-            })
-            .expect("append genesis");
+        let authority_dependency = test_runtime_dependency("diagnostic-test-genesis");
+        establish_test_runtime_authority(&mut store, &authority_dependency.trust_anchor_id);
         drop(store);
 
         let evaluator = EvaluatorRuntimeIdentity::for_test(nq_protocol::sha256_bytes(
@@ -17826,7 +17798,7 @@ sys.stdout.write("\n")
         assert_eq!(artifact.state_bindings.len(), 1);
         assert_eq!(
             artifact.producer.node_id,
-            "nq-store-genesis:diagnostic-test-genesis"
+            format!("nq-store-genesis:{FIXTURE_OCCURRENCE_ID}")
         );
 
         let original = artifact.canonical_bytes().expect("canonical live bytes");
@@ -17958,17 +17930,8 @@ sys.stdout.write("\n")
             resolve(&watcher).expect("host profile"),
         )
         .expect("profile descriptor");
-        store
-            .begin_writer_session()
-            .expect("writer session")
-            .append_genesis(&GenesisInput {
-                genesis_id: "diagnostic-refusal-test-genesis".to_owned(),
-                legacy_manifest_digest: None,
-                created_at: "2026-07-28T12:00:00.000Z".to_owned(),
-                detail: canonical(&json!({"source": "diagnostic-refusal-test"}))
-                    .expect("genesis detail"),
-            })
-            .expect("append genesis");
+        let authority_dependency = test_runtime_dependency("diagnostic-refusal-test-genesis");
+        establish_test_runtime_authority(&mut store, &authority_dependency.trust_anchor_id);
         drop(store);
 
         let evaluator = EvaluatorRuntimeIdentity::for_test(nq_protocol::sha256_bytes(
@@ -18305,17 +18268,9 @@ sys.stdout.write("\n")
             resolve(&watcher).expect("host profile"),
         )
         .expect("profile descriptor");
-        store
-            .begin_writer_session()
-            .expect("writer session")
-            .append_genesis(&GenesisInput {
-                genesis_id: "diagnostic-admission-refusal-test-genesis".to_owned(),
-                legacy_manifest_digest: None,
-                created_at: "2026-07-28T12:00:00.000Z".to_owned(),
-                detail: canonical(&json!({"source": "diagnostic-admission-refusal-test"}))
-                    .expect("genesis detail"),
-            })
-            .expect("append genesis");
+        let authority_dependency =
+            test_runtime_dependency("diagnostic-admission-refusal-test-genesis");
+        establish_test_runtime_authority(&mut store, &authority_dependency.trust_anchor_id);
         drop(store);
 
         let evaluator = EvaluatorRuntimeIdentity::for_test(nq_protocol::sha256_bytes(

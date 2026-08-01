@@ -11,16 +11,23 @@ use std::path::{Path, PathBuf};
 
 use nq_host_role_contract::{RecordRef, Token};
 use nq_host_role_runtime::{
-    HostRoleRuntime,
+    HostRoleRuntime, RuntimeAuthorityResidentBinding,
     test_support::{
         NativeEngineFixtureBinding, NativeEvaluatorFixtureBinding, NativeProfileFixtureBinding,
         native_engine_fixture,
     },
 };
+use nq_runtime_dependency_authority::{
+    test_support::{
+        FIXTURE_DOMAIN, FIXTURE_HOST_ROLE, FIXTURE_RESIDENT_GENERATION, FIXTURE_RESIDENT_ID,
+        FIXTURE_ROLE_MANIFEST_GENERATION, RawAuthorityFixture,
+    },
+    verify_for_establishment,
+};
 use nq_store::{
     DiagnosticArtifactByteState, DiagnosticArtifactLookup, DiagnosticArtifactSchemaSupport,
     GovernedCustodyInventoryEntry, GovernedCustodyRecoveryClass, GovernedProjectionRecovery,
-    GovernedProjectionVerificationDisposition, GovernedProtectedFailureAccess,
+    GovernedProjectionVerificationDisposition, GovernedProtectedFailureAccess, StoreError,
 };
 use tempfile::TempDir;
 
@@ -243,13 +250,31 @@ fn admitted_effect_fixture_with_profile(
     }
 
     let mut store = Store::open(&config.database_path).expect("reopen store for runtime");
+    let authority =
+        RawAuthorityFixture::fresh_genesis_with_anchor(fixture.dependency_anchor_id.clone());
+    let custody = authority.custody();
+    let presented = authority.presented_set();
+    let expectations = authority.activation_expectations();
     store
-        .begin_writer_session()
-        .expect("writer session")
-        .establish_runtime_dependency_trust_root(&fixture.dependency_anchor_id)
-        .expect("establish fixture trust root");
-    let mut runtime =
-        HostRoleRuntime::from_store(store, fixture.dependencies).expect("host-role runtime");
+        .with_runtime_authority_writer_session(
+            |brand, session| -> std::result::Result<(), StoreError> {
+                let resolved =
+                    verify_for_establishment(brand, &custody, &presented, None, &expectations)?;
+                session.establish_runtime_dependency_trust_root(&resolved)?;
+                Ok(())
+            },
+        )
+        .expect("establish fixture runtime authority");
+    let resident = RuntimeAuthorityResidentBinding {
+        resident_identity: FIXTURE_RESIDENT_ID.to_owned(),
+        resident_generation: FIXTURE_RESIDENT_GENERATION,
+        host_role: FIXTURE_HOST_ROLE.to_owned(),
+        role_manifest_generation: FIXTURE_ROLE_MANIFEST_GENERATION,
+        domain: FIXTURE_DOMAIN.to_owned(),
+        policy_floor: 1,
+    };
+    let mut runtime = HostRoleRuntime::from_store(store, fixture.dependencies, &custody, &resident)
+        .expect("host-role runtime");
     let prepared = runtime
         .prepare_native_deadline_invocation(fixture.request)
         .expect("production native-deadline preparation");

@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/ui/gen4/bare_digest_to_session_establishment.rs:9:61
+  |
+9 |     let _ = session.establish_runtime_dependency_trust_root(digest);
+  |                     --------------------------------------- ^^^^^^ expected `&ResolvedControllingActivation<'_>`, found `&Sha256Digest`
+  |                     |
+  |                     arguments to this method are incorrect
+  |
+  = note: expected reference `&ResolvedControllingActivation<'_>`
+             found reference `&Sha256Digest`
+note: method defined here
+ --> src/writer_session.rs
+  |
+  |     pub fn establish_runtime_dependency_trust_root(
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

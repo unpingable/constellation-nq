@@ -1,0 +1,11 @@
+error[E0599]: no method named `establish_runtime_dependency_trust_root` found for mutable reference `&mut Store` in the current scope
+ --> tests/ui/gen4/no_session_establishment.rs:5:19
+  |
+5 |     let _ = store.establish_runtime_dependency_trust_root(evidence);
+  |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+help: there is a method `runtime_dependency_trust_root` with a similar name, but with different arguments
+ --> src/lib.rs
+  |
+  |     pub fn runtime_dependency_trust_root(&self) -> Result<Option<Sha256Digest>, StoreError> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

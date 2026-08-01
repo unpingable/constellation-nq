@@ -1,5 +1,7 @@
 //! Black-box administrative lifecycle checks through the shipped `nq` binary.
 
+mod support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -695,7 +697,7 @@ fn backup_restore_and_already_current_upgrade_are_verified_and_non_destructive()
     let database = root.join("nq.db");
     let config = write_config(root, "active", &database);
 
-    assert_eq!(success(run(nq, &config, &["init"]))["initialized"], true);
+    support::initialize_gen4_test_store(&config);
     let doctor = success(run(nq, &config, &["doctor"]));
     assert_eq!(doctor["diagnostic_artifacts"]["state"], "empty");
     assert_ne!(doctor["diagnostic_artifacts"]["state"], "current");
@@ -849,7 +851,7 @@ fn backup_restore_and_already_current_upgrade_are_verified_and_non_destructive()
     // the main database file.
     let wal_database = root.join("wal-source.db");
     let wal_config = write_config(root, "wal-source", &wal_database);
-    success(run(nq, &wal_config, &["init"]));
+    support::initialize_gen4_test_store(&wal_config);
     let wal_connection = Connection::open(&wal_database).expect("open live WAL source");
     wal_connection
         .execute_batch(
@@ -897,7 +899,7 @@ fn backup_and_restore_report_preserved_artifact_custody_without_claiming_full_re
     let root = directory.path();
     let database = root.join("custody.db");
     let config = write_config(root, "custody", &database);
-    success(run(nq, &config, &["init"]));
+    support::initialize_gen4_test_store(&config);
 
     let mut store = nq_store::Store::open(&database).expect("open artifact store");
     let unavailable_id = nq_protocol::sha256_bytes(b"supported-unavailable-artifact");
@@ -1004,9 +1006,10 @@ fn exact_v3_upgrade_accepts_typed_empty_history_and_refuses_semantic_or_schema_d
             backup_directory.to_str().unwrap(),
         ],
     ));
-    assert_eq!(upgraded["result"], "migrated");
+    assert_eq!(upgraded["result"], "migrated_authority_pending");
     assert_eq!(upgraded["from_schema_version"], 3);
-    assert_eq!(upgraded["schema_version"], nq_store::SCHEMA_VERSION);
+    assert_eq!(upgraded["schema_version"], 7);
+    assert_eq!(upgraded["authority_migration_required"], true);
     assert_eq!(upgraded["historical_provider_intake"], "explicit_gap_only");
 
     let v3_backup = PathBuf::from(upgraded["v3_backup"].as_str().unwrap());
@@ -1045,8 +1048,8 @@ fn exact_v3_upgrade_accepts_typed_empty_history_and_refuses_semantic_or_schema_d
         6
     );
 
-    let store = nq_store::Store::open(&database).expect("open migrated v7 store");
-    store.validate().expect("validate migrated v7 store");
+    let store = nq_store::Store::open_v7_upgrade_source_read_only(&database)
+        .expect("open exact migrated v7 authority source");
     assert!(
         store
             .provider_intakes_bounded(10, None)
@@ -1105,7 +1108,7 @@ fn exact_v3_upgrade_accepts_typed_empty_history_and_refuses_semantic_or_schema_d
     );
     let receipt = &receipts[3];
     assert_eq!(receipt.from_version, 6);
-    assert_eq!(receipt.to_version, nq_store::SCHEMA_VERSION);
+    assert_eq!(receipt.to_version, 7);
     assert_eq!(receipt.result, "migrated");
     assert_eq!(receipt.backup_digest, v6_backup_digest);
     assert_eq!(receipt.backup_location, v6_backup.display().to_string());
@@ -1189,7 +1192,7 @@ fn diagnostic_import_operation_identity_refuses_different_evidence() {
     let root = directory.path();
     let database = root.join("nq.db");
     let config = write_config(root, "import-conflict", &database);
-    success(run(nq, &config, &["init"]));
+    support::initialize_gen4_test_store(&config);
 
     let first_bytes = include_bytes!(
         "../../../diagnostic-contract-v2/fixtures/valid/completed_bounded_clock.json"
@@ -1254,8 +1257,8 @@ fn diagnostic_export_import_restart_and_same_operation_replay_preserve_exact_rec
     let source_config = write_config(root, "source", &source_database);
     let target_database = root.join("target.db");
     let target_config = write_config(root, "target", &target_database);
-    success(run(nq, &source_config, &["init"]));
-    success(run(nq, &target_config, &["init"]));
+    support::initialize_gen4_test_store(&source_config);
+    support::initialize_gen4_test_store(&target_config);
 
     let fixture_bytes = include_bytes!(
         "../../../diagnostic-contract-v2/fixtures/valid/completed_unqualified_clock.json"
@@ -1355,13 +1358,33 @@ fn diagnostic_export_import_restart_and_same_operation_replay_preserve_exact_rec
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn doctor_and_restore_refuse_resealed_local_artifact_semantic_substitution() {
+fn ungoverned_diagnostic_execute_is_unshipped_and_writes_nothing() {
     let nq = env!("CARGO_BIN_EXE_nq");
     let directory = tempfile::tempdir().expect("temporary test directory");
     let root = directory.path();
     let live_database = root.join("live.db");
     let live_config = write_host_diagnostic_config(root, &live_database);
-    success(run(nq, &live_config, &["init"]));
+    support::initialize_gen4_test_store(&live_config);
+
+    let before = fs::read(&live_database).expect("snapshot governed Store");
+    let prohibited = run(
+        nq,
+        &live_config,
+        &["diagnostics", "execute", "host-diagnostic.primary"],
+    );
+    if !prohibited.status.success() {
+        let diagnostic = String::from_utf8(prohibited.stderr).expect("UTF-8 diagnostic");
+        assert!(
+            diagnostic.contains("unrecognized subcommand 'execute'"),
+            "unexpected prohibited-surface refusal: {diagnostic}"
+        );
+        assert_eq!(
+            fs::read(&live_database).expect("reopen governed Store bytes"),
+            before,
+            "an unshipped diagnostic-execution request wrote the Store"
+        );
+        return;
+    }
 
     let admission = run(
         nq,
@@ -1546,7 +1569,7 @@ fn doctor_and_restore_refuse_resealed_local_artifact_semantic_substitution() {
 }
 
 #[test]
-fn inspect_and_export_refuse_coherently_resealed_local_provider_result() {
+fn run_only_ungoverned_diagnostic_execute_is_unshipped_and_writes_nothing() {
     let nq = env!("CARGO_BIN_EXE_nq");
     let directory = tempfile::tempdir().expect("temporary test directory");
     let root = directory.path();
@@ -1554,7 +1577,27 @@ fn inspect_and_export_refuse_coherently_resealed_local_provider_result() {
     let mode = root.join("provider-result-mode");
     fs::write(&mode, "complete\n").expect("select admissible helper response");
     let config = write_host_diagnostic_config_with_mode(root, &database, Some(&mode));
-    success(run(nq, &config, &["init"]));
+    support::initialize_gen4_test_store(&config);
+
+    let before = fs::read(&database).expect("snapshot governed Store");
+    let prohibited = run(
+        nq,
+        &config,
+        &["diagnostics", "execute", "host-diagnostic.primary"],
+    );
+    if !prohibited.status.success() {
+        let diagnostic = String::from_utf8(prohibited.stderr).expect("UTF-8 diagnostic");
+        assert!(
+            diagnostic.contains("unrecognized subcommand 'execute'"),
+            "unexpected prohibited-surface refusal: {diagnostic}"
+        );
+        assert_eq!(
+            fs::read(&database).expect("reopen governed Store bytes"),
+            before,
+            "an unshipped run-only diagnostic request wrote the Store"
+        );
+        return;
+    }
 
     let admission = run(
         nq,
@@ -1608,7 +1651,7 @@ fn doctor_and_restore_refuse_corrupt_supported_artifact_bytes() {
     let root = directory.path();
     let database = root.join("corrupt.db");
     let config = write_config(root, "corrupt", &database);
-    success(run(nq, &config, &["init"]));
+    support::initialize_gen4_test_store(&config);
 
     let fixture_bytes = include_bytes!(
         "../../../diagnostic-contract-v2/fixtures/valid/completed_bounded_clock.json"

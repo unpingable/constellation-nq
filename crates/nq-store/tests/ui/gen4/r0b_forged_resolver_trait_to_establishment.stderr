@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+  --> tests/ui/gen4/r0b_forged_resolver_trait_to_establishment.rs:10:61
+   |
+10 |     let _ = session.establish_runtime_dependency_trust_root(forged);
+   |                     --------------------------------------- ^^^^^^ expected `&ResolvedControllingActivation<'_>`, found `&dyn CallerSelectedResolver`
+   |                     |
+   |                     arguments to this method are incorrect
+   |
+   = note: expected reference `&ResolvedControllingActivation<'_>`
+              found reference `&dyn CallerSelectedResolver`
+note: method defined here
+  --> src/writer_session.rs
+   |
+   |     pub fn establish_runtime_dependency_trust_root(
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

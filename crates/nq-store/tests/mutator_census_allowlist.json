@@ -1,0 +1,347 @@
+{
+  "schema_version": 1,
+  "store_sources": [
+    "crates/nq-store/src"
+  ],
+  "public_store": {
+    "lifecycle": [
+      "initialize",
+      "initialize_in_memory",
+      "open"
+    ],
+    "read_only": [
+      "admission",
+      "admitted_collection_for_run",
+      "admitted_evidence_reference",
+      "admitted_report_ids_bounded",
+      "collection_result_for_run",
+      "current_status_snapshots_bounded",
+      "database_schema_version",
+      "diagnostic_artifact",
+      "diagnostic_artifact_commitments_bounded",
+      "diagnostic_artifact_execution_binding",
+      "diagnostic_artifact_id_for_run",
+      "evaluation_origin",
+      "evaluation_refusal_history_bounded",
+      "evidence_snapshot",
+      "finding_snapshots",
+      "finding_snapshots_bounded",
+      "governed_custody_inventory",
+      "governed_protected_failure",
+      "latest_binding",
+      "latest_checkpoint",
+      "latest_evaluation_sequence",
+      "latest_status_sequence",
+      "legacy_provider_intake_gaps_bounded",
+      "open_governed_custody",
+      "open_immutable",
+      "open_read_only",
+      "open_v3_upgrade_source_read_only",
+      "open_v4_upgrade_source_read_only",
+      "open_v5_upgrade_source_read_only",
+      "open_v6_upgrade_source_read_only",
+      "path",
+      "pending_binding_materialization",
+      "preflight_provider_intake",
+      "prior_finding_for_evaluation_lineage",
+      "profile_descriptor",
+      "provider_admission_for_source",
+      "provider_intake",
+      "provider_intake_acknowledgment",
+      "provider_intake_raw_bytes",
+      "provider_intakes_bounded",
+      "raw_submission_bytes",
+      "rejected_custody",
+      "rejected_custody_bounded",
+      "rejected_custody_by_refusal_id",
+      "report_id_for_submission",
+      "runtime_checkpoint_by_id",
+      "runtime_checkpoint_dependency",
+      "runtime_dependency_trust_root",
+      "runtime_ledger_checkpoint",
+      "runtime_record",
+      "runtime_record_lookup_status",
+      "runtime_record_page",
+      "runtime_records_by_schema_bounded",
+      "sole_genesis_id",
+      "status_history_bounded",
+      "status_snapshots",
+      "status_snapshots_bounded",
+      "validate",
+      "validate_admitted_report_associations",
+      "validate_evaluation_history_invariants",
+      "validate_provider_intake_history_invariants",
+      "validate_run_results",
+      "verify_admitted_snapshot",
+      "verify_governed_execution_custody_closure_v2_capacity",
+      "verify_governed_execution_custody_closure_v3_capacity",
+      "watcher_run_outcome",
+      "watcher_run_outcomes_bounded"
+    ],
+    "optional_read_only": [
+      "open_v7_upgrade_source_read_only",
+      "runtime_authority_migration_expectations",
+      "runtime_authority_migration_receipt",
+      "runtime_authority_presented_set",
+      "runtime_dependency_establishment_receipt"
+    ],
+    "mutable_receiver_read_only": [
+      "evidence_snapshot"
+    ],
+    "session_factory": [
+      "begin_writer_session"
+    ],
+    "optional_session_factory": [
+      "with_runtime_authority_writer_session"
+    ],
+    "maintenance": [
+      "backup_incompatible",
+      "backup_v3_verified",
+      "backup_v4_verified",
+      "backup_v5_verified",
+      "backup_v6_verified",
+      "backup_verified",
+      "prepare_archive_copy",
+      "upgrade_v3_to_v4",
+      "upgrade_v4_to_v5",
+      "upgrade_v5_to_v6",
+      "upgrade_v6_to_v7"
+    ],
+    "optional_maintenance": [
+      "backup_v7_verified",
+      "open_v7_runtime_authority_migration_source",
+      "upgrade_v7_to_v8"
+    ]
+  },
+  "session": {
+    "source": "crates/nq-store/src/writer_session.rs",
+    "owner": "StoreWriterSession",
+    "constructor": "begin",
+    "optional_branded_constructor": "begin_runtime_authority",
+    "optional_branded_factory": "with_runtime_authority_writer_session",
+    "fence": "check_fence",
+    "lifecycle": [
+      "finish"
+    ],
+    "read_only": [
+      "bound_generation"
+    ],
+    "test_only": [
+      "genesis",
+      "store_key"
+    ],
+    "mutation_routes": {
+      "append_admission": {
+        "target_owner": "Store",
+        "target": "append_admission"
+      },
+      "append_legacy_reference": {
+        "target_owner": "Store",
+        "target": "append_legacy_reference"
+      },
+      "append_notification_attempt": {
+        "target_owner": "Store",
+        "target": "append_notification_attempt"
+      },
+      "append_profile_descriptor": {
+        "target_owner": "Store",
+        "target": "append_profile_descriptor"
+      },
+      "append_retention_tombstone": {
+        "target_owner": "Store",
+        "target": "append_retention_tombstone"
+      },
+      "append_runtime_records": {
+        "target_owner": "Store",
+        "target": "append_runtime_records"
+      },
+      "append_upgrade_receipt": {
+        "target_owner": "Store",
+        "target": "append_upgrade_receipt"
+      },
+      "begin_binding_transition": {
+        "target_owner": "Store",
+        "target": "begin_binding_transition"
+      },
+      "claim_custody_derivation": {
+        "target_owner": "GovernedCustody",
+        "target": "claim_derivation"
+      },
+      "claim_custody_launch": {
+        "target_owner": "GovernedCustody",
+        "target": "claim_launch"
+      },
+      "commit_admitted_collection": {
+        "target_owner": "Store",
+        "target": "commit_admitted_collection"
+      },
+      "commit_admitted_run_level_diagnostic": {
+        "target_owner": "Store",
+        "target": "commit_admitted_run_level_diagnostic"
+      },
+      "commit_evaluation": {
+        "target_owner": "Store",
+        "target": "commit_evaluation"
+      },
+      "commit_governed_admitted_run_level_diagnostic_with_publication": {
+        "target_owner": "Store",
+        "target": "commit_governed_admitted_run_level_diagnostic_with_publication"
+      },
+      "commit_governed_non_success_run_level_diagnostic": {
+        "target_owner": "Store",
+        "target": "commit_governed_non_success_run_level_diagnostic"
+      },
+      "commit_governed_non_success_run_level_diagnostic_with_publication": {
+        "target_owner": "Store",
+        "target": "commit_governed_non_success_run_level_diagnostic_with_publication"
+      },
+      "commit_non_success_collection": {
+        "target_owner": "Store",
+        "target": "commit_non_success_collection"
+      },
+      "commit_non_success_collection_with_artifact": {
+        "target_owner": "Store",
+        "target": "commit_non_success_collection_with_artifact"
+      },
+      "complete_binding_materialization": {
+        "target_owner": "Store",
+        "target": "complete_binding_materialization"
+      },
+      "enqueue_notification": {
+        "target_owner": "Store",
+        "target": "enqueue_notification"
+      },
+      "establish_runtime_dependency_trust_root": {
+        "target_owner": "Store",
+        "target": "establish_runtime_dependency_trust_root_bare",
+        "legacy_target": "establish_runtime_dependency_trust_root"
+      },
+      "import_diagnostic_artifact": {
+        "target_owner": "Store",
+        "target": "import_diagnostic_artifact"
+      },
+      "import_unavailable_diagnostic_artifact": {
+        "target_owner": "Store",
+        "target": "import_unavailable_diagnostic_artifact"
+      },
+      "rebuild_current_projections": {
+        "target_owner": "Store",
+        "target": "rebuild_current_projections"
+      },
+      "rebuild_runtime_record_lookup": {
+        "target_owner": "Store",
+        "target": "rebuild_runtime_record_lookup"
+      },
+      "rebuild_status_current_projection": {
+        "target_owner": "Store",
+        "target": "rebuild_status_current_projection"
+      },
+      "record_status": {
+        "target_owner": "Store",
+        "target": "record_status"
+      },
+      "recover_governed_projection_and_mark_indexed": {
+        "target_owner": "Store",
+        "target": "recover_governed_projection_and_mark_indexed"
+      },
+      "recover_pending_governed_projections": {
+        "target_owner": "Store",
+        "target": "recover_pending_governed_projections"
+      },
+      "reopen_custody_state_after_indeterminate_write": {
+        "target_owner": "GovernedCustody",
+        "target": "reopen_state_after_indeterminate_write"
+      },
+      "reserve_governed_custody": {
+        "target_owner": "Store",
+        "target": "reserve_governed_custody"
+      },
+      "seal_custody_acquisition": {
+        "target_owner": "GovernedCustody",
+        "target": "seal_acquisition"
+      },
+      "terminalize_custody_immediate_launch": {
+        "target_owner": "GovernedCustody",
+        "target": "terminalize_immediate_launch"
+      },
+      "verify_governed_projection_and_mark_indexed": {
+        "target_owner": "Store",
+        "target": "verify_governed_projection_and_mark_indexed"
+      }
+    },
+    "optional_mutation_routes": {
+      "append_runtime_activation_revocation": {
+        "target_owner": "Store",
+        "target": "append_verified_runtime_authority_event"
+      },
+      "append_runtime_operator_authority_rotation": {
+        "target_owner": "Store",
+        "target": "append_verified_runtime_authority_event"
+      },
+      "append_runtime_resident_activation_successor": {
+        "target_owner": "Store",
+        "target": "append_verified_runtime_authority_event"
+      }
+    },
+    "refusal_only_routes": {
+      "commit_collection": {
+        "target_owner": "Store",
+        "target": "commit_collection"
+      }
+    },
+    "optional_legacy_routes": {
+      "append_genesis": {
+        "target_owner": "Store",
+        "target": "append_genesis"
+      }
+    },
+    "raw_target_internal_callers": {
+      "Store::verify_governed_projection_and_mark_indexed": [
+        {
+          "path": "crates/nq-store/src/lib.rs",
+          "owner": "Store",
+          "name": "immediate_transaction"
+        }
+      ]
+    }
+  },
+  "internal_store": {
+    "read_only": [
+      "genesis_for_writer_session"
+    ],
+    "mutation_helpers": [
+      "commit_reopened_governed_projection"
+    ],
+    "optional_session_setup": [
+      "prepare_writer_connection"
+    ],
+    "optional_legacy_unrouted": [
+      "append_genesis"
+    ]
+  },
+  "maintenance_prelock_pure_calls": [
+    "as_path",
+    "as_ref"
+  ],
+  "mutation_lexemes": {
+    "calls": [
+      "execute",
+      "execute_batch",
+      "pragma_update",
+      "remove_file",
+      "run_to_completion",
+      "transaction_with_behavior",
+      "write"
+    ],
+    "sql_prefixes": [
+      "ALTER",
+      "CREATE",
+      "DELETE",
+      "DROP",
+      "INSERT",
+      "PRAGMA",
+      "REPLACE",
+      "UPDATE"
+    ]
+  }
+}

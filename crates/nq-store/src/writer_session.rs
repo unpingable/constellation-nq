@@ -9,11 +9,16 @@
 //! it is not a universal authority record.
 
 use std::collections::BTreeMap;
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
 use crate::{Store, StoreError};
+use nq_runtime_dependency_authority::{
+    ResolvedControllingActivation, VerificationBrand, VerifiedActivationRevocation,
+    VerifiedOperatorAuthorityRotation, VerifiedResidentActivationSuccessor,
+};
 
 /// Shared per-store-path writer state: one process-local non-reentrant
 /// write lock and the write fence. The C2 filesystem lock layer is a
@@ -123,16 +128,89 @@ pub(crate) fn fence_store_writes_for_test(key: &Path) {
 /// mutably for its entire lifetime, so it cannot outlive the store,
 /// cannot migrate to another store or generation, and cannot be
 /// replayed after `Drop`.
-pub struct StoreWriterSession<'store> {
+pub struct StoreWriterSession<'store, Brand = ()> {
     store: &'store mut Store,
     state: &'static PathLockState,
     _guard: MutexGuard<'static, ()>,
     store_key: PathBuf,
     genesis: Option<String>,
+    _brand: PhantomData<fn(Brand) -> Brand>,
 }
 
-impl<'store> StoreWriterSession<'store> {
+impl<'store> StoreWriterSession<'store, ()> {
     pub(crate) fn begin(store: &'store mut Store) -> Result<Self, StoreError> {
+        Self::begin_with_brand(store, true)
+    }
+}
+
+impl<'store, 'id> StoreWriterSession<'store, VerificationBrand<'id>> {
+    pub(crate) fn begin_runtime_authority(
+        store: &'store mut Store,
+        _brand: &VerificationBrand<'id>,
+    ) -> Result<Self, StoreError> {
+        Self::begin_with_brand(store, false)
+    }
+
+    /// Atomically establish the occurrence-bound immutable dependency root
+    /// from sealed verification evidence.  Neither this session nor the
+    /// evidence can be converted into the other.
+    pub fn establish_runtime_dependency_trust_root(
+        &mut self,
+        evidence: &ResolvedControllingActivation<'id>,
+    ) -> Result<crate::RuntimeDependencyEstablishmentReceipt, StoreError> {
+        self.check_fence()?;
+        self.store
+            .establish_runtime_dependency_trust_root_bare(evidence)
+    }
+
+    /// Append one verified Store-resident A1 rotation.
+    pub fn append_runtime_operator_authority_rotation(
+        &mut self,
+        event: &VerifiedOperatorAuthorityRotation<'id>,
+    ) -> Result<(), StoreError> {
+        self.check_fence()?;
+        self.store.append_verified_runtime_authority_event(
+            "runtime_operator_authority_rotations",
+            event.record_digest(),
+            event.canonical_bytes(),
+            event.resulting_candidate_set_digest(),
+        )
+    }
+
+    /// Append one verified Store-resident successor A2 activation.
+    pub fn append_runtime_resident_activation_successor(
+        &mut self,
+        event: &VerifiedResidentActivationSuccessor<'id>,
+    ) -> Result<(), StoreError> {
+        self.check_fence()?;
+        self.store.append_verified_runtime_authority_event(
+            "runtime_resident_activation_successors",
+            event.record_digest(),
+            event.canonical_bytes(),
+            event.resulting_candidate_set_digest(),
+        )
+    }
+
+    /// Append one verified prospective activation revocation.
+    pub fn append_runtime_activation_revocation(
+        &mut self,
+        event: &VerifiedActivationRevocation<'id>,
+    ) -> Result<(), StoreError> {
+        self.check_fence()?;
+        self.store.append_verified_runtime_authority_event(
+            "runtime_activation_revocations",
+            event.record_digest(),
+            event.canonical_bytes(),
+            event.resulting_candidate_set_digest(),
+        )
+    }
+}
+
+impl<'store, Brand> StoreWriterSession<'store, Brand> {
+    fn begin_with_brand(
+        store: &'store mut Store,
+        prepare_persistent_writer: bool,
+    ) -> Result<Self, StoreError> {
         let state = path_lock_state(&store.writer_key);
         if state.fenced.load(Ordering::SeqCst) {
             return Err(StoreError::WriteFenced(
@@ -143,6 +221,9 @@ impl<'store> StoreWriterSession<'store> {
             StoreError::WriterSessionUnavailable(store.writer_key.display().to_string())
         })?;
         let genesis = store.genesis_for_writer_session()?;
+        if prepare_persistent_writer {
+            store.prepare_writer_connection()?;
+        }
         let store_key = store.writer_key.clone();
         Ok(Self {
             store,
@@ -150,6 +231,7 @@ impl<'store> StoreWriterSession<'store> {
             _guard: guard,
             store_key,
             genesis,
+            _brand: PhantomData,
         })
     }
 
@@ -181,6 +263,8 @@ impl<'store> StoreWriterSession<'store> {
     }
 }
 
+#[cfg(test)]
+use crate::GenesisInput;
 use crate::governed_custody::{
     CustodiedAcquisition, GovernedAcquisitionCustodyInput, GovernedCustody,
     GovernedCustodyReservation, GovernedCustodyState, GovernedDerivationCustodyClaim,
@@ -192,9 +276,9 @@ use crate::{
     AdmittedRunLevelDiagnosticCompletion, BindingEventInput, BindingMaterializationInput,
     CollectionInput, CollectionReceipt, DiagnosticArtifactCommitInput,
     DiagnosticArtifactImportInput, DiagnosticArtifactImportReceipt, EvaluationInput,
-    EvaluationReceipt, FindingEventInput, GenesisInput, GovernedCustodyCommitment,
-    GovernedProjectionPublication, LegacyReferenceInput, NonSuccessCollectionArtifactCommit,
-    ProfileDescriptorInput, ProviderIntakeCommit, RunResultStatusInput, RuntimeRecordAppendReceipt,
+    EvaluationReceipt, FindingEventInput, GovernedCustodyCommitment, GovernedProjectionPublication,
+    LegacyReferenceInput, NonSuccessCollectionArtifactCommit, ProfileDescriptorInput,
+    ProviderIntakeCommit, RunResultStatusInput, RuntimeRecordAppendReceipt,
     RuntimeRecordBatchInput, StatusEventInput, UnavailableDiagnosticArtifactImportInput,
     UpgradeReceiptInput,
 };
@@ -202,7 +286,7 @@ use nq_protocol::Sha256Digest;
 
 /// The complete public mutation surface of the Store. Each method checks
 /// the write fence and forwards to the crate-internal implementation.
-impl StoreWriterSession<'_> {
+impl StoreWriterSession<'_, ()> {
     /// Append one profile descriptor snapshot.
     pub fn append_profile_descriptor(
         &mut self,
@@ -253,16 +337,6 @@ impl StoreWriterSession<'_> {
     ) -> Result<RuntimeRecordAppendReceipt, StoreError> {
         self.check_fence()?;
         self.store.append_runtime_records(batch)
-    }
-
-    /// Establish the immutable dependency-admission trust root for this store.
-    pub fn establish_runtime_dependency_trust_root(
-        &mut self,
-        trust_anchor_id: &Sha256Digest,
-    ) -> Result<(), StoreError> {
-        self.check_fence()?;
-        self.store
-            .establish_runtime_dependency_trust_root(trust_anchor_id)
     }
 
     /// Import one unavailable diagnostic artifact.
@@ -428,6 +502,7 @@ impl StoreWriterSession<'_> {
     }
 
     /// Append the store's sole genesis record.
+    #[cfg(test)]
     pub fn append_genesis(&mut self, genesis: &GenesisInput) -> Result<(), StoreError> {
         self.check_fence()?;
         self.store.append_genesis(genesis)

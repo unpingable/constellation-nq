@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "resolver_pin": {
+    "path": "crates/nq-host-role-dependency-custody/src/lib.rs",
+    "sha256": "fccda65babbc350d84866bb441058a24ff7f6c3fcf8692b54633d495810ae08d"
+  },
+  "r0b": {
+    "governed_source": "crates/nq-store/src/governed_custody.rs",
+    "store_source": "crates/nq-store/src/lib.rs",
+    "core_source": "crates/nq-core/src/engine.rs",
+    "test_only_helpers": [
+      "r0b_verify_requirement_context_for_test",
+      "r0b_verify_checkpoint_dependency_with_arena_bytes_for_test"
+    ],
+    "public_zero_resolver_apis": [
+      "verify_governed_execution_custody_closure_v2_capacity",
+      "verify_governed_execution_custody_closure_v3_capacity",
+      "recover_pending_governed_projections",
+      "recover_governed_projection_and_mark_indexed",
+      "verify_governed_projection_and_mark_indexed"
+    ]
+  },
+  "gen4": {
+    "enforcement": "active",
+    "activation_markers": [
+      "ResolvedControllingActivation",
+      "EstablishmentReceiptTranscript",
+      "StoreOccurrenceIdentity",
+      "MigrationReceipt"
+    ],
+    "_activation_note": "Set enforcement to active in the same change that introduces any activation marker, then update every selector below to the exact landed API.",
+    "bare_store_helper": {
+      "path": "crates/nq-store/src/lib.rs",
+      "owner": "Store",
+      "name": "establish_runtime_dependency_trust_root_bare"
+    },
+    "typed_session_method": {
+      "path": "crates/nq-store/src/writer_session.rs",
+      "owner": "StoreWriterSession",
+      "name": "establish_runtime_dependency_trust_root"
+    },
+    "branded_session_constructor": {
+      "path": "crates/nq-store/src/writer_session.rs",
+      "owner": "StoreWriterSession",
+      "name": "begin_runtime_authority"
+    },
+    "store_branded_session_scope": {
+      "path": "crates/nq-store/src/lib.rs",
+      "owner": "Store",
+      "name": "with_runtime_authority_writer_session"
+    },
+    "brand_generator": {
+      "path": "crates/nq-runtime-dependency-authority/src/brand.rs",
+      "owner": null,
+      "name": "with_verification_brand"
+    },
+    "bare_helper_receiver": "self.store",
+    "allowed_session_callers": [
+      {
+        "path": "crates/nq-host-role-runtime/src/runtime.rs",
+        "owner": "HostRoleRuntime",
+        "name": "initialize"
+      },
+      {
+        "path": "crates/nq-host-role-runtime/src/runtime.rs",
+        "owner": "HostRoleRuntime",
+        "name": "migrate_v7_runtime_authority"
+      }
+    ],
+    "evidence_type": "ResolvedControllingActivation",
+    "bounded_evidence_verifiers": [
+      {
+        "path": "crates/nq-runtime-dependency-authority/src/resolution.rs",
+        "owner": null,
+        "name": "verify_for_establishment"
+      }
+    ],
+    "authority_family_insert_helpers": [
+      {
+        "path": "crates/nq-store/src/lib.rs",
+        "owner": "Store",
+        "name": "append_verified_runtime_authority_event"
+      }
+    ],
+    "typed_family_session_methods": [
+      {
+        "path": "crates/nq-store/src/writer_session.rs",
+        "owner": "StoreWriterSession",
+        "name": "append_runtime_operator_authority_rotation"
+      },
+      {
+        "path": "crates/nq-store/src/writer_session.rs",
+        "owner": "StoreWriterSession",
+        "name": "append_runtime_resident_activation_successor"
+      },
+      {
+        "path": "crates/nq-store/src/writer_session.rs",
+        "owner": "StoreWriterSession",
+        "name": "append_runtime_activation_revocation"
+      }
+    ],
+    "cfg_test_direct_helpers": [],
+    "forbidden_reachability_name_fragments": [
+      "open",
+      "reopen",
+      "restart",
+      "recover",
+      "validate",
+      "repair",
+      "backup",
+      "schema",
+      "diagnostic"
+    ],
+    "forbidden_product_features": [
+      "test-support",
+      "test_support",
+      "fixture",
+      "unchecked"
+    ],
+    "authority_source_prefixes": [
+      "crates/nq-runtime-dependency-authority/src/",
+      "crates/nq-store/src/",
+      "crates/nq-host-role-runtime/src/"
+    ],
+    "forbidden_authority_forging_identifiers": [
+      "MaybeUninit",
+      "assume_init",
+      "transmute",
+      "transmute_copy",
+      "unsafe",
+      "zeroed"
+    ],
+    "dependency_direction": {
+      "store_package": "nq-store",
+      "store_forbidden_dependencies": [
+        "nq-host-role-runtime",
+        "nq-core",
+        "nq-app"
+      ],
+      "evidence_package": "nq-runtime-dependency-authority",
+      "evidence_forbidden_dependencies": [
+        "nq-store",
+        "nq-host-role-runtime",
+        "nq-core",
+        "nq-app"
+      ]
+    }
+  }
+}

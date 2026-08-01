@@ -614,6 +614,12 @@ fn verify_instructions() -> String {
 
 #[cfg(test)]
 mod tests {
+    use nq_runtime_dependency_authority::{
+        OldRootState,
+        test_support::{FIXTURE_OCCURRENCE_ID, RawAuthorityFixture},
+        verify_for_establishment,
+    };
+
     use super::*;
 
     fn canonical(value: &impl serde::Serialize) -> nq_store::CanonicalDocument {
@@ -1358,6 +1364,18 @@ mod tests {
                 rusqlite::params![nq_store::SCHEMA_V3_ARTIFACT_DIGEST, "2026-07-20T12:00:00Z"],
             )
             .expect("record exact schema-v3 identity");
+        connection
+            .execute(
+                "INSERT INTO genesis_records (
+                    genesis_id, legacy_manifest_digest, created_at, detail_json
+                 ) VALUES (?1, NULL, ?2, CAST(?3 AS BLOB))",
+                rusqlite::params![
+                    FIXTURE_OCCURRENCE_ID,
+                    "2026-07-20T12:00:00Z",
+                    br#"{"schema":"nq.archive_test_occurrence.v1"}"#,
+                ],
+            )
+            .expect("append exact legacy occurrence identity");
         let profile = nq_profiles::resolve_profile("nq.conformance", 1)
             .expect("compiled legacy archive fixture profile");
         let descriptor = canonical(profile.descriptor());
@@ -1617,6 +1635,32 @@ mod tests {
             })),
         };
         drop(Store::upgrade_v6_to_v7(&database, &v6_receipt).expect("upgrade schema-v6 store"));
+        let v7_backup =
+            Store::backup_v7_verified(&database, root.join("nq-v7.pre-authority-migration.db"))
+                .expect("backup exact schema-v7 Store");
+        let authority = RawAuthorityFixture::accepted_migration(OldRootState::Rootless, None);
+        let custody = authority.custody();
+        let presented = authority.presented_set();
+        let migration_receipt = authority
+            .migration_receipt()
+            .expect("accepted migration fixture");
+        let expectations = authority.activation_expectations();
+        let mut store = Store::open_v7_runtime_authority_migration_source(&database, &v7_backup)
+            .expect("open exact schema-v7 authority migration source");
+        store
+            .with_runtime_authority_writer_session(|brand, session| {
+                let resolved = verify_for_establishment(
+                    brand,
+                    &custody,
+                    &presented,
+                    Some(&migration_receipt),
+                    &expectations,
+                )?;
+                session.establish_runtime_dependency_trust_root(&resolved)?;
+                Ok(())
+            })
+            .expect("migrate legacy archive fixture into Gen4 authority law");
+        drop(store);
         let config = write_config(root, &database);
         let archive = root.join("archive");
         create_archive(&config, &archive).expect("create migrated-v3 archive");

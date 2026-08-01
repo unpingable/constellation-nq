@@ -1,0 +1,5 @@
+error[E0599]: no function or associated item named `builder` found for struct `ResolvedControllingActivation<'id>` in the current scope
+ --> tests/ui/gen4/evidence_builder_construction.rs:4:84
+  |
+4 |     let _: ResolvedControllingActivation<'static> = ResolvedControllingActivation::builder();
+  |                                                                                    ^^^^^^^ function or associated item not found in `ResolvedControllingActivation<'_>`
