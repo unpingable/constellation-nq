@@ -2166,7 +2166,7 @@ impl V3ProjectionCapsuleBoundQualificationV1 {
             ));
         }
 
-        self.validate_bindings(&manifest.common)?;
+        self.validate_bindings(&manifest.common, assets)?;
         self.validate_census(&manifest.common)?;
         self.validate_attempts()?;
         self.validate_evidence_dispositions()?;
@@ -2190,6 +2190,7 @@ impl V3ProjectionCapsuleBoundQualificationV1 {
     fn validate_bindings(
         &self,
         manifest: &V3ProjectionCapsuleBoundManifestV1,
+        assets: &nq_host_role_contract::QualifiedV3ProjectionCapsuleBoundAssets,
     ) -> Result<(), StoreError> {
         let policies = &self.policy_bindings;
         if (
@@ -2260,9 +2261,9 @@ impl V3ProjectionCapsuleBoundQualificationV1 {
                 != "crates/nq-store/src/governed_projection_capacity.rs"
             || self.qualification_budget.enforcement_binding.sha256 != store_source_sha256
             || implementation.post_acceptance_review.identity
-                != "nq.host-role-runtime-seam.physical-capacity-c1-post-acceptance-rereview.v3"
-            || implementation.post_acceptance_review.path
-                != "audits/nq-host-role-runtime-seam-v1/reviews/physical-capacity-c1-post-acceptance-rereview-v3.md"
+                != assets.post_acceptance_review_identity
+            || implementation.post_acceptance_review.path != assets.post_acceptance_review_path
+            || implementation.post_acceptance_review.sha256 != assets.post_acceptance_review_sha256
             || implementation
                 .post_acceptance_review
                 .qualification_basis_sha256

@@ -162,10 +162,43 @@ class C1GenerationIdentityTest(unittest.TestCase):
         ):
             reanchor.reanchor_bundle(self.baseline, self.old_engine, new_engine)
 
+    def test_review_preparation_is_explicit_and_updates_evaluator_family(self) -> None:
+        old_evaluator = reanchor.sha256_bytes(
+            reanchor.git_object(self.repo, self.gen3, reanchor.EVALUATOR_PATH)
+        )
+        new_evaluator = reanchor.sha256_bytes(b"review-preparation-evaluator")
+        generated, receipt = reanchor.reanchor_bundle(
+            self.baseline,
+            self.old_engine,
+            self.old_engine,
+            old_evaluator_digest=old_evaluator,
+            new_evaluator_digest=new_evaluator,
+            prepare_review=True,
+        )
+        carrier = reanchor.load_json(
+            generated[reanchor.CARRIER_PATH], "prepared carrier"
+        )
+        implementation = carrier["implementation_bindings"]
+        for field in ("evaluator", "independent_arithmetic", "test_source"):
+            self.assertEqual(implementation[field]["sha256"], new_evaluator)
+        self.assertEqual(
+            carrier["qualification_budget"]["enforcement_binding"]["sha256"],
+            new_evaluator,
+        )
+        review = implementation["post_acceptance_review"]
+        self.assertEqual(
+            review["pre_review_projection_sha256"],
+            reanchor.pre_review_projection(carrier),
+        )
+        self.assertEqual(
+            receipt["review_disposition"],
+            "prepared-pre-review-projection-old-verdict-is-not-evidence",
+        )
+
     def test_check_mode_selects_no_write_path(self) -> None:
         def baseline_file(_repo: Path, relative: str) -> bytes:
-            if relative == reanchor.ENGINE_PATH:
-                return reanchor.git_object(self.repo, self.gen3, reanchor.ENGINE_PATH)
+            if relative in (reanchor.ENGINE_PATH, reanchor.EVALUATOR_PATH):
+                return reanchor.git_object(self.repo, self.gen3, relative)
             return self.baseline[relative]
 
         def baseline_bundle(_repo: Path) -> dict[str, bytes]:

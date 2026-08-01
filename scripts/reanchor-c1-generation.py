@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
-"""Deterministically re-anchor the C1 qualification chain to an engine digest.
+"""Deterministically re-anchor the C1 qualification chain to reviewed sources.
 
 The default baseline is the exact qualified C1 Gen3 commit.  ``--check`` is
 read-only and requires the worktree's engine and six generated/pinned outputs
-to equal the deterministic result.  ``--write`` is the only mutation mode; it
+to equal the deterministic result.  ``--write`` is the qualification mutation
+mode; it
 requires every output file still to equal its baseline Git object, validates
 the complete result in memory, stages every replacement, and then uses
 same-directory atomic replacements with rollback on a reported error.
+
+``--prepare-review`` is a distinct non-qualification mutation mode.  It may
+update the CAP-H14 evaluator source binding and mechanically keeps the prior
+review object structurally joined only so an exact committed pre-review
+projection can be independently reviewed.  Its receipt explicitly says that
+the old verdict is not evidence for the prepared cut.  A later ``--write``
+with a fresh accepted review binding must replace that object before the cut
+can be a qualification candidate.
 
 The JSON projections used here contain no floating-point values.  The local
 canonicalizer deliberately refuses floats and unsafe integers while matching
@@ -709,6 +718,30 @@ def replace_engine_bindings(
         node["source_sha256"] = new_digest
 
 
+def replace_cap_h14_evaluator_bindings(
+    carrier: Any, old_digest: str, new_digest: str
+) -> None:
+    root = require_object(carrier, "CAP-H14 carrier")
+    implementation = object_member(root, "implementation_bindings", "CAP-H14 carrier")
+    bindings = [
+        object_member(implementation, field, "CAP-H14 implementation bindings")
+        for field in ("evaluator", "independent_arithmetic", "test_source")
+    ]
+    budget = object_member(root, "qualification_budget", "CAP-H14 carrier")
+    bindings.append(
+        object_member(budget, "enforcement_binding", "CAP-H14 qualification budget")
+    )
+    for binding in bindings:
+        if binding.get("path") != EVALUATOR_PATH:
+            refuse("CAP-H14 evaluator-family binding path differs")
+        if binding.get("sha256") != old_digest:
+            refuse(
+                "CAP-H14 evaluator-family binding digest differs within the baseline"
+            )
+    for binding in bindings:
+        binding["sha256"] = new_digest
+
+
 def replace_exact(text: str, old: str, new: str, expected: int, label: str) -> str:
     count = text.count(old)
     if count != expected:
@@ -723,7 +756,13 @@ def reanchor_bundle(
     old_engine_digest: str,
     new_engine_digest: str,
     review_binding: Mapping[str, Any] | None = None,
+    *,
+    old_evaluator_digest: str | None = None,
+    new_evaluator_digest: str | None = None,
+    prepare_review: bool = False,
 ) -> tuple[dict[str, bytes], dict[str, Any]]:
+    if prepare_review and review_binding is not None:
+        refuse("review preparation cannot also install an accepted review binding")
     old_receipt = verify_chain(baseline, old_engine_digest, label="baseline")
 
     manifest_v1 = copy.deepcopy(
@@ -740,6 +779,12 @@ def reanchor_bundle(
     replace_engine_bindings(
         manifest_v2, old_engine_digest, new_engine_digest, "manifest v2"
     )
+    baseline_evaluator = old_evaluator_digest or require_string(
+        carrier["implementation_bindings"]["evaluator"].get("sha256"),
+        "baseline CAP-H14 evaluator digest",
+    )
+    requested_evaluator = new_evaluator_digest or baseline_evaluator
+    replace_cap_h14_evaluator_bindings(carrier, baseline_evaluator, requested_evaluator)
 
     sections = section_digests(manifest_v1, manifest_v2)
     new_basis = qualification_basis(manifest_v2)
@@ -749,7 +794,11 @@ def reanchor_bundle(
         carrier_object["implementation_bindings"]["post_acceptance_review"]
     )
     generated_pre_review = pre_review_projection(carrier)
-    if review_binding is None:
+    if prepare_review:
+        new_review = old_review
+        new_review["qualification_basis_sha256"] = new_basis
+        new_review["pre_review_projection_sha256"] = generated_pre_review
+    elif review_binding is None:
         if (
             new_basis != old_receipt["qualification_basis_sha256"]
             or generated_pre_review != old_receipt["pre_review_projection_sha256"]
@@ -824,6 +873,13 @@ def reanchor_bundle(
         1,
         "assets.rs qualification-basis pin",
     )
+    assets_rs = replace_exact(
+        assets_rs,
+        baseline_evaluator,
+        requested_evaluator,
+        1,
+        "assets.rs CAP-H14 evaluator source pin",
+    )
     for field in ("identity", "path", "sha256"):
         assets_rs = replace_exact(
             assets_rs,
@@ -854,6 +910,13 @@ def reanchor_bundle(
         new_engine_digest,
         label="generated",
         review_binding=review_binding,
+    )
+    receipt["review_disposition"] = (
+        "prepared-pre-review-projection-old-verdict-is-not-evidence"
+        if prepare_review
+        else "accepted-review-binding-installed"
+        if review_binding is not None
+        else "unchanged-reviewed-projection"
     )
     return generated, receipt
 
@@ -1007,7 +1070,13 @@ def receipt_document(
 ) -> dict[str, Any]:
     return {
         "schema": "nq.c1_generation_reanchor_receipt.v1",
-        "status": "verified" if mode == "check" else "written-and-verified",
+        "status": (
+            "prepared-for-independent-review-not-qualified"
+            if mode == "prepare-review"
+            else "verified"
+            if mode == "check"
+            else "written-and-verified"
+        ),
         "mode": mode,
         "baseline_commit": baseline_commit,
         "baseline_tree": baseline_tree,
@@ -1053,6 +1122,14 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
     mode.add_argument(
         "--write", action="store_true", help="explicitly write all six outputs"
     )
+    mode.add_argument(
+        "--prepare-review",
+        action="store_true",
+        help=(
+            "write an exact pre-review projection after source changes; the old "
+            "review verdict is explicitly not evidence for this prepared cut"
+        ),
+    )
     return parser.parse_args(arguments)
 
 
@@ -1064,6 +1141,9 @@ def main(arguments: list[str] | None = None) -> int:
         baseline_tree = git_tree(repo, baseline_commit)
         baseline_engine_digest = sha256_bytes(
             git_object(repo, baseline_commit, ENGINE_PATH)
+        )
+        baseline_evaluator_digest = sha256_bytes(
+            git_object(repo, baseline_commit, EVALUATOR_PATH)
         )
         baseline = load_git_bundle(repo, baseline_commit)
         baseline_receipt = verify_chain(
@@ -1082,6 +1162,8 @@ def main(arguments: list[str] | None = None) -> int:
                 f"worktree {ENGINE_PATH} is {actual_engine}; requested engine digest is {requested}"
             )
         review_binding = None
+        if args.prepare_review and args.review_binding is not None:
+            refuse("--prepare-review cannot be combined with --review-binding")
         if args.review_binding is not None:
             review_binding = load_worktree_review_binding(repo, args.review_binding)
             source = require_object(
@@ -1104,6 +1186,9 @@ def main(arguments: list[str] | None = None) -> int:
             baseline_engine_digest,
             requested,
             review_binding=review_binding,
+            old_evaluator_digest=baseline_evaluator_digest,
+            new_evaluator_digest=sha256_bytes(read_worktree_file(repo, EVALUATOR_PATH)),
+            prepare_review=args.prepare_review,
         )
 
         if args.check:
@@ -1113,7 +1198,7 @@ def main(arguments: list[str] | None = None) -> int:
             if all(generated[path] == baseline[path] for path in OUTPUT_PATHS):
                 refuse("--write refuses a no-op re-anchor or review rebinding")
             write_bundle_atomically(repo, baseline, generated)
-            mode = "write"
+            mode = "prepare-review" if args.prepare_review else "write"
         document = receipt_document(
             mode=mode,
             baseline_commit=baseline_commit,

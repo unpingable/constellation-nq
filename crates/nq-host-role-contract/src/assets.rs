@@ -197,6 +197,12 @@ pub struct QualifiedV3ProjectionCapsuleBoundAssets {
     pub manifest_sha256: Sha256Digest,
     /// Digest of the exact qualification-carrier bytes.
     pub qualification_sha256: Sha256Digest,
+    /// Exact independently reviewed identity already validated from the carrier.
+    pub post_acceptance_review_identity: String,
+    /// Exact independently reviewed records path already validated from the carrier.
+    pub post_acceptance_review_path: String,
+    /// Digest of the exact independently reviewed report bytes.
+    pub post_acceptance_review_sha256: Sha256Digest,
 }
 
 type QualificationSourceEvidence = (
@@ -556,6 +562,38 @@ pub fn require_qualified_v3_projection_capsule_bound_manifest_v2()
             &qualification,
             qualification_bytes,
         )?;
+    let review = &qualification["implementation_bindings"]["post_acceptance_review"];
+    let post_acceptance_review_identity = review["identity"]
+        .as_str()
+        .ok_or_else(|| {
+            capacity_asset_error(
+                "nq.v3_projection_capsule_bound_qualification.v1",
+                "validated post-acceptance review identity is absent",
+            )
+        })?
+        .to_owned();
+    let post_acceptance_review_path = review["path"]
+        .as_str()
+        .ok_or_else(|| {
+            capacity_asset_error(
+                "nq.v3_projection_capsule_bound_qualification.v1",
+                "validated post-acceptance review path is absent",
+            )
+        })?
+        .to_owned();
+    let post_acceptance_review_sha256 =
+        Sha256Digest::parse(review["sha256"].as_str().ok_or_else(|| {
+            capacity_asset_error(
+                "nq.v3_projection_capsule_bound_qualification.v1",
+                "validated post-acceptance review digest is absent",
+            )
+        })?)
+        .map_err(|_| {
+            capacity_asset_error(
+                "nq.v3_projection_capsule_bound_qualification.v1",
+                "validated post-acceptance review digest is malformed",
+            )
+        })?;
 
     Ok(QualifiedV3ProjectionCapsuleBoundAssets {
         manifest_bytes,
@@ -563,6 +601,9 @@ pub fn require_qualified_v3_projection_capsule_bound_manifest_v2()
         qualification_basis_sha256,
         manifest_sha256: sha256_bytes(manifest_bytes),
         qualification_sha256,
+        post_acceptance_review_identity,
+        post_acceptance_review_path,
+        post_acceptance_review_sha256,
     })
 }
 
@@ -1809,7 +1850,7 @@ fn validate_v3_projection_capsule_qualification_bindings(
 ) -> Result<()> {
     const ASSET: &str = "nq.v3_projection_capsule_bound_qualification.v1";
     const STORE_CAPACITY_SOURCE_SHA256: &str =
-        "sha256:71378ee4d6203b1cd1c7db841e856d9e42a26a14c07e30f6d9d9945c55624cf1";
+        "sha256:fb197b52948521199336e07bbbc2e74e8d890f83cb702725a5be206f0f44e7db";
     let policy = &qualification["policy_bindings"];
     if !exact_source_binding(
         &policy["operator_decision"],
@@ -2440,7 +2481,7 @@ fn expected_capacity_static_assets()
             (
                 "nq.v3_projection_capsule_bound_manifest.v2",
                 "nq.v3_projection_capsule_bound_manifest.v2.json",
-                "sha256:0283108385e35bc8f922a940428533a8a81fbd2735ea0457901717fe03c06d01",
+                "sha256:f51556cf9be0519a1c8a982bfb9aec74fed9c16c271d6cff80b703ae4c6d6609",
             ),
         ),
         (
@@ -2448,7 +2489,7 @@ fn expected_capacity_static_assets()
             (
                 "nq.v3_projection_capsule_bound_qualification.v1",
                 "nq.v3_projection_capsule_bound_qualification.v1.json",
-                "sha256:94500eb36b9652b80fdd3eacf242eadd1a1ae8118d0de5c9b37bc2cd2b337c15",
+                "sha256:00b89df8be16e7d79b8ca7ef29b6bf3655bf072640e1ecc1fe3c3c2083915cb3",
             ),
         ),
     ]

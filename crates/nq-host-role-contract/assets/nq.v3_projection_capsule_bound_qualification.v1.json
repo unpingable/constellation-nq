@@ -1,6 +1,6 @@
 {
   "schema": "nq.v3_projection_capsule_bound_qualification.v1",
-  "qualification_id": "sha256:08eb06f58868c11b06556f2e08b3b9fa8baff18e153ed777ba1fa29454b3b78f",
+  "qualification_id": "sha256:90588d80a5180f3e3e2e4e7bf11c61730bee70cd5fa215f098f9dd5beae9614a",
   "gate": "CAP-H14",
   "status": "qualified",
   "qualification_basis": {
@@ -33,7 +33,7 @@
     "evaluator": {
       "identity": "nq.v3_projection_capsule_bound_evaluator.v1",
       "path": "crates/nq-store/src/governed_projection_capacity.rs",
-      "sha256": "sha256:71378ee4d6203b1cd1c7db841e856d9e42a26a14c07e30f6d9d9945c55624cf1"
+      "sha256": "sha256:fb197b52948521199336e07bbbc2e74e8d890f83cb702725a5be206f0f44e7db"
     },
     "canonical_serializer": {
       "identity": "nq.production-canonical-json.v1",
@@ -43,19 +43,19 @@
     "independent_arithmetic": {
       "identity": "nq.v3_projection_capsule_bound_independent_arithmetic.v1",
       "path": "crates/nq-store/src/governed_projection_capacity.rs",
-      "sha256": "sha256:71378ee4d6203b1cd1c7db841e856d9e42a26a14c07e30f6d9d9945c55624cf1"
+      "sha256": "sha256:fb197b52948521199336e07bbbc2e74e8d890f83cb702725a5be206f0f44e7db"
     },
     "test_source": {
       "identity": "nq.v3_projection_capsule_bound_qualification_tests.v1",
       "path": "crates/nq-store/src/governed_projection_capacity.rs",
-      "sha256": "sha256:71378ee4d6203b1cd1c7db841e856d9e42a26a14c07e30f6d9d9945c55624cf1"
+      "sha256": "sha256:fb197b52948521199336e07bbbc2e74e8d890f83cb702725a5be206f0f44e7db"
     },
     "post_acceptance_review": {
       "identity": "nq.host-role-runtime-seam.cap-h14-gen4-post-acceptance-review.v1",
       "path": "audits/nq-host-role-runtime-seam-v1/c1-gen4-r2-enrolled-activation/CAP-H14-GEN4-POST-ACCEPTANCE-REVIEW.md",
       "sha256": "sha256:bd6aba457cef42e456a829b611b8b36ee830a195f8290a5c15517b23aefb6d3e",
       "qualification_basis_sha256": "sha256:de440ec2fe3141d794bbb28c778eb273fc209a007691413953198d94ced669e3",
-      "pre_review_projection_sha256": "sha256:1c6e70f0e03ec7cab27e425a1ef740c3007c74c88f05aaa2924722db41be44c3"
+      "pre_review_projection_sha256": "sha256:d8b34ae651b8a0d1e8629000519fde8bfc936b82b50a3ddbc7ca2694861539c1"
     }
   },
   "qualification_budget": {
@@ -69,7 +69,7 @@
     "enforcement_binding": {
       "identity": "nq.v3_projection_capsule_materialization_preallocation.v1",
       "path": "crates/nq-store/src/governed_projection_capacity.rs",
-      "sha256": "sha256:71378ee4d6203b1cd1c7db841e856d9e42a26a14c07e30f6d9d9945c55624cf1"
+      "sha256": "sha256:fb197b52948521199336e07bbbc2e74e8d890f83cb702725a5be206f0f44e7db"
     },
     "preallocation_receipt": {
       "schema": "nq.v3_projection_capsule_qualification_budget_enforcement_receipt.v1",
