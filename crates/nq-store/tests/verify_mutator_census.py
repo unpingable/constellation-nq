@@ -341,14 +341,18 @@ def validate_session_construction(
         signature = compact_tokens(
             branded_factory.source.tokens[branded_factory.start_token : signature_end]
         )
+        expected_factory_visibility = config["session"].get(
+            "optional_branded_factory_visibility", "pub"
+        )
         require(
-            branded_factory.visibility == "pub"
+            branded_factory.visibility == expected_factory_visibility
             and "implfor<'id>FnOnce(" in signature
             and "&VerificationBrand<'id>" in signature
             and "&mutStoreWriterSession<'_,VerificationBrand<'id>>" in signature
             and signature.count("VerificationBrand<'id>") == 2
             and "'id" not in signature.split("(", 1)[0],
-            "branded authority session factory is not a Store-owned fresh HRTB scope",
+            "branded authority session factory has the wrong visibility or is not a "
+            "Store-owned fresh HRTB scope",
         )
         require(
             len(branded_factory.calls("with_verification_brand")) == 1

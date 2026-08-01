@@ -1,16 +1,7 @@
-error[E0061]: this method takes 0 arguments but 1 argument was supplied
- --> tests/ui/writer/session_from_boolean.rs:4:26
+error[E0277]: the trait bound `StoreWriterSession<'_>: From<bool>` is not satisfied
+ --> tests/ui/writer/session_from_boolean.rs:4:54
   |
-4 |     let _session = store.begin_writer_session(true);
-  |                          ^^^^^^^^^^^^^^^^^^^^ ---- unexpected argument of type `bool`
+4 |     let _session: StoreWriterSession<'static> = true.into();
+  |                                                      ^^^^ the trait `From<bool>` is not implemented for `StoreWriterSession<'_>`
   |
-note: method defined here
- --> src/lib.rs
-  |
-  |     pub fn begin_writer_session(&mut self) -> Result<StoreWriterSession<'_>, StoreError> {
-  |            ^^^^^^^^^^^^^^^^^^^^
-help: remove the extra argument
-  |
-4 -     let _session = store.begin_writer_session(true);
-4 +     let _session = store.begin_writer_session();
-  |
+  = note: required for `bool` to implement `Into<StoreWriterSession<'_>>`

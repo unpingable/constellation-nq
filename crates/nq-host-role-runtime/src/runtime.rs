@@ -450,7 +450,7 @@ impl HostRoleRuntime {
     pub fn classify_v7_runtime_authority(
         path: impl AsRef<Path>,
         backup: &BackupArtifact,
-        dependencies: RuntimeDependencies,
+        dependencies: &RuntimeDependencies,
         authority_custody: &GenesisAuthorityCustody,
         migration_receipt: &MigrationReceiptBytes,
         resident: &RuntimeAuthorityResidentBinding,

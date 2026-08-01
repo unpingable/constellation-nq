@@ -1,6 +1,6 @@
-use nq_store::{GenesisInput, Store};
+use nq_store::GenesisInput;
 
-fn bypass(store: &mut Store, genesis: &GenesisInput) {
+fn bypass(store: &mut nq_store::Store, genesis: &GenesisInput) {
     let _ = store.append_genesis(genesis);
 }
 

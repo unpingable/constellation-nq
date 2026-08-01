@@ -1,5 +1,5 @@
-error[E0599]: no method named `append_genesis` found for mutable reference `&mut Store` in the current scope
+error[E0599]: no method named `append_genesis` found for mutable reference `&mut nq_store::Store` in the current scope
  --> tests/ui/writer/mutator_without_session.rs:4:19
   |
 4 |     let _ = store.append_genesis(genesis);
-  |                   ^^^^^^^^^^^^^^ method not found in `&mut Store`
+  |                   ^^^^^^^^^^^^^^ method not found in `&mut nq_store::Store`

@@ -1,7 +1,7 @@
-use nq_store::Store;
+use nq_store::StoreWriterSession;
 
-fn forge_with_boolean(store: &mut Store) {
-    let _session = store.begin_writer_session(true);
+fn forge_with_boolean() {
+    let _session: StoreWriterSession<'static> = true.into();
 }
 
 fn main() {}

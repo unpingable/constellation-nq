@@ -7,6 +7,7 @@
     "lifecycle": [
       "initialize",
       "initialize_in_memory",
+      "initialize_unqualified_storage",
       "open"
     ],
     "read_only": [
@@ -79,7 +80,10 @@
       "watcher_run_outcomes_bounded"
     ],
     "optional_read_only": [
+      "build_restore_declaration",
       "open_v7_upgrade_source_read_only",
+      "restore_declaration_path",
+      "runtime_authority_cardinality_disposition_expectations",
       "runtime_authority_migration_expectations",
       "runtime_authority_migration_receipt",
       "runtime_authority_presented_set",
@@ -119,6 +123,7 @@
     "constructor": "begin",
     "optional_branded_constructor": "begin_runtime_authority",
     "optional_branded_factory": "with_runtime_authority_writer_session",
+    "optional_branded_factory_visibility": "pub(crate)",
     "fence": "check_fence",
     "lifecycle": [
       "finish"
@@ -281,6 +286,14 @@
       "append_runtime_resident_activation_successor": {
         "target_owner": "Store",
         "target": "append_verified_runtime_authority_event"
+      },
+      "classify_runtime_authority_migration": {
+        "target_owner": "Store",
+        "target": "freeze_runtime_authority_migration_bare"
+      },
+      "classify_v7_cardinality_disposition": {
+        "target_owner": "Store",
+        "target": "freeze_v7_cardinality_disposition_bare"
       }
     },
     "refusal_only_routes": {
@@ -307,13 +320,18 @@
   },
   "internal_store": {
     "read_only": [
-      "genesis_for_writer_session"
+      "genesis_for_writer_session",
+      "require_runtime_authority_initialization_candidate",
+      "with_runtime_authority_restart_snapshot"
     ],
     "mutation_helpers": [
-      "commit_reopened_governed_projection"
+      "commit_reopened_governed_projection",
+      "consume_runtime_authority_initialization_candidate",
+      "initialize_runtime_authority_candidate"
     ],
     "optional_session_setup": [
-      "prepare_writer_connection"
+      "prepare_writer_connection",
+      "with_runtime_authority_writer_session"
     ],
     "optional_legacy_unrouted": [
       "append_genesis"

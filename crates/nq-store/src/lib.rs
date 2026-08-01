@@ -2920,9 +2920,9 @@ impl Store {
     /// Checkpoint a writable backup copy and leave it in rollback-journal mode
     /// before archive inventory and sealing.
     pub fn prepare_archive_copy(&self) -> Result<(), StoreError> {
-        self.ensure_runtime_authority_not_frozen()?;
         let _maintenance_guards =
             writer_session::acquire_maintenance_locks(&[self.writer_key.as_path()])?;
+        self.ensure_runtime_authority_not_frozen()?;
         let checkpoint: (i64, i64, i64) =
             self.connection
                 .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
@@ -14479,7 +14479,6 @@ fn runtime_migration_receipt_bytes_on_connection(
 
 struct StoredRuntimeAuthorityMigrationFreeze {
     receipt: MigrationReceipt,
-    source_logical_digest: Sha256Digest,
     candidate_set_digest: Sha256Digest,
 }
 
@@ -14555,20 +14554,18 @@ fn runtime_migration_disposition_freeze_on_connection(
     {
         return Err(StoreError::AuthorityMigrationDispositionConflict);
     }
+    Sha256Digest::parse(source_logical_digest)
+        .map_err(|_| StoreError::AuthorityMigrationDispositionConflict)?;
     Ok(Some(StoredRuntimeAuthorityMigrationFreeze {
         receipt,
-        source_logical_digest: Sha256Digest::parse(source_logical_digest)
-            .map_err(|_| StoreError::AuthorityMigrationDispositionConflict)?,
         candidate_set_digest: Sha256Digest::parse(candidate_set_digest)
             .map_err(|_| StoreError::AuthorityMigrationDispositionConflict)?,
     }))
 }
 
 struct StoredRuntimeAuthorityCardinalityFreeze {
-    disposition_digest: Sha256Digest,
     disposition: MigrationDisposition,
     genesis_identities: Vec<String>,
-    source_logical_digest: Sha256Digest,
     old_root_state: OldRootState,
 }
 
@@ -14707,10 +14704,8 @@ fn runtime_v7_cardinality_disposition_freeze_on_connection(
         return Err(conflict());
     }
     Ok(Some(StoredRuntimeAuthorityCardinalityFreeze {
-        disposition_digest: parsed_disposition_digest,
         disposition: disposition_value,
         genesis_identities,
-        source_logical_digest: parsed_source_digest,
         old_root_state,
     }))
 }
@@ -14964,8 +14959,6 @@ fn validate_runtime_authority_invariants(connection: &Connection) -> Result<(), 
                 if trust_anchor_id.as_str() == existing => {}
             _ => return Err(StoreError::AuthorityMigrationOldRootMismatch),
         }
-        let _historical_source_digest = freeze.source_logical_digest;
-        let _signed_disposition_digest = freeze.disposition_digest;
         return Ok(());
     }
 
@@ -14997,7 +14990,6 @@ fn validate_runtime_authority_invariants(connection: &Connection) -> Result<(), 
                 if trust_anchor_id.as_str() == existing => {}
             _ => return Err(StoreError::AuthorityMigrationOldRootMismatch),
         }
-        let _source_identity = freeze.source_logical_digest;
         return Ok(());
     }
 
