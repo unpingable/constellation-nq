@@ -4,25 +4,25 @@
   "generation": "c1.generation.4",
   "authority_effect": "none",
   "reviewed_source": {
-    "commit": "8732b679db0c13a7599c94e9f99eab8a97ff93b8",
-    "tree": "3d34719d4e25305755d6a75cdb1da9c05e1fda48",
+    "commit": "6c6039b873d202160c26bf3ecc896a51e24c6328",
+    "tree": "a23b7f9d48543bed56a715bfbea7fdc526e625a1",
     "qualification_basis_sha256": "sha256:de440ec2fe3141d794bbb28c778eb273fc209a007691413953198d94ced669e3",
-    "pre_review_projection_sha256": "sha256:1c6e70f0e03ec7cab27e425a1ef740c3007c74c88f05aaa2924722db41be44c3",
+    "pre_review_projection_sha256": "sha256:d8b34ae651b8a0d1e8629000519fde8bfc936b82b50a3ddbc7ca2694861539c1",
     "evaluator_path": "crates/nq-store/src/governed_projection_capacity.rs",
-    "evaluator_sha256": "sha256:71378ee4d6203b1cd1c7db841e856d9e42a26a14c07e30f6d9d9945c55624cf1",
+    "evaluator_sha256": "sha256:fb197b52948521199336e07bbbc2e74e8d890f83cb702725a5be206f0f44e7db",
     "canonical_serializer_path": "crates/nq-store/src/governed_projection_capsule.rs",
     "canonical_serializer_sha256": "sha256:033b57efb16437a2379307dba0ea495810891bbaeb378462f9b8cf054b5011d3"
   },
   "records_repository": {
-    "commit": "07e03c91ba4cb181079013e612a5aed5361d2d59",
-    "tree": "3ed13d28d163d241d8a72d2ff50d7cb2efd439c0"
+    "commit": "c40a8302ad4398764565564559d633a7fc729b41",
+    "tree": "1a52dce6710572c50b7d686f24fab81c87b08b46"
   },
   "review_receipt": {
-    "identity": "nq.host-role-runtime-seam.cap-h14-gen4-post-acceptance-review.v1",
+    "identity": "nq.host-role-runtime-seam.cap-h14-gen4-post-acceptance-review.v2",
     "verdict": "PASS-PURE-C1",
-    "receipt_path": "audits/nq-host-role-runtime-seam-v1/c1-gen4-r2-enrolled-activation/CAP-H14-GEN4-POST-ACCEPTANCE-REVIEW.v1.json",
-    "receipt_sha256": "sha256:460335b7cd4cced4787a4db9a67aa4ebc30015038b17905626880beb47e98608",
-    "report_path": "audits/nq-host-role-runtime-seam-v1/c1-gen4-r2-enrolled-activation/CAP-H14-GEN4-POST-ACCEPTANCE-REVIEW.md",
-    "report_sha256": "sha256:bd6aba457cef42e456a829b611b8b36ee830a195f8290a5c15517b23aefb6d3e"
+    "receipt_path": "audits/nq-host-role-runtime-seam-v1/c1-gen4-r2-enrolled-activation/CAP-H14-GEN4-POST-ACCEPTANCE-REVIEW.v2.json",
+    "receipt_sha256": "sha256:b47a63399f281277c84373727ac5ea80c2ec16dc9842ed125bcf525595129495",
+    "report_path": "audits/nq-host-role-runtime-seam-v1/c1-gen4-r2-enrolled-activation/CAP-H14-GEN4-POST-ACCEPTANCE-REVIEW.v2.md",
+    "report_sha256": "sha256:aef825295ddfb98c5fe9497a32de81e331e568b3dc68e5120052095aeb829c61"
   }
 }
