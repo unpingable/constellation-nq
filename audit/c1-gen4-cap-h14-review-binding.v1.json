@@ -4,8 +4,8 @@
   "generation": "c1.generation.4",
   "authority_effect": "none",
   "reviewed_source": {
-    "commit": "6c6039b873d202160c26bf3ecc896a51e24c6328",
-    "tree": "a23b7f9d48543bed56a715bfbea7fdc526e625a1",
+    "commit": "a77292917c6852b10a530f31f14ed356c8d3b206",
+    "tree": "d5153ee226e8ab86ae4950f20b5e1f14fdd82d77",
     "qualification_basis_sha256": "sha256:de440ec2fe3141d794bbb28c778eb273fc209a007691413953198d94ced669e3",
     "pre_review_projection_sha256": "sha256:d8b34ae651b8a0d1e8629000519fde8bfc936b82b50a3ddbc7ca2694861539c1",
     "evaluator_path": "crates/nq-store/src/governed_projection_capacity.rs",
@@ -14,15 +14,15 @@
     "canonical_serializer_sha256": "sha256:033b57efb16437a2379307dba0ea495810891bbaeb378462f9b8cf054b5011d3"
   },
   "records_repository": {
-    "commit": "c40a8302ad4398764565564559d633a7fc729b41",
-    "tree": "1a52dce6710572c50b7d686f24fab81c87b08b46"
+    "commit": "61f8914d187888ba5bc29442e9806d2102a46b40",
+    "tree": "3a3c29671f832c9aa277963c52f5f62c19409fe6"
   },
   "review_receipt": {
-    "identity": "nq.host-role-runtime-seam.cap-h14-gen4-post-acceptance-review.v2",
+    "identity": "nq.host-role-runtime-seam.cap-h14-gen4-post-acceptance-review.v3",
     "verdict": "PASS-PURE-C1",
-    "receipt_path": "audits/nq-host-role-runtime-seam-v1/c1-gen4-r2-enrolled-activation/CAP-H14-GEN4-POST-ACCEPTANCE-REVIEW.v2.json",
-    "receipt_sha256": "sha256:b47a63399f281277c84373727ac5ea80c2ec16dc9842ed125bcf525595129495",
-    "report_path": "audits/nq-host-role-runtime-seam-v1/c1-gen4-r2-enrolled-activation/CAP-H14-GEN4-POST-ACCEPTANCE-REVIEW.v2.md",
-    "report_sha256": "sha256:aef825295ddfb98c5fe9497a32de81e331e568b3dc68e5120052095aeb829c61"
+    "receipt_path": "audits/nq-host-role-runtime-seam-v1/c1-gen4-r2-enrolled-activation-candidate-2/CAP-H14-GEN4-POST-ACCEPTANCE-REVIEW.v3.json",
+    "receipt_sha256": "sha256:1cd4c8c4f9b926c7182b9815820c2ecc7eca1422097e12d9d5cf33ea936e2f8e",
+    "report_path": "audits/nq-host-role-runtime-seam-v1/c1-gen4-r2-enrolled-activation-candidate-2/CAP-H14-GEN4-POST-ACCEPTANCE-REVIEW.v3.md",
+    "report_sha256": "sha256:9b380cc23bc2115ad1f78402763e05a16a1d8b90f6aa4a32c9cae7420baa60a1"
   }
 }

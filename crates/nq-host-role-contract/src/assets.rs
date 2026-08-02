@@ -1913,13 +1913,13 @@ fn validate_v3_projection_capsule_qualification_bindings(
     }
     let review = &implementation["post_acceptance_review"];
     if review["identity"].as_str()
-        != Some("nq.host-role-runtime-seam.cap-h14-gen4-post-acceptance-review.v2")
+        != Some("nq.host-role-runtime-seam.cap-h14-gen4-post-acceptance-review.v3")
         || review["path"].as_str()
             != Some(
-                "audits/nq-host-role-runtime-seam-v1/c1-gen4-r2-enrolled-activation/CAP-H14-GEN4-POST-ACCEPTANCE-REVIEW.v2.md",
+                "audits/nq-host-role-runtime-seam-v1/c1-gen4-r2-enrolled-activation-candidate-2/CAP-H14-GEN4-POST-ACCEPTANCE-REVIEW.v3.md",
             )
         || review["sha256"].as_str()
-            != Some("sha256:aef825295ddfb98c5fe9497a32de81e331e568b3dc68e5120052095aeb829c61")
+            != Some("sha256:9b380cc23bc2115ad1f78402763e05a16a1d8b90f6aa4a32c9cae7420baa60a1")
     {
         return Err(capacity_asset_error(
             ASSET,
@@ -2481,7 +2481,7 @@ fn expected_capacity_static_assets()
             (
                 "nq.v3_projection_capsule_bound_manifest.v2",
                 "nq.v3_projection_capsule_bound_manifest.v2.json",
-                "sha256:6aa865b53c7d67f7218069643a7e05e90c57be3b058977320d08a69a7b43e8de",
+                "sha256:72ab46189f6c9b2c23df433fbee6e1ddc9c5129772ad9f6896dfec7e181d8af7",
             ),
         ),
         (
@@ -2489,7 +2489,7 @@ fn expected_capacity_static_assets()
             (
                 "nq.v3_projection_capsule_bound_qualification.v1",
                 "nq.v3_projection_capsule_bound_qualification.v1.json",
-                "sha256:938d67cec06c9e37e7a1fdc979c19342404eefe3e228457b033242a677a4e3fb",
+                "sha256:a43af95a6b4565f4c13b15f49267ae2e97951b282fbb894c0e0ec08b5f24005d",
             ),
         ),
     ]
