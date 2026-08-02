@@ -14,7 +14,7 @@ use nq_host_role_runtime::{
     HostRoleRuntime, RuntimeAuthorityResidentBinding,
     test_support::{
         NativeEngineFixtureBinding, NativeEvaluatorFixtureBinding, NativeProfileFixtureBinding,
-        native_engine_fixture,
+        authenticated_runtime_dependencies, initialized_gen4_store, native_engine_fixture,
     },
 };
 use nq_runtime_dependency_authority::test_support::{
@@ -186,23 +186,47 @@ fn admitted_effect_fixture_with_profile(
         .expect("helper runtime mode");
 
     let config = effect_config(root, &helper_path, &marker);
-    let mut admission_config = config.clone();
-    admission_config.database_path = root.join("admission-stage.db");
     let profile: &'static dyn ProfileModule = &nq_profiles::conformance::MODULE;
-    let mut store = Store::initialize_unqualified_storage(&admission_config.database_path)
-        .expect("initialize admission staging Store");
+    // Establish the final Store before admission without manufacturing a
+    // provider reference. Seed 41 fixes the test trust anchor; no runtime
+    // checkpoint is written under this empty authenticated closure. The
+    // complete fixture below must independently reproduce the same anchor.
+    let bootstrap_dependencies =
+        authenticated_runtime_dependencies(41, Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let bootstrap_anchor = bootstrap_dependencies
+        .custody()
+        .trust_anchor_id()
+        .expect("bootstrap dependency anchor");
+    let authority = RawAuthorityFixture::fresh_genesis_with_anchor(bootstrap_anchor.clone());
+    let custody = authority.custody();
+    let resident = RuntimeAuthorityResidentBinding {
+        resident_identity: FIXTURE_RESIDENT_ID.to_owned(),
+        resident_generation: FIXTURE_RESIDENT_GENERATION,
+        host_role: FIXTURE_HOST_ROLE.to_owned(),
+        role_manifest_generation: FIXTURE_ROLE_MANIFEST_GENERATION,
+        domain: FIXTURE_DOMAIN.to_owned(),
+        policy_floor: 1,
+    };
+    let initialized = HostRoleRuntime::initialize(
+        &config.database_path,
+        bootstrap_dependencies,
+        &custody,
+        &resident,
+    )
+    .expect("initialize governed effect Store");
+    let mut store = initialized.into_store();
     append_profile_descriptor(
         &mut store.begin_writer_session().expect("writer session"),
         profile,
     )
-    .expect("append profile descriptor");
+    .expect("append governed Store profile descriptor");
 
     let watcher = config
         .watcher("governed.effect")
         .expect("configured watcher")
         .clone();
-    let mut admission_engine = collection_engine_from_fresh_store(&admission_config, store)
-        .expect("admission staging engine");
+    let mut admission_engine =
+        collection_engine_from_fresh_store(&config, store).expect("final admission engine");
     let evaluator = admission_engine
         .require_evaluator_identity()
         .expect("evaluator identity")
@@ -225,8 +249,10 @@ fn admitted_effect_fixture_with_profile(
         .provider_admission_for_source(&admission_id)
         .expect("provider admission lookup")
         .expect("provider admission");
-    let provider_digest = Sha256Digest::parse(provider.provider_admission_id.clone())
-        .expect("provider admission identity");
+    let provider_admission_id = provider.provider_admission_id.clone();
+    let provider_contract = provider.contract_json.clone();
+    let provider_digest =
+        Sha256Digest::parse(provider_admission_id.clone()).expect("provider admission identity");
     let provider_admission = RecordRef {
         schema: Token::parse("nq.local_provider_admission.v1").expect("provider schema"),
         record_id: provider_digest.clone(),
@@ -239,7 +265,7 @@ fn admitted_effect_fixture_with_profile(
         .expect("zero-detector closure");
     let fixture = native_engine_fixture(&NativeEngineFixtureBinding {
         provider_admission,
-        provider_admission_bytes: provider.contract_json,
+        provider_admission_bytes: provider_contract,
         production_profile_id: production_profile_id.to_owned(),
         production_profile_version,
         native_profile: NativeProfileFixtureBinding {
@@ -264,35 +290,42 @@ fn admitted_effect_fixture_with_profile(
         },
         maximum_execution_ms,
     });
-    drop(admission_engine);
+    assert_eq!(
+        fixture.dependency_anchor_id, bootstrap_anchor,
+        "neutral bootstrap and complete fixture must share one trust anchor"
+    );
+    let active_lock = admission_engine
+        .authoritative_active_lock(&watcher)
+        .expect("final authoritative binding")
+        .expect("final active lock");
+    assert_eq!(active_lock.admission_id, admission_id);
+    let final_provider = admission_engine
+        .store
+        .provider_admission_for_source(&admission_id)
+        .expect("final provider admission lookup")
+        .expect("final provider admission");
+    assert_eq!(final_provider.provider_admission_id, provider_admission_id);
+    assert_eq!(final_provider.contract_json, provider.contract_json);
+    assert!(
+        admission_engine
+            .store
+            .pending_binding_materialization(&watcher.instance_id)
+            .expect("final binding materialization state")
+            .is_none(),
+        "final admitted fixture must not retain a pending lock projection"
+    );
     if marker.exists() {
         fs::remove_file(&marker).expect("clear admission spawn marker");
     }
-
-    let authority =
-        RawAuthorityFixture::fresh_genesis_with_anchor(fixture.dependency_anchor_id.clone());
-    let custody = authority.custody();
-    let resident = RuntimeAuthorityResidentBinding {
-        resident_identity: FIXTURE_RESIDENT_ID.to_owned(),
-        resident_generation: FIXTURE_RESIDENT_GENERATION,
-        host_role: FIXTURE_HOST_ROLE.to_owned(),
-        role_manifest_generation: FIXTURE_ROLE_MANIFEST_GENERATION,
-        domain: FIXTURE_DOMAIN.to_owned(),
-        policy_floor: 1,
-    };
-    let initialized = HostRoleRuntime::initialize(
-        &config.database_path,
-        fixture.dependencies.clone(),
-        &custody,
-        &resident,
-    )
-    .expect("initialize governed effect Store");
-    let mut store = initialized.into_store();
-    append_profile_descriptor(
-        &mut store.begin_writer_session().expect("writer session"),
-        profile,
-    )
-    .expect("append governed Store profile descriptor");
+    assert!(
+        !root.join("admission-stage.db").exists(),
+        "the repaired fixture must not construct a staging database"
+    );
+    assert!(
+        !root.join("admission-stage").exists(),
+        "the repaired fixture must not construct a staging admissions namespace"
+    );
+    let store = admission_engine.store;
     let mut runtime = HostRoleRuntime::from_store(store, fixture.dependencies, &custody, &resident)
         .expect("host-role runtime");
     let prepared = runtime
@@ -354,6 +387,109 @@ fn assert_exact_run_scoped_status(
         "governed execution advanced watcher-instance health"
     );
     (status.status_event_id.clone(), status.observed_at.clone())
+}
+
+fn sqlite_durable_snapshot(path: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    ["", "-wal", "-shm", "-journal"]
+        .into_iter()
+        .filter_map(|suffix| {
+            let mut carrier = path.as_os_str().to_os_string();
+            carrier.push(suffix);
+            let carrier = PathBuf::from(carrier);
+            carrier.exists().then(|| {
+                let bytes = fs::read(&carrier).expect("read SQLite durable carrier");
+                (carrier, bytes)
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn hostile_active_lock_without_binding_refuses_without_durable_write() {
+    let directory = tempfile::tempdir().expect("orphan-lock directory");
+    let root = directory.path();
+    let helper_path = root.join("governed_conformance.py");
+    let marker = root.join("spawn-marker");
+    fs::write(&helper_path, helper_source(HelperMode::Complete)).expect("write helper");
+    fs::set_permissions(&helper_path, fs::Permissions::from_mode(0o755))
+        .expect("helper executable mode");
+    fs::create_dir(root.join("admissions")).expect("admissions directory");
+    fs::set_permissions(root.join("admissions"), fs::Permissions::from_mode(0o700))
+        .expect("admissions mode");
+    fs::create_dir(root.join("helpers")).expect("helper runtime directory");
+    fs::set_permissions(root.join("helpers"), fs::Permissions::from_mode(0o711))
+        .expect("helper runtime mode");
+
+    let config = effect_config(root, &helper_path, &marker);
+    let watcher = config
+        .watcher("governed.effect")
+        .expect("configured watcher")
+        .clone();
+    let profile = resolve(&watcher).expect("compiled profile");
+    let corpus = nq_protocol::verify_embedded_conformance_corpus().expect("embedded corpus");
+    let lock = AdmissionManager
+        .candidate(
+            &watcher,
+            CandidateEvidence {
+                profile_digest: profile
+                    .descriptor()
+                    .digest()
+                    .expect("profile digest")
+                    .as_str()
+                    .to_owned(),
+                protocol_version: nq_protocol::HELPER_PROTOCOL_VERSION.to_owned(),
+                declared_capabilities: BTreeSet::new(),
+                conformance: ConformanceReceipt {
+                    tool_version: corpus.version.verifier_version,
+                    protocol_passed: true,
+                    protocol_corpus_digest: corpus.version.corpus_digest.to_string(),
+                    protocol_fixtures_checked: corpus.fixtures_checked,
+                    dry_collection_passed: true,
+                    dry_report_digest: Some(format!("sha256:{}", "a".repeat(64))),
+                },
+            },
+        )
+        .expect("hostile valid-shaped lock");
+    AdmissionManager
+        .activate(&config.admissions_dir, &lock)
+        .expect("materialize hostile orphan lock");
+
+    let store = initialized_gen4_store(&config.database_path);
+    let engine =
+        collection_engine_from_fresh_store(&config, store).expect("hostile validation engine");
+    let active_path = config
+        .admissions_dir
+        .join(format!("{}.json", watcher.instance_id));
+    let database_before = sqlite_durable_snapshot(&config.database_path);
+    let lock_before = fs::read(&active_path).expect("orphan lock before refusal");
+
+    let error = engine
+        .authoritative_active_lock(&watcher)
+        .expect_err("orphan active lock must refuse");
+    assert!(matches!(
+        error,
+        EngineError::Invariant(message)
+            if message.contains("active lock but no authoritative binding event")
+    ));
+    assert!(
+        engine
+            .store
+            .latest_binding(&watcher.instance_id)
+            .expect("binding query after refusal")
+            .is_none(),
+        "orphan-lock refusal must not synthesize a binding"
+    );
+    assert_eq!(
+        sqlite_durable_snapshot(&config.database_path),
+        database_before,
+        "authoritative orphan-lock refusal changed durable SQLite bytes"
+    );
+    assert_eq!(
+        fs::read(&active_path).expect("orphan lock after refusal"),
+        lock_before,
+        "authoritative orphan-lock refusal changed the hostile lock bytes"
+    );
+    assert!(!marker.exists(), "validation refusal spawned the provider");
 }
 
 #[test]
