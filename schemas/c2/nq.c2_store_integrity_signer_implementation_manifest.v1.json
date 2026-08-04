@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.c2_store_integrity_signer_implementation_manifest.v1.json",
+  "title": "nq.c2_store_integrity_signer_implementation_manifest.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "manifest_identity",
+    "custody_format_identity",
+    "source_files",
+    "source_paths",
+    "cryptographic_backend_identity",
+    "toolchain_identity",
+    "target_profile_identity",
+    "qualification_assumption_identities",
+    "authority"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.c2_store_integrity_signer_implementation_manifest.v1"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "manifest_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "custody_format_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "source_files": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^sha256:[0-9a-f]{64}$"
+      }
+    },
+    "source_paths": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512,
+        "pattern": "^[A-Za-z0-9._:/@-]+$"
+      }
+    },
+    "cryptographic_backend_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "toolchain_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "target_profile_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "qualification_assumption_identities": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^sha256:[0-9a-f]{64}$"
+      }
+    },
+    "authority": {
+      "const": "none"
+    }
+  }
+}

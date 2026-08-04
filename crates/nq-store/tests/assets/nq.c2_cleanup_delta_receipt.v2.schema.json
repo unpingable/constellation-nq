@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.c2_cleanup_delta_receipt.v2.json",
+  "title": "nq.c2_cleanup_delta_receipt.v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "receipt_identity",
+    "case_id",
+    "store_root_identity",
+    "created_object_identity",
+    "removed_object_identity",
+    "allowed_cleanup_kind",
+    "authoritative_state_changed",
+    "secure_erasure_claimed",
+    "bounded_cleanup"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.c2_cleanup_delta_receipt.v2"
+    },
+    "schema_version": {
+      "const": 2
+    },
+    "receipt_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "case_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:/@-]+$"
+    },
+    "store_root_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "created_object_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "removed_object_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "allowed_cleanup_kind": {
+      "enum": [
+        "pending_custody_inode",
+        "uncommitted_temporary_extent",
+        "uncommitted_projection_transaction"
+      ]
+    },
+    "authoritative_state_changed": {
+      "const": false
+    },
+    "secure_erasure_claimed": {
+      "const": false
+    },
+    "bounded_cleanup": {
+      "const": true
+    }
+  }
+}

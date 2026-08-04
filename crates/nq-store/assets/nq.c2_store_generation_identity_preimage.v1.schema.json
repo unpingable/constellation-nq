@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.c2_store_generation_identity_preimage.v1.json",
+  "title": "nq.c2_store_generation_identity_preimage.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "generation_identity_preimage_identity",
+    "occurrence_id",
+    "physical_store_generation_identity",
+    "signer_lifecycle_root_identity",
+    "scope_identity",
+    "resident_identity",
+    "resident_generation",
+    "host_role",
+    "role_manifest_generation",
+    "authority_domain",
+    "signer_scope_policy_identity",
+    "signer_scope_policy_version",
+    "install_policy_identity",
+    "selected_enrollment_identity",
+    "installation_mode",
+    "qualified_backend_profile_identity",
+    "restore_authorization_identity",
+    "installation_nonce",
+    "root_descriptor_identity",
+    "lock_domain_identity",
+    "b_carrier_identity",
+    "g_carrier_identity",
+    "backend_physical_facts_identity"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.c2_store_generation_identity_preimage.v1"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "generation_identity_preimage_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "occurrence_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:/@-]+$"
+    },
+    "physical_store_generation_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "signer_lifecycle_root_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "scope_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "resident_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "resident_generation": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "host_role": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:/@-]+$"
+    },
+    "role_manifest_generation": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "authority_domain": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:/@-]+$"
+    },
+    "signer_scope_policy_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "signer_scope_policy_version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "install_policy_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "selected_enrollment_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "installation_mode": {
+      "enum": [
+        "fresh",
+        "restore_successor"
+      ]
+    },
+    "qualified_backend_profile_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "restore_authorization_identity": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "installation_nonce": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "root_descriptor_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "lock_domain_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "b_carrier_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "g_carrier_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "backend_physical_facts_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}

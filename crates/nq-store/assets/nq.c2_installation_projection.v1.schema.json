@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.c2_installation_projection.v1.json",
+  "title": "nq.c2_installation_projection.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "projection_identity",
+    "occurrence_id",
+    "physical_store_generation_identity",
+    "bootstrap_identity",
+    "installation_nonce",
+    "state"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.c2_installation_projection.v1"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "projection_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "occurrence_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:/@-]+$"
+    },
+    "physical_store_generation_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "bootstrap_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "installation_nonce": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "state": {
+      "const": "pending"
+    }
+  }
+}

@@ -27,12 +27,17 @@
 //! Neither facade can launch a provider, parse intake, establish evaluator
 //! occurrence, construct a diagnostic binding, or assign semantic standing.
 
+mod append_extent;
+mod backend_profile;
+mod capacity_backend;
 mod custody_arena;
 mod custody_capacity_model;
+mod global_failure_journal;
 mod governed_custody;
 #[cfg(test)]
 mod governed_projection_capacity;
 mod governed_projection_capsule;
+pub mod store_generation;
 mod writer_session;
 
 extern crate self as nq_store;
@@ -96,7 +101,7 @@ use chrono::{SecondsFormat, Utc};
 use nq_host_role_contract::ValidatedRuntimeRecord;
 use nq_protocol::{Sha256Digest, sha256_bytes};
 use nq_runtime_dependency_authority::{
-    ActivationContext, ActivationRevocationRecord, EstablishmentArm,
+    ActivationContext, ActivationRevocationRecord, ControllingActivationSnapshot, EstablishmentArm,
     EstablishmentReceiptTranscript, MigrationDisposition, MigrationExpectations, MigrationReceipt,
     MigrationReceiptBytes, OldRootState, OperatorAuthorityRecord, PresentedAuthorityRecord,
     PresentedAuthoritySet, ResidentActivationRecord, ResolvedControllingActivation,
@@ -112,6 +117,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 const SCHEMA: &str = include_str!("schema.sql");
+const SCHEMA_V8: &str = include_str!("schema_v8.sql");
 const SCHEMA_V3: &str = include_str!("schema_v3.sql");
 const SCHEMA_V4: &str = include_str!("schema_v4.sql");
 const SCHEMA_V5: &str = include_str!("schema_v5.sql");
@@ -123,6 +129,13 @@ const SCHEMA_V6_TO_V7_RUNTIME_DEPENDENCIES: &str =
     include_str!("schema_v6_to_v7_runtime_dependencies.sql");
 const SCHEMA_V7_TO_V8_RUNTIME_AUTHORITY: &str =
     include_str!("schema_v7_to_v8_runtime_authority.sql");
+const SCHEMA_V8_TO_V9_C2_STORE_GENERATION: &str =
+    include_str!("schema_v8_to_v9_c2_store_generation.sql");
+const SCHEMA_V9_C2_SIGNER_LINEAGE: &str = include_str!("../migrations/v9_c2_signer_lineage.sql");
+const SCHEMA_V8_TO_V9_C2_STORE_GENERATION_SHA256: &str =
+    "sha256:7386144f5a7fe1ec9fd573499bf1873b9f0197ab5abd9c1b6befb0110dc223fe";
+const SCHEMA_V9_C2_SIGNER_LINEAGE_SHA256: &str =
+    "sha256:dac5a70e3327922ec4b1733ffa62357ccac55c7d9a203508a7f45b1802c992aa";
 const APPLICATION_ID: i64 = 1_313_951_303;
 
 const SCHEMA_METADATA_V4: &str = r"CREATE TABLE schema_metadata (
@@ -200,6 +213,21 @@ const SCHEMA_METADATA_V8: &str = r"CREATE TABLE schema_metadata (
 const SCHEMA_METADATA_V8_TRIGGERS: &str = "CREATE TRIGGER immutable_schema_metadata_update BEFORE UPDATE ON schema_metadata BEGIN SELECT RAISE(ABORT, 'append-only table'); END;\n\
      CREATE TRIGGER immutable_schema_metadata_delete BEFORE DELETE ON schema_metadata BEGIN SELECT RAISE(ABORT, 'append-only table'); END;";
 
+const SCHEMA_METADATA_V9: &str = r"CREATE TABLE schema_metadata (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    product TEXT NOT NULL CHECK (product = 'nq-ng'),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 9),
+    -- Digest of the exact schema.sql artifact compiled into the writing binary.
+    -- Rejects stale provisional-candidate databases at startup; it is NOT a
+    -- tamper attestation of the live SQLite schema (which the structural
+    -- fingerprint checks separately).
+    schema_artifact_digest TEXT NOT NULL CHECK (length(schema_artifact_digest) = 71 AND substr(schema_artifact_digest, 1, 7) = 'sha256:'),
+    initialized_at TEXT NOT NULL
+) STRICT;";
+
+const SCHEMA_METADATA_V9_TRIGGERS: &str = "CREATE TRIGGER immutable_schema_metadata_update BEFORE UPDATE ON schema_metadata BEGIN SELECT RAISE(ABORT, 'append-only table'); END;\n\
+     CREATE TRIGGER immutable_schema_metadata_delete BEFORE DELETE ON schema_metadata BEGIN SELECT RAISE(ABORT, 'append-only table'); END;";
+
 /// Exact schema-artifact digest of the qualified v0.1.0 store. It is retained
 /// only to validate an explicit v3-to-v4 upgrade source; normal opening never
 /// interprets v3 bytes as current storage.
@@ -225,6 +253,12 @@ pub const SCHEMA_V6_ARTIFACT_DIGEST: &str =
 /// It is accepted only by the explicit governed v7-to-v8 authority migration.
 pub const SCHEMA_V7_ARTIFACT_DIGEST: &str =
     "sha256:794c06e3afc20a456ba4b258f68bb2f3ca17fdb0b587ceea8bd98c051c4bc13d";
+
+/// Exact schema-artifact digest of the qualified C1 Gen4 schema-v8 Store.
+/// It is accepted only by the explicit sequential C2 v8-to-v9 projection
+/// migration and never changes when the current schema advances.
+pub const SCHEMA_V8_ARTIFACT_DIGEST: &str =
+    "sha256:37423cf5af8a86449d02c4db303b5b71b7796f97e5d0ebf8da62c3d1f36b38a5";
 
 /// Schema tag bound into every admission-context digest preimage. Bump only when
 /// the constituent set or its canonicalization changes.
@@ -301,6 +335,13 @@ static EXPECTED_SCHEMA_FINGERPRINT: LazyLock<Result<String, String>> = LazyLock:
     let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
     connection
         .execute_batch(SCHEMA)
+        .map_err(|error| error.to_string())?;
+    schema_fingerprint(&connection).map_err(|error| error.to_string())
+});
+static EXPECTED_SCHEMA_V8_FINGERPRINT: LazyLock<Result<String, String>> = LazyLock::new(|| {
+    let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    connection
+        .execute_batch(SCHEMA_V8)
         .map_err(|error| error.to_string())?;
     schema_fingerprint(&connection).map_err(|error| error.to_string())
 });
@@ -455,8 +496,123 @@ fn expected_schema_v7_fingerprint() -> Result<String, String> {
     Ok(fingerprint)
 }
 
-/// The only schema version understood by this crate.
-pub const SCHEMA_VERSION: i64 = 8;
+/// Exact predecessor schema version retained for the governed Gen4-to-C2
+/// sequential migration.  Gen4 migration code must use this literal pin and
+/// never the moving current-schema constant.
+const SCHEMA_V8_VERSION: i64 = 8;
+
+/// The only ordinary schema version understood by this crate.
+pub const SCHEMA_VERSION: i64 = 9;
+
+/// Exact schema-v9 projection migration surface.
+///
+/// The functions are crate-private because schema compatibility is not
+/// migration authority.  A Store-owned installation or migration route must
+/// first obtain the linear verified-source brand; no external caller can turn
+/// an arbitrary SQLite path into C2 standing, B/G authority, a physical Store
+/// generation, or a writer session.
+pub mod schema {
+    use super::*;
+
+    /// Closed successful result of the exact sequential migration.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum C2SchemaV9Projection {
+        /// Exact schema-v8 bytes and state were verified immediately before
+        /// the atomic schema-v9 projection migration.
+        SequentialV8ToV9,
+    }
+
+    /// Linear proof that one exact on-disk schema-v8 Store was verified for
+    /// the sequential projection migration.  Fields and construction remain
+    /// crate-private; this value carries no signer or mutation standing.
+    #[derive(Debug)]
+    pub(crate) struct VerifiedC2SchemaV8ToV9Sequential {
+        path: PathBuf,
+        device: u64,
+        inode: u64,
+        logical_state_digest: String,
+    }
+
+    /// Verify the exact pinned schema-v8 source and return a non-cloneable
+    /// brand for that same file identity and logical state.
+    pub(crate) fn verify_c2_schema_v8_to_v9_sequential(
+        path: impl AsRef<Path>,
+    ) -> Result<VerifiedC2SchemaV8ToV9Sequential, StoreError> {
+        let path = path.as_ref();
+        if !path.is_file() || std::fs::metadata(path)?.len() == 0 {
+            return Err(StoreError::NotInitialized(path.to_path_buf()));
+        }
+        let path = std::fs::canonicalize(path)?;
+        let metadata = std::fs::metadata(&path)?;
+        let connection = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        connection.pragma_update(None, "query_only", "ON")?;
+        validate_v8_upgrade_source_connection(&connection)?;
+        let logical_state_digest = v8_logical_state_digest(&connection)?;
+        Ok(VerifiedC2SchemaV8ToV9Sequential {
+            path,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            logical_state_digest,
+        })
+    }
+
+    /// Consume one exact verified-source brand and atomically install the
+    /// complete schema-v9 projection.  The transaction creates only
+    /// rebuildable projection/index tables and cannot create B/G, a physical
+    /// generation, signer standing/currentness, or a writer session.
+    pub(crate) fn apply_c2_schema_v8_to_v9(
+        verified: VerifiedC2SchemaV8ToV9Sequential,
+    ) -> Result<C2SchemaV9Projection, StoreError> {
+        let _maintenance_guards =
+            writer_session::acquire_maintenance_locks(&[verified.path.as_path()])?;
+        let metadata = std::fs::metadata(&verified.path)?;
+        if (metadata.dev(), metadata.ino()) != (verified.device, verified.inode) {
+            return Err(StoreError::Invariant(
+                "schema-v8 migration source file identity changed after verification".into(),
+            ));
+        }
+
+        let mut connection = Connection::open_with_flags(
+            &verified.path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        configure_connection(&connection, false)?;
+        validate_v8_upgrade_source_connection(&connection)?;
+        if v8_logical_state_digest(&connection)? != verified.logical_state_digest {
+            return Err(StoreError::Invariant(
+                "schema-v8 migration source changed after exact verification".into(),
+            ));
+        }
+        if sha256_digest(SCHEMA_V8_TO_V9_C2_STORE_GENERATION.as_bytes())
+            != SCHEMA_V8_TO_V9_C2_STORE_GENERATION_SHA256
+            || sha256_digest(SCHEMA_V9_C2_SIGNER_LINEAGE.as_bytes())
+                != SCHEMA_V9_C2_SIGNER_LINEAGE_SHA256
+        {
+            return Err(StoreError::Invariant(
+                "compiled C2 schema-v9 projection migration identity mismatch".into(),
+            ));
+        }
+
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        upgrade_v8_to_v9_c2_schema(&transaction)?;
+        transaction.commit()?;
+
+        let store = Store {
+            connection,
+            path: Some(verified.path.clone()),
+            writer_key: writer_session::writer_key_for_path(Some(&verified.path)),
+            v7_authority_migration: None,
+            runtime_authority_initialization_candidate: false,
+        };
+        store.validate()?;
+        verify_empty_c2_schema_v9_projection(&store.connection)?;
+        Ok(C2SchemaV9Projection::SequentialV8ToV9)
+    }
+}
 
 /// Exact sidecar schema emitted by the official restore path.  The sidecar
 /// declares the restore act without changing the restored Store bytes.
@@ -618,6 +774,19 @@ pub enum StoreError {
     /// this occurrence; no writer or establishment path may reactivate it.
     #[error("runtime authority occurrence is evidence-frozen by migration disposition {0}")]
     AuthorityEvidenceFrozen(String),
+    /// The private C2 activation projection no longer corresponds to the
+    /// complete Store-owned Gen4 authority snapshot and its sealed resolver
+    /// result.
+    #[error("C2 current activation does not correspond to the complete Gen4 authority resolution")]
+    C2CurrentActivationCorrespondence,
+    /// A C2-governed Store may obtain an ordinary writer session only through
+    /// the closed-backend/current-activation HRTB path.
+    #[error("C2 ordinary writer session requires exact closed-backend open correspondence")]
+    C2OrdinaryOpenRequired,
+    /// The private closed backend disagrees with one or more exact completed
+    /// open coordinates or is no longer live under its retained lock.
+    #[error("C2 completed ordinary-open inputs do not correspond")]
+    C2CompletedOpenCorrespondence,
     /// A migration classification conflicts with an existing freeze fact.
     #[error("runtime authority migration classification conflicts with the retained freeze")]
     AuthorityMigrationDispositionConflict,
@@ -709,6 +878,273 @@ pub(crate) struct RuntimeAuthorityRestartSnapshot {
     pub(crate) receipt: RuntimeDependencyEstablishmentReceipt,
     pub(crate) presented: PresentedAuthoritySet,
     pub(crate) migration_receipt: Option<MigrationReceiptBytes>,
+}
+
+/// Store-owned input to the existing Gen4 restart resolver.
+///
+/// The value borrows one complete SQLite enumeration.  It has no public
+/// constructor and deliberately implements neither serialization nor any
+/// cloning/default trait.  In particular, a caller cannot replace the
+/// complete candidate set with a digest or a filtered list.
+pub(crate) struct CurrentActivationResolverInputV1<'snapshot> {
+    root: &'snapshot Sha256Digest,
+    occurrence_id: &'snapshot str,
+    receipt: &'snapshot RuntimeDependencyEstablishmentReceipt,
+    presented: &'snapshot PresentedAuthoritySet,
+    migration_receipt: Option<&'snapshot MigrationReceiptBytes>,
+    enumerated_set_digest: Sha256Digest,
+}
+
+impl CurrentActivationResolverInputV1<'_> {
+    pub(crate) const fn root(&self) -> &Sha256Digest {
+        self.root
+    }
+
+    pub(crate) const fn occurrence_id(&self) -> &str {
+        self.occurrence_id
+    }
+
+    pub(crate) const fn receipt(&self) -> &RuntimeDependencyEstablishmentReceipt {
+        self.receipt
+    }
+
+    pub(crate) const fn presented(&self) -> &PresentedAuthoritySet {
+        self.presented
+    }
+
+    pub(crate) const fn migration_receipt(&self) -> Option<&MigrationReceiptBytes> {
+        self.migration_receipt
+    }
+}
+
+/// Private borrowed projection of one already resolved Gen4 current A2.
+///
+/// This is applicability evidence only.  It is not A1 grant authority, C2
+/// signer standing, backend closure, capacity, or a writer session.  Its
+/// lifetime is bounded by the same Store-owned closure that holds the complete
+/// enumeration and resolver output.
+pub(crate) struct CurrentActivationForC2<'snapshot> {
+    resolved: &'snapshot ControllingActivationSnapshot,
+    enumerated_set_digest: &'snapshot Sha256Digest,
+}
+
+impl CurrentActivationForC2<'_> {
+    pub(crate) fn occurrence_id(&self) -> &str {
+        self.resolved.occurrence_id()
+    }
+
+    pub(crate) const fn controlling_tip_activation_digest(&self) -> &Sha256Digest {
+        self.resolved.controlling_tip_activation_digest()
+    }
+
+    pub(crate) const fn candidate_set_digest(&self) -> &Sha256Digest {
+        self.enumerated_set_digest
+    }
+
+    pub(crate) const fn policy_version(&self) -> u64 {
+        self.resolved.policy_version()
+    }
+}
+
+/// N-08: collect the complete, unfiltered Gen4 authority ledger from the one
+/// Store-owned read snapshot.  This performs no second parse or resolution.
+pub(crate) fn collect_complete_gen4_authority_ledger(
+    snapshot: &RuntimeAuthorityRestartSnapshot,
+) -> Result<CurrentActivationResolverInputV1<'_>, StoreError> {
+    let enumerated_set_digest = digest_presented_authority_set(&snapshot.presented)?;
+    let input = CurrentActivationResolverInputV1 {
+        root: &snapshot.root,
+        occurrence_id: &snapshot.occurrence_id,
+        receipt: &snapshot.receipt,
+        presented: &snapshot.presented,
+        migration_receipt: snapshot.migration_receipt.as_ref(),
+        enumerated_set_digest,
+    };
+    verify_n_08_complete_gen4_authority_ledger(&input)?;
+    Ok(input)
+}
+
+/// N-08 exact verifier.  The receipt is historical establishment evidence;
+/// the current candidate-set digest is recomputed over every enumerated row.
+pub(crate) fn verify_n_08_complete_gen4_authority_ledger(
+    input: &CurrentActivationResolverInputV1<'_>,
+) -> Result<(), StoreError> {
+    if input.occurrence_id.is_empty()
+        || input.receipt.transcript.occurrence_id() != input.occurrence_id
+        || input.receipt.transcript.trust_anchor_id() != input.root
+        || digest_presented_authority_set(input.presented)? != input.enumerated_set_digest
+    {
+        return Err(StoreError::C2CurrentActivationCorrespondence);
+    }
+    Ok(())
+}
+
+/// N-09: project only fields authenticated by the existing Gen4 resolver.
+/// The sealed resolver result remains the sole source of current A2 standing.
+pub(crate) fn project_current_activation_for_c2<'snapshot>(
+    input: &'snapshot CurrentActivationResolverInputV1<'snapshot>,
+    resolved: &'snapshot ControllingActivationSnapshot,
+) -> Result<CurrentActivationForC2<'snapshot>, StoreError> {
+    verify_n_08_complete_gen4_authority_ledger(input)?;
+    if resolved.occurrence_id() != input.occurrence_id
+        || resolved.trust_anchor_id() != input.root
+        || resolved.candidate_set_digest() != &input.enumerated_set_digest
+        || resolved.domain() != input.receipt.transcript.domain()
+        || resolved.chain_root_activation_digest()
+            != input.receipt.transcript.chain_root_activation_digest()
+    {
+        return Err(StoreError::C2CurrentActivationCorrespondence);
+    }
+    let activation = construct_current_activation_inside_complete_resolution(
+        resolved,
+        &input.enumerated_set_digest,
+    );
+    verify_n_09_current_activation_for_c2(&activation)?;
+    Ok(activation)
+}
+
+/// The sole physical constructor for the borrowed C2 activation projection.
+/// Its caller has already completed the exact Gen4 candidate-set resolution;
+/// this helper cannot parse, resolve, filter, or clone authority evidence.
+fn construct_current_activation_inside_complete_resolution<'snapshot>(
+    resolved: &'snapshot ControllingActivationSnapshot,
+    enumerated_set_digest: &'snapshot Sha256Digest,
+) -> CurrentActivationForC2<'snapshot> {
+    CurrentActivationForC2 {
+        resolved,
+        enumerated_set_digest,
+    }
+}
+
+/// WU-09 named constructor.  It is only a thin, auditable alias for the sole
+/// private projection above and never calls an authority parser or resolver.
+pub(crate) fn construct_wu_09_immutable_wu_private_current_activation_handoff_ordinary<
+    'snapshot,
+>(
+    input: &'snapshot CurrentActivationResolverInputV1<'snapshot>,
+    resolved: &'snapshot ControllingActivationSnapshot,
+) -> Result<CurrentActivationForC2<'snapshot>, StoreError> {
+    project_current_activation_for_c2(input, resolved)
+}
+
+/// WU-09 exact current-activation verifier.
+pub(crate) fn verify_wu_09_immutable_wu_private_current_activation_handoff_ordinary(
+    activation: &CurrentActivationForC2<'_>,
+) -> Result<(), StoreError> {
+    verify_n_09_current_activation_for_c2(activation)
+}
+
+/// N-09 exact private-projection verifier.
+pub(crate) fn verify_n_09_current_activation_for_c2(
+    activation: &CurrentActivationForC2<'_>,
+) -> Result<(), StoreError> {
+    if activation.occurrence_id().is_empty()
+        || activation
+            .controlling_tip_activation_digest()
+            .as_str()
+            .is_empty()
+        || activation.candidate_set_digest().as_str().is_empty()
+        || activation.policy_version() == 0
+    {
+        return Err(StoreError::C2CurrentActivationCorrespondence);
+    }
+    Ok(())
+}
+
+/// N-49 named row witness.  Returning the original invocation-borrowed value
+/// proves no clone, serialization, default, or public snapshot conversion is
+/// involved.
+pub(crate) fn construct_n_49_currentactivationforc2_is_private_borrowed_nonserializable_default_same<
+    'a,
+>(
+    activation: &'a CurrentActivationForC2<'a>,
+) -> Result<&'a CurrentActivationForC2<'a>, StoreError> {
+    verify_n_09_current_activation_for_c2(activation)?;
+    Ok(activation)
+}
+
+/// N-49 exact verifier.
+pub(crate) fn verify_n_49_currentactivationforc2_is_private_borrowed_nonserializable_default_same(
+    activation: &CurrentActivationForC2<'_>,
+) -> Result<(), StoreError> {
+    verify_n_09_current_activation_for_c2(activation)
+}
+
+/// N-50 exact verifier.  The only accepted value is the private projection;
+/// there is no raw snapshot, digest-only, A2-only, or second-parser overload.
+pub(crate) fn verify_n_50_refusal(
+    activation: &CurrentActivationForC2<'_>,
+) -> Result<(), StoreError> {
+    verify_n_09_current_activation_for_c2(activation)
+}
+
+/// P-06 exact completed-open inputs.  Every field is borrowed and private;
+/// the value cannot outlive either current activation or the sole closed
+/// backend and contains no independently mintable Boolean standing.
+pub(crate) struct CompletedC2OpenInputsV1<'activation, 'backend> {
+    current_activation: &'activation CurrentActivationForC2<'activation>,
+    occurrence: &'backend store_generation::records::StoreOccurrenceIdentityV1,
+    physical_generation: &'backend store_generation::records::PhysicalStoreGenerationIdentityV1,
+    active_policy: &'backend Sha256Digest,
+    closed_backend: &'backend capacity_backend::ClosedC2StoreBackendV1<'backend>,
+}
+
+impl<'activation, 'backend> CompletedC2OpenInputsV1<'activation, 'backend> {
+    fn new_verified(
+        current_activation: &'activation CurrentActivationForC2<'activation>,
+        occurrence: &'backend store_generation::records::StoreOccurrenceIdentityV1,
+        physical_generation: &'backend store_generation::records::PhysicalStoreGenerationIdentityV1,
+        active_policy: &'backend Sha256Digest,
+        closed_backend: &'backend capacity_backend::ClosedC2StoreBackendV1<'backend>,
+    ) -> Self {
+        Self {
+            current_activation,
+            occurrence,
+            physical_generation,
+            active_policy,
+            closed_backend,
+        }
+    }
+
+    fn begin<R>(
+        self,
+        store: &mut Store,
+        operation: impl for<'session> FnOnce(&mut StoreWriterSession<'session>) -> Result<R, StoreError>,
+    ) -> Result<R, StoreError> {
+        let mut session =
+            writer_session::construct_n_60_ordinary_session_requires_closed_state_process_mutex(
+                store,
+                self.closed_backend,
+                self.occurrence,
+                self.physical_generation,
+            )?;
+        operation(&mut session)
+    }
+}
+
+/// P-06 verifies current activation and the already closed backend against the
+/// same exact occurrence, physical generation, and active policy coordinates.
+pub(crate) fn verify_completed_c2_open_inputs(
+    current_activation: &CurrentActivationForC2<'_>,
+    occurrence: &store_generation::records::StoreOccurrenceIdentityV1,
+    physical_generation: &store_generation::records::PhysicalStoreGenerationIdentityV1,
+    active_policy: &Sha256Digest,
+    closed_backend: &capacity_backend::ClosedC2StoreBackendV1<'_>,
+) -> Result<(), StoreError> {
+    verify_n_09_current_activation_for_c2(current_activation)?;
+    if current_activation.occurrence_id() != occurrence.as_str()
+        || physical_generation.digest().as_str().is_empty()
+        || active_policy.as_str().is_empty()
+    {
+        return Err(StoreError::C2CompletedOpenCorrespondence);
+    }
+    capacity_backend::verify_closed_backend_current_activation_coordinates_v1(
+        closed_backend,
+        occurrence,
+        physical_generation,
+        active_policy,
+    )
+    .map_err(|_| StoreError::C2CompletedOpenCorrespondence)
 }
 
 /// A canonical JSON document and its SHA-256 semantic digest.
@@ -3734,7 +4170,7 @@ impl Store {
 
         // Exact replay is observationally read-only but still rechecks every
         // Store-owned binding from one coherent SQLite read snapshot.
-        if starting_version == SCHEMA_VERSION {
+        if matches!(starting_version, SCHEMA_V8_VERSION | SCHEMA_VERSION) {
             let replay = self
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Deferred)?;
@@ -3778,7 +4214,7 @@ impl Store {
                 validate_locked_v7_authority_migration_source(&transaction, preflight)?;
                 upgrade_v7_to_v8_authority_schema(&transaction)?;
             }
-            SCHEMA_VERSION => {}
+            SCHEMA_V8_VERSION | SCHEMA_VERSION => {}
             found => {
                 return Err(StoreError::SchemaVersionMismatch {
                     found,
@@ -8474,7 +8910,10 @@ impl AdmittedCollectionView<'_, '_> {
 
 impl Store {
     fn ensure_runtime_authority_not_frozen(&self) -> Result<(), StoreError> {
-        if pragma_i64(&self.connection, "user_version")? == SCHEMA_VERSION {
+        if matches!(
+            pragma_i64(&self.connection, "user_version")?,
+            SCHEMA_V8_VERSION | SCHEMA_VERSION
+        ) {
             if let Some(freeze) =
                 runtime_migration_disposition_freeze_on_connection(&self.connection)?
             {
@@ -10150,7 +10589,87 @@ impl Store {
     /// path is alive in this process, or when the genesis identity is empty
     /// or ambiguous.
     pub fn begin_writer_session(&mut self) -> Result<StoreWriterSession<'_>, StoreError> {
+        if self.has_c2_generation_state()? {
+            return Err(StoreError::C2OrdinaryOpenRequired);
+        }
         StoreWriterSession::begin(self)
+    }
+
+    /// Runs the sole ordinary C2 writer-session path under exact completed
+    /// current-activation and closed-backend correspondence.
+    ///
+    /// The higher-ranked body cannot return the session or any invocation-
+    /// scoped borrow.  The closed backend stays borrowed for the complete
+    /// operation and its retained exclusive generation lock is reverified
+    /// before the ordinary process writer mutex is acquired.
+    pub(crate) fn with_c2_writer_session<'activation, 'backend, R>(
+        &mut self,
+        current_activation: &'activation CurrentActivationForC2<'activation>,
+        occurrence: &'backend store_generation::records::StoreOccurrenceIdentityV1,
+        physical_generation: &'backend store_generation::records::PhysicalStoreGenerationIdentityV1,
+        active_policy: &'backend Sha256Digest,
+        closed_backend: &'backend capacity_backend::ClosedC2StoreBackendV1<'backend>,
+        operation: impl for<'session> FnOnce(&mut StoreWriterSession<'session>) -> Result<R, StoreError>,
+    ) -> Result<R, StoreError> {
+        verify_completed_c2_open_inputs(
+            current_activation,
+            occurrence,
+            physical_generation,
+            active_policy,
+            closed_backend,
+        )?;
+        let inputs = CompletedC2OpenInputsV1::new_verified(
+            current_activation,
+            occurrence,
+            physical_generation,
+            active_policy,
+            closed_backend,
+        );
+        self.verify_closed_backend_store_root(closed_backend)?;
+        if !self.has_c2_generation_state()? {
+            return Err(StoreError::C2CompletedOpenCorrespondence);
+        }
+        inputs.begin(self, operation)
+    }
+
+    /// C2 presence is structural.  A pending installation is already governed
+    /// and therefore cannot fall back to the Gen4 public ordinary-session
+    /// constructor.
+    fn has_c2_generation_state(&self) -> Result<bool, StoreError> {
+        if pragma_i64(&self.connection, "user_version")? < 9 {
+            return Ok(false);
+        }
+        self.connection
+            .query_row(
+                "SELECT (
+                    EXISTS (SELECT 1 FROM c2_installation_projection LIMIT 1)
+                    OR EXISTS (SELECT 1 FROM c2_signer_root_binding_projection LIMIT 1)
+                    OR EXISTS (SELECT 1 FROM c2_signer_current_binding_projection LIMIT 1)
+                )",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(StoreError::from)
+    }
+
+    fn verify_closed_backend_store_root(
+        &self,
+        closed_backend: &capacity_backend::ClosedC2StoreBackendV1<'_>,
+    ) -> Result<(), StoreError> {
+        let database = self
+            .path
+            .as_deref()
+            .ok_or(StoreError::C2CompletedOpenCorrespondence)?;
+        let root = database
+            .parent()
+            .ok_or(StoreError::C2CompletedOpenCorrespondence)?;
+        let metadata = std::fs::metadata(root)?;
+        let expected = capacity_backend::closed_backend_root_directory_inode_key_v1(closed_backend)
+            .map_err(|_| StoreError::C2CompletedOpenCorrespondence)?;
+        if (metadata.dev(), metadata.ino()) != expected {
+            return Err(StoreError::C2CompletedOpenCorrespondence);
+        }
+        Ok(())
     }
 
     /// Require the exact, unconsumed in-process handle returned by the private
@@ -11848,7 +12367,7 @@ fn append_runtime_records_in_transaction(
 #[allow(clippy::too_many_lines)]
 fn validate_runtime_record_ledger(connection: &Connection) -> Result<(), StoreError> {
     let schema_version = pragma_i64(connection, "user_version")?;
-    if !matches!(schema_version, 6..=8) {
+    if !matches!(schema_version, 6..=9) {
         return Err(StoreError::Integrity(format!(
             "runtime ledger validator does not support schema {schema_version}"
         )));
@@ -12069,7 +12588,7 @@ fn validate_runtime_record_ledger(connection: &Connection) -> Result<(), StoreEr
             "runtime checkpoint frontier does not cover the complete record ledger".into(),
         ));
     }
-    if matches!(schema_version, 7 | 8) {
+    if matches!(schema_version, 7 | 8 | 9) {
         validate_runtime_dependency_binding_boundary(connection)?;
     }
     Ok(())
@@ -14054,6 +14573,79 @@ fn validate_v7_upgrade_source_connection(connection: &Connection) -> Result<(), 
     validate_projection_invariants(connection)
 }
 
+fn validate_v8_upgrade_source_connection(connection: &Connection) -> Result<(), StoreError> {
+    let version = pragma_i64(connection, "user_version")?;
+    if version != SCHEMA_V8_VERSION {
+        return Err(StoreError::SchemaVersionMismatch {
+            found: version,
+            supported: SCHEMA_V8_VERSION,
+        });
+    }
+    let application_id = pragma_i64(connection, "application_id")?;
+    if application_id != APPLICATION_ID {
+        return Err(StoreError::ApplicationIdMismatch {
+            found: application_id,
+            expected: APPLICATION_ID,
+        });
+    }
+    let metadata: (i64, String) = connection.query_row(
+        "SELECT schema_version, schema_artifact_digest
+         FROM schema_metadata WHERE singleton = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if metadata.0 != SCHEMA_V8_VERSION || metadata.1 != SCHEMA_V8_ARTIFACT_DIGEST {
+        return Err(StoreError::Integrity(
+            "schema-v8 metadata does not identify the exact qualified C1 Gen4 schema artifact"
+                .into(),
+        ));
+    }
+    if sha256_digest(SCHEMA_V8.as_bytes()) != SCHEMA_V8_ARTIFACT_DIGEST {
+        return Err(StoreError::Integrity(
+            "compiled schema_v8.sql does not match its pinned qualified Gen4 digest".into(),
+        ));
+    }
+    let quick_check: String =
+        connection.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+    if quick_check != "ok" {
+        return Err(StoreError::Integrity(quick_check));
+    }
+    let foreign_key_failures: i64 =
+        connection.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })?;
+    if foreign_key_failures != 0 {
+        return Err(StoreError::Integrity(format!(
+            "{foreign_key_failures} schema-v8 foreign-key violations"
+        )));
+    }
+    let expected = EXPECTED_SCHEMA_V8_FINGERPRINT.as_ref().map_err(|error| {
+        StoreError::Integrity(format!(
+            "compiled v8 schema cannot be fingerprinted: {error}"
+        ))
+    })?;
+    let actual = schema_fingerprint(connection)?;
+    if &actual != expected {
+        return Err(StoreError::Integrity(format!(
+            "schema-v8 definition fingerprint {actual} differs from exact qualified C1 Gen4 {expected}"
+        )));
+    }
+    validate_stored_digests(connection)?;
+    validate_upgrade_receipts(connection)?;
+    validate_all_admission_context_digests(connection)?;
+    validate_local_provider_admissions(connection)?;
+    validate_provider_intake_invariants(connection)?;
+    validate_refusal_invariants(connection)?;
+    validate_run_results(connection)?;
+    validate_evaluation_refusal_invariants(connection)?;
+    validate_diagnostic_artifact_invariants(connection)?;
+    validate_runtime_record_ledger(connection)?;
+    validate_runtime_authority_invariants(connection)?;
+    validate_admitted_report_associations_connection(connection)?;
+    validate_status_sequence_lower_bound(connection)?;
+    validate_projection_invariants(connection)
+}
+
 fn validate_admitted_report_associations_connection(
     connection: &Connection,
 ) -> Result<(), StoreError> {
@@ -14152,6 +14744,10 @@ fn v6_logical_state_digest(connection: &Connection) -> Result<String, StoreError
 
 fn v7_logical_state_digest(connection: &Connection) -> Result<String, StoreError> {
     logical_state_digest(connection, b"nq.schema_v7.logical_state.v1\0")
+}
+
+fn v8_logical_state_digest(connection: &Connection) -> Result<String, StoreError> {
+    logical_state_digest(connection, b"nq.schema_v8.logical_state.v1\0")
 }
 
 fn logical_state_digest(connection: &Connection, domain: &[u8]) -> Result<String, StoreError> {
@@ -14287,6 +14883,14 @@ fn validate_required_objects(connection: &Connection) -> Result<(), StoreError> 
         "status_events",
         "provider_intake_acknowledgments",
         "status_current",
+        "c2_installation_projection",
+        "c2_installation_receipt_index",
+        "c2_signer_root_binding_projection",
+        "c2_signer_current_binding_projection",
+        "c2_signer_succession_projection",
+        "c2_signer_lineage_projection",
+        "c2_signer_lineage_edge_projection",
+        "c2_signer_lineage_completion_projection",
     ];
     const VIEWS: &[&str] = &[
         "public_finding_snapshot_v3",
@@ -14858,13 +15462,13 @@ fn upgrade_v7_to_v8_authority_schema(transaction: &Transaction<'_>) -> Result<()
          )
          SELECT singleton, product, 8, ?1, initialized_at
          FROM schema_metadata_v7",
-        [schema_artifact_digest()],
+        [SCHEMA_V8_ARTIFACT_DIGEST],
     )?;
     transaction.execute("DROP TABLE schema_metadata_v7", [])?;
     transaction.execute_batch(SCHEMA_METADATA_V8_TRIGGERS)?;
     transaction.execute_batch(SCHEMA_V7_TO_V8_RUNTIME_AUTHORITY)?;
-    transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    let expected = EXPECTED_SCHEMA_FINGERPRINT.as_ref().map_err(|error| {
+    transaction.pragma_update(None, "user_version", SCHEMA_V8_VERSION)?;
+    let expected = EXPECTED_SCHEMA_V8_FINGERPRINT.as_ref().map_err(|error| {
         StoreError::Integrity(format!(
             "compiled schema cannot be fingerprinted after v7-to-v8 migration: {error}"
         ))
@@ -14874,6 +15478,67 @@ fn upgrade_v7_to_v8_authority_schema(transaction: &Transaction<'_>) -> Result<()
         return Err(StoreError::Integrity(format!(
             "migrated v8 schema fingerprint {actual} differs from fresh v8 {expected}"
         )));
+    }
+    Ok(())
+}
+
+fn upgrade_v8_to_v9_c2_schema(transaction: &Transaction<'_>) -> Result<(), StoreError> {
+    validate_v8_upgrade_source_connection(transaction)?;
+    transaction.execute_batch(
+        "DROP TRIGGER immutable_schema_metadata_update;
+         DROP TRIGGER immutable_schema_metadata_delete;
+         ALTER TABLE schema_metadata RENAME TO schema_metadata_v8;",
+    )?;
+    transaction.execute_batch(SCHEMA_METADATA_V9)?;
+    transaction.execute(
+        "INSERT INTO schema_metadata (
+            singleton, product, schema_version, schema_artifact_digest, initialized_at
+         )
+         SELECT singleton, product, 9, ?1, initialized_at
+         FROM schema_metadata_v8",
+        [schema_artifact_digest()],
+    )?;
+    transaction.execute("DROP TABLE schema_metadata_v8", [])?;
+    transaction.execute_batch(SCHEMA_METADATA_V9_TRIGGERS)?;
+    transaction.execute_batch(SCHEMA_V8_TO_V9_C2_STORE_GENERATION)?;
+    transaction.execute_batch(SCHEMA_V9_C2_SIGNER_LINEAGE)?;
+    transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+
+    let expected = EXPECTED_SCHEMA_FINGERPRINT.as_ref().map_err(|error| {
+        StoreError::Integrity(format!(
+            "compiled schema cannot be fingerprinted after v8-to-v9 migration: {error}"
+        ))
+    })?;
+    let actual = schema_fingerprint(transaction)?;
+    if &actual != expected {
+        return Err(StoreError::Integrity(format!(
+            "migrated v9 schema fingerprint {actual} differs from fresh v9 {expected}"
+        )));
+    }
+    verify_empty_c2_schema_v9_projection(transaction)
+}
+
+fn verify_empty_c2_schema_v9_projection(connection: &Connection) -> Result<(), StoreError> {
+    for table in [
+        "c2_installation_projection",
+        "c2_installation_receipt_index",
+        "c2_signer_root_binding_projection",
+        "c2_signer_current_binding_projection",
+        "c2_signer_succession_projection",
+        "c2_signer_lineage_projection",
+        "c2_signer_lineage_edge_projection",
+        "c2_signer_lineage_completion_projection",
+    ] {
+        let quoted = table.replace('"', "\"\"");
+        let count: i64 =
+            connection.query_row(&format!("SELECT COUNT(*) FROM \"{quoted}\""), [], |row| {
+                row.get(0)
+            })?;
+        if count != 0 {
+            return Err(StoreError::Integrity(format!(
+                "fresh schema-v9 projection table {table} is not empty"
+            )));
+        }
     }
     Ok(())
 }
@@ -34396,6 +35061,189 @@ mod tests {
         ));
     }
 
+    fn initialize_exact_schema_v8_fixture(
+        path: &Path,
+        artifact_digest: &str,
+    ) -> Result<(), StoreError> {
+        let mut connection = Connection::open(path)?;
+        configure_connection(&connection, false)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute_batch(SCHEMA_V8)?;
+        transaction.execute(
+            "INSERT INTO schema_metadata (
+                singleton, product, schema_version, schema_artifact_digest, initialized_at
+             ) VALUES (1, 'nq-ng', 8, ?1, ?2)",
+            params![artifact_digest, TIME],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    #[test]
+    fn c2_schema_v9_fresh_projection_is_empty_and_non_authoritative() {
+        assert_eq!(
+            sha256_digest(SCHEMA_V8.as_bytes()),
+            SCHEMA_V8_ARTIFACT_DIGEST
+        );
+        assert_ne!(schema_artifact_digest(), SCHEMA_V8_ARTIFACT_DIGEST);
+
+        let store = Store::initialize_in_memory().expect("fresh schema-v9 Store");
+        assert_eq!(
+            pragma_i64(&store.connection, "user_version").unwrap(),
+            SCHEMA_VERSION
+        );
+        verify_empty_c2_schema_v9_projection(&store.connection)
+            .expect("fresh projection tables are empty");
+
+        let mut statement = store
+            .connection
+            .prepare(
+                "SELECT name FROM sqlite_schema
+                 WHERE type = 'table' AND name LIKE 'c2_%'
+                 ORDER BY name",
+            )
+            .unwrap();
+        let observed = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            observed,
+            vec![
+                "c2_installation_projection",
+                "c2_installation_receipt_index",
+                "c2_signer_current_binding_projection",
+                "c2_signer_lineage_completion_projection",
+                "c2_signer_lineage_edge_projection",
+                "c2_signer_lineage_projection",
+                "c2_signer_root_binding_projection",
+                "c2_signer_succession_projection",
+            ]
+        );
+        assert!(observed.iter().all(|name| {
+            name.ends_with("_projection") || name == "c2_installation_receipt_index"
+        }));
+    }
+
+    #[test]
+    fn c2_schema_v8_to_v9_is_exact_sequential_and_append_only() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("schema-v8.db");
+        initialize_exact_schema_v8_fixture(&path, SCHEMA_V8_ARTIFACT_DIGEST).unwrap();
+
+        let verified = schema::verify_c2_schema_v8_to_v9_sequential(&path)
+            .expect("exact schema-v8 source verifies");
+        assert_eq!(
+            schema::apply_c2_schema_v8_to_v9(verified).unwrap(),
+            schema::C2SchemaV9Projection::SequentialV8ToV9
+        );
+        let store = Store::open(&path).expect("migrated schema-v9 Store reopens");
+        verify_empty_c2_schema_v9_projection(&store.connection).unwrap();
+
+        let digest = |byte: char| format!("sha256:{}", byte.to_string().repeat(64));
+        let projection_identity = digest('1');
+        let generation_identity = digest('2');
+        let bootstrap_identity = digest('3');
+        let canonical_bytes = serde_json::to_vec(&json!({
+            "bootstrap_identity": bootstrap_identity.clone(),
+            "installation_nonce": "4".repeat(64),
+            "occurrence_id": "occurrence-v9",
+            "physical_store_generation_identity": generation_identity.clone(),
+            "projection_identity": projection_identity.clone(),
+            "schema": "nq.c2_installation_projection.v1",
+            "schema_version": 1,
+            "state": "pending"
+        }))
+        .unwrap();
+        let canonical_bytes_length = i64::try_from(canonical_bytes.len()).unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO c2_installation_projection (
+                    projection_identity, schema_id, schema_version, occurrence_id,
+                    physical_store_generation_identity, bootstrap_identity,
+                    installation_nonce, state, canonical_bytes,
+                    canonical_bytes_sha256, canonical_bytes_length, projected_at
+                 ) VALUES (?1, 'nq.c2_installation_projection.v1', 1, ?2, ?3,
+                           ?4, ?5, 'pending', ?6, ?7, ?8, ?9)",
+                params![
+                    projection_identity,
+                    "occurrence-v9",
+                    generation_identity,
+                    bootstrap_identity,
+                    "4".repeat(64),
+                    canonical_bytes,
+                    digest('5'),
+                    canonical_bytes_length,
+                    TIME,
+                ],
+            )
+            .expect("insert disposable pending projection");
+        let update = store.connection.execute(
+            "UPDATE c2_installation_projection SET projected_at = ?1",
+            ["2026-08-04T12:00:00.000Z"],
+        );
+        assert!(matches!(
+            update,
+            Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+                if message.contains("append-only")
+        ));
+        let delete = store
+            .connection
+            .execute("DELETE FROM c2_installation_projection", []);
+        assert!(matches!(
+            delete,
+            Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+                if message.contains("append-only")
+        ));
+    }
+
+    #[test]
+    fn host_role_runtime_exposes_only_explicit_c2_projection_migration() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("qualified-gen4-v8.db");
+        initialize_exact_schema_v8_fixture(&path, SCHEMA_V8_ARTIFACT_DIGEST).unwrap();
+
+        assert!(matches!(
+            host_role_runtime::HostRoleRuntime::migrate_c1_gen4_to_c2_schema_projection(&path)
+                .unwrap(),
+            schema::C2SchemaV9Projection::SequentialV8ToV9
+        ));
+        let store = Store::open(&path).expect("explicitly migrated Store reopens as schema v9");
+        verify_empty_c2_schema_v9_projection(&store.connection).unwrap();
+    }
+
+    #[test]
+    fn c2_schema_v8_verifier_refuses_wrong_or_nonsequential_sources_without_writes() {
+        let directory = tempdir().unwrap();
+        let wrong = directory.path().join("wrong-v8.db");
+        initialize_exact_schema_v8_fixture(
+            &wrong,
+            "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        )
+        .unwrap();
+        let before = sha256_file(&wrong).unwrap();
+        assert!(matches!(
+            schema::verify_c2_schema_v8_to_v9_sequential(&wrong),
+            Err(StoreError::Integrity(message))
+                if message.contains("exact qualified C1 Gen4 schema artifact")
+        ));
+        assert_eq!(sha256_file(&wrong).unwrap(), before);
+
+        let current = directory.path().join("current-v9.db");
+        drop(Store::initialize_unqualified_storage(&current).unwrap());
+        let before = sha256_file(&current).unwrap();
+        assert!(matches!(
+            schema::verify_c2_schema_v8_to_v9_sequential(&current),
+            Err(StoreError::SchemaVersionMismatch {
+                found: 9,
+                supported: 8
+            })
+        ));
+        assert_eq!(sha256_file(&current).unwrap(), before);
+    }
+
     #[test]
     fn admitted_report_persists_context_bound_recomputable_judgment() {
         let (mut store, profile_digest) = configured_store();
@@ -36720,11 +37568,19 @@ mod tests {
                         .expect("cardinality establishment receipt"),
                     None
                 );
-                store.validate().expect("cardinality freeze validates");
+                validate_v8_upgrade_source_connection(&store.connection)
+                    .expect("cardinality freeze validates as exact schema v8");
                 let before_refusal = authority_file_family(&source);
                 assert!(matches!(
-                    store.begin_writer_session(),
+                    store.ensure_runtime_authority_not_frozen(),
                     Err(StoreError::AuthorityEvidenceFrozen(_))
+                ));
+                assert!(matches!(
+                    store.begin_writer_session(),
+                    Err(StoreError::SchemaVersionMismatch {
+                        found: SCHEMA_V8_VERSION,
+                        supported: SCHEMA_VERSION,
+                    })
                 ));
                 drop(store);
                 assert_eq!(
@@ -36784,7 +37640,8 @@ mod tests {
             )
             .expect("frozen historical root row");
         assert_eq!(root_after, root_before);
-        store.validate().expect("empty rooted freeze validates");
+        validate_v8_upgrade_source_connection(&store.connection)
+            .expect("empty rooted freeze validates as exact schema v8");
 
         let frozen = authority_file_family(&source);
         assert!(matches!(
@@ -36796,19 +37653,15 @@ mod tests {
             Err(StoreError::AuthorityMigrationPreflightMissing)
         ));
         assert!(matches!(
-            store.begin_writer_session(),
+            store.ensure_runtime_authority_not_frozen(),
             Err(StoreError::AuthorityEvidenceFrozen(_))
         ));
         drop(store);
         assert_eq!(authority_file_family(&source), frozen);
 
-        let mut reopened = Store::open(&source).expect("reopen frozen empty source");
+        schema::verify_c2_schema_v8_to_v9_sequential(&source)
+            .expect("frozen empty source remains an exact schema-v8 migration source");
         let reopened_before = authority_file_family(&source);
-        assert!(matches!(
-            reopened.begin_writer_session(),
-            Err(StoreError::AuthorityEvidenceFrozen(_))
-        ));
-        drop(reopened);
         assert_eq!(authority_file_family(&source), reopened_before);
     }
 
@@ -36838,10 +37691,11 @@ mod tests {
             MigrationDisposition::Observed,
         )
         .expect("freeze declared restored empty source");
-        store.validate().expect("restored empty freeze validates");
+        validate_v8_upgrade_source_connection(&store.connection)
+            .expect("restored empty freeze validates as exact schema v8");
         let frozen = authority_file_family(&restored);
         assert!(matches!(
-            store.begin_writer_session(),
+            store.ensure_runtime_authority_not_frozen(),
             Err(StoreError::AuthorityEvidenceFrozen(_))
         ));
         drop(store);
@@ -36952,7 +37806,7 @@ mod tests {
             assert_eq!(receipt.occurrence_id, FIXTURE_OCCURRENCE_ID);
             assert_eq!(
                 Store::database_schema_version(&source).expect("frozen schema version"),
-                SCHEMA_VERSION
+                SCHEMA_V8_VERSION
             );
             assert_eq!(
                 store.runtime_dependency_trust_root().expect("frozen root"),
@@ -36975,17 +37829,19 @@ mod tests {
                     .expect("freeze count"),
                 1
             );
-            store
-                .validate()
-                .expect("frozen occurrence validates historically");
+            validate_v8_upgrade_source_connection(&store.connection)
+                .expect("frozen occurrence validates historically as exact schema v8");
             let frozen = authority_file_family(&source);
             assert!(matches!(
-                store.begin_writer_session(),
+                store.ensure_runtime_authority_not_frozen(),
                 Err(StoreError::AuthorityEvidenceFrozen(_))
             ));
             assert!(matches!(
                 store.with_runtime_authority_writer_session(|_, _| Ok::<_, StoreError>(())),
-                Err(StoreError::AuthorityEvidenceFrozen(_))
+                Err(StoreError::SchemaVersionMismatch {
+                    found: SCHEMA_V8_VERSION,
+                    supported: SCHEMA_VERSION,
+                })
             ));
             drop(store);
             assert_eq!(
@@ -37041,7 +37897,7 @@ mod tests {
             .expect("frozen predecessor root row");
         assert_eq!(root_after, root_before);
         assert!(matches!(
-            store.begin_writer_session(),
+            store.ensure_runtime_authority_not_frozen(),
             Err(StoreError::AuthorityEvidenceFrozen(_))
         ));
     }
@@ -37280,9 +38136,11 @@ mod tests {
             Some(&declaration.declaration_digest)
         );
         assert_eq!(migration.restore_proof_digest(), Some(&proof_id));
-        store.validate().expect("declared restored Store validates");
+        validate_v8_upgrade_source_connection(&store.connection)
+            .expect("declared restored Store validates as exact schema v8");
         drop(store);
-        Store::open_read_only(&restored).expect("declared restored Store reopens read-only");
+        schema::verify_c2_schema_v8_to_v9_sequential(&restored)
+            .expect("declared restored Store reopens as exact schema v8");
     }
 
     #[test]
@@ -37319,7 +38177,7 @@ mod tests {
             .expect("rootless v7 migration establishes authority");
         assert_eq!(
             Store::database_schema_version(&source).expect("migrated source version"),
-            SCHEMA_VERSION
+            SCHEMA_V8_VERSION
         );
         assert_eq!(
             Store::database_schema_version(&backup.path).expect("backup version"),
@@ -37354,7 +38212,8 @@ mod tests {
                 .expect("stored establishment receipt"),
             Some(establishment)
         );
-        store.validate().expect("rootless migrated Store validates");
+        validate_v8_upgrade_source_connection(&store.connection)
+            .expect("rootless migrated Store validates as exact schema v8");
         drop(store);
         assert_eq!(
             authority_file_family(&backup.path),
@@ -37418,7 +38277,8 @@ mod tests {
             &old_root,
             "migration cannot reinterpret the historical root"
         );
-        store.validate().expect("rooted migrated Store validates");
+        validate_v8_upgrade_source_connection(&store.connection)
+            .expect("rooted migrated Store validates as exact schema v8");
     }
 
     #[test]

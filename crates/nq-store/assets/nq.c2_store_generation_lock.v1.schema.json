@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.c2_store_generation_lock.v1.json",
+  "title": "nq.c2_store_generation_lock.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "lock_identity",
+    "occurrence_id",
+    "physical_store_generation_identity",
+    "b_genesis_frame_identity",
+    "checksum",
+    "canonical_length",
+    "trailing_padding"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.c2_store_generation_lock.v1"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "lock_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "occurrence_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:/@-]+$"
+    },
+    "physical_store_generation_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "b_genesis_frame_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "checksum": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "canonical_length": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967295
+    },
+    "trailing_padding": {
+      "const": "zero"
+    }
+  }
+}

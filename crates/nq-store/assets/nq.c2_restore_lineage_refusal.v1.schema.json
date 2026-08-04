@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.c2_restore_lineage_refusal.v1.json",
+  "title": "nq.c2_restore_lineage_refusal.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "refusal_identity",
+    "occurrence_id",
+    "predecessor_physical_store_generation_identity",
+    "successor_physical_store_generation_identity",
+    "candidate_set_identity",
+    "refusal_class",
+    "write_disposition",
+    "estate_wide_claim"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.c2_restore_lineage_refusal.v1"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "refusal_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "occurrence_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:/@-]+$"
+    },
+    "predecessor_physical_store_generation_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "successor_physical_store_generation_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "candidate_set_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "refusal_class": {
+      "enum": [
+        "absent",
+        "substituted",
+        "wrong_edge",
+        "copy",
+        "fork",
+        "cycle",
+        "duplicate",
+        "same_cut",
+        "zero_current",
+        "multiple_current"
+      ]
+    },
+    "write_disposition": {
+      "const": "no_write"
+    },
+    "estate_wide_claim": {
+      "const": false
+    }
+  }
+}

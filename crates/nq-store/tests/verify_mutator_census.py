@@ -283,8 +283,14 @@ def validate_session_construction(
             gate.visibility == "private",
             "branded session constructor is externally reachable",
         )
+    # Gen5 keeps the qualified Gen4 path-keyed gate under an explicit legacy
+    # name so the C2 ordinary path can use the retained lock-inode registry
+    # without conflating the two identities.  The construction law remains
+    # unchanged: exact path identity, fence load, then non-reentrant lock.
     require(
-        gate.calls("path_lock_state") and gate.calls("load") and gate.calls("try_lock"),
+        gate.calls("gen4_path_lock_state")
+        and gate.calls("load")
+        and gate.calls("try_lock"),
         "session construction omits path identity, fence load, or non-reentrant lock",
     )
     require(
@@ -824,12 +830,41 @@ def validate_maintenance(
             f"maintenance method must acquire its lock exactly once before non-pure calls: "
             f"{function.location}; pre-lock calls={before_lock}",
         )
+    additional_specs = config.get("additional_maintenance_lock_callers", [])
+    additional = []
+    for specification in additional_specs:
+        require(
+            isinstance(specification, dict)
+            and isinstance(specification.get("source"), str)
+            and isinstance(specification.get("name"), str)
+            and (specification.get("owner") is None or isinstance(specification.get("owner"), str)),
+            "additional maintenance-lock caller specification is malformed",
+        )
+        matches = [
+            function
+            for function in product
+            if function.source.path.as_posix() == specification["source"]
+            and function.owner == specification.get("owner")
+            and function.name == specification["name"]
+        ]
+        require(
+            len(matches) == 1,
+            "additional maintenance-lock caller is absent or ambiguous: "
+            f"{specification}",
+        )
+        lock_calls = matches[0].calls("acquire_maintenance_locks")
+        require(
+            len(lock_calls) == 1,
+            f"additional maintenance path must acquire exactly one lock: {matches[0].location}",
+        )
+        additional.append(matches[0])
+
     actual_callers = [
         function for function in product if function.calls("acquire_maintenance_locks")
     ]
     require(
         {identity(function) for function in actual_callers}
-        == {identity(function) for function in functions},
+        == {identity(function) for function in [*functions, *additional]},
         "maintenance-lock caller census differs from classified maintenance methods: "
         + ", ".join(function.location for function in actual_callers),
     )
@@ -851,6 +886,7 @@ def validate_maintenance(
     )
     return {
         "count": len(functions),
+        "additional": sorted(function.qualified_name for function in additional),
         "lock_helper": lock.qualified_name,
         "methods": sorted(names),
     }

@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.c2_store_integrity_key_enrollment.v1.json",
+  "title": "nq.c2_store_integrity_key_enrollment.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "identity_domain", "occurrence",
+    "physical_store_generation", "signer_scope_policy",
+    "a2_chain_root", "controlling_activation", "dependency_anchor", "resident",
+    "resident_generation", "role", "role_manifest", "role_manifest_generation",
+    "domain", "policy_version", "active_store_policy",
+    "active_store_policy_generation", "authority_cut", "algorithm", "public_key",
+    "key_generation", "predecessor_enrollment", "maximum_retained_key_generations",
+    "provenance_purposes", "bootstrap_grant_request", "bootstrap_grant",
+    "bootstrap_grant_signature_domain", "bootstrap_grant_signature",
+    "bootstrap_issuer", "bootstrap_issuer_key_generation", "proposal_identity",
+    "proof_of_possession_identity", "interpretation_policy", "predecessor_grant",
+    "superseded_grant"
+  ],
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "nullable_digest": {
+      "oneOf": [
+        { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        { "type": "null" }
+      ]
+    }
+  },
+  "properties": {
+    "schema": { "const": "nq.c2_store_integrity_key_enrollment.v1" },
+    "schema_version": { "const": 1 },
+    "identity_domain": { "const": "nq.c2.store_integrity_key_enrollment.identity.v1" },
+    "occurrence": {
+      "type": "string", "minLength": 1, "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:/@-]+$"
+    },
+    "physical_store_generation": { "$ref": "#/$defs/digest" },
+    "signer_scope_policy": { "$ref": "#/$defs/digest" },
+    "a2_chain_root": { "$ref": "#/$defs/digest" },
+    "controlling_activation": { "$ref": "#/$defs/digest" },
+    "dependency_anchor": { "$ref": "#/$defs/digest" },
+    "resident": { "$ref": "#/$defs/digest" },
+    "resident_generation": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+    "role": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "role_manifest": { "$ref": "#/$defs/digest" },
+    "role_manifest_generation": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+    "domain": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "policy_version": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+    "active_store_policy": { "$ref": "#/$defs/digest" },
+    "active_store_policy_generation": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+    "authority_cut": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ledger_position", "effect_position"],
+      "properties": {
+        "ledger_position": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "effect_position": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+      }
+    },
+    "algorithm": { "const": "ed25519_store_integrity_v1" },
+    "public_key": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "key_generation": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+    "predecessor_enrollment": { "$ref": "#/$defs/nullable_digest" },
+    "maximum_retained_key_generations": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+    "provenance_purposes": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": {
+        "enum": [
+          "physical_generation_bootstrap_verification",
+          "active_policy_frame_verification",
+          "installation_frame_verification",
+          "future_retained_material_verification"
+        ]
+      }
+    },
+    "bootstrap_grant_request": { "$ref": "#/$defs/digest" },
+    "bootstrap_grant": { "$ref": "#/$defs/digest" },
+    "bootstrap_grant_signature_domain": { "const": "nq.c2.store_integrity_bootstrap_grant.a1_signature.v1" },
+    "bootstrap_grant_signature": { "type": "string", "pattern": "^[0-9a-f]{128}$" },
+    "bootstrap_issuer": { "$ref": "#/$defs/digest" },
+    "bootstrap_issuer_key_generation": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "proposal_identity": { "$ref": "#/$defs/digest" },
+    "proof_of_possession_identity": { "$ref": "#/$defs/digest" },
+    "interpretation_policy": { "const": "nq.c2.a1_runtime_dependency_admission_refinement.v1" },
+    "predecessor_grant": { "$ref": "#/$defs/nullable_digest" },
+    "superseded_grant": { "$ref": "#/$defs/nullable_digest" }
+  }
+}

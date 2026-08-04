@@ -1,0 +1,321 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.c2_store_generation_install_policy.v1.json",
+  "title": "nq.c2_store_generation_install_policy.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "install_policy_identity",
+    "occurrence_id",
+    "physical_store_generation_identity",
+    "signer_lifecycle_root_identity",
+    "scope_identity",
+    "resident_identity",
+    "resident_generation",
+    "host_role",
+    "role_manifest_generation",
+    "authority_domain",
+    "signer_scope_policy_identity",
+    "signer_scope_policy_version",
+    "gen4_root_identity",
+    "gen4_initial_tip_identity",
+    "selected_enrollment_identity",
+    "installation_nonce",
+    "installation_mode",
+    "layout_identity",
+    "lock_domain_identity",
+    "b_payload_bound",
+    "g_payload_bound",
+    "key_generation_maximum",
+    "policy_generation_maximum",
+    "qualified_backend_profile_identity",
+    "backend_implementation_manifest_identity",
+    "predecessor_policy_identity",
+    "predecessor_physical_store_generation_identity",
+    "predecessor_bootstrap_identity",
+    "predecessor_installation_receipt_identity",
+    "predecessor_installation_cut",
+    "restore_disposition_identity",
+    "restore_proof_identity",
+    "installation_cut"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.c2_store_generation_install_policy.v1"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "install_policy_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "occurrence_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:/@-]+$"
+    },
+    "physical_store_generation_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "signer_lifecycle_root_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "scope_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "resident_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "resident_generation": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "host_role": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:/@-]+$"
+    },
+    "role_manifest_generation": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "authority_domain": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:/@-]+$"
+    },
+    "signer_scope_policy_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "signer_scope_policy_version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "gen4_root_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "gen4_initial_tip_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "selected_enrollment_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "installation_nonce": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "installation_mode": {
+      "enum": [
+        "fresh",
+        "restore_successor"
+      ]
+    },
+    "layout_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "lock_domain_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "b_payload_bound": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967295
+    },
+    "g_payload_bound": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967295
+    },
+    "key_generation_maximum": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "policy_generation_maximum": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967295
+    },
+    "qualified_backend_profile_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "backend_implementation_manifest_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "predecessor_policy_identity": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "predecessor_physical_store_generation_identity": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "predecessor_bootstrap_identity": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "predecessor_installation_receipt_identity": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "predecessor_installation_cut": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "restore_disposition_identity": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "restore_proof_identity": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "installation_cut": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "installation_mode": {
+            "const": "fresh"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "predecessor_physical_store_generation_identity": {
+            "type": "null"
+          },
+          "predecessor_bootstrap_identity": {
+            "type": "null"
+          },
+          "predecessor_installation_receipt_identity": {
+            "type": "null"
+          },
+          "predecessor_installation_cut": {
+            "type": "null"
+          },
+          "restore_disposition_identity": {
+            "type": "null"
+          },
+          "restore_proof_identity": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "installation_mode": {
+            "const": "restore_successor"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "predecessor_physical_store_generation_identity": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "predecessor_bootstrap_identity": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "predecessor_installation_receipt_identity": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "predecessor_installation_cut": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9223372036854775807
+          },
+          "restore_disposition_identity": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "restore_proof_identity": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          }
+        }
+      }
+    }
+  ]
+}

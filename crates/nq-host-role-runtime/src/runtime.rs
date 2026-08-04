@@ -349,6 +349,25 @@ impl HostRoleRuntime {
         )
     }
 
+    /// Apply the exact, projection-only C1 Gen4 schema-v8 to C2 schema-v9
+    /// migration after verifying the pinned source bytes and logical state.
+    ///
+    /// This is an explicit maintenance disposition, never an implicit side
+    /// effect of [`Self::open`].  It installs only rebuildable C2 projection
+    /// tables; it creates no Store generation, signer standing, B/G carrier,
+    /// writer session, or implementation/qualification status.
+    ///
+    /// # Errors
+    ///
+    /// Refuses any non-v8 source, path/inode race, logical-state race,
+    /// migration-byte mismatch, or non-exact resulting schema-v9 projection.
+    pub fn migrate_c1_gen4_to_c2_schema_projection(
+        path: impl AsRef<Path>,
+    ) -> Result<nq_store::schema::C2SchemaV9Projection> {
+        let verified = nq_store::schema::verify_c2_schema_v8_to_v9_sequential(path)?;
+        nq_store::schema::apply_c2_schema_v8_to_v9(verified).map_err(Into::into)
+    }
+
     /// Migrate one exact backup-preserved schema-v7 occurrence through the
     /// one-use accepted migration arm, then reopen it under the ordinary
     /// read-only restart law.
@@ -1841,18 +1860,22 @@ fn resolve_store_runtime_authority(
 ) -> Result<()> {
     let dependency_anchor = dependencies.custody().trust_anchor_id()?;
     store.with_runtime_authority_restart_snapshot(|snapshot| {
-        let receipt = snapshot.receipt;
-        let root = snapshot.root;
-        let occurrence = snapshot.occurrence_id;
-        if root != dependency_anchor {
+        // The C2 applicability projection is derived from this exact complete
+        // Store-owned enumeration and the one existing Gen4 resolver result.
+        // It cannot escape this closure or trigger a second parse/resolution.
+        let c2_input = nq_store::collect_complete_gen4_authority_ledger(&snapshot)?;
+        let receipt = &snapshot.receipt;
+        let root = &snapshot.root;
+        let occurrence = snapshot.occurrence_id.as_str();
+        if root != &dependency_anchor {
             return Err(RuntimeError::DependencyTrustAnchorSubstitution {
-                expected: root,
-                observed: dependency_anchor,
+                expected: root.clone(),
+                observed: dependency_anchor.clone(),
             });
         }
         let transcript = &receipt.transcript;
         if transcript.occurrence_id() != occurrence
-            || transcript.trust_anchor_id() != &root
+            || transcript.trust_anchor_id() != root
             || transcript.domain() != resident.domain
         {
             return Err(nq_store::StoreError::EstablishmentTranscriptMismatch.into());
@@ -1871,7 +1894,7 @@ fn resolve_store_runtime_authority(
         };
         let expectations = RestartExpectations {
             genesis_context,
-            expected_occurrence_id: occurrence,
+            expected_occurrence_id: occurrence.to_owned(),
             expected_chain_root_activation_digest: transcript
                 .chain_root_activation_digest()
                 .clone(),
@@ -1889,18 +1912,20 @@ fn resolve_store_runtime_authority(
             resident_generation: resident.resident_generation,
             host_role: resident.host_role.clone(),
             role_manifest_generation: resident.role_manifest_generation,
-            trust_anchor_id: root,
+            trust_anchor_id: root.clone(),
             domain: resident.domain.clone(),
             policy_floor: resident.policy_floor,
             expected_custody_digest: transcript.custody_digest().clone(),
             expected_migration_receipt_digest,
         };
-        let _resolved = resolve_for_restart(
+        let resolved = resolve_for_restart(
             custody,
             &snapshot.presented,
             snapshot.migration_receipt.as_ref(),
             &expectations,
         )?;
+        let c2_activation = nq_store::project_current_activation_for_c2(&c2_input, &resolved)?;
+        nq_store::verify_n_09_current_activation_for_c2(&c2_activation)?;
         Ok(())
     })
 }

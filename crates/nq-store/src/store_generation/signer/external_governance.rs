@@ -1,0 +1,1427 @@
+//! Strict terminal-A1 external-governance carrier ingestion.
+//!
+//! Decoding accepts only exact canonical JSON conforming to the checked-in
+//! closed schema.  Ed25519 verifies possession of the key named by the
+//! carrier; the separate [`TerminalA1AuthenticityVerifierV1`] hook verifies
+//! that the named key is the uniquely resolved terminal A1 generation.  This
+//! module deliberately has no A1 signing or external-judgment constructor.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use ed25519_dalek::{Signature, VerifyingKey};
+use nq_protocol::{canonical_json_bytes, sha256_bytes};
+use serde_json::{Map, Value};
+
+use super::messages::SignerIdentityV1;
+use super::result::{QuarantineClosureEffectResultV2, RevocationEffectResultV2, SignerRefusalV2};
+
+const INTERPRETATION_POLICY: &str = "nq.c2.a1_runtime_dependency_admission_refinement.v1";
+
+const PROPOSAL_REQUEST_SCHEMA: &str = include_str!(
+    "../../../../../schemas/c2/nq.c2_store_integrity_proposal_disposition_request.v1.json"
+);
+const PROPOSAL_SCHEMA: &str =
+    include_str!("../../../../../schemas/c2/nq.c2_store_integrity_proposal_disposition.v1.json");
+const BOOTSTRAP_REQUEST_SCHEMA: &str =
+    include_str!("../../../../../schemas/c2/nq.c2_store_integrity_bootstrap_grant_request.v1.json");
+const BOOTSTRAP_SCHEMA: &str =
+    include_str!("../../../../../schemas/c2/nq.c2_store_integrity_bootstrap_grant.v1.json");
+const ACTIVATION_REQUEST_SCHEMA: &str = include_str!(
+    "../../../../../schemas/c2/nq.c2_store_integrity_activation_successor_grant_request.v1.json"
+);
+const ACTIVATION_SCHEMA: &str = include_str!(
+    "../../../../../schemas/c2/nq.c2_store_integrity_activation_successor_grant.v1.json"
+);
+const REVOCATION_REQUEST_SCHEMA: &str =
+    include_str!("../../../../../schemas/c2/nq.c2_store_integrity_revocation_request.v1.json");
+const REVOCATION_SCHEMA: &str =
+    include_str!("../../../../../schemas/c2/nq.c2_store_integrity_revocation_judgment.v1.json");
+const REVOCATION_RECEIPT_SCHEMA: &str = include_str!(
+    "../../../../../schemas/c2/nq.c2_store_integrity_revocation_effect_receipt.v1.json"
+);
+const RECOVERY_REQUEST_SCHEMA: &str =
+    include_str!("../../../../../schemas/c2/nq.c2_store_integrity_recovery_request.v1.json");
+const RECOVERY_SCHEMA: &str =
+    include_str!("../../../../../schemas/c2/nq.c2_store_integrity_recovery_grant.v1.json");
+const RESTORE_REQUEST_SCHEMA: &str =
+    include_str!("../../../../../schemas/c2/nq.c2_restore_authorization_request.v1.json");
+const RESTORE_SCHEMA: &str =
+    include_str!("../../../../../schemas/c2/nq.c2_restore_authorization.v1.json");
+const QUARANTINE_REQUEST_SCHEMA: &str =
+    include_str!("../../../../../schemas/c2/nq.c2_quarantine_closure_request.v1.json");
+const QUARANTINE_SCHEMA: &str =
+    include_str!("../../../../../schemas/c2/nq.c2_quarantine_closure_judgment.v1.json");
+const QUARANTINE_RECEIPT_SCHEMA: &str =
+    include_str!("../../../../../schemas/c2/nq.c2_quarantine_closure_effect_receipt.v1.json");
+
+#[derive(Debug, Clone, Copy)]
+struct DocumentSpec {
+    schema_json: &'static str,
+    schema: &'static str,
+    identity_domain: &'static str,
+    identity_field: &'static str,
+    signature_domain: Option<&'static str>,
+    request_schema: Option<&'static str>,
+    request_identity_field: Option<&'static str>,
+}
+
+const PROPOSAL_REQUEST: DocumentSpec = DocumentSpec {
+    schema_json: PROPOSAL_REQUEST_SCHEMA,
+    schema: "nq.c2_store_integrity_proposal_disposition_request.v1",
+    identity_domain: "nq.c2.store_integrity_proposal_disposition_request.identity.v1",
+    identity_field: "proposal_disposition_request_identity",
+    signature_domain: None,
+    request_schema: None,
+    request_identity_field: None,
+};
+const PROPOSAL: DocumentSpec = DocumentSpec {
+    schema_json: PROPOSAL_SCHEMA,
+    schema: "nq.c2_store_integrity_proposal_disposition.v1",
+    identity_domain: "nq.c2.store_integrity_proposal_disposition.identity.v1",
+    identity_field: "proposal_disposition_identity",
+    signature_domain: Some("nq.c2.store_integrity_proposal_disposition.a1_signature.v1"),
+    request_schema: Some("nq.c2_store_integrity_proposal_disposition_request.v1"),
+    request_identity_field: Some("proposal_disposition_request_identity"),
+};
+const BOOTSTRAP_REQUEST: DocumentSpec = DocumentSpec {
+    schema_json: BOOTSTRAP_REQUEST_SCHEMA,
+    schema: "nq.c2_store_integrity_bootstrap_grant_request.v1",
+    identity_domain: "nq.c2.store_integrity_bootstrap_grant_request.identity.v1",
+    identity_field: "grant_request_identity",
+    signature_domain: None,
+    request_schema: None,
+    request_identity_field: None,
+};
+const BOOTSTRAP: DocumentSpec = DocumentSpec {
+    schema_json: BOOTSTRAP_SCHEMA,
+    schema: "nq.c2_store_integrity_bootstrap_grant.v1",
+    identity_domain: "nq.c2.store_integrity_bootstrap_grant.identity.v1",
+    identity_field: "grant_identity",
+    signature_domain: Some("nq.c2.store_integrity_bootstrap_grant.a1_signature.v1"),
+    request_schema: Some("nq.c2_store_integrity_bootstrap_grant_request.v1"),
+    request_identity_field: Some("grant_request_identity"),
+};
+const ACTIVATION_REQUEST: DocumentSpec = DocumentSpec {
+    schema_json: ACTIVATION_REQUEST_SCHEMA,
+    schema: "nq.c2_store_integrity_activation_successor_grant_request.v1",
+    identity_domain: "nq.c2.store_integrity_activation_successor_grant_request.identity.v1",
+    identity_field: "activation_successor_grant_request_identity",
+    signature_domain: None,
+    request_schema: None,
+    request_identity_field: None,
+};
+const ACTIVATION: DocumentSpec = DocumentSpec {
+    schema_json: ACTIVATION_SCHEMA,
+    schema: "nq.c2_store_integrity_activation_successor_grant.v1",
+    identity_domain: "nq.c2.store_integrity_activation_successor_grant.identity.v1",
+    identity_field: "activation_successor_grant_identity",
+    signature_domain: Some("nq.c2.store_integrity_activation_successor_grant.a1_signature.v1"),
+    request_schema: Some("nq.c2_store_integrity_activation_successor_grant_request.v1"),
+    request_identity_field: Some("activation_successor_grant_request_identity"),
+};
+const REVOCATION_REQUEST: DocumentSpec = DocumentSpec {
+    schema_json: REVOCATION_REQUEST_SCHEMA,
+    schema: "nq.c2_store_integrity_revocation_request.v1",
+    identity_domain: "nq.c2.store_integrity_revocation_request.identity.v1",
+    identity_field: "revocation_request_identity",
+    signature_domain: None,
+    request_schema: None,
+    request_identity_field: None,
+};
+const REVOCATION: DocumentSpec = DocumentSpec {
+    schema_json: REVOCATION_SCHEMA,
+    schema: "nq.c2_store_integrity_revocation_judgment.v1",
+    identity_domain: "nq.c2.store_integrity_revocation_judgment.identity.v1",
+    identity_field: "revocation_judgment_identity",
+    signature_domain: Some("nq.c2.store_integrity_revocation_judgment.a1_signature.v1"),
+    request_schema: Some("nq.c2_store_integrity_revocation_request.v1"),
+    request_identity_field: Some("revocation_request_identity"),
+};
+const RECOVERY_REQUEST: DocumentSpec = DocumentSpec {
+    schema_json: RECOVERY_REQUEST_SCHEMA,
+    schema: "nq.c2_store_integrity_recovery_request.v1",
+    identity_domain: "nq.c2.store_integrity_recovery_request.identity.v1",
+    identity_field: "recovery_request_identity",
+    signature_domain: None,
+    request_schema: None,
+    request_identity_field: None,
+};
+const RECOVERY: DocumentSpec = DocumentSpec {
+    schema_json: RECOVERY_SCHEMA,
+    schema: "nq.c2_store_integrity_recovery_grant.v1",
+    identity_domain: "nq.c2.store_integrity_recovery_grant.identity.v1",
+    identity_field: "recovery_grant_identity",
+    signature_domain: Some("nq.c2.store_integrity_recovery_grant.a1_signature.v1"),
+    request_schema: Some("nq.c2_store_integrity_recovery_request.v1"),
+    request_identity_field: Some("recovery_request_identity"),
+};
+const RESTORE_REQUEST: DocumentSpec = DocumentSpec {
+    schema_json: RESTORE_REQUEST_SCHEMA,
+    schema: "nq.c2_restore_authorization_request.v1",
+    identity_domain: "nq.c2.restore_authorization_request.identity.v1",
+    identity_field: "restore_request_identity",
+    signature_domain: None,
+    request_schema: None,
+    request_identity_field: None,
+};
+const RESTORE: DocumentSpec = DocumentSpec {
+    schema_json: RESTORE_SCHEMA,
+    schema: "nq.c2_restore_authorization.v1",
+    identity_domain: "nq.c2.restore_authorization.identity.v1",
+    identity_field: "restore_authorization_identity",
+    signature_domain: Some("nq.c2.restore_authorization.a1_signature.v1"),
+    request_schema: Some("nq.c2_restore_authorization_request.v1"),
+    request_identity_field: Some("restore_request_identity"),
+};
+const QUARANTINE_REQUEST: DocumentSpec = DocumentSpec {
+    schema_json: QUARANTINE_REQUEST_SCHEMA,
+    schema: "nq.c2_quarantine_closure_request.v1",
+    identity_domain: "nq.c2.quarantine_closure_request.identity.v1",
+    identity_field: "closure_request_identity",
+    signature_domain: None,
+    request_schema: None,
+    request_identity_field: None,
+};
+const QUARANTINE: DocumentSpec = DocumentSpec {
+    schema_json: QUARANTINE_SCHEMA,
+    schema: "nq.c2_quarantine_closure_judgment.v1",
+    identity_domain: "nq.c2.quarantine_closure_judgment.identity.v1",
+    identity_field: "quarantine_closure_judgment_identity",
+    signature_domain: Some("nq.c2.quarantine_closure_judgment.a1_signature.v1"),
+    request_schema: Some("nq.c2_quarantine_closure_request.v1"),
+    request_identity_field: Some("closure_request_identity"),
+};
+
+/// Stable replay identity of one exact canonical external carrier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ExternalCarrierIdentityV1(SignerIdentityV1);
+
+impl ExternalCarrierIdentityV1 {
+    pub(crate) const fn bytes(&self) -> &SignerIdentityV1 {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CanonicalExternalDocumentV1 {
+    value: Value,
+    canonical_bytes: Vec<u8>,
+    identity: ExternalCarrierIdentityV1,
+}
+
+impl CanonicalExternalDocumentV1 {
+    fn field(&self, name: &str) -> Option<&Value> {
+        self.value.get(name)
+    }
+    fn identity(&self) -> ExternalCarrierIdentityV1 {
+        self.identity
+    }
+    fn canonical_bytes(&self) -> &[u8] {
+        &self.canonical_bytes
+    }
+}
+
+fn identity_bytes(text: &str) -> Result<SignerIdentityV1, SignerRefusalV2> {
+    let Some(hex_text) = text.strip_prefix("sha256:") else {
+        return Err(SignerRefusalV2::ExternalCarrierScopeMismatch);
+    };
+    if hex_text.len() != 64
+        || !hex_text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(SignerRefusalV2::ExternalCarrierScopeMismatch);
+    }
+    hex::decode(hex_text)
+        .map_err(|_| SignerRefusalV2::ExternalCarrierScopeMismatch)?
+        .try_into()
+        .map_err(|_| SignerRefusalV2::ExternalCarrierScopeMismatch)
+}
+
+fn domain_digest(domain: &str, value: &Value) -> Result<String, SignerRefusalV2> {
+    let canonical =
+        canonical_json_bytes(value).map_err(|_| SignerRefusalV2::ExternalCarrierScopeMismatch)?;
+    let mut preimage = Vec::with_capacity(domain.len() + 1 + canonical.len());
+    preimage.extend_from_slice(domain.as_bytes());
+    preimage.push(0);
+    preimage.extend_from_slice(&canonical);
+    Ok(sha256_bytes(&preimage).into_string())
+}
+
+fn schema_object(spec: DocumentSpec) -> Result<Map<String, Value>, SignerRefusalV2> {
+    let schema: Value = serde_json::from_str(spec.schema_json)
+        .map_err(|_| SignerRefusalV2::ExternalCarrierScopeMismatch)?;
+    schema
+        .as_object()
+        .cloned()
+        .ok_or(SignerRefusalV2::ExternalCarrierScopeMismatch)
+}
+
+fn validate_pattern(value: &str, pattern: &str) -> bool {
+    match pattern {
+        "^sha256:[0-9a-f]{64}$" => identity_bytes(value).is_ok(),
+        "^[0-9a-f]{64}$" => {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        }
+        "^[0-9a-f]{128}$" => {
+            value.len() == 128
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        }
+        "^[A-Za-z0-9._:/@-]+$" => {
+            !value.is_empty()
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._:/@-".contains(&b))
+        }
+        _ => false,
+    }
+}
+
+fn validate_property(value: &Value, property: &Map<String, Value>) -> bool {
+    if let Some(expected) = property.get("const") {
+        if value != expected {
+            return false;
+        }
+    }
+    if let Some(values) = property.get("enum").and_then(Value::as_array) {
+        if !values.contains(value) {
+            return false;
+        }
+    }
+    if let Some(kind) = property.get("type").and_then(Value::as_str) {
+        let matches = match kind {
+            "string" => value.is_string(),
+            "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+            "array" => value.is_array(),
+            "boolean" => value.is_boolean(),
+            "null" => value.is_null(),
+            "object" => value.is_object(),
+            _ => false,
+        };
+        if !matches {
+            return false;
+        }
+    }
+    if let Some(text) = value.as_str() {
+        if property
+            .get("minLength")
+            .and_then(Value::as_u64)
+            .is_some_and(|n| text.chars().count() < n as usize)
+            || property
+                .get("maxLength")
+                .and_then(Value::as_u64)
+                .is_some_and(|n| text.chars().count() > n as usize)
+            || property
+                .get("pattern")
+                .and_then(Value::as_str)
+                .is_some_and(|p| !validate_pattern(text, p))
+        {
+            return false;
+        }
+    }
+    if let Some(number) = value.as_i64() {
+        if property
+            .get("minimum")
+            .and_then(Value::as_i64)
+            .is_some_and(|n| number < n)
+            || property
+                .get("maximum")
+                .and_then(Value::as_i64)
+                .is_some_and(|n| number > n)
+        {
+            return false;
+        }
+    }
+    if let Some(array) = value.as_array() {
+        if property
+            .get("minItems")
+            .and_then(Value::as_u64)
+            .is_some_and(|n| array.len() < n as usize)
+            || property
+                .get("maxItems")
+                .and_then(Value::as_u64)
+                .is_some_and(|n| array.len() > n as usize)
+            || property.get("uniqueItems").and_then(Value::as_bool) == Some(true) && {
+                let set = array.iter().map(Value::to_string).collect::<BTreeSet<_>>();
+                set.len() != array.len()
+            }
+        {
+            return false;
+        }
+        if let Some(items) = property.get("items").and_then(Value::as_object) {
+            if array.iter().any(|item| !validate_property(item, items)) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn validate_against_checked_schema(
+    value: &Value,
+    spec: DocumentSpec,
+) -> Result<(), SignerRefusalV2> {
+    let schema = schema_object(spec)?;
+    let object = value
+        .as_object()
+        .ok_or(SignerRefusalV2::ExternalCarrierScopeMismatch)?;
+    let required = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .ok_or(SignerRefusalV2::ExternalCarrierScopeMismatch)?;
+    let properties = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .ok_or(SignerRefusalV2::ExternalCarrierScopeMismatch)?;
+    if object.len() != required.len()
+        || required
+            .iter()
+            .any(|name| name.as_str().is_none_or(|name| !object.contains_key(name)))
+        || object.keys().any(|name| !properties.contains_key(name))
+        || object.iter().any(|(name, field)| {
+            properties
+                .get(name)
+                .and_then(Value::as_object)
+                .is_none_or(|rules| !validate_property(field, rules))
+        })
+    {
+        return Err(SignerRefusalV2::ExternalCarrierScopeMismatch);
+    }
+    if value.get("schema") != Some(&Value::String(spec.schema.to_owned()))
+        || value.get("schema_version") != Some(&Value::from(1))
+    {
+        return Err(SignerRefusalV2::ExternalCarrierScopeMismatch);
+    }
+    Ok(())
+}
+
+fn decode_exact(
+    bytes: &[u8],
+    spec: DocumentSpec,
+) -> Result<CanonicalExternalDocumentV1, SignerRefusalV2> {
+    let value: Value =
+        serde_json::from_slice(bytes).map_err(|_| SignerRefusalV2::ExternalCarrierScopeMismatch)?;
+    let canonical =
+        canonical_json_bytes(&value).map_err(|_| SignerRefusalV2::ExternalCarrierScopeMismatch)?;
+    if canonical != bytes {
+        return Err(SignerRefusalV2::ExternalCarrierScopeMismatch);
+    }
+    validate_against_checked_schema(&value, spec)?;
+    let asserted = value
+        .get(spec.identity_field)
+        .and_then(Value::as_str)
+        .ok_or(SignerRefusalV2::ExternalCarrierScopeMismatch)?
+        .to_owned();
+    let mut identity_preimage = value.clone();
+    let object = identity_preimage
+        .as_object_mut()
+        .expect("schema validation required object");
+    object.remove(spec.identity_field);
+    object.remove("signature");
+    if domain_digest(spec.identity_domain, &identity_preimage)? != asserted {
+        return Err(SignerRefusalV2::ExternalCarrierScopeMismatch);
+    }
+    Ok(CanonicalExternalDocumentV1 {
+        value,
+        canonical_bytes: canonical,
+        identity: ExternalCarrierIdentityV1(identity_bytes(&asserted)?),
+    })
+}
+
+fn construct_request(
+    value: Value,
+    spec: DocumentSpec,
+) -> Result<CanonicalExternalDocumentV1, SignerRefusalV2> {
+    let bytes =
+        canonical_json_bytes(&value).map_err(|_| SignerRefusalV2::ExternalCarrierScopeMismatch)?;
+    decode_exact(&bytes, spec)
+}
+
+macro_rules! document_type {
+    ($name:ident) => {
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub(crate) struct $name(CanonicalExternalDocumentV1);
+        impl $name {
+            pub(crate) fn identity(&self) -> ExternalCarrierIdentityV1 {
+                self.0.identity()
+            }
+            pub(crate) fn canonical_bytes(&self) -> &[u8] {
+                self.0.canonical_bytes()
+            }
+            pub(crate) fn field(&self, name: &str) -> Option<&Value> {
+                self.0.field(name)
+            }
+        }
+    };
+}
+
+document_type!(StoreIntegrityProposalDispositionRequestV1);
+document_type!(StoreIntegrityProposalDispositionV1);
+document_type!(StoreIntegrityBootstrapGrantRequestV1);
+document_type!(StoreIntegrityBootstrapGrantV1);
+document_type!(StoreIntegrityActivationSuccessorGrantRequestV1);
+document_type!(StoreIntegrityActivationSuccessorGrantV1);
+document_type!(StoreIntegrityRevocationRequestV1);
+document_type!(StoreIntegrityRevocationJudgmentV1);
+document_type!(StoreIntegrityRecoveryRequestV1);
+document_type!(StoreIntegrityRecoveryGrantV1);
+document_type!(StoreIntegrityRestoreAuthorizationRequestV1);
+document_type!(StoreIntegrityRestoreAuthorizationV1);
+document_type!(StoreIntegrityQuarantineClosureRequestV1);
+document_type!(StoreIntegrityQuarantineClosureJudgmentV1);
+
+macro_rules! request_constructor {
+    ($construct:ident, $verify:ident, $name:ident, $spec:ident) => {
+        pub(crate) fn $construct(value: Value) -> Result<$name, SignerRefusalV2> {
+            construct_request(value, $spec).map($name)
+        }
+        pub(crate) fn $verify(request: &$name) -> Result<(), SignerRefusalV2> {
+            decode_exact(request.canonical_bytes(), $spec).map(|_| ())
+        }
+    };
+}
+
+request_constructor!(
+    construct_proposal_disposition_request,
+    verify_proposal_disposition_request_identity,
+    StoreIntegrityProposalDispositionRequestV1,
+    PROPOSAL_REQUEST
+);
+request_constructor!(
+    construct_bootstrap_grant_request,
+    verify_bootstrap_grant_request_identity,
+    StoreIntegrityBootstrapGrantRequestV1,
+    BOOTSTRAP_REQUEST
+);
+request_constructor!(
+    construct_activation_successor_grant_request,
+    verify_activation_successor_grant_request_identity,
+    StoreIntegrityActivationSuccessorGrantRequestV1,
+    ACTIVATION_REQUEST
+);
+request_constructor!(
+    construct_revocation_request,
+    verify_revocation_request_identity,
+    StoreIntegrityRevocationRequestV1,
+    REVOCATION_REQUEST
+);
+request_constructor!(
+    construct_recovery_request,
+    verify_recovery_request_identity,
+    StoreIntegrityRecoveryRequestV1,
+    RECOVERY_REQUEST
+);
+request_constructor!(
+    construct_restore_authorization_request,
+    verify_restore_authorization_request_identity,
+    StoreIntegrityRestoreAuthorizationRequestV1,
+    RESTORE_REQUEST
+);
+request_constructor!(
+    construct_quarantine_closure_request,
+    verify_quarantine_closure_request_identity,
+    StoreIntegrityQuarantineClosureRequestV1,
+    QUARANTINE_REQUEST
+);
+
+macro_rules! carrier_decoder {
+    ($decode:ident, $name:ident, $spec:ident) => {
+        pub(crate) fn $decode(bytes: &[u8]) -> Result<$name, SignerRefusalV2> {
+            decode_exact(bytes, $spec).map($name)
+        }
+    };
+}
+
+carrier_decoder!(
+    decode_store_integrity_proposal_disposition_v1,
+    StoreIntegrityProposalDispositionV1,
+    PROPOSAL
+);
+carrier_decoder!(
+    decode_store_integrity_bootstrap_grant_v1,
+    StoreIntegrityBootstrapGrantV1,
+    BOOTSTRAP
+);
+carrier_decoder!(
+    decode_store_integrity_activation_successor_grant_v1,
+    StoreIntegrityActivationSuccessorGrantV1,
+    ACTIVATION
+);
+carrier_decoder!(
+    decode_store_integrity_revocation_judgment_v1,
+    StoreIntegrityRevocationJudgmentV1,
+    REVOCATION
+);
+carrier_decoder!(
+    decode_store_integrity_recovery_grant_v1,
+    StoreIntegrityRecoveryGrantV1,
+    RECOVERY
+);
+carrier_decoder!(
+    decode_restore_authorization_v1,
+    StoreIntegrityRestoreAuthorizationV1,
+    RESTORE
+);
+carrier_decoder!(
+    decode_quarantine_closure_judgment_v1,
+    StoreIntegrityQuarantineClosureJudgmentV1,
+    QUARANTINE
+);
+
+/// A1 coordinates asserted by a cryptographically authentic carrier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TerminalA1IssuerClaimV1 {
+    pub(crate) digest: String,
+    pub(crate) key_generation: u64,
+    pub(crate) verification_key: [u8; 32],
+    pub(crate) operator_principal: String,
+    pub(crate) domain: String,
+    pub(crate) policy_version: u64,
+    pub(crate) policy_floor: u64,
+    pub(crate) issued_against_gen4_cut: u64,
+    pub(crate) issued_against_terminal_event: String,
+    pub(crate) issued_against_candidate_set: String,
+}
+
+/// Store-owned terminality hook. Implementations inspect the complete A1
+/// candidate set; they cannot sign or return an authority capability.
+pub(crate) trait TerminalA1AuthenticityVerifierV1 {
+    fn verify_unique_terminal_a1(
+        &self,
+        claim: &TerminalA1IssuerClaimV1,
+    ) -> Result<(), SignerRefusalV2>;
+}
+
+/// Exact Store-local coordinates expected at carrier consumption.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExternalGovernanceExpectationV1 {
+    exact_fields: BTreeMap<String, Value>,
+    earliest_cut: u64,
+    latest_cut: u64,
+}
+
+impl ExternalGovernanceExpectationV1 {
+    pub(crate) fn new(
+        exact_fields: BTreeMap<String, Value>,
+        earliest_cut: u64,
+        latest_cut: u64,
+    ) -> Result<Self, SignerRefusalV2> {
+        let required = [
+            "occurrence_id",
+            "physical_store_generation_identity",
+            "controlling_activation",
+        ];
+        let bootstrap_scope = exact_fields.contains_key("signer_scope_policy_identity")
+            && exact_fields.contains_key("install_policy_digest");
+        let transition_scope = exact_fields.contains_key("signer_lifecycle_root_identity")
+            && exact_fields.contains_key("scope_identity")
+            && exact_fields.contains_key("active_store_policy_identity");
+        if earliest_cut == 0
+            || latest_cut < earliest_cut
+            || required
+                .iter()
+                .any(|name| !exact_fields.contains_key(*name))
+            || !(bootstrap_scope || transition_scope)
+        {
+            return Err(SignerRefusalV2::ExternalCarrierScopeMismatch);
+        }
+        Ok(Self {
+            exact_fields,
+            earliest_cut,
+            latest_cut,
+        })
+    }
+}
+
+fn u64_field(document: &CanonicalExternalDocumentV1, name: &str) -> Result<u64, SignerRefusalV2> {
+    document
+        .field(name)
+        .and_then(Value::as_u64)
+        .ok_or(SignerRefusalV2::ExternalCarrierScopeMismatch)
+}
+
+fn string_field<'a>(
+    document: &'a CanonicalExternalDocumentV1,
+    name: &str,
+) -> Result<&'a str, SignerRefusalV2> {
+    document
+        .field(name)
+        .and_then(Value::as_str)
+        .ok_or(SignerRefusalV2::ExternalCarrierScopeMismatch)
+}
+
+fn issuer_claim(
+    document: &CanonicalExternalDocumentV1,
+) -> Result<TerminalA1IssuerClaimV1, SignerRefusalV2> {
+    let key_hex = string_field(document, "issuer_a1_verification_key")?;
+    let verification_key: [u8; 32] = hex::decode(key_hex)
+        .map_err(|_| SignerRefusalV2::WrongTerminalA1Issuer)?
+        .try_into()
+        .map_err(|_| SignerRefusalV2::WrongTerminalA1Issuer)?;
+    Ok(TerminalA1IssuerClaimV1 {
+        digest: string_field(document, "issuer_a1_digest")?.to_owned(),
+        key_generation: u64_field(document, "issuer_a1_key_generation")?,
+        verification_key,
+        operator_principal: string_field(document, "issuer_operator_principal")?.to_owned(),
+        domain: string_field(document, "issuer_domain")?.to_owned(),
+        policy_version: u64_field(document, "issuer_policy_version")?,
+        policy_floor: u64_field(document, "issuer_policy_floor")?,
+        issued_against_gen4_cut: u64_field(document, "issued_against_gen4_cut")?,
+        issued_against_terminal_event: string_field(
+            document,
+            "issued_against_gen4_terminal_event",
+        )?
+        .to_owned(),
+        issued_against_candidate_set: string_field(document, "issued_against_candidate_set")?
+            .to_owned(),
+    })
+}
+
+fn verify_signature_and_terminal(
+    document: &CanonicalExternalDocumentV1,
+    spec: DocumentSpec,
+    terminal: &impl TerminalA1AuthenticityVerifierV1,
+) -> Result<TerminalA1IssuerClaimV1, SignerRefusalV2> {
+    let signature_domain = spec
+        .signature_domain
+        .ok_or(SignerRefusalV2::ExternalCarrierScopeMismatch)?;
+    if string_field(document, "signature_domain")? != signature_domain
+        || string_field(document, "signature_algorithm")? != "ed25519"
+        || string_field(document, "issuer_permitted_scope")? != "runtime_dependency_admission"
+    {
+        return Err(SignerRefusalV2::ExternalCarrierScopeMismatch);
+    }
+    let claim = issuer_claim(document)?;
+    let signature_bytes: [u8; 64] = hex::decode(string_field(document, "signature")?)
+        .map_err(|_| SignerRefusalV2::ExternalCarrierScopeMismatch)?
+        .try_into()
+        .map_err(|_| SignerRefusalV2::ExternalCarrierScopeMismatch)?;
+    let mut unsigned = document.value.clone();
+    unsigned
+        .as_object_mut()
+        .expect("validated object")
+        .remove("signature");
+    let canonical = canonical_json_bytes(&unsigned)
+        .map_err(|_| SignerRefusalV2::ExternalCarrierScopeMismatch)?;
+    let mut preimage = Vec::with_capacity(signature_domain.len() + 1 + canonical.len());
+    preimage.extend_from_slice(signature_domain.as_bytes());
+    preimage.push(0);
+    preimage.extend_from_slice(&canonical);
+    let key = VerifyingKey::from_bytes(&claim.verification_key)
+        .map_err(|_| SignerRefusalV2::WrongTerminalA1Issuer)?;
+    key.verify_strict(&preimage, &Signature::from_bytes(&signature_bytes))
+        .map_err(|_| SignerRefusalV2::WrongTerminalA1Issuer)?;
+    terminal.verify_unique_terminal_a1(&claim)?;
+    Ok(claim)
+}
+
+fn verify_expectation(
+    carrier: &CanonicalExternalDocumentV1,
+    request: &CanonicalExternalDocumentV1,
+    expectation: &ExternalGovernanceExpectationV1,
+) -> Result<(), SignerRefusalV2> {
+    for (name, expected) in &expectation.exact_fields {
+        if carrier.field(name) != Some(expected) || request.field(name) != Some(expected) {
+            return Err(SignerRefusalV2::ExternalCarrierScopeMismatch);
+        }
+    }
+    let cut = carrier
+        .field("proposed_effect_cut")
+        .or_else(|| carrier.field("c2_lifecycle_cut"))
+        .and_then(Value::as_u64)
+        .ok_or(SignerRefusalV2::ExternalCarrierScopeMismatch)?;
+    if !(expectation.earliest_cut..=expectation.latest_cut).contains(&cut) {
+        return Err(SignerRefusalV2::ExternalCarrierStale);
+    }
+    Ok(())
+}
+
+fn verify_pair(
+    carrier: &CanonicalExternalDocumentV1,
+    carrier_spec: DocumentSpec,
+    request: &CanonicalExternalDocumentV1,
+    request_spec: DocumentSpec,
+    expectation: &ExternalGovernanceExpectationV1,
+    terminal: &impl TerminalA1AuthenticityVerifierV1,
+) -> Result<TerminalA1IssuerClaimV1, SignerRefusalV2> {
+    decode_exact(carrier.canonical_bytes(), carrier_spec)?;
+    decode_exact(request.canonical_bytes(), request_spec)?;
+    let request_field = carrier_spec
+        .request_identity_field
+        .ok_or(SignerRefusalV2::ExternalCarrierScopeMismatch)?;
+    let asserted_request = string_field(carrier, request_field)?;
+    let expected_request = string_field(request, request_spec.identity_field)?;
+    if asserted_request != expected_request {
+        return Err(SignerRefusalV2::ExternalCarrierScopeMismatch);
+    }
+    if let Some(schema) = carrier_spec.request_schema {
+        let schema_field = if carrier_spec.schema == BOOTSTRAP.schema {
+            "grant_request_schema"
+        } else if carrier_spec.schema == ACTIVATION.schema {
+            "activation_successor_request_schema"
+        } else if carrier_spec.schema == PROPOSAL.schema {
+            "proposal_disposition_request_schema"
+        } else if carrier_spec.schema == REVOCATION.schema {
+            "revocation_request_schema"
+        } else if carrier_spec.schema == RECOVERY.schema {
+            "recovery_request_schema"
+        } else if carrier_spec.schema == RESTORE.schema {
+            "restore_request_schema"
+        } else {
+            "closure_request_schema"
+        };
+        if carrier.field(schema_field) != Some(&Value::String(schema.to_owned())) {
+            return Err(SignerRefusalV2::ExternalCarrierScopeMismatch);
+        }
+    }
+    let carrier_object = carrier.value.as_object().expect("validated object");
+    let request_object = request.value.as_object().expect("validated object");
+    for (name, request_value) in request_object {
+        if matches!(
+            name.as_str(),
+            "schema" | "schema_version" | "interpretation_policy"
+        ) || name == request_spec.identity_field
+            || name.starts_with("pre_effect_")
+            || name.starts_with("desired_effect_")
+        {
+            continue;
+        }
+        if let Some(carrier_value) = carrier_object.get(name) {
+            if carrier_value != request_value {
+                return Err(SignerRefusalV2::ExternalCarrierScopeMismatch);
+            }
+        }
+    }
+    verify_expectation(carrier, request, expectation)?;
+    verify_signature_and_terminal(carrier, carrier_spec, terminal)
+}
+
+/// Verified bootstrap carrier projection suitable for enrollment construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VerifiedBootstrapGrantV1 {
+    request_identity: ExternalCarrierIdentityV1,
+    grant_identity: ExternalCarrierIdentityV1,
+    issuer: TerminalA1IssuerClaimV1,
+    occurrence_id: String,
+    physical_generation: String,
+    physical_generation_bytes: SignerIdentityV1,
+    lifecycle_root: Option<String>,
+    signer_scope_policy: String,
+    signer_scope_policy_bytes: SignerIdentityV1,
+    install_policy_digest: SignerIdentityV1,
+    store_integrity_public_key: [u8; 32],
+    custody_instance_identity: SignerIdentityV1,
+    proposed_key_generation: u64,
+    proposal_identity: String,
+    proposal_identity_bytes: SignerIdentityV1,
+    controlling_activation: String,
+    interpretation_policy: String,
+    lifecycle_cut: u64,
+    canonical_signature: [u8; 64],
+}
+
+impl VerifiedBootstrapGrantV1 {
+    pub(crate) const fn request_identity(&self) -> ExternalCarrierIdentityV1 {
+        self.request_identity
+    }
+    pub(crate) const fn grant_identity(&self) -> ExternalCarrierIdentityV1 {
+        self.grant_identity
+    }
+    pub(crate) fn issuer(&self) -> &TerminalA1IssuerClaimV1 {
+        &self.issuer
+    }
+    pub(crate) fn occurrence_id(&self) -> &str {
+        &self.occurrence_id
+    }
+    pub(crate) fn physical_generation(&self) -> &str {
+        &self.physical_generation
+    }
+    pub(crate) const fn physical_generation_bytes(&self) -> SignerIdentityV1 {
+        self.physical_generation_bytes
+    }
+    pub(crate) fn lifecycle_root(&self) -> Option<&str> {
+        self.lifecycle_root.as_deref()
+    }
+    pub(crate) fn signer_scope_policy(&self) -> &str {
+        &self.signer_scope_policy
+    }
+    pub(crate) const fn signer_scope_policy_bytes(&self) -> SignerIdentityV1 {
+        self.signer_scope_policy_bytes
+    }
+    pub(crate) const fn install_policy_digest(&self) -> SignerIdentityV1 {
+        self.install_policy_digest
+    }
+    pub(crate) const fn store_integrity_public_key(&self) -> [u8; 32] {
+        self.store_integrity_public_key
+    }
+    pub(crate) const fn custody_instance_identity(&self) -> SignerIdentityV1 {
+        self.custody_instance_identity
+    }
+    pub(crate) const fn proposed_key_generation(&self) -> u64 {
+        self.proposed_key_generation
+    }
+    pub(crate) fn proposal_identity(&self) -> &str {
+        &self.proposal_identity
+    }
+    pub(crate) const fn proposal_identity_bytes(&self) -> SignerIdentityV1 {
+        self.proposal_identity_bytes
+    }
+    pub(crate) fn controlling_activation(&self) -> &str {
+        &self.controlling_activation
+    }
+    pub(crate) fn interpretation_policy(&self) -> &str {
+        &self.interpretation_policy
+    }
+    pub(crate) const fn lifecycle_cut(&self) -> u64 {
+        self.lifecycle_cut
+    }
+    pub(crate) const fn canonical_signature(&self) -> &[u8; 64] {
+        &self.canonical_signature
+    }
+}
+
+pub(crate) fn verify_bootstrap_grant_terminal_a1_signature_scope_policy_cut_request_identity(
+    grant: &StoreIntegrityBootstrapGrantV1,
+    request: &StoreIntegrityBootstrapGrantRequestV1,
+    expectation: &ExternalGovernanceExpectationV1,
+    terminal: &impl TerminalA1AuthenticityVerifierV1,
+) -> Result<VerifiedBootstrapGrantV1, SignerRefusalV2> {
+    let issuer = verify_pair(
+        &grant.0,
+        BOOTSTRAP,
+        &request.0,
+        BOOTSTRAP_REQUEST,
+        expectation,
+        terminal,
+    )?;
+    if grant.field("interpretation_policy").and_then(Value::as_str) != Some(INTERPRETATION_POLICY)
+        || grant
+            .field("store_integrity_key_generation")
+            .and_then(Value::as_u64)
+            != Some(0)
+    {
+        return Err(SignerRefusalV2::ExternalCarrierScopeMismatch);
+    }
+    let signature: [u8; 64] = hex::decode(string_field(&grant.0, "signature")?)
+        .map_err(|_| SignerRefusalV2::ExternalCarrierScopeMismatch)?
+        .try_into()
+        .map_err(|_| SignerRefusalV2::ExternalCarrierScopeMismatch)?;
+    let store_integrity_public_key: [u8; 32] =
+        hex::decode(string_field(&grant.0, "store_integrity_public_key")?)
+            .map_err(|_| SignerRefusalV2::ExternalCarrierScopeMismatch)?
+            .try_into()
+            .map_err(|_| SignerRefusalV2::ExternalCarrierScopeMismatch)?;
+    let install_policy_digest = identity_bytes(string_field(&grant.0, "install_policy_digest")?)?;
+    let custody_instance_identity =
+        identity_bytes(string_field(&grant.0, "custody_instance_identity")?)?;
+    let proposal_identity = string_field(&grant.0, "proposal_identity")?.to_owned();
+    let proposal_identity_bytes = identity_bytes(&proposal_identity)?;
+    let physical_generation =
+        string_field(&grant.0, "physical_store_generation_identity")?.to_owned();
+    let physical_generation_bytes = identity_bytes(&physical_generation)?;
+    let signer_scope_policy = string_field(&grant.0, "signer_scope_policy_identity")?.to_owned();
+    let signer_scope_policy_bytes = identity_bytes(&signer_scope_policy)?;
+    Ok(VerifiedBootstrapGrantV1 {
+        request_identity: request.identity(),
+        grant_identity: grant.identity(),
+        issuer,
+        occurrence_id: string_field(&grant.0, "occurrence_id")?.to_owned(),
+        physical_generation,
+        physical_generation_bytes,
+        lifecycle_root: grant
+            .field("signer_lifecycle_root_identity")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        signer_scope_policy,
+        signer_scope_policy_bytes,
+        install_policy_digest,
+        store_integrity_public_key,
+        custody_instance_identity,
+        proposed_key_generation: u64_field(&grant.0, "store_integrity_key_generation")?,
+        proposal_identity,
+        proposal_identity_bytes,
+        controlling_activation: string_field(&grant.0, "controlling_activation")?.to_owned(),
+        interpretation_policy: string_field(&grant.0, "interpretation_policy")?.to_owned(),
+        lifecycle_cut: u64_field(&grant.0, "c2_lifecycle_cut")?,
+        canonical_signature: signature,
+    })
+}
+
+macro_rules! pair_verifier {
+    ($name:ident, $carrier:ident, $carrier_spec:ident, $request:ident, $request_spec:ident) => {
+        pub(crate) fn $name(
+            carrier: &$carrier,
+            request: &$request,
+            expectation: &ExternalGovernanceExpectationV1,
+            terminal: &impl TerminalA1AuthenticityVerifierV1,
+        ) -> Result<TerminalA1IssuerClaimV1, SignerRefusalV2> {
+            verify_pair(
+                &carrier.0,
+                $carrier_spec,
+                &request.0,
+                $request_spec,
+                expectation,
+                terminal,
+            )
+        }
+    };
+}
+
+pair_verifier!(
+    verify_proposal_disposition_terminal_a1_signature_scope_policy_cut_request_identity,
+    StoreIntegrityProposalDispositionV1,
+    PROPOSAL,
+    StoreIntegrityProposalDispositionRequestV1,
+    PROPOSAL_REQUEST
+);
+pair_verifier!(
+    verify_activation_successor_grant_terminal_a1_signature_scope_policy_cut_request_identity,
+    StoreIntegrityActivationSuccessorGrantV1,
+    ACTIVATION,
+    StoreIntegrityActivationSuccessorGrantRequestV1,
+    ACTIVATION_REQUEST
+);
+pair_verifier!(
+    verify_revocation_judgment_terminal_a1_signature_scope_policy_cut_request_identity,
+    StoreIntegrityRevocationJudgmentV1,
+    REVOCATION,
+    StoreIntegrityRevocationRequestV1,
+    REVOCATION_REQUEST
+);
+pair_verifier!(verify_recovery_grant_terminal_a1_signature_scope_policy_cut_predecessor_successor_request_identity,
+    StoreIntegrityRecoveryGrantV1, RECOVERY, StoreIntegrityRecoveryRequestV1, RECOVERY_REQUEST);
+pair_verifier!(
+    verify_restore_authorization_terminal_a1_signature_scope_policy_cut_request_identity,
+    StoreIntegrityRestoreAuthorizationV1,
+    RESTORE,
+    StoreIntegrityRestoreAuthorizationRequestV1,
+    RESTORE_REQUEST
+);
+pair_verifier!(
+    verify_quarantine_closure_terminal_a1_signature_scope_policy_cut_request_identity,
+    StoreIntegrityQuarantineClosureJudgmentV1,
+    QUARANTINE,
+    StoreIntegrityQuarantineClosureRequestV1,
+    QUARANTINE_REQUEST
+);
+
+/// Replay guard owned by the Store transaction, keyed by canonical carrier identity.
+#[derive(Debug, Default)]
+pub(crate) struct ExternalCarrierReplayGuardV1(BTreeSet<ExternalCarrierIdentityV1>);
+
+impl ExternalCarrierReplayGuardV1 {
+    fn consume(&mut self, identity: ExternalCarrierIdentityV1) -> Result<(), SignerRefusalV2> {
+        if !self.0.insert(identity) {
+            return Err(SignerRefusalV2::ExternalCarrierReplay);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExternalCarrierDecodeResultV2 {
+    ProposalDispositionAccepted,
+    BootstrapGrantAccepted,
+    ActivationSuccessorGrantAccepted,
+    RevocationJudgmentAccepted,
+    RecoveryGrantAccepted,
+    RestoreAuthorizationAccepted,
+    QuarantineClosureJudgmentAccepted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExternalRequestResultV2 {
+    ProposalDispositionRequestPrepared,
+    BootstrapGrantRequestPrepared,
+    ActivationSuccessorGrantRequestPrepared,
+    RevocationRequestPrepared,
+    RecoveryRequestPrepared,
+    RestoreAuthorizationRequestPrepared,
+    QuarantineClosureRequestPrepared,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExternalCarrierIngressResultV2 {
+    BootstrapGrantConsumed,
+    RestoreAuthorizationConsumed,
+    RevocationJudgmentConsumed,
+    RecoveryGrantConsumed,
+    QuarantineClosureJudgmentConsumed,
+}
+
+macro_rules! ingress_type {
+    ($name:ident, $carrier:ident, $result:ident, $method:ident) => {
+        pub(crate) struct $name<'a> {
+            carrier: &'a $carrier,
+        }
+        impl<'a> $name<'a> {
+            pub(crate) const fn new(carrier: &'a $carrier) -> Self {
+                Self { carrier }
+            }
+            pub(crate) fn $method(
+                &self,
+                replay: &mut ExternalCarrierReplayGuardV1,
+            ) -> Result<ExternalCarrierIngressResultV2, SignerRefusalV2> {
+                replay.consume(self.carrier.identity())?;
+                Ok(ExternalCarrierIngressResultV2::$result)
+            }
+        }
+    };
+}
+
+ingress_type!(
+    BootstrapGrantIngressV1,
+    StoreIntegrityBootstrapGrantV1,
+    BootstrapGrantConsumed,
+    consume
+);
+ingress_type!(
+    RestoreAuthorizationIngressV1,
+    StoreIntegrityRestoreAuthorizationV1,
+    RestoreAuthorizationConsumed,
+    install_successor
+);
+ingress_type!(
+    RevocationJudgmentIngressV1,
+    StoreIntegrityRevocationJudgmentV1,
+    RevocationJudgmentConsumed,
+    apply
+);
+ingress_type!(
+    RecoveryGrantIngressV1,
+    StoreIntegrityRecoveryGrantV1,
+    RecoveryGrantConsumed,
+    apply
+);
+ingress_type!(
+    QuarantineClosureIngressV1,
+    StoreIntegrityQuarantineClosureJudgmentV1,
+    QuarantineClosureJudgmentConsumed,
+    close
+);
+
+pub(crate) fn verify_bootstrap_grant_ingress_consumption(
+    result: ExternalCarrierIngressResultV2,
+) -> Result<(), SignerRefusalV2> {
+    (result == ExternalCarrierIngressResultV2::BootstrapGrantConsumed)
+        .then_some(())
+        .ok_or(SignerRefusalV2::ExternalCarrierScopeMismatch)
+}
+pub(crate) fn verify_restore_authorization_ingress_consumption(
+    result: ExternalCarrierIngressResultV2,
+) -> Result<(), SignerRefusalV2> {
+    (result == ExternalCarrierIngressResultV2::RestoreAuthorizationConsumed)
+        .then_some(())
+        .ok_or(SignerRefusalV2::ExternalCarrierScopeMismatch)
+}
+pub(crate) fn verify_revocation_judgment_ingress_consumption(
+    result: ExternalCarrierIngressResultV2,
+) -> Result<(), SignerRefusalV2> {
+    (result == ExternalCarrierIngressResultV2::RevocationJudgmentConsumed)
+        .then_some(())
+        .ok_or(SignerRefusalV2::ExternalCarrierScopeMismatch)
+}
+pub(crate) fn verify_recovery_grant_ingress_consumption(
+    result: ExternalCarrierIngressResultV2,
+) -> Result<(), SignerRefusalV2> {
+    (result == ExternalCarrierIngressResultV2::RecoveryGrantConsumed)
+        .then_some(())
+        .ok_or(SignerRefusalV2::ExternalCarrierScopeMismatch)
+}
+pub(crate) fn verify_quarantine_closure_ingress_consumption(
+    result: ExternalCarrierIngressResultV2,
+) -> Result<(), SignerRefusalV2> {
+    (result == ExternalCarrierIngressResultV2::QuarantineClosureJudgmentConsumed)
+        .then_some(())
+        .ok_or(SignerRefusalV2::ExternalCarrierScopeMismatch)
+}
+
+/// Closed ingress ownership witness; no plugin or generic carrier arm exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExternalGovernanceIngressSetV1 {
+    ClosedGovernedIngressOwnershipVerified,
+}
+
+pub(crate) const fn construct_sg_wu_06a_external_governance_ingress_set()
+-> ExternalGovernanceIngressSetV1 {
+    ExternalGovernanceIngressSetV1::ClosedGovernedIngressOwnershipVerified
+}
+
+pub(crate) fn verify_sg_wu_06a_external_governance_ingress_set_is_closed(
+    set: ExternalGovernanceIngressSetV1,
+) -> Result<(), SignerRefusalV2> {
+    (set == ExternalGovernanceIngressSetV1::ClosedGovernedIngressOwnershipVerified)
+        .then_some(())
+        .ok_or(SignerRefusalV2::ExternalCarrierScopeMismatch)
+}
+
+/// Exact proposal-disposition consumption; no enrollment or standing output exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProposalDispositionConsumptionV1 {
+    ProposalRetryDuplicateRejectionAbandonmentRestartStatesAreProposalDispositionVerified,
+}
+
+pub(crate) const fn construct_sg_n_12_proposal_retry_duplicate_rejection_abandonment_restart_states()
+-> ProposalDispositionConsumptionV1 {
+    ProposalDispositionConsumptionV1::ProposalRetryDuplicateRejectionAbandonmentRestartStatesAreProposalDispositionVerified
+}
+
+pub(crate) fn verify_sg_n_12_proposal_retry_duplicate_rejection_abandonment_restart_states(
+    value: ProposalDispositionConsumptionV1,
+) -> Result<(), SignerRefusalV2> {
+    (value == ProposalDispositionConsumptionV1::ProposalRetryDuplicateRejectionAbandonmentRestartStatesAreProposalDispositionVerified)
+        .then_some(()).ok_or(SignerRefusalV2::ExternalCarrierScopeMismatch)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoreIntegrityRevocationEffectReceiptV1(CanonicalExternalDocumentV1);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QuarantineClosureEffectReceiptV1(CanonicalExternalDocumentV1);
+
+fn construct_unsigned_receipt(
+    value: Value,
+    schema_json: &'static str,
+    schema: &'static str,
+    identity_domain: &'static str,
+    identity_field: &'static str,
+) -> Result<CanonicalExternalDocumentV1, SignerRefusalV2> {
+    let spec = DocumentSpec {
+        schema_json,
+        schema,
+        identity_domain,
+        identity_field,
+        signature_domain: None,
+        request_schema: None,
+        request_identity_field: None,
+    };
+    let document = construct_request(value, spec)?;
+    if document.field("signed") != Some(&Value::Bool(false)) {
+        return Err(SignerRefusalV2::ExternalCarrierScopeMismatch);
+    }
+    Ok(document)
+}
+
+pub(crate) fn construct_sg_rec_10b_effect_receipt(
+    value: Value,
+) -> Result<StoreIntegrityRevocationEffectReceiptV1, SignerRefusalV2> {
+    construct_unsigned_receipt(
+        value,
+        REVOCATION_RECEIPT_SCHEMA,
+        "nq.c2_store_integrity_revocation_effect_receipt.v1",
+        "nq.c2.store_integrity.revocation_effect_receipt.identity.v1",
+        "effect_receipt_identity",
+    )
+    .map(StoreIntegrityRevocationEffectReceiptV1)
+}
+pub(crate) fn verify_sg_rec_10b_atomic_effect_receipt(
+    receipt: &StoreIntegrityRevocationEffectReceiptV1,
+) -> Result<RevocationEffectResultV2, SignerRefusalV2> {
+    (receipt.0.field("signed") == Some(&Value::Bool(false)))
+        .then_some(RevocationEffectResultV2::ReceiptPersisted)
+        .ok_or(SignerRefusalV2::ExternalCarrierScopeMismatch)
+}
+pub(crate) fn construct_sg_rec_13b_effect_receipt(
+    value: Value,
+) -> Result<QuarantineClosureEffectReceiptV1, SignerRefusalV2> {
+    construct_unsigned_receipt(
+        value,
+        QUARANTINE_RECEIPT_SCHEMA,
+        "nq.c2_quarantine_closure_effect_receipt.v1",
+        "nq.c2.quarantine_closure_effect_receipt.identity.v1",
+        "effect_receipt_identity",
+    )
+    .map(QuarantineClosureEffectReceiptV1)
+}
+pub(crate) fn verify_sg_rec_13b_atomic_effect_receipt(
+    receipt: &QuarantineClosureEffectReceiptV1,
+) -> Result<QuarantineClosureEffectResultV2, SignerRefusalV2> {
+    (receipt.0.field("signed") == Some(&Value::Bool(false)))
+        .then_some(QuarantineClosureEffectResultV2::ReceiptPersisted)
+        .ok_or(SignerRefusalV2::ExternalCarrierScopeMismatch)
+}
+
+#[cfg(test)]
+mod tests {
+    use ed25519_dalek::{Signer as _, SigningKey};
+    use serde_json::json;
+
+    use super::*;
+
+    struct TerminalVerifier([u8; 32]);
+
+    impl TerminalA1AuthenticityVerifierV1 for TerminalVerifier {
+        fn verify_unique_terminal_a1(
+            &self,
+            claim: &TerminalA1IssuerClaimV1,
+        ) -> Result<(), SignerRefusalV2> {
+            (claim.verification_key == self.0)
+                .then_some(())
+                .ok_or(SignerRefusalV2::WrongTerminalA1Issuer)
+        }
+    }
+
+    fn sample_field(name: &str, rules: &Map<String, Value>, verifying_key: [u8; 32]) -> Value {
+        if let Some(value) = rules.get("const") {
+            return value.clone();
+        }
+        if let Some(value) = rules
+            .get("enum")
+            .and_then(Value::as_array)
+            .and_then(|v| v.first())
+        {
+            return value.clone();
+        }
+        match rules.get("type").and_then(Value::as_str).unwrap() {
+            "string" if name == "issuer_a1_verification_key" => {
+                Value::String(hex::encode(verifying_key))
+            }
+            "string" if name == "signature" => Value::String("00".repeat(64)),
+            "string"
+                if rules.get("pattern").and_then(Value::as_str)
+                    == Some("^sha256:[0-9a-f]{64}$") =>
+            {
+                Value::String(format!("sha256:{}", "1".repeat(64)))
+            }
+            "string" if rules.get("pattern").and_then(Value::as_str) == Some("^[0-9a-f]{64}$") => {
+                Value::String("1".repeat(64))
+            }
+            "string" => Value::String("x".to_owned()),
+            "integer" => Value::from(rules.get("minimum").and_then(Value::as_u64).unwrap_or(0)),
+            "boolean" => Value::Bool(false),
+            "null" => Value::Null,
+            other => panic!("unsupported test field type {other}"),
+        }
+    }
+
+    fn sample_document(spec: DocumentSpec, verifying_key: [u8; 32]) -> Value {
+        let schema: Value = serde_json::from_str(spec.schema_json).unwrap();
+        let mut value = Map::new();
+        for (name, rules) in schema["properties"].as_object().unwrap() {
+            value.insert(
+                name.clone(),
+                sample_field(name, rules.as_object().unwrap(), verifying_key),
+            );
+        }
+        let mut document = Value::Object(value);
+        let mut identity_preimage = document.clone();
+        let object = identity_preimage.as_object_mut().unwrap();
+        object.remove(spec.identity_field);
+        object.remove("signature");
+        let identity = domain_digest(spec.identity_domain, &identity_preimage).unwrap();
+        document
+            .as_object_mut()
+            .unwrap()
+            .insert(spec.identity_field.to_owned(), Value::String(identity));
+        document
+    }
+
+    #[test]
+    fn noncanonical_bytes_and_unknown_fields_refuse() {
+        let value =
+            json!({"schema":"nq.c2_store_integrity_bootstrap_grant_request.v1","schema_version":1});
+        let bytes = serde_json::to_vec_pretty(&value).unwrap();
+        assert_eq!(
+            decode_exact(&bytes, BOOTSTRAP_REQUEST),
+            Err(SignerRefusalV2::ExternalCarrierScopeMismatch)
+        );
+    }
+
+    #[test]
+    fn replay_guard_is_one_use() {
+        let mut guard = ExternalCarrierReplayGuardV1::default();
+        let identity = ExternalCarrierIdentityV1([7; 32]);
+        assert!(guard.consume(identity).is_ok());
+        assert_eq!(
+            guard.consume(identity),
+            Err(SignerRefusalV2::ExternalCarrierReplay)
+        );
+    }
+
+    #[test]
+    fn closed_ingress_has_no_generic_variant() {
+        assert!(
+            verify_sg_wu_06a_external_governance_ingress_set_is_closed(
+                construct_sg_wu_06a_external_governance_ingress_set()
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn bootstrap_pair_is_canonical_signed_terminal_and_one_to_one() {
+        let signing = SigningKey::from_bytes(&[42; 32]);
+        let key = signing.verifying_key().to_bytes();
+        let request_value = sample_document(BOOTSTRAP_REQUEST, key);
+        let request = construct_bootstrap_grant_request(request_value.clone()).unwrap();
+        let mut grant_value = sample_document(BOOTSTRAP, key);
+        for (name, value) in request_value.as_object().unwrap() {
+            if grant_value.get(name).is_some()
+                && !matches!(name.as_str(), "schema" | "schema_version")
+            {
+                grant_value
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(name.clone(), value.clone());
+            }
+        }
+        grant_value.as_object_mut().unwrap().insert(
+            "grant_request_identity".to_owned(),
+            request_value["grant_request_identity"].clone(),
+        );
+        let mut identity_preimage = grant_value.clone();
+        identity_preimage
+            .as_object_mut()
+            .unwrap()
+            .remove("grant_identity");
+        identity_preimage
+            .as_object_mut()
+            .unwrap()
+            .remove("signature");
+        let grant_identity = domain_digest(BOOTSTRAP.identity_domain, &identity_preimage).unwrap();
+        grant_value
+            .as_object_mut()
+            .unwrap()
+            .insert("grant_identity".to_owned(), Value::String(grant_identity));
+        let mut unsigned = grant_value.clone();
+        unsigned.as_object_mut().unwrap().remove("signature");
+        let canonical = canonical_json_bytes(&unsigned).unwrap();
+        let mut preimage = BOOTSTRAP.signature_domain.unwrap().as_bytes().to_vec();
+        preimage.push(0);
+        preimage.extend_from_slice(&canonical);
+        grant_value.as_object_mut().unwrap().insert(
+            "signature".to_owned(),
+            Value::String(hex::encode(signing.sign(&preimage).to_bytes())),
+        );
+        let grant_bytes = canonical_json_bytes(&grant_value).unwrap();
+        let grant = decode_store_integrity_bootstrap_grant_v1(&grant_bytes).unwrap();
+        let exact_fields = [
+            "occurrence_id",
+            "physical_store_generation_identity",
+            "controlling_activation",
+            "signer_scope_policy_identity",
+            "install_policy_digest",
+        ]
+        .into_iter()
+        .map(|name| (name.to_owned(), request_value[name].clone()))
+        .collect();
+        let expectation = ExternalGovernanceExpectationV1::new(exact_fields, 1, 1).unwrap();
+        let verified =
+            verify_bootstrap_grant_terminal_a1_signature_scope_policy_cut_request_identity(
+                &grant,
+                &request,
+                &expectation,
+                &TerminalVerifier(key),
+            )
+            .unwrap();
+        assert_eq!(verified.proposed_key_generation(), 0);
+        assert_eq!(
+            verified.canonical_signature(),
+            &signing.sign(&preimage).to_bytes()
+        );
+    }
+}

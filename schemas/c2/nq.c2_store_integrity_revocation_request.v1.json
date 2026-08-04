@@ -1,0 +1,241 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.c2_store_integrity_revocation_request.v1.json",
+  "title": "nq.c2_store_integrity_revocation_request.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "revocation_request_identity",
+    "interpretation_policy",
+    "issuer_a1_digest",
+    "issuer_a1_key_generation",
+    "issuer_a1_verification_key",
+    "issuer_operator_principal",
+    "issuer_domain",
+    "issuer_permitted_scope",
+    "issuer_policy_version",
+    "issuer_policy_floor",
+    "issued_against_gen4_cut",
+    "issued_against_gen4_terminal_event",
+    "issued_against_candidate_set",
+    "occurrence_id",
+    "a2_chain_root",
+    "controlling_activation",
+    "resident_identity",
+    "resident_generation",
+    "host_role",
+    "role_manifest_generation",
+    "trust_anchor_id",
+    "authority_domain",
+    "activation_policy_version",
+    "physical_store_generation_identity",
+    "signer_lifecycle_root_identity",
+    "scope_identity",
+    "active_store_policy_identity",
+    "active_store_policy_generation",
+    "pre_effect_frontier_identity",
+    "desired_effect_projection_identity",
+    "proposed_effect_cut",
+    "target_enrollment_identity",
+    "target_public_key",
+    "target_key_generation",
+    "target_standing_identity",
+    "last_completed_lifecycle_receipt_identity",
+    "effective_cut",
+    "reason_code",
+    "disposition",
+    "revocation_projection_identity"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.c2_store_integrity_revocation_request.v1"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "revocation_request_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "interpretation_policy": {
+      "const": "nq.c2.a1_runtime_dependency_admission_refinement.v1"
+    },
+    "issuer_a1_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "issuer_a1_key_generation": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "issuer_a1_verification_key": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "issuer_operator_principal": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:/@-]+$"
+    },
+    "issuer_domain": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:/@-]+$"
+    },
+    "issuer_permitted_scope": {
+      "const": "runtime_dependency_admission"
+    },
+    "issuer_policy_version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "issuer_policy_floor": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "issued_against_gen4_cut": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "issued_against_gen4_terminal_event": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "issued_against_candidate_set": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "occurrence_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:/@-]+$"
+    },
+    "a2_chain_root": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "controlling_activation": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "resident_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "resident_generation": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "host_role": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:/@-]+$"
+    },
+    "role_manifest_generation": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "trust_anchor_id": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "authority_domain": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:/@-]+$"
+    },
+    "activation_policy_version": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "physical_store_generation_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "signer_lifecycle_root_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "scope_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "active_store_policy_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "active_store_policy_generation": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "pre_effect_frontier_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "desired_effect_projection_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "proposed_effect_cut": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "target_enrollment_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "target_public_key": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "target_key_generation": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "target_standing_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "last_completed_lifecycle_receipt_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "effective_cut": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "reason_code": {
+      "enum": [
+        "operator_withdrawal",
+        "suspected_key_compromise",
+        "custody_lost_or_unusable",
+        "policy_retirement"
+      ]
+    },
+    "disposition": {
+      "const": "revoked"
+    },
+    "revocation_projection_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}

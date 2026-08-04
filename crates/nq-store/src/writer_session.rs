@@ -9,12 +9,30 @@
 //! it is not a universal authority record.
 
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::marker::PhantomData;
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
-use crate::{Store, StoreError};
+use nix::fcntl::{FlockArg, flock};
+
+use crate::capacity_backend::{
+    ClosedC2StoreBackendV1, closed_backend_lock_inode_key_v1,
+    verify_rr_06_sole_post_receipt_constructor,
+};
+use crate::global_failure_journal::{
+    C2PostCompletionGRefusalV1, verify_n_45a_post_completion_candidate_g_refusal,
+};
+use crate::store_generation::lock::{C2StoreGenerationLockV1, LockInodeKey};
+use crate::store_generation::records::{
+    PhysicalStoreGenerationIdentityV1, StoreOccurrenceIdentityV1,
+};
+use crate::store_generation::{
+    C2_BOOTSTRAP_EXTENT_V1, C2_GLOBAL_REFUSAL_EXTENT_V1, C2_LOCK_FILE_V1,
+};
+use crate::{Store, StoreError, pragma_i64};
 use nq_runtime_dependency_authority::{
     ResolvedControllingActivation, VerificationBrand, VerifiedActivationRevocation,
     VerifiedMigrationClassification, VerifiedOperatorAuthorityRotation,
@@ -29,15 +47,136 @@ struct PathLockState {
     fenced: AtomicBool,
 }
 
-static STORE_WRITER_LOCKS: LazyLock<Mutex<BTreeMap<PathBuf, &'static PathLockState>>> =
+/// Exact maintenance exclusion held across both the process mutex and one
+/// kernel `flock`.  For a not-yet-created destination the flock is taken on
+/// the nearest existing retained ancestor, conservatively serializing sibling
+/// maintenance operations without creating a sidecar before authorization.
+pub(crate) struct MaintenanceLockGuard {
+    _process: MutexGuard<'static, ()>,
+    flock_file: File,
+}
+
+impl Drop for MaintenanceLockGuard {
+    fn drop(&mut self) {
+        let _ = flock(self.flock_file.as_raw_fd(), FlockArg::Unlock);
+    }
+}
+
+static GEN4_PATH_WRITER_LOCKS: LazyLock<Mutex<BTreeMap<PathBuf, &'static PathLockState>>> =
+    LazyLock::new(|| Mutex::new(BTreeMap::new()));
+static C2_LOCK_INODE_WRITER_LOCKS: LazyLock<Mutex<BTreeMap<LockInodeKey, &'static PathLockState>>> =
     LazyLock::new(|| Mutex::new(BTreeMap::new()));
 static IN_MEMORY_WRITER_KEYS: AtomicU64 = AtomicU64::new(1);
 
-fn path_lock_state(key: &Path) -> &'static PathLockState {
-    let mut registry = STORE_WRITER_LOCKS
+const LEGACY_C2_SESSION_REFUSAL: &str =
+    "legacy writer-session construction is forbidden for a C2-governed Store root";
+
+/// Inert writer-session refusal classifications used by the exact V2 row
+/// verifiers.  No variant contains a Store, backend, lock, descriptor,
+/// standing value, or session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum C2WriterSessionRefusalV1 {
+    LegacyBeginOnGovernedRoot,
+    C2RootMarkerMissing,
+    ClosedBackendMismatch,
+    OccurrenceMismatch,
+    PhysicalGenerationMismatch,
+    ProjectionCandidateSetMalformed,
+    SessionIsNotC2Ordinary,
+}
+
+/// Exact success classifications for the five V2 rows assigned to this
+/// module.  These are inert audit witnesses, not additional constructors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum C2WriterSessionLawV1 {
+    ImmutableWUStoreWriterSessionCompleteCAPH23SoleWriterOwnerWriterVerified,
+    ImmutableSEAMLegacySessionLegacyBeginWriterSessionVerificationBrandVerified,
+}
+
+/// WU-10/N-60 row witness. It borrows the already constructed session and
+/// cannot be converted into Store authority.
+pub(crate) struct C2WriterSessionLawWitnessV1<'session, 'store> {
+    session: &'session StoreWriterSession<'store>,
+    law: C2WriterSessionLawV1,
+}
+
+/// N-15 association between one already closed backend and the sole ordinary
+/// session that retains that same backend borrow.
+pub(crate) struct ClosedBackendOrdinarySessionAssociationV1<'session, 'store> {
+    backend: &'session ClosedC2StoreBackendV1<'store>,
+    session: &'session StoreWriterSession<'store>,
+}
+
+/// SEAM-04 proof that the Gen4 occurrence coordinate and C2 physical Store-
+/// generation coordinate occupy different nominal types and different
+/// session fields.
+pub(crate) struct C2WriterIdentitySplitWitnessV1<'session> {
+    occurrence: &'session StoreOccurrenceIdentityV1,
+    physical_generation: &'session PhysicalStoreGenerationIdentityV1,
+}
+
+/// SEAM-05 records one observed hard refusal of the legacy constructor.  It
+/// contains only inert scalar state.
+pub(crate) struct C2LegacySessionRefusalWitnessV1 {
+    law: C2WriterSessionLawV1,
+}
+
+/// Closed input to the C2 writer-fence setter.
+///
+/// Construction requires one already verified, predecessor-bound G refusal
+/// and the retained generation lock for the same occurrence and physical
+/// generation.  It is deliberately neither cloneable nor serializable and
+/// contains no Boolean authority shortcut.
+pub(crate) struct VerifiedGReconciliationFenceV1 {
+    lock_inode: LockInodeKey,
+}
+
+/// Derive one process fence command from exact verified G correspondence.
+pub(crate) fn verify_c2_g_reconciliation_fence_v1(
+    refusal: &C2PostCompletionGRefusalV1,
+    lock: &C2StoreGenerationLockV1,
+) -> Result<VerifiedGReconciliationFenceV1, C2WriterSessionRefusalV1> {
+    verify_n_45a_post_completion_candidate_g_refusal(refusal)
+        .map_err(|_| C2WriterSessionRefusalV1::ProjectionCandidateSetMalformed)?;
+    if refusal.record().occurrence_id() != lock.carrier().occurrence_id
+        || refusal.record().physical_store_generation_identity()
+            != &lock.carrier().physical_store_generation_identity
+    {
+        return Err(C2WriterSessionRefusalV1::PhysicalGenerationMismatch);
+    }
+    Ok(VerifiedGReconciliationFenceV1 {
+        lock_inode: lock.inode_key(),
+    })
+}
+
+/// The sole production C2 fence setter.  The verified input fixes the exact
+/// retained lock inode; callers cannot select a path, inode, or Boolean fence
+/// state independently of the verified G/reconciliation result.
+pub(crate) fn set_c2_writer_fence_from_verified_g_reconciliation_v1(
+    fence: &VerifiedGReconciliationFenceV1,
+) {
+    c2_inode_lock_state(fence.lock_inode)
+        .fenced
+        .store(true, Ordering::SeqCst);
+}
+
+fn gen4_path_lock_state(key: &Path) -> &'static PathLockState {
+    let mut registry = GEN4_PATH_WRITER_LOCKS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     registry.entry(key.to_path_buf()).or_insert_with(|| {
+        Box::leak(Box::new(PathLockState {
+            write_mutex: Mutex::new(()),
+            fenced: AtomicBool::new(false),
+        }))
+    })
+}
+
+fn c2_inode_lock_state(key: LockInodeKey) -> &'static PathLockState {
+    let mut registry = C2_LOCK_INODE_WRITER_LOCKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *registry.entry(key).or_insert_with(|| {
         Box::leak(Box::new(PathLockState {
             write_mutex: Mutex::new(()),
             fenced: AtomicBool::new(false),
@@ -86,13 +225,98 @@ fn canonicalize_for_writer_key(path: &Path) -> PathBuf {
     }
 }
 
+/// Return whether durable state is already inside the C2 governance boundary.
+///
+/// A projection row is sufficient to fence the legacy path but is never used
+/// to mint C2 standing.  Likewise, any fixed C2 carrier is sufficient to
+/// refuse legacy mutation during an incomplete installation.  The sidecar
+/// check is refusal-only: a path or file name cannot construct a C2 session.
+fn has_c2_governance_marker(store: &Store) -> Result<bool, StoreError> {
+    let projection_table: i64 = store.connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_schema \
+         WHERE type = 'table' AND name = 'c2_installation_projection'",
+        [],
+        |row| row.get(0),
+    )?;
+    if projection_table == 1 {
+        let projected: i64 = store.connection.query_row(
+            "SELECT COUNT(*) FROM c2_installation_projection",
+            [],
+            |row| row.get(0),
+        )?;
+        if projected != 0 {
+            return Ok(true);
+        }
+    }
+
+    let Some(database_path) = store.path.as_deref() else {
+        return Ok(false);
+    };
+    let Some(root) = database_path.parent() else {
+        return Ok(false);
+    };
+    Ok([
+        C2_LOCK_FILE_V1,
+        C2_BOOTSTRAP_EXTENT_V1,
+        C2_GLOBAL_REFUSAL_EXTENT_V1,
+    ]
+    .into_iter()
+    .any(|name| root.join(name).exists()))
+}
+
+fn refuse_legacy_begin_for_c2(store: &Store) -> Result<(), StoreError> {
+    if has_c2_governance_marker(store)? {
+        Err(StoreError::Invariant(LEGACY_C2_SESSION_REFUSAL.into()))
+    } else {
+        Ok(())
+    }
+}
+
+/// Check the rebuildable SQLite projection only for contradiction with the
+/// authoritative inputs. Absence is admissible because this projection is
+/// disposable; duplicates or a present mismatch refuse.
+fn verify_c2_projection_if_present(
+    store: &Store,
+    occurrence: &StoreOccurrenceIdentityV1,
+    physical_generation: &PhysicalStoreGenerationIdentityV1,
+) -> Result<(), C2WriterSessionRefusalV1> {
+    let mut statement = store
+        .connection
+        .prepare(
+            "SELECT occurrence_id, physical_store_generation_identity \
+             FROM c2_installation_projection \
+             ORDER BY projection_identity LIMIT 2",
+        )
+        .map_err(|_| C2WriterSessionRefusalV1::ProjectionCandidateSetMalformed)?;
+    let candidates = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|_| C2WriterSessionRefusalV1::ProjectionCandidateSetMalformed)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| C2WriterSessionRefusalV1::ProjectionCandidateSetMalformed)?;
+    match candidates.as_slice() {
+        [] => Ok(()),
+        [(projected_occurrence, _)] if projected_occurrence != occurrence.as_str() => {
+            Err(C2WriterSessionRefusalV1::OccurrenceMismatch)
+        }
+        [(_, projected_generation)]
+            if projected_generation != physical_generation.digest().as_str() =>
+        {
+            Err(C2WriterSessionRefusalV1::PhysicalGenerationMismatch)
+        }
+        [(_, _)] => Ok(()),
+        _ => Err(C2WriterSessionRefusalV1::ProjectionCandidateSetMalformed),
+    }
+}
+
 /// Acquire the per-path process write lock for the maintenance class
 /// (schema migrations and backup/preservation paths), which operate on
 /// closed paths under their own exclusive recovery transactions. Keys
 /// are deduplicated and acquired in sorted order.
 pub(crate) fn acquire_maintenance_locks(
     paths: &[&Path],
-) -> Result<Vec<MutexGuard<'static, ()>>, StoreError> {
+) -> Result<Vec<MaintenanceLockGuard>, StoreError> {
     let mut keys = paths
         .iter()
         .map(|path| writer_key_for_path(Some(path)))
@@ -101,16 +325,27 @@ pub(crate) fn acquire_maintenance_locks(
     keys.dedup();
     let mut guards = Vec::with_capacity(keys.len());
     for key in keys {
-        let state = path_lock_state(&key);
+        let state = gen4_path_lock_state(&key);
         if state.fenced.load(Ordering::SeqCst) {
             return Err(StoreError::WriteFenced(key.display().to_string()));
         }
-        guards.push(
-            state
-                .write_mutex
-                .try_lock()
-                .map_err(|_| StoreError::WriterSessionUnavailable(key.display().to_string()))?,
-        );
+        let process = state
+            .write_mutex
+            .try_lock()
+            .map_err(|_| StoreError::WriterSessionUnavailable(key.display().to_string()))?;
+        let mut existing = key.as_path();
+        while !existing.exists() {
+            existing = existing
+                .parent()
+                .ok_or_else(|| StoreError::WriterSessionUnavailable(key.display().to_string()))?;
+        }
+        let flock_file = File::open(existing)?;
+        flock(flock_file.as_raw_fd(), FlockArg::LockExclusiveNonblock)
+            .map_err(|_| StoreError::WriterSessionUnavailable(key.display().to_string()))?;
+        guards.push(MaintenanceLockGuard {
+            _process: process,
+            flock_file,
+        });
     }
     Ok(guards)
 }
@@ -119,7 +354,9 @@ pub(crate) fn acquire_maintenance_locks(
 /// construction and every session method refuses.
 #[cfg(test)]
 pub(crate) fn fence_store_writes_for_test(key: &Path) {
-    path_lock_state(key).fenced.store(true, Ordering::SeqCst);
+    gen4_path_lock_state(key)
+        .fenced
+        .store(true, Ordering::SeqCst);
 }
 
 /// Unforgeable writer capability for exactly one store.
@@ -134,12 +371,23 @@ pub struct StoreWriterSession<'store, Brand = ()> {
     state: &'static PathLockState,
     _guard: MutexGuard<'static, ()>,
     store_key: PathBuf,
+    occurrence: Option<StoreOccurrenceIdentityV1>,
+    physical_generation: Option<PhysicalStoreGenerationIdentityV1>,
+    closed_c2_backend: Option<&'store ClosedC2StoreBackendV1<'store>>,
     genesis: Option<String>,
     _brand: PhantomData<fn(Brand) -> Brand>,
 }
 
 impl<'store> StoreWriterSession<'store, ()> {
     pub(crate) fn begin(store: &'store mut Store) -> Result<Self, StoreError> {
+        refuse_legacy_begin_for_c2(store)?;
+        let schema_version = pragma_i64(&store.connection, "user_version")?;
+        if schema_version != crate::SCHEMA_VERSION {
+            return Err(StoreError::SchemaVersionMismatch {
+                found: schema_version,
+                supported: crate::SCHEMA_VERSION,
+            });
+        }
         Self::begin_with_brand(store, true, true)
     }
 }
@@ -149,6 +397,10 @@ impl<'store, 'id> StoreWriterSession<'store, VerificationBrand<'id>> {
         store: &'store mut Store,
         _brand: &VerificationBrand<'id>,
     ) -> Result<Self, StoreError> {
+        // This Gen4 authority-event path remains valid only before C2
+        // governance. Exact C2 transition effects use their closed branded
+        // coordinator/append consumer instead of this compatibility surface.
+        refuse_legacy_begin_for_c2(store)?;
         // Authority operations derive and recheck their exact occurrence or
         // zero/multiple cardinality inside their own Store transaction.  The
         // session therefore must not preselect a genesis identity.
@@ -240,7 +492,7 @@ impl<'store, Brand> StoreWriterSession<'store, Brand> {
         bind_unambiguous_genesis: bool,
     ) -> Result<Self, StoreError> {
         store.ensure_runtime_authority_not_frozen()?;
-        let state = path_lock_state(&store.writer_key);
+        let state = gen4_path_lock_state(&store.writer_key);
         if state.fenced.load(Ordering::SeqCst) {
             return Err(StoreError::WriteFenced(
                 store.writer_key.display().to_string(),
@@ -254,18 +506,26 @@ impl<'store, Brand> StoreWriterSession<'store, Brand> {
         } else {
             None
         };
-        if prepare_persistent_writer {
-            store.prepare_writer_connection()?;
-        }
         let store_key = store.writer_key.clone();
-        Ok(Self {
+        let session = Self {
             store,
             state,
             _guard: guard,
             store_key,
+            occurrence: None,
+            physical_generation: None,
+            closed_c2_backend: None,
             genesis,
             _brand: PhantomData,
-        })
+        };
+        // Connection preparation occurs only after the unforgeable session
+        // value exists and owns the process mutex. This preserves Gen4
+        // behavior while enforcing the CAP-H23 constructor-before-effect
+        // ordering.
+        if prepare_persistent_writer {
+            session.store.prepare_writer_connection()?;
+        }
+        Ok(session)
     }
 
     /// The exact store identity this session is bound to.
@@ -293,6 +553,237 @@ impl<'store, Brand> StoreWriterSession<'store, Brand> {
     pub fn finish(self) -> Result<(), StoreError> {
         drop(self);
         Ok(())
+    }
+}
+
+fn c2_session_store_error(refusal: C2WriterSessionRefusalV1) -> StoreError {
+    StoreError::Invariant(format!("C2 writer-session refused: {refusal:?}"))
+}
+
+fn verify_live_c2_ordinary_session(
+    session: &StoreWriterSession<'_>,
+) -> Result<(), C2WriterSessionRefusalV1> {
+    let backend = session
+        .closed_c2_backend
+        .ok_or(C2WriterSessionRefusalV1::SessionIsNotC2Ordinary)?;
+    verify_rr_06_sole_post_receipt_constructor(backend)
+        .map_err(|_| C2WriterSessionRefusalV1::ClosedBackendMismatch)?;
+    let occurrence = session
+        .occurrence
+        .as_ref()
+        .ok_or(C2WriterSessionRefusalV1::OccurrenceMismatch)?;
+    let _physical_generation = session
+        .physical_generation
+        .as_ref()
+        .ok_or(C2WriterSessionRefusalV1::PhysicalGenerationMismatch)?;
+    if session.genesis.as_deref() != Some(occurrence.as_str()) {
+        return Err(C2WriterSessionRefusalV1::OccurrenceMismatch);
+    }
+    if session.state.fenced.load(Ordering::SeqCst) {
+        return Err(C2WriterSessionRefusalV1::SessionIsNotC2Ordinary);
+    }
+    Ok(())
+}
+
+/// N-60 is the sole ordinary C2 writer-session constructor in this module.
+///
+/// Its caller must already have performed the complete P-06 resolution and
+/// backend close. This function rechecks the live closed backend, the exact
+/// Store occurrence, a present projection for contradiction, the C2 root
+/// marker, the process mutex, and the fence. The retained backend in turn
+/// retains the verified exclusive flock. No special brand or generic signer
+/// surface is created.
+pub(crate) fn construct_n_60_ordinary_session_requires_closed_state_process_mutex<'store>(
+    store: &'store mut Store,
+    closed_backend: &'store ClosedC2StoreBackendV1<'store>,
+    occurrence: &StoreOccurrenceIdentityV1,
+    physical_generation: &PhysicalStoreGenerationIdentityV1,
+) -> Result<StoreWriterSession<'store>, StoreError> {
+    store.ensure_runtime_authority_not_frozen()?;
+    if !has_c2_governance_marker(store)? {
+        return Err(c2_session_store_error(
+            C2WriterSessionRefusalV1::C2RootMarkerMissing,
+        ));
+    }
+    verify_rr_06_sole_post_receipt_constructor(closed_backend)
+        .map_err(|_| c2_session_store_error(C2WriterSessionRefusalV1::ClosedBackendMismatch))?;
+    let genesis = store.genesis_for_writer_session()?;
+    if genesis.as_deref() != Some(occurrence.as_str()) {
+        return Err(c2_session_store_error(
+            C2WriterSessionRefusalV1::OccurrenceMismatch,
+        ));
+    }
+    verify_c2_projection_if_present(store, occurrence, physical_generation)
+        .map_err(c2_session_store_error)?;
+
+    let inode_key = closed_backend_lock_inode_key_v1(closed_backend)
+        .map_err(|_| c2_session_store_error(C2WriterSessionRefusalV1::ClosedBackendMismatch))?;
+    let state = c2_inode_lock_state(inode_key);
+    if state.fenced.load(Ordering::SeqCst) {
+        return Err(StoreError::WriteFenced(
+            store.writer_key.display().to_string(),
+        ));
+    }
+    let guard = state.write_mutex.try_lock().map_err(|_| {
+        StoreError::WriterSessionUnavailable(store.writer_key.display().to_string())
+    })?;
+    let store_key = store.writer_key.clone();
+    let session = StoreWriterSession {
+        store,
+        state,
+        _guard: guard,
+        store_key,
+        occurrence: Some(occurrence.clone()),
+        physical_generation: Some(physical_generation.clone()),
+        closed_c2_backend: Some(closed_backend),
+        genesis,
+        _brand: PhantomData,
+    };
+    // This runs only after the session capability exists and retains both the
+    // process mutex and closed-backend/exclusive-flock correspondence.
+    session.store.prepare_writer_connection()?;
+    Ok(session)
+}
+
+/// N-60 exact live verifier. It never constructs or upgrades authority.
+pub(crate) fn verify_n_60_ordinary_session_requires_closed_state_process_mutex(
+    session: &StoreWriterSession<'_>,
+) -> Result<(), C2WriterSessionRefusalV1> {
+    verify_live_c2_ordinary_session(session)
+}
+
+/// WU-10 named CAP-H23 census witness. This is deliberately not a second
+/// ordinary-session constructor.
+pub(crate) fn construct_wu_10_immutable_wu_storewritersession_complete_cap_h23_sole<
+    'session,
+    'store,
+>(
+    session: &'session StoreWriterSession<'store>,
+) -> Result<C2WriterSessionLawWitnessV1<'session, 'store>, C2WriterSessionRefusalV1> {
+    verify_live_c2_ordinary_session(session)?;
+    Ok(C2WriterSessionLawWitnessV1 {
+        session,
+        law: C2WriterSessionLawV1::
+            ImmutableWUStoreWriterSessionCompleteCAPH23SoleWriterOwnerWriterVerified,
+    })
+}
+
+/// WU-10 confirms the inert census witness still borrows one live C2 ordinary
+/// session and nothing else.
+pub(crate) fn verify_wu_10_immutable_wu_storewritersession_complete_cap_h23_sole(
+    witness: &C2WriterSessionLawWitnessV1<'_, '_>,
+) -> Result<(), C2WriterSessionRefusalV1> {
+    if witness.law
+        != C2WriterSessionLawV1::
+            ImmutableWUStoreWriterSessionCompleteCAPH23SoleWriterOwnerWriterVerified
+    {
+        return Err(C2WriterSessionRefusalV1::SessionIsNotC2Ordinary);
+    }
+    verify_live_c2_ordinary_session(witness.session)
+}
+
+/// N-15 associates the session only with the exact backend borrow it retains.
+pub(crate) fn construct_n_15_closed_backend_ordinary_session_association<'session, 'store>(
+    backend: &'session ClosedC2StoreBackendV1<'store>,
+    session: &'session StoreWriterSession<'store>,
+) -> Result<ClosedBackendOrdinarySessionAssociationV1<'session, 'store>, C2WriterSessionRefusalV1> {
+    verify_live_c2_ordinary_session(session)?;
+    let retained = session
+        .closed_c2_backend
+        .ok_or(C2WriterSessionRefusalV1::SessionIsNotC2Ordinary)?;
+    if !std::ptr::eq(retained, backend) {
+        return Err(C2WriterSessionRefusalV1::ClosedBackendMismatch);
+    }
+    Ok(ClosedBackendOrdinarySessionAssociationV1 { backend, session })
+}
+
+/// N-15 exact close-before-session association verifier.
+pub(crate) fn verify_n_15_close_then_begin_session_order(
+    association: &ClosedBackendOrdinarySessionAssociationV1<'_, '_>,
+) -> Result<(), C2WriterSessionRefusalV1> {
+    verify_live_c2_ordinary_session(association.session)?;
+    match association.session.closed_c2_backend {
+        Some(retained) if std::ptr::eq(retained, association.backend) => Ok(()),
+        _ => Err(C2WriterSessionRefusalV1::ClosedBackendMismatch),
+    }
+}
+
+/// SEAM-04 produces a nominally typed occurrence/physical-generation split
+/// from one already verified C2 session.
+pub(crate) fn construct_seam_04_immutable_seam_identity_split_existing_writer_session<
+    'borrow,
+    'store,
+>(
+    session: &'borrow StoreWriterSession<'store>,
+) -> Result<C2WriterIdentitySplitWitnessV1<'borrow>, C2WriterSessionRefusalV1> {
+    verify_live_c2_ordinary_session(session)?;
+    Ok(C2WriterIdentitySplitWitnessV1 {
+        occurrence: session
+            .occurrence
+            .as_ref()
+            .ok_or(C2WriterSessionRefusalV1::OccurrenceMismatch)?,
+        physical_generation: session
+            .physical_generation
+            .as_ref()
+            .ok_or(C2WriterSessionRefusalV1::PhysicalGenerationMismatch)?,
+    })
+}
+
+/// SEAM-04 refuses either coordinate being absent or the legacy occurrence
+/// accessor being used as a physical-generation compatibility alias.
+pub(crate) fn verify_seam_04_immutable_seam_identity_split_existing_writer_session(
+    witness: &C2WriterIdentitySplitWitnessV1<'_>,
+) -> Result<(), C2WriterSessionRefusalV1> {
+    if witness.occurrence.as_str().is_empty() {
+        return Err(C2WriterSessionRefusalV1::OccurrenceMismatch);
+    }
+    if witness.physical_generation.digest().as_str().is_empty()
+        || witness.physical_generation.digest().as_str() == witness.occurrence.as_str()
+    {
+        return Err(C2WriterSessionRefusalV1::PhysicalGenerationMismatch);
+    }
+    Ok(())
+}
+
+/// SEAM-05 executes and records the required hard refusal of the legacy
+/// ordinary constructor for a C2-governed root. It cannot return a session.
+fn construct_seam_05_immutable_seam_legacy_session_legacy_begin_writer(
+    store: &mut Store,
+) -> Result<C2LegacySessionRefusalWitnessV1, C2WriterSessionRefusalV1> {
+    if !has_c2_governance_marker(store)
+        .map_err(|_| C2WriterSessionRefusalV1::ProjectionCandidateSetMalformed)?
+    {
+        return Err(C2WriterSessionRefusalV1::C2RootMarkerMissing);
+    }
+    // Exercise the sole Store-owned legacy factory.  Calling the private
+    // session constructor here would create a second constructor edge even
+    // though this route only expects refusal.
+    match store.begin_writer_session() {
+        Err(StoreError::Invariant(message)) if message == LEGACY_C2_SESSION_REFUSAL => {
+            Ok(C2LegacySessionRefusalWitnessV1 {
+                law: C2WriterSessionLawV1::
+                    ImmutableSEAMLegacySessionLegacyBeginWriterSessionVerificationBrandVerified,
+            })
+        }
+        Ok(session) => {
+            drop(session);
+            Err(C2WriterSessionRefusalV1::LegacyBeginOnGovernedRoot)
+        }
+        Err(_) => Err(C2WriterSessionRefusalV1::LegacyBeginOnGovernedRoot),
+    }
+}
+
+/// SEAM-05 exact inert-refusal verifier.
+pub(crate) fn verify_seam_05_immutable_seam_legacy_session_legacy_begin_writer(
+    witness: &C2LegacySessionRefusalWitnessV1,
+) -> Result<(), C2WriterSessionRefusalV1> {
+    if witness.law
+        == C2WriterSessionLawV1::
+            ImmutableSEAMLegacySessionLegacyBeginWriterSessionVerificationBrandVerified
+    {
+        Ok(())
+    } else {
+        Err(C2WriterSessionRefusalV1::LegacyBeginOnGovernedRoot)
     }
 }
 
@@ -650,10 +1141,30 @@ impl StoreWriterSession<'_, ()> {
 }
 
 impl StoreWriterSession<'_> {
-    /// The sole genesis identity this session is bound to, when present.
+    /// The sole Gen4 genesis/occurrence identity this session is bound to,
+    /// when present.
+    ///
+    /// This compatibility accessor is intentionally occurrence-only. It is
+    /// never a C2 physical Store-generation identity and cannot satisfy the
+    /// C2 physical-generation accessor below.
     #[must_use]
     pub fn bound_generation(&self) -> Option<&str> {
         self.genesis.as_deref()
+    }
+
+    /// Exact nominal Store occurrence for a C2 ordinary session.
+    #[must_use]
+    pub(crate) fn bound_c2_occurrence(&self) -> Option<&StoreOccurrenceIdentityV1> {
+        self.occurrence.as_ref()
+    }
+
+    /// Exact physical Store-generation identity for a C2 ordinary session.
+    /// This has no string or occurrence compatibility alias.
+    #[must_use]
+    pub(crate) fn bound_c2_physical_generation(
+        &self,
+    ) -> Option<&PhysicalStoreGenerationIdentityV1> {
+        self.physical_generation.as_ref()
     }
 
     /// Rebuild the runtime-record lookup projection.

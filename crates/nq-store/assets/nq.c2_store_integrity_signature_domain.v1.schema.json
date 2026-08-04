@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.c2_store_integrity_signature_domain.v1.json",
+  "title": "nq.c2_store_integrity_signature_domain.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "domains",
+    "unknown_domain_permitted",
+    "generic_domain_permitted"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.c2_store_integrity_signature_domain.v1"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "domains": {
+      "const": [
+        "generation_genesis",
+        "installation_intent",
+        "installation_receipt",
+        "initial_pop",
+        "active_policy_continuity",
+        "rotation_continuity",
+        "successor_pop",
+        "global_refusal"
+      ]
+    },
+    "unknown_domain_permitted": {
+      "const": false
+    },
+    "generic_domain_permitted": {
+      "const": false
+    }
+  }
+}

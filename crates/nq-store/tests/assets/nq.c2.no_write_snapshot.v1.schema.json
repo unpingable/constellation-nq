@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.c2.no_write_snapshot.v1.json",
+  "title": "nq.c2.no_write_snapshot.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "snapshot_identity",
+    "case_id",
+    "store_root_identity",
+    "sqlite_identity",
+    "lock_identity",
+    "b_carrier_identity",
+    "g_carrier_identity",
+    "custody_tree_identity",
+    "before_identity",
+    "after_identity",
+    "write_count",
+    "cleanup_count",
+    "result"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.c2.no_write_snapshot.v1"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "snapshot_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "case_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:/@-]+$"
+    },
+    "store_root_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "sqlite_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "lock_identity": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "b_carrier_identity": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "g_carrier_identity": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "custody_tree_identity": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "before_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "after_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "write_count": {
+      "const": 0
+    },
+    "cleanup_count": {
+      "const": 0
+    },
+    "result": {
+      "const": "byte_identical_no_write"
+    }
+  }
+}

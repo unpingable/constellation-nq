@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.c2_store_integrity_revocation_effect_receipt.v1.json",
+  "title": "nq.c2_store_integrity_revocation_effect_receipt.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "effect_receipt_identity",
+    "revocation_judgment_identity",
+    "revocation_request_identity",
+    "pre_effect_frontier_identity",
+    "revocation_projection_identity",
+    "append_cut",
+    "candidate_set_identity",
+    "effect",
+    "signed"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.c2_store_integrity_revocation_effect_receipt.v1"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "effect_receipt_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "revocation_judgment_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "revocation_request_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "pre_effect_frontier_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "revocation_projection_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "append_cut": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "candidate_set_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "effect": {
+      "const": "revoked"
+    },
+    "signed": {
+      "const": false
+    }
+  }
+}

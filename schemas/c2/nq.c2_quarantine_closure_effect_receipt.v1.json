@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.c2_quarantine_closure_effect_receipt.v1.json",
+  "title": "nq.c2_quarantine_closure_effect_receipt.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "effect_receipt_identity",
+    "quarantine_closure_judgment_identity",
+    "closure_request_identity",
+    "restore_authorization_identity",
+    "pre_effect_quarantine_frontier_identity",
+    "quarantine_closure_projection_identity",
+    "append_cut",
+    "candidate_set_identity",
+    "effect",
+    "signed"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.c2_quarantine_closure_effect_receipt.v1"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "effect_receipt_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "quarantine_closure_judgment_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "closure_request_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "restore_authorization_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "pre_effect_quarantine_frontier_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "quarantine_closure_projection_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "append_cut": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "candidate_set_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "effect": {
+      "const": "closed"
+    },
+    "signed": {
+      "const": false
+    }
+  }
+}
