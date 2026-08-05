@@ -42,6 +42,8 @@ pub(crate) struct ResolutionFields {
     pub(crate) trust_anchor_id: Sha256Digest,
     pub(crate) genesis_operator_authority_digest: Sha256Digest,
     pub(crate) genesis_operator_key_generation: u64,
+    pub(crate) terminal_operator_authority: ResolvedTerminalOperatorAuthority,
+    pub(crate) terminal_authority_event_digest: Sha256Digest,
     pub(crate) resident_identity: String,
     pub(crate) resident_generation: u64,
     pub(crate) host_role: String,
@@ -54,6 +56,80 @@ pub(crate) struct ResolutionFields {
     pub(crate) genesis_context: ActivationContext,
     pub(crate) migration_receipt_digest: Option<Sha256Digest>,
     pub(crate) migration_receipt_canonical_bytes: Option<Vec<u8>>,
+}
+
+/// Exact terminal A1 selected by the already verified complete adjacency chain.
+///
+/// This read-only projection is not standing and has no authority-bearing
+/// constructor. It exists so a Store-owned same-snapshot adapter can consume
+/// the resolver's exact terminal result without parsing or selecting again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedTerminalOperatorAuthority {
+    pub(crate) record_digest: Sha256Digest,
+    pub(crate) key_generation: u64,
+    pub(crate) verification_key: [u8; 32],
+    pub(crate) operator_principal: String,
+    pub(crate) domain: String,
+    pub(crate) permitted_scope: String,
+    pub(crate) policy_version: u64,
+    pub(crate) policy_floor: u64,
+    pub(crate) cut: AuthorityCut,
+}
+
+impl ResolvedTerminalOperatorAuthority {
+    /// Returns the canonical record digest of the resolved terminal A1.
+    #[must_use]
+    pub const fn record_digest(&self) -> &Sha256Digest {
+        &self.record_digest
+    }
+
+    /// Returns the resolved terminal A1 key generation.
+    #[must_use]
+    pub const fn key_generation(&self) -> u64 {
+        self.key_generation
+    }
+
+    /// Returns the resolved terminal A1 Ed25519 verification key.
+    #[must_use]
+    pub const fn verification_key(&self) -> &[u8; 32] {
+        &self.verification_key
+    }
+
+    /// Returns the operator principal named by the terminal A1 record.
+    #[must_use]
+    pub fn operator_principal(&self) -> &str {
+        &self.operator_principal
+    }
+
+    /// Returns the authority domain named by the terminal A1 record.
+    #[must_use]
+    pub fn domain(&self) -> &str {
+        &self.domain
+    }
+
+    /// Returns the exact scope permitted by the terminal A1 record.
+    #[must_use]
+    pub fn permitted_scope(&self) -> &str {
+        &self.permitted_scope
+    }
+
+    /// Returns the terminal A1 policy version.
+    #[must_use]
+    pub const fn policy_version(&self) -> u64 {
+        self.policy_version
+    }
+
+    /// Returns the terminal A1 policy floor.
+    #[must_use]
+    pub const fn policy_floor(&self) -> u64 {
+        self.policy_floor
+    }
+
+    /// Returns the signed cut carried by the terminal A1 record.
+    #[must_use]
+    pub const fn cut(&self) -> &AuthorityCut {
+        &self.cut
+    }
 }
 
 /// Exact unverified inputs retained solely so a Store can rerun the bounded
@@ -329,6 +405,8 @@ struct SnapshotFields {
     trust_anchor_id: Sha256Digest,
     genesis_operator_authority_digest: Sha256Digest,
     genesis_operator_key_generation: u64,
+    terminal_operator_authority: ResolvedTerminalOperatorAuthority,
+    terminal_authority_event_digest: Sha256Digest,
     resident_identity: String,
     resident_generation: u64,
     host_role: String,
@@ -351,6 +429,8 @@ impl From<ResolutionFields> for SnapshotFields {
             trust_anchor_id: fields.trust_anchor_id,
             genesis_operator_authority_digest: fields.genesis_operator_authority_digest,
             genesis_operator_key_generation: fields.genesis_operator_key_generation,
+            terminal_operator_authority: fields.terminal_operator_authority,
+            terminal_authority_event_digest: fields.terminal_authority_event_digest,
             resident_identity: fields.resident_identity,
             resident_generation: fields.resident_generation,
             host_role: fields.host_role,
@@ -578,6 +658,16 @@ macro_rules! snapshot_getters {
         #[must_use]
         pub const fn genesis_operator_key_generation(&self) -> u64 {
             self.fields.genesis_operator_key_generation
+        }
+        /// Returns the exact terminal A1 selected by verified adjacency.
+        #[must_use]
+        pub const fn terminal_operator_authority(&self) -> &ResolvedTerminalOperatorAuthority {
+            &self.fields.terminal_operator_authority
+        }
+        /// Returns the terminal event of the complete authority snapshot.
+        #[must_use]
+        pub const fn terminal_authority_event_digest(&self) -> &Sha256Digest {
+            &self.fields.terminal_authority_event_digest
         }
         /// Returns the exact enrolled resident identity.
         #[must_use]

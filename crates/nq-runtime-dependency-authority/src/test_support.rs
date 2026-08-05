@@ -2093,6 +2093,63 @@ mod tests {
     }
 
     #[test]
+    fn restart_snapshot_projects_the_exact_terminal_a1_from_the_verified_chain() {
+        let mut fixture = RawAuthorityFixture::fresh_genesis();
+        let genesis = restart(&fixture).unwrap();
+        assert_eq!(
+            genesis.terminal_operator_authority().record_digest(),
+            &fixture.current_a1_digest
+        );
+        assert_eq!(genesis.terminal_operator_authority().key_generation(), 1);
+        assert_eq!(
+            genesis.terminal_operator_authority().verification_key(),
+            fixture.current_signing_key.verifying_key().as_bytes()
+        );
+        assert_eq!(
+            genesis.terminal_operator_authority().operator_principal(),
+            "operator/principal-a"
+        );
+        assert_eq!(genesis.terminal_operator_authority().policy_version(), 1);
+        assert_eq!(genesis.terminal_operator_authority().policy_floor(), 1);
+        assert_eq!(
+            genesis.terminal_authority_event_digest(),
+            &fixture.current_a2_digest
+        );
+
+        fixture.append_operator_rotation();
+        let rotated = restart(&fixture).unwrap();
+        assert_eq!(
+            rotated.terminal_operator_authority().record_digest(),
+            &fixture.current_a1_digest
+        );
+        assert_eq!(rotated.terminal_operator_authority().key_generation(), 2);
+        assert_eq!(
+            rotated.terminal_operator_authority().verification_key(),
+            fixture.current_signing_key.verifying_key().as_bytes()
+        );
+        assert_eq!(
+            rotated.terminal_operator_authority().cut().sequence(),
+            fixture.next_sequence - 1
+        );
+        assert_eq!(
+            rotated.terminal_authority_event_digest(),
+            &fixture.current_a1_digest
+        );
+
+        fixture.append_activation_successor();
+        let successor = restart(&fixture).unwrap();
+        assert_eq!(
+            successor.terminal_operator_authority().record_digest(),
+            &fixture.current_a1_digest
+        );
+        assert_eq!(successor.terminal_operator_authority().key_generation(), 2);
+        assert_eq!(
+            successor.terminal_authority_event_digest(),
+            &fixture.current_a2_digest
+        );
+    }
+
+    #[test]
     fn receipt_parser_refuses_noncanonical_and_arm_inconsistent_transcripts() {
         let fixture = RawAuthorityFixture::fresh_genesis();
         let transcript = with_verification_brand(|brand| {

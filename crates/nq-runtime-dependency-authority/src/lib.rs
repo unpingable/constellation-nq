@@ -18,10 +18,10 @@ mod resolution;
 pub mod test_support;
 
 pub use brand::{
-    ControllingActivationSnapshot, ResolvedControllingActivation, VerificationBrand,
-    VerifiedActivationRevocation, VerifiedMigrationClassification,
-    VerifiedOperatorAuthorityRotation, VerifiedResidentActivationSuccessor,
-    with_verification_brand,
+    ControllingActivationSnapshot, ResolvedControllingActivation,
+    ResolvedTerminalOperatorAuthority, VerificationBrand, VerifiedActivationRevocation,
+    VerifiedMigrationClassification, VerifiedOperatorAuthorityRotation,
+    VerifiedResidentActivationSuccessor, with_verification_brand,
 };
 pub use cardinality::{
     CARDINALITY_DISPOSITION_SOURCE_SCHEMA_VERSION, V7_CARDINALITY_DISPOSITION_SCHEMA,

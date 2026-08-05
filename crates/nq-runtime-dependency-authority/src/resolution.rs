@@ -15,7 +15,8 @@ use crate::{
     VerifiedMigrationClassification, VerifiedOperatorAuthorityRotation,
     VerifiedResidentActivationSuccessor,
     brand::{
-        MigrationClassificationFields, ResolutionFields, ReverificationContext, VerifiedEventFields,
+        MigrationClassificationFields, ResolutionFields, ResolvedTerminalOperatorAuthority,
+        ReverificationContext, VerifiedEventFields,
     },
     digest_genesis_authority_custody, digest_presented_authority_set,
     records::{AUTHORITY_POLICY_VERSION, MAX_IDENTITY_BYTES},
@@ -465,7 +466,7 @@ fn resolve_migration_classification_fields(
         .a2
         .get(&parsed.genesis_a2_digest)
         .ok_or(AuthorityError::ActivationGap)?;
-    let verifying_keys = verify_a1_chain(&parsed, expectations)?;
+    let (verifying_keys, _terminal_a1_digest) = verify_a1_chain(&parsed, expectations)?;
     verify_activations(&parsed, expectations, &verifying_keys)?;
     verify_revocations(&parsed, expectations, &verifying_keys)?;
     let activation_tips = verify_activation_chain(&parsed)?;
@@ -632,7 +633,14 @@ fn resolve_fields(
         .get(&parsed.genesis_a2_digest)
         .ok_or(AuthorityError::ActivationGap)?;
 
-    let verifying_keys = verify_a1_chain(&parsed, expectations)?;
+    let (verifying_keys, terminal_a1_digest) = verify_a1_chain(&parsed, expectations)?;
+    let terminal_a1 = parsed
+        .a1
+        .get(&terminal_a1_digest)
+        .ok_or(AuthorityError::A1Gap)?;
+    let terminal_a1_key = verifying_keys
+        .get(&terminal_a1_digest)
+        .ok_or(AuthorityError::A1Gap)?;
     verify_activations(&parsed, expectations, &verifying_keys)?;
     verify_revocations(&parsed, expectations, &verifying_keys)?;
     let activation_tips = verify_activation_chain(&parsed)?;
@@ -712,6 +720,18 @@ fn resolve_fields(
         trust_anchor_id: genesis_a2.trust_anchor_id().clone(),
         genesis_operator_authority_digest: genesis_a1.record_digest().clone(),
         genesis_operator_key_generation: genesis_a1.key_generation(),
+        terminal_operator_authority: ResolvedTerminalOperatorAuthority {
+            record_digest: terminal_a1.record_digest().clone(),
+            key_generation: terminal_a1.key_generation(),
+            verification_key: terminal_a1_key.to_bytes(),
+            operator_principal: terminal_a1.operator_principal().to_owned(),
+            domain: terminal_a1.domain().to_owned(),
+            permitted_scope: terminal_a1.permitted_scope().to_owned(),
+            policy_version: terminal_a1.policy_version(),
+            policy_floor: terminal_a1.policy_floor(),
+            cut: terminal_a1.cut().clone(),
+        },
+        terminal_authority_event_digest: terminal_event_digest.clone(),
         resident_identity: tip.resident_identity().to_owned(),
         resident_generation: tip.resident_generation(),
         host_role: tip.host_role().to_owned(),
@@ -820,7 +840,7 @@ fn parse_authority(
 fn verify_a1_chain(
     parsed: &ParsedAuthority,
     expectations: &ActivationExpectations,
-) -> Result<BTreeMap<Sha256Digest, VerifyingKey>, AuthorityError> {
+) -> Result<(BTreeMap<Sha256Digest, VerifyingKey>, Sha256Digest), AuthorityError> {
     let genesis = parsed
         .a1
         .get(&parsed.genesis_a1_digest)
@@ -892,8 +912,9 @@ fn verify_a1_chain(
             )
         })
         .collect();
-    walk_linked_chain(&nodes, &parsed.genesis_a1_digest, ChainKind::A1)?;
-    Ok(keys)
+    let order = walk_linked_chain(&nodes, &parsed.genesis_a1_digest, ChainKind::A1)?;
+    let terminal = order.last().cloned().ok_or(AuthorityError::A1Gap)?;
+    Ok((keys, terminal))
 }
 
 fn validate_a1_common(
