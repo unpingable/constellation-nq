@@ -74,6 +74,41 @@ pub struct C2BootstrapSessionV1<Mode> {
     brand: C2BootstrapBrandV1<Mode>,
 }
 
+/// Linear authority to perform the pending schema-v9 projection step after
+/// the immutable installation prefix has been durably synchronized.
+///
+/// There is intentionally no production constructor yet.  The ordered,
+/// Store-owned installation driver must eventually construct this value only
+/// after retaining the exact root, permanent-lock, B/G carrier, signed-intent,
+/// and prefix-sync witnesses assigned to the `PersistPendingSqlProjection`
+/// step.  Until that driver exists, the schema mutator is unreachable from
+/// production code rather than being exposed through a path-only shortcut.
+#[derive(Debug)]
+pub(crate) struct C2PendingSqlProjectionPermitV1<Mode> {
+    verified_source: crate::schema::VerifiedC2SchemaV8ToV9Sequential,
+    _mode: PhantomData<Mode>,
+}
+
+impl<Mode> C2PendingSqlProjectionPermitV1<Mode> {
+    pub(crate) fn into_verified_source(self) -> crate::schema::VerifiedC2SchemaV8ToV9Sequential {
+        self.verified_source
+    }
+}
+
+/// Compile-confined positive control for the exact migration transaction.
+/// It is not an installation authority source and is absent from product
+/// builds; production construction remains intentionally unavailable until
+/// the ordered Store-owned driver is implemented.
+#[cfg(test)]
+pub(crate) fn c2_pending_sql_projection_permit_for_test<Mode>(
+    verified_source: crate::schema::VerifiedC2SchemaV8ToV9Sequential,
+) -> C2PendingSqlProjectionPermitV1<Mode> {
+    C2PendingSqlProjectionPermitV1 {
+        verified_source,
+        _mode: PhantomData,
+    }
+}
+
 /// Exact admissible installation-continuation prefix.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

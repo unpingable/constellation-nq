@@ -230,6 +230,7 @@ class SourceInventory:
 INSTALL = "crates/nq-store/src/store_generation/install.rs"
 POLICY = "crates/nq-store/src/store_generation/policy.rs"
 STORE_LIB = "crates/nq-store/src/lib.rs"
+HOST_RUNTIME = "crates/nq-host-role-runtime/src/runtime.rs"
 WRITER = "crates/nq-store/src/writer_session.rs"
 LOCK = "crates/nq-store/src/store_generation/lock.rs"
 RESTORE = "crates/nq-store/src/store_generation/restore.rs"
@@ -442,6 +443,12 @@ def _require_no_public_protected_surface(inventory: SourceInventory) -> None:
             SIGNER_RESTART,
             "struct",
             "ReconstructedTerminalSignerCapabilityV1",
+            {"pub(crate)"},
+        ),
+        (
+            INSTALL,
+            "struct",
+            "C2PendingSqlProjectionPermitV1",
             {"pub(crate)"},
         ),
     ):
@@ -936,7 +943,63 @@ def _verify_new_mutator_branding(inventory: SourceInventory) -> tuple[str, ...]:
         not violations,
         "C2 mutating primitive lacks an exact brand/session owner: " + ", ".join(violations),
     )
-    return (receipt, "c2-mutator-signatures=branded")
+    migration = _verify_schema_projection_gate(inventory)
+    return (receipt, "c2-mutator-signatures=branded", *migration)
+
+
+def _verify_schema_projection_gate(inventory: SourceInventory) -> tuple[str, ...]:
+    """Prove the incomplete schema mutator has no path-only product route."""
+
+    require(
+        not inventory.functions_named("migrate_c1_gen4_to_c2_schema_projection"),
+        "HostRoleRuntime still exposes the path-only schema-v9 projection bypass",
+    )
+    permit_visibility = _item_visibility(
+        inventory.source(INSTALL), "struct", "C2PendingSqlProjectionPermitV1"
+    )
+    require(
+        permit_visibility == "pub(crate)",
+        "pending SQL projection permit has an invalid visibility",
+    )
+    require(
+        not inventory.public_reexports({"C2PendingSqlProjectionPermitV1"}),
+        "pending SQL projection permit is publicly re-exported",
+    )
+    apply = inventory.require_function(STORE_LIB, "apply_c2_schema_v8_to_v9")
+    signature = compact_tokens(
+        apply.source.tokens[apply.start_token : apply.body_open_token]
+    )
+    require(
+        apply.visibility == "pub(crate)"
+        and "C2PendingSqlProjectionPermitV1<Mode>" in signature
+        and "VerifiedC2SchemaV8ToV9Sequential" not in signature,
+        "schema-v9 projection mutator does not consume only the installation permit",
+    )
+    require(
+        not apply.calls("acquire_maintenance_locks"),
+        "schema-v9 projection mutator still self-authorizes through generic maintenance locks",
+    )
+    callers = inventory.callers_of("apply_c2_schema_v8_to_v9")
+    require(
+        not callers,
+        "incomplete schema-v9 projection mutator has a production caller: "
+        + ", ".join(function.location for function in callers),
+    )
+    constructors = [
+        function
+        for function in inventory.functions
+        if _code_contains(function, "C2PendingSqlProjectionPermitV1{")
+    ]
+    require(
+        not constructors,
+        "pending SQL projection permit has a production constructor before the ordered driver: "
+        + ", ".join(function.location for function in constructors),
+    )
+    return (
+        "schema-v9-path-only-route=absent",
+        "schema-v9-permit-production-constructors=0",
+        "schema-v9-production-apply-callers=0",
+    )
 
 
 def _verify_lock_alias_law(inventory: SourceInventory) -> tuple[str, ...]:

@@ -508,7 +508,8 @@ pub const SCHEMA_VERSION: i64 = 9;
 ///
 /// The functions are crate-private because schema compatibility is not
 /// migration authority.  A Store-owned installation or migration route must
-/// first obtain the linear verified-source brand; no external caller can turn
+/// first obtain the linear verified-source brand and then earn the
+/// installation-owned pending-projection permit; no external caller can turn
 /// an arbitrary SQLite path into C2 standing, B/G authority, a physical Store
 /// generation, or a writer session.
 pub mod schema {
@@ -560,15 +561,16 @@ pub mod schema {
         })
     }
 
-    /// Consume one exact verified-source brand and atomically install the
-    /// complete schema-v9 projection.  The transaction creates only
-    /// rebuildable projection/index tables and cannot create B/G, a physical
-    /// generation, signer standing/currentness, or a writer session.
-    pub(crate) fn apply_c2_schema_v8_to_v9(
-        verified: VerifiedC2SchemaV8ToV9Sequential,
+    /// Consume one exact installation-owned pending-projection permit and
+    /// atomically install the complete schema-v9 projection.  The transaction
+    /// creates only rebuildable projection/index tables and cannot create B/G,
+    /// a physical generation, signer standing/currentness, or a writer
+    /// session.  The permit is deliberately not constructible in product code
+    /// until the ordered Store-owned installation driver exists.
+    pub(crate) fn apply_c2_schema_v8_to_v9<Mode>(
+        permit: crate::store_generation::install::C2PendingSqlProjectionPermitV1<Mode>,
     ) -> Result<C2SchemaV9Projection, StoreError> {
-        let _maintenance_guards =
-            writer_session::acquire_maintenance_locks(&[verified.path.as_path()])?;
+        let verified = permit.into_verified_source();
         let metadata = std::fs::metadata(&verified.path)?;
         if (metadata.dev(), metadata.ino()) != (verified.device, verified.inode) {
             return Err(StoreError::Invariant(
@@ -35134,8 +35136,11 @@ mod tests {
 
         let verified = schema::verify_c2_schema_v8_to_v9_sequential(&path)
             .expect("exact schema-v8 source verifies");
+        let permit = store_generation::install::c2_pending_sql_projection_permit_for_test::<
+            store_generation::install::FreshV1,
+        >(verified);
         assert_eq!(
-            schema::apply_c2_schema_v8_to_v9(verified).unwrap(),
+            schema::apply_c2_schema_v8_to_v9(permit).unwrap(),
             schema::C2SchemaV9Projection::SequentialV8ToV9
         );
         let store = Store::open(&path).expect("migrated schema-v9 Store reopens");
@@ -35197,21 +35202,6 @@ mod tests {
             Err(rusqlite::Error::SqliteFailure(_, Some(message)))
                 if message.contains("append-only")
         ));
-    }
-
-    #[test]
-    fn host_role_runtime_exposes_only_explicit_c2_projection_migration() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("qualified-gen4-v8.db");
-        initialize_exact_schema_v8_fixture(&path, SCHEMA_V8_ARTIFACT_DIGEST).unwrap();
-
-        assert!(matches!(
-            host_role_runtime::HostRoleRuntime::migrate_c1_gen4_to_c2_schema_projection(&path)
-                .unwrap(),
-            schema::C2SchemaV9Projection::SequentialV8ToV9
-        ));
-        let store = Store::open(&path).expect("explicitly migrated Store reopens as schema v9");
-        verify_empty_c2_schema_v9_projection(&store.connection).unwrap();
     }
 
     #[test]

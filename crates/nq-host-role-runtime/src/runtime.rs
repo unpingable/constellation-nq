@@ -349,25 +349,6 @@ impl HostRoleRuntime {
         )
     }
 
-    /// Apply the exact, projection-only C1 Gen4 schema-v8 to C2 schema-v9
-    /// migration after verifying the pinned source bytes and logical state.
-    ///
-    /// This is an explicit maintenance disposition, never an implicit side
-    /// effect of [`Self::open`].  It installs only rebuildable C2 projection
-    /// tables; it creates no Store generation, signer standing, B/G carrier,
-    /// writer session, or implementation/qualification status.
-    ///
-    /// # Errors
-    ///
-    /// Refuses any non-v8 source, path/inode race, logical-state race,
-    /// migration-byte mismatch, or non-exact resulting schema-v9 projection.
-    pub fn migrate_c1_gen4_to_c2_schema_projection(
-        path: impl AsRef<Path>,
-    ) -> Result<nq_store::schema::C2SchemaV9Projection> {
-        let verified = nq_store::schema::verify_c2_schema_v8_to_v9_sequential(path)?;
-        nq_store::schema::apply_c2_schema_v8_to_v9(verified).map_err(Into::into)
-    }
-
     /// Migrate one exact backup-preserved schema-v7 occurrence through the
     /// one-use accepted migration arm, then reopen it under the ordinary
     /// read-only restart law.

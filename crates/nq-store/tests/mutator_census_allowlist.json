@@ -342,13 +342,6 @@
     "as_path",
     "as_ref"
   ],
-  "additional_maintenance_lock_callers": [
-    {
-      "source": "crates/nq-store/src/lib.rs",
-      "owner": null,
-      "name": "apply_c2_schema_v8_to_v9"
-    }
-  ],
   "mutation_lexemes": {
     "calls": [
       "execute",

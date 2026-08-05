@@ -75,6 +75,56 @@ class CallGraphVerifierControls(unittest.TestCase):
         with self.assertRaises(MODULE.VerificationError):
             MODULE._require_calls_in_order(function, ("sign", "consume"))
 
+    def test_schema_projection_gate_accepts_only_an_unconstructed_permit(self) -> None:
+        inventory = MODULE.SourceInventory.from_texts(
+            {
+                MODULE.INSTALL: """
+                    pub(crate) struct C2PendingSqlProjectionPermitV1<Mode> {
+                        marker: core::marker::PhantomData<Mode>,
+                    }
+                """,
+                MODULE.STORE_LIB: """
+                    pub(crate) fn apply_c2_schema_v8_to_v9<Mode>(
+                        permit: crate::store_generation::install::C2PendingSqlProjectionPermitV1<Mode>,
+                    ) { consume(permit); }
+                """,
+                MODULE.HOST_RUNTIME: "fn ordinary_open() {}",
+            }
+        )
+        self.assertEqual(
+            MODULE._verify_schema_projection_gate(inventory),
+            (
+                "schema-v9-path-only-route=absent",
+                "schema-v9-permit-production-constructors=0",
+                "schema-v9-production-apply-callers=0",
+            ),
+        )
+
+    def test_schema_projection_gate_rejects_the_path_only_runtime_bypass(self) -> None:
+        inventory = MODULE.SourceInventory.from_texts(
+            {
+                MODULE.INSTALL: """
+                    pub(crate) struct C2PendingSqlProjectionPermitV1<Mode> {
+                        marker: core::marker::PhantomData<Mode>,
+                    }
+                """,
+                MODULE.STORE_LIB: """
+                    pub(crate) fn apply_c2_schema_v8_to_v9<Mode>(
+                        permit: crate::store_generation::install::C2PendingSqlProjectionPermitV1<Mode>,
+                    ) { consume(permit); }
+                """,
+                MODULE.HOST_RUNTIME: """
+                    pub fn migrate_c1_gen4_to_c2_schema_projection(path: &str) {
+                        consume(path);
+                    }
+                """,
+            }
+        )
+        with self.assertRaisesRegex(
+            MODULE.VerificationError, "path-only schema-v9 projection bypass"
+        ):
+            MODULE._verify_schema_projection_gate(inventory)
+
 
 if __name__ == "__main__":
     unittest.main()
