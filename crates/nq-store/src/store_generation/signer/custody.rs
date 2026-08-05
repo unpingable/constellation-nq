@@ -14,6 +14,7 @@ use std::sync::{Mutex, OnceLock};
 
 use ed25519_dalek::{Signer as _, SigningKey};
 use nix::fcntl::{Flock, FlockArg};
+use nq_helper_sandbox::enter_c2_secret_process_interval;
 use nq_protocol::{Sha256Digest, canonical_json_bytes, sha256_bytes};
 use rustix::fs::{
     AtFlags, Dir, Mode, OFlags, RenameFlags, StatxFlags, fchmod, fdatasync, flistxattr, fsync,
@@ -278,6 +279,8 @@ impl std::fmt::Debug for StoreIntegrityCustodyFileV1 {
 
 impl Drop for StoreIntegrityCustodyFileV1 {
     fn drop(&mut self) {
+        let zeroes = "0".repeat(self.0.private_seed.len());
+        self.0.private_seed.replace_range(.., &zeroes);
         self.0.private_seed.clear();
     }
 }
@@ -540,6 +543,11 @@ impl C2StoreIntegrityCustodian {
             },
         )?;
 
+        // From the first private random byte through carrier zeroization, no
+        // production helper process may be created from this address space.
+        let secret_process_guard =
+            enter_c2_secret_process_interval().map_err(|_| SignerRefusalV2::CustodyIo)?;
+
         let mut seed = [0_u8; 32];
         let mut nonce = [0_u8; 32];
         let mut process_epoch = [0_u8; 32];
@@ -647,7 +655,7 @@ impl C2StoreIntegrityCustodian {
         };
         carrier.payload_digest = StoreIntegrityCustodyFileV1::payload_digest(&carrier)?;
         let private_file = StoreIntegrityCustodyFileV1(carrier);
-        let bytes = private_file.encode()?;
+        let mut bytes = private_file.encode()?;
         temporary
             .write_all(&bytes)
             .and_then(|()| temporary.set_len(bytes.len() as u64))
@@ -676,7 +684,12 @@ impl C2StoreIntegrityCustodian {
         if final_facts != committed_facts || read_exact_bytes(&final_file)? != bytes {
             return Err(SignerRefusalV2::CustodyFileUnsafe);
         }
+        bytes.fill(0);
+        drop(private_file);
         drop(seed);
+        secret_process_guard
+            .verify_same_process()
+            .map_err(|_| SignerRefusalV2::CustodyIo)?;
         let custodian = Self {
             coordinates,
             proposal: proposal.clone(),
@@ -725,15 +738,23 @@ impl C2StoreIntegrityCustodian {
         {
             return Err(SignerRefusalV2::MessageFrontierMismatch);
         }
+        let secret_process_guard =
+            enter_c2_secret_process_interval().map_err(|_| SignerRefusalV2::CustodyIo)?;
         let (seed, retained_file, retained_facts) = self.load_seed_for_signing()?;
         let preimage = message.canonical_preimage();
         let payload_digest: SignerIdentityV1 = Sha256::digest(&preimage).into();
-        let signature = SigningKey::from_bytes(&seed.0).sign(&preimage).to_bytes();
+        let signing_key = SigningKey::from_bytes(&seed.0);
+        let signature = signing_key.sign(&preimage).to_bytes();
         let reopened = open_final_key(&self.scope_directory, &self.final_name)?;
         if object_facts(&reopened)? != retained_facts {
             return Err(SignerRefusalV2::CustodyFileUnsafe);
         }
         drop(retained_file);
+        drop(signing_key);
+        drop(seed);
+        secret_process_guard
+            .verify_same_process()
+            .map_err(|_| SignerRefusalV2::CustodyIo)?;
         Ok(CustodySignatureV1 {
             family: message.family(),
             signer_key_generation: self.proposal.key_generation_identity(),

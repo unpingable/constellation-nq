@@ -231,6 +231,8 @@ INSTALL = "crates/nq-store/src/store_generation/install.rs"
 POLICY = "crates/nq-store/src/store_generation/policy.rs"
 STORE_LIB = "crates/nq-store/src/lib.rs"
 HOST_RUNTIME = "crates/nq-host-role-runtime/src/runtime.rs"
+CORE_IDENTITY = "crates/nq-core/src/identity.rs"
+HELPER_SANDBOX = "crates/nq-helper-sandbox/src/lib.rs"
 WRITER = "crates/nq-store/src/writer_session.rs"
 LOCK = "crates/nq-store/src/store_generation/lock.rs"
 RESTORE = "crates/nq-store/src/store_generation/restore.rs"
@@ -509,6 +511,7 @@ def _require_no_public_protected_surface(inventory: SourceInventory) -> None:
 def _verify_private_signer_graph(inventory: SourceInventory) -> tuple[str, ...]:
     _require_no_public_protected_surface(inventory)
     pending_append = _verify_pending_signer_append_gate(inventory)
+    process_fence = _verify_signer_process_fence(inventory)
     custodian_sign = inventory.require_function(
         SIGNER_CUSTODY, "sign", "C2StoreIntegrityCustodian"
     )
@@ -632,6 +635,7 @@ def _verify_private_signer_graph(inventory: SourceInventory) -> tuple[str, ...]:
         "append-consumer=one",
         "message-family=MSG-01..MSG-16",
         *pending_append,
+        *process_fence,
     )
 
 
@@ -700,6 +704,90 @@ def _verify_pending_signer_append_gate(
         "signer-append-permit-production-constructors=0",
         "signed-frame-owned-payload=one",
         "durable-append-status=not-yet-wired",
+    )
+
+
+def _verify_signer_process_fence(inventory: SourceInventory) -> tuple[str, ...]:
+    """Prove every production helper spawn excludes live signer secrets."""
+
+    secret_interval = inventory.require_function(
+        HELPER_SANDBOX, "enter_c2_secret_process_interval"
+    )
+    spawn_interval = inventory.require_function(
+        HELPER_SANDBOX, "with_c2_process_spawn_fence"
+    )
+    for function in (secret_interval, spawn_interval):
+        require(
+            function.visibility == "pub" and _code_contains(function, "C2_PROCESS_FENCE.lock()"),
+            f"{function.location} does not acquire the shared process fence",
+        )
+
+    central_spawn = inventory.require_function(
+        CORE_IDENTITY, "spawn_with_inherited_descriptors"
+    )
+    central_code = compact_tokens(central_spawn.item_tokens, include_literals=False)
+    central_sequence = (
+        "with_c2_process_spawn_fence(",
+        "DESCRIPTOR_LAUNCH.lock()",
+        "make_inheritable(descriptors)",
+        "command.spawn()",
+        "restore_descriptor_flags(descriptors,&original_flags)",
+    )
+    central_positions = [central_code.find(value) for value in central_sequence]
+    require(
+        all(position >= 0 for position in central_positions)
+        and central_positions == sorted(central_positions),
+        "central helper spawn does not hold C2 fence before descriptor handoff/spawn/restore",
+    )
+    alternate_command_spawns = [
+        function.location
+        for function in inventory.functions
+        for call in function.calls("spawn")
+        if call.receiver == "command" and function is not central_spawn
+    ]
+    require(
+        not alternate_command_spawns,
+        "production Command spawn bypasses the C2 process fence: "
+        + ", ".join(alternate_command_spawns),
+    )
+
+    create = inventory.require_function(
+        SIGNER_CUSTODY, "create_below_root", "C2StoreIntegrityCustodian"
+    )
+    sign = inventory.require_function(SIGNER_CUSTODY, "sign", "C2StoreIntegrityCustodian")
+    for function, sequence in (
+        (
+            create,
+            (
+                "enter_c2_secret_process_interval()",
+                "getrandom::fill(&mutseed)",
+                "bytes.fill(0)",
+                "secret_process_guard.verify_same_process()",
+            ),
+        ),
+        (
+            sign,
+            (
+                "enter_c2_secret_process_interval()",
+                "self.load_seed_for_signing()",
+                "signing_key.sign(&preimage)",
+                "object_facts(&reopened)",
+                "drop(seed)",
+                "secret_process_guard.verify_same_process()",
+            ),
+        ),
+    ):
+        code = compact_tokens(function.item_tokens, include_literals=False)
+        positions = [code.find(value) for value in sequence]
+        require(
+            all(position >= 0 for position in positions)
+            and positions == sorted(positions),
+            f"{function.location} does not fence its complete live-secret interval",
+        )
+    return (
+        "signer-secret-fence=shared",
+        "production-command-spawn-bypasses=0",
+        "secret-process-recheck=after-zeroization",
     )
 
 

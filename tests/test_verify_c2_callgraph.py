@@ -196,6 +196,76 @@ class CallGraphVerifierControls(unittest.TestCase):
         ):
             MODULE._verify_pending_signer_append_gate(inventory)
 
+    @staticmethod
+    def _process_fence_inventory(*, alternate_spawn: bool = False):
+        alternate = (
+            "fn bypass(command: &mut Command) { let _ = command.spawn(); }"
+            if alternate_spawn
+            else ""
+        )
+        return MODULE.SourceInventory.from_texts(
+            {
+                MODULE.HELPER_SANDBOX: """
+                    static C2_PROCESS_FENCE: Mutex<()> = Mutex::new(());
+                    pub fn enter_c2_secret_process_interval() {
+                        let _guard = C2_PROCESS_FENCE.lock();
+                    }
+                    pub fn with_c2_process_spawn_fence(operation: impl FnOnce()) {
+                        let _guard = C2_PROCESS_FENCE.lock();
+                        operation();
+                    }
+                """,
+                MODULE.CORE_IDENTITY: f"""
+                    fn spawn_with_inherited_descriptors(command: &mut Command, descriptors: &[i32]) {{
+                        with_c2_process_spawn_fence(|| {{
+                            let _guard = DESCRIPTOR_LAUNCH.lock();
+                            let original_flags = make_inheritable(descriptors);
+                            let spawned = command.spawn();
+                            let restored = restore_descriptor_flags(descriptors, &original_flags);
+                        }});
+                    }}
+                    {alternate}
+                """,
+                MODULE.SIGNER_CUSTODY: """
+                    struct C2StoreIntegrityCustodian;
+                    impl C2StoreIntegrityCustodian {
+                        fn create_below_root() {
+                            let secret_process_guard = enter_c2_secret_process_interval();
+                            getrandom::fill(&mut seed);
+                            bytes.fill(0);
+                            secret_process_guard.verify_same_process();
+                        }
+                        fn sign(&self) {
+                            let secret_process_guard = enter_c2_secret_process_interval();
+                            let seed = self.load_seed_for_signing();
+                            signing_key.sign(&preimage);
+                            object_facts(&reopened);
+                            drop(seed);
+                            secret_process_guard.verify_same_process();
+                        }
+                    }
+                """,
+            }
+        )
+
+    def test_signer_process_fence_accepts_one_shared_spawn_boundary(self) -> None:
+        self.assertEqual(
+            MODULE._verify_signer_process_fence(self._process_fence_inventory()),
+            (
+                "signer-secret-fence=shared",
+                "production-command-spawn-bypasses=0",
+                "secret-process-recheck=after-zeroization",
+            ),
+        )
+
+    def test_signer_process_fence_rejects_alternate_command_spawn(self) -> None:
+        with self.assertRaisesRegex(
+            MODULE.VerificationError, "production Command spawn bypasses"
+        ):
+            MODULE._verify_signer_process_fence(
+                self._process_fence_inventory(alternate_spawn=True)
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

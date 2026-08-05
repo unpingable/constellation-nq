@@ -11,6 +11,7 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
 
 use nix::fcntl::AtFlags;
 use nix::unistd::{Gid, Uid, User, chown, fchownat, getegid, geteuid};
@@ -43,6 +44,58 @@ compile_error!("nq-helper-sandbox supports only Linux AMD64 and ARM64 in v1");
 const MAX_XATTR_NAME_BYTES: usize = 64 * 1024;
 const POSIX_ACCESS_ACL: &[u8] = b"system.posix_acl_access";
 const POSIX_DEFAULT_ACL: &[u8] = b"system.posix_acl_default";
+
+/// Serializes every production helper spawn against a Store-integrity secret
+/// interval.  The lock protects only the process-creation boundary; it grants
+/// no signing, Store, or helper authority.
+static C2_PROCESS_FENCE: Mutex<()> = Mutex::new(());
+
+/// Process-local guard held while Store-integrity secret bytes are live.
+///
+/// This type intentionally exposes no lock or authority accessor.  Its sole
+/// purpose is to make a production helper spawn mutually exclusive with the
+/// key-open/load/sign/recheck/drop interval.
+pub struct C2SecretProcessGuard {
+    _guard: MutexGuard<'static, ()>,
+    owner_pid: u32,
+}
+
+impl C2SecretProcessGuard {
+    /// Refuse if an ungoverned process split occurred while the guard was
+    /// held.  Production `Command::spawn` is prevented by the shared fence;
+    /// this check also catches an unexpected external `fork` in the child.
+    pub fn verify_same_process(&self) -> io::Result<()> {
+        if std::process::id() != self.owner_pid {
+            return Err(io::Error::other(
+                "Store-integrity secret interval crossed a process boundary",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Enter the process-wide Store-integrity secret interval.
+///
+/// The guard is deliberately non-`Send` through its `MutexGuard`, preventing
+/// transfer of the live-secret interval to another thread.
+pub fn enter_c2_secret_process_interval() -> io::Result<C2SecretProcessGuard> {
+    let guard = C2_PROCESS_FENCE
+        .lock()
+        .map_err(|_| io::Error::other("C2 process fence is poisoned"))?;
+    Ok(C2SecretProcessGuard {
+        _guard: guard,
+        owner_pid: std::process::id(),
+    })
+}
+
+/// Run one parent-side process-creation boundary while no Store-integrity
+/// secret interval is active.
+pub fn with_c2_process_spawn_fence<T>(operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    let _guard = C2_PROCESS_FENCE
+        .lock()
+        .map_err(|_| io::Error::other("C2 process fence is poisoned"))?;
+    operation()
+}
 
 /// Exact local account identity bound into an admission and helper launch.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -884,10 +937,36 @@ fn install_containment_filter() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc::{RecvTimeoutError, sync_channel};
+    use std::thread;
     use std::time::{Duration, Instant};
 
     const CLONE_PARENT_PROBE_ENV: &str = "NQ_TEST_CLONE_PARENT_PROBE";
     const CLONE_PARENT_SUPERVISOR_ENV: &str = "NQ_TEST_CLONE_PARENT_SUPERVISOR";
+
+    #[test]
+    fn c2_secret_interval_excludes_process_spawn_interval() {
+        let secret = enter_c2_secret_process_interval().expect("enter secret interval");
+        secret.verify_same_process().expect("same process");
+        let (entered_tx, entered_rx) = sync_channel(0);
+        let waiter = thread::spawn(move || {
+            with_c2_process_spawn_fence(|| {
+                entered_tx.send(()).expect("report spawn interval");
+                Ok(())
+            })
+            .expect("enter spawn interval");
+        });
+        assert_eq!(
+            entered_rx.recv_timeout(Duration::from_millis(50)),
+            Err(RecvTimeoutError::Timeout),
+            "spawn interval entered while signer secret was live"
+        );
+        drop(secret);
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("spawn interval enters after secret release");
+        waiter.join().expect("join spawn waiter");
+    }
 
     fn status_field<'a>(status: &'a str, name: &str) -> &'a str {
         status
