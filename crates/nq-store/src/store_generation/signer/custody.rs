@@ -14,6 +14,7 @@ use std::sync::{Mutex, OnceLock};
 
 use ed25519_dalek::{Signer as _, SigningKey};
 use nix::fcntl::{Flock, FlockArg};
+use nq_helper_sandbox::C2ForkFence;
 use nq_protocol::{Sha256Digest, canonical_json_bytes, sha256_bytes};
 use rustix::fs::{
     AtFlags, Dir, Mode, OFlags, RenameFlags, StatxFlags, fchmod, fdatasync, flistxattr, fsync,
@@ -405,6 +406,38 @@ impl Drop for SecretSeedV1 {
     }
 }
 
+/// Secret random temporary.  Bytes are cleared when this value is dropped.
+struct SecretBytes32([u8; 32]);
+
+impl Drop for SecretBytes32 {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
+}
+
+/// Secret byte buffer.  Bytes are cleared when this value is dropped.
+struct SecretBytes(Vec<u8>);
+
+impl std::ops::Deref for SecretBytes {
+    type Target = Vec<u8>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for SecretBytes {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for SecretBytes {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
+}
+
 /// Exact filesystem observations.  These facts grant no authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CustodyObservationV1 {
@@ -522,6 +555,11 @@ impl C2StoreIntegrityCustodian {
         frontier: &VerifiedCustodyProposalFrontierV1,
         root: File,
     ) -> Result<(Self, StoreIntegrityKeyProposalV1), SignerRefusalV2> {
+        // From entry through carrier zeroization, no process may be created
+        // from this address space.  The fence is acquired before every
+        // custody operation and every local custody lock in this method, and
+        // RAII releases it last.
+        let fork_fence_guard = C2ForkFence::acquire().map_err(|_| SignerRefusalV2::CustodyIo)?;
         coordinates.validate()?;
         let scope_token = coordinates.scope_token()?;
         let proposal_ordinal = frontier.verify_for(&scope_token)?;
@@ -548,15 +586,15 @@ impl C2StoreIntegrityCustodian {
         )?;
 
         let mut seed = [0_u8; 32];
-        let mut nonce = [0_u8; 32];
-        let mut process_epoch = [0_u8; 32];
+        let mut nonce = SecretBytes32([0_u8; 32]);
+        let mut process_epoch = SecretBytes32([0_u8; 32]);
         getrandom::fill(&mut seed).map_err(|_| SignerRefusalV2::CustodyIo)?;
-        getrandom::fill(&mut nonce).map_err(|_| SignerRefusalV2::CustodyIo)?;
-        getrandom::fill(&mut process_epoch).map_err(|_| SignerRefusalV2::CustodyIo)?;
+        getrandom::fill(&mut nonce.0).map_err(|_| SignerRefusalV2::CustodyIo)?;
+        getrandom::fill(&mut process_epoch.0).map_err(|_| SignerRefusalV2::CustodyIo)?;
         let seed = SecretSeedV1(seed);
         let verifying_key = SigningKey::from_bytes(&seed.0).verifying_key().to_bytes();
         let public_key = hex::encode(verifying_key);
-        let nonce_hex = hex::encode(nonce);
+        let nonce_hex = hex::encode(nonce.0);
         let proposal_core_identity = domain_digest(
             PROPOSAL_CORE_DOMAIN_V1,
             &ProposalCorePreimage {
@@ -654,7 +692,7 @@ impl C2StoreIntegrityCustodian {
         };
         carrier.payload_digest = StoreIntegrityCustodyFileV1::payload_digest(&carrier)?;
         let private_file = StoreIntegrityCustodyFileV1(carrier);
-        let mut bytes = private_file.encode()?;
+        let mut bytes = SecretBytes(private_file.encode()?);
         temporary
             .write_all(&bytes)
             .and_then(|()| temporary.set_len(bytes.len() as u64))
@@ -663,7 +701,7 @@ impl C2StoreIntegrityCustodian {
         fdatasync(&temporary).map_err(|_| SignerRefusalV2::CustodyIo)?;
         let committed_facts = object_facts(&temporary)?;
         verify_file_facts_against_fields(&committed_facts, private_file.0.fields(), bytes.len())?;
-        if read_exact_bytes(&temporary)? != bytes
+        if *read_exact_secret_bytes(&temporary)? != *bytes
             || StoreIntegrityCustodyFileV1::decode(&bytes)?.0 != private_file.0
         {
             return Err(SignerRefusalV2::CustodyFileMalformed);
@@ -680,19 +718,22 @@ impl C2StoreIntegrityCustodian {
         fsync(&scope_directory).map_err(|_| SignerRefusalV2::CustodyIo)?;
         let final_file = open_final_key(&scope_directory, &final_name)?;
         let final_facts = object_facts(&final_file)?;
-        if final_facts != committed_facts || read_exact_bytes(&final_file)? != bytes {
+        if final_facts != committed_facts || *read_exact_secret_bytes(&final_file)? != *bytes {
             return Err(SignerRefusalV2::CustodyFileUnsafe);
         }
         bytes.fill(0);
         drop(private_file);
         drop(seed);
+        fork_fence_guard
+            .verify_same_process()
+            .map_err(|_| SignerRefusalV2::CustodyIo)?;
         let custodian = Self {
             coordinates,
             proposal: proposal.clone(),
             scope_directory,
             final_name,
             creator_pid: std::process::id(),
-            process_epoch,
+            process_epoch: process_epoch.0,
         };
         Ok((custodian, proposal))
     }
@@ -734,6 +775,9 @@ impl C2StoreIntegrityCustodian {
         {
             return Err(SignerRefusalV2::MessageFrontierMismatch);
         }
+        // From seed reload through signing-key zeroization, no process may be
+        // created from this address space.
+        let fork_fence_guard = C2ForkFence::acquire().map_err(|_| SignerRefusalV2::CustodyIo)?;
         let (seed, retained_file, retained_facts) = self.load_seed_for_signing()?;
         let preimage = message.canonical_preimage();
         let payload_digest: SignerIdentityV1 = Sha256::digest(&preimage).into();
@@ -746,6 +790,9 @@ impl C2StoreIntegrityCustodian {
         drop(retained_file);
         drop(signing_key);
         drop(seed);
+        fork_fence_guard
+            .verify_same_process()
+            .map_err(|_| SignerRefusalV2::CustodyIo)?;
         Ok(CustodySignatureV1 {
             family: message.family(),
             signer_key_generation: self.proposal.key_generation_identity(),
@@ -761,7 +808,7 @@ impl C2StoreIntegrityCustodian {
         let flock = Flock::lock(file, FlockArg::LockSharedNonblock)
             .map_err(|_| SignerRefusalV2::CustodyIo)?;
         let facts = object_facts(&flock)?;
-        let bytes = read_exact_bytes(&flock)?;
+        let bytes = SecretBytes(read_exact_bytes(&flock)?);
         let carrier = StoreIntegrityCustodyFileV1::decode(&bytes)?;
         verify_file_facts_against_fields(&facts, carrier.0.fields(), bytes.len())?;
         if carrier.0.fields != *self.proposal.fields()
@@ -992,6 +1039,11 @@ fn read_exact_bytes(file: &File) -> Result<Vec<u8>, SignerRefusalV2> {
     Ok(bytes)
 }
 
+/// Read-back of a secret-bearing custody file, cleared when dropped.
+fn read_exact_secret_bytes(file: &File) -> Result<SecretBytes, SignerRefusalV2> {
+    Ok(SecretBytes(read_exact_bytes(file)?))
+}
+
 fn verify_file_facts_against_fields(
     facts: &CustodyObjectFactsV1,
     fields: &CustodyPublicFieldsV1,
@@ -1164,7 +1216,7 @@ pub(crate) fn construct_sg_n_11_custody_file_creation_commit_uses_no_follow(
 pub(crate) fn verify_sg_n_11_custody_file_creation_commit_uses_no_follow(
     file: &StoreIntegrityCustodyFileV1,
 ) -> Result<(), SignerRefusalV2> {
-    let bytes = file.encode()?;
+    let bytes = SecretBytes(file.encode()?);
     if StoreIntegrityCustodyFileV1::decode(&bytes)?.0 != file.0 {
         return Err(SignerRefusalV2::CustodyFileMalformed);
     }
@@ -1606,5 +1658,110 @@ mod tests {
             custodian.sign(CoordinatorSigningPermitV1::for_test(), &message),
             Err(SignerRefusalV2::CustodyFileUnsafe)
         );
+    }
+
+    #[test]
+    fn fork_fence_is_released_after_successful_creation() {
+        let root = tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (custodian, _) = C2StoreIntegrityCustodian::create_below_test_root(
+            test_coordinates(),
+            File::open(root.path()).unwrap(),
+        )
+        .expect("creation succeeds");
+        drop(custodian);
+        let guard = C2ForkFence::acquire().expect("fence is free after successful creation");
+        guard.verify_same_process().expect("same process");
+    }
+
+    #[test]
+    fn fork_fence_is_released_after_refused_creation_and_signing() {
+        let root = tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let coordinates = test_coordinates();
+        let scope_token = coordinates.scope_token().unwrap();
+        let frontier = VerifiedCustodyProposalFrontierV1::initial_for_test(scope_token.clone());
+        let (custodian, _) = C2StoreIntegrityCustodian::create_below_root(
+            coordinates.clone(),
+            &frontier,
+            File::open(root.path()).unwrap(),
+        )
+        .expect("first creation succeeds");
+        // The occupied scope directory refuses regeneration.
+        assert!(matches!(
+            C2StoreIntegrityCustodian::create_below_root(
+                test_coordinates(),
+                &frontier,
+                File::open(root.path()).unwrap(),
+            ),
+            Err(SignerRefusalV2::CustodyPathMismatch)
+        ));
+        // A hard-linked alias refuses signing after the fence is acquired.
+        let scope_path = root.path().join(digest_hex(&scope_token));
+        std::fs::hard_link(
+            scope_path.join(&custodian.final_name),
+            scope_path.join("attacker-alias.key"),
+        )
+        .unwrap();
+        let message = matching_message(&custodian, &coordinates);
+        assert_eq!(
+            custodian.sign(CoordinatorSigningPermitV1::for_test(), &message),
+            Err(SignerRefusalV2::CustodyFileUnsafe)
+        );
+        let guard = C2ForkFence::acquire().expect("fence is free after refusals");
+        guard.verify_same_process().expect("same process");
+    }
+
+    #[test]
+    fn fork_fence_serializes_cross_thread_acquisition() {
+        let guard = C2ForkFence::acquire().expect("main thread acquires the fence");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let acquired = C2ForkFence::acquire().expect("worker eventually acquires");
+            sender.send(()).expect("main thread waits");
+            drop(acquired);
+        });
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_millis(250))
+                .is_err(),
+            "second thread acquired the fence while the first thread held it"
+        );
+        drop(guard);
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("second thread acquires after release");
+        worker.join().expect("worker thread joins");
+    }
+
+    #[test]
+    fn fenced_custody_paths_refuse_same_thread_reentrancy() {
+        let root = tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let coordinates = test_coordinates();
+        let (custodian, _) = C2StoreIntegrityCustodian::create_below_test_root(
+            coordinates.clone(),
+            File::open(root.path()).unwrap(),
+        )
+        .expect("creation succeeds");
+        let message = matching_message(&custodian, &coordinates);
+        let guard = C2ForkFence::acquire().expect("main thread acquires the fence");
+        // The fence is acquired at the top of the fenced paths, so a
+        // reentrant attempt fails closed at the fence before touching any
+        // custody lock, rather than deadlocking.
+        assert!(matches!(
+            C2StoreIntegrityCustodian::create_below_test_root(
+                test_coordinates(),
+                File::open(root.path()).unwrap(),
+            ),
+            Err(SignerRefusalV2::CustodyIo)
+        ));
+        assert_eq!(
+            custodian.sign(CoordinatorSigningPermitV1::for_test(), &message),
+            Err(SignerRefusalV2::CustodyIo)
+        );
+        drop(guard);
+        let guard = C2ForkFence::acquire().expect("fence is free after reentrant refusals");
+        guard.verify_same_process().expect("same process");
     }
 }

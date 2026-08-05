@@ -767,6 +767,7 @@ dependencies = [
  "hex",
  "libc",
  "nix",
+ "nq-helper-sandbox",
  "nq-host-role-contract",
  "nq-host-role-dependency-custody",
  "nq-protocol",
