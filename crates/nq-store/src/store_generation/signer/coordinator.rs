@@ -19,6 +19,25 @@ use super::messages::{
 };
 use super::result::SignerRefusalV2;
 
+/// One-use lexical proof that signing was reached through the typed
+/// coordinator.  Its private field prevents sibling signer modules from
+/// invoking custody directly even though the custody/coordinator modules
+/// share a parent privacy boundary.
+pub(super) struct CoordinatorSigningPermitV1 {
+    _private: (),
+}
+
+impl CoordinatorSigningPermitV1 {
+    fn issue() -> Self {
+        Self { _private: () }
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_test() -> Self {
+        Self::issue()
+    }
+}
+
 /// Exact terminal signer frontier rechecked for every live request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TerminalSignerFrontierV1 {
@@ -193,12 +212,12 @@ impl<'custody> C2SignerTransitionCoordinator<'custody> {
     ) -> Result<Self, SignerRefusalV2> {
         frontier.validate()?;
         let custody = custodian.coordinates();
-        if custody.occurrence != frontier.occurrence
-            || custody.physical_generation != frontier.physical_generation
-            || custody.lifecycle_root != frontier.lifecycle_root
-            || custody.signer_scope != frontier.scope
-            || custody.policy != frontier.policy
-            || custody.key_generation != frontier.signer_key_generation
+        if custody.occurrence_identity() != frontier.occurrence
+            || custody.physical_generation_bytes() != frontier.physical_generation
+            || custody.lifecycle_root_bytes() != frontier.lifecycle_root
+            || custody.scope_bytes() != frontier.scope
+            || custody.policy_bytes() != frontier.policy
+            || custodian.key_generation_identity() != frontier.signer_key_generation
         {
             return Err(SignerRefusalV2::MessageFrontierMismatch);
         }
@@ -221,7 +240,8 @@ impl<'custody> C2SignerTransitionCoordinator<'custody> {
             &self.frontier,
             message,
         )?;
-        let signature = self.custodian.sign(message)?;
+        let signing_permit = CoordinatorSigningPermitV1::issue();
+        let signature = self.custodian.sign(signing_permit, message)?;
         let frame = construct_sg_n_20_signature_response_is_nonescaping_typed_value_consumed(
             brand, signature,
         )?;
@@ -571,10 +591,13 @@ pub(crate) fn verify_sg_n_20_signature_response_is_nonescaping_typed_value_consu
 
 #[cfg(test)]
 mod tests {
+    use std::fs::File;
+    use std::os::unix::fs::PermissionsExt;
+
+    use tempfile::tempdir;
+
     use super::*;
-    use crate::store_generation::signer::custody::{
-        C2StoreIntegrityCustodian, CustodyCoordinatesV1,
-    };
+    use crate::store_generation::signer::custody::{C2StoreIntegrityCustodian, test_coordinates};
     use crate::store_generation::signer::messages::{
         SignerMessageCoordinatesV1,
         construct_msg_06_healthy_rotation_continuity_current_usable_predecessor,
@@ -596,18 +619,25 @@ mod tests {
 
     #[test]
     fn typed_route_signs_and_immediately_consumes() {
-        let frontier = frontier();
-        let custodian = C2StoreIntegrityCustodian::from_seed_for_test(
-            CustodyCoordinatesV1 {
-                occurrence: frontier.occurrence,
-                physical_generation: frontier.physical_generation,
-                lifecycle_root: frontier.lifecycle_root,
-                signer_scope: frontier.scope,
-                policy: frontier.policy,
-                key_generation: frontier.signer_key_generation,
-            },
-            [10; 32],
-        );
+        let root = tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let coordinates = test_coordinates();
+        let (custodian, _) = C2StoreIntegrityCustodian::create_below_test_root(
+            coordinates.clone(),
+            File::open(root.path()).unwrap(),
+        )
+        .unwrap();
+        let frontier = TerminalSignerFrontierV1 {
+            occurrence: coordinates.occurrence_identity(),
+            physical_generation: coordinates.physical_generation_bytes(),
+            lifecycle_root: coordinates.lifecycle_root_bytes(),
+            scope: coordinates.scope_bytes(),
+            policy: coordinates.policy_bytes(),
+            terminal_binding: [6; 32],
+            signer_key_generation: custodian.key_generation_identity(),
+            complete_candidate_set_digest: [8; 32],
+            effective_cut: 9,
+        };
         let capability =
             construct_sg_wu_03b_capability_source_owner(GenerationCapabilityEvidenceV1 {
                 root_binding: [11; 32],
