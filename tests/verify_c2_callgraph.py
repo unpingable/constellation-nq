@@ -288,6 +288,7 @@ PROTECTED_TYPES = frozenset(
     {
         "C2StoreIntegrityCustodian",
         "C2SignerTransitionCoordinator",
+        "C2SignerDurableAppendPermitV1",
         "C2SignerDurableAppendConsumerV1",
         "NonescapingSignedFrameV1",
         "C2BootstrapSignerCapability",
@@ -415,6 +416,46 @@ def _source_token_count(source: RustSource, values: Sequence[str]) -> int:
     )
 
 
+def _item_body_token_count(
+    source: RustSource, kind: str, name: str, values: Sequence[str]
+) -> int:
+    """Count one token sequence inside one named braced item only."""
+
+    starts = [
+        index
+        for index, token in enumerate(source.tokens[:-1])
+        if token.value == kind and source.tokens[index + 1].value == name
+    ]
+    require(len(starts) == 1, f"{kind} {name} is absent or ambiguous in {source.path}")
+    open_index = next(
+        (
+            index
+            for index in range(starts[0] + 2, len(source.tokens))
+            if source.tokens[index].value == "{"
+        ),
+        None,
+    )
+    require(open_index is not None, f"{kind} {name} has no body in {source.path}")
+    depth = 0
+    close_index = None
+    for index in range(open_index, len(source.tokens)):
+        value = source.tokens[index].value
+        if value == "{":
+            depth += 1
+        elif value == "}":
+            depth -= 1
+            if depth == 0:
+                close_index = index
+                break
+    require(close_index is not None, f"{kind} {name} has an unclosed body in {source.path}")
+    actual = [token.value for token in source.tokens[open_index + 1 : close_index]]
+    width = len(values)
+    return sum(
+        actual[index : index + width] == list(values)
+        for index in range(len(actual) - width + 1)
+    )
+
+
 def _require_no_public_protected_surface(inventory: SourceInventory) -> None:
     exports = inventory.public_reexports(PROTECTED_TYPES)
     require(not exports, "protected C2 types are publicly re-exported: " + ", ".join(exports))
@@ -425,6 +466,12 @@ def _require_no_public_protected_surface(inventory: SourceInventory) -> None:
             "struct",
             "C2SignerTransitionCoordinator",
             {"pub(crate)"},
+        ),
+        (
+            SIGNER_COORDINATOR,
+            "struct",
+            "C2SignerDurableAppendPermitV1",
+            {"pub(super)"},
         ),
         (
             SIGNER_COORDINATOR,
@@ -461,6 +508,7 @@ def _require_no_public_protected_surface(inventory: SourceInventory) -> None:
 
 def _verify_private_signer_graph(inventory: SourceInventory) -> tuple[str, ...]:
     _require_no_public_protected_surface(inventory)
+    pending_append = _verify_pending_signer_append_gate(inventory)
     custodian_sign = inventory.require_function(
         SIGNER_CUSTODY, "sign", "C2StoreIntegrityCustodian"
     )
@@ -488,6 +536,15 @@ def _verify_private_signer_graph(inventory: SourceInventory) -> tuple[str, ...]:
     require(
         coordinator_new.visibility == "pub(super)",
         "transition coordinator construction escapes its owning signer module",
+    )
+    coordinator_signature = compact_tokens(
+        coordinator_new.source.tokens[
+            coordinator_new.start_token : coordinator_new.body_open_token
+        ]
+    )
+    require(
+        "append_permit:C2SignerDurableAppendPermitV1" in coordinator_signature,
+        "transition coordinator does not consume the unforgeable append permit",
     )
     bridge = inventory.require_function(
         SIGNER_COORDINATOR, "sign_and_consume", "C2SignerTransitionCoordinator"
@@ -574,6 +631,75 @@ def _verify_private_signer_graph(inventory: SourceInventory) -> tuple[str, ...]:
         f"typed-routes={len(SIGNER_ROUTE_METHODS)}",
         "append-consumer=one",
         "message-family=MSG-01..MSG-16",
+        *pending_append,
+    )
+
+
+def _verify_pending_signer_append_gate(
+    inventory: SourceInventory,
+) -> tuple[str, ...]:
+    """Prove the in-memory consumer is unreachable before durable B/G wiring."""
+
+    source = inventory.source(SIGNER_COORDINATOR)
+    permit_visibility = _item_visibility(
+        source, "struct", "C2SignerDurableAppendPermitV1"
+    )
+    require(
+        permit_visibility == "pub(super)",
+        "pending signer append permit has invalid visibility",
+    )
+    require(
+        not inventory.public_reexports({"C2SignerDurableAppendPermitV1"}),
+        "pending signer append permit is publicly re-exported",
+    )
+    constructors = [
+        function
+        for function in inventory.functions
+        if _code_contains(function, "C2SignerDurableAppendPermitV1{")
+    ]
+    require(
+        not constructors,
+        "pending signer append permit has a production constructor before durable wiring: "
+        + ", ".join(function.location for function in constructors),
+    )
+    consumer_new = inventory.require_function(
+        SIGNER_COORDINATOR, "new", "C2SignerDurableAppendConsumerV1"
+    )
+    consumer_signature = compact_tokens(
+        consumer_new.source.tokens[
+            consumer_new.start_token : consumer_new.body_open_token
+        ]
+    )
+    require(
+        consumer_new.visibility == "private"
+        and "permit:C2SignerDurableAppendPermitV1" in consumer_signature,
+        "pending signer append consumer does not consume the linear permit",
+    )
+    consumer_callers = tuple(
+        function
+        for function in inventory.callers_of("new", source_prefix=SIGNER_PREFIX)
+        if _code_contains(function, "C2SignerDurableAppendConsumerV1::new(")
+    )
+    require(
+        len(consumer_callers) == 1
+        and consumer_callers[0].owner == "C2SignerTransitionCoordinator"
+        and consumer_callers[0].name == "new",
+        "pending signer append consumer has an alternate production constructor caller",
+    )
+    require(
+        _item_body_token_count(
+            source,
+            "struct",
+            "NonescapingSignedFrameV1",
+            ("canonical_payload", ":", "Vec", "<", "u8", ">"),
+        )
+        == 1,
+        "nonescaping signed frame does not own exactly one canonical payload",
+    )
+    return (
+        "signer-append-permit-production-constructors=0",
+        "signed-frame-owned-payload=one",
+        "durable-append-status=not-yet-wired",
     )
 
 
@@ -931,7 +1057,6 @@ def _verify_new_mutator_branding(inventory: SourceInventory) -> tuple[str, ...]:
                 "C2PolicyTransitionBrandV1",
                 "C2PolicyTransitionContinuationBrandV1",
                 "StoreWriterSession",
-                "C2SignerDurableAppendConsumerV1",
             )
         )
         # Custody writes are purpose-locked by the private custodian rather

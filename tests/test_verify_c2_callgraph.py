@@ -125,6 +125,77 @@ class CallGraphVerifierControls(unittest.TestCase):
         ):
             MODULE._verify_schema_projection_gate(inventory)
 
+    def test_pending_signer_append_gate_accepts_only_unconstructed_permit(self) -> None:
+        inventory = MODULE.SourceInventory.from_texts(
+            {
+                MODULE.SIGNER_COORDINATOR: """
+                    pub(super) struct C2SignerDurableAppendPermitV1 { private: () }
+                    pub(crate) struct NonescapingSignedFrameV1 {
+                        canonical_payload: Vec<u8>,
+                    }
+                    pub(crate) struct C2SignerDurableAppendConsumerV1 {
+                        permit: C2SignerDurableAppendPermitV1,
+                    }
+                    impl C2SignerDurableAppendConsumerV1 {
+                        fn new(permit: C2SignerDurableAppendPermitV1) -> Self {
+                            Self { permit }
+                        }
+                    }
+                    struct C2SignerTransitionCoordinator {
+                        append_consumer: C2SignerDurableAppendConsumerV1,
+                    }
+                    impl C2SignerTransitionCoordinator {
+                        fn new(append_permit: C2SignerDurableAppendPermitV1) -> Self {
+                            Self {
+                                append_consumer: C2SignerDurableAppendConsumerV1::new(
+                                    append_permit,
+                                ),
+                            }
+                        }
+                    }
+                """,
+            }
+        )
+        self.assertEqual(
+            MODULE._verify_pending_signer_append_gate(inventory),
+            (
+                "signer-append-permit-production-constructors=0",
+                "signed-frame-owned-payload=one",
+                "durable-append-status=not-yet-wired",
+            ),
+        )
+
+    def test_pending_signer_append_gate_rejects_production_permit_constructor(self) -> None:
+        inventory = MODULE.SourceInventory.from_texts(
+            {
+                MODULE.SIGNER_COORDINATOR: """
+                    pub(super) struct C2SignerDurableAppendPermitV1 { private: () }
+                    pub(crate) struct NonescapingSignedFrameV1 {
+                        canonical_payload: Vec<u8>,
+                    }
+                    pub(crate) struct C2SignerDurableAppendConsumerV1 {
+                        permit: C2SignerDurableAppendPermitV1,
+                    }
+                    impl C2SignerDurableAppendConsumerV1 {
+                        fn new(permit: C2SignerDurableAppendPermitV1) -> Self {
+                            Self { permit }
+                        }
+                    }
+                    struct C2SignerTransitionCoordinator;
+                    impl C2SignerTransitionCoordinator {
+                        fn new(append_permit: C2SignerDurableAppendPermitV1) -> Self { Self }
+                    }
+                    fn bypass() -> C2SignerDurableAppendPermitV1 {
+                        C2SignerDurableAppendPermitV1 { private: () }
+                    }
+                """,
+            }
+        )
+        with self.assertRaisesRegex(
+            MODULE.VerificationError, "production constructor before durable wiring"
+        ):
+            MODULE._verify_pending_signer_append_gate(inventory)
+
 
 if __name__ == "__main__":
     unittest.main()

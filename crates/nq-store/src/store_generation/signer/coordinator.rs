@@ -142,15 +142,35 @@ pub(crate) struct SignerMessageBrandV1 {
 }
 
 /// A frame that cannot be constructed outside the coordinator and has no
-/// public signature accessor.
+/// public signature or payload accessor.  It owns the exact bytes that were
+/// signed so the eventual Store append cannot substitute a second payload.
 #[derive(Debug)]
 pub(crate) struct NonescapingSignedFrameV1 {
     brand: SignerMessageBrandV1,
+    canonical_payload: Vec<u8>,
     signature: CustodySignatureV1,
 }
 
-/// Durable append acknowledgement.  It contains identities, not signature
-/// bytes, and therefore cannot be replayed as a signing response.
+/// Linear authority to connect the coordinator to the one Store-owned
+/// durable append transaction.
+///
+/// There is deliberately no production constructor while the physical B/G
+/// append driver is not wired.  Keeping the existing in-memory model behind
+/// this unissued permit prevents it from being mistaken for durable evidence.
+#[derive(Debug)]
+pub(super) struct C2SignerDurableAppendPermitV1 {
+    _private: (),
+}
+
+impl C2SignerDurableAppendPermitV1 {
+    #[cfg(test)]
+    fn for_test() -> Self {
+        Self { _private: () }
+    }
+}
+
+/// Modeled consumption acknowledgement. It contains identities, not signature
+/// bytes, and is not durable evidence until the Store append driver exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ConsumedSignedFrameV1 {
     pub(crate) family: ClosedMessageFamilyV1,
@@ -160,30 +180,44 @@ pub(crate) struct ConsumedSignedFrameV1 {
     pub(crate) append_sequence: u64,
 }
 
-/// The sole concrete consumer of signed frames.
-#[derive(Debug, Default)]
+/// The sole named consumer model for signed frames.
+///
+/// Production construction remains impossible until the Store-owned append
+/// transaction can issue [`C2SignerDurableAppendPermitV1`].
+#[derive(Debug)]
 pub(crate) struct C2SignerDurableAppendConsumerV1 {
+    _permit: C2SignerDurableAppendPermitV1,
     consumed_payloads: BTreeSet<SignerIdentityV1>,
     next_sequence: u64,
 }
 
 impl C2SignerDurableAppendConsumerV1 {
+    fn new(permit: C2SignerDurableAppendPermitV1) -> Self {
+        Self {
+            _permit: permit,
+            consumed_payloads: BTreeSet::new(),
+            next_sequence: 0,
+        }
+    }
+
     fn consume(
         &mut self,
         frame: NonescapingSignedFrameV1,
     ) -> Result<ConsumedSignedFrameV1, SignerRefusalV2> {
+        let payload_digest: SignerIdentityV1 = Sha256::digest(&frame.canonical_payload).into();
         if frame.brand.family != frame.signature.family
             || frame.brand.payload_digest != frame.signature.payload_digest
+            || frame.brand.payload_digest != payload_digest
             || !self
                 .consumed_payloads
                 .insert(frame.signature.payload_digest)
         {
             return Err(SignerRefusalV2::SignedFrameAlreadyConsumed);
         }
-        // Signature bytes are intentionally consumed here.  The durable Store
-        // append integration persists them in its named record; no accessor is
-        // exposed back through the coordinator.
-        let _signature_bytes = frame.signature.signature;
+        // This model deliberately does not claim a durable write. The owned
+        // payload and signature are dropped here; the future Store append
+        // implementation must replace this body while retaining the same
+        // linear permit and nonescaping frame boundary.
         self.next_sequence = self
             .next_sequence
             .checked_add(1)
@@ -209,6 +243,7 @@ impl<'custody> C2SignerTransitionCoordinator<'custody> {
     pub(super) fn new(
         custodian: &'custody C2StoreIntegrityCustodian,
         frontier: TerminalSignerFrontierV1,
+        append_permit: C2SignerDurableAppendPermitV1,
     ) -> Result<Self, SignerRefusalV2> {
         frontier.validate()?;
         let custody = custodian.coordinates();
@@ -224,7 +259,7 @@ impl<'custody> C2SignerTransitionCoordinator<'custody> {
         Ok(Self {
             custodian,
             frontier,
-            append_consumer: C2SignerDurableAppendConsumerV1::default(),
+            append_consumer: C2SignerDurableAppendConsumerV1::new(append_permit),
         })
     }
 
@@ -236,6 +271,7 @@ impl<'custody> C2SignerTransitionCoordinator<'custody> {
         if message.family() != expected_family || !self.frontier.matches(message) {
             return Err(SignerRefusalV2::MessageFrontierMismatch);
         }
+        let canonical_payload = message.canonical_preimage();
         let brand = construct_sg_n_18_signing_method_accepts_private_typed_payload_semantic(
             &self.frontier,
             message,
@@ -243,7 +279,9 @@ impl<'custody> C2SignerTransitionCoordinator<'custody> {
         let signing_permit = CoordinatorSigningPermitV1::issue();
         let signature = self.custodian.sign(signing_permit, message)?;
         let frame = construct_sg_n_20_signature_response_is_nonescaping_typed_value_consumed(
-            brand, signature,
+            brand,
+            canonical_payload,
+            signature,
         )?;
         self.append_consumer.consume(frame)
     }
@@ -465,11 +503,12 @@ pub(crate) fn verify_sg_wu_03c_capability_source_owner(
     verify_pending_capability(capability, &capability.evidence.frontier)
 }
 
-pub(crate) fn construct_sg_wu_04_typed_request_message_owner_closed_methods_canonical<'a>(
+pub(super) fn construct_sg_wu_04_typed_request_message_owner_closed_methods_canonical<'a>(
     custodian: &'a C2StoreIntegrityCustodian,
     frontier: TerminalSignerFrontierV1,
+    append_permit: C2SignerDurableAppendPermitV1,
 ) -> Result<C2SignerTransitionCoordinator<'a>, SignerRefusalV2> {
-    C2SignerTransitionCoordinator::new(custodian, frontier)
+    C2SignerTransitionCoordinator::new(custodian, frontier, append_permit)
 }
 
 pub(crate) fn verify_sg_wu_04_typed_request_message_owner_closed_methods_canonical(
@@ -514,11 +553,12 @@ pub(crate) fn verify_sg_n_16_pending_successor_capability_is_distinct_may_sign(
     verify_sg_wu_03c_capability_source_owner(capability)
 }
 
-pub(crate) fn construct_sg_n_17_request_bridge_has_store_owned_requester_capability<'a>(
+pub(super) fn construct_sg_n_17_request_bridge_has_store_owned_requester_capability<'a>(
     custodian: &'a C2StoreIntegrityCustodian,
     frontier: TerminalSignerFrontierV1,
+    append_permit: C2SignerDurableAppendPermitV1,
 ) -> Result<C2SignerTransitionCoordinator<'a>, SignerRefusalV2> {
-    C2SignerTransitionCoordinator::new(custodian, frontier)
+    C2SignerTransitionCoordinator::new(custodian, frontier, append_permit)
 }
 
 pub(crate) fn verify_sg_n_17_request_bridge_has_store_owned_requester_capability(
@@ -570,19 +610,32 @@ pub(crate) fn verify_sg_n_19_lifecycle_transition_restart_live_signer_request_re
 
 pub(crate) fn construct_sg_n_20_signature_response_is_nonescaping_typed_value_consumed(
     brand: SignerMessageBrandV1,
+    canonical_payload: Vec<u8>,
     signature: CustodySignatureV1,
 ) -> Result<NonescapingSignedFrameV1, SignerRefusalV2> {
-    if brand.family != signature.family || brand.payload_digest != signature.payload_digest {
+    let payload_digest: SignerIdentityV1 = Sha256::digest(&canonical_payload).into();
+    if canonical_payload.is_empty()
+        || brand.family != signature.family
+        || brand.payload_digest != signature.payload_digest
+        || brand.payload_digest != payload_digest
+    {
         return Err(SignerRefusalV2::MessagePayloadSubstitution);
     }
-    Ok(NonescapingSignedFrameV1 { brand, signature })
+    Ok(NonescapingSignedFrameV1 {
+        brand,
+        canonical_payload,
+        signature,
+    })
 }
 
 pub(crate) fn verify_sg_n_20_signature_response_is_nonescaping_typed_value_consumed(
     frame: &NonescapingSignedFrameV1,
 ) -> Result<(), SignerRefusalV2> {
-    if frame.brand.family != frame.signature.family
+    let payload_digest: SignerIdentityV1 = Sha256::digest(&frame.canonical_payload).into();
+    if frame.canonical_payload.is_empty()
+        || frame.brand.family != frame.signature.family
         || frame.brand.payload_digest != frame.signature.payload_digest
+        || frame.brand.payload_digest != payload_digest
     {
         return Err(SignerRefusalV2::MessagePayloadSubstitution);
     }
@@ -618,7 +671,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_route_signs_and_immediately_consumes() {
+    fn typed_route_is_confined_behind_test_only_append_permit() {
         let root = tempdir().unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let coordinates = test_coordinates();
@@ -661,8 +714,12 @@ mod tests {
             [15; 32],
         )
         .expect("valid typed message");
-        let mut coordinator = C2SignerTransitionCoordinator::new(&custodian, frontier)
-            .expect("matching private coordinator");
+        let mut coordinator = C2SignerTransitionCoordinator::new(
+            &custodian,
+            frontier,
+            C2SignerDurableAppendPermitV1::for_test(),
+        )
+        .expect("matching private coordinator");
         let receipt = coordinator
             .append_normal_rotation_continuity(&capability, &message)
             .expect("frame consumed by named append consumer");
@@ -670,5 +727,30 @@ mod tests {
             receipt.family,
             ClosedMessageFamilyV1::Msg06NormalRotationContinuity
         );
+    }
+
+    #[test]
+    fn owned_payload_cannot_be_substituted_after_signing() {
+        let original = b"exact canonical payload".to_vec();
+        let digest: SignerIdentityV1 = Sha256::digest(&original).into();
+        let brand = SignerMessageBrandV1 {
+            family: ClosedMessageFamilyV1::Msg06NormalRotationContinuity,
+            terminal_binding: [1; 32],
+            payload_digest: digest,
+        };
+        let signature = CustodySignatureV1 {
+            family: ClosedMessageFamilyV1::Msg06NormalRotationContinuity,
+            signer_key_generation: [2; 32],
+            payload_digest: digest,
+            signature: [3; 64],
+        };
+        assert!(matches!(
+            construct_sg_n_20_signature_response_is_nonescaping_typed_value_consumed(
+                brand,
+                b"substituted payload".to_vec(),
+                signature,
+            ),
+            Err(SignerRefusalV2::MessagePayloadSubstitution)
+        ));
     }
 }

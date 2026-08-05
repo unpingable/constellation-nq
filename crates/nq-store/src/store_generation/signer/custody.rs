@@ -425,6 +425,12 @@ pub(super) struct CustodySignatureV1 {
     pub(super) signature: [u8; 64],
 }
 
+impl Drop for CustodySignatureV1 {
+    fn drop(&mut self) {
+        self.signature.fill(0);
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CustodyObjectFactsV1 {
     device: u64,
