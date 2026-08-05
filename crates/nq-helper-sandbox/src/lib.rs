@@ -4,6 +4,7 @@
 //! code. Its public surface is safe: resolve one local execution account and
 //! attach a fixed, async-signal-safe child hook to a [`std::process::Command`].
 
+use std::cell::Cell;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
@@ -11,6 +12,7 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
 
 use nix::fcntl::AtFlags;
 use nix::unistd::{Gid, Uid, User, chown, fchownat, getegid, geteuid};
@@ -43,6 +45,115 @@ compile_error!("nq-helper-sandbox supports only Linux AMD64 and ARM64 in v1");
 const MAX_XATTR_NAME_BYTES: usize = 64 * 1024;
 const POSIX_ACCESS_ACL: &[u8] = b"system.posix_acl_access";
 const POSIX_DEFAULT_ACL: &[u8] = b"system.posix_acl_default";
+
+/// One process-global fork fence shared by every protected interval.
+static C2_FORK_FENCE: Mutex<()> = Mutex::new(());
+
+thread_local! {
+    /// Per-thread record that the current thread already holds the fork
+    /// fence, used to refuse reentrant acquisition instead of deadlocking.
+    static C2_FORK_FENCE_HELD: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Process-global, authority-neutral fork fence.
+///
+/// `C2ForkFence` serializes process creation against protected intervals in
+/// the same process; that is all it does. It is a purely mechanical
+/// process-isolation primitive and carries no other semantics.
+///
+/// The fence is non-reentrant: a thread that already holds it cannot acquire
+/// it again, so reentry fails closed immediately instead of deadlocking. It
+/// is also fail-closed on poison: a panic while a guard is held poisons the
+/// shared mutex, and every later acquisition in the process is refused
+/// permanently. There is deliberately no reset, recovery, or bypass API.
+pub struct C2ForkFence;
+
+impl C2ForkFence {
+    /// Acquire the process-global fork fence, entering a protected interval.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the current thread already holds the fence (the
+    /// fence is non-reentrant) or if the fence was poisoned by a panic while
+    /// a guard was held. Poisoning is permanent and never recovered.
+    pub fn acquire() -> io::Result<C2ForkFenceGuard> {
+        C2_FORK_FENCE_HELD.with(|held| {
+            if held.get() {
+                return Err(io::Error::other("C2 fork fence is non-reentrant"));
+            }
+            let guard = C2_FORK_FENCE
+                .lock()
+                .map_err(|_| io::Error::other("C2 fork fence is poisoned"))?;
+            held.set(true);
+            Ok(C2ForkFenceGuard {
+                _guard: guard,
+                owner_pid: std::process::id(),
+            })
+        })
+    }
+}
+
+/// Guard held for the duration of one protected fork-fence interval.
+///
+/// The guard is deliberately `!Send` through its `MutexGuard`: the protected
+/// interval cannot migrate to another thread. Its fields are private and no
+/// accessor exposes the underlying lock.
+pub struct C2ForkFenceGuard {
+    _guard: MutexGuard<'static, ()>,
+    owner_pid: u32,
+}
+
+impl C2ForkFenceGuard {
+    /// Refuse if the process changed while the guard was held.
+    ///
+    /// The fence itself serializes in-process process creation; this check
+    /// additionally catches an ungoverned external fork observed in a child.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the current process ID differs from the one
+    /// recorded at acquisition.
+    pub fn verify_same_process(&self) -> io::Result<()> {
+        if std::process::id() != self.owner_pid {
+            return Err(io::Error::other(
+                "C2 fork fence interval crossed a process boundary",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for C2ForkFenceGuard {
+    fn drop(&mut self) {
+        // `try_with` tolerates thread-local teardown order when a guard is
+        // dropped while its thread's local slots are already being destroyed.
+        let _ = C2_FORK_FENCE_HELD.try_with(|held| held.set(false));
+    }
+}
+
+/// Construct the authority-neutral shared process-global fork-fence primitive.
+pub fn construct_sg_wu_02_fence_shared_process_global_fork_fence_primitive() -> C2ForkFence {
+    C2ForkFence
+}
+
+/// Verify the shared process-global fork-fence primitive non-destructively.
+///
+/// The check acquires a guard through the fence, verifies the process
+/// identity inside the interval, and releases. It fails closed when the
+/// fence is poisoned or already held on this thread; that refusal is the
+/// correct behavior, not a verification defect.
+///
+/// # Errors
+///
+/// Returns an error when the fence refuses acquisition or the process
+/// identity changed inside the interval.
+pub fn verify_sg_wu_02_fence_shared_process_global_fork_fence_primitive(
+    fence: &C2ForkFence,
+) -> io::Result<()> {
+    let _ = fence;
+    let guard = C2ForkFence::acquire()?;
+    guard.verify_same_process()
+}
 
 /// Exact local account identity bound into an admission and helper launch.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -884,10 +995,149 @@ fn install_containment_filter() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::mpsc::{RecvTimeoutError, sync_channel};
+    use std::thread;
     use std::time::{Duration, Instant};
 
     const CLONE_PARENT_PROBE_ENV: &str = "NQ_TEST_CLONE_PARENT_PROBE";
     const CLONE_PARENT_SUPERVISOR_ENV: &str = "NQ_TEST_CLONE_PARENT_SUPERVISOR";
+
+    /// Set when the functional fence test completes. The fence is
+    /// process-global and poisoning is permanent, and libtest runs tests
+    /// concurrently, so the poison test must wait for this flag before it
+    /// poisons the fence; test-name ordering alone cannot serialize them.
+    static FUNCTIONAL_FENCE_TEST_DONE: AtomicBool = AtomicBool::new(false);
+
+    // Every non-poisoning fence assertion lives in this single test. No other
+    // test in this module may acquire the fence.
+    #[test]
+    fn c2_fork_fence_a_functional_exclusion_serialization_and_reentry() {
+        // Mutual exclusion: a second thread blocks until the guard releases.
+        let guard = C2ForkFence::acquire().expect("acquire fence");
+        guard.verify_same_process().expect("same process");
+        let (entered_tx, entered_rx) = sync_channel(0);
+        let waiter = thread::spawn(move || {
+            let guard = C2ForkFence::acquire().expect("acquire after release");
+            entered_tx.send(()).expect("report acquisition");
+            drop(guard);
+        });
+        assert_eq!(
+            entered_rx.recv_timeout(Duration::from_millis(100)),
+            Err(RecvTimeoutError::Timeout),
+            "second acquisition entered while the fence was held"
+        );
+        drop(guard);
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("acquisition completes after release");
+        waiter.join().expect("join waiter");
+
+        // Process-global serialization: concurrent intervals never interleave.
+        let counter = Arc::new(AtomicUsize::new(0));
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let counter = Arc::clone(&counter);
+                thread::spawn(move || {
+                    for _ in 0..32 {
+                        let _guard = C2ForkFence::acquire().expect("acquire in worker");
+                        let observed = counter.fetch_add(1, Ordering::SeqCst);
+                        assert_eq!(
+                            counter.load(Ordering::SeqCst),
+                            observed + 1,
+                            "interleaved fence interval"
+                        );
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().expect("join worker");
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), 8 * 32);
+
+        // Guard release on an ordinary error path: a fresh acquire succeeds.
+        let outcome: io::Result<()> = (|| {
+            let _guard = C2ForkFence::acquire()?;
+            Err(io::Error::other("simulated interval failure"))
+        })();
+        assert!(outcome.is_err());
+        let guard = C2ForkFence::acquire().expect("reacquire after error return");
+        drop(guard);
+
+        // Same-process checking: a real guard verifies; a guard recorded
+        // against a foreign process ID refuses.
+        let guard = C2ForkFence::acquire().expect("acquire for pid check");
+        guard.verify_same_process().expect("same process");
+        drop(guard);
+        let foreign = C2ForkFenceGuard {
+            _guard: C2_FORK_FENCE.lock().expect("fence not poisoned"),
+            owner_pid: 0,
+        };
+        assert!(
+            foreign.verify_same_process().is_err(),
+            "foreign owner pid must be refused"
+        );
+        drop(foreign);
+
+        // Non-reentrancy: a second acquisition on the same thread fails
+        // immediately instead of deadlocking.
+        let first = C2ForkFence::acquire().expect("acquire first");
+        let started = Instant::now();
+        let error = C2ForkFence::acquire()
+            .err()
+            .expect("reentrant acquisition must be refused");
+        assert!(
+            started.elapsed() < Duration::from_millis(50),
+            "reentrancy refusal must be immediate"
+        );
+        assert_eq!(error.to_string(), "C2 fork fence is non-reentrant");
+        drop(first);
+        let again = C2ForkFence::acquire().expect("acquire after release");
+        drop(again);
+
+        // Matrix-row construct/verify pair.
+        let fence = construct_sg_wu_02_fence_shared_process_global_fork_fence_primitive();
+        verify_sg_wu_02_fence_shared_process_global_fork_fence_primitive(&fence)
+            .expect("verify fork-fence primitive");
+
+        // Release the poison test only after every functional assertion is
+        // complete; it permanently poisons the process-global fence.
+        FUNCTIONAL_FENCE_TEST_DONE.store(true, Ordering::SeqCst);
+    }
+
+    // Every poisoning assertion lives in this single test. A poisoned fence
+    // never recovers, so this test waits for the functional test to finish
+    // before poisoning; anything acquiring afterwards would fail spuriously.
+    #[test]
+    fn c2_fork_fence_z_poison_refuses_acquisition_permanently() {
+        let started = Instant::now();
+        while !FUNCTIONAL_FENCE_TEST_DONE.load(Ordering::SeqCst) {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "functional fence test did not complete before poisoning"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        let poisoner = thread::spawn(|| {
+            let _guard = C2ForkFence::acquire().expect("acquire before panic");
+            panic!("intentional fork-fence poisoning");
+        });
+        assert!(poisoner.join().is_err(), "poisoning thread must panic");
+        for _ in 0..4 {
+            let error = C2ForkFence::acquire()
+                .err()
+                .expect("poisoned fence must refuse");
+            assert_eq!(error.to_string(), "C2 fork fence is poisoned");
+        }
+        let fence = construct_sg_wu_02_fence_shared_process_global_fork_fence_primitive();
+        assert!(
+            verify_sg_wu_02_fence_shared_process_global_fork_fence_primitive(&fence).is_err(),
+            "verification must fail closed on a poisoned fence"
+        );
+    }
 
     fn status_field<'a>(status: &'a str, name: &str) -> &'a str {
         status
