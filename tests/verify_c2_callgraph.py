@@ -24,6 +24,7 @@ import os
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
@@ -232,7 +233,12 @@ POLICY = "crates/nq-store/src/store_generation/policy.rs"
 STORE_LIB = "crates/nq-store/src/lib.rs"
 HOST_RUNTIME = "crates/nq-host-role-runtime/src/runtime.rs"
 CORE_IDENTITY = "crates/nq-core/src/identity.rs"
+CORE_RUNTIME = "crates/nq-core/src/runtime.rs"
+CORE_RUNNER = "crates/nq-core/src/runner.rs"
+CORE_UNIX_RUNNER = "crates/nq-core/src/unix_runner.rs"
 HELPER_SANDBOX = "crates/nq-helper-sandbox/src/lib.rs"
+HELPER_SANDBOX_MANIFEST = "crates/nq-helper-sandbox/Cargo.toml"
+STORE_MANIFEST = "crates/nq-store/Cargo.toml"
 WRITER = "crates/nq-store/src/writer_session.rs"
 LOCK = "crates/nq-store/src/store_generation/lock.rs"
 RESTORE = "crates/nq-store/src/store_generation/restore.rs"
@@ -1008,27 +1014,307 @@ def _verify_pending_external_carrier_ingress_gate(
     )
 
 
-def _verify_signer_process_fence(inventory: SourceInventory) -> tuple[str, ...]:
-    """Prove every production helper spawn excludes live signer secrets."""
+FENCE_ROW_CONSTRUCTOR = (
+    "construct_sg_wu_02_fence_shared_process_global_fork_fence_primitive"
+)
+FENCE_ROW_VERIFIER = "verify_sg_wu_02_fence_shared_process_global_fork_fence_primitive"
+SPAWN_ROW_CONSTRUCTOR = (
+    "construct_sg_wu_02_spawn_production_spawn_integration_shared_fence"
+)
+SPAWN_ROW_VERIFIER = "verify_sg_wu_02_spawn_production_spawn_integration_shared_fence"
 
-    secret_interval = inventory.require_function(
-        HELPER_SANDBOX, "enter_c2_secret_process_interval"
+# Call names that create or replace a process image without going through
+# std::process::Command.  Exact call-name matching (not substring scanning)
+# keeps unrelated identifiers such as `chain_fork` out of scope.
+PROCESS_CREATION_CALL_NAMES = frozenset(
+    {
+        "fork",
+        "vfork",
+        "posix_spawn",
+        "posix_spawnp",
+        "execve",
+        "execveat",
+        "execl",
+        "execle",
+        "execlp",
+        "execv",
+        "execvp",
+        "execvpe",
+        "fexecve",
+    }
+)
+
+# Production launch wrappers whose `launch.spawn(...)` call is the pinned
+# `VerifiedLaunch::spawn` delegation into the choke, not a Command spawn.
+LAUNCH_WRAPPER_SPECS = (
+    (CORE_RUNNER, "spawn"),
+    (CORE_UNIX_RUNNER, "spawn_helper"),
+)
+
+# The complete public API the fork fence may expose.  Anything beyond this
+# surface is a reset/recovery/bypass route and is refused.
+FENCE_PUBLIC_API_NAMES = frozenset(
+    {
+        "acquire",
+        "verify_same_process",
+        "drop",
+        FENCE_ROW_CONSTRUCTOR,
+        FENCE_ROW_VERIFIER,
+    }
+)
+
+FENCE_IDENTS = frozenset(
+    {"C2ForkFence", "C2ForkFenceGuard", "C2_FORK_FENCE", "C2_FORK_FENCE_HELD"}
+)
+
+# Identifier stems the authority-neutral fence API must never reference.
+FENCE_AUTHORITY_STEMS = (
+    "signer",
+    "store",
+    "key",
+    "seed",
+    "path",
+    "message",
+    "policy",
+    "authority",
+    "custody",
+    "secret",
+)
+
+FENCE_RESET_STEMS = ("reset", "clear", "recover", "bypass")
+
+
+def _function_idents(function: Function) -> frozenset[str]:
+    return frozenset(token.value for token in function.item_tokens if token.kind == "ident")
+
+
+def _static_mutex_names(source: RustSource) -> tuple[str, ...]:
+    values = [token.value for token in source.tokens]
+    return tuple(
+        values[index + 1]
+        for index in range(len(values) - 3)
+        if values[index] == "static"
+        and values[index + 1] not in {"mut"}
+        and values[index + 2] == ":"
+        and "Mutex" in values[index + 3 : index + 9]
     )
-    spawn_interval = inventory.require_function(
-        HELPER_SANDBOX, "with_c2_process_spawn_fence"
+
+
+def _manifest_dependency_names(manifest: dict) -> frozenset[str]:
+    names: set[str] = set()
+    for key, table in manifest.items():
+        if "dependencies" in key and isinstance(table, dict):
+            names.update(table)
+    target = manifest.get("target")
+    if isinstance(target, dict):
+        for target_table in target.values():
+            if not isinstance(target_table, dict):
+                continue
+            for key, table in target_table.items():
+                if "dependencies" in key and isinstance(table, dict):
+                    names.update(table)
+    return frozenset(names)
+
+
+def _load_manifest(root: Path, relative: str) -> dict:
+    path = root / relative
+    require(path.is_file(), f"required Cargo manifest is absent: {relative}")
+    with path.open("rb") as handle:
+        return tomllib.load(handle)
+
+
+def _verify_fence_dependency_acyclicity(
+    root: Path, manifests: dict[str, dict] | None = None
+) -> None:
+    """Prove the fence owner is a leaf: nq-store depends on it, never back."""
+
+    if manifests is None:
+        manifests = {
+            relative: _load_manifest(root, relative)
+            for relative in (HELPER_SANDBOX_MANIFEST, STORE_MANIFEST)
+        }
+    helper_dependencies = _manifest_dependency_names(manifests[HELPER_SANDBOX_MANIFEST])
+    require(
+        "nq-store" not in helper_dependencies and "nq-core" not in helper_dependencies,
+        "nq-helper-sandbox depends upward on nq-store/nq-core: "
+        + ", ".join(sorted(helper_dependencies)),
     )
-    for function in (secret_interval, spawn_interval):
+    store_dependencies = _manifest_dependency_names(manifests[STORE_MANIFEST])
+    require(
+        "nq-helper-sandbox" in store_dependencies,
+        "nq-store does not depend on the fence owner nq-helper-sandbox",
+    )
+
+
+def _verify_signer_process_fence(
+    inventory: SourceInventory, manifests: dict[str, dict] | None = None
+) -> tuple[str, ...]:
+    """Prove the shared fork fence has one owner and no production bypass."""
+
+    sandbox = inventory.source(HELPER_SANDBOX)
+
+    # 1. Exactly one process-global fence owner.
+    require(
+        _source_token_count(sandbox, ("static", "C2_FORK_FENCE", ":", "Mutex")) == 1,
+        "helper sandbox must define exactly one static C2_FORK_FENCE: Mutex",
+    )
+    for source in inventory.sources:
+        static_count = _source_token_count(source, ("static", "C2_FORK_FENCE"))
         require(
-            function.visibility == "pub" and _code_contains(function, "C2_PROCESS_FENCE.lock()"),
-            f"{function.location} does not acquire the shared process fence",
+            static_count == (1 if source.path.as_posix() == HELPER_SANDBOX else 0),
+            f"C2_FORK_FENCE static count changed in {source.path}",
+        )
+        for name in _static_mutex_names(source):
+            lowered = name.lower()
+            if "fence" in lowered or "fork" in lowered:
+                require(
+                    source.path.as_posix() == HELPER_SANDBOX and name == "C2_FORK_FENCE",
+                    f"second fork/fence process mutex {name} in {source.path}",
+                )
+        if source.path.as_posix() != HELPER_SANDBOX:
+            require(
+                not source.identifier_occurrences("C2_FORK_FENCE"),
+                f"C2_FORK_FENCE escapes its owner into {source.path}",
+            )
+    guard_structs = sum(
+        _source_token_count(source, ("struct", "C2ForkFenceGuard"))
+        for source in inventory.sources
+    )
+    require(guard_structs == 1, "C2ForkFenceGuard must have exactly one definition")
+    fence_structs = sum(
+        _source_token_count(source, ("struct", "C2ForkFence"))
+        for source in inventory.sources
+    )
+    require(fence_structs == 1, "C2ForkFence must have exactly one definition")
+    fence_acquires = tuple(
+        function
+        for function in inventory.functions_named("acquire")
+        if function.owner == "C2ForkFence"
+    )
+    require(
+        len(fence_acquires) == 1
+        and fence_acquires[0].source.path.as_posix() == HELPER_SANDBOX,
+        "C2ForkFence::acquire is absent or ambiguous",
+    )
+    acquire = fence_acquires[0]
+
+    # 2. acquire is pub, locks the shared static, is non-reentrant, and never
+    # recovers from poison.
+    require(
+        acquire.visibility == "pub",
+        "C2ForkFence::acquire is not public",
+    )
+    acquire_code = compact_tokens(acquire.item_tokens, include_literals=False)
+    require(
+        "C2_FORK_FENCE.lock()" in acquire_code,
+        "C2ForkFence::acquire does not lock C2_FORK_FENCE",
+    )
+    require(
+        _source_token_count(sandbox, ("thread_local", "!")) >= 1
+        and _source_token_count(
+            sandbox, ("static", "C2_FORK_FENCE_HELD", ":", "Cell")
+        )
+        == 1
+        and "C2_FORK_FENCE_HELD" in acquire_code,
+        "fork fence non-reentrancy thread-local is absent or not consulted in acquire",
+    )
+    sandbox_production = [
+        function
+        for function in sandbox.functions
+        if not function.cfg_test
+        and function.source.path.as_posix() == HELPER_SANDBOX
+    ]
+    for function in sandbox_production:
+        code = compact_tokens(function.item_tokens, include_literals=False)
+        idents = _function_idents(function)
+        require(
+            "into_inner" not in idents and "clear_poison" not in idents,
+            f"fence poison recovery is present at {function.location}",
+        )
+        if "C2_FORK_FENCE" in idents:
+            require(
+                "lock().unwrap(" not in code
+                and "lock().expect(" not in code
+                and "unwrap_or_else(" not in code,
+                f"fence lock result is unwrapped or recovered at {function.location}",
+            )
+
+    # 3. The guard rechecks process identity and never leaks the inner lock.
+    verify_same_process = inventory.require_function(
+        HELPER_SANDBOX, "verify_same_process", "C2ForkFenceGuard"
+    )
+    require(
+        verify_same_process.visibility == "pub",
+        "C2ForkFenceGuard::verify_same_process is not public",
+    )
+    same_process_code = compact_tokens(
+        verify_same_process.item_tokens, include_literals=False
+    )
+    require(
+        "std::process::id()" in same_process_code
+        and "self.owner_pid" in same_process_code,
+        "verify_same_process does not compare the live pid against the stored owner pid",
+    )
+    require(
+        _item_body_token_count(sandbox, "struct", "C2ForkFenceGuard", ("owner_pid", ":", "u32"))
+        == 1
+        and _item_body_token_count(
+            sandbox, "struct", "C2ForkFenceGuard", ("_guard", ":", "MutexGuard")
+        )
+        == 1,
+        "C2ForkFenceGuard does not retain exactly the lock guard and the owner pid",
+    )
+    for function in inventory.functions:
+        if function.owner != "C2ForkFenceGuard":
+            continue
+        require(
+            "MutexGuard" not in function.signature_code
+            and "Mutex" not in function.signature_code,
+            f"guard accessor leaks the inner lock at {function.location}",
         )
 
+    # 4. The fence public API is authority-neutral.  The lexer omits comments
+    # and literal contents, so only parsed code tokens are consulted here.
+    fence_api_functions = [
+        function
+        for function in sandbox_production
+        if function.owner in {"C2ForkFence", "C2ForkFenceGuard"}
+        or function.name in {FENCE_ROW_CONSTRUCTOR, FENCE_ROW_VERIFIER}
+    ]
+    require(
+        {function.name for function in fence_api_functions}
+        >= {"acquire", "verify_same_process", FENCE_ROW_CONSTRUCTOR, FENCE_ROW_VERIFIER},
+        "fence public API census is incomplete",
+    )
+    for function in fence_api_functions:
+        signature = compact_tokens(
+            function.source.tokens[function.start_token : function.body_open_token]
+        )
+        lowered = signature.lower()
+        leaks = [stem for stem in FENCE_AUTHORITY_STEMS if stem in lowered]
+        require(
+            not leaks,
+            f"authority-neutral fence API references {leaks} at {function.location}",
+        )
+    for type_name in ("C2ForkFence", "C2ForkFenceGuard"):
+        lowered = type_name.lower()
+        require(
+            not any(stem in lowered for stem in FENCE_AUTHORITY_STEMS),
+            f"fence public type name {type_name} is not authority-neutral",
+        )
+
+    # 5. The sole production spawn choke holds the fence across the complete
+    # descriptor-handoff/spawn/restore interval.
     central_spawn = inventory.require_function(
         CORE_IDENTITY, "spawn_with_inherited_descriptors"
     )
+    require(
+        central_spawn.visibility == "pub(crate)",
+        "spawn choke visibility changed",
+    )
     central_code = compact_tokens(central_spawn.item_tokens, include_literals=False)
     central_sequence = (
-        "with_c2_process_spawn_fence(",
+        "C2ForkFence::acquire()",
         "DESCRIPTOR_LAUNCH.lock()",
         "make_inheritable(descriptors)",
         "command.spawn()",
@@ -1037,9 +1323,17 @@ def _verify_signer_process_fence(inventory: SourceInventory) -> tuple[str, ...]:
     central_positions = [central_code.find(value) for value in central_sequence]
     require(
         all(position >= 0 for position in central_positions)
-        and central_positions == sorted(central_positions),
-        "central helper spawn does not hold C2 fence before descriptor handoff/spawn/restore",
+        and central_positions == sorted(central_positions)
+        and len(set(central_positions)) == len(central_positions),
+        "central helper spawn does not hold the C2 fork fence before descriptor handoff/spawn/restore",
     )
+    require(
+        len(central_spawn.calls("spawn")) == 1,
+        "spawn choke must contain exactly one command.spawn()",
+    )
+
+    # 6. No production process-creation bypass anywhere in the searched
+    # production source scope.
     alternate_command_spawns = [
         function.location
         for function in inventory.functions
@@ -1051,7 +1345,137 @@ def _verify_signer_process_fence(inventory: SourceInventory) -> tuple[str, ...]:
         "production Command spawn bypasses the C2 process fence: "
         + ", ".join(alternate_command_spawns),
     )
+    pinned_wrappers = {(path, name) for path, name in LAUNCH_WRAPPER_SPECS}
+    process_bypasses: list[str] = []
+    for function in inventory.functions:
+        path = function.source.path.as_posix()
+        idents = _function_idents(function)
+        code = compact_tokens(function.item_tokens, include_literals=False)
+        if "tokio::process" in code:
+            process_bypasses.append(f"{function.location}:tokio::process")
+        for call in function.calls():
+            if call.name in {"output", "status"}:
+                process_bypasses.append(f"{function.location}:{call.name}")
+            elif call.name in PROCESS_CREATION_CALL_NAMES:
+                process_bypasses.append(f"{function.location}:{call.name}")
+            elif call.name == "spawn":
+                allowed = (
+                    (function is central_spawn and call.receiver == "command")
+                    or call.path == "thread::spawn"
+                    or (
+                        (path, function.name) in pinned_wrappers
+                        and call.receiver == "launch"
+                    )
+                    or (
+                        call.receiver is None
+                        and call.path == "spawn"
+                        and (path, "spawn") in pinned_wrappers
+                    )
+                    or (call.receiver is not None and "Command" not in idents)
+                )
+                if not allowed:
+                    process_bypasses.append(f"{function.location}:spawn:{call.receiver}")
+        if any("cfg(feature" in attribute for attribute in function.attributes):
+            feature_calls = {
+                call.name
+                for call in function.calls()
+                if call.name in {"spawn", "output", "status"} | PROCESS_CREATION_CALL_NAMES
+            }
+            require(
+                "Command" not in idents and not feature_calls,
+                f"feature-gated production function creates processes at {function.location}",
+            )
+    require(
+        not process_bypasses,
+        "production process creation bypasses the fenced choke: "
+        + ", ".join(process_bypasses),
+    )
+    command_constructors = {
+        function.location
+        for function in inventory.functions
+        if "Command::new(" in compact_tokens(function.item_tokens, include_literals=False)
+    }
+    launcher = inventory.require_function(CORE_IDENTITY, "spawn", "VerifiedLaunch")
+    loader = inventory.require_function(CORE_RUNTIME, "invoke_loader")
+    require(
+        command_constructors == {launcher.location, loader.location},
+        "production Command construction census changed: "
+        + ", ".join(sorted(command_constructors)),
+    )
 
+    # 7. Loader and runner launch sites route to the fenced choke.
+    require(
+        len(loader.calls("spawn_with_inherited_descriptors")) == 1,
+        "invoke_loader does not route through the fenced spawn choke",
+    )
+    loader_process_calls = {
+        call.name
+        for call in loader.calls()
+        if call.name in {"spawn", "output", "status"}
+    }
+    require(
+        not loader_process_calls,
+        f"invoke_loader creates a process directly: {sorted(loader_process_calls)}",
+    )
+    require(
+        "Command::new(" in compact_tokens(launcher.item_tokens, include_literals=False)
+        and len(launcher.calls("spawn_with_inherited_descriptors")) == 1,
+        "VerifiedLaunch::spawn no longer builds the command and delegates to the choke",
+    )
+    for wrapper_path, wrapper_name in LAUNCH_WRAPPER_SPECS:
+        wrapper = inventory.require_function(wrapper_path, wrapper_name)
+        wrapper_spawns = [
+            call for call in wrapper.calls("spawn") if call.receiver == "launch"
+        ]
+        require(
+            len(wrapper_spawns) == 1,
+            f"{wrapper.location} does not launch exactly once through VerifiedLaunch::spawn",
+        )
+    launch_spawn_callers = {
+        (function.source.path.as_posix(), function.name)
+        for function in inventory.functions
+        for call in function.calls("spawn")
+        if call.receiver == "launch"
+    }
+    require(
+        launch_spawn_callers == pinned_wrappers,
+        "VerifiedLaunch::spawn has an alternate production caller: "
+        + ", ".join(f"{path}::{name}" for path, name in sorted(launch_spawn_callers)),
+    )
+    choke_callers = {
+        function.qualified_name
+        for function in inventory.callers_of("spawn_with_inherited_descriptors")
+    }
+    require(
+        choke_callers
+        == {
+            "VerifiedLaunch::spawn",
+            "invoke_loader",
+            SPAWN_ROW_CONSTRUCTOR,
+        },
+        "spawn choke has an alternate production caller: "
+        + ", ".join(sorted(choke_callers)),
+    )
+
+    # 8. The named spawn row constructor only delegates to the choke.
+    spawn_row = inventory.require_function(CORE_IDENTITY, SPAWN_ROW_CONSTRUCTOR)
+    require(
+        spawn_row.visibility == "pub(crate)"
+        and len(spawn_row.calls("spawn_with_inherited_descriptors")) == 1
+        and not spawn_row.calls("spawn")
+        and "Command::new("
+        not in compact_tokens(spawn_row.item_tokens, include_literals=False),
+        "spawn row constructor is a second spawn owner instead of a choke delegation",
+    )
+    spawn_row_verifier = inventory.require_function(CORE_IDENTITY, SPAWN_ROW_VERIFIER)
+    require(
+        "C2ForkFence::acquire()"
+        in compact_tokens(spawn_row_verifier.item_tokens, include_literals=False),
+        "spawn row verifier does not acquire the shared fork fence",
+    )
+
+    # 9. Custody secret-live intervals hold the fence from entry through the
+    # post-zeroization process recheck.
     create = inventory.require_function(
         SIGNER_CUSTODY, "create_below_root", "C2StoreIntegrityCustodian"
     )
@@ -1060,21 +1484,25 @@ def _verify_signer_process_fence(inventory: SourceInventory) -> tuple[str, ...]:
         (
             create,
             (
-                "enter_c2_secret_process_interval()",
+                "C2ForkFence::acquire()",
+                "coordinates.validate()",
+                "scope_mutex.lock()",
                 "getrandom::fill(&mutseed)",
                 "bytes.fill(0)",
-                "secret_process_guard.verify_same_process()",
+                "drop(private_file)",
+                "drop(seed)",
+                "fork_fence_guard.verify_same_process()",
             ),
         ),
         (
             sign,
             (
-                "enter_c2_secret_process_interval()",
+                "C2ForkFence::acquire()",
                 "self.load_seed_for_signing()",
                 "signing_key.sign(&preimage)",
                 "object_facts(&reopened)",
                 "drop(seed)",
-                "secret_process_guard.verify_same_process()",
+                "fork_fence_guard.verify_same_process()",
             ),
         ),
     ):
@@ -1082,13 +1510,101 @@ def _verify_signer_process_fence(inventory: SourceInventory) -> tuple[str, ...]:
         positions = [code.find(value) for value in sequence]
         require(
             all(position >= 0 for position in positions)
-            and positions == sorted(positions),
+            and positions == sorted(positions)
+            and len(set(positions)) == len(positions),
             f"{function.location} does not fence its complete live-secret interval",
+        )
+
+    # 10. No secret-live path performs process creation.
+    custody_source = inventory.source(SIGNER_CUSTODY)
+    for function in custody_source.functions:
+        if function.cfg_test:
+            continue
+        idents = _function_idents(function)
+        process_calls = {
+            call.name
+            for call in function.calls()
+            if call.name in {"spawn", "output", "status"} | PROCESS_CREATION_CALL_NAMES
+        }
+        require(
+            "Command" not in idents and not process_calls,
+            f"signer custody path creates a process at {function.location}",
+        )
+
+    # 11. No constructed child receives signer-secret material.
+    for function in inventory.functions:
+        idents = _function_idents(function)
+        code = compact_tokens(function.item_tokens, include_literals=False)
+        if "Command" not in idents and "Command::new(" not in code:
+            continue
+        lowered = {ident.lower() for ident in idents}
+        secret_leaks = sorted(
+            ident
+            for ident in lowered
+            if "seed" in ident or "signing_key" in ident or "private_key" in ident
+        )
+        require(
+            not secret_leaks,
+            f"Command-constructing path references signer secret material "
+            f"{secret_leaks} at {function.location}",
+        )
+
+    # 12. Dependency direction is acyclic: the fence owner is a leaf crate.
+    _verify_fence_dependency_acyclicity(inventory.root, manifests)
+
+    # 13. No production reset, recovery, or bypass route exists for the fence.
+    fence_lockers = [
+        function
+        for function in inventory.functions
+        if "C2_FORK_FENCE.lock()" in compact_tokens(function.item_tokens, include_literals=False)
+    ]
+    require(
+        [function.qualified_name for function in fence_lockers]
+        == ["C2ForkFence::acquire"],
+        "a function other than acquire locks C2_FORK_FENCE: "
+        + ", ".join(function.location for function in fence_lockers),
+    )
+    for function in inventory.functions:
+        idents = _function_idents(function)
+        if not (FENCE_IDENTS & idents or "fork_fence_guard" in idents):
+            continue
+        require(
+            not any(stem in function.name.lower() for stem in FENCE_RESET_STEMS),
+            f"fence reset/recovery/bypass route present at {function.location}",
+        )
+        if function.source.path.as_posix() != HELPER_SANDBOX:
+            continue
+        if function.owner in {"C2ForkFence", "C2ForkFenceGuard"} or (
+            FENCE_IDENTS & idents
+        ):
+            require(
+                function.name in FENCE_PUBLIC_API_NAMES,
+                f"fence exposes an unapproved public surface at {function.location}",
+            )
+    for row_name in (FENCE_ROW_CONSTRUCTOR, FENCE_ROW_VERIFIER):
+        row_function = inventory.require_function(HELPER_SANDBOX, row_name)
+        require(
+            row_function.visibility == "pub",
+            f"{row_name} must remain public",
         )
     return (
         "signer-secret-fence=shared",
         "production-command-spawn-bypasses=0",
         "secret-process-recheck=after-zeroization",
+        "fork-fence-owner=one-process-global",
+        "fork-fence-poison-recovery=absent",
+        "fork-fence-nonreentrancy=thread-local",
+        "guard-lock-accessor=absent",
+        "fence-api=authority-neutral",
+        "spawn-choke=fence-before-descriptor-handoff",
+        "process-creation-bypasses=0",
+        "loader-and-runner-routes=single-choke",
+        "spawn-row-constructor=delegates-only",
+        "custody-secret-intervals=fenced-entry-to-recheck",
+        "secret-interval-process-creation=0",
+        "command-secret-material=absent",
+        "fence-dependency-direction=helper-sandbox-leaf",
+        "fence-reset-bypass=absent",
     )
 
 
@@ -1336,14 +1852,21 @@ def _direct_open_inventory(inventory: SourceInventory) -> C2DirectOpenCallGraphV
 
 
 def _verify_current_activation_projection(inventory: SourceInventory) -> tuple[str, ...]:
-    occurrences = [
+    # Physical ownership means the single definition site of the projection
+    # type.  Typed downstream references (imports, `&CurrentActivationForC2`
+    # parameters in the terminal-A1 snapshot and ingress verifiers) are
+    # consumers, not owners; the definition-site census below still refuses
+    # any second definition anywhere, and the constructor census below still
+    # refuses any second construction site, so this refines -- not weakens --
+    # the single-owner obligation.
+    owners = [
         source.path.as_posix()
         for source in inventory.sources
-        if source.identifier_occurrences("CurrentActivationForC2")
+        if _source_token_count(source, ("struct", "CurrentActivationForC2"))
     ]
     require(
-        len(occurrences) == 1,
-        f"CurrentActivationForC2 must have one physical owner; found {occurrences}",
+        len(owners) == 1,
+        f"CurrentActivationForC2 must have one physical owner; found {owners}",
     )
     constructors = [
         function
@@ -1359,7 +1882,7 @@ def _verify_current_activation_projection(inventory: SourceInventory) -> tuple[s
         "complete" in constructor.name and "resolution" in constructor.name,
         f"current activation constructor is not inside complete resolution: {constructor.location}",
     )
-    return (f"owner={occurrences[0]}", f"constructor={constructor.qualified_name}")
+    return (f"owner={owners[0]}", f"constructor={constructor.qualified_name}")
 
 
 def _verify_no_raw_restart_snapshot(inventory: SourceInventory) -> tuple[str, ...]:

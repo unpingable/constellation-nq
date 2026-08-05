@@ -420,74 +420,384 @@ class CallGraphVerifierControls(unittest.TestCase):
             )
 
     @staticmethod
-    def _process_fence_inventory(*, alternate_spawn: bool = False):
+    def _fence_manifests(*, helper_depends_on_store: bool = False):
+        helper_dependencies = {"libc": {}, "nix": {}}
+        if helper_depends_on_store:
+            helper_dependencies["nq-store"] = {"path": "../nq-store"}
+        return {
+            MODULE.HELPER_SANDBOX_MANIFEST: {
+                "package": {"name": "nq-helper-sandbox"},
+                "dependencies": helper_dependencies,
+            },
+            MODULE.STORE_MANIFEST: {
+                "package": {"name": "nq-store"},
+                "dependencies": {"nq-helper-sandbox": {"path": "../nq-helper-sandbox"}},
+            },
+        }
+
+    @classmethod
+    def _process_fence_inventory(
+        cls,
+        *,
+        alternate_spawn: bool = False,
+        choke_fence: str = "first",
+        loader_output: bool = False,
+        poison_recovery: bool = False,
+        second_fence_static: bool = False,
+        custody_recheck: bool = True,
+        custody_acquire_late: bool = False,
+        custody_command: bool = False,
+        feature_gated_spawn: bool = False,
+        fence_reset_api: bool = False,
+        row_constructor_spawns: bool = False,
+        helper_depends_on_store: bool = False,
+    ):
+        lock_expression = (
+            "C2_FORK_FENCE.lock().unwrap_or_else(PoisonError::into_inner)"
+            if poison_recovery
+            else 'C2_FORK_FENCE.lock().map_err(|_| io::Error::other("poisoned"))?'
+        )
+        reset_function = (
+            """
+            pub fn reset_fork_fence() {
+                C2_FORK_FENCE.clear_poison();
+            }
+            """
+            if fence_reset_api
+            else ""
+        )
+        choke_fence_first = """
+            let _fork_fence = C2ForkFence::acquire()?;
+            let _guard = DESCRIPTOR_LAUNCH.lock().map_err(|_| io::Error::other("poisoned"))?;
+        """
+        choke_body_lock = {
+            "first": choke_fence_first,
+            "missing": """
+            let _guard = DESCRIPTOR_LAUNCH.lock().map_err(|_| io::Error::other("poisoned"))?;
+            """,
+            "late": """
+            let _guard = DESCRIPTOR_LAUNCH.lock().map_err(|_| io::Error::other("poisoned"))?;
+            let _fork_fence = C2ForkFence::acquire()?;
+            """,
+        }[choke_fence]
         alternate = (
             "fn bypass(command: &mut Command) { let _ = command.spawn(); }"
             if alternate_spawn
             else ""
         )
-        return MODULE.SourceInventory.from_texts(
+        second_static = (
+            "static SECOND_FORK_FENCE: Mutex<()> = Mutex::new(());"
+            if second_fence_static
+            else ""
+        )
+        feature_gated = (
+            """
+            #[cfg(feature = "extended-helper")]
+            fn gated_helper(command: &mut Command) { let _ = command.output(); }
+            """
+            if feature_gated_spawn
+            else ""
+        )
+        row_constructor_body = (
+            "Ok(command.spawn()?)"
+            if row_constructor_spawns
+            else "spawn_with_inherited_descriptors(command, descriptors)"
+        )
+        loader_body = (
+            """
+            let mut command = Command::new(loader);
+            isolate_command(&mut command, account);
+            let output = command.output()?;
+            drain(output)
+            """
+            if loader_output
+            else """
+            let mut command = Command::new(loader);
+            isolate_command(&mut command, account);
+            let child = spawn_with_inherited_descriptors(&mut command, &[descriptor])?;
+            drain(child)
+            """
+        )
+        create_acquire = (
+            ""
+            if custody_acquire_late
+            else "let fork_fence_guard = C2ForkFence::acquire().map_err(|_| SignerRefusalV2::CustodyIo)?;"
+        )
+        create_acquire_late = (
+            "let fork_fence_guard = C2ForkFence::acquire().map_err(|_| SignerRefusalV2::CustodyIo)?;"
+            if custody_acquire_late
+            else ""
+        )
+        create_recheck = (
+            "fork_fence_guard.verify_same_process().map_err(|_| SignerRefusalV2::CustodyIo)?;"
+            if custody_recheck
+            else ""
+        )
+        custody_process = (
+            """
+            fn hold_command(command: &mut Command) {
+                let _ = command;
+            }
+            """
+            if custody_command
+            else ""
+        )
+        inventory = MODULE.SourceInventory.from_texts(
             {
-                MODULE.HELPER_SANDBOX: """
-                    static C2_PROCESS_FENCE: Mutex<()> = Mutex::new(());
-                    pub fn enter_c2_secret_process_interval() {
-                        let _guard = C2_PROCESS_FENCE.lock();
-                    }
-                    pub fn with_c2_process_spawn_fence(operation: impl FnOnce()) {
-                        let _guard = C2_PROCESS_FENCE.lock();
-                        operation();
-                    }
+                MODULE.HELPER_SANDBOX: f"""
+                    static C2_FORK_FENCE: Mutex<()> = Mutex::new(());
+                    thread_local! {{
+                        static C2_FORK_FENCE_HELD: Cell<bool> = const {{ Cell::new(false) }};
+                    }}
+                    pub struct C2ForkFence;
+                    impl C2ForkFence {{
+                        pub fn acquire() -> io::Result<C2ForkFenceGuard> {{
+                            C2_FORK_FENCE_HELD.with(|held| {{
+                                if held.get() {{ return Err(io::Error::other("non-reentrant")); }}
+                                let guard = {lock_expression};
+                                held.set(true);
+                                Ok(C2ForkFenceGuard {{ _guard: guard, owner_pid: std::process::id() }})
+                            }})
+                        }}
+                    }}
+                    pub struct C2ForkFenceGuard {{
+                        _guard: MutexGuard<'static, ()>,
+                        owner_pid: u32,
+                    }}
+                    impl C2ForkFenceGuard {{
+                        pub fn verify_same_process(&self) -> io::Result<()> {{
+                            if std::process::id() != self.owner_pid {{
+                                return Err(io::Error::other("crossed"));
+                            }}
+                            Ok(())
+                        }}
+                    }}
+                    impl Drop for C2ForkFenceGuard {{
+                        fn drop(&mut self) {{
+                            let _ = C2_FORK_FENCE_HELD.try_with(|held| held.set(false));
+                        }}
+                    }}
+                    pub fn construct_sg_wu_02_fence_shared_process_global_fork_fence_primitive() -> C2ForkFence {{
+                        C2ForkFence
+                    }}
+                    pub fn verify_sg_wu_02_fence_shared_process_global_fork_fence_primitive(
+                        fence: &C2ForkFence,
+                    ) -> io::Result<()> {{
+                        let _ = fence;
+                        let guard = C2ForkFence::acquire()?;
+                        guard.verify_same_process()
+                    }}
+                    {reset_function}
                 """,
                 MODULE.CORE_IDENTITY: f"""
-                    fn spawn_with_inherited_descriptors(command: &mut Command, descriptors: &[i32]) {{
-                        with_c2_process_spawn_fence(|| {{
-                            let _guard = DESCRIPTOR_LAUNCH.lock();
-                            let original_flags = make_inheritable(descriptors);
-                            let spawned = command.spawn();
-                            let restored = restore_descriptor_flags(descriptors, &original_flags);
-                        }});
+                    static DESCRIPTOR_LAUNCH: Mutex<()> = Mutex::new(());
+                    {second_static}
+                    pub(crate) fn spawn_with_inherited_descriptors(
+                        command: &mut Command,
+                        descriptors: &[i32],
+                    ) -> io::Result<Child> {{
+                        {choke_body_lock}
+                        let original_flags = make_inheritable(descriptors)?;
+                        let spawned = command.spawn();
+                        let restored = restore_descriptor_flags(descriptors, &original_flags);
+                        match (spawned, restored) {{
+                            (Ok(child), Ok(())) => Ok(child),
+                            (Err(error), _) => Err(error),
+                            (_, Err(error)) => Err(error),
+                        }}
+                    }}
+                    pub(crate) fn construct_sg_wu_02_spawn_production_spawn_integration_shared_fence(
+                        command: &mut Command,
+                        descriptors: &[i32],
+                    ) -> io::Result<Child> {{
+                        {row_constructor_body}
+                    }}
+                    pub(crate) fn verify_sg_wu_02_spawn_production_spawn_integration_shared_fence() -> io::Result<()> {{
+                        let guard = C2ForkFence::acquire()?;
+                        guard.verify_same_process()
+                    }}
+                    struct VerifiedLaunch;
+                    impl VerifiedLaunch {{
+                        pub(crate) fn spawn(&self, configure: impl FnOnce(&mut Command)) -> io::Result<Child> {{
+                            let mut command = Command::new(&self.executable);
+                            configure(&mut command);
+                            let descriptors = self.inherited_descriptors();
+                            spawn_with_inherited_descriptors(&mut command, &descriptors)
+                        }}
                     }}
                     {alternate}
+                    {feature_gated}
                 """,
-                MODULE.SIGNER_CUSTODY: """
-                    struct C2StoreIntegrityCustodian;
-                    impl C2StoreIntegrityCustodian {
-                        fn create_below_root() {
-                            let secret_process_guard = enter_c2_secret_process_interval();
-                            getrandom::fill(&mut seed);
-                            bytes.fill(0);
-                            secret_process_guard.verify_same_process();
-                        }
-                        fn sign(&self) {
-                            let secret_process_guard = enter_c2_secret_process_interval();
-                            let seed = self.load_seed_for_signing();
-                            signing_key.sign(&preimage);
-                            object_facts(&reopened);
-                            drop(seed);
-                            secret_process_guard.verify_same_process();
-                        }
+                MODULE.CORE_RUNTIME: f"""
+                    fn invoke_loader(
+                        loader: &Path,
+                        descriptor: i32,
+                        account: &ExecutionAccount,
+                    ) -> Result<Vec<u8>, IdentityError> {{
+                        {loader_body}
+                    }}
+                """,
+                MODULE.CORE_RUNNER: """
+                    fn spawn(launch: &VerifiedLaunch) -> io::Result<Child> {
+                        launch.spawn(|command| {
+                            command.env_clear();
+                        })
                     }
+                """,
+                MODULE.CORE_UNIX_RUNNER: """
+                    fn spawn_helper(launch: &VerifiedLaunch) -> io::Result<Child> {
+                        launch.spawn(|command| {
+                            command.env_clear();
+                        })
+                    }
+                """,
+                MODULE.SIGNER_CUSTODY: f"""
+                    struct C2StoreIntegrityCustodian;
+                    impl C2StoreIntegrityCustodian {{
+                        fn create_below_root() {{
+                            {create_acquire}
+                            coordinates.validate()?;
+                            let scope_mutex = custody_scope_mutex(&scope_token);
+                            let _scope_guard = scope_mutex.lock().map_err(|_| SignerRefusalV2::CustodyIo)?;
+                            getrandom::fill(&mut seed).map_err(|_| SignerRefusalV2::CustodyIo)?;
+                            {create_acquire_late}
+                            bytes.fill(0);
+                            drop(private_file);
+                            drop(seed);
+                            {create_recheck}
+                        }}
+                        fn sign(&self) {{
+                            let fork_fence_guard = C2ForkFence::acquire().map_err(|_| SignerRefusalV2::CustodyIo)?;
+                            let (seed, retained_file, retained_facts) = self.load_seed_for_signing()?;
+                            signing_key.sign(&preimage);
+                            object_facts(&reopened)?;
+                            drop(retained_file);
+                            drop(signing_key);
+                            drop(seed);
+                            {create_recheck}
+                        }}
+                    }}
+                    {custody_process}
                 """,
             }
         )
+        return inventory, cls._fence_manifests(
+            helper_depends_on_store=helper_depends_on_store
+        )
 
     def test_signer_process_fence_accepts_one_shared_spawn_boundary(self) -> None:
+        inventory, manifests = self._process_fence_inventory()
         self.assertEqual(
-            MODULE._verify_signer_process_fence(self._process_fence_inventory()),
+            MODULE._verify_signer_process_fence(inventory, manifests),
             (
                 "signer-secret-fence=shared",
                 "production-command-spawn-bypasses=0",
                 "secret-process-recheck=after-zeroization",
+                "fork-fence-owner=one-process-global",
+                "fork-fence-poison-recovery=absent",
+                "fork-fence-nonreentrancy=thread-local",
+                "guard-lock-accessor=absent",
+                "fence-api=authority-neutral",
+                "spawn-choke=fence-before-descriptor-handoff",
+                "process-creation-bypasses=0",
+                "loader-and-runner-routes=single-choke",
+                "spawn-row-constructor=delegates-only",
+                "custody-secret-intervals=fenced-entry-to-recheck",
+                "secret-interval-process-creation=0",
+                "command-secret-material=absent",
+                "fence-dependency-direction=helper-sandbox-leaf",
+                "fence-reset-bypass=absent",
             ),
         )
 
     def test_signer_process_fence_rejects_alternate_command_spawn(self) -> None:
+        inventory, manifests = self._process_fence_inventory(alternate_spawn=True)
         with self.assertRaisesRegex(
             MODULE.VerificationError, "production Command spawn bypasses"
         ):
-            MODULE._verify_signer_process_fence(
-                self._process_fence_inventory(alternate_spawn=True)
-            )
+            MODULE._verify_signer_process_fence(inventory, manifests)
+
+    def test_signer_process_fence_rejects_choke_missing_fence(self) -> None:
+        inventory, manifests = self._process_fence_inventory(choke_fence="missing")
+        with self.assertRaisesRegex(
+            MODULE.VerificationError, "does not hold the C2 fork fence"
+        ):
+            MODULE._verify_signer_process_fence(inventory, manifests)
+
+    def test_signer_process_fence_rejects_fence_after_descriptor_lock(self) -> None:
+        inventory, manifests = self._process_fence_inventory(choke_fence="late")
+        with self.assertRaisesRegex(
+            MODULE.VerificationError, "does not hold the C2 fork fence"
+        ):
+            MODULE._verify_signer_process_fence(inventory, manifests)
+
+    def test_signer_process_fence_rejects_loader_command_output(self) -> None:
+        inventory, manifests = self._process_fence_inventory(loader_output=True)
+        with self.assertRaisesRegex(
+            MODULE.VerificationError, "process creation bypasses the fenced choke"
+        ):
+            MODULE._verify_signer_process_fence(inventory, manifests)
+
+    def test_signer_process_fence_rejects_poison_recovery(self) -> None:
+        inventory, manifests = self._process_fence_inventory(poison_recovery=True)
+        with self.assertRaisesRegex(
+            MODULE.VerificationError, "fence poison recovery is present"
+        ):
+            MODULE._verify_signer_process_fence(inventory, manifests)
+
+    def test_signer_process_fence_rejects_second_fence_static(self) -> None:
+        inventory, manifests = self._process_fence_inventory(second_fence_static=True)
+        with self.assertRaisesRegex(
+            MODULE.VerificationError, "second fork/fence process mutex"
+        ):
+            MODULE._verify_signer_process_fence(inventory, manifests)
+
+    def test_signer_process_fence_rejects_custody_missing_process_recheck(self) -> None:
+        inventory, manifests = self._process_fence_inventory(custody_recheck=False)
+        with self.assertRaisesRegex(
+            MODULE.VerificationError, "does not fence its complete live-secret interval"
+        ):
+            MODULE._verify_signer_process_fence(inventory, manifests)
+
+    def test_signer_process_fence_rejects_custody_acquire_after_random_fill(self) -> None:
+        inventory, manifests = self._process_fence_inventory(custody_acquire_late=True)
+        with self.assertRaisesRegex(
+            MODULE.VerificationError, "does not fence its complete live-secret interval"
+        ):
+            MODULE._verify_signer_process_fence(inventory, manifests)
+
+    def test_signer_process_fence_rejects_command_in_custody(self) -> None:
+        inventory, manifests = self._process_fence_inventory(custody_command=True)
+        with self.assertRaisesRegex(
+            MODULE.VerificationError, "signer custody path creates a process"
+        ):
+            MODULE._verify_signer_process_fence(inventory, manifests)
+
+    def test_signer_process_fence_rejects_feature_gated_spawn(self) -> None:
+        inventory, manifests = self._process_fence_inventory(feature_gated_spawn=True)
+        with self.assertRaisesRegex(
+            MODULE.VerificationError, "feature-gated production function creates processes"
+        ):
+            MODULE._verify_signer_process_fence(inventory, manifests)
+
+    def test_signer_process_fence_rejects_helper_manifest_store_dependency(self) -> None:
+        inventory, manifests = self._process_fence_inventory(helper_depends_on_store=True)
+        with self.assertRaisesRegex(
+            MODULE.VerificationError, "nq-helper-sandbox depends upward"
+        ):
+            MODULE._verify_signer_process_fence(inventory, manifests)
+
+    def test_signer_process_fence_rejects_fence_reset_api(self) -> None:
+        inventory, manifests = self._process_fence_inventory(fence_reset_api=True)
+        with self.assertRaisesRegex(
+            MODULE.VerificationError, "fence poison recovery is present"
+        ):
+            MODULE._verify_signer_process_fence(inventory, manifests)
+
+    def test_signer_process_fence_rejects_non_delegating_spawn_row_constructor(self) -> None:
+        inventory, manifests = self._process_fence_inventory(row_constructor_spawns=True)
+        with self.assertRaises(MODULE.VerificationError):
+            MODULE._verify_signer_process_fence(inventory, manifests)
 
 
 if __name__ == "__main__":
