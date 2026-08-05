@@ -232,7 +232,7 @@ fn construct_transition(
         pop_identity: pop.identity,
         enrollment_identity: enrollment.identity,
         install_policy_identity: grant.install_policy_digest(),
-        coordinates: enrollment.candidate.coordinates,
+        coordinates: enrollment.candidate.coordinates.clone(),
         genesis_identity: genesis.identity,
         store_commitment_identity,
         append_identity: receipt.append_identity,

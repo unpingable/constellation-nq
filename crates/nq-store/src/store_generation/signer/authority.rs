@@ -16,7 +16,10 @@ use crate::{
 };
 
 use super::external_governance::{
+    ExternalCarrierVerificationPermitV1, ExternalGovernanceExpectationV1,
+    StoreIntegrityBootstrapGrantRequestV1, StoreIntegrityBootstrapGrantV1,
     TerminalA1AuthenticityVerifierV1, TerminalA1IssuerClaimV1, VerifiedBootstrapGrantV1,
+    verify_bootstrap_grant_terminal_a1_signature_scope_policy_cut_request_identity,
 };
 use super::messages::{ClosedMessageFamilyV1, SignerIdentityV1};
 use super::result::SignerRefusalV2;
@@ -88,19 +91,19 @@ impl TerminalA1AuthoritySnapshotV1<'_> {
 /// The only A1 key generation permitted to verify an initial bootstrap grant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TerminalA1BootstrapIssuerV1 {
-    pub(crate) snapshot_identity: Sha256Digest,
-    pub(crate) occurrence: String,
-    pub(crate) trust_anchor_id: Sha256Digest,
-    pub(crate) record_digest: Sha256Digest,
-    pub(crate) key_generation: u64,
-    pub(crate) verifying_key: [u8; 32],
-    pub(crate) operator_principal: String,
-    pub(crate) domain: String,
-    pub(crate) policy_version: u64,
-    pub(crate) policy_floor: u64,
-    pub(crate) terminal_a1_cut: u64,
-    pub(crate) terminal_event: Sha256Digest,
-    pub(crate) issuance_cut: u64,
+    snapshot_identity: Sha256Digest,
+    occurrence: String,
+    trust_anchor_id: Sha256Digest,
+    record_digest: Sha256Digest,
+    key_generation: u64,
+    verifying_key: [u8; 32],
+    operator_principal: String,
+    domain: String,
+    policy_version: u64,
+    policy_floor: u64,
+    terminal_a1_cut: u64,
+    terminal_event: Sha256Digest,
+    issuance_cut: u64,
 }
 
 /// Complete signer bootstrap grant scope.
@@ -110,7 +113,7 @@ pub(crate) struct BootstrapGrantScopeV1 {
     physical_generation: SignerIdentityV1,
     a2_chain_root: SignerIdentityV1,
     a2_snapshot: SignerIdentityV1,
-    resident: SignerIdentityV1,
+    resident_identity: String,
     resident_generation: u64,
     role: String,
     role_manifest_generation: u64,
@@ -144,9 +147,17 @@ pub(crate) struct BootstrapGrantIdentityV1 {
 pub(crate) struct A2ApplicabilityRefinementV1 {
     grant_identity: SignerIdentityV1,
     occurrence: String,
+    a2_chain_root: SignerIdentityV1,
     a2_snapshot: SignerIdentityV1,
     candidate_set: SignerIdentityV1,
+    trust_anchor: SignerIdentityV1,
+    resident_identity: String,
+    resident_generation: u64,
+    role: String,
+    role_manifest_generation: u64,
+    domain: String,
     activation_policy_version: u64,
+    resolution_cut: u64,
     interpretation: &'static str,
 }
 
@@ -177,10 +188,12 @@ pub(crate) struct SignerAuthoritySeparationV1 {
     pub(crate) bootstrap_grant_identity: SignerIdentityV1,
 }
 
-/// Store-owned ingress projection for an already verified external A1
-/// bootstrap/regrant carrier.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TerminalA1ExternalCarrierIngressV1 {
+/// Store-owned ingress projection whose carrier verification, terminal-A1
+/// resolution and A2 applicability all share one borrowed Store snapshot.
+pub(crate) struct TerminalA1ExternalCarrierIngressV1<'ingress, 'snapshot> {
+    snapshot: &'ingress TerminalA1AuthoritySnapshotV1<'snapshot>,
+    current: &'ingress CurrentActivationForC2<'snapshot>,
+    verified: VerifiedBootstrapGrantV1,
     family: ClosedMessageFamilyV1,
     issuer: TerminalA1BootstrapIssuerV1,
     grant: BootstrapGrantIdentityV1,
@@ -198,6 +211,60 @@ impl BootstrapGrantIdentityV1 {
 
     pub(crate) const fn issuer(&self) -> &TerminalA1BootstrapIssuerV1 {
         &self.issuer
+    }
+}
+
+impl TerminalA1BootstrapIssuerV1 {
+    pub(crate) const fn snapshot_identity(&self) -> &Sha256Digest {
+        &self.snapshot_identity
+    }
+
+    pub(crate) const fn trust_anchor_id(&self) -> &Sha256Digest {
+        &self.trust_anchor_id
+    }
+
+    pub(crate) fn occurrence(&self) -> &str {
+        &self.occurrence
+    }
+
+    pub(crate) const fn record_digest(&self) -> &Sha256Digest {
+        &self.record_digest
+    }
+
+    pub(crate) const fn key_generation(&self) -> u64 {
+        self.key_generation
+    }
+
+    pub(crate) const fn verifying_key(&self) -> &[u8; 32] {
+        &self.verifying_key
+    }
+
+    pub(crate) fn operator_principal(&self) -> &str {
+        &self.operator_principal
+    }
+
+    pub(crate) fn domain(&self) -> &str {
+        &self.domain
+    }
+
+    pub(crate) const fn policy_version(&self) -> u64 {
+        self.policy_version
+    }
+
+    pub(crate) const fn policy_floor(&self) -> u64 {
+        self.policy_floor
+    }
+
+    pub(crate) const fn terminal_a1_cut(&self) -> u64 {
+        self.terminal_a1_cut
+    }
+
+    pub(crate) const fn terminal_event(&self) -> &Sha256Digest {
+        &self.terminal_event
+    }
+
+    pub(crate) const fn issuance_cut(&self) -> u64 {
+        self.issuance_cut
     }
 }
 
@@ -344,6 +411,10 @@ fn digest_identity(digest: &Sha256Digest) -> Result<SignerIdentityV1, SignerRefu
     .map_err(|_| SignerRefusalV2::ExternalCarrierScopeMismatch)
 }
 
+fn valid_gen4_identity(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 1024 && !value.chars().any(char::is_control)
+}
+
 fn verified_issuer_matches(
     issuer: &TerminalA1BootstrapIssuerV1,
     claim: &TerminalA1IssuerClaimV1,
@@ -369,6 +440,7 @@ fn verify_bootstrap_scope_against_issuer(
         || scope.trust_anchor != digest_identity(&issuer.trust_anchor_id)?
         || scope.domain != issuer.domain
         || scope.resident_generation == 0
+        || !valid_gen4_identity(&scope.resident_identity)
         || scope.role.is_empty()
         || scope.role_manifest_generation == 0
         || scope.activation_policy_version == 0
@@ -378,7 +450,6 @@ fn verify_bootstrap_scope_against_issuer(
             scope.physical_generation,
             scope.a2_chain_root,
             scope.a2_snapshot,
-            scope.resident,
             scope.trust_anchor,
             scope.signer_scope,
             scope.initial_active_policy,
@@ -412,7 +483,7 @@ pub(crate) fn construct_sg_n_04_bootstrap_grant_binds_complete_occurrence_reside
         physical_generation: verified.physical_generation_bytes(),
         a2_chain_root: verified.a2_chain_root_bytes(),
         a2_snapshot: verified.controlling_activation_bytes(),
-        resident: verified.resident_identity_bytes(),
+        resident_identity: verified.resident_identity().to_owned(),
         resident_generation: verified.resident_generation(),
         role: verified.host_role().to_owned(),
         role_manifest_generation: verified.role_manifest_generation(),
@@ -495,27 +566,53 @@ pub(crate) fn verify_sg_n_05_grant_uses_canonical_encoding_identity_signature_do
 }
 
 pub(crate) fn construct_sg_n_06_current_a2_is_applicability_constraint_named_by(
+    snapshot: &TerminalA1AuthoritySnapshotV1<'_>,
     grant: &BootstrapGrantIdentityV1,
     current: &CurrentActivationForC2<'_>,
 ) -> Result<A2ApplicabilityRefinementV1, SignerRefusalV2> {
+    verify_snapshot(snapshot)?;
     verify_sg_n_05_grant_uses_canonical_encoding_identity_signature_domain(grant)?;
     verify_n_09_current_activation_for_c2(current)
         .map_err(|_| SignerRefusalV2::A2ApplicabilityMismatch)?;
+    let expected_issuer = construct_sg_n_02_bootstrap_grant_issuer_is_exactly_resolver_selected(
+        snapshot,
+        grant.scope.proposed_verifying_key,
+    )?;
     let a2_snapshot = digest_identity(current.controlling_tip_activation_digest())?;
+    let a2_chain_root = digest_identity(current.chain_root_activation_digest())?;
     let candidate_set = digest_identity(current.candidate_set_digest())?;
-    if grant.scope.occurrence != current.occurrence_id()
+    let trust_anchor = digest_identity(current.trust_anchor_id())?;
+    if !current.is_exact_projection_of(snapshot.input, snapshot.resolved)
+        || grant.issuer != expected_issuer
+        || grant.scope.occurrence != current.occurrence_id()
+        || grant.scope.a2_chain_root != a2_chain_root
         || grant.scope.a2_snapshot != a2_snapshot
+        || grant.scope.trust_anchor != trust_anchor
+        || grant.scope.resident_identity != current.resident_identity()
+        || grant.scope.resident_generation != current.resident_generation()
+        || grant.scope.role != current.host_role()
+        || grant.scope.role_manifest_generation != current.role_manifest_generation()
+        || grant.scope.domain != current.domain()
         || grant.scope.activation_policy_version != current.policy_version()
         || digest_identity(&grant.issuer.snapshot_identity)? != candidate_set
+        || grant.issuer.issuance_cut != current.resolution_cut()
     {
         return Err(SignerRefusalV2::A2ApplicabilityMismatch);
     }
     Ok(A2ApplicabilityRefinementV1 {
         grant_identity: grant.grant_identity,
         occurrence: grant.scope.occurrence.clone(),
+        a2_chain_root,
         a2_snapshot,
         candidate_set,
+        trust_anchor,
+        resident_identity: current.resident_identity().to_owned(),
+        resident_generation: current.resident_generation(),
+        role: current.host_role().to_owned(),
+        role_manifest_generation: current.role_manifest_generation(),
+        domain: current.domain().to_owned(),
         activation_policy_version: current.policy_version(),
+        resolution_cut: current.resolution_cut(),
         interpretation: A2_APPLICABILITY_INTERPRETATION_V1,
     })
 }
@@ -526,9 +623,17 @@ pub(crate) fn verify_sg_n_06_current_a2_is_applicability_constraint_named_by(
 ) -> Result<(), SignerRefusalV2> {
     if applicability.grant_identity != grant.grant_identity
         || applicability.occurrence != grant.scope.occurrence
+        || applicability.a2_chain_root != grant.scope.a2_chain_root
         || applicability.a2_snapshot != grant.scope.a2_snapshot
         || applicability.candidate_set != digest_identity(&grant.issuer.snapshot_identity)?
+        || applicability.trust_anchor != grant.scope.trust_anchor
+        || applicability.resident_identity != grant.scope.resident_identity
+        || applicability.resident_generation != grant.scope.resident_generation
+        || applicability.role != grant.scope.role
+        || applicability.role_manifest_generation != grant.scope.role_manifest_generation
+        || applicability.domain != grant.scope.domain
         || applicability.activation_policy_version != grant.scope.activation_policy_version
+        || applicability.resolution_cut != grant.issuer.issuance_cut
         || applicability.interpretation != A2_APPLICABILITY_INTERPRETATION_V1
     {
         return Err(SignerRefusalV2::A2ApplicabilityMismatch);
@@ -617,19 +722,43 @@ pub(crate) fn verify_sg_n_01_keep_operator_authority_a1_possession_a2_activation
     Ok(())
 }
 
-pub(crate) fn construct_sg_wu_01_a1_grant_interpretation_owner_terminal_a1_projection(
-    issuer: &TerminalA1BootstrapIssuerV1,
-    verified: &VerifiedBootstrapGrantV1,
-    current: &CurrentActivationForC2<'_>,
-) -> Result<TerminalA1ExternalCarrierIngressV1, SignerRefusalV2> {
-    let grant = construct_sg_n_05_grant_uses_canonical_encoding_identity_signature_domain(
-        issuer, verified,
+pub(super) fn construct_sg_wu_01_a1_grant_interpretation_owner_terminal_a1_projection<
+    'ingress,
+    'snapshot,
+>(
+    verification_permit: &ExternalCarrierVerificationPermitV1,
+    snapshot: &'ingress TerminalA1AuthoritySnapshotV1<'snapshot>,
+    carrier: &StoreIntegrityBootstrapGrantV1,
+    request: &StoreIntegrityBootstrapGrantRequestV1,
+    expectation: &ExternalGovernanceExpectationV1,
+    current: &'ingress CurrentActivationForC2<'snapshot>,
+) -> Result<TerminalA1ExternalCarrierIngressV1<'ingress, 'snapshot>, SignerRefusalV2> {
+    // Authenticity verification and Store-owned ingress construction are one
+    // operation over the same borrowed terminal snapshot.  No owned verified
+    // carrier can be supplied by a caller from a detached resolution.
+    let verified = verify_bootstrap_grant_terminal_a1_signature_scope_policy_cut_request_identity(
+        verification_permit,
+        carrier,
+        request,
+        expectation,
+        snapshot,
     )?;
-    let applicability =
-        construct_sg_n_06_current_a2_is_applicability_constraint_named_by(&grant, current)?;
+    let issuer = construct_sg_n_02_bootstrap_grant_issuer_is_exactly_resolver_selected(
+        snapshot,
+        verified.store_integrity_public_key(),
+    )?;
+    let grant = construct_sg_n_05_grant_uses_canonical_encoding_identity_signature_domain(
+        &issuer, &verified,
+    )?;
+    let applicability = construct_sg_n_06_current_a2_is_applicability_constraint_named_by(
+        snapshot, &grant, current,
+    )?;
     let ingress = TerminalA1ExternalCarrierIngressV1 {
+        snapshot,
+        current,
+        verified,
         family: ClosedMessageFamilyV1::Msg01BootstrapGrant,
-        issuer: issuer.clone(),
+        issuer,
         grant,
         applicability,
     };
@@ -638,11 +767,35 @@ pub(crate) fn construct_sg_wu_01_a1_grant_interpretation_owner_terminal_a1_proje
 }
 
 pub(crate) fn verify_sg_wu_01_a1_grant_interpretation_owner_terminal_a1_projection(
-    ingress: &TerminalA1ExternalCarrierIngressV1,
+    ingress: &TerminalA1ExternalCarrierIngressV1<'_, '_>,
 ) -> Result<(), SignerRefusalV2> {
+    verify_snapshot(ingress.snapshot)?;
+    verify_n_09_current_activation_for_c2(ingress.current)
+        .map_err(|_| SignerRefusalV2::A2ApplicabilityMismatch)?;
+    if !ingress
+        .current
+        .is_exact_projection_of(ingress.snapshot.input, ingress.snapshot.resolved)
+    {
+        return Err(SignerRefusalV2::A2ApplicabilityMismatch);
+    }
+    let expected_issuer = construct_sg_n_02_bootstrap_grant_issuer_is_exactly_resolver_selected(
+        ingress.snapshot,
+        ingress.verified.store_integrity_public_key(),
+    )?;
+    let expected_grant = construct_sg_n_05_grant_uses_canonical_encoding_identity_signature_domain(
+        &expected_issuer,
+        &ingress.verified,
+    )?;
+    let expected_applicability = construct_sg_n_06_current_a2_is_applicability_constraint_named_by(
+        ingress.snapshot,
+        &expected_grant,
+        ingress.current,
+    )?;
     if ingress.family != ClosedMessageFamilyV1::Msg01BootstrapGrant
         || ingress.family.owner() != super::messages::MessageFamilyOwnerV1::ExternalTerminalA1
-        || ingress.issuer != ingress.grant.issuer
+        || ingress.issuer != expected_issuer
+        || ingress.grant != expected_grant
+        || ingress.applicability != expected_applicability
     {
         return Err(SignerRefusalV2::ExternalCarrierScopeMismatch);
     }

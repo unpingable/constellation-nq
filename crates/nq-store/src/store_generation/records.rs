@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 
 use ed25519_dalek::VerifyingKey;
 use nq_protocol::{CanonicalizationError, Sha256Digest, canonical_json_bytes, semantic_digest};
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 use super::signer::external_governance::VerifiedBootstrapGrantV1;
@@ -105,7 +105,44 @@ digest_identity!(
     DependencyAnchorIdentityV1,
     "Exact runtime-dependency anchor identity."
 );
-digest_identity!(ResidentIdentityV1, "Exact resident identity.");
+
+/// Exact Gen4 resident identity.
+///
+/// Gen4 deliberately treats this as a bounded opaque string. It is not a
+/// SHA-256 digest, and C2 preserves it byte-for-byte inside its enclosing
+/// canonical records.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct ResidentIdentityV1(String);
+
+impl ResidentIdentityV1 {
+    /// Parse the exact bounded Gen4 resident coordinate.
+    pub fn new(value: impl Into<String>) -> Result<Self, C2CanonicalRecordErrorV1> {
+        let value = value.into();
+        if value.is_empty() || value.len() > 1024 || value.chars().any(char::is_control) {
+            return Err(C2CanonicalRecordErrorV1::InvalidTextField(
+                "resident_identity",
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    /// Exact raw Gen4 resident text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ResidentIdentityV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
 digest_identity!(RoleManifestIdentityV1, "Exact role-manifest identity.");
 digest_identity!(
     EnrollmentIdentityV1,
@@ -1228,7 +1265,7 @@ mod tests {
             a2_chain_root: A2ChainRootIdentityV1::new(digest('2')),
             controlling_activation: ControllingActivationIdentityV1::new(digest('3')),
             dependency_anchor: DependencyAnchorIdentityV1::new(digest('4')),
-            resident: ResidentIdentityV1::new(digest('5')),
+            resident: ResidentIdentityV1::new("resident/node-a").unwrap(),
             resident_generation: 1,
             role: "nq.host_role.store.v1".to_owned(),
             role_manifest: RoleManifestIdentityV1::new(digest('6')),
@@ -1298,5 +1335,23 @@ mod tests {
             .is_err()
         );
         assert!(Ed25519StoreIntegrityPublicKeyV1::from_lower_hex("00").is_err());
+    }
+
+    #[test]
+    fn resident_identity_preserves_the_exact_gen4_text_bound() {
+        assert_eq!(
+            ResidentIdentityV1::new("resident/node-a").unwrap().as_str(),
+            "resident/node-a"
+        );
+        assert!(ResidentIdentityV1::new("a".repeat(1024)).is_ok());
+        assert!(ResidentIdentityV1::new("é".repeat(512)).is_ok());
+        assert!(ResidentIdentityV1::new("").is_err());
+        assert!(ResidentIdentityV1::new("resident\nnode-a").is_err());
+        assert!(ResidentIdentityV1::new("a".repeat(1025)).is_err());
+        assert!(ResidentIdentityV1::new("é".repeat(513)).is_err());
+        assert!(
+            serde_json::from_value::<ResidentIdentityV1>(serde_json::json!("resident\u{0}node"))
+                .is_err()
+        );
     }
 }

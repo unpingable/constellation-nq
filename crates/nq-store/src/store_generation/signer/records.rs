@@ -52,13 +52,13 @@ fn verify_signature(
 }
 
 /// Coordinates preserved across every record in one signer lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SignerRecordCoordinatesV1 {
     pub(crate) occurrence: SignerIdentityV1,
     pub(crate) physical_generation: SignerIdentityV1,
     pub(crate) lifecycle_root: SignerIdentityV1,
     pub(crate) scope: SignerIdentityV1,
-    pub(crate) resident: SignerIdentityV1,
+    pub(crate) resident: String,
     pub(crate) resident_generation: u64,
     pub(crate) role: SignerIdentityV1,
     pub(crate) role_manifest_generation: u64,
@@ -72,12 +72,14 @@ impl SignerRecordCoordinatesV1 {
         if self.resident_generation == 0
             || self.role_manifest_generation == 0
             || self.signer_policy_version == 0
+            || self.resident.is_empty()
+            || self.resident.len() > 1024
+            || self.resident.chars().any(char::is_control)
             || [
                 self.occurrence,
                 self.physical_generation,
                 self.lifecycle_root,
                 self.scope,
-                self.resident,
                 self.role,
                 self.authority_domain,
                 self.signer_policy,
@@ -91,12 +93,13 @@ impl SignerRecordCoordinatesV1 {
     }
 
     pub(crate) fn identity_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(32 * 8 + 24);
+        let mut bytes = Vec::with_capacity(32 * 7 + 32 + self.resident.len());
         bytes.extend_from_slice(&self.occurrence);
         bytes.extend_from_slice(&self.physical_generation);
         bytes.extend_from_slice(&self.lifecycle_root);
         bytes.extend_from_slice(&self.scope);
-        bytes.extend_from_slice(&self.resident);
+        bytes.extend_from_slice(&(self.resident.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(self.resident.as_bytes());
         bytes.extend_from_slice(&self.resident_generation.to_be_bytes());
         bytes.extend_from_slice(&self.role);
         bytes.extend_from_slice(&self.role_manifest_generation.to_be_bytes());
@@ -799,7 +802,7 @@ mod tests {
             physical_generation: id(2),
             lifecycle_root: id(3),
             scope: id(4),
-            resident: id(5),
+            resident: "resident/node-a".to_owned(),
             resident_generation: 1,
             role: id(6),
             role_manifest_generation: 1,

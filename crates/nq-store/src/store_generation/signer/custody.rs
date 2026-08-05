@@ -14,7 +14,6 @@ use std::sync::{Mutex, OnceLock};
 
 use ed25519_dalek::{Signer as _, SigningKey};
 use nix::fcntl::{Flock, FlockArg};
-use nq_helper_sandbox::enter_c2_secret_process_interval;
 use nq_protocol::{Sha256Digest, canonical_json_bytes, sha256_bytes};
 use rustix::fs::{
     AtFlags, Dir, Mode, OFlags, RenameFlags, StatxFlags, fchmod, fdatasync, flistxattr, fsync,
@@ -41,6 +40,10 @@ const PRIVATE_PAYLOAD_DOMAIN_V1: &[u8] = b"nq.c2.store_integrity_private_key_cus
 const KEY_GENERATION_DOMAIN_V1: &[u8] = b"nq.c2.store_integrity_key_generation.identity.v1\0";
 const IJSON_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
+fn valid_resident_identity(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 1024 && !value.chars().any(char::is_control)
+}
+
 /// Complete non-secret coordinates fixed before key creation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CustodyCoordinatesV1 {
@@ -50,7 +53,7 @@ pub(crate) struct CustodyCoordinatesV1 {
     pub(crate) scope_identity: Sha256Digest,
     pub(crate) a2_chain_root_identity: Sha256Digest,
     pub(crate) trust_anchor_identity: Sha256Digest,
-    pub(crate) resident_identity: Sha256Digest,
+    pub(crate) resident_identity: String,
     pub(crate) resident_generation: u64,
     pub(crate) host_role: String,
     pub(crate) role_manifest_generation: u64,
@@ -73,6 +76,7 @@ impl CustodyCoordinatesV1 {
         if !token(&self.occurrence_id)
             || !token(&self.host_role)
             || !token(&self.authority_domain)
+            || !valid_resident_identity(&self.resident_identity)
             || self.resident_generation == 0
             || self.role_manifest_generation == 0
             || self.signer_scope_policy_version == 0
@@ -138,7 +142,7 @@ struct ScopeTokenPreimage<'a> {
     occurrence_id: &'a str,
     a2_chain_root_identity: &'a Sha256Digest,
     trust_anchor_identity: &'a Sha256Digest,
-    resident_identity: &'a Sha256Digest,
+    resident_identity: &'a str,
     resident_generation: u64,
     host_role: &'a str,
     role_manifest_generation: u64,
@@ -194,7 +198,7 @@ struct CustodyPublicFieldsV1 {
     scope_identity: Sha256Digest,
     a2_chain_root_identity: Sha256Digest,
     trust_anchor_identity: Sha256Digest,
-    resident_identity: Sha256Digest,
+    resident_identity: String,
     resident_generation: u64,
     host_role: String,
     role_manifest_generation: u64,
@@ -543,11 +547,6 @@ impl C2StoreIntegrityCustodian {
             },
         )?;
 
-        // From the first private random byte through carrier zeroization, no
-        // production helper process may be created from this address space.
-        let secret_process_guard =
-            enter_c2_secret_process_interval().map_err(|_| SignerRefusalV2::CustodyIo)?;
-
         let mut seed = [0_u8; 32];
         let mut nonce = [0_u8; 32];
         let mut process_epoch = [0_u8; 32];
@@ -687,9 +686,6 @@ impl C2StoreIntegrityCustodian {
         bytes.fill(0);
         drop(private_file);
         drop(seed);
-        secret_process_guard
-            .verify_same_process()
-            .map_err(|_| SignerRefusalV2::CustodyIo)?;
         let custodian = Self {
             coordinates,
             proposal: proposal.clone(),
@@ -738,8 +734,6 @@ impl C2StoreIntegrityCustodian {
         {
             return Err(SignerRefusalV2::MessageFrontierMismatch);
         }
-        let secret_process_guard =
-            enter_c2_secret_process_interval().map_err(|_| SignerRefusalV2::CustodyIo)?;
         let (seed, retained_file, retained_facts) = self.load_seed_for_signing()?;
         let preimage = message.canonical_preimage();
         let payload_digest: SignerIdentityV1 = Sha256::digest(&preimage).into();
@@ -752,9 +746,6 @@ impl C2StoreIntegrityCustodian {
         drop(retained_file);
         drop(signing_key);
         drop(seed);
-        secret_process_guard
-            .verify_same_process()
-            .map_err(|_| SignerRefusalV2::CustodyIo)?;
         Ok(CustodySignatureV1 {
             family: message.family(),
             signer_key_generation: self.proposal.key_generation_identity(),
@@ -1096,6 +1087,7 @@ pub(crate) fn verify_sg_n_08_local_key_proposal_is_inert_carries_no(
         || fields.proposal_ordinal == 0
         || fields.proposal_ordinal > IJSON_SAFE_INTEGER
         || fields.proposed_key_generation > IJSON_SAFE_INTEGER
+        || !valid_resident_identity(&fields.resident_identity)
         || fields.resident_generation == 0
         || fields.resident_generation > IJSON_SAFE_INTEGER
         || fields.role_manifest_generation == 0
@@ -1242,7 +1234,7 @@ pub(super) fn test_coordinates() -> CustodyCoordinatesV1 {
         scope_identity: digest('3'),
         a2_chain_root_identity: digest('4'),
         trust_anchor_identity: digest('5'),
-        resident_identity: digest('6'),
+        resident_identity: "resident/node-a".into(),
         resident_generation: 7,
         host_role: "nq.host.store".into(),
         role_manifest_generation: 8,
@@ -1403,6 +1395,21 @@ mod tests {
         assert_eq!(proposal_properties, public_keys);
         assert_eq!(custody_required, private_keys);
         assert_eq!(custody_properties, private_keys);
+    }
+
+    #[test]
+    fn custody_refuses_invalid_raw_gen4_resident_coordinates() {
+        assert!(valid_resident_identity("resident/node-a"));
+        assert!(valid_resident_identity(&"é".repeat(512)));
+        assert!(!valid_resident_identity("resident\nnode-a"));
+        assert!(!valid_resident_identity(&"é".repeat(513)));
+
+        let mut coordinates = test_coordinates();
+        coordinates.resident_identity = "resident\nnode-a".to_owned();
+        assert_eq!(
+            coordinates.validate(),
+            Err(SignerRefusalV2::CustodyPathMismatch)
+        );
     }
 
     #[test]

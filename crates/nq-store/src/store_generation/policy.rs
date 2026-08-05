@@ -32,7 +32,7 @@ pub struct C2StoreGenerationInstallPolicyV1 {
     physical_store_generation_identity: Sha256Digest,
     signer_lifecycle_root_identity: Sha256Digest,
     scope_identity: Sha256Digest,
-    resident_identity: Sha256Digest,
+    resident_identity: String,
     resident_generation: u64,
     host_role: String,
     role_manifest_generation: u64,
@@ -69,7 +69,7 @@ pub(crate) struct C2StoreGenerationInstallPolicyInputV1 {
     pub physical_store_generation_identity: Sha256Digest,
     pub signer_lifecycle_root_identity: Sha256Digest,
     pub scope_identity: Sha256Digest,
-    pub resident_identity: Sha256Digest,
+    pub resident_identity: String,
     pub resident_generation: u64,
     pub host_role: String,
     pub role_manifest_generation: u64,
@@ -127,7 +127,7 @@ pub struct C2ActiveStorePolicyV1 {
     physical_store_generation_identity: Sha256Digest,
     signer_lifecycle_root_identity: Sha256Digest,
     scope_identity: Sha256Digest,
-    resident_identity: Sha256Digest,
+    resident_identity: String,
     resident_generation: u64,
     host_role: String,
     role_manifest_generation: u64,
@@ -163,7 +163,7 @@ pub(crate) struct C2ActiveStorePolicyInputV1 {
     pub physical_store_generation_identity: Sha256Digest,
     pub signer_lifecycle_root_identity: Sha256Digest,
     pub scope_identity: Sha256Digest,
-    pub resident_identity: Sha256Digest,
+    pub resident_identity: String,
     pub resident_generation: u64,
     pub host_role: String,
     pub role_manifest_generation: u64,
@@ -285,7 +285,7 @@ impl Serialize for C2StoreGenerationInstallPolicyInputV1 {
             physical_store_generation_identity: &'a Sha256Digest,
             signer_lifecycle_root_identity: &'a Sha256Digest,
             scope_identity: &'a Sha256Digest,
-            resident_identity: &'a Sha256Digest,
+            resident_identity: &'a str,
             resident_generation: u64,
             host_role: &'a str,
             role_manifest_generation: u64,
@@ -371,7 +371,7 @@ impl Serialize for C2ActiveStorePolicyInputV1 {
             physical_generation: &'a Sha256Digest,
             lifecycle_root: &'a Sha256Digest,
             scope: &'a Sha256Digest,
-            resident: &'a Sha256Digest,
+            resident: &'a str,
             resident_generation: u64,
             host_role: &'a str,
             role_manifest_generation: u64,
@@ -436,6 +436,14 @@ fn require_policy_strings(values: &[&str]) -> Result<(), PolicyRefusalV1> {
     }
 }
 
+fn require_exact_gen4_resident(value: &str) -> Result<(), PolicyRefusalV1> {
+    if value.is_empty() || value.len() > 1024 || value.chars().any(char::is_control) {
+        Err(PolicyRefusalV1::EmptyCoordinate)
+    } else {
+        Ok(())
+    }
+}
+
 fn verify_install_mode(
     input: &C2StoreGenerationInstallPolicyInputV1,
 ) -> Result<(), PolicyRefusalV1> {
@@ -474,6 +482,7 @@ pub(crate) fn construct_n_22_install_policy_binds_complete_gen4_tuple_enrollment
         &input.authority_domain,
         &input.installation_nonce,
     ])?;
+    require_exact_gen4_resident(&input.resident_identity)?;
     if input.resident_generation == 0
         || input.role_manifest_generation == 0
         || input.signer_scope_policy_version == 0
@@ -669,6 +678,7 @@ pub(crate) fn construct_n_34_active_policy(
         &input.host_role,
         &input.authority_domain,
     ])?;
+    require_exact_gen4_resident(&input.resident_identity)?;
     if input.active_store_policy_generation == 0
         || input.active_store_policy_generation > MAX_IJSON_INTEGER
         || input.resident_generation == 0
@@ -1226,7 +1236,7 @@ mod tests {
             physical_store_generation_identity: digest('a'),
             signer_lifecycle_root_identity: digest('b'),
             scope_identity: digest('c'),
-            resident_identity: digest('d'),
+            resident_identity: "resident/node-a".to_owned(),
             resident_generation: 1,
             host_role: "host-role".into(),
             role_manifest_generation: 1,
@@ -1278,7 +1288,7 @@ mod tests {
             physical_store_generation_identity: digest('d'),
             signer_lifecycle_root_identity: digest('e'),
             scope_identity: digest('f'),
-            resident_identity: digest('0'),
+            resident_identity: "resident/node-a".to_owned(),
             resident_generation: 1,
             host_role: "host-role".into(),
             role_manifest_generation: 1,
@@ -1338,6 +1348,23 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn install_and_active_policy_refuse_non_gen4_resident_text() {
+        let mut install = install_input(C2InstallPolicyModeV1::Fresh);
+        install.resident_identity = "resident\nnode-a".to_owned();
+        assert!(matches!(
+            construct_n_22_install_policy_binds_complete_gen4_tuple_enrollment(install),
+            Err(PolicyRefusalV1::EmptyCoordinate)
+        ));
+
+        let mut active = active_input(1, None, '8', '9', 'a', 1);
+        active.resident_identity = "é".repeat(513);
+        assert!(matches!(
+            construct_n_34_active_policy(active),
+            Err(PolicyRefusalV1::EmptyCoordinate)
+        ));
     }
 
     #[test]

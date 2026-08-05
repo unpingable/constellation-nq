@@ -21,7 +21,6 @@ libc.workspace = true
 nix = { workspace = true, features = ["time"] }
 nq-host-role-contract = { path = "../nq-host-role-contract" }
 nq-host-role-dependency-custody = { path = "../nq-host-role-dependency-custody" }
-nq-helper-sandbox = { path = "../nq-helper-sandbox" }
 nq-protocol = { path = "../nq-protocol" }
 nq-runtime-dependency-authority = { path = "../nq-runtime-dependency-authority" }
 rusqlite.workspace = true

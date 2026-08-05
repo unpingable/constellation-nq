@@ -43,7 +43,7 @@ pub struct C2GlobalRefusalInputV1 {
     pub physical_store_generation_identity: Sha256Digest,
     pub signer_lifecycle_root_identity: Sha256Digest,
     pub scope_identity: Sha256Digest,
-    pub resident_identity: Sha256Digest,
+    pub resident_identity: String,
     pub resident_generation: u64,
     pub host_role: String,
     pub role_manifest_generation: u64,
@@ -110,7 +110,7 @@ struct C2GlobalRefusalUnsignedBodyV1<'a> {
     physical_store_generation_identity: &'a Sha256Digest,
     signer_lifecycle_root_identity: &'a Sha256Digest,
     scope_identity: &'a Sha256Digest,
-    resident_identity: &'a Sha256Digest,
+    resident_identity: &'a str,
     resident_generation: u64,
     host_role: &'a str,
     role_manifest_generation: u64,
@@ -150,7 +150,7 @@ pub struct C2GlobalRefusalV1 {
     physical_store_generation_identity: Sha256Digest,
     signer_lifecycle_root_identity: Sha256Digest,
     scope_identity: Sha256Digest,
-    resident_identity: Sha256Digest,
+    resident_identity: String,
     resident_generation: u64,
     host_role: String,
     role_manifest_generation: u64,
@@ -248,6 +248,14 @@ fn validate_text(value: &str) -> Result<(), C2GlobalRefusalRefusalV1> {
     }
 }
 
+fn validate_resident_identity(value: &str) -> Result<(), C2GlobalRefusalRefusalV1> {
+    if value.is_empty() || value.len() > 1024 || value.chars().any(char::is_control) {
+        Err(C2GlobalRefusalRefusalV1::InvalidText)
+    } else {
+        Ok(())
+    }
+}
+
 fn validate_input(
     input: &C2GlobalRefusalInputV1,
     installed_entry_max_bytes: u32,
@@ -255,6 +263,7 @@ fn validate_input(
     validate_text(&input.occurrence_id)?;
     validate_text(&input.host_role)?;
     validate_text(&input.authority_domain)?;
+    validate_resident_identity(&input.resident_identity)?;
     if input.resident_generation == 0
         || input.resident_generation > IJSON_SAFE_U64
         || input.role_manifest_generation == 0
@@ -547,7 +556,7 @@ pub struct C2GFrontierV1 {
     pub physical_store_generation_identity: Sha256Digest,
     pub signer_lifecycle_root_identity: Sha256Digest,
     pub scope_identity: Sha256Digest,
-    pub resident_identity: Sha256Digest,
+    pub resident_identity: String,
     pub resident_generation: u64,
     pub host_role: String,
     pub role_manifest_generation: u64,
@@ -584,7 +593,7 @@ pub struct C2GReservationV1 {
     physical_store_generation_identity: Sha256Digest,
     signer_lifecycle_root_identity: Sha256Digest,
     scope_identity: Sha256Digest,
-    resident_identity: Sha256Digest,
+    resident_identity: String,
     resident_generation: u64,
     host_role: String,
     role_manifest_generation: u64,
@@ -611,7 +620,7 @@ struct ReservationPreimage<'a> {
     physical_store_generation_identity: &'a Sha256Digest,
     signer_lifecycle_root_identity: &'a Sha256Digest,
     scope_identity: &'a Sha256Digest,
-    resident_identity: &'a Sha256Digest,
+    resident_identity: &'a str,
     resident_generation: u64,
     host_role: &'a str,
     role_manifest_generation: u64,
@@ -664,6 +673,7 @@ fn validate_frontier(frontier: &C2GFrontierV1) -> Result<(), C2GReservationRefus
     validate_text(&frontier.occurrence_id)
         .and_then(|()| validate_text(&frontier.host_role))
         .and_then(|()| validate_text(&frontier.authority_domain))
+        .and_then(|()| validate_resident_identity(&frontier.resident_identity))
         .map_err(|_| C2GReservationRefusalV1::MalformedFrontier)?;
     if frontier.resident_generation == 0
         || frontier.resident_generation > IJSON_SAFE_U64
@@ -980,7 +990,7 @@ mod tests {
             physical_store_generation_identity: digest('a'),
             signer_lifecycle_root_identity: digest('b'),
             scope_identity: digest('c'),
-            resident_identity: digest('d'),
+            resident_identity: "resident/node-a".to_owned(),
             resident_generation: 1,
             host_role: "nq_store".into(),
             role_manifest_generation: 1,
@@ -1124,5 +1134,22 @@ mod tests {
             assert_eq!(base64_decode(&encoded).as_deref(), Some(bytes));
         }
         assert!(base64_decode("YQ=").is_none());
+    }
+
+    #[test]
+    fn global_refusal_and_reservation_refuse_invalid_raw_resident_text() {
+        let mut refusal = input();
+        refusal.resident_identity = "resident\nnode-a".to_owned();
+        assert!(matches!(
+            validate_input(&refusal, 4096),
+            Err(C2GlobalRefusalRefusalV1::InvalidText)
+        ));
+
+        let mut invalid_frontier = frontier();
+        invalid_frontier.resident_identity = "é".repeat(513);
+        assert!(matches!(
+            reserve_n_87_before_candidate_effect(&invalid_frontier, 9),
+            Err(C2GReservationRefusalV1::MalformedFrontier)
+        ));
     }
 }

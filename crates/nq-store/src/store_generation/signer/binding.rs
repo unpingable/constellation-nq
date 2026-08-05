@@ -8,13 +8,13 @@
 use std::collections::BTreeSet;
 
 use nq_protocol::{Sha256Digest, semantic_digest};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use thiserror::Error;
 
 const MAX_IJSON_INTEGER: u64 = 9_007_199_254_740_991;
 
 /// Identity shared by every signer generation in one Store lifecycle.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignerLifecycleRootIdentityV1 {
     occurrence_id: String,
@@ -26,6 +26,41 @@ pub struct SignerLifecycleRootIdentityV1 {
     role_manifest_generation: String,
     domain_id: String,
     policy_lineage_root: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSignerLifecycleRootIdentityV1 {
+    occurrence_id: String,
+    physical_store_generation: String,
+    lifecycle_root_id: String,
+    scope_id: String,
+    resident_id: String,
+    role_id: String,
+    role_manifest_generation: String,
+    domain_id: String,
+    policy_lineage_root: String,
+}
+
+impl<'de> Deserialize<'de> for SignerLifecycleRootIdentityV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawSignerLifecycleRootIdentityV1::deserialize(deserializer)?;
+        construct_sb_01_lifecycle_root_identity(
+            raw.occurrence_id,
+            raw.physical_store_generation,
+            raw.lifecycle_root_id,
+            raw.scope_id,
+            raw.resident_id,
+            raw.role_id,
+            raw.role_manifest_generation,
+            raw.domain_id,
+            raw.policy_lineage_root,
+        )
+        .map_err(de::Error::custom)
+    }
 }
 
 /// Immutable signer provenance for one physical Store generation.
@@ -151,6 +186,8 @@ pub struct MalformedCurrentSignerBindingV1 {
 pub enum BindingRefusalV1 {
     #[error("a required binding coordinate is empty")]
     EmptyCoordinate,
+    #[error("resident identity violates the exact Gen4 bounded opaque UTF-8 identity law")]
+    InvalidResidentIdentity,
     #[error("a cut exceeds the exact I-JSON integer range")]
     UnsafeCut,
     #[error("the root binding identity does not match its canonical preimage")]
@@ -211,6 +248,30 @@ fn require_nonempty(values: &[&str]) -> Result<(), BindingRefusalV1> {
     }
 }
 
+fn valid_gen4_resident_identity(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 1024 && !value.chars().any(char::is_control)
+}
+
+fn verify_lifecycle_root_identity(
+    identity: &SignerLifecycleRootIdentityV1,
+) -> Result<(), BindingRefusalV1> {
+    require_nonempty(&[
+        &identity.occurrence_id,
+        &identity.physical_store_generation,
+        &identity.lifecycle_root_id,
+        &identity.scope_id,
+        &identity.resident_id,
+        &identity.role_id,
+        &identity.role_manifest_generation,
+        &identity.domain_id,
+        &identity.policy_lineage_root,
+    ])?;
+    if !valid_gen4_resident_identity(&identity.resident_id) {
+        return Err(BindingRefusalV1::InvalidResidentIdentity);
+    }
+    Ok(())
+}
+
 fn root_digest(
     identity: &SignerLifecycleRootIdentityV1,
     initial_enrollment_id: &str,
@@ -265,18 +326,7 @@ pub(crate) fn construct_sb_01_lifecycle_root_identity(
     domain_id: String,
     policy_lineage_root: String,
 ) -> Result<SignerLifecycleRootIdentityV1, BindingRefusalV1> {
-    require_nonempty(&[
-        &occurrence_id,
-        &physical_store_generation,
-        &lifecycle_root_id,
-        &scope_id,
-        &resident_id,
-        &role_id,
-        &role_manifest_generation,
-        &domain_id,
-        &policy_lineage_root,
-    ])?;
-    Ok(SignerLifecycleRootIdentityV1 {
+    let identity = SignerLifecycleRootIdentityV1 {
         occurrence_id,
         physical_store_generation,
         lifecycle_root_id,
@@ -286,7 +336,9 @@ pub(crate) fn construct_sb_01_lifecycle_root_identity(
         role_manifest_generation,
         domain_id,
         policy_lineage_root,
-    })
+    };
+    verify_lifecycle_root_identity(&identity)?;
+    Ok(identity)
 }
 
 /// Construct SB-02's immutable root binding.
@@ -299,6 +351,7 @@ pub(crate) fn construct_sb_02_immutable_root_binding(
     generation_commitment_digest: Sha256Digest,
     creation_cut: u64,
 ) -> Result<StoreGenerationSignerRootBindingV1, BindingRefusalV1> {
+    verify_lifecycle_root_identity(&identity)?;
     require_nonempty(&[
         &initial_enrollment_id,
         &initial_key_generation,
@@ -332,6 +385,7 @@ pub(crate) fn construct_sb_02_immutable_root_binding(
 pub(crate) fn verify_sb_02_immutable_root_binding(
     root: &StoreGenerationSignerRootBindingV1,
 ) -> Result<(), BindingRefusalV1> {
+    verify_lifecycle_root_identity(&root.identity)?;
     if root.creation_cut > MAX_IJSON_INTEGER {
         return Err(BindingRefusalV1::UnsafeCut);
     }
@@ -818,6 +872,54 @@ mod tests {
         assert_eq!(
             construct_sb_09_binding_uniqueness(&root, &[initial.clone(), initial], 2),
             Err(BindingRefusalV1::CurrentBindingConflict)
+        );
+    }
+
+    #[test]
+    fn lifecycle_root_enforces_exact_raw_gen4_resident_identity() {
+        let construct = |resident_id: String| {
+            construct_sb_01_lifecycle_root_identity(
+                "occurrence".into(),
+                "store-generation".into(),
+                "lifecycle-root".into(),
+                "scope".into(),
+                resident_id,
+                "store-integrity".into(),
+                "role-manifest-generation".into(),
+                "domain".into(),
+                "policy-lineage".into(),
+            )
+        };
+
+        assert!(construct("r".repeat(1024)).is_ok());
+        assert_eq!(
+            construct("r".repeat(1025)),
+            Err(BindingRefusalV1::InvalidResidentIdentity)
+        );
+        assert_eq!(
+            construct("é".repeat(513)),
+            Err(BindingRefusalV1::InvalidResidentIdentity)
+        );
+        assert_eq!(
+            construct("resident\nnode-a".into()),
+            Err(BindingRefusalV1::InvalidResidentIdentity)
+        );
+    }
+
+    #[test]
+    fn deserialization_and_reverification_cannot_bypass_resident_validation() {
+        let valid = root();
+        let mut malformed_value = serde_json::to_value(&valid).unwrap();
+        malformed_value["identity"]["resident_id"] = serde_json::Value::String("é".repeat(513));
+        assert!(
+            serde_json::from_value::<StoreGenerationSignerRootBindingV1>(malformed_value).is_err()
+        );
+
+        let mut forged_inside_module = valid;
+        forged_inside_module.identity.resident_id = "resident\nnode-a".into();
+        assert_eq!(
+            verify_sb_02_immutable_root_binding(&forged_inside_module),
+            Err(BindingRefusalV1::InvalidResidentIdentity)
         );
     }
 }

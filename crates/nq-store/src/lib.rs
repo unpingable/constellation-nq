@@ -135,7 +135,7 @@ const SCHEMA_V9_C2_SIGNER_LINEAGE: &str = include_str!("../migrations/v9_c2_sign
 const SCHEMA_V8_TO_V9_C2_STORE_GENERATION_SHA256: &str =
     "sha256:7386144f5a7fe1ec9fd573499bf1873b9f0197ab5abd9c1b6befb0110dc223fe";
 const SCHEMA_V9_C2_SIGNER_LINEAGE_SHA256: &str =
-    "sha256:dac5a70e3327922ec4b1733ffa62357ccac55c7d9a203508a7f45b1802c992aa";
+    "sha256:17f5f33ddbaf8ae11cd2ea76942d02acfe437bbc094eac58d190381941d4f319";
 const APPLICATION_ID: i64 = 1_313_951_303;
 
 const SCHEMA_METADATA_V4: &str = r"CREATE TABLE schema_metadata (
@@ -943,6 +943,53 @@ impl CurrentActivationForC2<'_> {
         self.resolved.controlling_tip_activation_digest()
     }
 
+    pub(crate) const fn chain_root_activation_digest(&self) -> &Sha256Digest {
+        self.resolved.chain_root_activation_digest()
+    }
+
+    pub(crate) const fn trust_anchor_id(&self) -> &Sha256Digest {
+        self.resolved.trust_anchor_id()
+    }
+
+    pub(crate) fn domain(&self) -> &str {
+        self.resolved.domain()
+    }
+
+    pub(crate) fn resident_identity(&self) -> &str {
+        self.resolved.resident_identity()
+    }
+
+    pub(crate) const fn resident_generation(&self) -> u64 {
+        self.resolved.resident_generation()
+    }
+
+    pub(crate) fn host_role(&self) -> &str {
+        self.resolved.host_role()
+    }
+
+    pub(crate) const fn role_manifest_generation(&self) -> u64 {
+        self.resolved.role_manifest_generation()
+    }
+
+    pub(crate) const fn resolution_cut(&self) -> u64 {
+        self.resolved.verification_cut().sequence()
+    }
+
+    /// Prove that this applicability view and another authority view borrow
+    /// the same resolver result and the same complete Store enumeration.
+    ///
+    /// Equal values from a detached second resolution are deliberately
+    /// insufficient: this is invocation-local provenance, not digest
+    /// equivalence or a caller assertion.
+    pub(crate) fn is_exact_projection_of(
+        &self,
+        input: &CurrentActivationResolverInputV1<'_>,
+        resolved: &ControllingActivationSnapshot,
+    ) -> bool {
+        std::ptr::eq(self.resolved, resolved)
+            && std::ptr::eq(self.enumerated_set_digest, input.candidate_set_digest())
+    }
+
     pub(crate) const fn candidate_set_digest(&self) -> &Sha256Digest {
         self.enumerated_set_digest
     }
@@ -1046,11 +1093,22 @@ pub(crate) fn verify_n_09_current_activation_for_c2(
 ) -> Result<(), StoreError> {
     if activation.occurrence_id().is_empty()
         || activation
+            .chain_root_activation_digest()
+            .as_str()
+            .is_empty()
+        || activation
             .controlling_tip_activation_digest()
             .as_str()
             .is_empty()
+        || activation.trust_anchor_id().as_str().is_empty()
         || activation.candidate_set_digest().as_str().is_empty()
+        || activation.domain().is_empty()
+        || activation.resident_identity().is_empty()
+        || activation.resident_generation() == 0
+        || activation.host_role().is_empty()
+        || activation.role_manifest_generation() == 0
         || activation.policy_version() == 0
+        || activation.resolution_cut() == 0
     {
         return Err(StoreError::C2CurrentActivationCorrespondence);
     }
@@ -19576,6 +19634,7 @@ mod tests {
     use std::os::unix::process::ExitStatusExt;
     use std::process::Command;
 
+    use ed25519_dalek::SigningKey;
     use serde_json::json;
     use tempfile::tempdir;
 
@@ -37832,10 +37891,7 @@ mod tests {
             ));
             assert!(matches!(
                 store.with_runtime_authority_writer_session(|_, _| Ok::<_, StoreError>(())),
-                Err(StoreError::SchemaVersionMismatch {
-                    found: SCHEMA_V8_VERSION,
-                    supported: SCHEMA_VERSION,
-                })
+                Err(StoreError::AuthorityEvidenceFrozen(_))
             ));
             drop(store);
             assert_eq!(
@@ -38849,10 +38905,10 @@ mod tests {
                     [0x55; 32],
                 )
                 .expect("verify exact terminal A1 bootstrap issuer");
-                assert_eq!(issuer.key_generation, 3);
-                assert_eq!(issuer.record_digest, *terminal.terminal().record_digest());
-                assert_eq!(issuer.issuance_cut, terminal.issuance_cut());
-                assert_eq!(issuer.terminal_a1_cut, terminal.terminal().cut().sequence());
+                assert_eq!(issuer.key_generation(), 3);
+                assert_eq!(issuer.record_digest(), terminal.terminal().record_digest());
+                assert_eq!(issuer.issuance_cut(), terminal.issuance_cut());
+                assert_eq!(issuer.terminal_a1_cut(), terminal.terminal().cut().sequence());
 
                 assert!(matches!(
                     store_generation::signer::authority::construct_sg_n_02_bootstrap_grant_issuer_is_exactly_resolver_selected(
@@ -38904,6 +38960,73 @@ mod tests {
                 Ok(())
             })
             .expect("project exact terminal A1 from complete Store snapshot");
+    }
+
+    #[test]
+    fn c2_bootstrap_ingress_preserves_raw_resident_and_refuses_detached_resolution() {
+        let mut store = Store::initialize_runtime_authority_candidate_in_memory()
+            .expect("bootstrap projection Store");
+        let fixture = RawAuthorityFixture::fresh_genesis();
+        establish_authority_fixture(&mut store, &fixture).expect("establish authority");
+        let custody = fixture.custody();
+
+        store
+            .with_runtime_authority_restart_snapshot(|snapshot| -> Result<(), StoreError> {
+                let input = collect_complete_gen4_authority_ledger(&snapshot)?;
+                let first_resolution = resolve_for_restart(
+                    &custody,
+                    &snapshot.presented,
+                    snapshot.migration_receipt.as_ref(),
+                    &fixture.restart_expectations(),
+                )?;
+                let first_current = project_current_activation_for_c2(&input, &first_resolution)?;
+                assert_eq!(first_current.resident_identity(), "resident/node-a");
+
+                let terminal = store_generation::signer::authority::construct_sg_n_03_issuer_currentness_is_resolved_complete_store_owned(
+                    &input,
+                    &first_resolution,
+                )
+                .map_err(|_| StoreError::C2CurrentActivationCorrespondence)?;
+                let issuer = store_generation::signer::authority::construct_sg_n_02_bootstrap_grant_issuer_is_exactly_resolver_selected(
+                    &terminal,
+                    [0x55; 32],
+                )
+                .map_err(|_| StoreError::C2CurrentActivationCorrespondence)?;
+                let ingress = store_generation::signer::external_governance::tests::bootstrap_ingress_for_current_snapshot_for_test(
+                    &SigningKey::from_bytes(&[1_u8; 32]),
+                    &issuer,
+                    &first_current,
+                    &terminal,
+                    &first_current,
+                )
+                .map_err(|_| StoreError::C2CurrentActivationCorrespondence)?;
+                store_generation::signer::authority::verify_sg_wu_01_a1_grant_interpretation_owner_terminal_a1_projection(
+                    &ingress,
+                )
+                .map_err(|_| StoreError::C2CurrentActivationCorrespondence)?;
+
+                let detached_resolution = resolve_for_restart(
+                    &custody,
+                    &snapshot.presented,
+                    snapshot.migration_receipt.as_ref(),
+                    &fixture.restart_expectations(),
+                )?;
+                assert_eq!(detached_resolution, first_resolution);
+                let detached_current =
+                    project_current_activation_for_c2(&input, &detached_resolution)?;
+                assert!(matches!(
+                    store_generation::signer::external_governance::tests::bootstrap_ingress_for_current_snapshot_for_test(
+                        &SigningKey::from_bytes(&[1_u8; 32]),
+                        &issuer,
+                        &first_current,
+                        &terminal,
+                        &detached_current,
+                    ),
+                    Err(store_generation::signer::result::SignerRefusalV2::A2ApplicabilityMismatch)
+                ));
+                Ok(())
+            })
+            .expect("exact bootstrap projection accepts only its borrowed resolution");
     }
 
     #[test]

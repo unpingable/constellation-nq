@@ -40,7 +40,12 @@
     "a2_chain_root": { "$ref": "#/$defs/digest" },
     "controlling_activation": { "$ref": "#/$defs/digest" },
     "dependency_anchor": { "$ref": "#/$defs/digest" },
-    "resident": { "$ref": "#/$defs/digest" },
+    "resident": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]+$"
+    },
     "resident_generation": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
     "role": { "type": "string", "minLength": 1, "maxLength": 256 },
     "role_manifest": { "$ref": "#/$defs/digest" },

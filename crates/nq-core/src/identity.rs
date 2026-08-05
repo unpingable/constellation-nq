@@ -15,7 +15,7 @@ use nix::errno::Errno;
 use nix::fcntl::{FcntlArg, FdFlag, SealFlag, fcntl};
 use nix::sys::memfd::{MemFdCreateFlag, memfd_create};
 use nix::sys::stat::{Mode, fchmod};
-use nq_helper_sandbox::{ExecutionAccount, resolve_account, with_c2_process_spawn_fence};
+use nq_helper_sandbox::{ExecutionAccount, resolve_account};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -682,26 +682,24 @@ pub(crate) fn spawn_with_inherited_descriptors(
     command: &mut Command,
     descriptors: &[RawFd],
 ) -> io::Result<Child> {
-    with_c2_process_spawn_fence(|| {
-        let _guard = DESCRIPTOR_LAUNCH
-            .lock()
-            .map_err(|_| io::Error::other("descriptor launch lock is poisoned"))?;
-        let original_flags = make_inheritable(descriptors)?;
-        let spawned = command.spawn();
-        let restored = restore_descriptor_flags(descriptors, &original_flags);
-        match (spawned, restored) {
-            (Ok(child), Ok(())) => Ok(child),
-            (Err(error), Ok(())) => Err(error),
-            (Ok(mut child), Err(error)) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                Err(error)
-            }
-            (Err(spawn_error), Err(restore_error)) => Err(io::Error::other(format!(
-                "spawn failed ({spawn_error}) and descriptor flags could not be restored ({restore_error})"
-            ))),
+    let _guard = DESCRIPTOR_LAUNCH
+        .lock()
+        .map_err(|_| io::Error::other("descriptor launch lock is poisoned"))?;
+    let original_flags = make_inheritable(descriptors)?;
+    let spawned = command.spawn();
+    let restored = restore_descriptor_flags(descriptors, &original_flags);
+    match (spawned, restored) {
+        (Ok(child), Ok(())) => Ok(child),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(mut child), Err(error)) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(error)
         }
-    })
+        (Err(spawn_error), Err(restore_error)) => Err(io::Error::other(format!(
+            "spawn failed ({spawn_error}) and descriptor flags could not be restored ({restore_error})"
+        ))),
+    }
 }
 
 #[derive(Debug)]

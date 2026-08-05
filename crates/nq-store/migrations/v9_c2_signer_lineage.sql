@@ -36,7 +36,7 @@ CREATE TABLE c2_signer_root_binding_projection (
         length(scope_identity) = 71 AND substr(scope_identity, 1, 7) = 'sha256:'
     ),
     resident_identity TEXT NOT NULL CHECK (
-        length(resident_identity) = 71 AND substr(resident_identity, 1, 7) = 'sha256:'
+        length(CAST(resident_identity AS BLOB)) BETWEEN 1 AND 1024
     ),
     resident_generation INTEGER NOT NULL CHECK (resident_generation > 0),
     host_role TEXT NOT NULL CHECK (length(host_role) BETWEEN 1 AND 256),
@@ -89,7 +89,7 @@ CREATE TABLE c2_signer_current_binding_projection (
         length(scope_identity) = 71 AND substr(scope_identity, 1, 7) = 'sha256:'
     ),
     resident_identity TEXT NOT NULL CHECK (
-        length(resident_identity) = 71 AND substr(resident_identity, 1, 7) = 'sha256:'
+        length(CAST(resident_identity AS BLOB)) BETWEEN 1 AND 1024
     ),
     resident_generation INTEGER NOT NULL CHECK (resident_generation > 0),
     host_role TEXT NOT NULL CHECK (length(host_role) BETWEEN 1 AND 256),

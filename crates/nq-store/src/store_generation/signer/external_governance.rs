@@ -278,6 +278,9 @@ fn validate_pattern(value: &str, pattern: &str) -> bool {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b"._:/@-".contains(&b))
         }
+        "^[^\\u0000-\\u001F\\u007F-\\u009F]+$" => {
+            !value.is_empty() && value.len() <= 1024 && !value.chars().any(char::is_control)
+        }
         _ => false,
     }
 }
@@ -832,7 +835,6 @@ pub(crate) struct VerifiedBootstrapGrantV1 {
     controlling_activation: String,
     controlling_activation_bytes: SignerIdentityV1,
     resident_identity: String,
-    resident_identity_bytes: SignerIdentityV1,
     resident_generation: u64,
     host_role: String,
     role_manifest_generation: u64,
@@ -891,9 +893,6 @@ impl VerifiedBootstrapGrantV1 {
     }
     pub(crate) fn resident_identity(&self) -> &str {
         &self.resident_identity
-    }
-    pub(crate) const fn resident_identity_bytes(&self) -> SignerIdentityV1 {
-        self.resident_identity_bytes
     }
     pub(crate) const fn resident_generation(&self) -> u64 {
         self.resident_generation
@@ -1013,7 +1012,6 @@ pub(super) fn verify_bootstrap_grant_terminal_a1_signature_scope_policy_cut_requ
     let controlling_activation = string_field(&grant.0, "controlling_activation")?.to_owned();
     let controlling_activation_bytes = identity_bytes(&controlling_activation)?;
     let resident_identity = string_field(&grant.0, "resident_identity")?.to_owned();
-    let resident_identity_bytes = identity_bytes(&resident_identity)?;
     let trust_anchor_id = string_field(&grant.0, "trust_anchor_id")?.to_owned();
     let trust_anchor_id_bytes = identity_bytes(&trust_anchor_id)?;
     let canonical_carrier_digest = identity_bytes(sha256_bytes(grant.canonical_bytes()).as_str())?;
@@ -1028,7 +1026,6 @@ pub(super) fn verify_bootstrap_grant_terminal_a1_signature_scope_policy_cut_requ
         controlling_activation,
         controlling_activation_bytes,
         resident_identity,
-        resident_identity_bytes,
         resident_generation: u64_field(&grant.0, "resident_generation")?,
         host_role: string_field(&grant.0, "host_role")?.to_owned(),
         role_manifest_generation: u64_field(&grant.0, "role_manifest_generation")?,
@@ -1522,9 +1519,8 @@ pub(crate) fn verify_sg_rec_13b_atomic_effect_receipt(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use ed25519_dalek::{Signer as _, SigningKey};
-    use nq_protocol::Sha256Digest;
     use serde_json::json;
 
     use super::*;
@@ -1595,6 +1591,198 @@ mod tests {
             .unwrap()
             .insert(spec.identity_field.to_owned(), Value::String(identity));
         document
+    }
+
+    #[test]
+    fn bootstrap_schema_preserves_the_exact_raw_gen4_resident_bound() {
+        let key = SigningKey::from_bytes(&[1_u8; 32])
+            .verifying_key()
+            .to_bytes();
+        let mut value = sample_document(BOOTSTRAP_REQUEST, key);
+        value["resident_identity"] = Value::String("resident/node-a".to_owned());
+        assert!(validate_against_checked_schema(&value, BOOTSTRAP_REQUEST).is_ok());
+
+        value["resident_identity"] = Value::String("resident\nnode-a".to_owned());
+        assert!(validate_against_checked_schema(&value, BOOTSTRAP_REQUEST).is_err());
+        value["resident_identity"] = Value::String("é".repeat(513));
+        assert!(validate_against_checked_schema(&value, BOOTSTRAP_REQUEST).is_err());
+    }
+
+    /// Build, verify, and project one exact bootstrap carrier in the same
+    /// borrowed Store/resolver invocation.  The verified carrier never exists
+    /// as a detachable test authority witness.
+    pub(crate) fn bootstrap_ingress_for_current_snapshot_for_test<'ingress, 'snapshot>(
+        signing: &SigningKey,
+        issuer: &super::super::authority::TerminalA1BootstrapIssuerV1,
+        carrier_current: &crate::CurrentActivationForC2<'_>,
+        terminal: &'ingress super::super::authority::TerminalA1AuthoritySnapshotV1<'snapshot>,
+        ingress_current: &'ingress crate::CurrentActivationForC2<'snapshot>,
+    ) -> Result<
+        super::super::authority::TerminalA1ExternalCarrierIngressV1<'ingress, 'snapshot>,
+        SignerRefusalV2,
+    > {
+        assert_eq!(
+            signing.verifying_key().to_bytes(),
+            *issuer.verifying_key(),
+            "test carrier signer must be the exact projected terminal A1"
+        );
+        let key = signing.verifying_key().to_bytes();
+        let mut request_value = sample_document(BOOTSTRAP_REQUEST, key);
+        let request_object = request_value.as_object_mut().unwrap();
+        let exact_strings = [
+            ("issuer_a1_digest", issuer.record_digest().as_str()),
+            ("issuer_operator_principal", issuer.operator_principal()),
+            ("issuer_domain", issuer.domain()),
+            (
+                "issued_against_gen4_terminal_event",
+                issuer.terminal_event().as_str(),
+            ),
+            (
+                "issued_against_candidate_set",
+                issuer.snapshot_identity().as_str(),
+            ),
+            ("occurrence_id", carrier_current.occurrence_id()),
+            (
+                "a2_chain_root",
+                carrier_current.chain_root_activation_digest().as_str(),
+            ),
+            (
+                "controlling_activation",
+                carrier_current.controlling_tip_activation_digest().as_str(),
+            ),
+            ("resident_identity", carrier_current.resident_identity()),
+            ("host_role", carrier_current.host_role()),
+            (
+                "trust_anchor_id",
+                carrier_current.trust_anchor_id().as_str(),
+            ),
+            ("authority_domain", carrier_current.domain()),
+        ];
+        for (name, value) in exact_strings {
+            request_object.insert(name.to_owned(), Value::String(value.to_owned()));
+        }
+        for (name, value) in [
+            ("issuer_a1_key_generation", issuer.key_generation()),
+            ("issuer_policy_version", issuer.policy_version()),
+            ("issuer_policy_floor", issuer.policy_floor()),
+            ("issued_against_gen4_cut", issuer.issuance_cut()),
+            ("resident_generation", carrier_current.resident_generation()),
+            (
+                "role_manifest_generation",
+                carrier_current.role_manifest_generation(),
+            ),
+            (
+                "activation_policy_version",
+                carrier_current.policy_version(),
+            ),
+            ("c2_lifecycle_cut", issuer.issuance_cut() + 1),
+        ] {
+            request_object.insert(name.to_owned(), Value::from(value));
+        }
+        request_object.insert(
+            "issuer_a1_verification_key".to_owned(),
+            Value::String(hex::encode(issuer.verifying_key())),
+        );
+        request_object.insert(
+            "proposal_identity".to_owned(),
+            Value::String(sha256_bytes(b"test bootstrap proposal").into_string()),
+        );
+        request_object.insert(
+            "custody_instance_identity".to_owned(),
+            Value::String(sha256_bytes(b"test bootstrap custody").into_string()),
+        );
+        request_object.insert(
+            "signer_scope_policy_identity".to_owned(),
+            Value::String(sha256_bytes(b"test signer scope").into_string()),
+        );
+        request_object.insert(
+            "install_policy_digest".to_owned(),
+            Value::String(sha256_bytes(b"test install policy").into_string()),
+        );
+        request_object.insert(
+            "physical_store_generation_identity".to_owned(),
+            Value::String(sha256_bytes(b"test physical generation").into_string()),
+        );
+        request_object.insert(
+            "store_integrity_public_key".to_owned(),
+            Value::String(hex::encode([0x55; 32])),
+        );
+        let mut request_preimage = request_value.clone();
+        request_preimage
+            .as_object_mut()
+            .unwrap()
+            .remove(BOOTSTRAP_REQUEST.identity_field);
+        let request_identity =
+            domain_digest(BOOTSTRAP_REQUEST.identity_domain, &request_preimage).unwrap();
+        request_value.as_object_mut().unwrap().insert(
+            BOOTSTRAP_REQUEST.identity_field.to_owned(),
+            Value::String(request_identity),
+        );
+        let request = construct_bootstrap_grant_request(request_value.clone()).unwrap();
+
+        let mut grant_value = sample_document(BOOTSTRAP, key);
+        for (name, value) in request_value.as_object().unwrap() {
+            if grant_value.get(name).is_some()
+                && !matches!(name.as_str(), "schema" | "schema_version")
+            {
+                grant_value
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(name.clone(), value.clone());
+            }
+        }
+        grant_value.as_object_mut().unwrap().insert(
+            "grant_request_identity".to_owned(),
+            request_value["grant_request_identity"].clone(),
+        );
+        let mut identity_preimage = grant_value.clone();
+        identity_preimage
+            .as_object_mut()
+            .unwrap()
+            .remove(BOOTSTRAP.identity_field);
+        identity_preimage
+            .as_object_mut()
+            .unwrap()
+            .remove("signature");
+        let grant_identity = domain_digest(BOOTSTRAP.identity_domain, &identity_preimage).unwrap();
+        grant_value.as_object_mut().unwrap().insert(
+            BOOTSTRAP.identity_field.to_owned(),
+            Value::String(grant_identity),
+        );
+        let mut unsigned = grant_value.clone();
+        unsigned.as_object_mut().unwrap().remove("signature");
+        let canonical = canonical_json_bytes(&unsigned).unwrap();
+        let mut signature_preimage = BOOTSTRAP.signature_domain.unwrap().as_bytes().to_vec();
+        signature_preimage.push(0);
+        signature_preimage.extend_from_slice(&canonical);
+        grant_value.as_object_mut().unwrap().insert(
+            "signature".to_owned(),
+            Value::String(hex::encode(signing.sign(&signature_preimage).to_bytes())),
+        );
+        let grant_bytes = canonical_json_bytes(&grant_value).unwrap();
+        let grant = decode_store_integrity_bootstrap_grant_v1(&grant_bytes).unwrap();
+        let exact_fields = [
+            "occurrence_id",
+            "physical_store_generation_identity",
+            "controlling_activation",
+            "signer_scope_policy_identity",
+            "install_policy_digest",
+        ]
+        .into_iter()
+        .map(|name| (name.to_owned(), request_value[name].clone()))
+        .collect();
+        let lifecycle_cut = issuer.issuance_cut() + 1;
+        let expectation =
+            ExternalGovernanceExpectationV1::new(exact_fields, lifecycle_cut, lifecycle_cut)
+                .unwrap();
+        super::super::authority::construct_sg_wu_01_a1_grant_interpretation_owner_terminal_a1_projection(
+            &ExternalCarrierVerificationPermitV1::for_test(),
+            terminal,
+            &grant,
+            &request,
+            &expectation,
+            ingress_current,
+        )
     }
 
     fn signed_pair_documents(
@@ -1780,55 +1968,8 @@ mod tests {
             verified.canonical_signature(),
             &signing.sign(&preimage).to_bytes()
         );
-        let claim = verified.issuer().clone();
-        let issuer = super::super::authority::TerminalA1BootstrapIssuerV1 {
-            snapshot_identity: Sha256Digest::parse(claim.issued_against_candidate_set.clone())
-                .unwrap(),
-            occurrence: verified.occurrence_id().to_owned(),
-            trust_anchor_id: Sha256Digest::parse(verified.trust_anchor_id().to_owned()).unwrap(),
-            record_digest: Sha256Digest::parse(claim.digest.clone()).unwrap(),
-            key_generation: claim.key_generation,
-            verifying_key: claim.verification_key,
-            operator_principal: claim.operator_principal,
-            domain: claim.domain,
-            policy_version: claim.policy_version,
-            policy_floor: claim.policy_floor,
-            terminal_a1_cut: claim.issued_against_gen4_cut,
-            terminal_event: Sha256Digest::parse(claim.issued_against_terminal_event).unwrap(),
-            issuance_cut: claim.issued_against_gen4_cut,
-        };
-        let scope = super::super::authority::construct_sg_n_04_bootstrap_grant_binds_complete_occurrence_resident_role(
-            &issuer,
-            &verified,
-        )
-        .expect("project complete scope only from verified carrier");
-        super::super::authority::verify_sg_n_04_bootstrap_grant_binds_complete_occurrence_resident_role(
-            &issuer,
-            &verified,
-            &scope,
-        )
-        .expect("complete carrier-derived scope revalidates");
-        let identity = super::super::authority::construct_sg_n_05_grant_uses_canonical_encoding_identity_signature_domain(
-            &issuer,
-            &verified,
-        )
-        .expect("project canonical signed grant identity");
-        super::super::authority::verify_sg_n_05_grant_uses_canonical_encoding_identity_signature_domain(
-            &identity,
-        )
-        .expect("canonical signed grant identity revalidates");
-        assert_eq!(identity.request_identity(), request.identity().bytes());
-        assert_eq!(identity.grant_identity(), grant.identity().bytes());
-
-        let mut incomplete = verified.clone();
-        incomplete.resident_generation = 0;
-        assert!(matches!(
-            super::super::authority::construct_sg_n_04_bootstrap_grant_binds_complete_occurrence_resident_role(
-                &issuer,
-                &incomplete,
-            ),
-            Err(SignerRefusalV2::ExternalCarrierScopeMismatch)
-        ));
+        assert_eq!(verified.request_identity(), request.identity());
+        assert_eq!(verified.grant_identity(), grant.identity());
         let mut replay =
             ExternalCarrierReplayGuardV1::new(ExternalCarrierStoreIngressPermitV1::for_test());
         let ingress = BootstrapGrantIngressV1::new(&verified);
