@@ -197,6 +197,166 @@ class CallGraphVerifierControls(unittest.TestCase):
             MODULE._verify_pending_signer_append_gate(inventory)
 
     @staticmethod
+    def _external_ingress_inventory(*, raw_bootstrap_ingress: bool = False):
+        bootstrap_projection = (
+            "StoreIntegrityBootstrapGrantV1"
+            if raw_bootstrap_ingress
+            else "VerifiedBootstrapGrantV1"
+        )
+        return MODULE.SourceInventory.from_texts(
+            {
+                MODULE.SIGNER_GOVERNANCE: f"""
+                    pub(super) trait TerminalA1AuthenticityVerifierV1 {{
+                        fn verify_unique_terminal_a1(&self);
+                    }}
+                    pub(super) struct ExternalGovernanceExpectationV1;
+                    impl ExternalGovernanceExpectationV1 {{
+                        fn new() -> Self {{ Self }}
+                    }}
+                    pub(super) struct ExternalCarrierVerificationPermitV1 {{
+                        private: (),
+                    }}
+                    pub(super) struct ExternalCarrierStoreIngressPermitV1 {{
+                        private: (),
+                    }}
+                    pub(crate) struct ExternalCarrierReplayGuardV1 {{
+                        permit: ExternalCarrierStoreIngressPermitV1,
+                    }}
+                    impl ExternalCarrierReplayGuardV1 {{
+                        pub(super) fn new(
+                            permit: ExternalCarrierStoreIngressPermitV1,
+                        ) -> Self {{ Self {{ permit }} }}
+                    }}
+                    fn verify_bootstrap_grant_terminal_a1_signature_scope_policy_cut_request_identity(
+                        _permit: &ExternalCarrierVerificationPermitV1,
+                    ) {{}}
+                    macro_rules! pair_verifier {{
+                        ($name:ident) => {{
+                            fn $name(_permit: &ExternalCarrierVerificationPermitV1) {{}}
+                        }};
+                    }}
+                    macro_rules! ingress_type {{
+                        ($name:ident, $verified:ident, $receipt:ident, $result:ident, $method:ident) => {{
+                            #[derive(Debug, PartialEq, Eq)]
+                            pub(crate) struct $receipt {{
+                                carrier_identity: ExternalCarrierIdentityV1,
+                                _private: (),
+                            }}
+                        }};
+                    }}
+                    #[derive(Debug)]
+                    pub(crate) enum ExternalCarrierIngressResultV2 {{
+                        ProposalDispositionConsumed(ProposalDispositionIngressReceiptV1),
+                        BootstrapGrantConsumed(BootstrapGrantIngressReceiptV1),
+                        ActivationSuccessorGrantConsumed(ActivationSuccessorGrantIngressReceiptV1),
+                        RevocationJudgmentConsumed(RevocationJudgmentIngressReceiptV1),
+                        RecoveryGrantConsumed(RecoveryGrantIngressReceiptV1),
+                        RestoreAuthorizationConsumed(RestoreAuthorizationIngressReceiptV1),
+                        QuarantineClosureJudgmentConsumed(QuarantineClosureIngressReceiptV1),
+                    }}
+                    verified_pair_type!(
+                        VerifiedProposalDispositionV1,
+                        StoreIntegrityProposalDispositionV1
+                    );
+                    struct VerifiedBootstrapGrantV1;
+                    verified_pair_type!(
+                        VerifiedActivationSuccessorGrantV1,
+                        StoreIntegrityActivationSuccessorGrantV1
+                    );
+                    verified_pair_type!(
+                        VerifiedRevocationJudgmentV1,
+                        StoreIntegrityRevocationJudgmentV1
+                    );
+                    verified_pair_type!(
+                        VerifiedRecoveryGrantV1,
+                        StoreIntegrityRecoveryGrantV1
+                    );
+                    verified_pair_type!(
+                        VerifiedRestoreAuthorizationV1,
+                        StoreIntegrityRestoreAuthorizationV1
+                    );
+                    verified_pair_type!(
+                        VerifiedQuarantineClosureJudgmentV1,
+                        StoreIntegrityQuarantineClosureJudgmentV1
+                    );
+                    ingress_type!(
+                        ProposalDispositionIngressV1,
+                        VerifiedProposalDispositionV1,
+                        ProposalDispositionIngressReceiptV1,
+                        ProposalDispositionConsumed,
+                        apply
+                    );
+                    ingress_type!(
+                        BootstrapGrantIngressV1,
+                        {bootstrap_projection},
+                        BootstrapGrantIngressReceiptV1,
+                        BootstrapGrantConsumed,
+                        consume
+                    );
+                    ingress_type!(
+                        ActivationSuccessorGrantIngressV1,
+                        VerifiedActivationSuccessorGrantV1,
+                        ActivationSuccessorGrantIngressReceiptV1,
+                        ActivationSuccessorGrantConsumed,
+                        apply
+                    );
+                    ingress_type!(
+                        RevocationJudgmentIngressV1,
+                        VerifiedRevocationJudgmentV1,
+                        RevocationJudgmentIngressReceiptV1,
+                        RevocationJudgmentConsumed,
+                        apply
+                    );
+                    ingress_type!(
+                        RecoveryGrantIngressV1,
+                        VerifiedRecoveryGrantV1,
+                        RecoveryGrantIngressReceiptV1,
+                        RecoveryGrantConsumed,
+                        apply
+                    );
+                    ingress_type!(
+                        RestoreAuthorizationIngressV1,
+                        VerifiedRestoreAuthorizationV1,
+                        RestoreAuthorizationIngressReceiptV1,
+                        RestoreAuthorizationConsumed,
+                        install_successor
+                    );
+                    ingress_type!(
+                        QuarantineClosureIngressV1,
+                        VerifiedQuarantineClosureJudgmentV1,
+                        QuarantineClosureIngressReceiptV1,
+                        QuarantineClosureJudgmentConsumed,
+                        close
+                    );
+                """,
+            }
+        )
+
+    def test_external_ingress_gate_accepts_only_verified_carriers(self) -> None:
+        self.assertEqual(
+            MODULE._verify_pending_external_carrier_ingress_gate(
+                self._external_ingress_inventory()
+            ),
+            (
+                "external-verification-permit-production-constructors=0",
+                "terminal-A1-production-verifiers=0",
+                "external-ingress-permit-production-constructors=0",
+                "external-ingress-routes=7-terminal-A1-verified-only",
+                "external-ingress-receipts=7-opaque",
+                "external-replay-status=process-local-pending-not-durable",
+            ),
+        )
+
+    def test_external_ingress_gate_rejects_decoded_carrier(self) -> None:
+        with self.assertRaisesRegex(
+            MODULE.VerificationError,
+            "does not require VerifiedBootstrapGrantV1",
+        ):
+            MODULE._verify_pending_external_carrier_ingress_gate(
+                self._external_ingress_inventory(raw_bootstrap_ingress=True)
+            )
+
+    @staticmethod
     def _process_fence_inventory(*, alternate_spawn: bool = False):
         alternate = (
             "fn bypass(command: &mut Command) { let _ = command.spawn(); }"

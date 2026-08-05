@@ -588,25 +588,43 @@ pub(crate) struct TerminalA1IssuerClaimV1 {
     pub(crate) issued_against_candidate_set: String,
 }
 
-/// Store-owned terminality hook. Implementations inspect the complete A1
-/// candidate set; they cannot sign or return an authority capability.
-pub(crate) trait TerminalA1AuthenticityVerifierV1 {
+/// Pending terminality hook. The eventual sole production implementation must
+/// inspect the Store-owned complete A1 candidate set; this tranche exposes no
+/// production verification permit and no production implementation.
+pub(super) trait TerminalA1AuthenticityVerifierV1 {
     fn verify_unique_terminal_a1(
         &self,
         claim: &TerminalA1IssuerClaimV1,
     ) -> Result<(), SignerRefusalV2>;
 }
 
-/// Exact Store-local coordinates expected at carrier consumption.
+/// Linear authority for the eventual Store-owned terminal-A1 verification
+/// driver. No production constructor exists until that driver projects an
+/// exact, complete authority snapshot into this module.
+#[derive(Debug)]
+pub(super) struct ExternalCarrierVerificationPermitV1 {
+    _private: (),
+}
+
+impl ExternalCarrierVerificationPermitV1 {
+    #[cfg(test)]
+    fn for_test() -> Self {
+        Self { _private: () }
+    }
+}
+
+/// Pending exact Store-local coordinates expected at carrier consumption.
+/// Production construction remains closed until the Store-owned terminal-A1
+/// driver can derive the complete coordinate set from one resolved snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ExternalGovernanceExpectationV1 {
+pub(super) struct ExternalGovernanceExpectationV1 {
     exact_fields: BTreeMap<String, Value>,
     earliest_cut: u64,
     latest_cut: u64,
 }
 
 impl ExternalGovernanceExpectationV1 {
-    pub(crate) fn new(
+    fn new(
         exact_fields: BTreeMap<String, Value>,
         earliest_cut: u64,
         latest_cut: u64,
@@ -832,6 +850,9 @@ impl VerifiedBootstrapGrantV1 {
     pub(crate) const fn grant_identity(&self) -> ExternalCarrierIdentityV1 {
         self.grant_identity
     }
+    pub(crate) const fn carrier_identity(&self) -> ExternalCarrierIdentityV1 {
+        self.grant_identity
+    }
     pub(crate) fn issuer(&self) -> &TerminalA1IssuerClaimV1 {
         &self.issuer
     }
@@ -885,7 +906,8 @@ impl VerifiedBootstrapGrantV1 {
     }
 }
 
-pub(crate) fn verify_bootstrap_grant_terminal_a1_signature_scope_policy_cut_request_identity(
+pub(super) fn verify_bootstrap_grant_terminal_a1_signature_scope_policy_cut_request_identity(
+    _permit: &ExternalCarrierVerificationPermitV1,
     grant: &StoreIntegrityBootstrapGrantV1,
     request: &StoreIntegrityBootstrapGrantRequestV1,
     expectation: &ExternalGovernanceExpectationV1,
@@ -952,28 +974,86 @@ pub(crate) fn verify_bootstrap_grant_terminal_a1_signature_scope_policy_cut_requ
     })
 }
 
+macro_rules! verified_pair_type {
+    ($name:ident, $carrier:ident) => {
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub(crate) struct $name {
+            carrier: $carrier,
+            request_identity: ExternalCarrierIdentityV1,
+            issuer: TerminalA1IssuerClaimV1,
+        }
+
+        impl $name {
+            pub(crate) fn carrier(&self) -> &$carrier {
+                &self.carrier
+            }
+
+            pub(crate) const fn carrier_identity(&self) -> ExternalCarrierIdentityV1 {
+                self.carrier.0.identity
+            }
+
+            pub(crate) const fn request_identity(&self) -> ExternalCarrierIdentityV1 {
+                self.request_identity
+            }
+
+            pub(crate) fn issuer(&self) -> &TerminalA1IssuerClaimV1 {
+                &self.issuer
+            }
+        }
+    };
+}
+
+verified_pair_type!(
+    VerifiedProposalDispositionV1,
+    StoreIntegrityProposalDispositionV1
+);
+verified_pair_type!(
+    VerifiedActivationSuccessorGrantV1,
+    StoreIntegrityActivationSuccessorGrantV1
+);
+verified_pair_type!(
+    VerifiedRevocationJudgmentV1,
+    StoreIntegrityRevocationJudgmentV1
+);
+verified_pair_type!(VerifiedRecoveryGrantV1, StoreIntegrityRecoveryGrantV1);
+verified_pair_type!(
+    VerifiedRestoreAuthorizationV1,
+    StoreIntegrityRestoreAuthorizationV1
+);
+verified_pair_type!(
+    VerifiedQuarantineClosureJudgmentV1,
+    StoreIntegrityQuarantineClosureJudgmentV1
+);
+
 macro_rules! pair_verifier {
-    ($name:ident, $carrier:ident, $carrier_spec:ident, $request:ident, $request_spec:ident) => {
-        pub(crate) fn $name(
+    ($name:ident, $verified:ident, $carrier:ident, $carrier_spec:ident, $request:ident, $request_spec:ident) => {
+        pub(super) fn $name(
+            _permit: &ExternalCarrierVerificationPermitV1,
             carrier: &$carrier,
             request: &$request,
             expectation: &ExternalGovernanceExpectationV1,
             terminal: &impl TerminalA1AuthenticityVerifierV1,
-        ) -> Result<TerminalA1IssuerClaimV1, SignerRefusalV2> {
-            verify_pair(
+        ) -> Result<$verified, SignerRefusalV2> {
+            let issuer = verify_pair(
                 &carrier.0,
                 $carrier_spec,
                 &request.0,
                 $request_spec,
                 expectation,
                 terminal,
-            )
+            )?;
+            Ok($verified {
+                carrier: carrier.clone(),
+                request_identity: request.identity(),
+                issuer,
+            })
         }
     };
 }
 
 pair_verifier!(
     verify_proposal_disposition_terminal_a1_signature_scope_policy_cut_request_identity,
+    VerifiedProposalDispositionV1,
     StoreIntegrityProposalDispositionV1,
     PROPOSAL,
     StoreIntegrityProposalDispositionRequestV1,
@@ -981,6 +1061,7 @@ pair_verifier!(
 );
 pair_verifier!(
     verify_activation_successor_grant_terminal_a1_signature_scope_policy_cut_request_identity,
+    VerifiedActivationSuccessorGrantV1,
     StoreIntegrityActivationSuccessorGrantV1,
     ACTIVATION,
     StoreIntegrityActivationSuccessorGrantRequestV1,
@@ -988,15 +1069,17 @@ pair_verifier!(
 );
 pair_verifier!(
     verify_revocation_judgment_terminal_a1_signature_scope_policy_cut_request_identity,
+    VerifiedRevocationJudgmentV1,
     StoreIntegrityRevocationJudgmentV1,
     REVOCATION,
     StoreIntegrityRevocationRequestV1,
     REVOCATION_REQUEST
 );
 pair_verifier!(verify_recovery_grant_terminal_a1_signature_scope_policy_cut_predecessor_successor_request_identity,
-    StoreIntegrityRecoveryGrantV1, RECOVERY, StoreIntegrityRecoveryRequestV1, RECOVERY_REQUEST);
+    VerifiedRecoveryGrantV1, StoreIntegrityRecoveryGrantV1, RECOVERY, StoreIntegrityRecoveryRequestV1, RECOVERY_REQUEST);
 pair_verifier!(
     verify_restore_authorization_terminal_a1_signature_scope_policy_cut_request_identity,
+    VerifiedRestoreAuthorizationV1,
     StoreIntegrityRestoreAuthorizationV1,
     RESTORE,
     StoreIntegrityRestoreAuthorizationRequestV1,
@@ -1004,19 +1087,50 @@ pair_verifier!(
 );
 pair_verifier!(
     verify_quarantine_closure_terminal_a1_signature_scope_policy_cut_request_identity,
+    VerifiedQuarantineClosureJudgmentV1,
     StoreIntegrityQuarantineClosureJudgmentV1,
     QUARANTINE,
     StoreIntegrityQuarantineClosureRequestV1,
     QUARANTINE_REQUEST
 );
 
-/// Replay guard owned by the Store transaction, keyed by canonical carrier identity.
-#[derive(Debug, Default)]
-pub(crate) struct ExternalCarrierReplayGuardV1(BTreeSet<ExternalCarrierIdentityV1>);
+/// Linear authority for the eventual Store-owned external-carrier ingress.
+///
+/// No production constructor exists until durable replay persistence and the
+/// Store actor are wired. This prevents the process-local set below from being
+/// represented as a durable replay decision.
+#[derive(Debug)]
+pub(super) struct ExternalCarrierStoreIngressPermitV1 {
+    _private: (),
+}
+
+impl ExternalCarrierStoreIngressPermitV1 {
+    #[cfg(test)]
+    fn for_test() -> Self {
+        Self { _private: () }
+    }
+}
+
+/// Process-local pending replay model keyed by canonical carrier identity.
+///
+/// This type is deliberately unreachable in production. It is not durable
+/// replay evidence and must not be represented as transactionally persisted.
+#[derive(Debug)]
+pub(crate) struct ExternalCarrierReplayGuardV1 {
+    _permit: ExternalCarrierStoreIngressPermitV1,
+    consumed: BTreeSet<ExternalCarrierIdentityV1>,
+}
 
 impl ExternalCarrierReplayGuardV1 {
+    pub(super) fn new(permit: ExternalCarrierStoreIngressPermitV1) -> Self {
+        Self {
+            _permit: permit,
+            consumed: BTreeSet::new(),
+        }
+    }
+
     fn consume(&mut self, identity: ExternalCarrierIdentityV1) -> Result<(), SignerRefusalV2> {
-        if !self.0.insert(identity) {
+        if !self.consumed.insert(identity) {
             return Err(SignerRefusalV2::ExternalCarrierReplay);
         }
         Ok(())
@@ -1045,100 +1159,178 @@ pub(crate) enum ExternalRequestResultV2 {
     QuarantineClosureRequestPrepared,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) enum ExternalCarrierIngressResultV2 {
-    BootstrapGrantConsumed,
-    RestoreAuthorizationConsumed,
-    RevocationJudgmentConsumed,
-    RecoveryGrantConsumed,
-    QuarantineClosureJudgmentConsumed,
+    ProposalDispositionConsumed(ProposalDispositionIngressReceiptV1),
+    BootstrapGrantConsumed(BootstrapGrantIngressReceiptV1),
+    ActivationSuccessorGrantConsumed(ActivationSuccessorGrantIngressReceiptV1),
+    RestoreAuthorizationConsumed(RestoreAuthorizationIngressReceiptV1),
+    RevocationJudgmentConsumed(RevocationJudgmentIngressReceiptV1),
+    RecoveryGrantConsumed(RecoveryGrantIngressReceiptV1),
+    QuarantineClosureJudgmentConsumed(QuarantineClosureIngressReceiptV1),
 }
 
 macro_rules! ingress_type {
-    ($name:ident, $carrier:ident, $result:ident, $method:ident) => {
+    ($name:ident, $verified:ident, $receipt:ident, $result:ident, $method:ident) => {
+        #[derive(Debug, PartialEq, Eq)]
+        pub(crate) struct $receipt {
+            carrier_identity: ExternalCarrierIdentityV1,
+            _private: (),
+        }
+        impl $receipt {
+            pub(crate) const fn carrier_identity(&self) -> ExternalCarrierIdentityV1 {
+                self.carrier_identity
+            }
+        }
         pub(crate) struct $name<'a> {
-            carrier: &'a $carrier,
+            verified: &'a $verified,
         }
         impl<'a> $name<'a> {
-            pub(crate) const fn new(carrier: &'a $carrier) -> Self {
-                Self { carrier }
+            pub(crate) const fn new(verified: &'a $verified) -> Self {
+                Self { verified }
             }
             pub(crate) fn $method(
                 &self,
                 replay: &mut ExternalCarrierReplayGuardV1,
             ) -> Result<ExternalCarrierIngressResultV2, SignerRefusalV2> {
-                replay.consume(self.carrier.identity())?;
-                Ok(ExternalCarrierIngressResultV2::$result)
+                let carrier_identity = self.verified.carrier_identity();
+                replay.consume(carrier_identity)?;
+                Ok(ExternalCarrierIngressResultV2::$result($receipt {
+                    carrier_identity,
+                    _private: (),
+                }))
             }
         }
     };
 }
 
 ingress_type!(
+    ProposalDispositionIngressV1,
+    VerifiedProposalDispositionV1,
+    ProposalDispositionIngressReceiptV1,
+    ProposalDispositionConsumed,
+    apply
+);
+ingress_type!(
     BootstrapGrantIngressV1,
-    StoreIntegrityBootstrapGrantV1,
+    VerifiedBootstrapGrantV1,
+    BootstrapGrantIngressReceiptV1,
     BootstrapGrantConsumed,
     consume
 );
 ingress_type!(
+    ActivationSuccessorGrantIngressV1,
+    VerifiedActivationSuccessorGrantV1,
+    ActivationSuccessorGrantIngressReceiptV1,
+    ActivationSuccessorGrantConsumed,
+    apply
+);
+ingress_type!(
     RestoreAuthorizationIngressV1,
-    StoreIntegrityRestoreAuthorizationV1,
+    VerifiedRestoreAuthorizationV1,
+    RestoreAuthorizationIngressReceiptV1,
     RestoreAuthorizationConsumed,
     install_successor
 );
 ingress_type!(
     RevocationJudgmentIngressV1,
-    StoreIntegrityRevocationJudgmentV1,
+    VerifiedRevocationJudgmentV1,
+    RevocationJudgmentIngressReceiptV1,
     RevocationJudgmentConsumed,
     apply
 );
 ingress_type!(
     RecoveryGrantIngressV1,
-    StoreIntegrityRecoveryGrantV1,
+    VerifiedRecoveryGrantV1,
+    RecoveryGrantIngressReceiptV1,
     RecoveryGrantConsumed,
     apply
 );
 ingress_type!(
     QuarantineClosureIngressV1,
-    StoreIntegrityQuarantineClosureJudgmentV1,
+    VerifiedQuarantineClosureJudgmentV1,
+    QuarantineClosureIngressReceiptV1,
     QuarantineClosureJudgmentConsumed,
     close
 );
 
+pub(crate) fn verify_proposal_disposition_ingress_consumption(
+    result: ExternalCarrierIngressResultV2,
+) -> Result<(), SignerRefusalV2> {
+    match result {
+        ExternalCarrierIngressResultV2::ProposalDispositionConsumed(receipt) => {
+            let _ = receipt.carrier_identity();
+            Ok(())
+        }
+        _ => Err(SignerRefusalV2::ExternalCarrierScopeMismatch),
+    }
+}
+
 pub(crate) fn verify_bootstrap_grant_ingress_consumption(
     result: ExternalCarrierIngressResultV2,
 ) -> Result<(), SignerRefusalV2> {
-    (result == ExternalCarrierIngressResultV2::BootstrapGrantConsumed)
-        .then_some(())
-        .ok_or(SignerRefusalV2::ExternalCarrierScopeMismatch)
+    match result {
+        ExternalCarrierIngressResultV2::BootstrapGrantConsumed(receipt) => {
+            let _ = receipt.carrier_identity();
+            Ok(())
+        }
+        _ => Err(SignerRefusalV2::ExternalCarrierScopeMismatch),
+    }
+}
+pub(crate) fn verify_activation_successor_grant_ingress_consumption(
+    result: ExternalCarrierIngressResultV2,
+) -> Result<(), SignerRefusalV2> {
+    match result {
+        ExternalCarrierIngressResultV2::ActivationSuccessorGrantConsumed(receipt) => {
+            let _ = receipt.carrier_identity();
+            Ok(())
+        }
+        _ => Err(SignerRefusalV2::ExternalCarrierScopeMismatch),
+    }
 }
 pub(crate) fn verify_restore_authorization_ingress_consumption(
     result: ExternalCarrierIngressResultV2,
 ) -> Result<(), SignerRefusalV2> {
-    (result == ExternalCarrierIngressResultV2::RestoreAuthorizationConsumed)
-        .then_some(())
-        .ok_or(SignerRefusalV2::ExternalCarrierScopeMismatch)
+    match result {
+        ExternalCarrierIngressResultV2::RestoreAuthorizationConsumed(receipt) => {
+            let _ = receipt.carrier_identity();
+            Ok(())
+        }
+        _ => Err(SignerRefusalV2::ExternalCarrierScopeMismatch),
+    }
 }
 pub(crate) fn verify_revocation_judgment_ingress_consumption(
     result: ExternalCarrierIngressResultV2,
 ) -> Result<(), SignerRefusalV2> {
-    (result == ExternalCarrierIngressResultV2::RevocationJudgmentConsumed)
-        .then_some(())
-        .ok_or(SignerRefusalV2::ExternalCarrierScopeMismatch)
+    match result {
+        ExternalCarrierIngressResultV2::RevocationJudgmentConsumed(receipt) => {
+            let _ = receipt.carrier_identity();
+            Ok(())
+        }
+        _ => Err(SignerRefusalV2::ExternalCarrierScopeMismatch),
+    }
 }
 pub(crate) fn verify_recovery_grant_ingress_consumption(
     result: ExternalCarrierIngressResultV2,
 ) -> Result<(), SignerRefusalV2> {
-    (result == ExternalCarrierIngressResultV2::RecoveryGrantConsumed)
-        .then_some(())
-        .ok_or(SignerRefusalV2::ExternalCarrierScopeMismatch)
+    match result {
+        ExternalCarrierIngressResultV2::RecoveryGrantConsumed(receipt) => {
+            let _ = receipt.carrier_identity();
+            Ok(())
+        }
+        _ => Err(SignerRefusalV2::ExternalCarrierScopeMismatch),
+    }
 }
 pub(crate) fn verify_quarantine_closure_ingress_consumption(
     result: ExternalCarrierIngressResultV2,
 ) -> Result<(), SignerRefusalV2> {
-    (result == ExternalCarrierIngressResultV2::QuarantineClosureJudgmentConsumed)
-        .then_some(())
-        .ok_or(SignerRefusalV2::ExternalCarrierScopeMismatch)
+    match result {
+        ExternalCarrierIngressResultV2::QuarantineClosureJudgmentConsumed(receipt) => {
+            let _ = receipt.carrier_identity();
+            Ok(())
+        }
+        _ => Err(SignerRefusalV2::ExternalCarrierScopeMismatch),
+    }
 }
 
 /// Closed ingress ownership witness; no plugin or generic carrier arm exists.
@@ -1320,6 +1512,84 @@ mod tests {
         document
     }
 
+    fn signed_pair_documents(
+        request_spec: DocumentSpec,
+        carrier_spec: DocumentSpec,
+        signing: &SigningKey,
+    ) -> (Value, Vec<u8>, ExternalGovernanceExpectationV1) {
+        let key = signing.verifying_key().to_bytes();
+        let request = sample_document(request_spec, key);
+        let mut carrier = sample_document(carrier_spec, key);
+        for (name, value) in request.as_object().unwrap() {
+            if carrier.get(name).is_some() && !matches!(name.as_str(), "schema" | "schema_version")
+            {
+                carrier
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(name.clone(), value.clone());
+            }
+        }
+        let mut identity_preimage = carrier.clone();
+        identity_preimage
+            .as_object_mut()
+            .unwrap()
+            .remove(carrier_spec.identity_field);
+        identity_preimage
+            .as_object_mut()
+            .unwrap()
+            .remove("signature");
+        let carrier_identity =
+            domain_digest(carrier_spec.identity_domain, &identity_preimage).unwrap();
+        carrier.as_object_mut().unwrap().insert(
+            carrier_spec.identity_field.to_owned(),
+            Value::String(carrier_identity),
+        );
+        let mut unsigned = carrier.clone();
+        unsigned.as_object_mut().unwrap().remove("signature");
+        let canonical = canonical_json_bytes(&unsigned).unwrap();
+        let mut preimage = carrier_spec.signature_domain.unwrap().as_bytes().to_vec();
+        preimage.push(0);
+        preimage.extend_from_slice(&canonical);
+        carrier.as_object_mut().unwrap().insert(
+            "signature".to_owned(),
+            Value::String(hex::encode(signing.sign(&preimage).to_bytes())),
+        );
+
+        let names: &[&str] = if request.get("signer_scope_policy_identity").is_some() {
+            &[
+                "occurrence_id",
+                "physical_store_generation_identity",
+                "controlling_activation",
+                "signer_scope_policy_identity",
+                "install_policy_digest",
+            ]
+        } else {
+            &[
+                "occurrence_id",
+                "physical_store_generation_identity",
+                "controlling_activation",
+                "signer_lifecycle_root_identity",
+                "scope_identity",
+                "active_store_policy_identity",
+            ]
+        };
+        let exact_fields = names
+            .iter()
+            .map(|name| ((*name).to_owned(), request[*name].clone()))
+            .collect();
+        let cut = carrier
+            .get("proposed_effect_cut")
+            .or_else(|| carrier.get("c2_lifecycle_cut"))
+            .and_then(Value::as_u64)
+            .unwrap();
+        let expectation = ExternalGovernanceExpectationV1::new(exact_fields, cut, cut).unwrap();
+        (
+            request,
+            canonical_json_bytes(&carrier).unwrap(),
+            expectation,
+        )
+    }
+
     #[test]
     fn noncanonical_bytes_and_unknown_fields_refuse() {
         let value =
@@ -1333,7 +1603,8 @@ mod tests {
 
     #[test]
     fn replay_guard_is_one_use() {
-        let mut guard = ExternalCarrierReplayGuardV1::default();
+        let mut guard =
+            ExternalCarrierReplayGuardV1::new(ExternalCarrierStoreIngressPermitV1::for_test());
         let identity = ExternalCarrierIdentityV1([7; 32]);
         assert!(guard.consume(identity).is_ok());
         assert_eq!(
@@ -1412,6 +1683,7 @@ mod tests {
         let expectation = ExternalGovernanceExpectationV1::new(exact_fields, 1, 1).unwrap();
         let verified =
             verify_bootstrap_grant_terminal_a1_signature_scope_policy_cut_request_identity(
+                &ExternalCarrierVerificationPermitV1::for_test(),
                 &grant,
                 &request,
                 &expectation,
@@ -1422,6 +1694,127 @@ mod tests {
         assert_eq!(
             verified.canonical_signature(),
             &signing.sign(&preimage).to_bytes()
+        );
+        let mut replay =
+            ExternalCarrierReplayGuardV1::new(ExternalCarrierStoreIngressPermitV1::for_test());
+        let ingress = BootstrapGrantIngressV1::new(&verified);
+        let result = ingress.consume(&mut replay).unwrap();
+        match &result {
+            ExternalCarrierIngressResultV2::BootstrapGrantConsumed(receipt) => {
+                assert_eq!(receipt.carrier_identity(), verified.carrier_identity());
+            }
+            _ => panic!("bootstrap ingress returned another route"),
+        }
+        assert!(verify_bootstrap_grant_ingress_consumption(result).is_ok());
+        assert!(matches!(
+            ingress.consume(&mut replay),
+            Err(SignerRefusalV2::ExternalCarrierReplay)
+        ));
+    }
+
+    #[test]
+    fn every_nonbootstrap_pair_requires_terminal_verification_before_typed_ingress() {
+        let signing = SigningKey::from_bytes(&[73; 32]);
+        let key = signing.verifying_key().to_bytes();
+        let terminal = TerminalVerifier(key);
+        let verification_permit = ExternalCarrierVerificationPermitV1::for_test();
+
+        macro_rules! verify_route {
+            ($request_spec:ident, $carrier_spec:ident, $request_ctor:ident, $carrier_decode:ident,
+             $pair_verify:ident, $ingress:ident, $method:ident, $result:ident,
+             $receipt_verify:ident) => {{
+                let (request_value, carrier_bytes, expectation) =
+                    signed_pair_documents($request_spec, $carrier_spec, &signing);
+                let request = $request_ctor(request_value).unwrap();
+                let carrier = $carrier_decode(&carrier_bytes).unwrap();
+                let verified = $pair_verify(
+                    &verification_permit,
+                    &carrier,
+                    &request,
+                    &expectation,
+                    &terminal,
+                )
+                .unwrap();
+                assert_eq!(verified.request_identity(), request.identity());
+                let mut replay = ExternalCarrierReplayGuardV1::new(
+                    ExternalCarrierStoreIngressPermitV1::for_test(),
+                );
+                let result = $ingress::new(&verified).$method(&mut replay).unwrap();
+                match &result {
+                    ExternalCarrierIngressResultV2::$result(receipt) => {
+                        assert_eq!(receipt.carrier_identity(), verified.carrier_identity());
+                    }
+                    _ => panic!("typed ingress returned another route"),
+                }
+                assert!($receipt_verify(result).is_ok());
+            }};
+        }
+
+        verify_route!(
+            PROPOSAL_REQUEST,
+            PROPOSAL,
+            construct_proposal_disposition_request,
+            decode_store_integrity_proposal_disposition_v1,
+            verify_proposal_disposition_terminal_a1_signature_scope_policy_cut_request_identity,
+            ProposalDispositionIngressV1,
+            apply,
+            ProposalDispositionConsumed,
+            verify_proposal_disposition_ingress_consumption
+        );
+        verify_route!(
+            ACTIVATION_REQUEST,
+            ACTIVATION,
+            construct_activation_successor_grant_request,
+            decode_store_integrity_activation_successor_grant_v1,
+            verify_activation_successor_grant_terminal_a1_signature_scope_policy_cut_request_identity,
+            ActivationSuccessorGrantIngressV1,
+            apply,
+            ActivationSuccessorGrantConsumed,
+            verify_activation_successor_grant_ingress_consumption
+        );
+        verify_route!(
+            REVOCATION_REQUEST,
+            REVOCATION,
+            construct_revocation_request,
+            decode_store_integrity_revocation_judgment_v1,
+            verify_revocation_judgment_terminal_a1_signature_scope_policy_cut_request_identity,
+            RevocationJudgmentIngressV1,
+            apply,
+            RevocationJudgmentConsumed,
+            verify_revocation_judgment_ingress_consumption
+        );
+        verify_route!(
+            RECOVERY_REQUEST,
+            RECOVERY,
+            construct_recovery_request,
+            decode_store_integrity_recovery_grant_v1,
+            verify_recovery_grant_terminal_a1_signature_scope_policy_cut_predecessor_successor_request_identity,
+            RecoveryGrantIngressV1,
+            apply,
+            RecoveryGrantConsumed,
+            verify_recovery_grant_ingress_consumption
+        );
+        verify_route!(
+            RESTORE_REQUEST,
+            RESTORE,
+            construct_restore_authorization_request,
+            decode_restore_authorization_v1,
+            verify_restore_authorization_terminal_a1_signature_scope_policy_cut_request_identity,
+            RestoreAuthorizationIngressV1,
+            install_successor,
+            RestoreAuthorizationConsumed,
+            verify_restore_authorization_ingress_consumption
+        );
+        verify_route!(
+            QUARANTINE_REQUEST,
+            QUARANTINE,
+            construct_quarantine_closure_request,
+            decode_quarantine_closure_judgment_v1,
+            verify_quarantine_closure_terminal_a1_signature_scope_policy_cut_request_identity,
+            QuarantineClosureIngressV1,
+            close,
+            QuarantineClosureJudgmentConsumed,
+            verify_quarantine_closure_ingress_consumption
         );
     }
 }

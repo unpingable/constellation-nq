@@ -511,6 +511,7 @@ def _require_no_public_protected_surface(inventory: SourceInventory) -> None:
 def _verify_private_signer_graph(inventory: SourceInventory) -> tuple[str, ...]:
     _require_no_public_protected_surface(inventory)
     pending_append = _verify_pending_signer_append_gate(inventory)
+    external_ingress = _verify_pending_external_carrier_ingress_gate(inventory)
     process_fence = _verify_signer_process_fence(inventory)
     custodian_sign = inventory.require_function(
         SIGNER_CUSTODY, "sign", "C2StoreIntegrityCustodian"
@@ -635,6 +636,7 @@ def _verify_private_signer_graph(inventory: SourceInventory) -> tuple[str, ...]:
         "append-consumer=one",
         "message-family=MSG-01..MSG-16",
         *pending_append,
+        *external_ingress,
         *process_fence,
     )
 
@@ -704,6 +706,212 @@ def _verify_pending_signer_append_gate(
         "signer-append-permit-production-constructors=0",
         "signed-frame-owned-payload=one",
         "durable-append-status=not-yet-wired",
+    )
+
+
+def _verify_pending_external_carrier_ingress_gate(
+    inventory: SourceInventory,
+) -> tuple[str, ...]:
+    """Prove only terminal-A1-verified carriers can reach the pending ingress.
+
+    Durable replay persistence and the Store-owned consumer are not wired yet,
+    so the linear ingress permit intentionally has no production constructor.
+    """
+
+    source = inventory.source(SIGNER_GOVERNANCE)
+    require(
+        _item_visibility(source, "struct", "ExternalCarrierVerificationPermitV1")
+        == "pub(super)",
+        "external-carrier verification permit has invalid visibility",
+    )
+    require(
+        not inventory.public_reexports({"ExternalCarrierVerificationPermitV1"}),
+        "external-carrier verification permit is publicly re-exported",
+    )
+    verification_constructors = [
+        function
+        for function in inventory.functions
+        if _code_contains(function, "ExternalCarrierVerificationPermitV1{")
+    ]
+    require(
+        not verification_constructors,
+        "external-carrier verification permit has a production constructor before "
+        "the Store-owned terminal-A1 resolver: "
+        + ", ".join(function.location for function in verification_constructors),
+    )
+    require(
+        _item_visibility(source, "trait", "TerminalA1AuthenticityVerifierV1")
+        == "pub(super)",
+        "pending terminal-A1 verifier hook escapes the signer module",
+    )
+    require(
+        not tuple(
+            function
+            for function in inventory.functions_named("verify_unique_terminal_a1")
+            if not function.declaration_only
+        ),
+        "terminal-A1 verifier gained a production implementation before Store-owned wiring",
+    )
+    expectation_new = inventory.require_function(
+        SIGNER_GOVERNANCE, "new", "ExternalGovernanceExpectationV1"
+    )
+    require(
+        expectation_new.visibility == "private",
+        "caller-selected external-governance expectation construction is reachable",
+    )
+    require(
+        _item_visibility(source, "struct", "ExternalCarrierStoreIngressPermitV1")
+        == "pub(super)",
+        "external-carrier Store-ingress permit has invalid visibility",
+    )
+    require(
+        not inventory.public_reexports({"ExternalCarrierStoreIngressPermitV1"}),
+        "external-carrier Store-ingress permit is publicly re-exported",
+    )
+    constructors = [
+        function
+        for function in inventory.functions
+        if _code_contains(function, "ExternalCarrierStoreIngressPermitV1{")
+    ]
+    require(
+        not constructors,
+        "external-carrier Store-ingress permit has a production constructor before "
+        "durable replay wiring: "
+        + ", ".join(function.location for function in constructors),
+    )
+    replay_new = inventory.require_function(
+        SIGNER_GOVERNANCE, "new", "ExternalCarrierReplayGuardV1"
+    )
+    replay_signature = compact_tokens(
+        replay_new.source.tokens[replay_new.start_token : replay_new.body_open_token]
+    )
+    require(
+        replay_new.visibility == "pub(super)"
+        and "permit:ExternalCarrierStoreIngressPermitV1" in replay_signature,
+        "external-carrier replay guard does not consume the linear Store-ingress permit",
+    )
+    require(
+        "implDefaultforExternalCarrierReplayGuardV1" not in compact_tokens(source.tokens),
+        "process-local pending replay guard regained a Default construction path",
+    )
+    bootstrap_verifier = inventory.require_function(
+        SIGNER_GOVERNANCE,
+        "verify_bootstrap_grant_terminal_a1_signature_scope_policy_cut_request_identity",
+    )
+    bootstrap_signature = compact_tokens(
+        bootstrap_verifier.source.tokens[
+            bootstrap_verifier.start_token : bootstrap_verifier.body_open_token
+        ]
+    )
+    require(
+        "_permit:&ExternalCarrierVerificationPermitV1" in bootstrap_signature,
+        "bootstrap verified projection bypasses the Store-owned verification permit",
+    )
+
+    exact_routes = (
+        (
+            "VerifiedProposalDispositionV1",
+            "StoreIntegrityProposalDispositionV1",
+            "ProposalDispositionIngressV1",
+            "ProposalDispositionIngressReceiptV1",
+            "ProposalDispositionConsumed",
+        ),
+        (
+            "VerifiedBootstrapGrantV1",
+            "StoreIntegrityBootstrapGrantV1",
+            "BootstrapGrantIngressV1",
+            "BootstrapGrantIngressReceiptV1",
+            "BootstrapGrantConsumed",
+        ),
+        (
+            "VerifiedActivationSuccessorGrantV1",
+            "StoreIntegrityActivationSuccessorGrantV1",
+            "ActivationSuccessorGrantIngressV1",
+            "ActivationSuccessorGrantIngressReceiptV1",
+            "ActivationSuccessorGrantConsumed",
+        ),
+        (
+            "VerifiedRevocationJudgmentV1",
+            "StoreIntegrityRevocationJudgmentV1",
+            "RevocationJudgmentIngressV1",
+            "RevocationJudgmentIngressReceiptV1",
+            "RevocationJudgmentConsumed",
+        ),
+        (
+            "VerifiedRecoveryGrantV1",
+            "StoreIntegrityRecoveryGrantV1",
+            "RecoveryGrantIngressV1",
+            "RecoveryGrantIngressReceiptV1",
+            "RecoveryGrantConsumed",
+        ),
+        (
+            "VerifiedRestoreAuthorizationV1",
+            "StoreIntegrityRestoreAuthorizationV1",
+            "RestoreAuthorizationIngressV1",
+            "RestoreAuthorizationIngressReceiptV1",
+            "RestoreAuthorizationConsumed",
+        ),
+        (
+            "VerifiedQuarantineClosureJudgmentV1",
+            "StoreIntegrityQuarantineClosureJudgmentV1",
+            "QuarantineClosureIngressV1",
+            "QuarantineClosureIngressReceiptV1",
+            "QuarantineClosureJudgmentConsumed",
+        ),
+    )
+    tokens = compact_tokens(source.tokens)
+    require(
+        "_permit:&ExternalCarrierVerificationPermitV1" in tokens,
+        "paired carrier verifiers bypass the Store-owned verification permit",
+    )
+    require(
+        _item_visibility(source, "enum", "ExternalCarrierIngressResultV2")
+        == "pub(crate)",
+        "matrix-assigned external-carrier result vocabulary has invalid visibility",
+    )
+    require(
+        "#[derive(Debug)]pub(crate)enumExternalCarrierIngressResultV2" in tokens,
+        "external-carrier result regained a cloneable or copyable witness",
+    )
+    require(
+        "#[derive(Debug,PartialEq,Eq)]pub(crate)struct$receipt{"
+        "carrier_identity:ExternalCarrierIdentityV1,_private:(),}"
+        in tokens,
+        "route-specific external-carrier ingress receipt is not opaque",
+    )
+    for verified, decoded, ingress, receipt, result in exact_routes:
+        if verified != "VerifiedBootstrapGrantV1":
+            require(
+                f"verified_pair_type!({verified},{decoded});" in tokens,
+                f"verified external-carrier projection is absent for {decoded}",
+            )
+        require(
+            f"ingress_type!({ingress},{verified},{receipt},{result}," in tokens,
+            f"external-carrier ingress {ingress} does not require {verified}",
+        )
+        require(
+            f"{result}({receipt})" in tokens,
+            f"matrix-assigned result {result} does not carry its opaque route receipt",
+        )
+        require(
+            f"ingress_type!({ingress},{decoded}," not in tokens,
+            f"decoded but unverified carrier {decoded} reaches {ingress}",
+        )
+        for other_source in inventory.sources:
+            if other_source.path.as_posix() == SIGNER_GOVERNANCE:
+                continue
+            require(
+                not other_source.identifier_occurrences(receipt),
+                f"opaque external-carrier receipt {receipt} escapes its owning module",
+            )
+
+    return (
+        "external-verification-permit-production-constructors=0",
+        "terminal-A1-production-verifiers=0",
+        "external-ingress-permit-production-constructors=0",
+        "external-ingress-routes=7-terminal-A1-verified-only",
+        "external-ingress-receipts=7-opaque",
+        "external-replay-status=process-local-pending-not-durable",
     )
 
 
