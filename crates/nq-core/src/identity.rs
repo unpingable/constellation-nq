@@ -15,7 +15,7 @@ use nix::errno::Errno;
 use nix::fcntl::{FcntlArg, FdFlag, SealFlag, fcntl};
 use nix::sys::memfd::{MemFdCreateFlag, memfd_create};
 use nix::sys::stat::{Mode, fchmod};
-use nq_helper_sandbox::{ExecutionAccount, resolve_account};
+use nq_helper_sandbox::{C2ForkFence, ExecutionAccount, resolve_account};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -682,6 +682,14 @@ pub(crate) fn spawn_with_inherited_descriptors(
     command: &mut Command,
     descriptors: &[RawFd],
 ) -> io::Result<Child> {
+    // The shared fork fence is acquired first, outside DESCRIPTOR_LAUNCH, so
+    // it covers the complete fork-to-exec exposure interval: the descriptor
+    // flag handoff, `Command::spawn`, and the flag restoration. RAII
+    // declaration order gives the exact release order — DESCRIPTOR_LAUNCH is
+    // released first and the fork fence last — and keeps the restoration
+    // inside the fence on every error path. `O_CLOEXEC` remains only a
+    // secondary defense; by itself it does not satisfy the fork-fence law.
+    let _fork_fence = C2ForkFence::acquire()?;
     let _guard = DESCRIPTOR_LAUNCH
         .lock()
         .map_err(|_| io::Error::other("descriptor launch lock is poisoned"))?;
@@ -700,6 +708,32 @@ pub(crate) fn spawn_with_inherited_descriptors(
             "spawn failed ({spawn_error}) and descriptor flags could not be restored ({restore_error})"
         ))),
     }
+}
+
+/// Named matrix-row constructor for the production spawn integration with
+/// the shared process-global fork fence.
+///
+/// This is a named row, not a second spawn owner: it delegates directly to
+/// [`spawn_with_inherited_descriptors`], the sole production process-creation
+/// choke point, and contains no spawn logic of its own.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn construct_sg_wu_02_spawn_production_spawn_integration_shared_fence(
+    command: &mut Command,
+    descriptors: &[RawFd],
+) -> io::Result<Child> {
+    spawn_with_inherited_descriptors(command, descriptors)
+}
+
+/// Verify the production-spawn shared-fence row non-destructively.
+///
+/// The check acquires the shared fork fence, verifies the process identity
+/// inside the interval, and releases. It fails closed when the fence is
+/// poisoned or already held on this thread; that refusal is the correct
+/// behavior, not a verification defect.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn verify_sg_wu_02_spawn_production_spawn_integration_shared_fence() -> io::Result<()> {
+    let guard = C2ForkFence::acquire()?;
+    guard.verify_same_process()
 }
 
 #[derive(Debug)]
@@ -1957,5 +1991,74 @@ mod tests {
                 ..
             }) if requested_bytes == MAX_RESIDENT_LAUNCH_BYTES + 1
         ));
+    }
+
+    #[test]
+    fn spawn_is_excluded_while_another_thread_holds_the_fork_fence() {
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let _fence = C2ForkFence::acquire().expect("holder acquires the fork fence");
+            acquired_tx.send(()).expect("signal fence acquired");
+            release_rx.recv().expect("wait for release signal");
+        });
+        acquired_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("holder thread acquired the fork fence");
+
+        let (spawned_tx, spawned_rx) = std::sync::mpsc::channel();
+        let spawner = std::thread::spawn(move || {
+            let mut command = Command::new("/bin/true");
+            let result = construct_sg_wu_02_spawn_production_spawn_integration_shared_fence(
+                &mut command,
+                &[],
+            )
+            .map(|mut child| child.wait().expect("wait for spawned child"));
+            spawned_tx.send(result).expect("report spawn result");
+        });
+
+        assert!(
+            spawned_rx
+                .recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "spawn completed while another thread held the fork fence"
+        );
+        release_tx.send(()).expect("release the fork fence");
+        let outcome = spawned_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("spawn completes within a generous window after release");
+        let status = outcome.expect("spawn succeeds after release");
+        assert!(status.success());
+        holder.join().expect("holder thread joins");
+        spawner.join().expect("spawner thread joins");
+    }
+
+    #[test]
+    fn spawn_error_restores_descriptor_flags() {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC)
+            .open("/bin/true")
+            .expect("open descriptor");
+        let descriptor = file.as_raw_fd();
+        let before = descriptor_flags(descriptor).expect("read descriptor flags");
+        assert!(before.contains(FdFlag::FD_CLOEXEC));
+
+        let mut command = Command::new("/definitely/not/a/real/executable");
+        let error = spawn_with_inherited_descriptors(&mut command, &[descriptor])
+            .expect_err("spawning a missing executable fails");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+
+        let after = descriptor_flags(descriptor).expect("read descriptor flags after error");
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn shared_fence_row_verify_succeeds_when_free_and_fails_when_held() {
+        verify_sg_wu_02_spawn_production_spawn_integration_shared_fence()
+            .expect("verify succeeds while the fence is free on this thread");
+        let _fence = C2ForkFence::acquire().expect("acquire the fork fence on this thread");
+        verify_sg_wu_02_spawn_production_spawn_integration_shared_fence()
+            .expect_err("verify fails closed while this thread already holds the fence");
     }
 }
