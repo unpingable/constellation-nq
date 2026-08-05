@@ -824,21 +824,36 @@ fn verify_pair(
 pub(crate) struct VerifiedBootstrapGrantV1 {
     request_identity: ExternalCarrierIdentityV1,
     grant_identity: ExternalCarrierIdentityV1,
+    canonical_carrier_digest: SignerIdentityV1,
     issuer: TerminalA1IssuerClaimV1,
     occurrence_id: String,
+    a2_chain_root: String,
+    a2_chain_root_bytes: SignerIdentityV1,
+    controlling_activation: String,
+    controlling_activation_bytes: SignerIdentityV1,
+    resident_identity: String,
+    resident_identity_bytes: SignerIdentityV1,
+    resident_generation: u64,
+    host_role: String,
+    role_manifest_generation: u64,
+    trust_anchor_id: String,
+    trust_anchor_id_bytes: SignerIdentityV1,
+    authority_domain: String,
+    activation_policy_version: u64,
     physical_generation: String,
     physical_generation_bytes: SignerIdentityV1,
     lifecycle_root: Option<String>,
     signer_scope_policy: String,
     signer_scope_policy_bytes: SignerIdentityV1,
+    signer_scope_policy_version: u64,
     install_policy_digest: SignerIdentityV1,
     store_integrity_public_key: [u8; 32],
     custody_instance_identity: SignerIdentityV1,
     proposed_key_generation: u64,
     proposal_identity: String,
     proposal_identity_bytes: SignerIdentityV1,
-    controlling_activation: String,
     interpretation_policy: String,
+    installation_mode: String,
     lifecycle_cut: u64,
     canonical_signature: [u8; 64],
 }
@@ -850,6 +865,9 @@ impl VerifiedBootstrapGrantV1 {
     pub(crate) const fn grant_identity(&self) -> ExternalCarrierIdentityV1 {
         self.grant_identity
     }
+    pub(crate) const fn canonical_carrier_digest(&self) -> SignerIdentityV1 {
+        self.canonical_carrier_digest
+    }
     pub(crate) const fn carrier_identity(&self) -> ExternalCarrierIdentityV1 {
         self.grant_identity
     }
@@ -858,6 +876,45 @@ impl VerifiedBootstrapGrantV1 {
     }
     pub(crate) fn occurrence_id(&self) -> &str {
         &self.occurrence_id
+    }
+    pub(crate) fn a2_chain_root(&self) -> &str {
+        &self.a2_chain_root
+    }
+    pub(crate) const fn a2_chain_root_bytes(&self) -> SignerIdentityV1 {
+        self.a2_chain_root_bytes
+    }
+    pub(crate) fn controlling_activation(&self) -> &str {
+        &self.controlling_activation
+    }
+    pub(crate) const fn controlling_activation_bytes(&self) -> SignerIdentityV1 {
+        self.controlling_activation_bytes
+    }
+    pub(crate) fn resident_identity(&self) -> &str {
+        &self.resident_identity
+    }
+    pub(crate) const fn resident_identity_bytes(&self) -> SignerIdentityV1 {
+        self.resident_identity_bytes
+    }
+    pub(crate) const fn resident_generation(&self) -> u64 {
+        self.resident_generation
+    }
+    pub(crate) fn host_role(&self) -> &str {
+        &self.host_role
+    }
+    pub(crate) const fn role_manifest_generation(&self) -> u64 {
+        self.role_manifest_generation
+    }
+    pub(crate) fn trust_anchor_id(&self) -> &str {
+        &self.trust_anchor_id
+    }
+    pub(crate) const fn trust_anchor_id_bytes(&self) -> SignerIdentityV1 {
+        self.trust_anchor_id_bytes
+    }
+    pub(crate) fn authority_domain(&self) -> &str {
+        &self.authority_domain
+    }
+    pub(crate) const fn activation_policy_version(&self) -> u64 {
+        self.activation_policy_version
     }
     pub(crate) fn physical_generation(&self) -> &str {
         &self.physical_generation
@@ -873,6 +930,9 @@ impl VerifiedBootstrapGrantV1 {
     }
     pub(crate) const fn signer_scope_policy_bytes(&self) -> SignerIdentityV1 {
         self.signer_scope_policy_bytes
+    }
+    pub(crate) const fn signer_scope_policy_version(&self) -> u64 {
+        self.signer_scope_policy_version
     }
     pub(crate) const fn install_policy_digest(&self) -> SignerIdentityV1 {
         self.install_policy_digest
@@ -892,11 +952,11 @@ impl VerifiedBootstrapGrantV1 {
     pub(crate) const fn proposal_identity_bytes(&self) -> SignerIdentityV1 {
         self.proposal_identity_bytes
     }
-    pub(crate) fn controlling_activation(&self) -> &str {
-        &self.controlling_activation
-    }
     pub(crate) fn interpretation_policy(&self) -> &str {
         &self.interpretation_policy
+    }
+    pub(crate) fn installation_mode(&self) -> &str {
+        &self.installation_mode
     }
     pub(crate) const fn lifecycle_cut(&self) -> u64 {
         self.lifecycle_cut
@@ -948,11 +1008,34 @@ pub(super) fn verify_bootstrap_grant_terminal_a1_signature_scope_policy_cut_requ
     let physical_generation_bytes = identity_bytes(&physical_generation)?;
     let signer_scope_policy = string_field(&grant.0, "signer_scope_policy_identity")?.to_owned();
     let signer_scope_policy_bytes = identity_bytes(&signer_scope_policy)?;
+    let a2_chain_root = string_field(&grant.0, "a2_chain_root")?.to_owned();
+    let a2_chain_root_bytes = identity_bytes(&a2_chain_root)?;
+    let controlling_activation = string_field(&grant.0, "controlling_activation")?.to_owned();
+    let controlling_activation_bytes = identity_bytes(&controlling_activation)?;
+    let resident_identity = string_field(&grant.0, "resident_identity")?.to_owned();
+    let resident_identity_bytes = identity_bytes(&resident_identity)?;
+    let trust_anchor_id = string_field(&grant.0, "trust_anchor_id")?.to_owned();
+    let trust_anchor_id_bytes = identity_bytes(&trust_anchor_id)?;
+    let canonical_carrier_digest = identity_bytes(sha256_bytes(grant.canonical_bytes()).as_str())?;
     Ok(VerifiedBootstrapGrantV1 {
         request_identity: request.identity(),
         grant_identity: grant.identity(),
+        canonical_carrier_digest,
         issuer,
         occurrence_id: string_field(&grant.0, "occurrence_id")?.to_owned(),
+        a2_chain_root,
+        a2_chain_root_bytes,
+        controlling_activation,
+        controlling_activation_bytes,
+        resident_identity,
+        resident_identity_bytes,
+        resident_generation: u64_field(&grant.0, "resident_generation")?,
+        host_role: string_field(&grant.0, "host_role")?.to_owned(),
+        role_manifest_generation: u64_field(&grant.0, "role_manifest_generation")?,
+        trust_anchor_id,
+        trust_anchor_id_bytes,
+        authority_domain: string_field(&grant.0, "authority_domain")?.to_owned(),
+        activation_policy_version: u64_field(&grant.0, "activation_policy_version")?,
         physical_generation,
         physical_generation_bytes,
         lifecycle_root: grant
@@ -961,14 +1044,15 @@ pub(super) fn verify_bootstrap_grant_terminal_a1_signature_scope_policy_cut_requ
             .map(str::to_owned),
         signer_scope_policy,
         signer_scope_policy_bytes,
+        signer_scope_policy_version: u64_field(&grant.0, "signer_scope_policy_version")?,
         install_policy_digest,
         store_integrity_public_key,
         custody_instance_identity,
         proposed_key_generation: u64_field(&grant.0, "store_integrity_key_generation")?,
         proposal_identity,
         proposal_identity_bytes,
-        controlling_activation: string_field(&grant.0, "controlling_activation")?.to_owned(),
         interpretation_policy: string_field(&grant.0, "interpretation_policy")?.to_owned(),
+        installation_mode: string_field(&grant.0, "installation_mode")?.to_owned(),
         lifecycle_cut: u64_field(&grant.0, "c2_lifecycle_cut")?,
         canonical_signature: signature,
     })
@@ -1440,6 +1524,7 @@ pub(crate) fn verify_sg_rec_13b_atomic_effect_receipt(
 #[cfg(test)]
 mod tests {
     use ed25519_dalek::{Signer as _, SigningKey};
+    use nq_protocol::Sha256Digest;
     use serde_json::json;
 
     use super::*;
@@ -1695,6 +1780,55 @@ mod tests {
             verified.canonical_signature(),
             &signing.sign(&preimage).to_bytes()
         );
+        let claim = verified.issuer().clone();
+        let issuer = super::super::authority::TerminalA1BootstrapIssuerV1 {
+            snapshot_identity: Sha256Digest::parse(claim.issued_against_candidate_set.clone())
+                .unwrap(),
+            occurrence: verified.occurrence_id().to_owned(),
+            trust_anchor_id: Sha256Digest::parse(verified.trust_anchor_id().to_owned()).unwrap(),
+            record_digest: Sha256Digest::parse(claim.digest.clone()).unwrap(),
+            key_generation: claim.key_generation,
+            verifying_key: claim.verification_key,
+            operator_principal: claim.operator_principal,
+            domain: claim.domain,
+            policy_version: claim.policy_version,
+            policy_floor: claim.policy_floor,
+            terminal_a1_cut: claim.issued_against_gen4_cut,
+            terminal_event: Sha256Digest::parse(claim.issued_against_terminal_event).unwrap(),
+            issuance_cut: claim.issued_against_gen4_cut,
+        };
+        let scope = super::super::authority::construct_sg_n_04_bootstrap_grant_binds_complete_occurrence_resident_role(
+            &issuer,
+            &verified,
+        )
+        .expect("project complete scope only from verified carrier");
+        super::super::authority::verify_sg_n_04_bootstrap_grant_binds_complete_occurrence_resident_role(
+            &issuer,
+            &verified,
+            &scope,
+        )
+        .expect("complete carrier-derived scope revalidates");
+        let identity = super::super::authority::construct_sg_n_05_grant_uses_canonical_encoding_identity_signature_domain(
+            &issuer,
+            &verified,
+        )
+        .expect("project canonical signed grant identity");
+        super::super::authority::verify_sg_n_05_grant_uses_canonical_encoding_identity_signature_domain(
+            &identity,
+        )
+        .expect("canonical signed grant identity revalidates");
+        assert_eq!(identity.request_identity(), request.identity().bytes());
+        assert_eq!(identity.grant_identity(), grant.identity().bytes());
+
+        let mut incomplete = verified.clone();
+        incomplete.resident_generation = 0;
+        assert!(matches!(
+            super::super::authority::construct_sg_n_04_bootstrap_grant_binds_complete_occurrence_resident_role(
+                &issuer,
+                &incomplete,
+            ),
+            Err(SignerRefusalV2::ExternalCarrierScopeMismatch)
+        ));
         let mut replay =
             ExternalCarrierReplayGuardV1::new(ExternalCarrierStoreIngressPermitV1::for_test());
         let ingress = BootstrapGrantIngressV1::new(&verified);

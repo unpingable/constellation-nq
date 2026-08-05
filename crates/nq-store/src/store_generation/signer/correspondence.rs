@@ -51,9 +51,9 @@ pub(crate) enum InitialStandingExternalityCorrespondenceV2 {
 pub(crate) fn construct_initial_standing_externality_correspondence(
     grant: &BootstrapGrantIdentityV1,
 ) -> Result<InitialStandingExternalityCorrespondenceV2, CorrespondenceRefusalV2> {
-    if !nonzero(&grant.request_identity)
-        || !nonzero(&grant.grant_identity)
-        || grant.issuer.key_generation == 0
+    if !nonzero(grant.request_identity())
+        || !nonzero(grant.grant_identity())
+        || grant.issuer().key_generation == 0
     {
         return Err(CorrespondenceRefusalV2::MissingIdentity);
     }
@@ -75,10 +75,10 @@ pub(crate) enum ActivationApplicabilityNonAuthorityCorrespondenceV2 {
 pub(crate) fn construct_activation_applicability_non_authority_correspondence(
     applicability: &A2ApplicabilityRefinementV1,
 ) -> Result<ActivationApplicabilityNonAuthorityCorrespondenceV2, CorrespondenceRefusalV2> {
-    if applicability.interpretation != A2_APPLICABILITY_INTERPRETATION_V1 {
+    if applicability.interpretation() != A2_APPLICABILITY_INTERPRETATION_V1 {
         return Err(CorrespondenceRefusalV2::ActivationInterpretationMismatch);
     }
-    if !nonzero(&applicability.grant_identity) || !nonzero(&applicability.a2_snapshot) {
+    if !nonzero(applicability.grant_identity()) || !nonzero(applicability.a2_snapshot()) {
         return Err(CorrespondenceRefusalV2::MissingIdentity);
     }
     Ok(ActivationApplicabilityNonAuthorityCorrespondenceV2::ActivationConstrainsApplicabilityWithoutIssuingGrant)
