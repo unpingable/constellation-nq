@@ -11,12 +11,11 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::marker::PhantomData;
-use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
-use nix::fcntl::{FlockArg, flock};
+use nix::fcntl::{Flock, FlockArg};
 
 use crate::capacity_backend::{
     ClosedC2StoreBackendV1, closed_backend_lock_inode_key_v1,
@@ -53,13 +52,7 @@ struct PathLockState {
 /// maintenance operations without creating a sidecar before authorization.
 pub(crate) struct MaintenanceLockGuard {
     _process: MutexGuard<'static, ()>,
-    flock_file: File,
-}
-
-impl Drop for MaintenanceLockGuard {
-    fn drop(&mut self) {
-        let _ = flock(self.flock_file.as_raw_fd(), FlockArg::Unlock);
-    }
+    _flock: Flock<File>,
 }
 
 static GEN4_PATH_WRITER_LOCKS: LazyLock<Mutex<BTreeMap<PathBuf, &'static PathLockState>>> =
@@ -340,11 +333,11 @@ pub(crate) fn acquire_maintenance_locks(
                 .ok_or_else(|| StoreError::WriterSessionUnavailable(key.display().to_string()))?;
         }
         let flock_file = File::open(existing)?;
-        flock(flock_file.as_raw_fd(), FlockArg::LockExclusiveNonblock)
+        let flock = Flock::lock(flock_file, FlockArg::LockExclusiveNonblock)
             .map_err(|_| StoreError::WriterSessionUnavailable(key.display().to_string()))?;
         guards.push(MaintenanceLockGuard {
             _process: process,
-            flock_file,
+            _flock: flock,
         });
     }
     Ok(guards)

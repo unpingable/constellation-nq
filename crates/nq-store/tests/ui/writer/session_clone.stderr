@@ -1,5 +1,5 @@
-error[E0599]: no method named `clone` found for struct `StoreWriterSession<'store, Brand>` in the current scope
+error[E0599]: no method named `clone` found for struct `nq_store::StoreWriterSession<'store, Brand>` in the current scope
  --> tests/ui/writer/session_clone.rs:4:16
   |
 4 |     (*session).clone()
-  |                ^^^^^ method not found in `StoreWriterSession<'s>`
+  |                ^^^^^ method not found in `nq_store::StoreWriterSession<'s>`

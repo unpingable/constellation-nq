@@ -1007,11 +1007,9 @@ mod tests {
         let physical =
             preallocate_n_90_permanent_lock_b_g(&preflight, &raw_lock, 4096, &b, 8192, &g, 12288)
                 .unwrap();
-        let held_lock = construct_wu_04_immutable_wu_local_lock_flock_process_registry(
-            directory.path(),
-            &b_genesis,
-        )
-        .unwrap();
+        let held_lock =
+            construct_wu_04_immutable_wu_local_lock_flock_process_registry(&root, &b_genesis)
+                .unwrap();
 
         let common = digest('o');
         let b_header = digest('h');

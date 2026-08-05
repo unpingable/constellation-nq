@@ -771,6 +771,7 @@ dependencies = [
  "nq-protocol",
  "nq-runtime-dependency-authority",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

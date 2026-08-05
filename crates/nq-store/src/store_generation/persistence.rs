@@ -6,18 +6,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nq_protocol::{Sha256Digest, semantic_digest, sha256_bytes};
-use rusqlite::{Connection, TransactionBehavior};
+use nq_protocol::{Sha256Digest, semantic_digest};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const MAX_IJSON_INTEGER: u64 = 9_007_199_254_740_991;
-const C2_PROJECTION_MIGRATION: &str = include_str!("../schema_v8_to_v9_c2_store_generation.sql");
-const C2_SIGNER_LINEAGE_MIGRATION: &str = include_str!("../../migrations/v9_c2_signer_lineage.sql");
-const C2_PROJECTION_MIGRATION_SHA256: &str =
-    "sha256:7386144f5a7fe1ec9fd573499bf1873b9f0197ab5abd9c1b6befb0110dc223fe";
-const C2_SIGNER_LINEAGE_MIGRATION_SHA256: &str =
-    "sha256:dac5a70e3327922ec4b1733ffa62357ccac55c7d9a203508a7f45b1802c992aa";
 
 /// Closed provenance mode for one persisted current-binding projection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -76,15 +69,6 @@ pub struct C2PersistencePlanV1 {
     receipt_append_pairs: BTreeSet<(Sha256Digest, Sha256Digest)>,
 }
 
-/// Receipt binding the exact campaign-local migration bytes applied together.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct C2ProjectionMigrationReceiptV1 {
-    source_schema_version: i64,
-    projection_migration_sha256: Sha256Digest,
-    lineage_migration_sha256: Sha256Digest,
-    tables: BTreeSet<String>,
-}
-
 /// Typed persistence refusal; every variant is no-write until a transaction
 /// has passed all checks.
 #[derive(Debug, Error)]
@@ -109,14 +93,6 @@ pub enum PersistenceRefusalV1 {
     AssociationIdentityMismatch,
     #[error("canonical identity derivation failed")]
     Canonicalization,
-    #[error("the source schema is not exact schema v8")]
-    SourceSchemaMismatch,
-    #[error("the compiled migration bytes differ from their pinned identities")]
-    MigrationIdentityMismatch,
-    #[error("the projection migration did not install its exact table set")]
-    MigrationTableMismatch,
-    #[error("SQLite rejected the atomic projection migration: {0}")]
-    Sqlite(#[from] rusqlite::Error),
 }
 
 #[derive(Serialize)]
@@ -392,93 +368,6 @@ impl C2PersistencePlanV1 {
     }
 }
 
-impl C2ProjectionMigrationReceiptV1 {
-    /// Exact compiled projection migration identity.
-    #[must_use]
-    pub fn projection_migration_sha256(&self) -> &Sha256Digest {
-        &self.projection_migration_sha256
-    }
-
-    /// Exact compiled signer-lineage migration identity.
-    #[must_use]
-    pub fn lineage_migration_sha256(&self) -> &Sha256Digest {
-        &self.lineage_migration_sha256
-    }
-
-    /// Source schema version proven before the transaction.
-    #[must_use]
-    pub const fn source_schema_version(&self) -> i64 {
-        self.source_schema_version
-    }
-
-    /// Exact tables installed by the transaction.
-    #[must_use]
-    pub fn tables(&self) -> &BTreeSet<String> {
-        &self.tables
-    }
-}
-
-fn expected_projection_tables() -> BTreeSet<String> {
-    [
-        "c2_installation_projection",
-        "c2_installation_receipt_index",
-        "c2_signer_root_binding_projection",
-        "c2_signer_current_binding_projection",
-        "c2_signer_succession_projection",
-        "c2_signer_lineage_projection",
-        "c2_signer_lineage_edge_projection",
-        "c2_signer_lineage_completion_projection",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect()
-}
-
-/// Apply the two exact projection migrations atomically to an exact schema-v8
-/// Store.  Schema-metadata promotion remains owned by the outer Store
-/// migration transaction; this bounded hook cannot make v9 current by itself.
-pub(crate) fn apply_schema_v8_c2_projection_migrations(
-    connection: &mut Connection,
-) -> Result<C2ProjectionMigrationReceiptV1, PersistenceRefusalV1> {
-    let source_schema_version: i64 = connection.query_row(
-        "SELECT schema_version FROM schema_metadata WHERE singleton = 1",
-        [],
-        |row| row.get(0),
-    )?;
-    if source_schema_version != 8 {
-        return Err(PersistenceRefusalV1::SourceSchemaMismatch);
-    }
-    let projection_hash = sha256_bytes(C2_PROJECTION_MIGRATION.as_bytes());
-    let lineage_hash = sha256_bytes(C2_SIGNER_LINEAGE_MIGRATION.as_bytes());
-    if projection_hash.as_str() != C2_PROJECTION_MIGRATION_SHA256
-        || lineage_hash.as_str() != C2_SIGNER_LINEAGE_MIGRATION_SHA256
-    {
-        return Err(PersistenceRefusalV1::MigrationIdentityMismatch);
-    }
-
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    transaction.execute_batch(C2_PROJECTION_MIGRATION)?;
-    transaction.execute_batch(C2_SIGNER_LINEAGE_MIGRATION)?;
-    let observed = {
-        let mut statement = transaction.prepare(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'c2_%_projection' OR type = 'table' AND name = 'c2_installation_receipt_index'",
-        )?;
-        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-        rows.collect::<Result<BTreeSet<_>, _>>()?
-    };
-    let expected = expected_projection_tables();
-    if observed != expected {
-        return Err(PersistenceRefusalV1::MigrationTableMismatch);
-    }
-    transaction.commit()?;
-    Ok(C2ProjectionMigrationReceiptV1 {
-        source_schema_version,
-        projection_migration_sha256: projection_hash,
-        lineage_migration_sha256: lineage_hash,
-        tables: observed,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -633,18 +522,5 @@ mod tests {
             plan.append_binding(recovery_two),
             Err(PersistenceRefusalV1::DuplicateAssociation)
         ));
-    }
-
-    #[test]
-    fn exact_projection_migrations_apply_as_one_transaction() {
-        let mut connection = Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE schema_metadata (singleton INTEGER PRIMARY KEY, schema_version INTEGER NOT NULL); INSERT INTO schema_metadata VALUES (1, 8);",
-            )
-            .unwrap();
-        let receipt = apply_schema_v8_c2_projection_migrations(&mut connection).unwrap();
-        assert_eq!(receipt.source_schema_version(), 8);
-        assert_eq!(receipt.tables(), &expected_projection_tables());
     }
 }

@@ -23,6 +23,7 @@ nq-host-role-dependency-custody = { path = "../nq-host-role-dependency-custody" 
 nq-protocol = { path = "../nq-protocol" }
 nq-runtime-dependency-authority = { path = "../nq-runtime-dependency-authority" }
 rusqlite.workspace = true
+rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

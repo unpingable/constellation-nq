@@ -4,14 +4,14 @@
 //! process mutex, nor the operating-system lock is mutation standing.
 
 use std::collections::BTreeSet;
-use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::path::{Path, PathBuf};
+use std::fs::File;
+use std::io;
+use std::os::unix::fs::{FileExt, MetadataExt};
 use std::sync::{Mutex, OnceLock};
 
 use nix::fcntl::{Flock, FlockArg};
 use nq_protocol::{Sha256Digest, canonical_json_bytes, sha256_bytes};
+use rustix::fs::{Mode, OFlags, openat};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -100,17 +100,16 @@ pub struct VerifiedGenerationLockCarrierV1 {
 ///
 /// This type intentionally has no conversion into writer standing.
 pub struct C2StoreGenerationLockV1 {
-    path: PathBuf,
     inode: LockInodeKey,
     carrier: VerifiedGenerationLockCarrierV1,
     _flock: LifetimeLockedFile,
 }
 
 impl C2StoreGenerationLockV1 {
-    /// Fixed lock path actually opened.
+    /// Fixed child name resolved through the retained Store-root descriptor.
     #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.path
+    pub const fn fixed_name(&self) -> &'static str {
+        C2_LOCK_FILE_V1
     }
 
     /// Parsed, independently verified carrier.
@@ -124,6 +123,48 @@ impl C2StoreGenerationLockV1 {
     pub const fn inode_key(&self) -> LockInodeKey {
         self.inode
     }
+}
+
+/// Provisional process-registry entry removed automatically on every
+/// constructor error.  Ownership transfers to `C2StoreGenerationLockV1` only
+/// after the descriptor, flock, bytes, and backlink have all verified.
+struct ProvisionalHeldInode {
+    inode: LockInodeKey,
+    armed: bool,
+}
+
+impl ProvisionalHeldInode {
+    fn insert(inode: LockInodeKey) -> Result<Self, C2StoreGenerationLockErrorV1> {
+        let mut held = held_lock_inodes()
+            .lock()
+            .map_err(|_| C2StoreGenerationLockErrorV1::ProcessAliasConflict)?;
+        if !held.insert(inode) {
+            return Err(C2StoreGenerationLockErrorV1::ProcessAliasConflict);
+        }
+        Ok(Self { inode, armed: true })
+    }
+
+    fn transfer(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ProvisionalHeldInode {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Ok(mut held) = held_lock_inodes().lock() {
+                held.remove(&self.inode);
+            }
+        }
+    }
+}
+
+fn read_exact_descriptor_bytes(file: &File) -> Result<Vec<u8>, C2StoreGenerationLockErrorV1> {
+    let len = usize::try_from(file.metadata()?.len())
+        .map_err(|_| C2StoreGenerationLockErrorV1::NoncanonicalLengthOrPadding)?;
+    let mut bytes = vec![0_u8; len];
+    file.read_exact_at(&mut bytes, 0)?;
+    Ok(bytes)
 }
 
 impl Drop for C2StoreGenerationLockV1 {
@@ -252,56 +293,33 @@ pub fn verify_rec_29_generation_lock(
 }
 
 /// Acquire the fixed-name permanent lock. This is quiescence evidence only.
-pub fn construct_wu_04_immutable_wu_local_lock_flock_process_registry(
-    retained_root: &Path,
+pub(crate) fn construct_wu_04_immutable_wu_local_lock_flock_process_registry(
+    retained_root: &File,
     expected_b_genesis: &Sha256Digest,
 ) -> Result<C2StoreGenerationLockV1, C2StoreGenerationLockErrorV1> {
-    let path = retained_root.join(C2_LOCK_FILE_V1);
-    let mut options = OpenOptions::new();
-    options
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
-    let mut file = options.open(&path)?;
+    let file = File::from(
+        openat(
+            retained_root,
+            C2_LOCK_FILE_V1,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(io::Error::from)?,
+    );
     let metadata = file.metadata()?;
     if !metadata.file_type().is_file() || metadata.nlink() != 1 {
         return Err(C2StoreGenerationLockErrorV1::MalformedCarrier);
     }
     let inode = (metadata.dev(), metadata.ino());
-    {
-        let mut held = held_lock_inodes()
-            .lock()
-            .map_err(|_| C2StoreGenerationLockErrorV1::ProcessAliasConflict)?;
-        if !held.insert(inode) {
-            return Err(C2StoreGenerationLockErrorV1::ProcessAliasConflict);
-        }
-    }
+    let provisional_inode = ProvisionalHeldInode::insert(inode)?;
     let flock = match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
         Ok(flock) => flock,
-        Err((_file, _error)) => {
-            held_lock_inodes()
-                .lock()
-                .map_err(|_| C2StoreGenerationLockErrorV1::ProcessAliasConflict)?
-                .remove(&inode);
-            return Err(C2StoreGenerationLockErrorV1::OperatingSystemConflict);
-        }
+        Err((_file, _error)) => return Err(C2StoreGenerationLockErrorV1::OperatingSystemConflict),
     };
-    let mut bytes = Vec::new();
-    file = flock.try_clone()?;
-    file.seek(SeekFrom::Start(0))?;
-    file.read_to_end(&mut bytes)?;
-    let carrier = match verify_rec_29_generation_lock(&bytes, expected_b_genesis) {
-        Ok(carrier) => carrier,
-        Err(error) => {
-            held_lock_inodes()
-                .lock()
-                .map_err(|_| C2StoreGenerationLockErrorV1::ProcessAliasConflict)?
-                .remove(&inode);
-            return Err(error);
-        }
-    };
+    let bytes = read_exact_descriptor_bytes(&flock)?;
+    let carrier = verify_rec_29_generation_lock(&bytes, expected_b_genesis)?;
+    provisional_inode.transfer();
     Ok(C2StoreGenerationLockV1 {
-        path,
         inode,
         carrier,
         _flock: flock,
@@ -313,13 +331,20 @@ pub fn verify_wu_04_immutable_wu_local_lock_flock_process_registry(
     lock: &C2StoreGenerationLockV1,
 ) -> Result<(), C2StoreGenerationLockErrorV1> {
     let metadata = lock._flock.metadata()?;
-    if (metadata.dev(), metadata.ino()) != lock.inode
+    if !metadata.file_type().is_file()
+        || metadata.nlink() != 1
+        || (metadata.dev(), metadata.ino()) != lock.inode
         || !held_lock_inodes()
             .lock()
             .map_err(|_| C2StoreGenerationLockErrorV1::ProcessAliasConflict)?
             .contains(&lock.inode)
     {
         return Err(C2StoreGenerationLockErrorV1::ProcessAliasConflict);
+    }
+    let bytes = read_exact_descriptor_bytes(&lock._flock)?;
+    let reparsed = verify_rec_29_generation_lock(&bytes, &lock.carrier.b_genesis_frame_identity)?;
+    if reparsed != lock.carrier {
+        return Err(C2StoreGenerationLockErrorV1::MalformedCarrier);
     }
     Ok(())
 }
@@ -389,32 +414,32 @@ pub fn verify_n_83_fresh_creation_bucket_is_root_inode_fixed(
     Ok(())
 }
 
-/// Write exact REC-29 bytes to a newly created fixed-name lock object.
-pub(crate) fn create_fixed_generation_lock(
-    retained_root: &Path,
-    bytes: &[u8],
-) -> Result<(), C2StoreGenerationLockErrorV1> {
-    let path = retained_root.join(C2_LOCK_FILE_V1);
-    let mut options = OpenOptions::new();
-    options
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
-    let mut file = options.open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::path::Path;
+
     use tempfile::tempdir;
 
     use super::*;
 
     fn digest(byte: char) -> Sha256Digest {
         Sha256Digest::parse(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
+    }
+
+    fn write_lock_fixture(retained_root: &Path, bytes: &[u8]) {
+        let path = retained_root.join(C2_LOCK_FILE_V1);
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(path)
+            .unwrap();
+        file.write_all(bytes).unwrap();
+        file.sync_all().unwrap();
     }
 
     #[test]
@@ -438,16 +463,17 @@ mod tests {
         let bytes =
             encode_rec_29_generation_lock("occurrence-1".into(), digest('2'), digest('3'), 2048)
                 .unwrap();
-        create_fixed_generation_lock(root.path(), &bytes).unwrap();
+        write_lock_fixture(root.path(), &bytes);
+        let retained_root = File::open(root.path()).unwrap();
         let first = construct_wu_04_immutable_wu_local_lock_flock_process_registry(
-            root.path(),
+            &retained_root,
             &digest('3'),
         )
         .unwrap();
         // Fixed-name reopen is sufficient to hit the same inode.
         assert!(matches!(
             construct_wu_04_immutable_wu_local_lock_flock_process_registry(
-                root.path(),
+                &retained_root,
                 &digest('3')
             ),
             Err(C2StoreGenerationLockErrorV1::ProcessAliasConflict)
@@ -455,7 +481,7 @@ mod tests {
         drop(first);
         assert!(
             construct_wu_04_immutable_wu_local_lock_flock_process_registry(
-                root.path(),
+                &retained_root,
                 &digest('3')
             )
             .is_ok()
@@ -468,7 +494,8 @@ mod tests {
         let bytes =
             encode_rec_29_generation_lock("occurrence-1".into(), digest('2'), digest('3'), 2048)
                 .unwrap();
-        create_fixed_generation_lock(root.path(), &bytes).unwrap();
+        write_lock_fixture(root.path(), &bytes);
+        let retained_root = File::open(root.path()).unwrap();
         std::fs::hard_link(
             root.path().join(C2_LOCK_FILE_V1),
             root.path().join("second-lock"),
@@ -476,10 +503,29 @@ mod tests {
         .unwrap();
         assert!(matches!(
             construct_wu_04_immutable_wu_local_lock_flock_process_registry(
-                root.path(),
+                &retained_root,
                 &digest('3')
             ),
             Err(C2StoreGenerationLockErrorV1::MalformedCarrier)
         ));
+    }
+
+    #[test]
+    fn failed_constructor_releases_provisional_inode_registry_entry() {
+        let root = tempdir().unwrap();
+        let bytes =
+            encode_rec_29_generation_lock("occurrence-1".into(), digest('2'), digest('3'), 2048)
+                .unwrap();
+        write_lock_fixture(root.path(), &bytes);
+        let retained_root = File::open(root.path()).unwrap();
+        for _ in 0..2 {
+            assert!(matches!(
+                construct_wu_04_immutable_wu_local_lock_flock_process_registry(
+                    &retained_root,
+                    &digest('4')
+                ),
+                Err(C2StoreGenerationLockErrorV1::BacklinkMismatch)
+            ));
+        }
     }
 }

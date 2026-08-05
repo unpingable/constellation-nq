@@ -1431,11 +1431,29 @@ def verify_cg_15_maintenance_site_uses_full_process_mutex_flock(
     inventory = inventory or SourceInventory.load()
     receipt = _run_inherited_verifier("verify_mutator_census.py")
     helper = inventory.require_function(WRITER, "acquire_maintenance_locks")
-    require(
-        helper.calls("try_lock") and helper.calls("flock"),
-        "maintenance lock helper does not acquire both process mutex and flock",
+    raii_flock = any(
+        call.name == "lock" and call.path == "Flock::lock" for call in helper.calls()
     )
-    return _evidence("CG-15", receipt, f"helper={helper.location}")
+    writer_tokens = compact_tokens(inventory.source(WRITER).tokens)
+    helper_body = compact_tokens(helper.body_tokens)
+    guard_shape = (
+        "structMaintenanceLockGuard{_process:MutexGuard<'static,()>,_flock:Flock<File>,}"
+        in writer_tokens
+    )
+    retained_values = (
+        "MaintenanceLockGuard{_process:process,_flock:flock,}" in helper_body
+    )
+    require(
+        helper.calls("try_lock") and raii_flock and guard_shape and retained_values,
+        "maintenance lock helper does not retain both process mutex and RAII flock",
+    )
+    return _evidence(
+        "CG-15",
+        receipt,
+        f"helper={helper.location}",
+        "guard=MutexGuard+Flock<File>",
+        "values=retained",
+    )
 
 
 def verify_cg_16_handle_alias_uses_process_wide_lock_inode(

@@ -1,12 +1,12 @@
-error[E0277]: the trait bound `StoreWriterSession<'_>: serde::Serialize` is not satisfied
+error[E0277]: the trait bound `nq_store::StoreWriterSession<'_>: serde::Serialize` is not satisfied
  --> tests/ui/writer/session_serialize.rs:4:27
   |
 4 |     serde_json::to_string(session).expect("serialize session")
-  |     --------------------- ^^^^^^^ the trait `serde_core::ser::Serialize` is not implemented for `StoreWriterSession<'_>`
+  |     --------------------- ^^^^^^^ the trait `serde_core::ser::Serialize` is not implemented for `nq_store::StoreWriterSession<'_>`
   |     |
   |     required by a bound introduced by this call
   |
-  = note: for local types consider adding `#[derive(serde::Serialize)]` to your `StoreWriterSession<'_>` type
+  = note: for local types consider adding `#[derive(serde::Serialize)]` to your `nq_store::StoreWriterSession<'_>` type
   = note: for types from other crates check whether the crate offers a `serde` feature flag
   = help: the following other types implement trait `serde_core::ser::Serialize`:
             &'a T
