@@ -53,7 +53,7 @@ pub(crate) fn construct_initial_standing_externality_correspondence(
 ) -> Result<InitialStandingExternalityCorrespondenceV2, CorrespondenceRefusalV2> {
     if !nonzero(&grant.request_identity)
         || !nonzero(&grant.grant_identity)
-        || !nonzero(&grant.issuer.key_generation)
+        || grant.issuer.key_generation == 0
     {
         return Err(CorrespondenceRefusalV2::MissingIdentity);
     }

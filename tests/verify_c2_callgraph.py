@@ -244,6 +244,7 @@ SIGNER_MESSAGES = SIGNER_PREFIX + "messages.rs"
 SIGNER_RESTART = SIGNER_PREFIX + "restart.rs"
 SIGNER_LINEAGE = SIGNER_PREFIX + "lineage.rs"
 SIGNER_GOVERNANCE = SIGNER_PREFIX + "external_governance.rs"
+SIGNER_AUTHORITY = SIGNER_PREFIX + "authority.rs"
 
 SPECIAL_ROOT_SPECS = (
     ("P-01", INSTALL, None, "install_c2_fresh", "C2BootstrapBrandV1"),
@@ -764,13 +765,85 @@ def _verify_pending_external_carrier_ingress_gate(
         == "pub(super)",
         "pending terminal-A1 verifier hook escapes the signer module",
     )
+    terminal_verifiers = tuple(
+        function
+        for function in inventory.functions_named("verify_unique_terminal_a1")
+        if not function.declaration_only
+    )
     require(
-        not tuple(
-            function
-            for function in inventory.functions_named("verify_unique_terminal_a1")
-            if not function.declaration_only
+        len(terminal_verifiers) == 1
+        and terminal_verifiers[0].source.path.as_posix() == SIGNER_AUTHORITY
+        and terminal_verifiers[0].owner == "TerminalA1AuthoritySnapshotV1",
+        "terminal-A1 authenticity must have exactly one private Store-owned snapshot implementation: "
+        + (", ".join(function.location for function in terminal_verifiers) or "none"),
+    )
+    terminal_constructor = inventory.require_function(
+        SIGNER_AUTHORITY,
+        "construct_sg_n_03_issuer_currentness_is_resolved_complete_store_owned",
+    )
+    authority_source = inventory.source(SIGNER_AUTHORITY)
+    authority_tokens = compact_tokens(authority_source.tokens)
+    require(
+        "structTerminalA1AuthoritySnapshotV1<'snapshot>{"
+        "input:&'snapshotCurrentActivationResolverInputV1<'snapshot>,"
+        "resolved:&'snapshotControllingActivationSnapshot,}" in authority_tokens,
+        "terminal-A1 authority snapshot does not retain both complete same-snapshot inputs",
+    )
+    require(
+        "TerminalA1CandidateV1" not in authority_tokens
+        and "terminal:bool" not in authority_tokens
+        and "current_at_cut:bool" not in authority_tokens,
+        "terminal-A1 projection regained a caller-selected candidate or currentness Boolean",
+    )
+    require(
+        "implCloneforTerminalA1AuthoritySnapshotV1" not in authority_tokens
+        and "implCopyforTerminalA1AuthoritySnapshotV1" not in authority_tokens
+        and "implDefaultforTerminalA1AuthoritySnapshotV1" not in authority_tokens
+        and not re.search(
+            r"#\[derive\([^\]]*(?:Clone|Copy|Default|Serialize|Deserialize)[^\]]*\)\]"
+            r"\s*pub\(crate\)\s+struct\s+TerminalA1AuthoritySnapshotV1",
+            authority_source.text,
+        )
+        and not inventory.public_reexports({"TerminalA1AuthoritySnapshotV1"}),
+        "terminal-A1 authority snapshot regained a detached construction or escape surface",
+    )
+    terminal_constructor_signature = compact_tokens(
+        terminal_constructor.source.tokens[
+            terminal_constructor.start_token : terminal_constructor.body_open_token
+        ]
+    )
+    require(
+        "input:&'snapshotCurrentActivationResolverInputV1<'snapshot>"
+        in terminal_constructor_signature
+        and "resolved:&'snapshotControllingActivationSnapshot"
+        in terminal_constructor_signature
+        and "Vec<" not in terminal_constructor_signature
+        and "bool" not in terminal_constructor_signature,
+        "terminal-A1 projection constructor is not tied to the complete same-snapshot inputs",
+    )
+    terminal_constructor_callers = inventory.callers_of(
+        "construct_sg_n_03_issuer_currentness_is_resolved_complete_store_owned"
+    )
+    require(
+        len(terminal_constructor_callers) == 1
+        and terminal_constructor_callers[0].source.path.as_posix() == HOST_RUNTIME
+        and terminal_constructor_callers[0].name == "resolve_store_runtime_authority",
+        "terminal-A1 projection constructor has an alternate production caller: "
+        + (
+            ", ".join(function.location for function in terminal_constructor_callers)
+            or "none"
         ),
-        "terminal-A1 verifier gained a production implementation before Store-owned wiring",
+    )
+    runtime_projection = inventory.require_function(
+        HOST_RUNTIME, "resolve_store_runtime_authority"
+    )
+    _require_calls_in_order(
+        runtime_projection,
+        (
+            "project_current_activation_for_c2",
+            "construct_sg_n_03_issuer_currentness_is_resolved_complete_store_owned",
+            "verify_sg_n_03_issuer_currentness_is_resolved_complete_store_owned",
+        ),
     )
     expectation_new = inventory.require_function(
         SIGNER_GOVERNANCE, "new", "ExternalGovernanceExpectationV1"
@@ -927,7 +1000,7 @@ def _verify_pending_external_carrier_ingress_gate(
 
     return (
         "external-verification-permit-production-constructors=0",
-        "terminal-A1-production-verifiers=0",
+        "terminal-A1-production-verifiers=1-store-owned-same-snapshot",
         "external-ingress-permit-production-constructors=0",
         "external-ingress-routes=7-terminal-A1-verified-only",
         "external-ingress-receipts=7-opaque",

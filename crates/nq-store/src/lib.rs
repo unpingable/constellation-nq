@@ -917,6 +917,10 @@ impl CurrentActivationResolverInputV1<'_> {
     pub(crate) const fn migration_receipt(&self) -> Option<&MigrationReceiptBytes> {
         self.migration_receipt
     }
+
+    pub(crate) const fn candidate_set_digest(&self) -> &Sha256Digest {
+        &self.enumerated_set_digest
+    }
 }
 
 /// Private borrowed projection of one already resolved Gen4 current A2.
@@ -38751,6 +38755,155 @@ mod tests {
             resolved.controlling_tip_activation_digest(),
             fixture.current_activation_digest()
         );
+    }
+
+    #[test]
+    fn c2_terminal_a1_projection_is_same_snapshot_and_adjacency_selected() {
+        let mut store = Store::initialize_runtime_authority_candidate_in_memory()
+            .expect("terminal A1 projection Store");
+        let mut fixture = RawAuthorityFixture::fresh_genesis();
+        establish_authority_fixture(&mut store, &fixture).expect("establish authority");
+        let custody = fixture.custody();
+        let expectations = fixture.activation_expectations();
+
+        for _ in 0..2 {
+            let current = store
+                .runtime_authority_presented_set()
+                .expect("complete predecessor set");
+            let rotation = fixture.append_operator_rotation();
+            store
+                .with_runtime_authority_writer_session(|brand, session| {
+                    let verified = verify_operator_authority_rotation(
+                        brand,
+                        &custody,
+                        &current,
+                        &rotation,
+                        None,
+                        &expectations,
+                    )?;
+                    session.append_runtime_operator_authority_rotation(&verified)
+                })
+                .expect("append adjacent A1 rotation");
+        }
+
+        let current = store
+            .runtime_authority_presented_set()
+            .expect("two-rotation predecessor set");
+        let successor = fixture.append_activation_successor();
+        store
+            .with_runtime_authority_writer_session(|brand, session| {
+                let verified = verify_resident_activation_successor(
+                    brand,
+                    &custody,
+                    &current,
+                    &successor,
+                    None,
+                    &expectations,
+                )?;
+                session.append_runtime_resident_activation_successor(&verified)
+            })
+            .expect("append later A2 event");
+
+        store
+            .with_runtime_authority_restart_snapshot(|snapshot| -> Result<(), StoreError> {
+                let input = collect_complete_gen4_authority_ledger(&snapshot)?;
+                let resolved = resolve_for_restart(
+                    &custody,
+                    &snapshot.presented,
+                    snapshot.migration_receipt.as_ref(),
+                    &fixture.restart_expectations(),
+                )?;
+                let terminal = store_generation::signer::authority::construct_sg_n_03_issuer_currentness_is_resolved_complete_store_owned(
+                    &input,
+                    &resolved,
+                )
+                .map_err(|_| StoreError::C2CurrentActivationCorrespondence)?;
+                store_generation::signer::authority::verify_sg_n_03_issuer_currentness_is_resolved_complete_store_owned(
+                    &terminal,
+                )
+                .map_err(|_| StoreError::C2CurrentActivationCorrespondence)?;
+
+                assert_eq!(terminal.terminal().key_generation(), 3);
+                assert_eq!(
+                    terminal.terminal().record_digest(),
+                    resolved.terminal_operator_authority().record_digest()
+                );
+                assert_eq!(
+                    terminal.issuance_cut(),
+                    resolved.verification_cut().sequence()
+                );
+                assert!(terminal.terminal().cut().sequence() < terminal.issuance_cut());
+                assert_eq!(
+                    terminal.controlling_activation(),
+                    resolved.controlling_tip_activation_digest()
+                );
+
+                let issuer = store_generation::signer::authority::construct_sg_n_02_bootstrap_grant_issuer_is_exactly_resolver_selected(
+                    &terminal,
+                    [0x55; 32],
+                )
+                .expect("derive terminal A1 bootstrap issuer");
+                store_generation::signer::authority::verify_sg_n_02_bootstrap_grant_issuer_is_exactly_resolver_selected(
+                    &issuer,
+                    &terminal,
+                    [0x55; 32],
+                )
+                .expect("verify exact terminal A1 bootstrap issuer");
+                assert_eq!(issuer.key_generation, 3);
+                assert_eq!(issuer.record_digest, *terminal.terminal().record_digest());
+                assert_eq!(issuer.issuance_cut, terminal.issuance_cut());
+                assert_eq!(issuer.terminal_a1_cut, terminal.terminal().cut().sequence());
+
+                assert!(matches!(
+                    store_generation::signer::authority::construct_sg_n_02_bootstrap_grant_issuer_is_exactly_resolver_selected(
+                        &terminal,
+                        *terminal.terminal().verification_key(),
+                    ),
+                    Err(store_generation::signer::result::SignerRefusalV2::IssuerSignerKeyCollision)
+                ));
+
+                let mut reordered_records = snapshot.presented.records().to_vec();
+                reordered_records.reverse();
+                let reordered = PresentedAuthoritySet::new(reordered_records);
+                let reordered_digest = digest_presented_authority_set(&reordered)?;
+                let reordered_input = CurrentActivationResolverInputV1 {
+                    root: &snapshot.root,
+                    occurrence_id: &snapshot.occurrence_id,
+                    receipt: &snapshot.receipt,
+                    presented: &reordered,
+                    migration_receipt: snapshot.migration_receipt.as_ref(),
+                    enumerated_set_digest: reordered_digest,
+                };
+                assert!(matches!(
+                    store_generation::signer::authority::construct_sg_n_03_issuer_currentness_is_resolved_complete_store_owned(
+                        &reordered_input,
+                        &resolved,
+                    ),
+                    Err(store_generation::signer::result::SignerRefusalV2::WrongTerminalA1Issuer)
+                ));
+
+                let prefix = PresentedAuthoritySet::new(
+                    snapshot.presented.records()[..2].to_vec(),
+                );
+                let prefix_digest = digest_presented_authority_set(&prefix)?;
+                let prefix_input = CurrentActivationResolverInputV1 {
+                    root: &snapshot.root,
+                    occurrence_id: &snapshot.occurrence_id,
+                    receipt: &snapshot.receipt,
+                    presented: &prefix,
+                    migration_receipt: snapshot.migration_receipt.as_ref(),
+                    enumerated_set_digest: prefix_digest,
+                };
+                assert!(matches!(
+                    store_generation::signer::authority::construct_sg_n_03_issuer_currentness_is_resolved_complete_store_owned(
+                        &prefix_input,
+                        &resolved,
+                    ),
+                    Err(store_generation::signer::result::SignerRefusalV2::WrongTerminalA1Issuer)
+                ));
+                Ok(())
+            })
+            .expect("project exact terminal A1 from complete Store snapshot");
     }
 
     #[test]

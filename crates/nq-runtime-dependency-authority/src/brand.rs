@@ -58,7 +58,7 @@ pub(crate) struct ResolutionFields {
     pub(crate) migration_receipt_canonical_bytes: Option<Vec<u8>>,
 }
 
-/// Exact terminal A1 selected by the already verified complete adjacency chain.
+/// Exact terminal A1 selected by the already verified adjacency chain.
 ///
 /// This read-only projection is not standing and has no authority-bearing
 /// constructor. It exists so a Store-owned same-snapshot adapter can consume
@@ -599,7 +599,7 @@ macro_rules! resolved_getters {
         pub const fn custody_digest(&self) -> &Sha256Digest {
             &self.fields.custody_digest
         }
-        /// Returns the exact order-independent Store-resident set binding.
+        /// Returns the exact presented-order Store-resident set binding.
         #[must_use]
         pub const fn candidate_set_digest(&self) -> &Sha256Digest {
             &self.fields.candidate_set_digest
@@ -704,7 +704,7 @@ macro_rules! snapshot_getters {
         pub const fn custody_digest(&self) -> &Sha256Digest {
             &self.fields.custody_digest
         }
-        /// Returns the exact order-independent Store-resident set binding.
+        /// Returns the exact presented-order Store-resident set binding.
         #[must_use]
         pub const fn candidate_set_digest(&self) -> &Sha256Digest {
             &self.fields.candidate_set_digest

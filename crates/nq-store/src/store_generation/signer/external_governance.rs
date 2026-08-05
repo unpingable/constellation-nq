@@ -588,9 +588,9 @@ pub(crate) struct TerminalA1IssuerClaimV1 {
     pub(crate) issued_against_candidate_set: String,
 }
 
-/// Pending terminality hook. The eventual sole production implementation must
-/// inspect the Store-owned complete A1 candidate set; this tranche exposes no
-/// production verification permit and no production implementation.
+/// Terminality hook implemented only by the private same-snapshot Store-owned
+/// projection. This tranche still exposes no production verification permit,
+/// so decoded carriers cannot yet enter an authoritative Store consumer.
 pub(super) trait TerminalA1AuthenticityVerifierV1 {
     fn verify_unique_terminal_a1(
         &self,

@@ -216,11 +216,20 @@ class CallGraphVerifierControls(unittest.TestCase):
             MODULE._verify_pending_signer_append_gate(inventory)
 
     @staticmethod
-    def _external_ingress_inventory(*, raw_bootstrap_ingress: bool = False):
+    def _external_ingress_inventory(
+        *,
+        raw_bootstrap_ingress: bool = False,
+        public_snapshot_verifier: bool = False,
+    ):
         bootstrap_projection = (
             "StoreIntegrityBootstrapGrantV1"
             if raw_bootstrap_ingress
             else "VerifiedBootstrapGrantV1"
+        )
+        verifier_owner = (
+            "ControllingActivationSnapshot"
+            if public_snapshot_verifier
+            else "TerminalA1AuthoritySnapshotV1<'_>"
         )
         return MODULE.SourceInventory.from_texts(
             {
@@ -348,6 +357,32 @@ class CallGraphVerifierControls(unittest.TestCase):
                         close
                     );
                 """,
+                MODULE.SIGNER_AUTHORITY: f"""
+                    struct TerminalA1AuthoritySnapshotV1<'snapshot> {{
+                        input: &'snapshot CurrentActivationResolverInputV1<'snapshot>,
+                        resolved: &'snapshot ControllingActivationSnapshot,
+                    }}
+                    impl TerminalA1AuthenticityVerifierV1 for {verifier_owner} {{
+                        fn verify_unique_terminal_a1(&self) {{}}
+                    }}
+                    pub(crate) fn construct_sg_n_03_issuer_currentness_is_resolved_complete_store_owned<'snapshot>(
+                        input: &'snapshot CurrentActivationResolverInputV1<'snapshot>,
+                        resolved: &'snapshot ControllingActivationSnapshot,
+                    ) -> Result<TerminalA1AuthoritySnapshotV1<'snapshot>, SignerRefusalV2> {{
+                        consume(input);
+                        consume(resolved);
+                    }}
+                    pub(crate) fn verify_sg_n_03_issuer_currentness_is_resolved_complete_store_owned(
+                        snapshot: &TerminalA1AuthoritySnapshotV1<'_>,
+                    ) {{ consume(snapshot); }}
+                """,
+                MODULE.HOST_RUNTIME: """
+                    fn resolve_store_runtime_authority() {
+                        let activation = project_current_activation_for_c2();
+                        let terminal = construct_sg_n_03_issuer_currentness_is_resolved_complete_store_owned();
+                        verify_sg_n_03_issuer_currentness_is_resolved_complete_store_owned(&terminal);
+                    }
+                """,
             }
         )
 
@@ -358,13 +393,22 @@ class CallGraphVerifierControls(unittest.TestCase):
             ),
             (
                 "external-verification-permit-production-constructors=0",
-                "terminal-A1-production-verifiers=0",
+                "terminal-A1-production-verifiers=1-store-owned-same-snapshot",
                 "external-ingress-permit-production-constructors=0",
                 "external-ingress-routes=7-terminal-A1-verified-only",
                 "external-ingress-receipts=7-opaque",
                 "external-replay-status=process-local-pending-not-durable",
             ),
         )
+
+    def test_external_ingress_gate_rejects_public_resolver_terminal_verifier(self) -> None:
+        with self.assertRaisesRegex(
+            MODULE.VerificationError,
+            "exactly one private Store-owned snapshot implementation",
+        ):
+            MODULE._verify_pending_external_carrier_ingress_gate(
+                self._external_ingress_inventory(public_snapshot_verifier=True)
+            )
 
     def test_external_ingress_gate_rejects_decoded_carrier(self) -> None:
         with self.assertRaisesRegex(

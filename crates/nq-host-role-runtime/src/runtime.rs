@@ -1907,6 +1907,15 @@ fn resolve_store_runtime_authority(
         )?;
         let c2_activation = nq_store::project_current_activation_for_c2(&c2_input, &resolved)?;
         nq_store::verify_n_09_current_activation_for_c2(&c2_activation)?;
+        let terminal_a1 = nq_store::store_generation::signer::authority::construct_sg_n_03_issuer_currentness_is_resolved_complete_store_owned(
+            &c2_input,
+            &resolved,
+        )
+        .map_err(|_| StoreError::C2CurrentActivationCorrespondence)?;
+        nq_store::store_generation::signer::authority::verify_sg_n_03_issuer_currentness_is_resolved_complete_store_owned(
+            &terminal_a1,
+        )
+        .map_err(|_| StoreError::C2CurrentActivationCorrespondence)?;
         Ok(())
     })
 }
