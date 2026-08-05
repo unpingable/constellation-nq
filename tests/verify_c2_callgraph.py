@@ -237,6 +237,7 @@ WRITER = "crates/nq-store/src/writer_session.rs"
 LOCK = "crates/nq-store/src/store_generation/lock.rs"
 RESTORE = "crates/nq-store/src/store_generation/restore.rs"
 SIGNER_PREFIX = "crates/nq-store/src/store_generation/signer/"
+SIGNER_MOD = SIGNER_PREFIX + "mod.rs"
 SIGNER_CUSTODY = SIGNER_PREFIX + "custody.rs"
 SIGNER_COORDINATOR = SIGNER_PREFIX + "coordinator.rs"
 SIGNER_MESSAGES = SIGNER_PREFIX + "messages.rs"
@@ -509,6 +510,7 @@ def _require_no_public_protected_surface(inventory: SourceInventory) -> None:
 
 
 def _verify_private_signer_graph(inventory: SourceInventory) -> tuple[str, ...]:
+    unsafe_boundary = _verify_signer_module_unsafe_boundary(inventory)
     _require_no_public_protected_surface(inventory)
     pending_append = _verify_pending_signer_append_gate(inventory)
     external_ingress = _verify_pending_external_carrier_ingress_gate(inventory)
@@ -635,10 +637,28 @@ def _verify_private_signer_graph(inventory: SourceInventory) -> tuple[str, ...]:
         f"typed-routes={len(SIGNER_ROUTE_METHODS)}",
         "append-consumer=one",
         "message-family=MSG-01..MSG-16",
+        *unsafe_boundary,
         *pending_append,
         *external_ingress,
         *process_fence,
     )
+
+
+def _verify_signer_module_unsafe_boundary(
+    inventory: SourceInventory,
+) -> tuple[str, ...]:
+    """Require an unrelaxable unsafe-code prohibition for the signer subtree."""
+
+    source = inventory.source(SIGNER_MOD)
+    require(
+        _source_token_count(
+            source,
+            ("#", "!", "[", "forbid", "(", "unsafe_code", ")", "]"),
+        )
+        == 1,
+        "signer module root must contain exactly one #![forbid(unsafe_code)]",
+    )
+    return ("signer-unsafe-code=forbidden-at-module-root",)
 
 
 def _verify_pending_signer_append_gate(

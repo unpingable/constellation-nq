@@ -75,6 +75,25 @@ class CallGraphVerifierControls(unittest.TestCase):
         with self.assertRaises(MODULE.VerificationError):
             MODULE._require_calls_in_order(function, ("sign", "consume"))
 
+    def test_signer_unsafe_boundary_requires_exact_forbid_attribute(self) -> None:
+        inventory = MODULE.SourceInventory.from_texts(
+            {MODULE.SIGNER_MOD: "#![forbid(unsafe_code)]\nmod custody;"}
+        )
+        self.assertEqual(
+            MODULE._verify_signer_module_unsafe_boundary(inventory),
+            ("signer-unsafe-code=forbidden-at-module-root",),
+        )
+
+    def test_signer_unsafe_boundary_rejects_weaker_deny_attribute(self) -> None:
+        inventory = MODULE.SourceInventory.from_texts(
+            {MODULE.SIGNER_MOD: "#![deny(unsafe_code)]\nmod custody;"}
+        )
+        with self.assertRaisesRegex(
+            MODULE.VerificationError,
+            "exactly one #!\\[forbid\\(unsafe_code\\)\\]",
+        ):
+            MODULE._verify_signer_module_unsafe_boundary(inventory)
+
     def test_schema_projection_gate_accepts_only_an_unconstructed_permit(self) -> None:
         inventory = MODULE.SourceInventory.from_texts(
             {

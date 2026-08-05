@@ -3,6 +3,8 @@
 //! Modules are visible for persisted record types and verification results;
 //! authority-bearing constructors and custody remain crate-private.
 
+#![forbid(unsafe_code)]
+
 pub mod authority;
 pub mod binding;
 pub(crate) mod bootstrap;
