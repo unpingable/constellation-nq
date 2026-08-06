@@ -3,9 +3,26 @@
 //! a valid negative control and no vacuous success.
 //!
 //! Anchor `v2-csh-10-hostile` is implemented here. This runner is also the
-//! assigned home of anchors `v2-sg-wu-07-hostile` and `v2-sg-n-30-hostile`;
-//! those rows will be added later as further `#[test]` functions reusing the
-//! shared probe helpers and the re-exec child role, without restructuring.
+//! assigned home of anchors `v2-sg-wu-07-hostile` and `v2-sg-n-30-hostile`,
+//! implemented below as further `#[test]` functions reusing the shared probe
+//! helpers and the re-exec child role:
+//!
+//! - `v2-sg-wu-07-hostile`: two-process/exec/shutdown observation of the
+//!   shared fence — while the parent holds the fence, re-exec children
+//!   acquire their own per-process fences (observation, not enforcement, per
+//!   the V3 amendment), two concurrent alias children do so independently, a
+//!   child spawned after the parent interval ends finds no residual fence
+//!   state, and same-thread reentry in the parent remains refused (the
+//!   enforcement half). Layer: fence/process boundary.
+//! - `v2-sg-n-30-hostile`: hostile two-process/copy behavior — the child
+//!   process cannot obtain the parent's fence standing or any signer
+//!   capability (compile-boundary E0603 stderr still exact; fd-table clean;
+//!   fence fresh per process), and a filesystem-copied Store directory opens
+//!   only as an independent instance whose sole public cross-instance
+//!   declaration grants no authority. Layers: compile boundary, fence/fd
+//!   process boundary, public Store substrate. The custody-driving surface
+//!   and the cross-process permanent C2 lock are crate-private at this
+//!   checkpoint; nothing beyond the observable public behavior is asserted.
 //!
 //! The hostile case perturbs the real load-bearing boundary:
 //!
@@ -47,6 +64,7 @@ use std::time::Duration;
 
 use nix::fcntl::{FcntlArg, FdFlag, fcntl};
 use nq_helper_sandbox::C2ForkFence;
+use nq_store::{Store, StoreError};
 
 use crate::c2_signer_hostile::csh_10::{
     ConcreteSignerHostileCaseV2, Csh10Observations, Csh10RefusalV2,
@@ -69,6 +87,11 @@ const POSITIVE_WINDOW: Duration = Duration::from_secs(30);
 /// Exact refusal message of the non-reentrant fence, distinguishing the
 /// intended fail-closed refusal from any other acquisition error.
 const NON_REENTRANT_REFUSAL: &str = "C2 fork fence is non-reentrant";
+/// Environment marker gating the fence-probe half of the re-exec child role;
+/// its value is an opaque run token (presence gates the role).
+const FENCE_CHILD_ROLE_ENV: &str = "NQ_STORE_SG_WU_07_CHILD_FENCE_PROBE";
+/// Prefix of the single structured result line the fence-probe child prints.
+const FENCE_LINE_PREFIX: &str = "NQ-SG-WU-07-FENCE ";
 
 /// Parsed result of one re-exec child fd-table probe.
 #[derive(Debug)]
@@ -127,6 +150,85 @@ fn parse_fd_probe_report(status_success: bool, stdout: &str) -> FdProbeReport {
     report
 }
 
+/// Parsed result of one re-exec child fence probe.
+#[derive(Debug)]
+struct FenceProbeReport {
+    /// Whether the child process exited successfully.
+    status_success: bool,
+    /// The child process's own pid, if it reported one.
+    pid: Option<u32>,
+    /// The child's structured result line, if it printed one.
+    line: Option<String>,
+}
+
+/// Build the re-exec command for the fence-probe child role. The caller
+/// decides whether to run it to completion or race several concurrently.
+fn fence_probe_command() -> Result<Command, String> {
+    let executable =
+        std::env::current_exe().map_err(|error| format!("current test executable: {error}"))?;
+    let mut command = Command::new(executable);
+    command
+        .arg("--exact")
+        .arg(CHILD_TEST_NAME)
+        .arg("--nocapture")
+        .env(FENCE_CHILD_ROLE_ENV, "run");
+    Ok(command)
+}
+
+/// Parse the child's single structured fence-probe result line
+/// (`NQ-SG-WU-07-FENCE pid=<pid> acquired=ok same-process=ok
+/// reentry-refused=exact`).
+fn parse_fence_probe_report(status_success: bool, stdout: &[u8]) -> FenceProbeReport {
+    let stdout = String::from_utf8_lossy(stdout);
+    let line = stdout
+        .lines()
+        .find(|l| l.starts_with(FENCE_LINE_PREFIX))
+        .map(str::to_owned);
+    let pid = line.as_deref().and_then(|line| {
+        line.split_whitespace()
+            .find_map(|token| token.strip_prefix("pid="))
+            .and_then(|pid| pid.parse().ok())
+    });
+    FenceProbeReport {
+        status_success,
+        pid,
+        line,
+    }
+}
+
+/// Re-exec this test binary as the fence-probe child and parse its
+/// structured result line.
+fn spawn_fence_probe_child() -> Result<FenceProbeReport, String> {
+    let output = fence_probe_command()?
+        .output()
+        .map_err(|error| format!("spawn fence-probe child: {error}"))?;
+    Ok(parse_fence_probe_report(
+        output.status.success(),
+        &output.stdout,
+    ))
+}
+
+/// Assert one fence-probe child exited successfully with the exact expected
+/// tokens, returning its pid for cross-process identity checks.
+fn require_fence_probe_ok(report: &FenceProbeReport, context: &str) -> u32 {
+    assert!(
+        report.status_success,
+        "{context}: fence-probe child must exit 0: {report:?}"
+    );
+    let line = report.line.as_ref().unwrap_or_else(|| {
+        panic!("{context}: fence-probe child printed no result line: {report:?}")
+    });
+    for token in ["acquired=ok", "same-process=ok", "reentry-refused=exact"] {
+        assert!(
+            line.contains(token),
+            "{context}: fence-probe line must contain {token:?}: {line}"
+        );
+    }
+    report
+        .pid
+        .unwrap_or_else(|| panic!("{context}: fence-probe line must carry a pid: {line}"))
+}
+
 /// Read the fd-status flags of `file`.
 fn fd_flags(file: &std::fs::File) -> Result<FdFlag, String> {
     fcntl(file.as_raw_fd(), FcntlArg::F_GETFD)
@@ -172,31 +274,74 @@ fn inspect_fd_table(identity: &str) -> Result<(usize, Vec<String>), String> {
 /// Re-exec child role: inspect the inherited fd table and report any fd that
 /// resolves to the parent marker identity. A clean table prints
 /// `foreign-fds=none` and lets the harness exit 0; any foreign fd prints the
-/// fd list and exits non-zero with the diagnostic. A no-op pass when not
-/// invoked under the marker environment variable.
+/// fd list and exits non-zero with the diagnostic. When the fence-probe
+/// marker is also (or instead) present, the child additionally acquires its
+/// OWN process's fence, proves the same-process binding, and requires the
+/// exact non-reentrant refusal on a same-thread second acquire — the
+/// non-vacuous control proving the child's fence is real. A no-op pass when
+/// not invoked under either marker environment variable.
 #[test]
 fn v2_csh_10_child_fd_probe() {
-    let Ok(identity) = std::env::var(CHILD_ROLE_ENV) else {
-        return;
-    };
-    match inspect_fd_table(&identity) {
-        Ok((total, foreign)) if foreign.is_empty() => {
-            println!("{PROBE_LINE_PREFIX}total={total} foreign-fds=none");
+    if let Ok(identity) = std::env::var(CHILD_ROLE_ENV) {
+        match inspect_fd_table(&identity) {
+            Ok((total, foreign)) if foreign.is_empty() => {
+                println!("{PROBE_LINE_PREFIX}total={total} foreign-fds=none");
+            }
+            Ok((total, foreign)) => {
+                println!(
+                    "{PROBE_LINE_PREFIX}total={total} foreign-fds={}",
+                    foreign.join(",")
+                );
+                let _ = std::io::stdout().flush();
+                std::process::exit(2);
+            }
+            Err(message) => {
+                println!("{PROBE_LINE_PREFIX}error={message}");
+                let _ = std::io::stdout().flush();
+                std::process::exit(3);
+            }
         }
-        Ok((total, foreign)) => {
-            println!(
-                "{PROBE_LINE_PREFIX}total={total} foreign-fds={}",
-                foreign.join(",")
-            );
-            let _ = std::io::stdout().flush();
-            std::process::exit(2);
-        }
-        Err(message) => {
-            println!("{PROBE_LINE_PREFIX}error={message}");
+    }
+    if std::env::var(FENCE_CHILD_ROLE_ENV).is_ok() {
+        child_fence_probe();
+    }
+}
+
+/// Fence-probe half of the re-exec child role: acquire THIS process's fence
+/// immediately after exec (proving no fence-interval state is inherited
+/// across the process boundary), verify the same-process binding, and
+/// require the exact non-reentrant refusal on a same-thread reacquire.
+fn child_fence_probe() {
+    let guard = match C2ForkFence::acquire() {
+        Ok(guard) => guard,
+        Err(error) => {
+            println!("{FENCE_LINE_PREFIX}error=fence-acquire-refused:{error}");
             let _ = std::io::stdout().flush();
             std::process::exit(3);
         }
+    };
+    if guard.verify_same_process().is_err() {
+        println!("{FENCE_LINE_PREFIX}error=not-same-process");
+        let _ = std::io::stdout().flush();
+        std::process::exit(2);
     }
+    let reentry_exact = match C2ForkFence::acquire() {
+        Err(error) => error.to_string() == NON_REENTRANT_REFUSAL,
+        Ok(extra) => {
+            drop(extra);
+            false
+        }
+    };
+    drop(guard);
+    if !reentry_exact {
+        println!("{FENCE_LINE_PREFIX}error=reentry-not-refused-exactly");
+        let _ = std::io::stdout().flush();
+        std::process::exit(2);
+    }
+    println!(
+        "{FENCE_LINE_PREFIX}pid={} acquired=ok same-process=ok reentry-refused=exact",
+        std::process::id()
+    );
 }
 
 /// Matrix V3 anchor `v2-csh-10-hostile`: a child process must not inherit
@@ -351,5 +496,240 @@ fn v2_csh_10_hostile() {
     assert_eq!(
         outcome.refusal,
         Csh10RefusalV2::ChildProcessInheritsLoadedKeyFdRefused
+    );
+}
+
+/// Matrix V3 anchor `v2-sg-wu-07-hostile`: "two-process/alias/copy/fork/
+/// exec/shutdown law ...; process, fork, exec and shutdown evidence observes
+/// but does not enforce the shared fence".
+///
+/// Layer covered: the fence/process boundary. While the parent holds the
+/// fence, (i) a re-exec child acquires its own process fence — exec discards
+/// the parent's in-memory fence state, so the child's fresh acquisition
+/// observes (not enforces, per the V3 amendment) that no fence-interval
+/// state crosses the boundary; (ii) two concurrent alias children do the
+/// same independently of each other; (iii) after the parent's interval ends,
+/// a further child finds no residual fence state and the parent re-acquires
+/// cleanly (the shutdown observation — the parent test process cannot exit
+/// mid-test, so interval shutdown is the honest analog); (iv) within the
+/// parent, same-thread reentry remains refused with the exact message (the
+/// enforcement half). The child's own non-reentrant reacquire control proves
+/// its fence is real, not a vacuous pass.
+#[test]
+fn v2_sg_wu_07_hostile() {
+    let parent_pid = std::process::id();
+    let guard = C2ForkFence::acquire().expect("initial fence acquisition in a fresh test process");
+
+    // Nothing may panic while the guard is held (a panic would poison the
+    // process-global fence), so every child result is captured into a value
+    // and asserted only after release.
+    //
+    // (i) One re-exec child, while the parent fence is held.
+    let first_child = spawn_fence_probe_child();
+
+    // (ii) Two concurrent alias children, spawned before either is awaited.
+    let concurrent_children = (|| -> Result<(FenceProbeReport, FenceProbeReport), String> {
+        let mut first_command = fence_probe_command()?;
+        let mut second_command = fence_probe_command()?;
+        first_command.stdout(std::process::Stdio::piped());
+        second_command.stdout(std::process::Stdio::piped());
+        let first = first_command
+            .spawn()
+            .map_err(|error| format!("spawn first concurrent child: {error}"))?;
+        let second = second_command
+            .spawn()
+            .map_err(|error| format!("spawn second concurrent child: {error}"))?;
+        let first_output = first
+            .wait_with_output()
+            .map_err(|error| format!("await first concurrent child: {error}"))?;
+        let second_output = second
+            .wait_with_output()
+            .map_err(|error| format!("await second concurrent child: {error}"))?;
+        Ok((
+            parse_fence_probe_report(first_output.status.success(), &first_output.stdout),
+            parse_fence_probe_report(second_output.status.success(), &second_output.stdout),
+        ))
+    })();
+
+    // (iv) The enforcement half: same-thread reentry in the parent remains
+    // refused, and for exactly the non-reentrant reason.
+    let same_thread_reacquire_refused = match C2ForkFence::acquire() {
+        Err(error) => error.to_string() == NON_REENTRANT_REFUSAL,
+        Ok(extra) => {
+            drop(extra);
+            false
+        }
+    };
+
+    let parent_identity_stable = guard.verify_same_process().is_ok();
+    drop(guard);
+
+    // (iii) Shutdown observation: after the parent's interval ended, a
+    // further child finds no residual fence state, and the parent's own
+    // re-acquisition confirms nothing lingers in this process either.
+    let post_shutdown_child = spawn_fence_probe_child();
+    let parent_reacquired_after_shutdown = C2ForkFence::acquire()
+        .map(|guard| guard.verify_same_process().is_ok())
+        .unwrap_or(false);
+
+    let first_child = first_child.expect("spawn first fence-probe child");
+    let first_pid = require_fence_probe_ok(&first_child, "SG-WU-07 (i)");
+    assert_ne!(
+        first_pid, parent_pid,
+        "SG-WU-07 (i): the child fence owner is its own process, not the parent"
+    );
+
+    let (alias_a, alias_b) = concurrent_children.expect("spawn concurrent fence-probe children");
+    let alias_a_pid = require_fence_probe_ok(&alias_a, "SG-WU-07 (ii) first alias");
+    let alias_b_pid = require_fence_probe_ok(&alias_b, "SG-WU-07 (ii) second alias");
+    assert_ne!(
+        alias_a_pid, alias_b_pid,
+        "SG-WU-07 (ii): alias children are independent processes"
+    );
+    assert!(
+        alias_a_pid != parent_pid && alias_b_pid != parent_pid,
+        "SG-WU-07 (ii): alias fences are owned by the children, not the parent"
+    );
+
+    assert!(
+        same_thread_reacquire_refused,
+        "SG-WU-07 (iv): same-thread reentry must remain refused as non-reentrant"
+    );
+    assert!(
+        parent_identity_stable,
+        "SG-WU-07: the protected interval must not have crossed a process boundary"
+    );
+
+    let post_shutdown_child = post_shutdown_child.expect("spawn post-shutdown fence-probe child");
+    require_fence_probe_ok(&post_shutdown_child, "SG-WU-07 (iii)");
+    assert!(
+        parent_reacquired_after_shutdown,
+        "SG-WU-07 (iii): the parent must re-acquire cleanly after interval shutdown"
+    );
+}
+
+/// Matrix V3 anchor `v2-sg-n-30-hostile`: "Two-process, alias, copied
+/// Store/key, fork, child, namespace, cross-occurrence, cross-role, and
+/// cross-domain behavior follows the exact local custody law and makes no
+/// estate claim ... PID and process-epoch observation occurs after the
+/// process boundary and cannot serialize it".
+///
+/// Layers covered: the compile boundary (the committed E0603 private-module
+/// refusal is still exact — the child cannot even name a signer capability),
+/// the fd/fence process boundary (the child inherits no custody fd and only
+/// a fresh, pid-bound fence while the parent holds its own), and the public
+/// Store substrate (a filesystem-copied Store directory opens only as an
+/// independent instance: physically distinct, equally valid, and the sole
+/// cross-instance declaration the public API can build for it grants no
+/// authority). Every refusal is classified exactly. The custody-driving
+/// surface and the cross-process permanent C2 lock are crate-private; the
+/// compile boundary and the per-process observations are the honest evidence
+/// at this checkpoint.
+#[test]
+fn v2_sg_n_30_hostile() {
+    // Compile boundary: the committed expected diagnostic must still be
+    // exactly the E0603 privacy refusal and nothing else.
+    let diagnostic = std::fs::read_to_string("tests/ui/c2/v2-scf-17.stderr")
+        .expect("committed SCF-17 expected diagnostic");
+    let error_count = diagnostic.matches("error[").count() + diagnostic.matches("\nerror:").count();
+    let compile_fail_stderr_exact = diagnostic.contains("error[E0603]")
+        && diagnostic.contains("module `custody` is private")
+        && error_count == 1
+        && !diagnostic.contains("warning");
+
+    // Process boundary: while the parent holds its fence and a live
+    // O_CLOEXEC custody-analog fd, the child inherits no foreign fd and only
+    // a fresh fence of its own. The decoy-positive control for the fd probe
+    // lives in `v2_csh_10_hostile` above and is not repeated here.
+    let directory = tempfile::tempdir().expect("n-30 hostile directory");
+    let marker = tempfile::NamedTempFile::new_in(directory.path()).expect("custody-analog marker");
+    writeln!(marker.as_file(), "sg-n-30 custody analog").expect("write marker");
+    let clean_setup = (|| -> Result<(), String> {
+        let flags = fd_flags(marker.as_file())?;
+        set_fd_flags(marker.as_file(), flags | FdFlag::FD_CLOEXEC)?;
+        if !fd_flags(marker.as_file())?.contains(FdFlag::FD_CLOEXEC) {
+            return Err("marker O_CLOEXEC would not stay set".to_string());
+        }
+        Ok(())
+    })();
+    let guard = C2ForkFence::acquire().expect("parent fence acquisition");
+    let fd_probe = clean_setup.and_then(|()| spawn_fd_probe_child(marker.path()));
+    let fence_child = spawn_fence_probe_child();
+    let parent_identity_stable = guard.verify_same_process().is_ok();
+    drop(guard);
+
+    let fd_probe = fd_probe.expect("fd-table probe setup and spawn");
+    assert!(
+        fd_probe.status_success
+            && fd_probe.total_fds.is_some_and(|total| total >= 3)
+            && fd_probe.foreign_fds.as_ref().is_some_and(Vec::is_empty),
+        "SG-N-30: the child must inherit no custody fd: {fd_probe:?}"
+    );
+    let fence_child = fence_child.expect("spawn fence-probe child");
+    let child_pid = require_fence_probe_ok(&fence_child, "SG-N-30 fence");
+    assert_ne!(
+        child_pid,
+        std::process::id(),
+        "SG-N-30: the child's fence standing is its own, never the parent's"
+    );
+    assert!(
+        parent_identity_stable,
+        "SG-N-30: process-epoch observation stays bound to this process"
+    );
+
+    // Copied Store/key: a filesystem copy of the resource directory's Store
+    // opens as an independent instance and yields no standing over the
+    // original.
+    let db_path = directory.path().join("original.sqlite3");
+    let original = Store::initialize_unqualified_storage(&db_path).expect("initialize store");
+    original.validate().expect("fresh store validates");
+    let schema = Store::database_schema_version(&db_path).expect("original schema version");
+    drop(original);
+
+    let copy_directory = tempfile::tempdir().expect("copy directory");
+    let copy_path = copy_directory.path().join("copy.sqlite3");
+    std::fs::copy(&db_path, &copy_path).expect("copy the store file");
+    let original_metadata = std::fs::metadata(&db_path).expect("original metadata");
+    let copy_metadata = std::fs::metadata(&copy_path).expect("copy metadata");
+    assert_ne!(
+        (original_metadata.dev(), original_metadata.ino()),
+        (copy_metadata.dev(), copy_metadata.ino()),
+        "SG-N-30: the copy must be a physically distinct instance"
+    );
+    let copy_store = Store::open(&copy_path).expect("copied store opens independently");
+    copy_store.validate().expect("copied store validates");
+    assert_eq!(
+        Store::database_schema_version(&copy_path).expect("copy schema version"),
+        schema,
+        "SG-N-30: the copy carries the same persisted facts but no standing"
+    );
+    drop(copy_store);
+
+    // No estate claim: the sole cross-instance declaration the public API
+    // can build for the copy explicitly grants no authority.
+    let declaration = Store::build_restore_declaration(&db_path, &copy_path)
+        .expect("restore declaration for the copy");
+    let declaration_json: serde_json::Value =
+        serde_json::from_slice(&declaration.canonical_bytes).expect("declaration canonical JSON");
+    assert_eq!(
+        declaration_json["grants_authority"],
+        serde_json::Value::Bool(false),
+        "SG-N-30: the only public declaration for the copy grants no authority"
+    );
+
+    // Every refusal classified exactly: opening an absent artifact refuses
+    // with exactly `NotInitialized` (proving the opens above are not
+    // vacuously succeeding).
+    let missing_refusal_exact = matches!(
+        Store::open(directory.path().join("absent.sqlite3")),
+        Err(StoreError::NotInitialized(_))
+    );
+    assert!(
+        missing_refusal_exact,
+        "SG-N-30: the missing-artifact refusal must be exactly NotInitialized"
+    );
+    assert!(
+        compile_fail_stderr_exact,
+        "SG-N-30: the compile boundary must remain exactly E0603:\n{diagnostic}"
     );
 }
