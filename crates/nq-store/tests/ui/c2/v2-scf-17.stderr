@@ -1,0 +1,11 @@
+error[E0603]: module `custody` is private
+  --> tests/ui/c2/v2-scf-17.rs:12:41
+   |
+12 | use nq_store::store_generation::signer::custody::C2StoreIntegrityCustodian;
+   |                                         ^^^^^^^ private module
+   |
+note: the module `custody` is defined here
+  --> src/store_generation/signer/mod.rs
+   |
+   | pub(crate) mod custody;
+   | ^^^^^^^^^^^^^^^^^^^^^^
