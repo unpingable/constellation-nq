@@ -142,6 +142,26 @@ def validate_public_store(
         not repeated, f"public Store method names are ambiguous: {sorted(repeated)}"
     )
     by_name = {function.name: function for function in public}
+    scoped_facades = settings.get("scoped_store_facades", [])
+    require(
+        isinstance(scoped_facades, list)
+        and all(
+            isinstance(entry, dict)
+            and set(entry) == {"path", "owner", "name", "sole_store_factory"}
+            and all(isinstance(value, str) for value in entry.values())
+            for entry in scoped_facades
+        ),
+        "public_store.scoped_store_facades must contain exact facade records",
+    )
+    scoped_identities = {
+        (entry["path"], entry["owner"], entry["name"]): entry
+        for entry in scoped_facades
+    }
+    require(
+        len(scoped_identities) == len(scoped_facades),
+        "public_store.scoped_store_facades repeats an identity",
+    )
+    observed_scoped_facades: set[tuple[str, str | None, str]] = set()
     alternate_store_mutators = []
     for function in functions:
         if function.visibility not in ("pub", "pub(crate)") or function.owner in (
@@ -152,8 +172,32 @@ def validate_public_store(
         signature = compact_tokens(
             function.source.tokens[function.fn_token : function.body_open_token]
         )
-        if "&mutStore" in signature or "&mutStoreWriterSession" in signature:
+        # Match the two legacy mutation owners exactly.  A type such as
+        # `StoreC2SnapshotActorV1` must not be mistaken for `Store` merely
+        # because its name begins with the same token text; that actor has a
+        # separate, fail-closed census below.
+        if re.search(r"&mut(?:Store|StoreWriterSession)(?![A-Za-z0-9_])", signature):
+            function_identity = identity(function)
+            if function_identity in scoped_identities:
+                entry = scoped_identities[function_identity]
+                factory = entry["sole_store_factory"]
+                require(
+                    len(function.calls(factory)) == 1,
+                    f"scoped Store facade must call its sole factory exactly once: {function.location}",
+                )
+                lexemes = mutation_lexemes(function, config)
+                require(
+                    not lexemes["calls"] and not lexemes["sql"],
+                    f"scoped Store facade contains a direct mutation: {function.location}: {lexemes}",
+                )
+                observed_scoped_facades.add(function_identity)
+                continue
             alternate_store_mutators.append(function)
+    require(
+        observed_scoped_facades == set(scoped_identities),
+        "configured scoped Store facade is absent or does not borrow Store mutably: "
+        + repr(sorted(set(scoped_identities) - observed_scoped_facades)),
+    )
     require(
         not alternate_store_mutators,
         "public/crate-visible free or trait Store mutation surface bypasses the session census: "
@@ -255,6 +299,248 @@ def validate_public_store(
         name: mutation_lexemes(by_name[name], config) for name in sorted(by_name)
     }
     return inventory, lexemes
+
+
+def validate_live_c2_actor(
+    product: Sequence[Function], config: dict
+) -> dict:
+    """Census the Store-owned live-C2 transaction actor and its lock root.
+
+    `StoreC2SnapshotActorV1` intentionally bypasses the ordinary
+    `StoreWriterSession`: it retains one immediate transaction, Store
+    snapshot, process correspondence, and maintenance lock for the whole C2
+    operation.  This verifier therefore treats the actor as a second *closed*
+    mutation owner, not as an unclassified session bypass.
+    """
+
+    settings = config["live_c2_actor"]
+    source_path = settings["source"]
+    owner = settings["owner"]
+    methods = [
+        function
+        for function in product
+        if function.source.path.as_posix() == source_path and function.owner == owner
+    ]
+    require(methods, f"live C2 actor is absent from {source_path}")
+    repeated = duplicates(function.name for function in methods)
+    require(not repeated, f"live C2 actor methods are ambiguous: {sorted(repeated)}")
+    by_name = {function.name: function for function in methods}
+
+    categories = (
+        "read_only",
+        "authority_constructors",
+        "state_attachments",
+        "mutation_roots",
+        "private_helpers",
+    )
+    configured = [name for category in categories for name in settings[category]]
+    require(
+        not duplicates(configured),
+        "live C2 actor method is classified more than once: "
+        + str(sorted(duplicates(configured))),
+    )
+    require(
+        set(configured) == set(by_name),
+        "live C2 actor census differs from the closed classification; "
+        f"missing={sorted(set(by_name) - set(configured))}, "
+        f"stale={sorted(set(configured) - set(by_name))}",
+    )
+
+    for name in settings["read_only"] + settings["authority_constructors"]:
+        function = by_name[name]
+        signature = compact_tokens(
+            function.source.tokens[function.fn_token : function.body_open_token]
+        )
+        require(
+            "&mutself" not in signature,
+            f"live C2 read/authority method unexpectedly mutates self: {function.location}",
+        )
+        lexemes = mutation_lexemes(function, config)
+        dangerous_sql = [prefix for prefix in lexemes["sql"] if prefix != "PRAGMA"]
+        require(
+            not lexemes["calls"] and not dangerous_sql,
+            f"live C2 read/authority method contains mutation lexemes: "
+            f"{function.location}: {lexemes}",
+        )
+
+    direct_actor_gates = (
+        "verify_same_snapshot",
+        "verify_authority_snapshot",
+        "verify_authority_lineage",
+        "verify_live",
+        "with_permitted_effect",
+        "append_prepared_signer_effect",
+        "append_verified_governed_carrier_effect",
+        "install_c2_live_with_observer_v1",
+    )
+    delegated_mutation_roots = settings.get("delegated_mutation_roots", {})
+    require(
+        isinstance(delegated_mutation_roots, dict)
+        and set(delegated_mutation_roots) <= set(settings["mutation_roots"]),
+        "live C2 delegated mutation roots must be an exact mutation-root subset",
+    )
+    for name, required_calls in delegated_mutation_roots.items():
+        require(
+            isinstance(required_calls, list)
+            and required_calls
+            and all(isinstance(call, str) for call in required_calls),
+            f"live C2 delegated mutation root {name} must have a nonempty call list",
+        )
+
+    for name in settings["state_attachments"] + settings["mutation_roots"]:
+        function = by_name[name]
+        signature = compact_tokens(
+            function.source.tokens[function.fn_token : function.body_open_token]
+        )
+        require(
+            "&mutself" in signature,
+            f"live C2 mutation root lacks exclusive actor access: {function.location}",
+        )
+
+    for name in settings["state_attachments"]:
+        function = by_name[name]
+        require(
+            any(function.calls(gate) for gate in direct_actor_gates),
+            f"live C2 state attachment omits a direct same-snapshot gate: {function.location}",
+        )
+
+    mutation_names = set(settings["mutation_roots"])
+
+    def mutation_reaches_gate(name: str, visiting: frozenset[str]) -> bool:
+        if name in visiting:
+            return False
+        function = by_name[name]
+        if any(function.calls(gate) for gate in direct_actor_gates):
+            return True
+        required_calls = delegated_mutation_roots.get(name)
+        if required_calls is not None:
+            calls = [function.calls(call) for call in required_calls]
+            require(
+                all(len(found) == 1 for found in calls),
+                f"live C2 delegated mutation root {function.location} changed its exact call census",
+            )
+            require(
+                [found[0].start for found in calls]
+                == sorted(found[0].start for found in calls),
+                f"live C2 delegated mutation root {function.location} reordered verification/effect calls",
+            )
+            return True
+        next_visiting = visiting | {name}
+        return any(
+            function.calls(callee)
+            and mutation_reaches_gate(callee, next_visiting)
+            for callee in mutation_names
+        )
+
+    for name in settings["mutation_roots"]:
+        function = by_name[name]
+        require(
+            mutation_reaches_gate(name, frozenset()),
+            f"live C2 mutation root omits a direct or exact delegated same-snapshot/effect gate: {function.location}",
+        )
+
+    for name in settings["private_helpers"]:
+        require(
+            by_name[name].visibility == "private",
+            f"live C2 actor helper is externally reachable: {by_name[name].location}",
+        )
+
+    forbidden_traits = {"Clone", "Copy", "Default", "Serialize", "Deserialize"}
+    actor_source = methods[0].source
+    actor_traits = sorted(
+        scope.trait_name
+        for scope in actor_source.impl_scopes
+        if scope.owner == owner and scope.trait_name in forbidden_traits
+    )
+    require(not actor_traits, f"live C2 actor implements forbidden traits: {actor_traits}")
+
+    factory_spec = settings["factory"]
+    factory = require_unique(
+        product,
+        factory_spec["name"],
+        owner=factory_spec["owner"],
+        label="live C2 Store factory",
+    )
+    require(
+        factory.source.path.as_posix() == source_path and factory.visibility == "private",
+        "live C2 actor factory is not private to its Store owner",
+    )
+    factory_signature = compact_tokens(
+        factory.source.tokens[factory.fn_token : factory.body_open_token]
+    )
+    require(
+        "&mutself" in factory_signature
+        and "for<'operation,'snapshot>FnOnce(" in factory_signature
+        and "&'operationmutStoreC2SnapshotActorV1<'snapshot>" in factory_signature,
+        "live C2 Store factory does not retain exclusive Store access in a fresh HRTB scope",
+    )
+    require(
+        len(factory.calls("acquire_maintenance_locks")) == 1
+        and len(factory.calls("transaction_with_behavior")) == 1
+        and len(factory.calls("commit")) == 1,
+        "live C2 Store factory must acquire one maintenance lock, retain one transaction, and commit once",
+    )
+    actor_literals = [
+        function
+        for function in product
+        if f"{owner}{{" in compact_tokens(function.item_tokens)
+    ]
+    require(
+        len(actor_literals) == 1 and identity(actor_literals[0]) == identity(factory),
+        "live C2 actor has a constructor outside its sole Store-owned factory: "
+        + ", ".join(function.location for function in actor_literals),
+    )
+    commit_callers = [
+        function for function in product if function.calls("commit") and function.owner == "Store"
+    ]
+    require(
+        any(identity(function) == identity(factory) for function in commit_callers),
+        "live C2 actor factory no longer closes through actor commit",
+    )
+
+    delegate_specs = settings["actor_delegates"]
+    delegates: list[Function] = []
+    for selector in delegate_specs:
+        matches = [
+            function
+            for function in product
+            if function.source.path.as_posix() == selector["source"]
+            and function.owner == selector.get("owner")
+            and function.name == selector["name"]
+        ]
+        require(
+            len(matches) == 1,
+            f"live C2 actor delegate is absent or ambiguous: {selector}",
+        )
+        delegates.append(matches[0])
+    actual_delegates = []
+    actor_borrow = f"&mut{owner}"
+    for function in product:
+        if function.owner in (owner, "Store"):
+            continue
+        signature = compact_tokens(
+            function.source.tokens[function.fn_token : function.body_open_token]
+        )
+        if actor_borrow in signature:
+            actual_delegates.append(function)
+    require(
+        {identity(function) for function in actual_delegates}
+        == {identity(function) for function in delegates},
+        "live C2 actor delegate census changed: "
+        + ", ".join(function.location for function in actual_delegates),
+    )
+
+    return {
+        "actor": owner,
+        "factory": factory.qualified_name,
+        "factory_lock": "acquire_maintenance_locks",
+        "read_only": sorted(settings["read_only"]),
+        "authority_constructors": sorted(settings["authority_constructors"]),
+        "state_attachments": sorted(settings["state_attachments"]),
+        "mutation_roots": sorted(settings["mutation_roots"]),
+        "private_helpers": sorted(settings["private_helpers"]),
+        "actor_delegates": sorted(function.qualified_name for function in delegates),
+    }
 
 
 def validate_session_construction(
@@ -909,6 +1195,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     all_functions = [function for source in sources for function in source.functions]
     product = product_functions(sources, compile_confined_paths)
     public, public_lexemes = validate_public_store(product, config)
+    live_c2_actor = validate_live_c2_actor(product, config)
     construction = validate_session_construction(all_functions, product, config)
     routes, legacy, raw_target_callers = validate_session_routes(
         sources, product, config
@@ -917,6 +1204,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     maintenance = validate_maintenance(product, public, config)
     inventory = {
         "internal_store": internal,
+        "live_c2_actor": live_c2_actor,
         "maintenance": maintenance,
         "public_store": public,
         "public_store_mutation_lexemes": public_lexemes,
@@ -961,6 +1249,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             f"maintenance locks: {maintenance['count']} "
             + ",".join(maintenance["methods"])
+        )
+        print(
+            "live C2 actor: "
+            f"mutation-roots={len(live_c2_actor['mutation_roots'])}, "
+            f"state-attachments={len(live_c2_actor['state_attachments'])}, "
+            f"delegates={len(live_c2_actor['actor_delegates'])}"
         )
     print("Store mutation/session/maintenance census: PASS")
     return 0

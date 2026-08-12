@@ -27,6 +27,7 @@ use super::result::{LineageRefusalV1, RestartRefusalV2, RestartResultV2};
 pub(crate) enum VerifiedRestartRouteV1 {
     Initial,
     NormalTerminal,
+    RestoreTerminal,
     RecoveryTerminal,
 }
 
@@ -180,6 +181,14 @@ fn derived_route(
         {
             Ok(VerifiedRestartRouteV1::NormalTerminal)
         }
+        CurrentSignerBindingModeV1::RestoreSuccessor
+            if matches!(
+                lineage.edges().last(),
+                Some(CurrentBindingSuccessionV1::Restore { .. })
+            ) =>
+        {
+            Ok(VerifiedRestartRouteV1::RestoreTerminal)
+        }
         CurrentSignerBindingModeV1::RecoverySuccessor
             if matches!(
                 lineage.edges().last(),
@@ -251,6 +260,9 @@ fn reconstruct(
         VerifiedRestartRouteV1::Initial => RestartResultV2::InitialCapabilityReconstructed,
         VerifiedRestartRouteV1::NormalTerminal => {
             RestartResultV2::NormalTerminalCapabilityReconstructed
+        }
+        VerifiedRestartRouteV1::RestoreTerminal => {
+            RestartResultV2::RestoreTerminalCapabilityReconstructed
         }
         VerifiedRestartRouteV1::RecoveryTerminal => {
             RestartResultV2::RecoveryTerminalCapabilityReconstructed
@@ -439,6 +451,10 @@ pub(crate) enum PendingSignerRestartStateV1 {
         predecessor: CurrentSignerGenerationBindingV1,
         pending_transition_id: String,
     },
+    Restore {
+        historical_predecessor_binding_id: Sha256Digest,
+        pending_transition_id: String,
+    },
     Recovery {
         displaced_predecessor_binding_id: Sha256Digest,
         pending_transition_id: String,
@@ -473,6 +489,30 @@ pub(crate) fn verify_frt_05_pending_normal_restart(
     let expected = construct_frt_05_pending_normal_restart(root, state)?;
     (result == expected)
         .then_some(result)
+        .ok_or(RestartRefusalV2::MalformedOrSplicedEvidence)
+}
+
+/// A durable pending-restore prefix is evidence only.  Ordinary restart does
+/// not recreate its external entry authority or any pending signer brand.
+pub(crate) fn construct_pending_restore_restart_refusal(
+    state: &PendingSignerRestartStateV1,
+) -> RestartRefusalV2 {
+    match state {
+        PendingSignerRestartStateV1::Restore {
+            historical_predecessor_binding_id: _,
+            pending_transition_id,
+        } if !pending_transition_id.is_empty() => RestartRefusalV2::RestoreSuccessorQuarantined,
+        _ => RestartRefusalV2::PendingStateMalformed,
+    }
+}
+
+pub(crate) fn verify_pending_restore_restart_refusal(
+    state: &PendingSignerRestartStateV1,
+    refusal: RestartRefusalV2,
+) -> Result<RestartRefusalV2, RestartRefusalV2> {
+    let expected = construct_pending_restore_restart_refusal(state);
+    (refusal == expected)
+        .then_some(refusal)
         .ok_or(RestartRefusalV2::MalformedOrSplicedEvidence)
 }
 
@@ -531,6 +571,25 @@ pub(crate) fn verify_frt_08_completed_normal_indexed_restart(
     result: RestartResultV2,
 ) -> Result<RestartResultV2, RestartRefusalV2> {
     let expected = construct_frt_08_completed_normal_indexed_restart(snapshot)?;
+    (result == expected)
+        .then_some(result)
+        .ok_or(RestartRefusalV2::RouteModeMismatch)
+}
+
+/// A completed restore reopens only through its exact terminal lineage and
+/// fresh target-process custody observation.  Its persisted restore route is
+/// not normalized into healthy succession or recovery.
+pub(crate) fn construct_completed_restore_indexed_restart(
+    snapshot: &CompleteSignerRestartSnapshotV1,
+) -> Result<RestartResultV2, RestartRefusalV2> {
+    require_route(snapshot, VerifiedRestartRouteV1::RestoreTerminal)
+}
+
+pub(crate) fn verify_completed_restore_indexed_restart(
+    snapshot: &CompleteSignerRestartSnapshotV1,
+    result: RestartResultV2,
+) -> Result<RestartResultV2, RestartRefusalV2> {
+    let expected = construct_completed_restore_indexed_restart(snapshot)?;
     (result == expected)
         .then_some(result)
         .ok_or(RestartRefusalV2::RouteModeMismatch)
@@ -853,8 +912,13 @@ mod tests {
         construct_sb_04_initial_binding_derivation,
     };
     use crate::store_generation::signer::lineage::{
-        NormalSuccessionInputV1, RecoverySuccessionInputV1, construct_nrp_01_normal_predecessor,
-        construct_nrp_06_adjacent_normal_succession, construct_rpa_01_recovery_ledger_base_join,
+        NormalSuccessionInputV1, RecoverySuccessionInputV1, RestoreSuccessionInputV1,
+        construct_nrp_01_normal_predecessor, construct_nrp_06_adjacent_normal_succession,
+        construct_restore_01_historical_foundation_base_join,
+        construct_restore_02_authorization_seals_predecessor_foundation,
+        construct_restore_03_lawful_restore_predecessor_provenance,
+        construct_restore_04_adjacent_restore_inversion,
+        construct_rpa_01_recovery_ledger_base_join,
         construct_rpa_03_lawful_recovery_predecessor_provenance,
         construct_rpa_04_adjacent_recovery_inversion,
     };
@@ -952,7 +1016,12 @@ mod tests {
             NormalSuccessionInputV1 {
                 transition_id: format!("normal-{id}"),
                 continuity_authorization_id: format!("continuity-{id}"),
+                policy_continuity_authorization_id: None,
                 continuity_signer_key_generation: terminal.key_generation().into(),
+                predecessor_activation_id: "activation".into(),
+                successor_activation_id: "activation".into(),
+                predecessor_applicability_id: "applicability".into(),
+                successor_applicability_id: "applicability".into(),
                 successor_enrollment_id: format!("enrollment-{id}"),
                 successor_key_generation: format!("key-{id}"),
                 successor_policy_id: "policy".into(),
@@ -1002,6 +1071,54 @@ mod tests {
                 receipt_id: format!("recovery-receipt-{id}"),
                 append_id: format!("recovery-append-{id}"),
                 resolution_id: format!("recovery-resolution-{id}"),
+                effective_cut: id + 2,
+            },
+        )
+        .unwrap();
+        lineage.append(edge).unwrap()
+    }
+
+    fn append_restore(
+        root: &StoreGenerationSignerRootBindingV1,
+        lineage: RootedCurrentBindingLineageV1,
+        id: u64,
+    ) -> RootedCurrentBindingLineageV1 {
+        let terminal = lineage.terminal_binding().clone();
+        let historical_foundation_id = format!("historical-foundation-{id}");
+        let association = construct_restore_01_historical_foundation_base_join(
+            &terminal,
+            format!("restore-authority-{id}"),
+            format!("restore-authorization-{id}"),
+            terminal.binding_id().clone(),
+            historical_foundation_id.clone(),
+            historical_foundation_id.clone(),
+            terminal.key_generation().into(),
+            terminal.policy_id().into(),
+        )
+        .unwrap();
+        let association =
+            construct_restore_02_authorization_seals_predecessor_foundation(&terminal, association)
+                .unwrap();
+        let binding_id = terminal.binding_id().clone();
+        let predecessor = construct_restore_03_lawful_restore_predecessor_provenance(
+            terminal.clone(),
+            &binding_id,
+            association,
+        )
+        .unwrap();
+        let edge = construct_restore_04_adjacent_restore_inversion(
+            root,
+            predecessor,
+            RestoreSuccessionInputV1 {
+                transition_id: format!("restore-{id}"),
+                restored_foundation_id: historical_foundation_id,
+                successor_enrollment_id: format!("restore-enrollment-{id}"),
+                successor_key_generation: terminal.key_generation().into(),
+                successor_policy_id: terminal.policy_id().into(),
+                successor_standing_id: format!("restore-standing-{id}"),
+                receipt_id: format!("restore-receipt-{id}"),
+                append_id: format!("restore-append-{id}"),
+                resolution_id: format!("restore-resolution-{id}"),
                 effective_cut: id + 2,
             },
         )
@@ -1078,6 +1195,45 @@ mod tests {
         assert_eq!(
             construct_frt_13_recovery_authority_inversion(&snapshot.lineage).unwrap(),
             FinalRestartCorrespondenceV1::Frt13RecoveryAuthorityInversionVerified
+        );
+    }
+
+    #[test]
+    fn completed_restore_restarts_as_distinct_restore_terminal() {
+        let (root, initial) = root_and_initial();
+        let lineage = RootedCurrentBindingLineageV1::initial(root.clone(), initial).unwrap();
+        let lineage = append_restore(&root, lineage, 1);
+        let terminal_custody = custody(&root, lineage.terminal_binding(), "process-b");
+        let snapshot = snapshot(lineage, vec![terminal_custody]);
+
+        let capability =
+            construct_sg_n_29_restart_reconstructs_capability_complete_durable_authority_plus(
+                &snapshot,
+            )
+            .unwrap();
+        assert_eq!(capability.route(), VerifiedRestartRouteV1::RestoreTerminal);
+        assert_eq!(
+            construct_completed_restore_indexed_restart(&snapshot).unwrap(),
+            RestartResultV2::RestoreTerminalCapabilityReconstructed
+        );
+        assert_eq!(
+            construct_frt_09_completed_recovery_indexed_restart(&snapshot),
+            Err(RestartRefusalV2::RouteModeMismatch)
+        );
+    }
+
+    #[test]
+    fn pending_restore_is_evidence_only_and_cannot_reopen_as_current() {
+        let state = PendingSignerRestartStateV1::Restore {
+            historical_predecessor_binding_id: sha256_bytes(b"historical-terminal"),
+            pending_transition_id: "pending-restore".into(),
+        };
+        let refusal = construct_pending_restore_restart_refusal(&state);
+        assert_eq!(refusal, RestartRefusalV2::RestoreSuccessorQuarantined);
+        verify_pending_restore_restart_refusal(&state, refusal).unwrap();
+        assert_eq!(
+            construct_frt_06_pending_recovery_restart(&state),
+            RestartRefusalV2::PendingStateMalformed
         );
     }
 

@@ -17,6 +17,12 @@ use std::os::unix::fs::MetadataExt;
 use nq_protocol::Sha256Digest;
 use thiserror::Error;
 
+use crate::append_extent::{
+    C2AppendExtentLayoutV1, C2AppendExtentRefusalV1, C2CarrierPairHeaderCorrespondenceV1,
+    C2DurableAppendPairV1, C2InstallationExtentInitializedV1, C2ObservedAppendExtentRefusalV1,
+    initialize_durable_append_pair_v1, initialize_durable_append_pair_with_observer_v1,
+    open_durable_append_pair_v1,
+};
 use crate::store_generation::install::C2DurableResultV1;
 use crate::store_generation::lock::{
     C2StoreGenerationLockV1, LockInodeKey,
@@ -655,6 +661,70 @@ fn verify_closed_backend_live(
         return Err(C2BackendRefusalV1::FinalReopenMismatch);
     }
     Ok(())
+}
+
+/// Initialize the physical B/G append codec while the Store-owned installer
+/// retains the exact preallocation. Raw descriptors alone are insufficient:
+/// both authenticated role headers must correspond to the same pair.
+pub(crate) fn initialize_durable_append_pair_for_installation_v1(
+    physical_allocation: &C2PermanentPhysicalPreallocationV1<'_>,
+    layout: &C2AppendExtentLayoutV1,
+    correspondence: &C2CarrierPairHeaderCorrespondenceV1,
+) -> Result<C2DurableAppendPairV1, C2AppendExtentRefusalV1> {
+    verify_n_90_non_authoritative_physical_facts(physical_allocation)
+        .map_err(|_| C2AppendExtentRefusalV1::InvalidFileFacts)?;
+    initialize_durable_append_pair_v1(
+        layout,
+        correspondence,
+        physical_allocation.b.file,
+        physical_allocation.g.file,
+    )
+}
+
+/// Fresh-installation crash-observed variant.  Observation happens only
+/// after the selected B or G extent has completed its physical initialization
+/// and data synchronization; the normal production wrapper above remains
+/// observer-free.
+pub(crate) fn initialize_durable_append_pair_for_installation_with_observer_v1<E>(
+    physical_allocation: &C2PermanentPhysicalPreallocationV1<'_>,
+    layout: &C2AppendExtentLayoutV1,
+    correspondence: &C2CarrierPairHeaderCorrespondenceV1,
+    observer: &mut impl FnMut(C2InstallationExtentInitializedV1) -> Result<(), E>,
+) -> Result<C2DurableAppendPairV1, C2ObservedAppendExtentRefusalV1<E>> {
+    verify_n_90_non_authoritative_physical_facts(physical_allocation).map_err(|_| {
+        C2ObservedAppendExtentRefusalV1::Append(C2AppendExtentRefusalV1::InvalidFileFacts)
+    })?;
+    initialize_durable_append_pair_with_observer_v1(
+        layout,
+        correspondence,
+        physical_allocation.b.file,
+        physical_allocation.g.file,
+        observer,
+    )
+}
+
+/// Reopen the physical append codec only through the already-closed backend
+/// and its retained exact descriptors. This function returns append
+/// mechanics, not writer or signer standing.
+pub(crate) fn open_durable_append_pair_from_closed_backend_v1(
+    backend: &ClosedC2StoreBackendV1<'_>,
+    layout: &C2AppendExtentLayoutV1,
+    correspondence: &C2CarrierPairHeaderCorrespondenceV1,
+) -> Result<C2DurableAppendPairV1, C2AppendExtentRefusalV1> {
+    verify_closed_backend_live(backend)
+        .map_err(|_| C2AppendExtentRefusalV1::HeaderCorrespondenceMismatch)?;
+    if correspondence.pair_identity() != backend.tuple.b_g_common_binding
+        || correspondence.b_header().identity() != backend.tuple.b_header
+        || correspondence.g_header().identity() != backend.tuple.g_header
+    {
+        return Err(C2AppendExtentRefusalV1::HeaderCorrespondenceMismatch);
+    }
+    open_durable_append_pair_v1(
+        layout,
+        correspondence,
+        backend.final_reopen.b,
+        backend.final_reopen.g,
+    )
 }
 
 /// Bind the ordinary-open activation coordinates to the authenticated tuple

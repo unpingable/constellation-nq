@@ -6,6 +6,8 @@
 //! coordinator.  Filesystem possession is never converted into standing.
 
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
+use std::cell::RefCell;
 use std::fs::File;
 use std::io::Write;
 use std::os::unix::fs::{FileExt, MetadataExt};
@@ -24,8 +26,21 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use super::coordinator::CoordinatorSigningPermitV1;
+use super::external_governance::{
+    StoreIntegrityBootstrapGrantRequestV1, StoreIntegrityRecoveryRequestV1,
+    construct_bootstrap_grant_request, construct_recovery_request,
+};
 use super::messages::{ClosedMessageFamilyV1, SignerIdentityV1, SignerMessageV1};
+use super::records::{
+    FoundationalAdoptionLineageV1, StoreIntegritySignerFoundationV1,
+    VerifiedInitialPossessionRequestV1, verify_store_integrity_signer_foundation_v1,
+};
 use super::result::{ProposalResultV2, SignerRefusalV2};
+use crate::store_generation::live_c2::{
+    C2LiveSignerContextV1, C2LiveSigningScopeV1, C2LiveSigningViewV1, GenerationCurrentV1,
+    StoreC2InitialPossessionAppendPermitV1, StoreC2SignerAppendPermitV1, StoreC2SnapshotActorV1,
+};
+use crate::store_generation::records::{StoreIntegrityKeyEnrollmentV1, verify_n_18_key_enrollment};
 
 pub(crate) const STORE_INTEGRITY_CUSTODY_ROOT_V1: &str = "/var/lib/nq/store-integrity-custody.v1";
 const STORE_INTEGRITY_CUSTODY_CHILD_V1: &str = "store-integrity-custody.v1";
@@ -39,18 +54,227 @@ const PROPOSAL_ID_DOMAIN_V1: &[u8] = b"nq.c2.store_integrity_key_proposal.identi
 const SCOPE_DIRECTORY_DOMAIN_V1: &[u8] = b"nq.c2.store_integrity_custody_scope.directory.v1\0";
 const PRIVATE_PAYLOAD_DOMAIN_V1: &[u8] = b"nq.c2.store_integrity_private_key_custody.payload.v1\0";
 const KEY_GENERATION_DOMAIN_V1: &[u8] = b"nq.c2.store_integrity_key_generation.identity.v1\0";
+const ORDINARY_SUCCESSOR_CUSTODY_PREPARATION_SCHEMA_V1: &str =
+    "nq.c2_store_integrity_ordinary_successor_custody_preparation.v1";
+const ORDINARY_SUCCESSOR_CUSTODY_PREPARATION_ID_DOMAIN_V1: &[u8] =
+    b"nq.c2.store_integrity_ordinary_successor_custody_preparation.identity.v1\0";
+pub(in crate::store_generation) const C2_CUSTODY_EMPTY_FRONTIER_DOMAIN_V1: &[u8] =
+    b"nq.c2.custody_proposal_frontier.empty.v1\0";
+pub(in crate::store_generation) const C2_CUSTODY_FRONTIER_STEP_DOMAIN_V1: &[u8] =
+    b"nq.c2.custody_proposal_frontier.step.v1\0";
 const IJSON_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only descriptor substitution for the literal production custody
+    /// root.  The override is thread-local and descriptor based so an
+    /// executable Store-root test exercises every production custody check
+    /// below `open_production_custody_root` without sharing authority across
+    /// parallel tests or requiring `/var/lib/nq` mutation.
+    static TEST_PRODUCTION_CUSTODY_ROOT_V1: RefCell<Option<File>> = const {
+        RefCell::new(None)
+    };
+}
+
+/// Run one executable Store-root test against an exact retained custody-root
+/// descriptor.  This seam does not exist in non-test builds and cannot alter
+/// the production path constant.
+#[cfg(test)]
+pub(in crate::store_generation) fn with_test_production_custody_root_v1<R>(
+    root: &Path,
+    operation: impl FnOnce() -> R,
+) -> R {
+    let descriptor = File::open(root).expect("open exact test custody root");
+    validate_directory(&descriptor, 0o700).expect("safe exact test custody root");
+
+    struct ClearOverride;
+    impl Drop for ClearOverride {
+        fn drop(&mut self) {
+            TEST_PRODUCTION_CUSTODY_ROOT_V1.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+
+    TEST_PRODUCTION_CUSTODY_ROOT_V1.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "nested production-custody test override"
+        );
+        *slot.borrow_mut() = Some(descriptor);
+    });
+    let _clear = ClearOverride;
+    operation()
+}
+
+/// Closed provenance of a custody preparation that created one stable
+/// foundation. Restore is intentionally absent: it reopens the exact durable
+/// preparation which originally created the historical foundation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::store_generation) enum StableFoundationCreationLineageV1 {
+    InitialExternal,
+    OrdinarySuccessorContinuity,
+    RecoveryNewFoundation,
+}
+
+impl StableFoundationCreationLineageV1 {
+    pub(in crate::store_generation) fn parse(value: &str) -> Result<Self, SignerRefusalV2> {
+        match value {
+            "initialExternal" => Ok(Self::InitialExternal),
+            "ordinarySuccessorContinuity" => Ok(Self::OrdinarySuccessorContinuity),
+            "recoveryNewFoundation" => Ok(Self::RecoveryNewFoundation),
+            // A restore adoption is a new adoption event, not a custody/key
+            // creation event. Accepting this tag here would permit a second
+            // proposal row to masquerade as historical custody reuse.
+            _ => Err(SignerRefusalV2::CustodyPathMismatch),
+        }
+    }
+
+    #[must_use]
+    pub(in crate::store_generation) const fn as_str(self) -> &'static str {
+        match self {
+            Self::InitialExternal => "initialExternal",
+            Self::OrdinarySuccessorContinuity => "ordinarySuccessorContinuity",
+            Self::RecoveryNewFoundation => "recoveryNewFoundation",
+        }
+    }
+}
+
+/// Verify the distinct custody-creation/adoption provenance join.
+///
+/// Bootstrap, healthy succession, and recovery must reopen a proposal created
+/// by that exact creation path. Restore instead reuses the selected historical
+/// stable foundation, so its preparation retains whichever legal creation
+/// lineage originally minted that foundation. This check grants no authority;
+/// it only prevents the Store reopener from requiring or accepting a fabricated
+/// `restoreHistorical` custody-preparation row.
+pub(in crate::store_generation) fn verify_stable_foundation_creation_lineage_for_adoption_v1(
+    preparation_lineage: &str,
+    adoption_lineage: FoundationalAdoptionLineageV1,
+) -> Result<StableFoundationCreationLineageV1, SignerRefusalV2> {
+    let creation = StableFoundationCreationLineageV1::parse(preparation_lineage)?;
+    let matches = match adoption_lineage {
+        FoundationalAdoptionLineageV1::InitialExternal => {
+            creation == StableFoundationCreationLineageV1::InitialExternal
+        }
+        FoundationalAdoptionLineageV1::OrdinarySuccessorContinuity => {
+            creation == StableFoundationCreationLineageV1::OrdinarySuccessorContinuity
+        }
+        FoundationalAdoptionLineageV1::RestoreHistorical => true,
+        FoundationalAdoptionLineageV1::RecoveryNewFoundation => {
+            creation == StableFoundationCreationLineageV1::RecoveryNewFoundation
+        }
+    };
+    if matches {
+        Ok(creation)
+    } else {
+        Err(SignerRefusalV2::CustodyPathMismatch)
+    }
+}
+
+/// Store-sealed inert basis for preparing a semantically new recovery key.
+/// It is deliberately not recovery entry authority: exact MSG-15 and the
+/// discontinuity/current-state join are still required after the asynchronous
+/// external grant returns. The private fields prevent a generic lineage/tag
+/// constructor from reaching custody creation.
+pub(in crate::store_generation) struct StoreRecoveryCustodyPreparationBasisV1 {
+    coordinates: PreGenerationCustodyCoordinatesV1,
+    historical_foundation_identity: Sha256Digest,
+    terminal_binding_identity: Sha256Digest,
+    recovery_transition_identity: Sha256Digest,
+    successor_pop_challenge_identity: Sha256Digest,
+    actor_instance_identity: Sha256Digest,
+    actor_snapshot_identity: Sha256Digest,
+    actor_effect_epoch: u64,
+    creator_pid: u32,
+}
+
+impl StoreRecoveryCustodyPreparationBasisV1 {
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::store_generation) fn from_store_actor_resolution(
+        actor: &StoreC2SnapshotActorV1<'_>,
+        coordinates: PreGenerationCustodyCoordinatesV1,
+        historical_foundation_identity: Sha256Digest,
+        terminal_binding_identity: Sha256Digest,
+        recovery_transition_identity: Sha256Digest,
+        successor_pop_challenge_identity: Sha256Digest,
+    ) -> Result<Self, SignerRefusalV2> {
+        actor
+            .verify_same_snapshot()
+            .map_err(|_| SignerRefusalV2::CustodyPathMismatch)?;
+        coordinates.validate()?;
+        if [
+            &historical_foundation_identity,
+            &terminal_binding_identity,
+            &recovery_transition_identity,
+            &successor_pop_challenge_identity,
+        ]
+        .into_iter()
+        .any(|identity| identity.as_str().ends_with(&"0".repeat(64)))
+        {
+            return Err(SignerRefusalV2::CustodyPathMismatch);
+        }
+        Ok(Self {
+            coordinates,
+            historical_foundation_identity,
+            terminal_binding_identity,
+            recovery_transition_identity,
+            successor_pop_challenge_identity,
+            actor_instance_identity: actor.actor_instance_identity().clone(),
+            actor_snapshot_identity: actor.current_snapshot_identity().clone(),
+            actor_effect_epoch: actor.effect_epoch(),
+            creator_pid: std::process::id(),
+        })
+    }
+
+    fn verify_for_actor(&self, actor: &StoreC2SnapshotActorV1<'_>) -> Result<(), SignerRefusalV2> {
+        actor
+            .verify_same_snapshot()
+            .map_err(|_| SignerRefusalV2::CustodyPathMismatch)?;
+        if self.creator_pid != std::process::id()
+            || self.actor_instance_identity != *actor.actor_instance_identity()
+            || self.actor_snapshot_identity != *actor.current_snapshot_identity()
+            || self.actor_effect_epoch != actor.effect_epoch()
+        {
+            return Err(SignerRefusalV2::CustodyPathMismatch);
+        }
+        self.coordinates.validate()
+    }
+
+    #[must_use]
+    pub(in crate::store_generation) fn historical_foundation_identity(&self) -> &Sha256Digest {
+        &self.historical_foundation_identity
+    }
+
+    #[must_use]
+    pub(in crate::store_generation) fn terminal_binding_identity(&self) -> &Sha256Digest {
+        &self.terminal_binding_identity
+    }
+
+    #[must_use]
+    pub(in crate::store_generation) fn recovery_transition_identity(&self) -> &Sha256Digest {
+        &self.recovery_transition_identity
+    }
+
+    #[must_use]
+    pub(in crate::store_generation) fn successor_pop_challenge_identity(&self) -> &Sha256Digest {
+        &self.successor_pop_challenge_identity
+    }
+}
 
 fn valid_resident_identity(value: &str) -> bool {
     !value.is_empty() && value.len() <= 1024 && !value.chars().any(char::is_control)
 }
 
-/// Complete non-secret coordinates fixed before key creation.
+/// Complete non-secret pre-generation coordinates fixed before key creation.
+///
+/// Initial custody deliberately contains no physical Store generation or
+/// signer-lifecycle root.  Those coordinates do not exist until the later
+/// signer-acceptance/bootstrap transition and therefore cannot be smuggled
+/// backward into foundational enrollment through a custody carrier.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CustodyCoordinatesV1 {
+pub(crate) struct PreGenerationCustodyCoordinatesV1 {
     pub(crate) occurrence_id: String,
-    pub(crate) physical_store_generation_identity: Sha256Digest,
-    pub(crate) signer_lifecycle_root_identity: Sha256Digest,
     pub(crate) scope_identity: Sha256Digest,
     pub(crate) a2_chain_root_identity: Sha256Digest,
     pub(crate) trust_anchor_identity: Sha256Digest,
@@ -65,7 +289,7 @@ pub(crate) struct CustodyCoordinatesV1 {
     pub(crate) custodian_implementation_manifest_identity: Sha256Digest,
 }
 
-impl CustodyCoordinatesV1 {
+impl PreGenerationCustodyCoordinatesV1 {
     fn validate(&self) -> Result<(), SignerRefusalV2> {
         let token = |value: &str| {
             !value.is_empty()
@@ -95,7 +319,7 @@ impl CustodyCoordinatesV1 {
         Ok(())
     }
 
-    fn scope_token(&self) -> Result<Sha256Digest, SignerRefusalV2> {
+    pub(in crate::store_generation) fn scope_token(&self) -> Result<Sha256Digest, SignerRefusalV2> {
         self.validate()?;
         domain_digest(
             SCOPE_DOMAIN_V1,
@@ -119,14 +343,6 @@ impl CustodyCoordinatesV1 {
             b"nq.c2.store_occurrence.identity.v1\0",
             self.occurrence_id.as_bytes(),
         )
-    }
-
-    pub(super) fn physical_generation_bytes(&self) -> SignerIdentityV1 {
-        digest_bytes(&self.physical_store_generation_identity)
-    }
-
-    pub(super) fn lifecycle_root_bytes(&self) -> SignerIdentityV1 {
-        digest_bytes(&self.signer_lifecycle_root_identity)
     }
 
     pub(super) fn scope_bytes(&self) -> SignerIdentityV1 {
@@ -194,8 +410,6 @@ struct CustodyPublicFieldsV1 {
     proposal_ordinal: u64,
     scope_token: Sha256Digest,
     occurrence_id: String,
-    physical_store_generation_identity: Sha256Digest,
-    signer_lifecycle_root_identity: Sha256Digest,
     scope_identity: Sha256Digest,
     a2_chain_root_identity: Sha256Digest,
     trust_anchor_identity: Sha256Digest,
@@ -250,6 +464,132 @@ impl StoreIntegrityKeyProposalV1 {
         bytes.extend_from_slice(self.fields().proposal_identity.as_str().as_bytes());
         bytes.extend_from_slice(&self.fields().proposed_key_generation.to_be_bytes());
         domain_digest_bytes(KEY_GENERATION_DOMAIN_V1, &bytes)
+    }
+}
+
+/// Canonical inert Store request to prepare custody for one ordinary healthy
+/// successor. This is proposal evidence, not MSG-06 continuity authority and
+/// not signer standing. The exact current-predecessor authority remains a
+/// separate process-local premise consumed later by the healthy transition.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct OrdinarySuccessorCustodyPreparationCarrierV1 {
+    schema: String,
+    schema_version: u8,
+    preparation_request_identity: Sha256Digest,
+    occurrence_id: String,
+    scope_identity: Sha256Digest,
+    predecessor_binding_identity: Sha256Digest,
+    predecessor_key_generation_identity: Sha256Digest,
+    transition_identity: Sha256Digest,
+    successor_proposal_identity: Sha256Digest,
+    successor_pop_challenge_identity: Sha256Digest,
+    successor_key_generation: u64,
+    active_policy_identity: Sha256Digest,
+    active_policy_generation: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(in crate::store_generation) struct StoreOrdinarySuccessorCustodyPreparationRequestV1(
+    OrdinarySuccessorCustodyPreparationCarrierV1,
+);
+
+impl StoreOrdinarySuccessorCustodyPreparationRequestV1 {
+    fn identity_for(
+        carrier: &OrdinarySuccessorCustodyPreparationCarrierV1,
+    ) -> Result<Sha256Digest, SignerRefusalV2> {
+        let mut body =
+            serde_json::to_value(carrier).map_err(|_| SignerRefusalV2::CustodyFileMalformed)?;
+        body.as_object_mut()
+            .ok_or(SignerRefusalV2::CustodyFileMalformed)?
+            .remove("preparation_request_identity");
+        domain_digest(ORDINARY_SUCCESSOR_CUSTODY_PREPARATION_ID_DOMAIN_V1, &body)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::store_generation) fn construct(
+        occurrence_id: String,
+        scope_identity: Sha256Digest,
+        predecessor_binding_identity: Sha256Digest,
+        predecessor_key_generation_identity: Sha256Digest,
+        transition_identity: Sha256Digest,
+        proposal: &StoreIntegrityKeyProposalV1,
+        successor_pop_challenge_identity: Sha256Digest,
+        active_policy_identity: Sha256Digest,
+        active_policy_generation: u64,
+    ) -> Result<Self, SignerRefusalV2> {
+        verify_sg_n_08_local_key_proposal_is_inert_carries_no(proposal)?;
+        if !valid_resident_identity(&occurrence_id)
+            || proposal.fields().scope_identity != scope_identity
+            || proposal.fields().proposed_key_generation == 0
+            || active_policy_generation == 0
+            || active_policy_generation > IJSON_SAFE_INTEGER
+        {
+            return Err(SignerRefusalV2::CustodyPathMismatch);
+        }
+        let mut carrier = OrdinarySuccessorCustodyPreparationCarrierV1 {
+            schema: ORDINARY_SUCCESSOR_CUSTODY_PREPARATION_SCHEMA_V1.to_owned(),
+            schema_version: 1,
+            preparation_request_identity: sha256_bytes(b"uninitialized"),
+            occurrence_id,
+            scope_identity,
+            predecessor_binding_identity,
+            predecessor_key_generation_identity,
+            transition_identity,
+            successor_proposal_identity: proposal.proposal_identity().clone(),
+            successor_pop_challenge_identity,
+            successor_key_generation: proposal.fields().proposed_key_generation,
+            active_policy_identity,
+            active_policy_generation,
+        };
+        carrier.preparation_request_identity = Self::identity_for(&carrier)?;
+        let request = Self(carrier);
+        request.verify()?;
+        Ok(request)
+    }
+
+    pub(in crate::store_generation) fn decode(bytes: &[u8]) -> Result<Self, SignerRefusalV2> {
+        let value: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(|_| SignerRefusalV2::CustodyFileMalformed)?;
+        if canonical_json_bytes(&value).map_err(|_| SignerRefusalV2::CustodyFileMalformed)? != bytes
+        {
+            return Err(SignerRefusalV2::CustodyFileMalformed);
+        }
+        let request =
+            Self(serde_json::from_value(value).map_err(|_| SignerRefusalV2::CustodyFileMalformed)?);
+        request.verify()?;
+        Ok(request)
+    }
+
+    fn verify(&self) -> Result<(), SignerRefusalV2> {
+        let fields = &self.0;
+        if fields.schema != ORDINARY_SUCCESSOR_CUSTODY_PREPARATION_SCHEMA_V1
+            || fields.schema_version != 1
+            || !valid_resident_identity(&fields.occurrence_id)
+            || fields.successor_key_generation == 0
+            || fields.successor_key_generation > IJSON_SAFE_INTEGER
+            || fields.active_policy_generation == 0
+            || fields.active_policy_generation > IJSON_SAFE_INTEGER
+            || Self::identity_for(fields)? != fields.preparation_request_identity
+        {
+            return Err(SignerRefusalV2::CustodyPathMismatch);
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub(in crate::store_generation) fn identity(&self) -> &Sha256Digest {
+        &self.0.preparation_request_identity
+    }
+
+    #[must_use]
+    pub(in crate::store_generation) fn proposal_identity(&self) -> &Sha256Digest {
+        &self.0.successor_proposal_identity
+    }
+
+    pub(in crate::store_generation) fn canonical_bytes(&self) -> Result<Vec<u8>, SignerRefusalV2> {
+        self.verify()?;
+        canonical_json_bytes(&self.0).map_err(|_| SignerRefusalV2::CustodyFileMalformed)
     }
 }
 
@@ -358,7 +698,7 @@ impl StoreIntegrityCustodyFileV1 {
     }
 }
 
-fn private_carrier_keys() -> [&'static str; 35] {
+fn private_carrier_keys() -> [&'static str; 33] {
     [
         "schema",
         "schema_version",
@@ -367,8 +707,6 @@ fn private_carrier_keys() -> [&'static str; 35] {
         "proposal_ordinal",
         "scope_token",
         "occurrence_id",
-        "physical_store_generation_identity",
-        "signer_lifecycle_root_identity",
         "scope_identity",
         "a2_chain_root_identity",
         "trust_anchor_identity",
@@ -456,6 +794,280 @@ pub(crate) struct CustodyObservationV1 {
     pub(crate) key_correspondence: bool,
 }
 
+/// Exact canonical request bytes which accompanied one custody proposal in
+/// the durable frontier. The variants are nominal so a query/replay caller
+/// cannot select a free-form lineage tag or identity field.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(in crate::store_generation) enum StoreCustodyPreparationReferenceV1 {
+    InitialExternal(StoreIntegrityBootstrapGrantRequestV1),
+    OrdinarySuccessor(StoreOrdinarySuccessorCustodyPreparationRequestV1),
+    RecoveryNewFoundation(StoreIntegrityRecoveryRequestV1),
+}
+
+impl StoreCustodyPreparationReferenceV1 {
+    pub(in crate::store_generation) fn decode_initial_external(
+        canonical_bytes: &[u8],
+    ) -> Result<Self, SignerRefusalV2> {
+        let value = decode_canonical_json_v1(canonical_bytes)?;
+        construct_bootstrap_grant_request(value).map(Self::InitialExternal)
+    }
+
+    pub(in crate::store_generation) fn decode_ordinary_successor(
+        canonical_bytes: &[u8],
+    ) -> Result<Self, SignerRefusalV2> {
+        StoreOrdinarySuccessorCustodyPreparationRequestV1::decode(canonical_bytes)
+            .map(Self::OrdinarySuccessor)
+    }
+
+    pub(in crate::store_generation) fn decode_recovery_new_foundation(
+        canonical_bytes: &[u8],
+    ) -> Result<Self, SignerRefusalV2> {
+        let value = decode_canonical_json_v1(canonical_bytes)?;
+        construct_recovery_request(value).map(Self::RecoveryNewFoundation)
+    }
+
+    #[must_use]
+    pub(in crate::store_generation) const fn creation_lineage(
+        &self,
+    ) -> StableFoundationCreationLineageV1 {
+        match self {
+            Self::InitialExternal(_) => StableFoundationCreationLineageV1::InitialExternal,
+            Self::OrdinarySuccessor(_) => {
+                StableFoundationCreationLineageV1::OrdinarySuccessorContinuity
+            }
+            Self::RecoveryNewFoundation(_) => {
+                StableFoundationCreationLineageV1::RecoveryNewFoundation
+            }
+        }
+    }
+
+    fn identity(&self) -> Result<Sha256Digest, SignerRefusalV2> {
+        match self {
+            Self::InitialExternal(request) => {
+                digest_from_identity_bytes(*request.identity().bytes())
+            }
+            Self::OrdinarySuccessor(request) => Ok(request.identity().clone()),
+            Self::RecoveryNewFoundation(request) => {
+                digest_from_identity_bytes(*request.identity().bytes())
+            }
+        }
+    }
+
+    fn proposal_identity(&self) -> Result<Sha256Digest, SignerRefusalV2> {
+        match self {
+            Self::InitialExternal(request) => digest_field_v1(request.field("proposal_identity")),
+            Self::OrdinarySuccessor(request) => Ok(request.proposal_identity().clone()),
+            Self::RecoveryNewFoundation(request) => {
+                digest_field_v1(request.field("successor_proposal_identity"))
+            }
+        }
+    }
+
+    fn canonical_bytes(&self) -> Result<Vec<u8>, SignerRefusalV2> {
+        match self {
+            Self::InitialExternal(request) => Ok(request.canonical_bytes().to_vec()),
+            Self::OrdinarySuccessor(request) => request.canonical_bytes(),
+            Self::RecoveryNewFoundation(request) => Ok(request.canonical_bytes().to_vec()),
+        }
+    }
+}
+
+/// One immutable SQL row projected into a route-typed value before frontier
+/// recomputation. This is evidence only. Its constructors are route-specific
+/// and no constructor accepts a caller-selected lineage string.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(in crate::store_generation) struct StoreCustodyProposalFrontierRowV1 {
+    proposal_ordinal: u64,
+    predecessor_frontier_identity: Sha256Digest,
+    resulting_frontier_identity: Sha256Digest,
+    proposal_identity: Sha256Digest,
+    proposal_canonical_bytes: Vec<u8>,
+    proposal_canonical_sha256: Sha256Digest,
+    proposal_canonical_length: u64,
+    reference: StoreCustodyPreparationReferenceV1,
+    reference_canonical_sha256: Sha256Digest,
+    reference_canonical_length: u64,
+}
+
+impl StoreCustodyProposalFrontierRowV1 {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        proposal_ordinal: u64,
+        predecessor_frontier_identity: Sha256Digest,
+        resulting_frontier_identity: Sha256Digest,
+        proposal_identity: Sha256Digest,
+        proposal_canonical_bytes: Vec<u8>,
+        proposal_canonical_sha256: Sha256Digest,
+        proposal_canonical_length: u64,
+        reference: StoreCustodyPreparationReferenceV1,
+        reference_canonical_sha256: Sha256Digest,
+        reference_canonical_length: u64,
+    ) -> Result<Self, SignerRefusalV2> {
+        let row = Self {
+            proposal_ordinal,
+            predecessor_frontier_identity,
+            resulting_frontier_identity,
+            proposal_identity,
+            proposal_canonical_bytes,
+            proposal_canonical_sha256,
+            proposal_canonical_length,
+            reference,
+            reference_canonical_sha256,
+            reference_canonical_length,
+        };
+        row.verify_static()?;
+        Ok(row)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::store_generation) fn initial_external(
+        proposal_ordinal: u64,
+        predecessor_frontier_identity: Sha256Digest,
+        resulting_frontier_identity: Sha256Digest,
+        proposal_identity: Sha256Digest,
+        proposal_canonical_bytes: Vec<u8>,
+        proposal_canonical_sha256: Sha256Digest,
+        proposal_canonical_length: u64,
+        request: StoreIntegrityBootstrapGrantRequestV1,
+        request_canonical_sha256: Sha256Digest,
+        request_canonical_length: u64,
+    ) -> Result<Self, SignerRefusalV2> {
+        Self::new(
+            proposal_ordinal,
+            predecessor_frontier_identity,
+            resulting_frontier_identity,
+            proposal_identity,
+            proposal_canonical_bytes,
+            proposal_canonical_sha256,
+            proposal_canonical_length,
+            StoreCustodyPreparationReferenceV1::InitialExternal(request),
+            request_canonical_sha256,
+            request_canonical_length,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::store_generation) fn ordinary_successor(
+        proposal_ordinal: u64,
+        predecessor_frontier_identity: Sha256Digest,
+        resulting_frontier_identity: Sha256Digest,
+        proposal_identity: Sha256Digest,
+        proposal_canonical_bytes: Vec<u8>,
+        proposal_canonical_sha256: Sha256Digest,
+        proposal_canonical_length: u64,
+        request: StoreOrdinarySuccessorCustodyPreparationRequestV1,
+        request_canonical_sha256: Sha256Digest,
+        request_canonical_length: u64,
+    ) -> Result<Self, SignerRefusalV2> {
+        Self::new(
+            proposal_ordinal,
+            predecessor_frontier_identity,
+            resulting_frontier_identity,
+            proposal_identity,
+            proposal_canonical_bytes,
+            proposal_canonical_sha256,
+            proposal_canonical_length,
+            StoreCustodyPreparationReferenceV1::OrdinarySuccessor(request),
+            request_canonical_sha256,
+            request_canonical_length,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::store_generation) fn recovery_new_foundation(
+        proposal_ordinal: u64,
+        predecessor_frontier_identity: Sha256Digest,
+        resulting_frontier_identity: Sha256Digest,
+        proposal_identity: Sha256Digest,
+        proposal_canonical_bytes: Vec<u8>,
+        proposal_canonical_sha256: Sha256Digest,
+        proposal_canonical_length: u64,
+        request: StoreIntegrityRecoveryRequestV1,
+        request_canonical_sha256: Sha256Digest,
+        request_canonical_length: u64,
+    ) -> Result<Self, SignerRefusalV2> {
+        Self::new(
+            proposal_ordinal,
+            predecessor_frontier_identity,
+            resulting_frontier_identity,
+            proposal_identity,
+            proposal_canonical_bytes,
+            proposal_canonical_sha256,
+            proposal_canonical_length,
+            StoreCustodyPreparationReferenceV1::RecoveryNewFoundation(request),
+            request_canonical_sha256,
+            request_canonical_length,
+        )
+    }
+
+    fn verify_static(&self) -> Result<(), SignerRefusalV2> {
+        let proposal = decode_canonical_proposal_v1(&self.proposal_canonical_bytes)?;
+        let reference_bytes = self.reference.canonical_bytes()?;
+        if self.proposal_ordinal == 0
+            || self.proposal_ordinal > IJSON_SAFE_INTEGER
+            || proposal.fields().proposal_ordinal != self.proposal_ordinal
+            || proposal.proposal_identity() != &self.proposal_identity
+            || self.reference.proposal_identity()? != self.proposal_identity
+            || self.proposal_canonical_sha256 != sha256_bytes(&self.proposal_canonical_bytes)
+            || self.proposal_canonical_length != self.proposal_canonical_bytes.len() as u64
+            || self.reference_canonical_sha256 != sha256_bytes(&reference_bytes)
+            || self.reference_canonical_length != reference_bytes.len() as u64
+        {
+            return Err(SignerRefusalV2::EnrollmentEvidenceCollision);
+        }
+        Ok(())
+    }
+}
+
+/// Recompute the complete durable custody frontier across bootstrap, healthy
+/// successor, and recovery creation rows. Restore contributes no row because
+/// it reuses one already present proposal. Exact route parsing occurs before
+/// this function, and every adjacent step binds the canonical request bytes.
+pub(in crate::store_generation) fn resolve_store_custody_proposal_frontier_rows_v1(
+    scope_token: &Sha256Digest,
+    rows: impl IntoIterator<Item = StoreCustodyProposalFrontierRowV1>,
+) -> Result<(u64, Sha256Digest, BTreeMap<u64, Sha256Digest>), SignerRefusalV2> {
+    let mut frontier = digest_fields_v1(
+        C2_CUSTODY_EMPTY_FRONTIER_DOMAIN_V1,
+        &[scope_token.as_str().as_bytes()],
+    );
+    let mut expected_ordinal = 1_u64;
+    let mut committed = BTreeMap::new();
+    for row in rows {
+        row.verify_static()?;
+        let reference_identity = row.reference.identity()?;
+        let reference_bytes = row.reference.canonical_bytes()?;
+        let expected_resulting = digest_fields_v1(
+            C2_CUSTODY_FRONTIER_STEP_DOMAIN_V1,
+            &[
+                frontier.as_str().as_bytes(),
+                &row.proposal_ordinal.to_be_bytes(),
+                row.proposal_identity.as_str().as_bytes(),
+                reference_identity.as_str().as_bytes(),
+                row.proposal_canonical_sha256.as_str().as_bytes(),
+                sha256_bytes(&reference_bytes).as_str().as_bytes(),
+            ],
+        );
+        let proposal = decode_canonical_proposal_v1(&row.proposal_canonical_bytes)?;
+        if row.proposal_ordinal != expected_ordinal
+            || row.predecessor_frontier_identity != frontier
+            || row.resulting_frontier_identity != expected_resulting
+            || proposal.fields().scope_token != *scope_token
+            || committed
+                .insert(row.proposal_ordinal, row.proposal_identity.clone())
+                .is_some()
+        {
+            return Err(SignerRefusalV2::EnrollmentEvidenceCollision);
+        }
+        frontier = expected_resulting;
+        expected_ordinal = expected_ordinal
+            .checked_add(1)
+            .filter(|ordinal| *ordinal <= IJSON_SAFE_INTEGER)
+            .ok_or(SignerRefusalV2::CustodyPathMismatch)?;
+    }
+    Ok((expected_ordinal, frontier, committed))
+}
+
 /// Internal signature returned only to the private transition coordinator.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct CustodySignatureV1 {
@@ -487,19 +1099,44 @@ struct CustodyObjectFactsV1 {
 /// Proof that the proposal/disposition and Store frontier was fully resolved.
 /// Construction will move to the Store actor when durable ingress is wired.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct VerifiedCustodyProposalFrontierV1 {
+pub(crate) struct VerifiedCustodyProposalFrontierV1 {
     scope_token: Sha256Digest,
     next_ordinal: u64,
     complete_frontier_identity: Sha256Digest,
+    committed_proposals: BTreeMap<u64, Sha256Digest>,
 }
 
 impl VerifiedCustodyProposalFrontierV1 {
+    /// Seal only a frontier that the retained Store actor has already
+    /// enumerated and whose complete identity it has recomputed from durable
+    /// rows.  Raw ordinals never call custody creation directly.
+    pub(in crate::store_generation) fn from_store_actor_resolution(
+        actor: &StoreC2SnapshotActorV1<'_>,
+        scope_token: Sha256Digest,
+        next_ordinal: u64,
+        complete_frontier_identity: Sha256Digest,
+        committed_proposals: BTreeMap<u64, Sha256Digest>,
+    ) -> Result<Self, SignerRefusalV2> {
+        actor
+            .verify_same_snapshot()
+            .map_err(|_| SignerRefusalV2::CustodyPathMismatch)?;
+        let frontier = Self {
+            scope_token: scope_token.clone(),
+            next_ordinal,
+            complete_frontier_identity,
+            committed_proposals,
+        };
+        frontier.verify_for(&scope_token)?;
+        Ok(frontier)
+    }
+
     #[cfg(test)]
     fn initial_for_test(scope_token: Sha256Digest) -> Self {
         Self {
             scope_token,
             next_ordinal: 1,
             complete_frontier_identity: sha256_bytes(b"test-only-empty-custody-frontier"),
+            committed_proposals: BTreeMap::new(),
         }
     }
 
@@ -511,21 +1148,469 @@ impl VerifiedCustodyProposalFrontierV1 {
                 .complete_frontier_identity
                 .as_str()
                 .ends_with(&"0".repeat(64))
+            || self.committed_proposals.len()
+                != usize::try_from(self.next_ordinal.saturating_sub(1))
+                    .map_err(|_| SignerRefusalV2::CustodyPathMismatch)?
+            || self
+                .committed_proposals
+                .keys()
+                .copied()
+                .ne(1..self.next_ordinal)
+            || self
+                .committed_proposals
+                .values()
+                .collect::<BTreeSet<_>>()
+                .len()
+                != self.committed_proposals.len()
         {
             return Err(SignerRefusalV2::CustodyPathMismatch);
         }
         Ok(self.next_ordinal)
     }
+
+    fn verify_directory(
+        &self,
+        directory: &File,
+        coordinates: &PreGenerationCustodyCoordinatesV1,
+    ) -> Result<(), SignerRefusalV2> {
+        let observed = scope_directory_committed_proposal_identities(directory)?;
+        let expected = self
+            .committed_proposals
+            .values()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if observed != expected {
+            return Err(SignerRefusalV2::CustodyPathMismatch);
+        }
+        for (ordinal, identity) in &self.committed_proposals {
+            verify_committed_carrier_for_frontier(
+                directory,
+                &self.scope_token,
+                *ordinal,
+                identity,
+                &coordinates.custodian_implementation_manifest_identity,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// Store-sealed inert proposal evidence reloaded from the exact durable
+/// preparation row.  It grants no signing or standing; custody still reopens
+/// and authenticates the fixed descriptor/carrier in the current process.
+pub(crate) struct StoreVerifiedPreparedCustodyV1 {
+    coordinates: PreGenerationCustodyCoordinatesV1,
+    proposal: StoreIntegrityKeyProposalV1,
+    actor_instance_identity: Sha256Digest,
+    actor_snapshot_identity: Sha256Digest,
+    actor_effect_epoch: u64,
+    creator_pid: u32,
+}
+
+/// Exact stable foundation coordinates extracted only from the canonical
+/// foundation record.  This private value is the route-neutral join between
+/// durable signer-foundation evidence and custody; no raw-parts constructor
+/// exists.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StableFoundationCustodyCoordinatesV1 {
+    foundation_identity: Sha256Digest,
+    public_key: [u8; 32],
+    key_generation: u64,
+    custody_evidence_identity: Sha256Digest,
+}
+
+impl StableFoundationCustodyCoordinatesV1 {
+    fn from_foundation(
+        foundation: &StoreIntegritySignerFoundationV1,
+    ) -> Result<Self, SignerRefusalV2> {
+        verify_store_integrity_signer_foundation_v1(foundation)?;
+        Ok(Self {
+            foundation_identity: foundation.identity().clone(),
+            public_key: foundation.public_key()?,
+            key_generation: foundation.key_generation(),
+            custody_evidence_identity: foundation.custody_evidence_identity().clone(),
+        })
+    }
+
+    fn verify_proposal(
+        &self,
+        proposal: &StoreIntegrityKeyProposalV1,
+    ) -> Result<(), SignerRefusalV2> {
+        verify_sg_n_08_local_key_proposal_is_inert_carries_no(proposal)?;
+        if decode_hex_32(&proposal.fields().public_key)? != self.public_key
+            || proposal.fields().proposed_key_generation != self.key_generation
+            || proposal.proposal_identity() != &self.custody_evidence_identity
+        {
+            return Err(SignerRefusalV2::CustodyKeyMismatch);
+        }
+        Ok(())
+    }
+}
+
+impl StoreVerifiedPreparedCustodyV1 {
+    /// Reconstruct the exact non-secret custody coordinates from one
+    /// canonical proposal selected by the Store and bind them to the freshly
+    /// admitted implementation manifest.  Callers cannot supply individual
+    /// coordinates; changing any proposal field changes or invalidates the
+    /// canonical proposal identity before this seal is minted.
+    pub(in crate::store_generation) fn from_store_selected_canonical_proposal(
+        actor: &StoreC2SnapshotActorV1<'_>,
+        canonical_proposal_bytes: &[u8],
+        implementation_manifest_identity: Sha256Digest,
+    ) -> Result<Self, SignerRefusalV2> {
+        let value: serde_json::Value = serde_json::from_slice(canonical_proposal_bytes)
+            .map_err(|_| SignerRefusalV2::CustodyFileMalformed)?;
+        if canonical_json_bytes(&value).map_err(|_| SignerRefusalV2::CustodyFileMalformed)?
+            != canonical_proposal_bytes
+        {
+            return Err(SignerRefusalV2::CustodyFileMalformed);
+        }
+        let carrier: StoreIntegrityKeyProposalCarrierV1 =
+            serde_json::from_value(value).map_err(|_| SignerRefusalV2::CustodyFileMalformed)?;
+        let fields = &carrier.fields;
+        let coordinates = PreGenerationCustodyCoordinatesV1 {
+            occurrence_id: fields.occurrence_id.clone(),
+            scope_identity: fields.scope_identity.clone(),
+            a2_chain_root_identity: fields.a2_chain_root_identity.clone(),
+            trust_anchor_identity: fields.trust_anchor_identity.clone(),
+            resident_identity: fields.resident_identity.clone(),
+            resident_generation: fields.resident_generation,
+            host_role: fields.host_role.clone(),
+            role_manifest_generation: fields.role_manifest_generation,
+            authority_domain: fields.authority_domain.clone(),
+            signer_scope_policy_identity: fields.signer_scope_policy_identity.clone(),
+            signer_scope_policy_version: fields.signer_scope_policy_version,
+            proposed_key_generation: fields.proposed_key_generation,
+            custodian_implementation_manifest_identity: implementation_manifest_identity,
+        };
+        Self::from_store_actor(actor, coordinates, canonical_proposal_bytes)
+    }
+
+    pub(in crate::store_generation) fn from_store_actor(
+        actor: &StoreC2SnapshotActorV1<'_>,
+        coordinates: PreGenerationCustodyCoordinatesV1,
+        canonical_proposal_bytes: &[u8],
+    ) -> Result<Self, SignerRefusalV2> {
+        actor
+            .verify_same_snapshot()
+            .map_err(|_| SignerRefusalV2::CustodyPathMismatch)?;
+        coordinates.validate()?;
+        let value: serde_json::Value = serde_json::from_slice(canonical_proposal_bytes)
+            .map_err(|_| SignerRefusalV2::CustodyFileMalformed)?;
+        if canonical_json_bytes(&value).map_err(|_| SignerRefusalV2::CustodyFileMalformed)?
+            != canonical_proposal_bytes
+        {
+            return Err(SignerRefusalV2::CustodyFileMalformed);
+        }
+        let carrier: StoreIntegrityKeyProposalCarrierV1 =
+            serde_json::from_value(value).map_err(|_| SignerRefusalV2::CustodyFileMalformed)?;
+        let proposal = StoreIntegrityKeyProposalV1(carrier);
+        verify_sg_n_08_local_key_proposal_is_inert_carries_no(&proposal)?;
+        if proposal.fields().scope_token != coordinates.scope_token()?
+            || !proposal_fields_match_coordinates(proposal.fields(), &coordinates)
+        {
+            return Err(SignerRefusalV2::CustodyPathMismatch);
+        }
+        Ok(Self {
+            coordinates,
+            proposal,
+            actor_instance_identity: actor.actor_instance_identity().clone(),
+            actor_snapshot_identity: actor.current_snapshot_identity().clone(),
+            actor_effect_epoch: actor.effect_epoch(),
+            creator_pid: std::process::id(),
+        })
+    }
+
+    fn verify_for_actor(&self, actor: &StoreC2SnapshotActorV1<'_>) -> Result<(), SignerRefusalV2> {
+        actor
+            .verify_same_snapshot()
+            .map_err(|_| SignerRefusalV2::CustodyPathMismatch)?;
+        if self.creator_pid != std::process::id()
+            || self.actor_instance_identity != *actor.actor_instance_identity()
+            || self.actor_snapshot_identity != *actor.current_snapshot_identity()
+            || self.actor_effect_epoch != actor.effect_epoch()
+        {
+            return Err(SignerRefusalV2::CustodyPathMismatch);
+        }
+        Ok(())
+    }
+
+    /// Derive the next recovery key's pre-generation coordinates from the
+    /// exact Store-selected current foundation preparation.  Only the key
+    /// generation and freshly admitted implementation basis change; callers
+    /// cannot supply or splice scope/custody coordinates individually.
+    pub(in crate::store_generation) fn recovery_successor_coordinates_for_actor(
+        &self,
+        actor: &StoreC2SnapshotActorV1<'_>,
+        proposed_key_generation: u64,
+        implementation_manifest_identity: Sha256Digest,
+    ) -> Result<PreGenerationCustodyCoordinatesV1, SignerRefusalV2> {
+        self.verify_for_actor(actor)?;
+        if proposed_key_generation <= self.coordinates.proposed_key_generation
+            || implementation_manifest_identity
+                .as_str()
+                .ends_with(&"0".repeat(64))
+        {
+            return Err(SignerRefusalV2::CustodyPathMismatch);
+        }
+        let mut coordinates = self.coordinates.clone();
+        coordinates.proposed_key_generation = proposed_key_generation;
+        coordinates.custodian_implementation_manifest_identity =
+            implementation_manifest_identity;
+        coordinates.validate()?;
+        Ok(coordinates)
+    }
 }
 
 /// Purpose-locked private owner of one Store-integrity key generation.
 pub(crate) struct C2StoreIntegrityCustodian {
-    coordinates: CustodyCoordinatesV1,
+    coordinates: PreGenerationCustodyCoordinatesV1,
     proposal: StoreIntegrityKeyProposalV1,
     scope_directory: File,
     final_name: String,
     creator_pid: u32,
     process_epoch: SignerIdentityV1,
+}
+
+/// Process-local proof that one exact proposal is backed by the retained,
+/// authenticated custody descriptor and its corresponding private key.
+///
+/// This proof is custody-owned.  It has no raw-digest constructor and cannot
+/// be cloned, copied, serialized, or defaulted.  The custody-evidence identity
+/// is deliberately the proposal identity: that proposal identity already
+/// commits the scope directory, device/mount/inode, ownership/mode/link count,
+/// public key, nonce, generation, and exact proposal core.  A second digest
+/// over the same facts would create an unnecessary parallel taxonomy.
+pub(crate) struct VerifiedFoundationalCustodyV1<'process> {
+    custodian: &'process C2StoreIntegrityCustodian,
+    proposal: &'process StoreIntegrityKeyProposalV1,
+    public_key: [u8; 32],
+    creator_pid: u32,
+}
+
+/// Fresh process-local custody verified against one exact canonical stable
+/// signer foundation.  This wrapper carries no standing and cannot be built
+/// from public-key/generation/digest coordinates supplied separately.
+pub(crate) struct StoreVerifiedGenerationCurrentCustodyV1<'process> {
+    foundational: VerifiedFoundationalCustodyV1<'process>,
+    stable: StableFoundationCustodyCoordinatesV1,
+}
+
+/// Owner returned by the route-neutral durable-preparation reopen seam.
+/// Borrowing a verified current-custody proof from it reauthenticates the
+/// retained descriptor in the current process; the proof cannot outlive this
+/// owner.
+pub(crate) struct StoreReopenedGenerationCurrentCustodianV1 {
+    custodian: C2StoreIntegrityCustodian,
+    stable: StableFoundationCustodyCoordinatesV1,
+}
+
+/// Borrowed generation-bound view of one pre-generation custody object.
+///
+/// Final generation and lifecycle-root coordinates come exclusively from the
+/// sealed Store live phase, never from the durable custody carrier.  The view
+/// cannot outlive either premise and has no raw-parts constructor.
+pub(crate) struct GenerationBoundC2CustodyV1<'live, 'context, 'store, Phase> {
+    custodian: &'live C2StoreIntegrityCustodian,
+    live: C2LiveSigningViewV1<'live, 'context, 'store, Phase>,
+    physical_generation: SignerIdentityV1,
+    lifecycle_root: SignerIdentityV1,
+}
+
+impl<'live, 'context, 'store, Phase> GenerationBoundC2CustodyV1<'live, 'context, 'store, Phase> {
+    pub(crate) fn from_live_context(
+        custodian: &'live C2StoreIntegrityCustodian,
+        context: &'live C2LiveSignerContextV1<'context, 'store, Phase>,
+        permit: &StoreC2SignerAppendPermitV1<'_, '_, '_, Phase>,
+    ) -> Result<Self, SignerRefusalV2> {
+        let live = context.signing_view();
+        permit
+            .verify_live_view(&live)
+            .map_err(|_| SignerRefusalV2::MessageFrontierMismatch)?;
+        let physical_generation = live
+            .physical_generation_identity()
+            .ok_or(SignerRefusalV2::MessageFrontierMismatch)?;
+        let lifecycle_root = live
+            .lifecycle_root_identity()
+            .ok_or(SignerRefusalV2::MessageFrontierMismatch)?;
+        if live.scope_class() != C2LiveSigningScopeV1::GenerationBound
+            || live.occurrence_identity() != custodian.coordinates.occurrence_identity()
+            || live.signer_scope_identity() != custodian.coordinates.scope_bytes()
+            || live.signer_scope_policy_identity() != custodian.coordinates.policy_bytes()
+            || live.signer_key_generation_identity() != custodian.key_generation_identity()
+            || live.signer_public_key() != custodian.verifying_key()?
+        {
+            return Err(SignerRefusalV2::MessageFrontierMismatch);
+        }
+        Ok(Self {
+            custodian,
+            live,
+            physical_generation,
+            lifecycle_root,
+        })
+    }
+
+    #[must_use]
+    pub(crate) fn occurrence_identity(&self) -> SignerIdentityV1 {
+        self.live.occurrence_identity()
+    }
+
+    #[must_use]
+    pub(crate) fn physical_generation_identity(&self) -> SignerIdentityV1 {
+        self.physical_generation
+    }
+
+    #[must_use]
+    pub(crate) fn lifecycle_root_identity(&self) -> SignerIdentityV1 {
+        self.lifecycle_root
+    }
+
+    #[must_use]
+    pub(crate) fn scope_identity(&self) -> SignerIdentityV1 {
+        self.live.signer_scope_identity()
+    }
+
+    #[must_use]
+    pub(crate) fn policy_identity(&self) -> SignerIdentityV1 {
+        self.live.signer_scope_policy_identity()
+    }
+
+    #[must_use]
+    pub(crate) fn key_generation_identity(&self) -> SignerIdentityV1 {
+        self.live.signer_key_generation_identity()
+    }
+
+    pub(super) fn sign<M: SignerMessageV1>(
+        &self,
+        permit: CoordinatorSigningPermitV1,
+        live_permit: &StoreC2SignerAppendPermitV1<'_, '_, '_, Phase>,
+        message: &M,
+    ) -> Result<CustodySignatureV1, SignerRefusalV2> {
+        self.custodian
+            .sign(permit, live_permit, &self.live, message)
+    }
+}
+
+impl<'process> VerifiedFoundationalCustodyV1<'process> {
+    /// Borrow the exact retained custodian behind this sealed proof.  This is
+    /// crate-private and one-way: a custodian cannot construct the proof, and
+    /// the live Store driver uses it only to prevent a separately supplied
+    /// key object from being substituted at signing time.
+    pub(crate) const fn retained_custodian(&self) -> &'process C2StoreIntegrityCustodian {
+        self.custodian
+    }
+
+    #[must_use]
+    pub(crate) fn proposal_identity(&self) -> &Sha256Digest {
+        self.proposal.proposal_identity()
+    }
+
+    #[must_use]
+    pub(crate) fn custody_evidence_identity(&self) -> &Sha256Digest {
+        self.proposal.proposal_identity()
+    }
+
+    pub(crate) fn public_key(&self) -> [u8; 32] {
+        self.public_key
+    }
+
+    #[must_use]
+    pub(crate) fn key_generation(&self) -> u64 {
+        self.proposal.fields().proposed_key_generation
+    }
+
+    /// Exact proposal-derived key-generation identity.  This is inert
+    /// evidence; it has no conversion into custody or live signer standing.
+    #[must_use]
+    pub(crate) fn key_generation_identity(&self) -> SignerIdentityV1 {
+        self.proposal.key_generation_identity()
+    }
+
+    #[must_use]
+    pub(crate) fn scope_identity(&self) -> SignerIdentityV1 {
+        self.custodian.coordinates.scope_bytes()
+    }
+
+    #[must_use]
+    pub(crate) fn signer_scope_policy_identity(&self) -> SignerIdentityV1 {
+        self.custodian.coordinates.policy_bytes()
+    }
+
+    #[must_use]
+    pub(crate) fn signer_scope_policy_version(&self) -> u64 {
+        self.proposal.fields().signer_scope_policy_version
+    }
+
+    /// Reopen and reauthenticate the descriptor on every authority-bearing
+    /// use; an inherited or displaced file cannot remain verified by value.
+    pub(crate) fn verify_same_process(&self) -> Result<(), SignerRefusalV2> {
+        if self.creator_pid != std::process::id()
+            || self.custodian.creator_pid != std::process::id()
+            || !std::ptr::eq(self.proposal, &self.custodian.proposal)
+        {
+            return Err(SignerRefusalV2::CustodyKeyMismatch);
+        }
+        let (seed, retained_file, retained_facts) = self.custodian.load_seed_for_signing()?;
+        if retained_facts.inode != self.proposal.fields().custody_file_inode
+            || retained_facts.device != self.proposal.fields().custody_file_device
+            || retained_facts.mount != self.proposal.fields().custody_file_mount
+            || self.custodian.verifying_key()? != self.public_key
+        {
+            return Err(SignerRefusalV2::CustodyKeyMismatch);
+        }
+        drop(retained_file);
+        drop(seed);
+        Ok(())
+    }
+}
+
+impl<'process> StoreVerifiedGenerationCurrentCustodyV1<'process> {
+    #[must_use]
+    pub(crate) fn foundation_identity(&self) -> &Sha256Digest {
+        &self.stable.foundation_identity
+    }
+
+    #[must_use]
+    pub(crate) fn foundational_custody(&self) -> &VerifiedFoundationalCustodyV1<'process> {
+        &self.foundational
+    }
+
+    #[must_use]
+    pub(crate) fn public_key(&self) -> [u8; 32] {
+        self.stable.public_key
+    }
+
+    #[must_use]
+    pub(crate) fn key_generation(&self) -> u64 {
+        self.stable.key_generation
+    }
+
+    #[must_use]
+    pub(crate) fn custody_evidence_identity(&self) -> &Sha256Digest {
+        &self.stable.custody_evidence_identity
+    }
+
+    pub(crate) fn verify_same_process(&self) -> Result<(), SignerRefusalV2> {
+        self.foundational.verify_same_process()?;
+        self.stable.verify_proposal(self.foundational.proposal)
+    }
+}
+
+impl StoreReopenedGenerationCurrentCustodianV1 {
+    /// Reauthenticate and seal this retained custodian against the stable
+    /// foundation selected by the Store during reopen.
+    pub(crate) fn verify_generation_current_custody(
+        &self,
+    ) -> Result<StoreVerifiedGenerationCurrentCustodyV1<'_>, SignerRefusalV2> {
+        let foundational = self
+            .custodian
+            .verify_foundational_custody(&self.custodian.proposal)?;
+        self.stable.verify_proposal(foundational.proposal)?;
+        Ok(StoreVerifiedGenerationCurrentCustodyV1 {
+            foundational,
+            stable: self.stable.clone(),
+        })
+    }
 }
 
 impl std::fmt::Debug for C2StoreIntegrityCustodian {
@@ -542,16 +1627,142 @@ impl std::fmt::Debug for C2StoreIntegrityCustodian {
 
 impl C2StoreIntegrityCustodian {
     /// Production creation accepts no path or randomness from its caller.
-    pub(super) fn create(
-        coordinates: CustodyCoordinatesV1,
+    pub(in crate::store_generation) fn create(
+        coordinates: PreGenerationCustodyCoordinatesV1,
         frontier: &VerifiedCustodyProposalFrontierV1,
     ) -> Result<(Self, StoreIntegrityKeyProposalV1), SignerRefusalV2> {
         let root = open_production_custody_root()?;
-        Self::create_below_root(coordinates, frontier, root)
+        let reconciliation_root = root.try_clone().map_err(|_| SignerRefusalV2::CustodyIo)?;
+        match Self::create_below_root(coordinates.clone(), frontier, root) {
+            Ok(created) => Ok(created),
+            Err(SignerRefusalV2::CustodyPathMismatch) => {
+                // The only recoverable filesystem-first cut is one exact
+                // committed carrier at the Store's still-missing ordinal.
+                // Reconciliation reauthenticates that carrier and never
+                // generates replacement key material.
+                Self::reconcile_filesystem_first_below_root(
+                    coordinates,
+                    frontier,
+                    reconciliation_root,
+                )
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Nominal Store-owned preparation lane for a new ordinary-successor
+    /// foundation. The current live view fixes the predecessor, scope, policy,
+    /// implementation and next key generation; the returned request remains
+    /// inert and cannot substitute for MSG-06 or MSG-07.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::store_generation) fn create_ordinary_successor_for_actor_v1(
+        actor: &StoreC2SnapshotActorV1<'_>,
+        current: &C2LiveSigningViewV1<'_, '_, '_, GenerationCurrentV1>,
+        coordinates: PreGenerationCustodyCoordinatesV1,
+        frontier: &VerifiedCustodyProposalFrontierV1,
+        transition_identity: Sha256Digest,
+        successor_pop_challenge_identity: Sha256Digest,
+    ) -> Result<
+        (
+            Self,
+            StoreIntegrityKeyProposalV1,
+            StoreOrdinarySuccessorCustodyPreparationRequestV1,
+        ),
+        SignerRefusalV2,
+    > {
+        current
+            .verify_live(actor)
+            .map_err(|_| SignerRefusalV2::CustodyPathMismatch)?;
+        let current_binding = current
+            .current_binding_identity()
+            .ok_or(SignerRefusalV2::CustodyPathMismatch)?;
+        let expected_generation = current
+            .signer_key_generation()
+            .checked_add(1)
+            .ok_or(SignerRefusalV2::CustodyPathMismatch)?;
+        if coordinates.occurrence_id != current.occurrence_id()
+            || digest_bytes(&coordinates.scope_identity) != current.signer_scope_identity()
+            || coordinates.resident_identity != current.resident_identity()
+            || coordinates.resident_generation != current.resident_generation()
+            || coordinates.host_role != current.host_role()
+            || coordinates.role_manifest_generation != current.role_manifest_generation()
+            || coordinates.authority_domain != current.authority_domain()
+            || digest_bytes(&coordinates.signer_scope_policy_identity)
+                != current.signer_scope_policy_identity()
+            || coordinates.signer_scope_policy_version != current.signer_scope_policy_version()
+            || coordinates.proposed_key_generation != expected_generation
+            || digest_bytes(&coordinates.custodian_implementation_manifest_identity)
+                != current.implementation_manifest_identity()
+        {
+            return Err(SignerRefusalV2::CustodyPathMismatch);
+        }
+        let (custodian, proposal) = Self::create(coordinates, frontier)?;
+        let request = StoreOrdinarySuccessorCustodyPreparationRequestV1::construct(
+            current.occurrence_id().to_owned(),
+            digest_from_identity_bytes(current.signer_scope_identity())?,
+            digest_from_identity_bytes(current_binding)?,
+            digest_from_identity_bytes(current.signer_key_generation_identity())?,
+            transition_identity,
+            &proposal,
+            successor_pop_challenge_identity,
+            digest_from_identity_bytes(current.active_policy_identity())?,
+            current.active_policy_generation(),
+        )?;
+        Ok((custodian, proposal, request))
+    }
+
+    /// Nominal Store-owned key-creation lane for recovery. The returned
+    /// proposal is inert and the consumed basis is not returned, so one live
+    /// preparation seal cannot create two keys. Exact external MSG-15 remains
+    /// a later, independently verified entry premise.
+    pub(in crate::store_generation) fn create_recovery_foundation_for_actor_v1(
+        actor: &StoreC2SnapshotActorV1<'_>,
+        basis: StoreRecoveryCustodyPreparationBasisV1,
+        frontier: &VerifiedCustodyProposalFrontierV1,
+    ) -> Result<(Self, StoreIntegrityKeyProposalV1), SignerRefusalV2> {
+        basis.verify_for_actor(actor)?;
+        Self::create(basis.coordinates, frontier)
+    }
+
+    /// Reopen only the exact proposal/coordinate pair freshly sealed from a
+    /// Store-owned durable preparation row.  No raw proposal or path enters
+    /// this production seam.
+    pub(in crate::store_generation) fn reopen_prepared_for_actor(
+        actor: &StoreC2SnapshotActorV1<'_>,
+        prepared: StoreVerifiedPreparedCustodyV1,
+    ) -> Result<Self, SignerRefusalV2> {
+        prepared.verify_for_actor(actor)?;
+        let root = open_production_custody_root()?;
+        Self::reopen_below_root(prepared.coordinates, prepared.proposal, root)
+    }
+
+    /// Route-neutral reopen for a completed GenerationCurrent terminal.
+    ///
+    /// The Store actor supplies its sealed durable preparation and the exact
+    /// canonical stable foundation selected by the terminal binding.  This
+    /// seam accepts neither a caller-selected lineage/mode nor an independently
+    /// authored public-key/generation/custody tuple.  It serves healthy
+    /// successors and recovery with their prepared new custody, and restore
+    /// only when the preparation is the exact historical custody foundation.
+    pub(in crate::store_generation) fn reopen_prepared_generation_current_for_actor(
+        actor: &StoreC2SnapshotActorV1<'_>,
+        prepared: StoreVerifiedPreparedCustodyV1,
+        foundation: &StoreIntegritySignerFoundationV1,
+    ) -> Result<StoreReopenedGenerationCurrentCustodianV1, SignerRefusalV2> {
+        prepared.verify_for_actor(actor)?;
+        let stable = StableFoundationCustodyCoordinatesV1::from_foundation(foundation)?;
+        stable.verify_proposal(&prepared.proposal)?;
+        let root = open_production_custody_root()?;
+        let custodian = Self::reopen_below_root(prepared.coordinates, prepared.proposal, root)?;
+        let reopened = StoreReopenedGenerationCurrentCustodianV1 { custodian, stable };
+        let verified = reopened.verify_generation_current_custody()?;
+        verified.verify_same_process()?;
+        drop(verified);
+        Ok(reopened)
     }
 
     fn create_below_root(
-        coordinates: CustodyCoordinatesV1,
+        coordinates: PreGenerationCustodyCoordinatesV1,
         frontier: &VerifiedCustodyProposalFrontierV1,
         root: File,
     ) -> Result<(Self, StoreIntegrityKeyProposalV1), SignerRefusalV2> {
@@ -563,15 +1774,10 @@ impl C2StoreIntegrityCustodian {
         coordinates.validate()?;
         let scope_token = coordinates.scope_token()?;
         let proposal_ordinal = frontier.verify_for(&scope_token)?;
-        let scope_mutex = custody_scope_mutex(&scope_token);
+        let scope_mutex = custody_scope_mutex(&scope_token)?;
         let _scope_guard = scope_mutex.lock().map_err(|_| SignerRefusalV2::CustodyIo)?;
         let scope_directory = open_or_create_scope_directory(&root, &scope_token)?;
-        if proposal_ordinal != 1 || !scope_directory_is_empty(&scope_directory)? {
-            // Later ordinals require the complete Store/frontier join.  Until
-            // that actor-owned resolver is connected, refuse rather than
-            // regenerate, sort, or select a file by name.
-            return Err(SignerRefusalV2::CustodyPathMismatch);
-        }
+        frontier.verify_directory(&scope_directory, &coordinates)?;
         let scope_facts = directory_facts(&scope_directory)?;
         let scope_directory_identity = domain_digest(
             SCOPE_DIRECTORY_DOMAIN_V1,
@@ -617,6 +1823,8 @@ impl C2StoreIntegrityCustodian {
             )
             .map_err(|_| SignerRefusalV2::CustodyIo)?,
         );
+        #[cfg(test)]
+        crate::store_generation::source_io_crash_test_support::after_source_io_v1("SC-45");
         let initial_facts = object_facts(&temporary)?;
         if !initial_facts.regular_file
             || initial_facts.link_count != 1
@@ -646,10 +1854,6 @@ impl C2StoreIntegrityCustodian {
             proposal_ordinal,
             scope_token,
             occurrence_id: coordinates.occurrence_id.clone(),
-            physical_store_generation_identity: coordinates
-                .physical_store_generation_identity
-                .clone(),
-            signer_lifecycle_root_identity: coordinates.signer_lifecycle_root_identity.clone(),
             scope_identity: coordinates.scope_identity.clone(),
             a2_chain_root_identity: coordinates.a2_chain_root_identity.clone(),
             trust_anchor_identity: coordinates.trust_anchor_identity.clone(),
@@ -695,8 +1899,14 @@ impl C2StoreIntegrityCustodian {
         let mut bytes = SecretBytes(private_file.encode()?);
         temporary
             .write_all(&bytes)
-            .and_then(|()| temporary.set_len(bytes.len() as u64))
             .map_err(|_| SignerRefusalV2::CustodyIo)?;
+        #[cfg(test)]
+        crate::store_generation::source_io_crash_test_support::after_source_io_v1("SC-46");
+        temporary
+            .set_len(bytes.len() as u64)
+            .map_err(|_| SignerRefusalV2::CustodyIo)?;
+        #[cfg(test)]
+        crate::store_generation::source_io_crash_test_support::after_source_io_v1("SC-47");
         fchmod(&temporary, Mode::RUSR).map_err(|_| SignerRefusalV2::CustodyIo)?;
         fdatasync(&temporary).map_err(|_| SignerRefusalV2::CustodyIo)?;
         let committed_facts = object_facts(&temporary)?;
@@ -716,6 +1926,8 @@ impl C2StoreIntegrityCustodian {
         )
         .map_err(|_| SignerRefusalV2::CustodyIo)?;
         fsync(&scope_directory).map_err(|_| SignerRefusalV2::CustodyIo)?;
+        #[cfg(test)]
+        crate::store_generation::source_io_crash_test_support::after_source_io_v1("SC-48");
         let final_file = open_final_key(&scope_directory, &final_name)?;
         let final_facts = object_facts(&final_file)?;
         if final_facts != committed_facts || *read_exact_secret_bytes(&final_file)? != *bytes {
@@ -738,15 +1950,263 @@ impl C2StoreIntegrityCustodian {
         Ok((custodian, proposal))
     }
 
-    pub(super) fn proposal_identity(&self) -> &Sha256Digest {
+    fn reconcile_filesystem_first_below_root(
+        coordinates: PreGenerationCustodyCoordinatesV1,
+        frontier: &VerifiedCustodyProposalFrontierV1,
+        root: File,
+    ) -> Result<(Self, StoreIntegrityKeyProposalV1), SignerRefusalV2> {
+        let fork_fence_guard = C2ForkFence::acquire().map_err(|_| SignerRefusalV2::CustodyIo)?;
+        coordinates.validate()?;
+        let scope_token = coordinates.scope_token()?;
+        let proposal_ordinal = frontier.verify_for(&scope_token)?;
+        let scope_mutex = custody_scope_mutex(&scope_token)?;
+        let _scope_guard = scope_mutex.lock().map_err(|_| SignerRefusalV2::CustodyIo)?;
+        validate_directory(&root, 0o700)?;
+        let scope_directory = open_directory_component(&root, digest_hex(&scope_token))?;
+        validate_directory(&scope_directory, 0o700)?;
+        require_same_filesystem(&root, &scope_directory)?;
+
+        let observed = scope_directory_committed_proposal_identities(&scope_directory)?;
+        let committed = frontier
+            .committed_proposals
+            .values()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if !committed.is_subset(&observed) || observed.len() != committed.len() + 1 {
+            return Err(SignerRefusalV2::CustodyPathMismatch);
+        }
+        for (ordinal, identity) in &frontier.committed_proposals {
+            verify_committed_carrier_for_frontier(
+                &scope_directory,
+                &scope_token,
+                *ordinal,
+                identity,
+                &coordinates.custodian_implementation_manifest_identity,
+            )?;
+        }
+        let orphan_identity = observed
+            .difference(&committed)
+            .next()
+            .ok_or(SignerRefusalV2::CustodyPathMismatch)?
+            .clone();
+        let final_name = format!("{}.key", digest_hex(&orphan_identity));
+        let final_file = open_final_key(&scope_directory, &final_name)?;
+        let facts = object_facts(&final_file)?;
+        let bytes = read_exact_secret_bytes(&final_file)?;
+        let carrier = StoreIntegrityCustodyFileV1::decode(&bytes)?;
+        verify_file_facts_against_fields(&facts, carrier.0.fields(), bytes.len())?;
+        let proposal = StoreIntegrityKeyProposalV1(StoreIntegrityKeyProposalCarrierV1 {
+            schema: KEY_PROPOSAL_SCHEMA_V1.to_owned(),
+            schema_version: 1,
+            fields: carrier.0.fields.clone(),
+        });
+        verify_sg_n_08_local_key_proposal_is_inert_carries_no(&proposal)?;
+        let seed = carrier.secret_seed()?;
+        if proposal.proposal_identity() != &orphan_identity
+            || proposal.fields().proposal_ordinal != proposal_ordinal
+            || proposal.fields().scope_token != scope_token
+            || !proposal_fields_match_coordinates(proposal.fields(), &coordinates)
+            || carrier.0.custodian_implementation_manifest_identity
+                != coordinates.custodian_implementation_manifest_identity
+            || SigningKey::from_bytes(&seed.0).verifying_key().to_bytes()
+                != decode_hex_32(&proposal.fields().public_key)?
+        {
+            return Err(SignerRefusalV2::CustodyKeyMismatch);
+        }
+        drop(seed);
+        drop(carrier);
+        drop(bytes);
+        drop(final_file);
+        let mut process_epoch = [0_u8; 32];
+        getrandom::fill(&mut process_epoch).map_err(|_| SignerRefusalV2::CustodyIo)?;
+        fork_fence_guard
+            .verify_same_process()
+            .map_err(|_| SignerRefusalV2::CustodyIo)?;
+        let custodian = Self {
+            coordinates,
+            proposal: proposal.clone(),
+            scope_directory,
+            final_name,
+            creator_pid: std::process::id(),
+            process_epoch,
+        };
+        let proof = custodian.verify_foundational_custody(&custodian.proposal)?;
+        proof.verify_same_process()?;
+        drop(proof);
+        Ok((custodian, proposal))
+    }
+
+    /// Reopen one exact pre-generation custody object in the current process.
+    ///
+    /// The caller supplies evidence coordinates and the exact public proposal,
+    /// but neither can create custody: this function resolves the fixed root
+    /// and scope through retained descriptors, reopens the proposal-named
+    /// private carrier with `NOFOLLOW`, verifies inode/ownership/mode/link
+    /// facts, canonical bytes, implementation manifest and seed/public-key
+    /// correspondence, and only then returns a new process-local custodian.
+    pub(crate) fn reopen(
+        coordinates: PreGenerationCustodyCoordinatesV1,
+        proposal: StoreIntegrityKeyProposalV1,
+    ) -> Result<Self, SignerRefusalV2> {
+        let root = open_production_custody_root()?;
+        Self::reopen_below_root(coordinates, proposal, root)
+    }
+
+    /// Reconstruct fresh process-local custody from the exact durable
+    /// foundational-enrollment evidence and the currently admitted custodian
+    /// implementation basis.
+    ///
+    /// The public proposal is deliberately not a caller input.  It is decoded
+    /// from the proposal-named, `NOFOLLOW` private carrier under the fixed
+    /// custody root, then every pre-generation coordinate is checked against
+    /// the canonical foundational record before the ordinary descriptor-
+    /// retaining reopen verifier may mint a new custodian.  Neither the
+    /// enrollment nor any of its digest fields is live authority by itself.
+    pub(crate) fn reopen_from_foundational_evidence(
+        foundational: &StoreIntegrityKeyEnrollmentV1,
+        pre_generation_scope_identity: SignerIdentityV1,
+        custodian_implementation_manifest_identity: &Sha256Digest,
+    ) -> Result<Self, SignerRefusalV2> {
+        verify_n_18_key_enrollment(foundational)
+            .map_err(|_| SignerRefusalV2::EnrollmentEvidenceCollision)?;
+        let scope_identity = Sha256Digest::parse(format!(
+            "sha256:{}",
+            hex::encode(pre_generation_scope_identity)
+        ))
+        .map_err(|_| SignerRefusalV2::EnrollmentEvidenceCollision)?;
+        let coordinates = PreGenerationCustodyCoordinatesV1 {
+            occurrence_id: foundational.occurrence().as_str().to_owned(),
+            scope_identity,
+            a2_chain_root_identity: foundational.a2_chain_root().digest().clone(),
+            trust_anchor_identity: foundational.dependency_anchor().digest().clone(),
+            resident_identity: foundational.resident().as_str().to_owned(),
+            resident_generation: foundational.resident_generation(),
+            host_role: foundational.role().to_owned(),
+            role_manifest_generation: foundational.role_manifest_generation(),
+            authority_domain: foundational.authority_domain().to_owned(),
+            signer_scope_policy_identity: foundational.signer_scope_policy().digest().clone(),
+            signer_scope_policy_version: foundational.signer_scope_policy_version(),
+            proposed_key_generation: u64::from(foundational.key_generation().get()),
+            custodian_implementation_manifest_identity: custodian_implementation_manifest_identity
+                .clone(),
+        };
+        coordinates.validate()?;
+        let scope_token = coordinates.scope_token()?;
+        let root = open_production_custody_root()?;
+        validate_directory(&root, 0o700)?;
+        let scope_directory = open_directory_component(&root, digest_hex(&scope_token))?;
+        validate_directory(&scope_directory, 0o700)?;
+        require_same_filesystem(&root, &scope_directory)?;
+        let proposal_identity = foundational.proposal_identity().digest();
+        let final_name = format!("{}.key", digest_hex(proposal_identity));
+        let final_file = open_final_key(&scope_directory, &final_name)?;
+        let bytes = read_exact_secret_bytes(&final_file)?;
+        let carrier = StoreIntegrityCustodyFileV1::decode(&bytes)?;
+        let proposal = StoreIntegrityKeyProposalV1(StoreIntegrityKeyProposalCarrierV1 {
+            schema: KEY_PROPOSAL_SCHEMA_V1.to_owned(),
+            schema_version: 1,
+            fields: carrier.0.fields.clone(),
+        });
+        let enrolled_public_key = hex::decode(foundational.public_key().as_str())
+            .map_err(|_| SignerRefusalV2::EnrollmentEvidenceCollision)?;
+        if proposal.proposal_identity() != proposal_identity
+            || foundational.custody_evidence_identity().digest() != proposal_identity
+            || proposal.fields().scope_token != scope_token
+            || !proposal_fields_match_coordinates(proposal.fields(), &coordinates)
+            || proposal.fields().public_key.as_bytes()
+                != foundational.public_key().as_str().as_bytes()
+            || proposal.fields().proposed_key_generation
+                != u64::from(foundational.key_generation().get())
+            || enrolled_public_key.len() != 32
+            || carrier.0.custodian_implementation_manifest_identity
+                != *custodian_implementation_manifest_identity
+        {
+            return Err(SignerRefusalV2::CustodyKeyMismatch);
+        }
+        drop(carrier);
+        drop(bytes);
+        drop(final_file);
+        drop(scope_directory);
+        Self::reopen_below_root(coordinates, proposal, root)
+    }
+
+    fn reopen_below_root(
+        coordinates: PreGenerationCustodyCoordinatesV1,
+        proposal: StoreIntegrityKeyProposalV1,
+        root: File,
+    ) -> Result<Self, SignerRefusalV2> {
+        let fork_fence_guard = C2ForkFence::acquire().map_err(|_| SignerRefusalV2::CustodyIo)?;
+        coordinates.validate()?;
+        let scope_token = coordinates.scope_token()?;
+        verify_sg_n_08_local_key_proposal_is_inert_carries_no(&proposal)?;
+        if proposal.fields().scope_token != scope_token
+            || !proposal_fields_match_coordinates(proposal.fields(), &coordinates)
+        {
+            return Err(SignerRefusalV2::CustodyPathMismatch);
+        }
+        let scope_mutex = custody_scope_mutex(&scope_token)?;
+        let _scope_guard = scope_mutex.lock().map_err(|_| SignerRefusalV2::CustodyIo)?;
+        validate_directory(&root, 0o700)?;
+        let scope_directory = open_directory_component(&root, digest_hex(&scope_token))?;
+        validate_directory(&scope_directory, 0o700)?;
+        require_same_filesystem(&root, &scope_directory)?;
+        let final_name = format!("{}.key", digest_hex(proposal.proposal_identity()));
+        let final_file = open_final_key(&scope_directory, &final_name)?;
+        let facts = object_facts(&final_file)?;
+        let bytes = read_exact_secret_bytes(&final_file)?;
+        let carrier = StoreIntegrityCustodyFileV1::decode(&bytes)?;
+        verify_file_facts_against_fields(&facts, carrier.0.fields(), bytes.len())?;
+        if carrier.0.fields != *proposal.fields()
+            || carrier.0.custodian_implementation_manifest_identity
+                != coordinates.custodian_implementation_manifest_identity
+        {
+            return Err(SignerRefusalV2::CustodyKeyMismatch);
+        }
+        let seed = carrier.secret_seed()?;
+        if SigningKey::from_bytes(&seed.0).verifying_key().to_bytes()
+            != decode_hex_32(&proposal.fields().public_key)?
+        {
+            return Err(SignerRefusalV2::CustodyKeyMismatch);
+        }
+        drop(seed);
+        drop(carrier);
+        drop(bytes);
+        let mut process_epoch = [0_u8; 32];
+        getrandom::fill(&mut process_epoch).map_err(|_| SignerRefusalV2::CustodyIo)?;
+        fork_fence_guard
+            .verify_same_process()
+            .map_err(|_| SignerRefusalV2::CustodyIo)?;
+        let custodian = Self {
+            coordinates,
+            proposal,
+            scope_directory,
+            final_name,
+            creator_pid: std::process::id(),
+            process_epoch,
+        };
+        // Final readback after construction prevents the reopened descriptor
+        // set from being replaced between verification and returned custody.
+        let proof = custodian.verify_foundational_custody(&custodian.proposal)?;
+        proof.verify_same_process()?;
+        drop(proof);
+        Ok(custodian)
+    }
+
+    pub(in crate::store_generation) fn proposal_identity(&self) -> &Sha256Digest {
         self.proposal.proposal_identity()
     }
 
-    pub(super) fn coordinates(&self) -> &CustodyCoordinatesV1 {
+    pub(in crate::store_generation) fn canonical_proposal_bytes(
+        &self,
+    ) -> Result<Vec<u8>, SignerRefusalV2> {
+        self.proposal.canonical_bytes()
+    }
+
+    pub(super) fn coordinates(&self) -> &PreGenerationCustodyCoordinatesV1 {
         &self.coordinates
     }
 
-    pub(super) fn verifying_key(&self) -> Result<[u8; 32], SignerRefusalV2> {
+    pub(in crate::store_generation) fn verifying_key(&self) -> Result<[u8; 32], SignerRefusalV2> {
         decode_hex_32(&self.proposal.fields().public_key)
     }
 
@@ -754,27 +2214,140 @@ impl C2StoreIntegrityCustodian {
         self.proposal.key_generation_identity()
     }
 
+    /// Seal foundational custody only after exact descriptor readback, file
+    /// facts, carrier canonicality, seed/public-key correspondence, and
+    /// process freshness have all been reverified.
+    pub(crate) fn verify_foundational_custody<'process>(
+        &'process self,
+        proposal: &'process StoreIntegrityKeyProposalV1,
+    ) -> Result<VerifiedFoundationalCustodyV1<'process>, SignerRefusalV2> {
+        if self.creator_pid != std::process::id()
+            || !std::ptr::eq(proposal, &self.proposal)
+            || proposal.fields() != self.proposal.fields()
+        {
+            return Err(SignerRefusalV2::CustodyKeyMismatch);
+        }
+        let public_key = self.verifying_key()?;
+        let proof = VerifiedFoundationalCustodyV1 {
+            custodian: self,
+            proposal,
+            public_key,
+            creator_pid: std::process::id(),
+        };
+        proof.verify_same_process()?;
+        Ok(proof)
+    }
+
+    /// Bind retained, freshly authenticated custody to one exact canonical
+    /// stable signer foundation.  This is route-neutral: the four lineage
+    /// routes differ in how the Store selected/adopted the foundation, not in
+    /// the custody correspondence required once it is GenerationCurrent.
+    pub(crate) fn verify_generation_current_foundation_custody<'process>(
+        &'process self,
+        foundation: &StoreIntegritySignerFoundationV1,
+    ) -> Result<StoreVerifiedGenerationCurrentCustodyV1<'process>, SignerRefusalV2> {
+        let stable = StableFoundationCustodyCoordinatesV1::from_foundation(foundation)?;
+        let foundational = self.verify_foundational_custody(&self.proposal)?;
+        stable.verify_proposal(foundational.proposal)?;
+        Ok(StoreVerifiedGenerationCurrentCustodyV1 {
+            foundational,
+            stable,
+        })
+    }
+
+    /// Seal custody reopened from durable foundational evidence without
+    /// exposing or reconstructing the private retained proposal outside the
+    /// custodian.  The proposal remains inert; this fresh descriptor/process
+    /// check is what produces the borrowed live custody proof.
+    pub(crate) fn seal_reopened_foundational_custody(
+        &self,
+    ) -> Result<VerifiedFoundationalCustodyV1<'_>, SignerRefusalV2> {
+        self.verify_foundational_custody(&self.proposal)
+    }
+
     /// Private typed signing helper; the sealed message trait excludes raw
     /// bytes and external-governance carriers.
-    pub(super) fn sign<M: SignerMessageV1>(
+    pub(super) fn sign<M: SignerMessageV1, Phase>(
         &self,
         _permit: CoordinatorSigningPermitV1,
+        live_permit: &StoreC2SignerAppendPermitV1<'_, '_, '_, Phase>,
+        live: &C2LiveSigningViewV1<'_, '_, '_, Phase>,
         message: &M,
     ) -> Result<CustodySignatureV1, SignerRefusalV2> {
+        live_permit
+            .verify_live_view(live)
+            .map_err(|_| SignerRefusalV2::MessageFrontierMismatch)?;
+        let expected_physical_generation = live.physical_generation_identity().unwrap_or([0; 32]);
+        let expected_lifecycle_root = live.lifecycle_root_identity().unwrap_or([0; 32]);
         if std::process::id() != self.creator_pid
             || self.process_epoch.iter().all(|byte| *byte == 0)
             || !message.family().is_store_signable()
             || message.coordinates().occurrence != self.coordinates.occurrence_identity()
-            || message.coordinates().physical_generation
-                != self.coordinates.physical_generation_bytes()
-            || message.coordinates().lifecycle_root != self.coordinates.lifecycle_root_bytes()
+            || message.coordinates().occurrence != live.occurrence_identity()
+            || message.coordinates().physical_generation != expected_physical_generation
+            || message.coordinates().lifecycle_root != expected_lifecycle_root
             || message.coordinates().scope != self.coordinates.scope_bytes()
+            || message.coordinates().scope != live.signer_scope_identity()
             || message.coordinates().policy != self.coordinates.policy_bytes()
+            || message.coordinates().policy != live.signer_scope_policy_identity()
             || message.coordinates().signer_key_generation
                 != self.proposal.key_generation_identity()
+            || message.coordinates().signer_key_generation != live.signer_key_generation_identity()
+            || message.coordinates().cut != live.event_cut()
+            || self.verifying_key()? != live.signer_public_key()
         {
             return Err(SignerRefusalV2::MessageFrontierMismatch);
         }
+        self.sign_after_authority_checks(message)
+    }
+
+    /// Purpose-locked MSG-02 signing before B/G or live signer standing.
+    /// The actor has already verified the sealed request immediately before
+    /// issuing `live_permit`; this method additionally binds that exact
+    /// request to this retained custodian and the typed MSG-02 message.
+    pub(super) fn sign_initial_possession<M: SignerMessageV1>(
+        &self,
+        _permit: CoordinatorSigningPermitV1,
+        live_permit: &StoreC2InitialPossessionAppendPermitV1<'_, '_>,
+        request: &VerifiedInitialPossessionRequestV1<'_, '_>,
+        message: &M,
+    ) -> Result<CustodySignatureV1, SignerRefusalV2> {
+        if std::ptr::from_ref(live_permit.request()).cast::<()>()
+            != std::ptr::from_ref(request).cast::<()>()
+            || !std::ptr::eq(request.custody().custodian, self)
+            || std::process::id() != self.creator_pid
+            || message.family() != ClosedMessageFamilyV1::Msg02InitialProposalPop
+            || message.coordinates().occurrence != request.occurrence_identity()?
+            || message.coordinates().occurrence != self.coordinates.occurrence_identity()
+            || message.coordinates().physical_generation != [0; 32]
+            || message.coordinates().lifecycle_root != [0; 32]
+            || message.coordinates().scope != request.signer_scope_identity()
+            || message.coordinates().scope != self.coordinates.scope_bytes()
+            || message.coordinates().policy != request.signer_scope_policy_identity()?
+            || message.coordinates().policy != self.coordinates.policy_bytes()
+            || message.coordinates().signer_key_generation
+                != request.signer_key_generation_identity()
+            || message.coordinates().signer_key_generation
+                != self.proposal.key_generation_identity()
+            || message.coordinates().cut != request.event_cut()
+            || request.public_key() != self.verifying_key()?
+        {
+            return Err(SignerRefusalV2::MessageFrontierMismatch);
+        }
+        self.sign_after_authority_checks(message)
+    }
+
+    /// Perform only the custody/cryptographic portion after the caller has
+    /// established the sealed live-Store correspondence.
+    ///
+    /// Keeping this helper private prevents a sibling module from bypassing
+    /// the live permit checks above.  The test-only wrapper below exists so
+    /// filesystem-tamper tests can exercise custody failures without minting
+    /// fake product authority.
+    fn sign_after_authority_checks<M: SignerMessageV1>(
+        &self,
+        message: &M,
+    ) -> Result<CustodySignatureV1, SignerRefusalV2> {
         // From seed reload through signing-key zeroization, no process may be
         // created from this address space.
         let fork_fence_guard = C2ForkFence::acquire().map_err(|_| SignerRefusalV2::CustodyIo)?;
@@ -801,6 +2374,26 @@ impl C2StoreIntegrityCustodian {
         })
     }
 
+    #[cfg(test)]
+    fn sign_for_custody_hostile_test<M: SignerMessageV1>(
+        &self,
+        _permit: CoordinatorSigningPermitV1,
+        message: &M,
+    ) -> Result<CustodySignatureV1, SignerRefusalV2> {
+        if std::process::id() != self.creator_pid
+            || self.process_epoch.iter().all(|byte| *byte == 0)
+            || !message.family().is_store_signable()
+            || message.coordinates().occurrence != self.coordinates.occurrence_identity()
+            || message.coordinates().scope != self.coordinates.scope_bytes()
+            || message.coordinates().policy != self.coordinates.policy_bytes()
+            || message.coordinates().signer_key_generation
+                != self.proposal.key_generation_identity()
+        {
+            return Err(SignerRefusalV2::MessageFrontierMismatch);
+        }
+        self.sign_after_authority_checks(message)
+    }
+
     fn load_seed_for_signing(
         &self,
     ) -> Result<(SecretSeedV1, Flock<File>, CustodyObjectFactsV1), SignerRefusalV2> {
@@ -823,13 +2416,31 @@ impl C2StoreIntegrityCustodian {
 
     #[cfg(test)]
     pub(super) fn create_below_test_root(
-        coordinates: CustodyCoordinatesV1,
+        coordinates: PreGenerationCustodyCoordinatesV1,
         root: File,
     ) -> Result<(Self, StoreIntegrityKeyProposalV1), SignerRefusalV2> {
         let frontier =
             VerifiedCustodyProposalFrontierV1::initial_for_test(coordinates.scope_token()?);
         Self::create_below_root(coordinates, &frontier, root)
     }
+}
+
+fn proposal_fields_match_coordinates(
+    fields: &CustodyPublicFieldsV1,
+    coordinates: &PreGenerationCustodyCoordinatesV1,
+) -> bool {
+    fields.occurrence_id == coordinates.occurrence_id
+        && fields.scope_identity == coordinates.scope_identity
+        && fields.a2_chain_root_identity == coordinates.a2_chain_root_identity
+        && fields.trust_anchor_identity == coordinates.trust_anchor_identity
+        && fields.resident_identity == coordinates.resident_identity
+        && fields.resident_generation == coordinates.resident_generation
+        && fields.host_role == coordinates.host_role
+        && fields.role_manifest_generation == coordinates.role_manifest_generation
+        && fields.authority_domain == coordinates.authority_domain
+        && fields.signer_scope_policy_identity == coordinates.signer_scope_policy_identity
+        && fields.signer_scope_policy_version == coordinates.signer_scope_policy_version
+        && fields.proposed_key_generation == coordinates.proposed_key_generation
 }
 
 impl CustodyPublicFieldsV1 {
@@ -854,16 +2465,29 @@ impl StoreIntegrityCustodyCarrierV1 {
     }
 }
 
-fn custody_scope_mutex(scope_token: &Sha256Digest) -> &'static Mutex<()> {
+fn custody_scope_mutex(scope_token: &Sha256Digest) -> Result<&'static Mutex<()>, SignerRefusalV2> {
     static REGISTRY: OnceLock<Mutex<BTreeMap<String, &'static Mutex<()>>>> = OnceLock::new();
     let registry = REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()));
-    let mut registry = registry.lock().expect("custody mutex registry poisoned");
-    *registry
+    let mut registry = registry.lock().map_err(|_| SignerRefusalV2::CustodyIo)?;
+    Ok(*registry
         .entry(scope_token.as_str().to_owned())
-        .or_insert_with(|| Box::leak(Box::new(Mutex::new(()))))
+        .or_insert_with(|| Box::leak(Box::new(Mutex::new(())))))
 }
 
 fn open_production_custody_root() -> Result<File, SignerRefusalV2> {
+    #[cfg(test)]
+    if let Some(root) = TEST_PRODUCTION_CUSTODY_ROOT_V1.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(File::try_clone)
+            .transpose()
+    })
+    .map_err(|_| SignerRefusalV2::CustodyIo)?
+    {
+        validate_directory(&root, 0o700)?;
+        return Ok(root);
+    }
+
     let filesystem_root = File::from(
         open(
             "/",
@@ -872,6 +2496,8 @@ fn open_production_custody_root() -> Result<File, SignerRefusalV2> {
         )
         .map_err(|_| SignerRefusalV2::CustodyIo)?,
     );
+    #[cfg(test)]
+    crate::store_generation::source_io_crash_test_support::after_source_io_v1("SC-49");
     let var = open_directory_component(&filesystem_root, "var")?;
     require_same_filesystem(&filesystem_root, &var)?;
     let lib = open_directory_component(&var, "lib")?;
@@ -886,7 +2512,7 @@ fn open_production_custody_root() -> Result<File, SignerRefusalV2> {
 }
 
 fn open_directory_component(parent: &File, name: &str) -> Result<File, SignerRefusalV2> {
-    Ok(File::from(
+    let directory = File::from(
         openat(
             parent,
             name,
@@ -894,7 +2520,10 @@ fn open_directory_component(parent: &File, name: &str) -> Result<File, SignerRef
             Mode::empty(),
         )
         .map_err(|_| SignerRefusalV2::CustodyIo)?,
-    ))
+    );
+    #[cfg(test)]
+    crate::store_generation::source_io_crash_test_support::after_source_io_v1("SC-50");
+    Ok(directory)
 }
 
 fn require_same_filesystem(parent: &File, child: &File) -> Result<(), SignerRefusalV2> {
@@ -913,7 +2542,11 @@ fn open_or_create_scope_directory(
     validate_directory(root, 0o700)?;
     let name = digest_hex(scope_token);
     match mkdirat(root, name, Mode::RUSR | Mode::WUSR | Mode::XUSR) {
-        Ok(()) => fsync(root).map_err(|_| SignerRefusalV2::CustodyIo)?,
+        Ok(()) => {
+            fsync(root).map_err(|_| SignerRefusalV2::CustodyIo)?;
+            #[cfg(test)]
+            crate::store_generation::source_io_crash_test_support::after_source_io_v1("SC-51");
+        }
         Err(error) if error == rustix::io::Errno::EXIST => {}
         Err(_) => return Err(SignerRefusalV2::CustodyIo),
     }
@@ -926,6 +2559,8 @@ fn open_or_create_scope_directory(
         )
         .map_err(|_| SignerRefusalV2::CustodyIo)?,
     );
+    #[cfg(test)]
+    crate::store_generation::source_io_crash_test_support::after_source_io_v1("SC-52");
     validate_directory(&directory, 0o700)?;
     require_same_filesystem(root, &directory)?;
     Ok(directory)
@@ -1000,7 +2635,7 @@ fn object_facts(file: &File) -> Result<CustodyObjectFactsV1, SignerRefusalV2> {
 }
 
 fn open_final_key(directory: &File, name: &str) -> Result<File, SignerRefusalV2> {
-    Ok(File::from(
+    let file = File::from(
         openat(
             directory,
             name,
@@ -1008,19 +2643,70 @@ fn open_final_key(directory: &File, name: &str) -> Result<File, SignerRefusalV2>
             Mode::empty(),
         )
         .map_err(|_| SignerRefusalV2::CustodyIo)?,
-    ))
+    );
+    #[cfg(test)]
+    crate::store_generation::source_io_crash_test_support::after_source_io_v1("SC-53");
+    Ok(file)
 }
 
-fn scope_directory_is_empty(directory: &File) -> Result<bool, SignerRefusalV2> {
+fn scope_directory_committed_proposal_identities(
+    directory: &File,
+) -> Result<BTreeSet<Sha256Digest>, SignerRefusalV2> {
     let mut reader = Dir::read_from(directory).map_err(|_| SignerRefusalV2::CustodyIo)?;
+    let mut identities = BTreeSet::new();
     for entry in &mut reader {
         let entry = entry.map_err(|_| SignerRefusalV2::CustodyIo)?;
         let name = entry.file_name().to_bytes();
-        if name != b"." && name != b".." {
-            return Ok(false);
+        if name == b"." || name == b".." {
+            continue;
+        }
+        let is_exact_key_name = name.len() == 64 + b".key".len()
+            && name.ends_with(b".key")
+            && name[..64]
+                .iter()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte));
+        if !is_exact_key_name {
+            return Err(SignerRefusalV2::CustodyPathMismatch);
+        }
+        let digest = Sha256Digest::parse(format!(
+            "sha256:{}",
+            std::str::from_utf8(&name[..64]).map_err(|_| SignerRefusalV2::CustodyPathMismatch)?,
+        ))
+        .map_err(|_| SignerRefusalV2::CustodyPathMismatch)?;
+        if !identities.insert(digest) {
+            return Err(SignerRefusalV2::CustodyPathMismatch);
         }
     }
-    Ok(true)
+    Ok(identities)
+}
+
+fn verify_committed_carrier_for_frontier(
+    directory: &File,
+    expected_scope_token: &Sha256Digest,
+    expected_ordinal: u64,
+    expected_proposal_identity: &Sha256Digest,
+    expected_manifest_identity: &Sha256Digest,
+) -> Result<(), SignerRefusalV2> {
+    let name = format!("{}.key", digest_hex(expected_proposal_identity));
+    let file = open_final_key(directory, &name)?;
+    let facts = object_facts(&file)?;
+    let bytes = read_exact_secret_bytes(&file)?;
+    let carrier = StoreIntegrityCustodyFileV1::decode(&bytes)?;
+    verify_file_facts_against_fields(&facts, carrier.0.fields(), bytes.len())?;
+    let proposal = StoreIntegrityKeyProposalV1(StoreIntegrityKeyProposalCarrierV1 {
+        schema: KEY_PROPOSAL_SCHEMA_V1.to_owned(),
+        schema_version: 1,
+        fields: carrier.0.fields.clone(),
+    });
+    verify_sg_n_08_local_key_proposal_is_inert_carries_no(&proposal)?;
+    if proposal.proposal_identity() != expected_proposal_identity
+        || proposal.fields().scope_token != *expected_scope_token
+        || proposal.fields().proposal_ordinal != expected_ordinal
+        || carrier.0.custodian_implementation_manifest_identity != *expected_manifest_identity
+    {
+        return Err(SignerRefusalV2::CustodyPathMismatch);
+    }
+    Ok(())
 }
 
 fn read_exact_bytes(file: &File) -> Result<Vec<u8>, SignerRefusalV2> {
@@ -1076,6 +2762,53 @@ fn domain_digest<T: Serialize>(domain: &[u8], value: &T) -> Result<Sha256Digest,
     let canonical =
         canonical_json_bytes(value).map_err(|_| SignerRefusalV2::CustodyFileMalformed)?;
     Ok(sha256_bytes(&[domain, canonical.as_slice()].concat()))
+}
+
+fn digest_fields_v1(domain: &[u8], fields: &[&[u8]]) -> Sha256Digest {
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    for field in fields {
+        hasher.update((field.len() as u64).to_be_bytes());
+        hasher.update(field);
+    }
+    let bytes: [u8; 32] = hasher.finalize().into();
+    Sha256Digest::parse(format!("sha256:{}", hex::encode(bytes)))
+        .expect("SHA-256 bytes always form a valid algorithm-qualified digest")
+}
+
+fn decode_canonical_json_v1(bytes: &[u8]) -> Result<serde_json::Value, SignerRefusalV2> {
+    let value: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| SignerRefusalV2::CustodyFileMalformed)?;
+    if canonical_json_bytes(&value).map_err(|_| SignerRefusalV2::CustodyFileMalformed)? != bytes {
+        return Err(SignerRefusalV2::CustodyFileMalformed);
+    }
+    Ok(value)
+}
+
+fn decode_canonical_proposal_v1(
+    bytes: &[u8],
+) -> Result<StoreIntegrityKeyProposalV1, SignerRefusalV2> {
+    let value = decode_canonical_json_v1(bytes)?;
+    let carrier: StoreIntegrityKeyProposalCarrierV1 =
+        serde_json::from_value(value).map_err(|_| SignerRefusalV2::CustodyFileMalformed)?;
+    let proposal = StoreIntegrityKeyProposalV1(carrier);
+    verify_sg_n_08_local_key_proposal_is_inert_carries_no(&proposal)?;
+    Ok(proposal)
+}
+
+fn digest_from_identity_bytes(bytes: [u8; 32]) -> Result<Sha256Digest, SignerRefusalV2> {
+    Sha256Digest::parse(format!("sha256:{}", hex::encode(bytes)))
+        .map_err(|_| SignerRefusalV2::EnrollmentEvidenceCollision)
+}
+
+fn digest_field_v1(value: Option<&serde_json::Value>) -> Result<Sha256Digest, SignerRefusalV2> {
+    value
+        .and_then(serde_json::Value::as_str)
+        .ok_or(SignerRefusalV2::EnrollmentEvidenceCollision)
+        .and_then(|value| {
+            Sha256Digest::parse(value.to_owned())
+                .map_err(|_| SignerRefusalV2::EnrollmentEvidenceCollision)
+        })
 }
 
 fn domain_digest_bytes(domain: &[u8], bytes: &[u8]) -> SignerIdentityV1 {
@@ -1190,14 +2923,14 @@ pub(crate) fn verify_sg_n_08_local_key_proposal_is_inert_carries_no(
 }
 
 pub(crate) fn construct_sg_n_10_custody_root_path_are_fixed_by_implementation(
-    coordinates: &CustodyCoordinatesV1,
+    coordinates: &PreGenerationCustodyCoordinatesV1,
 ) -> Result<PathBuf, SignerRefusalV2> {
     let scope = coordinates.scope_token()?;
     Ok(Path::new(STORE_INTEGRITY_CUSTODY_ROOT_V1).join(digest_hex(&scope)))
 }
 
 pub(crate) fn verify_sg_n_10_custody_root_path_are_fixed_by_implementation(
-    coordinates: &CustodyCoordinatesV1,
+    coordinates: &PreGenerationCustodyCoordinatesV1,
     path: &Path,
 ) -> Result<(), SignerRefusalV2> {
     if construct_sg_n_10_custody_root_path_are_fixed_by_implementation(coordinates)? != path {
@@ -1275,14 +3008,12 @@ pub(crate) fn verify_sg_rec_14_custody_file(
 }
 
 #[cfg(test)]
-pub(super) fn test_coordinates() -> CustodyCoordinatesV1 {
+pub(super) fn test_coordinates() -> PreGenerationCustodyCoordinatesV1 {
     let digest = |byte: char| {
         Sha256Digest::parse(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
     };
-    CustodyCoordinatesV1 {
+    PreGenerationCustodyCoordinatesV1 {
         occurrence_id: "occurrence-1".into(),
-        physical_store_generation_identity: digest('1'),
-        signer_lifecycle_root_identity: digest('2'),
         scope_identity: digest('3'),
         a2_chain_root_identity: digest('4'),
         trust_anchor_identity: digest('5'),
@@ -1300,7 +3031,7 @@ pub(super) fn test_coordinates() -> CustodyCoordinatesV1 {
 
 #[cfg(test)]
 fn test_public_fields(
-    coordinates: &CustodyCoordinatesV1,
+    coordinates: &PreGenerationCustodyCoordinatesV1,
     scope_token: Sha256Digest,
     verifying_key: [u8; 32],
 ) -> CustodyPublicFieldsV1 {
@@ -1341,8 +3072,6 @@ fn test_public_fields(
         proposal_ordinal: 1,
         scope_token,
         occurrence_id: coordinates.occurrence_id.clone(),
-        physical_store_generation_identity: coordinates.physical_store_generation_identity.clone(),
-        signer_lifecycle_root_identity: coordinates.signer_lifecycle_root_identity.clone(),
         scope_identity: coordinates.scope_identity.clone(),
         a2_chain_root_identity: coordinates.a2_chain_root_identity.clone(),
         trust_anchor_identity: coordinates.trust_anchor_identity.clone(),
@@ -1379,16 +3108,21 @@ mod tests {
         SignerMessageCoordinatesV1,
         construct_msg_06_healthy_rotation_continuity_current_usable_predecessor,
     };
+    use crate::store_generation::signer::records::construct_store_integrity_signer_foundation_v1;
 
     fn matching_message(
         custodian: &C2StoreIntegrityCustodian,
-        coordinates: &CustodyCoordinatesV1,
+        coordinates: &PreGenerationCustodyCoordinatesV1,
     ) -> impl SignerMessageV1 {
         construct_msg_06_healthy_rotation_continuity_current_usable_predecessor(
             SignerMessageCoordinatesV1 {
                 occurrence: coordinates.occurrence_identity(),
-                physical_generation: coordinates.physical_generation_bytes(),
-                lifecycle_root: coordinates.lifecycle_root_bytes(),
+                // This test-only sealed MSG-06 exercises descriptor custody,
+                // not phase construction.  Use a coherent nonzero synthetic
+                // generation-bound scope; the production signer path derives
+                // both identities from the unforgeable live context.
+                physical_generation: [6; 32],
+                lifecycle_root: [7; 32],
                 scope: coordinates.scope_bytes(),
                 policy: coordinates.policy_bytes(),
                 signer_key_generation: custodian.proposal.key_generation_identity(),
@@ -1450,6 +3184,58 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_successor_preparation_schema_matches_runtime_record() {
+        let schema = include_str!(
+            "../../../../../schemas/c2/nq.c2_store_integrity_ordinary_successor_custody_preparation.v1.json"
+        );
+        let expected = [
+            "schema",
+            "schema_version",
+            "preparation_request_identity",
+            "occurrence_id",
+            "scope_identity",
+            "predecessor_binding_identity",
+            "predecessor_key_generation_identity",
+            "transition_identity",
+            "successor_proposal_identity",
+            "successor_pop_challenge_identity",
+            "successor_key_generation",
+            "active_policy_identity",
+            "active_policy_generation",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+        let (required, properties) = schema_keys(schema);
+        assert_eq!(required, expected);
+        assert_eq!(properties, expected);
+        let digest = Sha256Digest::parse(format!("sha256:{}", "a".repeat(64))).unwrap();
+        let runtime = serde_json::to_value(OrdinarySuccessorCustodyPreparationCarrierV1 {
+            schema: ORDINARY_SUCCESSOR_CUSTODY_PREPARATION_SCHEMA_V1.to_owned(),
+            schema_version: 1,
+            preparation_request_identity: digest.clone(),
+            occurrence_id: "occurrence-1".to_owned(),
+            scope_identity: digest.clone(),
+            predecessor_binding_identity: digest.clone(),
+            predecessor_key_generation_identity: digest.clone(),
+            transition_identity: digest.clone(),
+            successor_proposal_identity: digest.clone(),
+            successor_pop_challenge_identity: digest.clone(),
+            successor_key_generation: 1,
+            active_policy_identity: digest,
+            active_policy_generation: 1,
+        })
+        .unwrap();
+        let runtime = runtime
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(runtime, expected);
+    }
+
+    #[test]
     fn custody_refuses_invalid_raw_gen4_resident_coordinates() {
         assert!(valid_resident_identity("resident/node-a"));
         assert!(valid_resident_identity(&"é".repeat(512)));
@@ -1491,7 +3277,7 @@ mod tests {
         .unwrap();
         let message = matching_message(&custodian, &coordinates);
         let signature = custodian
-            .sign(CoordinatorSigningPermitV1::for_test(), &message)
+            .sign_for_custody_hostile_test(CoordinatorSigningPermitV1::for_test(), &message)
             .expect("typed signing succeeds");
         assert_eq!(
             signature.family,
@@ -1588,6 +3374,200 @@ mod tests {
     }
 
     #[test]
+    fn generation_current_custody_requires_exact_stable_foundation_coordinates() {
+        let root = tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut coordinates = test_coordinates();
+        coordinates.proposed_key_generation = 1;
+        let (custodian, _) = C2StoreIntegrityCustodian::create_below_test_root(
+            coordinates,
+            File::open(root.path()).unwrap(),
+        )
+        .unwrap();
+        let foundational = custodian.seal_reopened_foundational_custody().unwrap();
+        let exact = construct_store_integrity_signer_foundation_v1(
+            foundational.public_key(),
+            foundational.key_generation(),
+            foundational.custody_evidence_identity().clone(),
+        )
+        .unwrap();
+        drop(foundational);
+
+        let verified = custodian
+            .verify_generation_current_foundation_custody(&exact)
+            .unwrap();
+        assert_eq!(verified.foundation_identity(), exact.identity());
+        assert_eq!(verified.public_key(), exact.public_key().unwrap());
+        assert_eq!(verified.key_generation(), exact.key_generation());
+        assert_eq!(
+            verified.custody_evidence_identity(),
+            exact.custody_evidence_identity()
+        );
+        assert_eq!(
+            verified.foundational_custody().proposal_identity(),
+            exact.custody_evidence_identity()
+        );
+        verified.verify_same_process().unwrap();
+        drop(verified);
+
+        let wrong_public_key = construct_store_integrity_signer_foundation_v1(
+            SigningKey::from_bytes(&[19; 32]).verifying_key().to_bytes(),
+            exact.key_generation(),
+            exact.custody_evidence_identity().clone(),
+        )
+        .unwrap();
+        assert!(matches!(
+            custodian.verify_generation_current_foundation_custody(&wrong_public_key),
+            Err(SignerRefusalV2::CustodyKeyMismatch)
+        ));
+
+        let wrong_generation = construct_store_integrity_signer_foundation_v1(
+            exact.public_key().unwrap(),
+            exact.key_generation() + 1,
+            exact.custody_evidence_identity().clone(),
+        )
+        .unwrap();
+        assert!(matches!(
+            custodian.verify_generation_current_foundation_custody(&wrong_generation),
+            Err(SignerRefusalV2::CustodyKeyMismatch)
+        ));
+
+        let wrong_custody = construct_store_integrity_signer_foundation_v1(
+            exact.public_key().unwrap(),
+            exact.key_generation(),
+            sha256_bytes(b"substituted-custody-evidence"),
+        )
+        .unwrap();
+        assert!(matches!(
+            custodian.verify_generation_current_foundation_custody(&wrong_custody),
+            Err(SignerRefusalV2::CustodyKeyMismatch)
+        ));
+    }
+
+    #[test]
+    fn filesystem_first_crash_cut_reconciles_exact_carrier_without_second_key() {
+        let root = tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let coordinates = test_coordinates();
+        let scope_token = coordinates.scope_token().unwrap();
+        let frontier = VerifiedCustodyProposalFrontierV1::initial_for_test(scope_token.clone());
+        let (first_process, proposal) = C2StoreIntegrityCustodian::create_below_root(
+            coordinates.clone(),
+            &frontier,
+            File::open(root.path()).unwrap(),
+        )
+        .expect("filesystem-first carrier is durably committed");
+        let proposal_identity = proposal.proposal_identity().clone();
+        drop(first_process);
+
+        // This models the cut after carrier fsync/rename but before the Store
+        // preparation row commits. Reconciliation must reopen exactly that
+        // carrier and must not generate a second proposal.
+        let (reconciled, reconciled_proposal) =
+            C2StoreIntegrityCustodian::reconcile_filesystem_first_below_root(
+                coordinates,
+                &frontier,
+                File::open(root.path()).unwrap(),
+            )
+            .expect("exact missing Store row reconciles from the committed carrier");
+        assert_eq!(reconciled_proposal.proposal_identity(), &proposal_identity);
+        assert_eq!(reconciled.proposal_identity(), &proposal_identity);
+        assert_eq!(
+            scope_directory_committed_proposal_identities(&reconciled.scope_directory).unwrap(),
+            BTreeSet::from([proposal_identity]),
+        );
+    }
+
+    #[test]
+    fn exact_frontier_refuses_same_count_proposal_name_substitution() {
+        let root = tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let coordinates = test_coordinates();
+        let scope_token = coordinates.scope_token().unwrap();
+        let initial = VerifiedCustodyProposalFrontierV1::initial_for_test(scope_token.clone());
+        let (custodian, proposal) = C2StoreIntegrityCustodian::create_below_root(
+            coordinates.clone(),
+            &initial,
+            File::open(root.path()).unwrap(),
+        )
+        .unwrap();
+        let committed = proposal.proposal_identity().clone();
+        let scope_path = root.path().join(digest_hex(&scope_token));
+        let substituted = format!("{}.key", "a".repeat(64));
+        std::fs::rename(
+            scope_path.join(&custodian.final_name),
+            scope_path.join(&substituted),
+        )
+        .unwrap();
+        drop(custodian);
+
+        let frontier = VerifiedCustodyProposalFrontierV1 {
+            scope_token,
+            next_ordinal: 2,
+            complete_frontier_identity: sha256_bytes(b"store-resolved-frontier-after-one"),
+            committed_proposals: BTreeMap::from([(1, committed)]),
+        };
+        let mut successor_coordinates = coordinates;
+        successor_coordinates.proposed_key_generation = 1;
+        assert_eq!(
+            C2StoreIntegrityCustodian::create_below_root(
+                successor_coordinates,
+                &frontier,
+                File::open(root.path()).unwrap(),
+            )
+            .unwrap_err(),
+            SignerRefusalV2::CustodyPathMismatch,
+        );
+        assert_eq!(std::fs::read_dir(scope_path).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn exact_frontier_refuses_same_name_replacement_inode() {
+        let root = tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let coordinates = test_coordinates();
+        let scope_token = coordinates.scope_token().unwrap();
+        let initial = VerifiedCustodyProposalFrontierV1::initial_for_test(scope_token.clone());
+        let (custodian, proposal) = C2StoreIntegrityCustodian::create_below_root(
+            coordinates.clone(),
+            &initial,
+            File::open(root.path()).unwrap(),
+        )
+        .unwrap();
+        let committed = proposal.proposal_identity().clone();
+        let scope_path = root.path().join(digest_hex(&scope_token));
+        let carrier_path = scope_path.join(&custodian.final_name);
+        let bytes = std::fs::read(&carrier_path).unwrap();
+        drop(custodian);
+        // Retain the displaced inode so the filesystem cannot immediately
+        // recycle its number for the replacement and make this hostile
+        // specimen allocator-dependent.
+        let displaced_inode = File::open(&carrier_path).unwrap();
+        std::fs::remove_file(&carrier_path).unwrap();
+        std::fs::write(&carrier_path, bytes).unwrap();
+        std::fs::set_permissions(&carrier_path, std::fs::Permissions::from_mode(0o400)).unwrap();
+
+        let frontier = VerifiedCustodyProposalFrontierV1 {
+            scope_token,
+            next_ordinal: 2,
+            complete_frontier_identity: sha256_bytes(b"store-resolved-frontier-after-one"),
+            committed_proposals: BTreeMap::from([(1, committed)]),
+        };
+        let mut successor_coordinates = coordinates;
+        successor_coordinates.proposed_key_generation = 1;
+        assert!(matches!(
+            C2StoreIntegrityCustodian::create_below_root(
+                successor_coordinates,
+                &frontier,
+                File::open(root.path()).unwrap(),
+            ),
+            Err(SignerRefusalV2::CustodyFileUnsafe)
+        ));
+        assert_eq!(std::fs::read_dir(scope_path).unwrap().count(), 1);
+        drop(displaced_inode);
+    }
+
+    #[test]
     fn nonconforming_root_refuses_without_chmod_or_creation() {
         let root = tempdir().unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1629,7 +3609,8 @@ mod tests {
         .unwrap();
         let message = matching_message(&custodian, &coordinates);
         assert_eq!(
-            custodian.sign(CoordinatorSigningPermitV1::for_test(), &message),
+            custodian
+                .sign_for_custody_hostile_test(CoordinatorSigningPermitV1::for_test(), &message,),
             Err(SignerRefusalV2::CustodyFileUnsafe)
         );
     }
@@ -1655,7 +3636,8 @@ mod tests {
         std::fs::set_permissions(&final_path, std::fs::Permissions::from_mode(0o400)).unwrap();
         let message = matching_message(&custodian, &coordinates);
         assert_eq!(
-            custodian.sign(CoordinatorSigningPermitV1::for_test(), &message),
+            custodian
+                .sign_for_custody_hostile_test(CoordinatorSigningPermitV1::for_test(), &message,),
             Err(SignerRefusalV2::CustodyFileUnsafe)
         );
     }
@@ -1705,7 +3687,8 @@ mod tests {
         .unwrap();
         let message = matching_message(&custodian, &coordinates);
         assert_eq!(
-            custodian.sign(CoordinatorSigningPermitV1::for_test(), &message),
+            custodian
+                .sign_for_custody_hostile_test(CoordinatorSigningPermitV1::for_test(), &message,),
             Err(SignerRefusalV2::CustodyFileUnsafe)
         );
         let guard = C2ForkFence::acquire().expect("fence is free after refusals");
@@ -1757,11 +3740,173 @@ mod tests {
             Err(SignerRefusalV2::CustodyIo)
         ));
         assert_eq!(
-            custodian.sign(CoordinatorSigningPermitV1::for_test(), &message),
+            custodian
+                .sign_for_custody_hostile_test(CoordinatorSigningPermitV1::for_test(), &message,),
             Err(SignerRefusalV2::CustodyIo)
         );
         drop(guard);
         let guard = C2ForkFence::acquire().expect("fence is free after reentrant refusals");
         guard.verify_same_process().expect("same process");
+    }
+
+    #[test]
+    fn custody_creation_provenance_is_distinct_from_restore_adoption_lineage() {
+        for creation in [
+            "initialExternal",
+            "ordinarySuccessorContinuity",
+            "recoveryNewFoundation",
+        ] {
+            assert_eq!(
+                verify_stable_foundation_creation_lineage_for_adoption_v1(
+                    creation,
+                    FoundationalAdoptionLineageV1::RestoreHistorical,
+                )
+                .expect("restore reuses an exact legally created foundation")
+                .as_str(),
+                creation
+            );
+        }
+        assert_eq!(
+            verify_stable_foundation_creation_lineage_for_adoption_v1(
+                "restoreHistorical",
+                FoundationalAdoptionLineageV1::RestoreHistorical,
+            ),
+            Err(SignerRefusalV2::CustodyPathMismatch)
+        );
+    }
+
+    #[test]
+    fn nonrestore_adoption_requires_its_exact_custody_creation_lineage() {
+        let cases = [
+            (
+                FoundationalAdoptionLineageV1::InitialExternal,
+                "initialExternal",
+            ),
+            (
+                FoundationalAdoptionLineageV1::OrdinarySuccessorContinuity,
+                "ordinarySuccessorContinuity",
+            ),
+            (
+                FoundationalAdoptionLineageV1::RecoveryNewFoundation,
+                "recoveryNewFoundation",
+            ),
+        ];
+        for (adoption, expected) in cases {
+            for actual in [
+                "initialExternal",
+                "ordinarySuccessorContinuity",
+                "recoveryNewFoundation",
+            ] {
+                let result =
+                    verify_stable_foundation_creation_lineage_for_adoption_v1(actual, adoption);
+                assert_eq!(result.is_ok(), actual == expected);
+            }
+        }
+    }
+
+    #[test]
+    fn route_aware_frontier_accepts_ordinary_successor_without_bootstrap_request() {
+        let digest = |byte: char| {
+            Sha256Digest::parse(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
+        };
+        let mut coordinates = test_coordinates();
+        coordinates.proposed_key_generation = 1;
+        let scope_token = coordinates.scope_token().unwrap();
+        let fields = test_public_fields(
+            &coordinates,
+            scope_token.clone(),
+            SigningKey::from_bytes(&[7; 32]).verifying_key().to_bytes(),
+        );
+        let proposal = StoreIntegrityKeyProposalV1(StoreIntegrityKeyProposalCarrierV1 {
+            schema: KEY_PROPOSAL_SCHEMA_V1.to_owned(),
+            schema_version: 1,
+            fields,
+        });
+        verify_sg_n_08_local_key_proposal_is_inert_carries_no(&proposal).unwrap();
+        let request = StoreOrdinarySuccessorCustodyPreparationRequestV1::construct(
+            coordinates.occurrence_id.clone(),
+            coordinates.scope_identity.clone(),
+            digest('b'),
+            digest('c'),
+            digest('d'),
+            &proposal,
+            digest('e'),
+            digest('f'),
+            2,
+        )
+        .unwrap();
+        let proposal_bytes = proposal.canonical_bytes().unwrap();
+        let request_bytes = request.canonical_bytes().unwrap();
+        let predecessor = digest_fields_v1(
+            C2_CUSTODY_EMPTY_FRONTIER_DOMAIN_V1,
+            &[scope_token.as_str().as_bytes()],
+        );
+        let proposal_sha = sha256_bytes(&proposal_bytes);
+        let request_sha = sha256_bytes(&request_bytes);
+        let resulting = digest_fields_v1(
+            C2_CUSTODY_FRONTIER_STEP_DOMAIN_V1,
+            &[
+                predecessor.as_str().as_bytes(),
+                &1_u64.to_be_bytes(),
+                proposal.proposal_identity().as_str().as_bytes(),
+                request.identity().as_str().as_bytes(),
+                proposal_sha.as_str().as_bytes(),
+                request_sha.as_str().as_bytes(),
+            ],
+        );
+        let row = StoreCustodyProposalFrontierRowV1::ordinary_successor(
+            1,
+            predecessor,
+            resulting.clone(),
+            proposal.proposal_identity().clone(),
+            proposal_bytes.clone(),
+            proposal_sha,
+            proposal_bytes.len() as u64,
+            request,
+            request_sha,
+            request_bytes.len() as u64,
+        )
+        .unwrap();
+        let (next, resolved, committed) =
+            resolve_store_custody_proposal_frontier_rows_v1(&scope_token, [row.clone()]).unwrap();
+        assert_eq!(next, 2);
+        assert_eq!(resolved, resulting);
+        assert_eq!(committed.get(&1), Some(proposal.proposal_identity()));
+
+        let mut collision = row;
+        collision.resulting_frontier_identity = digest('1');
+        assert_eq!(
+            resolve_store_custody_proposal_frontier_rows_v1(&scope_token, [collision]),
+            Err(SignerRefusalV2::EnrollmentEvidenceCollision)
+        );
+    }
+
+    #[test]
+    fn schema_closes_custody_creation_lineages_and_recovery_ordinal_law() {
+        let canonical = include_str!("../../schema.sql");
+        let migration = include_str!("../../../migrations/v9_c2_signer_lineage.sql");
+        for sql in [canonical, migration] {
+            let preparation_start = sql
+                .find("CREATE TABLE c2_custody_proposal_preparations")
+                .expect("custody preparation table exists");
+            let preparation_end = sql[preparation_start..]
+                .find("CREATE TRIGGER immutable_c2_custody_proposal_preparations_update")
+                .map(|offset| preparation_start + offset)
+                .expect("custody preparation table closes before trigger");
+            let preparation = &sql[preparation_start..preparation_end];
+            assert!(preparation.contains("'ordinarySuccessorContinuity'"));
+            assert!(preparation.contains("'recoveryNewFoundation'"));
+            assert!(
+                !preparation.contains("'restoreHistorical'"),
+                "restore must reuse historical custody rather than create a row"
+            );
+
+            let recovery_check = sql
+                .find("(binding_mode = 'recovery_successor'")
+                .expect("recovery current-binding check exists");
+            let recovery_check = &sql[recovery_check..][..500.min(sql.len() - recovery_check)];
+            assert!(recovery_check.contains("current_key_generation >= 0"));
+            assert!(!recovery_check.contains("current_key_generation > 0"));
+        }
     }
 }

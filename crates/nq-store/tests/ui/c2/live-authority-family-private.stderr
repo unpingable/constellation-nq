@@ -1,0 +1,187 @@
+error[E0603]: module `live_c2` is private
+ --> tests/ui/c2/live-authority-family-private.rs:6:33
+  |
+6 | use nq_store::store_generation::live_c2::C2LiveSignerContextV1;
+  |                                 ^^^^^^^ private module
+  |
+note: the module `live_c2` is defined here
+ --> src/store_generation.rs
+  |
+  | pub(crate) mod live_c2;
+  | ^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: module `live_c2` is private
+ --> tests/ui/c2/live-authority-family-private.rs:7:33
+  |
+7 | use nq_store::store_generation::live_c2::C2LiveWriterSessionV1;
+  |                                 ^^^^^^^ private module
+  |
+note: the module `live_c2` is defined here
+ --> src/store_generation.rs
+  |
+  | pub(crate) mod live_c2;
+  | ^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: module `live_c2` is private
+ --> tests/ui/c2/live-authority-family-private.rs:8:33
+  |
+8 | use nq_store::store_generation::live_c2::ConsumedStoreFoundationAdoptionAuthorityV1;
+  |                                 ^^^^^^^ private module
+  |
+note: the module `live_c2` is defined here
+ --> src/store_generation.rs
+  |
+  | pub(crate) mod live_c2;
+  | ^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: module `live_c2` is private
+ --> tests/ui/c2/live-authority-family-private.rs:9:33
+  |
+9 | use nq_store::store_generation::live_c2::GenerationCurrentV1;
+  |                                 ^^^^^^^  ------------------- enum `GenerationCurrentV1` is not publicly re-exported
+  |                                 |
+  |                                 private module
+  |
+note: the module `live_c2` is defined here
+ --> src/store_generation.rs
+  |
+  | pub(crate) mod live_c2;
+  | ^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: module `live_c2` is private
+  --> tests/ui/c2/live-authority-family-private.rs:10:33
+   |
+10 | use nq_store::store_generation::live_c2::PendingPossessionV1;
+   |                                 ^^^^^^^  ------------------- enum `PendingPossessionV1` is not publicly re-exported
+   |                                 |
+   |                                 private module
+   |
+note: the module `live_c2` is defined here
+  --> src/store_generation.rs
+   |
+   | pub(crate) mod live_c2;
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: module `live_c2` is private
+  --> tests/ui/c2/live-authority-family-private.rs:11:33
+   |
+11 | use nq_store::store_generation::live_c2::PendingSelectedV1;
+   |                                 ^^^^^^^  ----------------- enum `PendingSelectedV1` is not publicly re-exported
+   |                                 |
+   |                                 private module
+   |
+note: the module `live_c2` is defined here
+  --> src/store_generation.rs
+   |
+   | pub(crate) mod live_c2;
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: module `live_c2` is private
+  --> tests/ui/c2/live-authority-family-private.rs:12:33
+   |
+12 | use nq_store::store_generation::live_c2::StoreVerifiedCurrentPredecessorAuthorityV1;
+   |                                 ^^^^^^^ private module
+   |
+note: the module `live_c2` is defined here
+  --> src/store_generation.rs
+   |
+   | pub(crate) mod live_c2;
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: module `live_c2` is private
+  --> tests/ui/c2/live-authority-family-private.rs:13:33
+   |
+13 | use nq_store::store_generation::live_c2::StoreVerifiedOrdinarySuccessorFoundationAuthorityV1;
+   |                                 ^^^^^^^ private module
+   |
+note: the module `live_c2` is defined here
+  --> src/store_generation.rs
+   |
+   | pub(crate) mod live_c2;
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: module `live_c2` is private
+  --> tests/ui/c2/live-authority-family-private.rs:14:33
+   |
+14 | use nq_store::store_generation::live_c2::StoreVerifiedRecoveryEntryAuthorityV1;
+   |                                 ^^^^^^^ private module
+   |
+note: the module `live_c2` is defined here
+  --> src/store_generation.rs
+   |
+   | pub(crate) mod live_c2;
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: module `live_c2` is private
+  --> tests/ui/c2/live-authority-family-private.rs:15:33
+   |
+15 | use nq_store::store_generation::live_c2::StoreVerifiedRecoveryFoundationAuthorityV1;
+   |                                 ^^^^^^^ private module
+   |
+note: the module `live_c2` is defined here
+  --> src/store_generation.rs
+   |
+   | pub(crate) mod live_c2;
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: module `live_c2` is private
+  --> tests/ui/c2/live-authority-family-private.rs:16:33
+   |
+16 | use nq_store::store_generation::live_c2::StoreVerifiedRecoveryPossessionPermitV1;
+   |                                 ^^^^^^^ private module
+   |
+note: the module `live_c2` is defined here
+  --> src/store_generation.rs
+   |
+   | pub(crate) mod live_c2;
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: module `live_c2` is private
+  --> tests/ui/c2/live-authority-family-private.rs:17:33
+   |
+17 | use nq_store::store_generation::live_c2::StoreVerifiedRestoreEntryAuthorityV1;
+   |                                 ^^^^^^^ private module
+   |
+note: the module `live_c2` is defined here
+  --> src/store_generation.rs
+   |
+   | pub(crate) mod live_c2;
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: module `live_c2` is private
+  --> tests/ui/c2/live-authority-family-private.rs:18:33
+   |
+18 | use nq_store::store_generation::live_c2::StoreVerifiedRestoreFoundationAuthorityV1;
+   |                                 ^^^^^^^ private module
+   |
+note: the module `live_c2` is defined here
+  --> src/store_generation.rs
+   |
+   | pub(crate) mod live_c2;
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: module `live_c2` is private
+  --> tests/ui/c2/live-authority-family-private.rs:19:33
+   |
+19 | use nq_store::store_generation::live_c2::StoreVerifiedRestorePossessionPermitV1;
+   |                                 ^^^^^^^ private module
+   |
+note: the module `live_c2` is defined here
+  --> src/store_generation.rs
+   |
+   | pub(crate) mod live_c2;
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: module `messages` is private
+  --> tests/ui/c2/live-authority-family-private.rs:20:41
+   |
+20 | use nq_store::store_generation::signer::messages::SignerMessageV1;
+   |                                         ^^^^^^^^  --------------- trait `SignerMessageV1` is not publicly re-exported
+   |                                         |
+   |                                         private module
+   |
+note: the module `messages` is defined here
+  --> src/store_generation/signer/mod.rs
+   |
+   | pub(crate) mod messages;
+   | ^^^^^^^^^^^^^^^^^^^^^^^

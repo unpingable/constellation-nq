@@ -133,9 +133,9 @@ const SCHEMA_V8_TO_V9_C2_STORE_GENERATION: &str =
     include_str!("schema_v8_to_v9_c2_store_generation.sql");
 const SCHEMA_V9_C2_SIGNER_LINEAGE: &str = include_str!("../migrations/v9_c2_signer_lineage.sql");
 const SCHEMA_V8_TO_V9_C2_STORE_GENERATION_SHA256: &str =
-    "sha256:7386144f5a7fe1ec9fd573499bf1873b9f0197ab5abd9c1b6befb0110dc223fe";
+    "sha256:c0150d114702668683d05a3024de0cb4f5b0a032635f29acf7767ef2b75dda07";
 const SCHEMA_V9_C2_SIGNER_LINEAGE_SHA256: &str =
-    "sha256:17f5f33ddbaf8ae11cd2ea76942d02acfe437bbc094eac58d190381941d4f319";
+    "sha256:e8001146d221261a4b6b8016bb29a554154da8d4edc9b583757000328c9568f8";
 const APPLICATION_ID: i64 = 1_313_951_303;
 
 const SCHEMA_METADATA_V4: &str = r"CREATE TABLE schema_metadata (
@@ -567,6 +567,7 @@ pub mod schema {
     /// a physical generation, signer standing/currentness, or a writer
     /// session.  The permit is deliberately not constructible in product code
     /// until the ordered Store-owned installation driver exists.
+    #[cfg(test)]
     pub(crate) fn apply_c2_schema_v8_to_v9<Mode>(
         permit: crate::store_generation::install::C2PendingSqlProjectionPermitV1<Mode>,
     ) -> Result<C2SchemaV9Projection, StoreError> {
@@ -10666,6 +10667,7 @@ impl Store {
     /// scoped borrow.  The closed backend stays borrowed for the complete
     /// operation and its retained exclusive generation lock is reverified
     /// before the ordinary process writer mutex is acquired.
+    #[cfg(test)]
     pub(crate) fn with_c2_writer_session<'activation, 'backend, R>(
         &mut self,
         current_activation: &'activation CurrentActivationForC2<'activation>,
@@ -10700,6 +10702,25 @@ impl Store {
     /// and therefore cannot fall back to the Gen4 public ordinary-session
     /// constructor.
     fn has_c2_generation_state(&self) -> Result<bool, StoreError> {
+        // Installation allocates the fixed lock/B/G carriers before the SQL
+        // projection exists.  Any one of those names therefore marks a
+        // governed S1--S5 footprint, including a malformed file, directory,
+        // symlink, or broken symlink.  `symlink_metadata` deliberately does
+        // not follow the final component: an attacker cannot hide a partial
+        // installation from generic-writer refusal with a dangling link.
+        if let Some(root) = self.path.as_deref().and_then(Path::parent) {
+            for fixed_name in [
+                store_generation::C2_LOCK_FILE_V1,
+                store_generation::C2_BOOTSTRAP_EXTENT_V1,
+                store_generation::C2_GLOBAL_REFUSAL_EXTENT_V1,
+            ] {
+                match std::fs::symlink_metadata(root.join(fixed_name)) {
+                    Ok(_) => return Ok(true),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(StoreError::Io(error)),
+                }
+            }
+        }
         if pragma_i64(&self.connection, "user_version")? < 9 {
             return Ok(false);
         }
@@ -10707,8 +10728,22 @@ impl Store {
             .query_row(
                 "SELECT (
                     EXISTS (SELECT 1 FROM c2_installation_projection LIMIT 1)
+                    OR EXISTS (SELECT 1 FROM c2_installation_receipt_index LIMIT 1)
+                    OR EXISTS (SELECT 1 FROM c2_signer_bootstrap_transition LIMIT 1)
                     OR EXISTS (SELECT 1 FROM c2_signer_root_binding_projection LIMIT 1)
                     OR EXISTS (SELECT 1 FROM c2_signer_current_binding_projection LIMIT 1)
+                    OR EXISTS (SELECT 1 FROM c2_signer_succession_projection LIMIT 1)
+                    OR EXISTS (SELECT 1 FROM c2_signer_lineage_projection LIMIT 1)
+                    OR EXISTS (SELECT 1 FROM c2_signer_lineage_edge_projection LIMIT 1)
+                    OR EXISTS (SELECT 1 FROM c2_signer_lineage_completion_projection LIMIT 1)
+                    OR EXISTS (SELECT 1 FROM c2_custody_proposal_preparations LIMIT 1)
+                    OR EXISTS (SELECT 1 FROM c2_signer_message_appends LIMIT 1)
+                    OR EXISTS (SELECT 1 FROM c2_external_carrier_ingress LIMIT 1)
+                    OR EXISTS (SELECT 1 FROM c2_revocation_effects LIMIT 1)
+                    OR EXISTS (SELECT 1 FROM c2_quarantine_closure_effects LIMIT 1)
+                    OR EXISTS (SELECT 1 FROM c2_signer_foundations LIMIT 1)
+                    OR EXISTS (SELECT 1 FROM c2_foundational_enrollment_adoptions LIMIT 1)
+                    OR EXISTS (SELECT 1 FROM c2_signer_enrollment_acceptances LIMIT 1)
                 )",
                 [],
                 |row| row.get::<_, bool>(0),
@@ -10716,6 +10751,7 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    #[cfg(test)]
     fn verify_closed_backend_store_root(
         &self,
         closed_backend: &capacity_backend::ClosedC2StoreBackendV1<'_>,
@@ -14949,12 +14985,21 @@ fn validate_required_objects(connection: &Connection) -> Result<(), StoreError> 
         "status_current",
         "c2_installation_projection",
         "c2_installation_receipt_index",
+        "c2_signer_bootstrap_transition",
         "c2_signer_root_binding_projection",
         "c2_signer_current_binding_projection",
         "c2_signer_succession_projection",
         "c2_signer_lineage_projection",
         "c2_signer_lineage_edge_projection",
         "c2_signer_lineage_completion_projection",
+        "c2_custody_proposal_preparations",
+        "c2_signer_message_appends",
+        "c2_external_carrier_ingress",
+        "c2_revocation_effects",
+        "c2_quarantine_closure_effects",
+        "c2_signer_foundations",
+        "c2_foundational_enrollment_adoptions",
+        "c2_signer_enrollment_acceptances",
     ];
     const VIEWS: &[&str] = &[
         "public_finding_snapshot_v3",
@@ -15586,12 +15631,21 @@ fn verify_empty_c2_schema_v9_projection(connection: &Connection) -> Result<(), S
     for table in [
         "c2_installation_projection",
         "c2_installation_receipt_index",
+        "c2_signer_bootstrap_transition",
         "c2_signer_root_binding_projection",
         "c2_signer_current_binding_projection",
         "c2_signer_succession_projection",
         "c2_signer_lineage_projection",
         "c2_signer_lineage_edge_projection",
         "c2_signer_lineage_completion_projection",
+        "c2_custody_proposal_preparations",
+        "c2_signer_message_appends",
+        "c2_external_carrier_ingress",
+        "c2_revocation_effects",
+        "c2_quarantine_closure_effects",
+        "c2_signer_foundations",
+        "c2_foundational_enrollment_adoptions",
+        "c2_signer_enrollment_acceptances",
     ] {
         let quoted = table.replace('"', "\"\"");
         let count: i64 =
@@ -35176,19 +35230,244 @@ mod tests {
         assert_eq!(
             observed,
             vec![
+                "c2_custody_proposal_preparations",
+                "c2_external_carrier_ingress",
+                "c2_foundational_enrollment_adoptions",
                 "c2_installation_projection",
                 "c2_installation_receipt_index",
+                "c2_quarantine_closure_effects",
+                "c2_revocation_effects",
+                "c2_signer_bootstrap_transition",
                 "c2_signer_current_binding_projection",
+                "c2_signer_enrollment_acceptances",
+                "c2_signer_foundations",
                 "c2_signer_lineage_completion_projection",
                 "c2_signer_lineage_edge_projection",
                 "c2_signer_lineage_projection",
+                "c2_signer_message_appends",
                 "c2_signer_root_binding_projection",
                 "c2_signer_succession_projection",
             ]
         );
         assert!(observed.iter().all(|name| {
-            name.ends_with("_projection") || name == "c2_installation_receipt_index"
+            name.ends_with("_projection")
+                || matches!(
+                    name.as_str(),
+                    "c2_installation_receipt_index"
+                        | "c2_signer_bootstrap_transition"
+                        | "c2_signer_message_appends"
+                        | "c2_custody_proposal_preparations"
+                        | "c2_external_carrier_ingress"
+                        | "c2_revocation_effects"
+                        | "c2_quarantine_closure_effects"
+                        | "c2_foundational_enrollment_adoptions"
+                        | "c2_signer_foundations"
+                        | "c2_signer_enrollment_acceptances"
+                )
         }));
+    }
+
+    #[test]
+    fn generic_writer_refuses_every_filesystem_first_c2_footprint_without_writing() {
+        for fixed_name in [
+            store_generation::C2_LOCK_FILE_V1,
+            store_generation::C2_BOOTSTRAP_EXTENT_V1,
+            store_generation::C2_GLOBAL_REFUSAL_EXTENT_V1,
+        ] {
+            let directory = tempdir().unwrap();
+            let path = directory.path().join(store_generation::C2_SQLITE_FILE_V1);
+            let mut store = Store::initialize_unqualified_storage(&path).unwrap();
+            std::fs::File::create(directory.path().join(fixed_name)).unwrap();
+            let before = logical_state_digest(
+                &store.connection,
+                b"nq.test.c2-filesystem-first-writer-refusal.v1\0",
+            )
+            .unwrap();
+            assert!(matches!(
+                store.begin_writer_session(),
+                Err(StoreError::C2OrdinaryOpenRequired)
+            ));
+            assert!(matches!(
+                store.with_runtime_authority_writer_session(|_, _| Ok::<_, StoreError>(())),
+                Err(StoreError::Invariant(_))
+            ));
+            assert_eq!(
+                logical_state_digest(
+                    &store.connection,
+                    b"nq.test.c2-filesystem-first-writer-refusal.v1\0",
+                )
+                .unwrap(),
+                before,
+                "generic writer refusal changed Store state for {fixed_name}",
+            );
+        }
+
+        let directory = tempdir().unwrap();
+        let path = directory.path().join(store_generation::C2_SQLITE_FILE_V1);
+        let mut store = Store::initialize_unqualified_storage(&path).unwrap();
+        std::os::unix::fs::symlink(
+            "missing-c2-lock-target",
+            directory.path().join(store_generation::C2_LOCK_FILE_V1),
+        )
+        .unwrap();
+        assert!(matches!(
+            store.begin_writer_session(),
+            Err(StoreError::C2OrdinaryOpenRequired)
+        ));
+        assert!(matches!(
+            store.with_runtime_authority_writer_session(|_, _| Ok::<_, StoreError>(())),
+            Err(StoreError::Invariant(_))
+        ));
+
+        let directory = tempdir().unwrap();
+        let path = directory.path().join(store_generation::C2_SQLITE_FILE_V1);
+        let mut store = Store::initialize_unqualified_storage(&path).unwrap();
+        std::fs::create_dir(directory.path().join(store_generation::C2_LOCK_FILE_V1)).unwrap();
+        assert!(matches!(
+            store.begin_writer_session(),
+            Err(StoreError::C2OrdinaryOpenRequired)
+        ));
+        assert!(matches!(
+            store.with_runtime_authority_writer_session(|_, _| Ok::<_, StoreError>(())),
+            Err(StoreError::Invariant(_))
+        ));
+    }
+
+    #[test]
+    fn generic_writer_refuses_every_sql_first_c2_footprint_without_writing() {
+        // A crash can expose any one durable SQL prefix before the fixed
+        // filesystem carriers are visible to a later opener.  Exercise every
+        // table named by `has_c2_generation_state` independently.  The rows
+        // are deliberately hostile structural markers, not purported valid
+        // lifecycle records: generic writer admission must fence before it
+        // tries to interpret or repair their semantics.
+        const TABLES: &[&str] = &[
+            "c2_installation_projection",
+            "c2_installation_receipt_index",
+            "c2_signer_bootstrap_transition",
+            "c2_signer_root_binding_projection",
+            "c2_signer_current_binding_projection",
+            "c2_signer_succession_projection",
+            "c2_signer_lineage_projection",
+            "c2_signer_lineage_edge_projection",
+            "c2_signer_lineage_completion_projection",
+            "c2_custody_proposal_preparations",
+            "c2_signer_message_appends",
+            "c2_external_carrier_ingress",
+            "c2_revocation_effects",
+            "c2_quarantine_closure_effects",
+            "c2_signer_foundations",
+            "c2_foundational_enrollment_adoptions",
+            "c2_signer_enrollment_acceptances",
+        ];
+
+        for table in TABLES {
+            let directory = tempdir().unwrap();
+            let path = directory.path().join(store_generation::C2_SQLITE_FILE_V1);
+            let mut store = Store::initialize_unqualified_storage(&path).unwrap();
+            store
+                .connection
+                .execute_batch(
+                    "PRAGMA foreign_keys = OFF;
+                     PRAGMA ignore_check_constraints = ON;",
+                )
+                .unwrap();
+
+            // Cross-table insert triggers correctly reject malformed product
+            // state.  This hostile fence test is narrower: seed exactly one
+            // syntactically present SQL marker so every OR arm in the generic
+            // writer fence is executed independently.
+            let trigger_names = {
+                let mut statement = store
+                    .connection
+                    .prepare(
+                        "SELECT name FROM sqlite_schema
+                         WHERE type = 'trigger' AND tbl_name = ?1
+                         ORDER BY name",
+                    )
+                    .unwrap();
+                statement
+                    .query_map([*table], |row| row.get::<_, String>(0))
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+            };
+            for trigger in trigger_names {
+                let quoted = trigger.replace('"', "\"\"");
+                store
+                    .connection
+                    .execute_batch(&format!("DROP TRIGGER \"{quoted}\""))
+                    .unwrap();
+            }
+
+            let columns = {
+                let quoted = table.replace('"', "\"\"");
+                let mut statement = store
+                    .connection
+                    .prepare(&format!("PRAGMA table_info(\"{quoted}\")"))
+                    .unwrap();
+                statement
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+                    })
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+            };
+            assert!(!columns.is_empty(), "missing C2 table {table}");
+            let names = columns
+                .iter()
+                .map(|(name, _)| format!("\"{}\"", name.replace('"', "\"\"")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let values = columns
+                .iter()
+                .map(|(_, declared_type)| {
+                    let declared_type = declared_type.to_ascii_uppercase();
+                    if declared_type.contains("INT") {
+                        "1"
+                    } else if declared_type.contains("BLOB") {
+                        "X'00'"
+                    } else {
+                        "'x'"
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let quoted_table = table.replace('"', "\"\"");
+            store
+                .connection
+                .execute(
+                    &format!(
+                        "INSERT INTO \"{quoted_table}\" ({names}) VALUES ({values})"
+                    ),
+                    [],
+                )
+                .unwrap_or_else(|error| panic!("seed SQL-first marker {table}: {error}"));
+
+            let before = logical_state_digest(
+                &store.connection,
+                b"nq.test.c2-sql-first-writer-refusal.v1\0",
+            )
+            .unwrap();
+            assert!(matches!(
+                store.begin_writer_session(),
+                Err(StoreError::C2OrdinaryOpenRequired)
+            ));
+            assert!(matches!(
+                store.with_runtime_authority_writer_session(|_, _| Ok::<_, StoreError>(())),
+                Err(StoreError::Invariant(_))
+            ));
+            assert_eq!(
+                logical_state_digest(
+                    &store.connection,
+                    b"nq.test.c2-sql-first-writer-refusal.v1\0",
+                )
+                .unwrap(),
+                before,
+                "generic writer refusal changed SQL-first C2 state for {table}",
+            );
+        }
     }
 
     #[test]
@@ -38960,73 +39239,6 @@ mod tests {
                 Ok(())
             })
             .expect("project exact terminal A1 from complete Store snapshot");
-    }
-
-    #[test]
-    fn c2_bootstrap_ingress_preserves_raw_resident_and_refuses_detached_resolution() {
-        let mut store = Store::initialize_runtime_authority_candidate_in_memory()
-            .expect("bootstrap projection Store");
-        let fixture = RawAuthorityFixture::fresh_genesis();
-        establish_authority_fixture(&mut store, &fixture).expect("establish authority");
-        let custody = fixture.custody();
-
-        store
-            .with_runtime_authority_restart_snapshot(|snapshot| -> Result<(), StoreError> {
-                let input = collect_complete_gen4_authority_ledger(&snapshot)?;
-                let first_resolution = resolve_for_restart(
-                    &custody,
-                    &snapshot.presented,
-                    snapshot.migration_receipt.as_ref(),
-                    &fixture.restart_expectations(),
-                )?;
-                let first_current = project_current_activation_for_c2(&input, &first_resolution)?;
-                assert_eq!(first_current.resident_identity(), "resident/node-a");
-
-                let terminal = store_generation::signer::authority::construct_sg_n_03_issuer_currentness_is_resolved_complete_store_owned(
-                    &input,
-                    &first_resolution,
-                )
-                .map_err(|_| StoreError::C2CurrentActivationCorrespondence)?;
-                let issuer = store_generation::signer::authority::construct_sg_n_02_bootstrap_grant_issuer_is_exactly_resolver_selected(
-                    &terminal,
-                    [0x55; 32],
-                )
-                .map_err(|_| StoreError::C2CurrentActivationCorrespondence)?;
-                let ingress = store_generation::signer::external_governance::tests::bootstrap_ingress_for_current_snapshot_for_test(
-                    &SigningKey::from_bytes(&[1_u8; 32]),
-                    &issuer,
-                    &first_current,
-                    &terminal,
-                    &first_current,
-                )
-                .map_err(|_| StoreError::C2CurrentActivationCorrespondence)?;
-                store_generation::signer::authority::verify_sg_wu_01_a1_grant_interpretation_owner_terminal_a1_projection(
-                    &ingress,
-                )
-                .map_err(|_| StoreError::C2CurrentActivationCorrespondence)?;
-
-                let detached_resolution = resolve_for_restart(
-                    &custody,
-                    &snapshot.presented,
-                    snapshot.migration_receipt.as_ref(),
-                    &fixture.restart_expectations(),
-                )?;
-                assert_eq!(detached_resolution, first_resolution);
-                let detached_current =
-                    project_current_activation_for_c2(&input, &detached_resolution)?;
-                assert!(matches!(
-                    store_generation::signer::external_governance::tests::bootstrap_ingress_for_current_snapshot_for_test(
-                        &SigningKey::from_bytes(&[1_u8; 32]),
-                        &issuer,
-                        &first_current,
-                        &terminal,
-                        &detached_current,
-                    ),
-                    Err(store_generation::signer::result::SignerRefusalV2::A2ApplicabilityMismatch)
-                ));
-                Ok(())
-            })
-            .expect("exact bootstrap projection accepts only its borrowed resolution");
     }
 
     #[test]

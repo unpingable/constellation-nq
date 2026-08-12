@@ -93,7 +93,8 @@
       "evidence_snapshot"
     ],
     "session_factory": [
-      "begin_writer_session"
+      "begin_writer_session",
+      "c2_lifecycle_v1"
     ],
     "optional_session_factory": [
       "with_runtime_authority_writer_session"
@@ -115,6 +116,14 @@
       "backup_v7_verified",
       "open_v7_runtime_authority_migration_source",
       "upgrade_v7_to_v8"
+    ],
+    "scoped_store_facades": [
+      {
+        "name": "with_verified_c2_lifecycle",
+        "owner": "StoreC2CandidateRuntimeVerifierV1",
+        "path": "crates/nq-store/src/store_generation/c2_lifecycle.rs",
+        "sole_store_factory": "c2_lifecycle_v1"
+      }
     ]
   },
   "session": {
@@ -327,7 +336,15 @@
     "mutation_helpers": [
       "commit_reopened_governed_projection",
       "consume_runtime_authority_initialization_candidate",
-      "initialize_runtime_authority_candidate"
+      "initialize_runtime_authority_candidate",
+      "install_c2_live_from_bootstrap_grant_v1",
+      "prepare_c2_live_bootstrap_v1",
+      "prepare_c2_live_recovery_v1",
+      "recover_c2_live_new_foundation_v1",
+      "restore_c2_live_historical_foundation_v1",
+      "rotate_c2_live_healthy_successor_v1",
+      "rotate_c2_live_healthy_successor_with_activation_grant_v1",
+      "with_reopened_c2_generation_current_v1"
     ],
     "optional_session_setup": [
       "prepare_writer_connection",
@@ -338,6 +355,134 @@
       "append_genesis"
     ]
   },
+  "live_c2_actor": {
+    "source": "crates/nq-store/src/store_generation/live_c2.rs",
+    "owner": "StoreC2SnapshotActorV1",
+    "factory": {
+      "owner": "Store",
+      "name": "with_c2_authority_snapshot"
+    },
+    "read_only": [
+      "actor_instance_identity",
+      "current_snapshot_identity",
+      "effect_epoch",
+      "load_terminal_foundation_prepared_custody_v1",
+      "verify_authority_snapshot",
+      "verify_authority_lineage",
+      "retained_root",
+      "resolve_generation_current_evidence_v1",
+      "resolve_generation_current_evidence_before_governance_v1",
+      "resolve_discontinuity_eligibility_v1",
+      "resolve_recovery_entry_basis_v1",
+      "resolve_restore_entry_basis_v1",
+      "resolved_governance_exact_fields_v1",
+      "database_path",
+      "verify_discontinuity_eligibility_for_entry_v1",
+      "verify_same_snapshot"
+    ],
+    "authority_constructors": [
+      "construct_installation_bootstrap_facts_v1",
+      "construct_installation_receipt_facts_v1",
+      "begin_recovery_entry_v1",
+      "begin_restore_successor_v1",
+      "consume_current_predecessor_authority_v1",
+      "consume_ordinary_successor_foundation_authority_v1",
+      "consume_recovery_foundation_authority_v1",
+      "consume_restore_foundation_authority_v1",
+      "mint_current_predecessor_authority_v1",
+      "mint_generation_current_from_bootstrap_v1",
+      "mint_bootstrap_signer_context",
+      "mint_ordinary_successor_pending_possession_v1",
+      "mint_pending_selected_from_consumed_acceptance_v1",
+      "mint_recovery_pending_possession_v1",
+      "mint_reopened_terminal_generation_current_v1",
+      "mint_restore_pending_possession_v1",
+      "refine_recovery_foundation_after_msg07_v1",
+      "refine_restore_foundation_after_msg07_v1",
+      "reopen_prepared_recovery_custodian_v1",
+      "reopen_terminal_foundation_custodian_v1",
+      "reopen_prepared_bootstrap_custodian_v1",
+      "seal_recovery_possession_permit_v1",
+      "seal_restore_possession_permit_v1"
+    ],
+    "state_attachments": [
+      "attach_durable_append_pair_v1",
+      "attach_completed_generation_lock_v1"
+    ],
+    "mutation_roots": [
+      "adopt_foundational_enrollment_v1",
+      "adopt_consumed_foundational_enrollment_v1",
+      "accept_signer_enrollment_v1",
+      "accept_consumed_signer_enrollment_v1",
+      "append_healthy_rotation_intent_v1",
+      "append_pending_healthy_rotation_receipt_v1",
+      "append_store_derived_recovery_msg12_v1",
+      "append_store_derived_restore_msg12_v1",
+      "append_successor_possession_v1",
+      "complete_store_recovery_lifecycle_v1",
+      "complete_store_restore_lifecycle_v1",
+      "complete_healthy_successor_v1",
+      "prepare_initial_bootstrap_grant_request_v1",
+      "prepare_recovery_grant_request_v1",
+      "adopt_bootstrap_grant_v1",
+      "adopt_activation_successor_grant_v1",
+      "adopt_proposal_disposition_v1",
+      "adopt_restore_authorization_v1",
+      "adopt_recovery_grant_v1",
+      "apply_revocation_judgment_v1",
+      "apply_quarantine_closure_judgment_v1",
+      "with_signer_append_effect",
+      "with_initial_possession_append_effect",
+      "with_installation_bootstrap_batch_effect",
+      "install_c2_live_v1",
+      "install_c2_live_with_observer_v1",
+      "persist_initial_generation_current_projection_v1",
+      "persist_pending_installation_projection_v1",
+      "persist_healthy_successor_terminal_v1",
+      "persist_recovery_successor_terminal_v1",
+      "persist_restore_successor_terminal_v1",
+      "prepare_ordinary_successor_custody_v1",
+      "with_prospective_generation_append_effect",
+      "with_current_predecessor_append_effect",
+      "with_reopened_generation_current_v1"
+    ],
+    "delegated_mutation_roots": {
+      "append_pending_healthy_rotation_receipt_v1": [
+        "from_store_actor",
+        "append_pending_healthy_rotation_receipt"
+      ],
+      "append_successor_possession_v1": [
+        "from_store_actor",
+        "append_successor_possession"
+      ]
+    },
+    "private_helpers": [
+      "with_permitted_effect",
+      "append_prepared_signer_effect",
+      "append_verified_governed_carrier_effect",
+      "construct_initial_enrollment_candidate_v1",
+      "derive_final_install_policy_v1",
+      "refresh_current_after_external_ingress_v1",
+      "refresh_current_predecessor_after_msg07_v1",
+      "reopen_complete_physical_substrate_v1",
+      "reopen_complete_physical_generation_v1",
+      "commit"
+    ],
+    "actor_delegates": [
+      {
+        "source": "crates/nq-store/src/store_generation/signer/coordinator.rs",
+        "owner": null,
+        "name": "append_initial_proposal_pop_v1"
+      }
+    ]
+  },
+  "additional_maintenance_lock_callers": [
+    {
+      "source": "crates/nq-store/src/store_generation/live_c2.rs",
+      "owner": "Store",
+      "name": "with_c2_authority_snapshot"
+    }
+  ],
   "maintenance_prelock_pure_calls": [
     "as_path",
     "as_ref"

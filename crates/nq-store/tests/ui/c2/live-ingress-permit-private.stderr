@@ -1,0 +1,11 @@
+error[E0603]: module `external_governance` is private
+ --> tests/ui/c2/live-ingress-permit-private.rs:3:41
+  |
+3 | use nq_store::store_generation::signer::external_governance::ExternalCarrierVerificationPermitV1;
+  |                                         ^^^^^^^^^^^^^^^^^^^ private module
+  |
+note: the module `external_governance` is defined here
+ --> src/store_generation/signer/mod.rs
+  |
+  | pub(crate) mod external_governance;
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

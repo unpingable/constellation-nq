@@ -9,9 +9,9 @@ use nq_protocol::sha256_bytes;
 use super::external_governance::VerifiedBootstrapGrantV1;
 use super::messages::SignerIdentityV1;
 use super::records::{
-    SignerRecordCoordinatesV1, StoreIntegrityBootstrapTransitionReceiptV1,
-    StoreIntegrityEnrollmentV2, StoreIntegrityGenerationGenesisV1,
-    StoreIntegrityProofOfPossessionV1, verify_sg_rec_05_accepted_wrapper,
+    PreGenerationSignerCoordinatesV1, SignerRecordCoordinatesV1, StoreAcceptedSignerEnrollmentV1,
+    StoreIntegrityBootstrapTransitionReceiptV1, StoreIntegrityGenerationGenesisV1,
+    pre_generation_scope_identity_v1, verify_sg_rec_05_accepted_wrapper,
     verify_sg_rec_06_generation_genesis_signed_payload_identity_signature_carrier,
     verify_sg_rec_07_bootstrap_generation_transition_receipt_binding_commitment_signature,
 };
@@ -153,47 +153,101 @@ fn cycle_free_transition_identity(
     ])
 }
 
+fn digest_bytes(digest: &nq_protocol::Sha256Digest) -> Result<SignerIdentityV1, SignerRefusalV2> {
+    hex::decode(
+        digest
+            .as_str()
+            .strip_prefix("sha256:")
+            .ok_or(SignerRefusalV2::ExternalCarrierScopeMismatch)?,
+    )
+    .map_err(|_| SignerRefusalV2::ExternalCarrierScopeMismatch)?
+    .try_into()
+    .map_err(|_| SignerRefusalV2::ExternalCarrierScopeMismatch)
+}
+
+fn text_coordinate_identity(
+    domain: &[u8],
+    value: &str,
+) -> Result<SignerIdentityV1, SignerRefusalV2> {
+    let mut preimage = Vec::with_capacity(domain.len() + value.len());
+    preimage.extend_from_slice(domain);
+    preimage.extend_from_slice(value.as_bytes());
+    let digest = nq_protocol::sha256_bytes(&preimage);
+    digest_bytes(&digest)
+}
+
+/// Verify that MSG-03 introduces generation/root coordinates while preserving
+/// every pre-generation coordinate; it never reads a final generation from
+/// the foundational enrollment itself.
+fn post_generation_coordinates_extend_pre_generation(
+    post: &SignerRecordCoordinatesV1,
+    pre: &PreGenerationSignerCoordinatesV1,
+) -> Result<bool, SignerRefusalV2> {
+    pre.verify()?;
+    post.verify()?;
+    Ok(post.occurrence
+        == text_coordinate_identity(b"nq.c2.store_occurrence.identity.v1\0", &pre.occurrence)?
+        && post.physical_generation != [0; 32]
+        && post.lifecycle_root != [0; 32]
+        && post.scope == pre_generation_scope_identity_v1(pre)?
+        && post.resident == pre.resident
+        && post.resident_generation == pre.resident_generation
+        && post.role == text_coordinate_identity(b"nq.c2.host_role.identity.v1\0", &pre.role)?
+        && post.role_manifest_generation == pre.role_manifest_generation
+        && post.authority_domain
+            == text_coordinate_identity(
+                b"nq.c2.authority_domain.identity.v1\0",
+                &pre.authority_domain,
+            )?
+        && post.signer_policy == digest_bytes(&pre.signer_scope_policy)?
+        && post.signer_policy_version == pre.signer_scope_policy_version)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn construct_transition(
     grant: &VerifiedBootstrapGrantV1,
-    pop: &StoreIntegrityProofOfPossessionV1,
-    enrollment: &StoreIntegrityEnrollmentV2,
+    accepted: &StoreAcceptedSignerEnrollmentV1,
     genesis: &StoreIntegrityGenerationGenesisV1,
     receipt: &StoreIntegrityBootstrapTransitionReceiptV1,
     store_commitment_identity: SignerIdentityV1,
     cuts: [u64; 9],
 ) -> Result<BootstrapTransitionEvidenceV1, SignerRefusalV2> {
     verify_cut_order(&cuts)?;
-    verify_sg_rec_05_accepted_wrapper(enrollment)?;
+    verify_sg_rec_05_accepted_wrapper(accepted)?;
+    let enrollment = accepted.record();
+    let candidate = accepted.adoption().candidate();
+    let pop_identity = accepted.adoption().pop_identity();
+    let pop_cut = accepted.adoption().pop_cut();
+    let enrollment_identity = enrollment.identity_bytes()?;
     verify_sg_rec_06_generation_genesis_signed_payload_identity_signature_carrier(genesis)?;
     verify_sg_rec_07_bootstrap_generation_transition_receipt_binding_commitment_signature(receipt)?;
     if grant.proposed_key_generation() != 0
         || cuts[0] < grant.lifecycle_cut()
-        || enrollment.candidate.candidate_cut != cuts[1]
-        || pop.pop_cut != cuts[2]
-        || enrollment.accepted_cut != cuts[3]
-        || enrollment.candidate.key_generation != 0
-        || grant.proposal_identity_bytes() != enrollment.candidate.proposal_identity
-        || grant.store_integrity_public_key() != enrollment.candidate.public_key
-        || grant.physical_generation_bytes() != enrollment.candidate.coordinates.physical_generation
-        || grant.signer_scope_policy_bytes() != enrollment.candidate.coordinates.signer_policy
-        || enrollment.candidate.grant_identity != *grant.grant_identity().bytes()
-        || enrollment.candidate.grant_request_identity != *grant.request_identity().bytes()
-        || pop.grant_identity != *grant.grant_identity().bytes()
-        || pop.proposal_identity != enrollment.candidate.proposal_identity
-        || pop.identity != enrollment.pop_identity
-        || genesis.initial_enrollment_identity != enrollment.identity
+        || candidate.candidate_cut != cuts[1]
+        || pop_cut != cuts[2]
+        || enrollment.accepted_cut() != cuts[3]
+        || candidate.key_generation != 0
+        || grant.proposal_identity_bytes() != candidate.proposal_identity
+        || grant.store_integrity_public_key() != candidate.public_key
+        || grant.signer_scope_policy_bytes()
+            != digest_bytes(&candidate.coordinates.signer_scope_policy)?
+        || candidate.grant_identity != *grant.grant_identity().bytes()
+        || candidate.grant_request_identity != *grant.request_identity().bytes()
+        || genesis.initial_enrollment_identity != enrollment_identity
         || genesis.bootstrap_identity != *grant.grant_identity().bytes()
         || genesis.generation_commitment_identity != store_commitment_identity
-        || genesis.coordinates != enrollment.candidate.coordinates
-        || genesis.signer_key_generation != enrollment.candidate.key_generation
-        || genesis.signer_public_key != enrollment.candidate.public_key
+        || !post_generation_coordinates_extend_pre_generation(
+            &genesis.coordinates,
+            &candidate.coordinates,
+        )?
+        || genesis.signer_key_generation != candidate.key_generation
+        || genesis.signer_public_key != candidate.public_key
         || receipt.bootstrap_grant_identity != *grant.grant_identity().bytes()
-        || receipt.enrollment_identity != enrollment.identity
-        || receipt.initial_pop_identity != pop.identity
-        || receipt.coordinates != enrollment.candidate.coordinates
-        || receipt.signer_key_generation != enrollment.candidate.key_generation
-        || receipt.signer_public_key != enrollment.candidate.public_key
+        || receipt.enrollment_identity != enrollment_identity
+        || receipt.initial_pop_identity != pop_identity
+        || receipt.coordinates != genesis.coordinates
+        || receipt.signer_key_generation != candidate.key_generation
+        || receipt.signer_public_key != candidate.public_key
         || receipt.append_identity == [0; 32]
         || receipt.persisted_resolution_identity == [0; 32]
         || receipt.initial_current_binding_identity == [0; 32]
@@ -211,11 +265,11 @@ fn construct_transition(
     let transition_identity = cycle_free_transition_identity(
         grant.grant_identity().bytes(),
         grant.request_identity().bytes(),
-        &enrollment.candidate.identity,
-        &enrollment.identity,
-        &pop.identity,
-        &grant.install_policy_digest(),
-        &enrollment.candidate.coordinates,
+        &candidate.identity,
+        &enrollment_identity,
+        &pop_identity,
+        &grant.installed_policy_calculation_identity(),
+        &genesis.coordinates,
         receipt.effective_cut,
     );
     if genesis.bootstrap_transition_identity != transition_identity
@@ -227,12 +281,12 @@ fn construct_transition(
         transition_identity,
         grant_identity: *grant.grant_identity().bytes(),
         grant_request_identity: *grant.request_identity().bytes(),
-        candidate_identity: enrollment.candidate.identity,
-        proposal_identity: pop.proposal_identity,
-        pop_identity: pop.identity,
-        enrollment_identity: enrollment.identity,
-        install_policy_identity: grant.install_policy_digest(),
-        coordinates: enrollment.candidate.coordinates.clone(),
+        candidate_identity: candidate.identity,
+        proposal_identity: candidate.proposal_identity,
+        pop_identity,
+        enrollment_identity,
+        install_policy_identity: grant.installed_policy_calculation_identity(),
+        coordinates: genesis.coordinates.clone(),
         genesis_identity: genesis.identity,
         store_commitment_identity,
         append_identity: receipt.append_identity,
@@ -246,14 +300,13 @@ fn construct_transition(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn construct_sg_wu_05_bootstrap_generation_owner_generation_genesis_signature_store(
     grant: &VerifiedBootstrapGrantV1,
-    pop: &StoreIntegrityProofOfPossessionV1,
-    enrollment: &StoreIntegrityEnrollmentV2,
+    accepted: &StoreAcceptedSignerEnrollmentV1,
     genesis: &StoreIntegrityGenerationGenesisV1,
     receipt: &StoreIntegrityBootstrapTransitionReceiptV1,
     store_commitment_identity: SignerIdentityV1,
     cuts: [u64; 9],
 ) -> Result<BootstrapToGenerationTransitionV1, SignerRefusalV2> {
-    construct_transition(grant, pop, enrollment, genesis, receipt, store_commitment_identity, cuts)
+    construct_transition(grant, accepted, genesis, receipt, store_commitment_identity, cuts)
         .map(BootstrapToGenerationTransitionV1::BootstrapGenerationOwnerGenerationGenesisSignatureStoreCommitmentTransitionReceiptVerified)
 }
 
@@ -310,14 +363,13 @@ fn verify_transition_evidence(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn construct_sg_n_21_bootstrap_generation_transition_follows_grant_proposal_pop(
     grant: &VerifiedBootstrapGrantV1,
-    pop: &StoreIntegrityProofOfPossessionV1,
-    enrollment: &StoreIntegrityEnrollmentV2,
+    accepted: &StoreAcceptedSignerEnrollmentV1,
     genesis: &StoreIntegrityGenerationGenesisV1,
     receipt: &StoreIntegrityBootstrapTransitionReceiptV1,
     store_commitment_identity: SignerIdentityV1,
     cuts: [u64; 9],
 ) -> Result<BootstrapToGenerationTransitionV1, SignerRefusalV2> {
-    construct_transition(grant, pop, enrollment, genesis, receipt, store_commitment_identity, cuts)
+    construct_transition(grant, accepted, genesis, receipt, store_commitment_identity, cuts)
         .map(BootstrapToGenerationTransitionV1::BootstrapGenerationTransitionFollowsGrantProposalPoPBootstrapCapabilityGenesisVerified)
 }
 

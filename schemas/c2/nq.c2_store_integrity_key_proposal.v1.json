@@ -12,8 +12,6 @@
     "proposal_ordinal",
     "scope_token",
     "occurrence_id",
-    "physical_store_generation_identity",
-    "signer_lifecycle_root_identity",
     "scope_identity",
     "a2_chain_root_identity",
     "trust_anchor_identity",
@@ -66,14 +64,6 @@
       "minLength": 1,
       "maxLength": 256,
       "pattern": "^[A-Za-z0-9._:/@-]+$"
-    },
-    "physical_store_generation_identity": {
-      "type": "string",
-      "pattern": "^sha256:[0-9a-f]{64}$"
-    },
-    "signer_lifecycle_root_identity": {
-      "type": "string",
-      "pattern": "^sha256:[0-9a-f]{64}$"
     },
     "scope_identity": {
       "type": "string",

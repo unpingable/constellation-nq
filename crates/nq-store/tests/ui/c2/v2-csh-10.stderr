@@ -1,5 +1,5 @@
 error[E0616]: field `owner_pid` of struct `C2ForkFenceGuard` is private
-  --> tests/ui/c2/v2-csh-10.rs:20:40
+  --> tests/ui/c2/v2-csh-10.rs:24:40
    |
-20 |     let _handoff_to_child: u32 = guard.owner_pid;
+24 |     let _handoff_to_child: u32 = guard.owner_pid;
    |                                        ^^^^^^^^^ private field

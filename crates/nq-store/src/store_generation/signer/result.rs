@@ -41,6 +41,10 @@ pub(crate) enum SignerRefusalV2 {
     MessagePayloadSubstitution,
     #[error("the signed frame was already consumed")]
     SignedFrameAlreadyConsumed,
+    #[error("the same enrollment occurrence carried changed canonical evidence")]
+    EnrollmentEvidenceCollision,
+    #[error("the durable signer-state operation failed")]
+    SignerStateIo,
     #[error("the custody root is not the fixed implementation root")]
     CallerSelectedCustodyRoot,
     #[error("the derived custody path does not match the signer coordinates")]
@@ -151,6 +155,7 @@ pub(crate) enum RestartResultV2 {
     PendingNormalPredecessorRetained,
     PendingNormalPredecessorRetainedAfterFrameLoss,
     NormalTerminalCapabilityReconstructed,
+    RestoreTerminalCapabilityReconstructed,
     RecoveryTerminalCapabilityReconstructed,
     TerminalCapabilityReconstructedAfterShutdown,
 }

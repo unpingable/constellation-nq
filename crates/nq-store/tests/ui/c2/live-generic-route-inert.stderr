@@ -1,0 +1,5 @@
+error[E0599]: no method named `sign` found for enum `C2StoreSigningRouteV1` in the current scope
+  --> tests/ui/c2/live-generic-route-inert.rs:12:19
+   |
+12 |     let _ = route.sign(caller_selected_key, caller_selected_bytes);
+   |                   ^^^^ method not found in `C2StoreSigningRouteV1`

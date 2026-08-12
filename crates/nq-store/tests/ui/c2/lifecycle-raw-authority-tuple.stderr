@@ -1,0 +1,11 @@
+error[E0432]: unresolved import `nq_store::store_generation::c2_lifecycle::C2InstallAuthorityTupleV1`
+ --> tests/ui/c2/lifecycle-raw-authority-tuple.rs:1:5
+  |
+1 | use nq_store::store_generation::c2_lifecycle::C2InstallAuthorityTupleV1;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `C2InstallAuthorityTupleV1` in `store_generation::c2_lifecycle`
+  |
+help: consider importing this struct instead
+  |
+1 - use nq_store::store_generation::c2_lifecycle::C2InstallAuthorityTupleV1;
+1 + use nq_store::store_generation::records::C2InstallAuthorityTupleV1;
+  |

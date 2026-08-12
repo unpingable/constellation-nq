@@ -18,6 +18,11 @@ pub mod lineage;
 pub(crate) mod manifest;
 pub(crate) mod messages;
 pub(crate) mod records;
+pub(crate) mod terminal;
+// The pre-live-C2 restart model remains only as an archaeological/specification
+// test specimen. Product reopen authority is minted solely by the Store-owned
+// live C2 resolver in `store_generation::live_c2`.
+#[cfg(test)]
 pub(crate) mod restart;
 pub(crate) mod result;
 

@@ -28,9 +28,6 @@ use crate::store_generation::lock::{C2StoreGenerationLockV1, LockInodeKey};
 use crate::store_generation::records::{
     PhysicalStoreGenerationIdentityV1, StoreOccurrenceIdentityV1,
 };
-use crate::store_generation::{
-    C2_BOOTSTRAP_EXTENT_V1, C2_GLOBAL_REFUSAL_EXTENT_V1, C2_LOCK_FILE_V1,
-};
 use crate::{Store, StoreError, pragma_i64};
 use nq_runtime_dependency_authority::{
     ResolvedControllingActivation, VerificationBrand, VerifiedActivationRevocation,
@@ -225,36 +222,12 @@ fn canonicalize_for_writer_key(path: &Path) -> PathBuf {
 /// refuse legacy mutation during an incomplete installation.  The sidecar
 /// check is refusal-only: a path or file name cannot construct a C2 session.
 fn has_c2_governance_marker(store: &Store) -> Result<bool, StoreError> {
-    let projection_table: i64 = store.connection.query_row(
-        "SELECT COUNT(*) FROM sqlite_schema \
-         WHERE type = 'table' AND name = 'c2_installation_projection'",
-        [],
-        |row| row.get(0),
-    )?;
-    if projection_table == 1 {
-        let projected: i64 = store.connection.query_row(
-            "SELECT COUNT(*) FROM c2_installation_projection",
-            [],
-            |row| row.get(0),
-        )?;
-        if projected != 0 {
-            return Ok(true);
-        }
-    }
-
-    let Some(database_path) = store.path.as_deref() else {
-        return Ok(false);
-    };
-    let Some(root) = database_path.parent() else {
-        return Ok(false);
-    };
-    Ok([
-        C2_LOCK_FILE_V1,
-        C2_BOOTSTRAP_EXTENT_V1,
-        C2_GLOBAL_REFUSAL_EXTENT_V1,
-    ]
-    .into_iter()
-    .any(|name| root.join(name).exists()))
+    // One refusal-only structural census serves the public ordinary writer,
+    // legacy runtime-authority writer, and any internal compatibility seam.
+    // Its fixed-name checks use `symlink_metadata`, so malformed objects and
+    // dangling symlinks cannot disappear as `Path::exists()` false negatives;
+    // its SQL checks include every durable C2 authority/evidence table.
+    store.has_c2_generation_state()
 }
 
 fn refuse_legacy_begin_for_c2(store: &Store) -> Result<(), StoreError> {

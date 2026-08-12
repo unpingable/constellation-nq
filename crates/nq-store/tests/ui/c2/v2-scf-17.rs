@@ -1,6 +1,10 @@
 //! Matrix V3 row SCF-17: "forked child cannot use inherited signer
 //! capability or file handle as standing".
 //!
+//! This retained case targets the pre-live-C2 custody module boundary only.
+//! It does not stand in for the current `C2LiveSignerContextV1`; that type's
+//! external exclusion has its own current-source trybuild case.
+//!
 //! This case stands in for the forked child's own code — a separate
 //! compilation, exactly like any external crate. The only route by which a
 //! child could turn an inherited signer capability or file handle into

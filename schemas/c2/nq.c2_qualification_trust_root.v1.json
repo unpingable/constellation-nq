@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.c2_qualification_trust_root.v1.json",
+  "title": "nq.c2_qualification_trust_root.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "identity_domain",
+    "signature_algorithm",
+    "qualification_scope_identity",
+    "qualification_verifier_contract_identity",
+    "qualification_policy_identity",
+    "qualification_key_generation_identity",
+    "verification_key",
+    "qualification_trust_root_identity"
+  ],
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  },
+  "properties": {
+    "schema": {
+      "const": "nq.c2_qualification_trust_root.v1"
+    },
+    "identity_domain": {
+      "const": "nq.c2.qualification_trust_root.identity.v1"
+    },
+    "signature_algorithm": {
+      "const": "ed25519"
+    },
+    "qualification_scope_identity": {
+      "$ref": "#/$defs/digest"
+    },
+    "qualification_verifier_contract_identity": {
+      "$ref": "#/$defs/digest"
+    },
+    "qualification_policy_identity": {
+      "$ref": "#/$defs/digest"
+    },
+    "qualification_key_generation_identity": {
+      "$ref": "#/$defs/digest"
+    },
+    "verification_key": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "qualification_trust_root_identity": {
+      "$ref": "#/$defs/digest"
+    }
+  }
+}

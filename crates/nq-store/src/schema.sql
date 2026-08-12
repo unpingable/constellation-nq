@@ -1412,7 +1412,7 @@ CREATE TABLE c2_installation_receipt_index (
         length(installation_intent_identity) = 71
         AND substr(installation_intent_identity, 1, 7) = 'sha256:'
     ),
-    bootstrap_identity TEXT NOT NULL CHECK (
+    bootstrap_identity TEXT NOT NULL UNIQUE CHECK (
         length(bootstrap_identity) = 71
         AND substr(bootstrap_identity, 1, 7) = 'sha256:'
     ),
@@ -1468,6 +1468,101 @@ CREATE TRIGGER immutable_c2_installation_receipt_index_delete
 BEFORE DELETE ON c2_installation_receipt_index
 BEGIN
     SELECT RAISE(ABORT, 'c2 installation receipt index is append-only');
+END;
+
+-- Unsigned MSG-04 bootstrap-to-generation relation.  This is canonical inert
+-- evidence consumed by the generation-current resolver; it is deliberately
+-- outside the signer-message ledger and has no signature/domain column.
+CREATE TABLE c2_signer_bootstrap_transition (
+    relation_identity TEXT PRIMARY KEY CHECK (
+        length(relation_identity) = 71
+        AND substr(relation_identity, 1, 7) = 'sha256:'
+    ),
+    schema_id TEXT NOT NULL CHECK (
+        schema_id = 'nq.c2_signer_bootstrap_transition.v1'
+    ),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    identity_domain TEXT NOT NULL CHECK (
+        identity_domain = 'nq.c2.signer_bootstrap_transition.identity.v1'
+    ),
+    bootstrap_grant_identity TEXT NOT NULL CHECK (
+        length(bootstrap_grant_identity) = 71
+        AND substr(bootstrap_grant_identity, 1, 7) = 'sha256:'
+    ),
+    foundational_enrollment_identity TEXT NOT NULL CHECK (
+        length(foundational_enrollment_identity) = 71
+        AND substr(foundational_enrollment_identity, 1, 7) = 'sha256:'
+    ),
+    signer_enrollment_identity TEXT NOT NULL UNIQUE CHECK (
+        length(signer_enrollment_identity) = 71
+        AND substr(signer_enrollment_identity, 1, 7) = 'sha256:'
+    ),
+    initial_pop_identity TEXT NOT NULL UNIQUE CHECK (
+        length(initial_pop_identity) = 71
+        AND substr(initial_pop_identity, 1, 7) = 'sha256:'
+    ),
+    physical_generation_bootstrap_identity TEXT NOT NULL UNIQUE CHECK (
+        length(physical_generation_bootstrap_identity) = 71
+        AND substr(physical_generation_bootstrap_identity, 1, 7) = 'sha256:'
+    ),
+    generation_commitment_identity TEXT NOT NULL UNIQUE CHECK (
+        length(generation_commitment_identity) = 71
+        AND substr(generation_commitment_identity, 1, 7) = 'sha256:'
+    ),
+    installation_receipt_identity TEXT NOT NULL UNIQUE CHECK (
+        length(installation_receipt_identity) = 71
+        AND substr(installation_receipt_identity, 1, 7) = 'sha256:'
+    ),
+    physical_store_generation_identity TEXT NOT NULL UNIQUE CHECK (
+        length(physical_store_generation_identity) = 71
+        AND substr(physical_store_generation_identity, 1, 7) = 'sha256:'
+    ),
+    transition_cut INTEGER NOT NULL CHECK (
+        transition_cut > 0 AND transition_cut <= 9007199254740991
+    ),
+    canonical_bytes BLOB NOT NULL CHECK (
+        length(canonical_bytes) > 0
+        AND length(canonical_bytes) <= 1048576
+        AND json_valid(CAST(canonical_bytes AS TEXT))
+    ),
+    canonical_bytes_sha256 TEXT NOT NULL UNIQUE CHECK (
+        length(canonical_bytes_sha256) = 71
+        AND substr(canonical_bytes_sha256, 1, 7) = 'sha256:'
+    ),
+    canonical_bytes_length INTEGER NOT NULL CHECK (
+        canonical_bytes_length > 0 AND canonical_bytes_length <= 1048576
+    ),
+    derived_at TEXT NOT NULL,
+    CHECK (length(canonical_bytes) = canonical_bytes_length),
+    CHECK (json_extract(CAST(canonical_bytes AS TEXT), '$.schema') = schema_id),
+    CHECK (json_extract(CAST(canonical_bytes AS TEXT), '$.schema_version') = schema_version),
+    CHECK (json_extract(CAST(canonical_bytes AS TEXT), '$.identity_domain') = identity_domain),
+    CHECK (json_extract(CAST(canonical_bytes AS TEXT), '$.relation_identity') = relation_identity),
+    CHECK (json_extract(CAST(canonical_bytes AS TEXT), '$.bootstrap_grant_identity') = bootstrap_grant_identity),
+    CHECK (json_extract(CAST(canonical_bytes AS TEXT), '$.foundational_enrollment_identity') = foundational_enrollment_identity),
+    CHECK (json_extract(CAST(canonical_bytes AS TEXT), '$.signer_enrollment_identity') = signer_enrollment_identity),
+    CHECK (json_extract(CAST(canonical_bytes AS TEXT), '$.initial_pop_identity') = initial_pop_identity),
+    CHECK (json_extract(CAST(canonical_bytes AS TEXT), '$.physical_generation_bootstrap_identity') = physical_generation_bootstrap_identity),
+    CHECK (json_extract(CAST(canonical_bytes AS TEXT), '$.generation_commitment_identity') = generation_commitment_identity),
+    CHECK (json_extract(CAST(canonical_bytes AS TEXT), '$.installation_receipt_identity') = installation_receipt_identity),
+    CHECK (json_extract(CAST(canonical_bytes AS TEXT), '$.physical_store_generation_identity') = physical_store_generation_identity),
+    CHECK (json_extract(CAST(canonical_bytes AS TEXT), '$.transition_cut') = transition_cut),
+    FOREIGN KEY (installation_receipt_identity)
+        REFERENCES c2_installation_receipt_index(installation_receipt_identity),
+    FOREIGN KEY (physical_store_generation_identity)
+        REFERENCES c2_installation_receipt_index(physical_store_generation_identity)
+) STRICT;
+
+CREATE TRIGGER immutable_c2_signer_bootstrap_transition_update
+BEFORE UPDATE ON c2_signer_bootstrap_transition
+BEGIN
+    SELECT RAISE(ABORT, 'unsigned MSG-04 bootstrap transition is append-only');
+END;
+
+CREATE TRIGGER immutable_c2_signer_bootstrap_transition_delete
+BEFORE DELETE ON c2_signer_bootstrap_transition
+BEGIN
+    SELECT RAISE(ABORT, 'unsigned MSG-04 bootstrap transition is append-only');
 END;
 
 -- C1 Gen5 / C2 signer-lineage projection for schema v9.
@@ -1586,7 +1681,7 @@ CREATE TABLE c2_signer_current_binding_projection (
         AND substr(current_standing_identity, 1, 7) = 'sha256:'
     ),
     binding_mode TEXT NOT NULL CHECK (
-        binding_mode IN ('initial', 'normal_successor', 'recovery_successor')
+        binding_mode IN ('initial', 'normal_successor', 'restore_successor', 'recovery_successor')
     ),
     provenance_identity TEXT NOT NULL CHECK (
         length(provenance_identity) = 71
@@ -1606,6 +1701,21 @@ CREATE TABLE c2_signer_current_binding_projection (
         continuity_authorization_identity IS NULL
         OR (length(continuity_authorization_identity) = 71
             AND substr(continuity_authorization_identity, 1, 7) = 'sha256:')
+    ),
+    restore_lineage_identity TEXT CHECK (
+        restore_lineage_identity IS NULL
+        OR (length(restore_lineage_identity) = 71
+            AND substr(restore_lineage_identity, 1, 7) = 'sha256:')
+    ),
+    restore_authority_identity TEXT CHECK (
+        restore_authority_identity IS NULL
+        OR (length(restore_authority_identity) = 71
+            AND substr(restore_authority_identity, 1, 7) = 'sha256:')
+    ),
+    historical_foundation_identity TEXT CHECK (
+        historical_foundation_identity IS NULL
+        OR (length(historical_foundation_identity) = 71
+            AND substr(historical_foundation_identity, 1, 7) = 'sha256:')
     ),
     recovery_condition_identity TEXT CHECK (
         recovery_condition_identity IS NULL
@@ -1647,6 +1757,9 @@ CREATE TABLE c2_signer_current_binding_projection (
             AND transition_identity IS NULL
             AND predecessor_binding_identity IS NULL
             AND continuity_authorization_identity IS NULL
+            AND restore_lineage_identity IS NULL
+            AND restore_authority_identity IS NULL
+            AND historical_foundation_identity IS NULL
             AND recovery_condition_identity IS NULL
             AND recovery_authority_identity IS NULL
             AND recovery_grant_identity IS NULL)
@@ -1656,15 +1769,36 @@ CREATE TABLE c2_signer_current_binding_projection (
             AND transition_identity IS NOT NULL
             AND predecessor_binding_identity IS NOT NULL
             AND continuity_authorization_identity IS NOT NULL
+            AND restore_lineage_identity IS NULL
+            AND restore_authority_identity IS NULL
+            AND historical_foundation_identity IS NULL
+            AND recovery_condition_identity IS NULL
+            AND recovery_authority_identity IS NULL
+            AND recovery_grant_identity IS NULL)
+        OR
+        (binding_mode = 'restore_successor'
+            AND current_key_generation >= 0
+            AND transition_identity IS NOT NULL
+            AND predecessor_binding_identity IS NOT NULL
+            AND continuity_authorization_identity IS NULL
+            AND restore_lineage_identity IS NOT NULL
+            AND restore_authority_identity IS NOT NULL
+            AND historical_foundation_identity IS NOT NULL
             AND recovery_condition_identity IS NULL
             AND recovery_authority_identity IS NULL
             AND recovery_grant_identity IS NULL)
         OR
         (binding_mode = 'recovery_successor'
-            AND current_key_generation > 0
+            -- Recovery requires a semantically new stable key-generation
+            -- identity, not a globally monotone ordinal. A discontinuous new
+            -- foundation may lawfully begin at generation zero.
+            AND current_key_generation >= 0
             AND transition_identity IS NOT NULL
             AND predecessor_binding_identity IS NOT NULL
             AND continuity_authorization_identity IS NULL
+            AND restore_lineage_identity IS NULL
+            AND restore_authority_identity IS NULL
+            AND historical_foundation_identity IS NULL
             AND recovery_condition_identity IS NOT NULL
             AND recovery_authority_identity IS NOT NULL
             AND recovery_grant_identity IS NOT NULL)
@@ -1681,7 +1815,7 @@ CREATE TABLE c2_signer_succession_projection (
         AND substr(succession_identity, 1, 7) = 'sha256:'
     ),
     root_binding_identity TEXT NOT NULL,
-    succession_mode TEXT NOT NULL CHECK (succession_mode IN ('normal', 'recovery')),
+    succession_mode TEXT NOT NULL CHECK (succession_mode IN ('normal', 'restore', 'recovery')),
     transition_identity TEXT NOT NULL UNIQUE CHECK (
         length(transition_identity) = 71
         AND substr(transition_identity, 1, 7) = 'sha256:'
@@ -1692,6 +1826,9 @@ CREATE TABLE c2_signer_succession_projection (
         length(authorization_identity) = 71
         AND substr(authorization_identity, 1, 7) = 'sha256:'
     ),
+    restore_lineage_identity TEXT UNIQUE,
+    restore_authority_identity TEXT UNIQUE,
+    historical_foundation_identity TEXT,
     recovery_condition_identity TEXT UNIQUE,
     recovery_authority_identity TEXT UNIQUE,
     recovery_grant_identity TEXT UNIQUE,
@@ -1736,11 +1873,31 @@ CREATE TABLE c2_signer_succession_projection (
     CHECK (length(canonical_bytes) = canonical_bytes_length),
     CHECK (
         (succession_mode = 'normal'
+            AND restore_lineage_identity IS NULL
+            AND restore_authority_identity IS NULL
+            AND historical_foundation_identity IS NULL
+            AND recovery_condition_identity IS NULL
+            AND recovery_authority_identity IS NULL
+            AND recovery_grant_identity IS NULL)
+        OR
+        (succession_mode = 'restore'
+            AND restore_lineage_identity IS NOT NULL
+            AND restore_authority_identity IS NOT NULL
+            AND historical_foundation_identity IS NOT NULL
+            AND length(restore_lineage_identity) = 71
+            AND substr(restore_lineage_identity, 1, 7) = 'sha256:'
+            AND length(restore_authority_identity) = 71
+            AND substr(restore_authority_identity, 1, 7) = 'sha256:'
+            AND length(historical_foundation_identity) = 71
+            AND substr(historical_foundation_identity, 1, 7) = 'sha256:'
             AND recovery_condition_identity IS NULL
             AND recovery_authority_identity IS NULL
             AND recovery_grant_identity IS NULL)
         OR
         (succession_mode = 'recovery'
+            AND restore_lineage_identity IS NULL
+            AND restore_authority_identity IS NULL
+            AND historical_foundation_identity IS NULL
             AND recovery_condition_identity IS NOT NULL
             AND recovery_authority_identity IS NOT NULL
             AND recovery_grant_identity IS NOT NULL
@@ -1799,7 +1956,7 @@ CREATE TABLE c2_signer_lineage_edge_projection (
     succession_identity TEXT NOT NULL,
     predecessor_binding_identity TEXT NOT NULL,
     successor_binding_identity TEXT NOT NULL,
-    succession_mode TEXT NOT NULL CHECK (succession_mode IN ('normal', 'recovery')),
+    succession_mode TEXT NOT NULL CHECK (succession_mode IN ('normal', 'restore', 'recovery')),
     PRIMARY KEY (lineage_identity, edge_ordinal),
     UNIQUE (lineage_identity, succession_identity),
     UNIQUE (lineage_identity, predecessor_binding_identity),
@@ -1876,6 +2033,12 @@ WHEN NOT EXISTS (
       AND ((NEW.succession_mode = 'normal'
             AND successor.binding_mode = 'normal_successor'
             AND successor.continuity_authorization_identity = NEW.authorization_identity)
+        OR (NEW.succession_mode = 'restore'
+            AND successor.binding_mode = 'restore_successor'
+            AND successor.restore_lineage_identity = NEW.restore_lineage_identity
+            AND successor.restore_authority_identity = NEW.restore_authority_identity
+            AND successor.historical_foundation_identity = NEW.historical_foundation_identity
+            AND NEW.authorization_identity = NEW.restore_authority_identity)
         OR (NEW.succession_mode = 'recovery'
             AND successor.binding_mode = 'recovery_successor'
             AND successor.recovery_condition_identity = NEW.recovery_condition_identity
@@ -1978,3 +2141,1010 @@ CREATE TRIGGER immutable_c2_signer_lineage_edge_update BEFORE UPDATE ON c2_signe
 CREATE TRIGGER immutable_c2_signer_lineage_edge_delete BEFORE DELETE ON c2_signer_lineage_edge_projection BEGIN SELECT RAISE(ABORT, 'append-only lineage edge projection'); END;
 CREATE TRIGGER immutable_c2_signer_lineage_completion_update BEFORE UPDATE ON c2_signer_lineage_completion_projection BEGIN SELECT RAISE(ABORT, 'append-only lineage completion projection'); END;
 CREATE TRIGGER immutable_c2_signer_lineage_completion_delete BEFORE DELETE ON c2_signer_lineage_completion_projection BEGIN SELECT RAISE(ABORT, 'append-only lineage completion projection'); END;
+-- Durable Store-owned pre-generation custody/proposal frontier.  Rows are
+-- immutable evidence only: ordinals and digests cannot construct custody or
+-- signer standing.  The live Store actor recomputes the complete frontier,
+-- reopens the fixed NOFOLLOW custody carrier, and mints fresh process-local
+-- custody before any authority-bearing use.
+CREATE TABLE c2_custody_proposal_preparations (
+    preparation_identity TEXT PRIMARY KEY CHECK (
+        length(preparation_identity) = 71 AND substr(preparation_identity, 1, 7) = 'sha256:'
+    ),
+    -- Custody preparation exists only when a stable foundation is created.
+    -- Restore reuses the exact preparation of the historical foundation and
+    -- therefore never creates a `restoreHistorical` preparation row.
+    preparation_lineage TEXT NOT NULL CHECK (preparation_lineage IN (
+        'initialExternal', 'ordinarySuccessorContinuity',
+        'recoveryNewFoundation'
+    )),
+    occurrence_id TEXT NOT NULL CHECK (length(occurrence_id) BETWEEN 1 AND 256),
+    scope_token TEXT NOT NULL CHECK (
+        length(scope_token) = 71 AND substr(scope_token, 1, 7) = 'sha256:'
+    ),
+    proposal_ordinal INTEGER NOT NULL CHECK (
+        proposal_ordinal > 0 AND proposal_ordinal <= 9007199254740991
+    ),
+    predecessor_frontier_identity TEXT NOT NULL CHECK (
+        length(predecessor_frontier_identity) = 71
+        AND substr(predecessor_frontier_identity, 1, 7) = 'sha256:'
+    ),
+    resulting_frontier_identity TEXT NOT NULL UNIQUE CHECK (
+        length(resulting_frontier_identity) = 71
+        AND substr(resulting_frontier_identity, 1, 7) = 'sha256:'
+    ),
+    proposal_identity TEXT NOT NULL UNIQUE CHECK (
+        length(proposal_identity) = 71 AND substr(proposal_identity, 1, 7) = 'sha256:'
+    ),
+    proposal_canonical_bytes BLOB NOT NULL CHECK (
+        length(proposal_canonical_bytes) > 0
+        AND length(proposal_canonical_bytes) <= 1048576
+        AND json_valid(CAST(proposal_canonical_bytes AS TEXT))
+    ),
+    proposal_canonical_sha256 TEXT NOT NULL UNIQUE CHECK (
+        length(proposal_canonical_sha256) = 71
+        AND substr(proposal_canonical_sha256, 1, 7) = 'sha256:'
+    ),
+    proposal_canonical_length INTEGER NOT NULL CHECK (
+        proposal_canonical_length > 0 AND proposal_canonical_length <= 1048576
+    ),
+    bootstrap_request_identity TEXT UNIQUE CHECK (
+        bootstrap_request_identity IS NULL OR (
+            length(bootstrap_request_identity) = 71
+            AND substr(bootstrap_request_identity, 1, 7) = 'sha256:'
+        )
+    ),
+    bootstrap_request_canonical_bytes BLOB CHECK (
+        bootstrap_request_canonical_bytes IS NULL OR (
+            length(bootstrap_request_canonical_bytes) > 0
+            AND length(bootstrap_request_canonical_bytes) <= 1048576
+            AND json_valid(CAST(bootstrap_request_canonical_bytes AS TEXT))
+        )
+    ),
+    bootstrap_request_canonical_sha256 TEXT UNIQUE CHECK (
+        bootstrap_request_canonical_sha256 IS NULL OR (
+            length(bootstrap_request_canonical_sha256) = 71
+            AND substr(bootstrap_request_canonical_sha256, 1, 7) = 'sha256:'
+        )
+    ),
+    bootstrap_request_canonical_length INTEGER CHECK (
+        bootstrap_request_canonical_length IS NULL OR (
+            bootstrap_request_canonical_length > 0
+            AND bootstrap_request_canonical_length <= 1048576
+        )
+    ),
+    install_policy_calculation_identity TEXT CHECK (
+        install_policy_calculation_identity IS NULL OR (
+            length(install_policy_calculation_identity) = 71
+            AND substr(install_policy_calculation_identity, 1, 7) = 'sha256:'
+        )
+    ),
+    install_policy_calculation_canonical_bytes BLOB CHECK (
+        install_policy_calculation_canonical_bytes IS NULL OR (
+            length(install_policy_calculation_canonical_bytes) > 0
+            AND length(install_policy_calculation_canonical_bytes) <= 1048576
+            AND json_valid(CAST(install_policy_calculation_canonical_bytes AS TEXT))
+        )
+    ),
+    install_policy_calculation_canonical_sha256 TEXT CHECK (
+        install_policy_calculation_canonical_sha256 IS NULL OR (
+            length(install_policy_calculation_canonical_sha256) = 71
+            AND substr(install_policy_calculation_canonical_sha256, 1, 7) = 'sha256:'
+        )
+    ),
+    install_policy_calculation_canonical_length INTEGER CHECK (
+        install_policy_calculation_canonical_length IS NULL OR (
+            install_policy_calculation_canonical_length > 0
+            AND install_policy_calculation_canonical_length <= 1048576
+        )
+    ),
+    successor_request_identity TEXT UNIQUE CHECK (
+        successor_request_identity IS NULL OR (
+            length(successor_request_identity) = 71
+            AND substr(successor_request_identity, 1, 7) = 'sha256:'
+        )
+    ),
+    successor_request_canonical_bytes BLOB CHECK (
+        successor_request_canonical_bytes IS NULL OR (
+            length(successor_request_canonical_bytes) > 0
+            AND length(successor_request_canonical_bytes) <= 1048576
+            AND json_valid(CAST(successor_request_canonical_bytes AS TEXT))
+        )
+    ),
+    successor_request_canonical_sha256 TEXT UNIQUE CHECK (
+        successor_request_canonical_sha256 IS NULL OR (
+            length(successor_request_canonical_sha256) = 71
+            AND substr(successor_request_canonical_sha256, 1, 7) = 'sha256:'
+        )
+    ),
+    successor_request_canonical_length INTEGER CHECK (
+        successor_request_canonical_length IS NULL OR (
+            successor_request_canonical_length > 0
+            AND successor_request_canonical_length <= 1048576
+        )
+    ),
+    predecessor_binding_identity TEXT CHECK (
+        predecessor_binding_identity IS NULL OR (
+            length(predecessor_binding_identity) = 71
+            AND substr(predecessor_binding_identity, 1, 7) = 'sha256:'
+        )
+    ),
+    transition_identity TEXT CHECK (
+        transition_identity IS NULL OR (
+            length(transition_identity) = 71
+            AND substr(transition_identity, 1, 7) = 'sha256:'
+        )
+    ),
+    -- Custody preparation precedes MSG-06/MSG-15 verification.  It must not
+    -- serialize or predict the later live adoption authority; exact authority
+    -- references belong to the append-only foundation-adoption event.
+    lineage_authority_identity TEXT CHECK (
+        lineage_authority_identity IS NULL OR (
+            length(lineage_authority_identity) = 71
+            AND substr(lineage_authority_identity, 1, 7) = 'sha256:'
+        )
+    ),
+    historical_foundation_identity TEXT CHECK (
+        historical_foundation_identity IS NULL OR (
+            length(historical_foundation_identity) = 71
+            AND substr(historical_foundation_identity, 1, 7) = 'sha256:'
+        )
+    ),
+    terminal_binding_identity TEXT CHECK (
+        terminal_binding_identity IS NULL OR (
+            length(terminal_binding_identity) = 71
+            AND substr(terminal_binding_identity, 1, 7) = 'sha256:'
+        )
+    ),
+    implementation_manifest_identity TEXT NOT NULL CHECK (
+        length(implementation_manifest_identity) = 71
+        AND substr(implementation_manifest_identity, 1, 7) = 'sha256:'
+    ),
+    qualified_candidate_identity TEXT NOT NULL CHECK (
+        length(qualified_candidate_identity) = 71
+        AND substr(qualified_candidate_identity, 1, 7) = 'sha256:'
+    ),
+    source_tree_identity TEXT NOT NULL CHECK (
+        length(source_tree_identity) = 71 AND substr(source_tree_identity, 1, 7) = 'sha256:'
+    ),
+    runtime_artifact_identity TEXT NOT NULL CHECK (
+        length(runtime_artifact_identity) = 71
+        AND substr(runtime_artifact_identity, 1, 7) = 'sha256:'
+    ),
+    prepared_at TEXT NOT NULL,
+    UNIQUE (scope_token, proposal_ordinal),
+    CHECK (length(proposal_canonical_bytes) = proposal_canonical_length),
+    CHECK (bootstrap_request_canonical_bytes IS NULL
+        OR length(bootstrap_request_canonical_bytes) = bootstrap_request_canonical_length),
+    CHECK (install_policy_calculation_canonical_bytes IS NULL
+        OR length(install_policy_calculation_canonical_bytes)
+            = install_policy_calculation_canonical_length),
+    CHECK (successor_request_canonical_bytes IS NULL
+        OR length(successor_request_canonical_bytes) = successor_request_canonical_length),
+    CHECK (json_extract(CAST(proposal_canonical_bytes AS TEXT), '$.proposal_identity')
+        = proposal_identity),
+    CHECK (bootstrap_request_canonical_bytes IS NULL OR
+        json_extract(CAST(bootstrap_request_canonical_bytes AS TEXT), '$.grant_request_identity')
+            = bootstrap_request_identity),
+    CHECK (bootstrap_request_canonical_bytes IS NULL OR
+        json_extract(CAST(bootstrap_request_canonical_bytes AS TEXT), '$.proposal_identity')
+            = proposal_identity),
+    CHECK (
+        (preparation_lineage = 'initialExternal'
+         AND bootstrap_request_identity IS NOT NULL
+         AND bootstrap_request_canonical_bytes IS NOT NULL
+         AND bootstrap_request_canonical_sha256 IS NOT NULL
+         AND bootstrap_request_canonical_length IS NOT NULL
+         AND install_policy_calculation_identity IS NOT NULL
+         AND install_policy_calculation_canonical_bytes IS NOT NULL
+         AND install_policy_calculation_canonical_sha256 IS NOT NULL
+         AND install_policy_calculation_canonical_length IS NOT NULL
+         AND successor_request_identity IS NULL
+         AND successor_request_canonical_bytes IS NULL
+         AND successor_request_canonical_sha256 IS NULL
+         AND successor_request_canonical_length IS NULL
+         AND predecessor_binding_identity IS NULL
+         AND transition_identity IS NULL
+         AND lineage_authority_identity IS NULL
+         AND historical_foundation_identity IS NULL
+         AND terminal_binding_identity IS NULL)
+        OR
+        (preparation_lineage = 'ordinarySuccessorContinuity'
+         AND bootstrap_request_identity IS NULL
+         AND bootstrap_request_canonical_bytes IS NULL
+         AND bootstrap_request_canonical_sha256 IS NULL
+         AND bootstrap_request_canonical_length IS NULL
+         AND install_policy_calculation_identity IS NULL
+         AND install_policy_calculation_canonical_bytes IS NULL
+         AND install_policy_calculation_canonical_sha256 IS NULL
+         AND install_policy_calculation_canonical_length IS NULL
+         AND successor_request_identity IS NOT NULL
+         AND successor_request_canonical_bytes IS NOT NULL
+         AND successor_request_canonical_sha256 IS NOT NULL
+         AND successor_request_canonical_length IS NOT NULL
+         AND predecessor_binding_identity IS NOT NULL
+         AND transition_identity IS NOT NULL
+         AND lineage_authority_identity IS NULL
+         AND historical_foundation_identity IS NULL
+         AND terminal_binding_identity IS NULL)
+        OR
+        (preparation_lineage = 'recoveryNewFoundation'
+         AND bootstrap_request_identity IS NULL
+         AND bootstrap_request_canonical_bytes IS NULL
+         AND bootstrap_request_canonical_sha256 IS NULL
+         AND bootstrap_request_canonical_length IS NULL
+         AND install_policy_calculation_identity IS NULL
+         AND install_policy_calculation_canonical_bytes IS NULL
+         AND install_policy_calculation_canonical_sha256 IS NULL
+         AND install_policy_calculation_canonical_length IS NULL
+         AND successor_request_identity IS NOT NULL
+         AND successor_request_canonical_bytes IS NOT NULL
+         AND successor_request_canonical_sha256 IS NOT NULL
+         AND successor_request_canonical_length IS NOT NULL
+         AND predecessor_binding_identity IS NOT NULL
+         AND transition_identity IS NOT NULL
+         AND lineage_authority_identity IS NULL
+         AND historical_foundation_identity IS NOT NULL
+         AND terminal_binding_identity IS NOT NULL)
+    )
+) STRICT;
+
+CREATE TRIGGER immutable_c2_custody_proposal_preparations_update
+BEFORE UPDATE ON c2_custody_proposal_preparations
+BEGIN SELECT RAISE(ABORT, 'custody proposal preparation is append-only'); END;
+CREATE TRIGGER immutable_c2_custody_proposal_preparations_delete
+BEFORE DELETE ON c2_custody_proposal_preparations
+BEGIN SELECT RAISE(ABORT, 'custody proposal preparation is append-only'); END;
+
+-- Durable closed-family signing ledger.  The canonical message, exact
+-- signature preimage, signature, route correspondence, frontier, and effect
+-- receipt commit in one SQLite transaction.  Live signer authority is never
+-- serialized here.
+CREATE TABLE c2_signer_message_appends (
+    ledger_sequence INTEGER PRIMARY KEY CHECK (ledger_sequence > 0),
+    generation_sequence INTEGER NOT NULL CHECK (generation_sequence > 0),
+    append_identity TEXT NOT NULL UNIQUE CHECK (
+        length(append_identity) = 71 AND substr(append_identity, 1, 7) = 'sha256:'
+    ),
+    message_identity BLOB NOT NULL UNIQUE CHECK (length(message_identity) = 32),
+    family TEXT NOT NULL CHECK (family IN (
+        'MSG-02', 'MSG-03', 'MSG-05', 'MSG-06', 'MSG-07', 'MSG-08',
+        'MSG-09', 'MSG-10', 'MSG-11', 'MSG-12'
+    )),
+    route TEXT NOT NULL CHECK (route IN (
+        'msg02_initial_pop', 'msg03_physical_generation_bootstrap',
+        'msg05_active_policy_continuity', 'msg06_normal_rotation_continuity',
+        'msg07_successor_pop', 'msg08_global_refusal',
+        'msg09_installation_intent', 'msg10_installation_receipt',
+        'msg11_policy_transition_intent', 'msg12_receipt_current',
+        'msg12_receipt_pending'
+    )),
+    identity_domain TEXT NOT NULL,
+    signature_domain TEXT NOT NULL,
+    signer_phase TEXT NOT NULL CHECK (signer_phase IN (
+        'proposed_initial', 'bootstrap', 'current_predecessor',
+        'generation_current', 'pending_successor'
+    )),
+    scope_class TEXT NOT NULL CHECK (scope_class IN (
+        'pre_generation', 'prospective_physical_generation', 'generation_bound'
+    )),
+    authority_class TEXT NOT NULL CHECK (authority_class IN (
+        'proposed_key', 'bootstrap', 'current_predecessor',
+        'generation_current', 'pending_successor'
+    )),
+    input_kind TEXT NOT NULL,
+    sole_consumer TEXT NOT NULL,
+    signature_algorithm TEXT NOT NULL CHECK (signature_algorithm = 'ed25519'),
+    occurrence_id TEXT NOT NULL CHECK (length(occurrence_id) > 0),
+    occurrence_identity BLOB NOT NULL CHECK (length(occurrence_identity) = 32),
+    physical_generation_identity BLOB CHECK (
+        physical_generation_identity IS NULL OR length(physical_generation_identity) = 32
+    ),
+    lifecycle_root_identity BLOB CHECK (
+        lifecycle_root_identity IS NULL OR length(lifecycle_root_identity) = 32
+    ),
+    prospective_generation_preimage BLOB CHECK (
+        prospective_generation_preimage IS NULL OR length(prospective_generation_preimage) = 32
+    ),
+    scope_identity BLOB NOT NULL CHECK (length(scope_identity) = 32),
+    resident_identity TEXT NOT NULL CHECK (length(resident_identity) > 0),
+    resident_generation INTEGER NOT NULL CHECK (
+        resident_generation > 0 AND resident_generation <= 9007199254740991
+    ),
+    host_role TEXT NOT NULL CHECK (length(host_role) > 0),
+    role_manifest_identity BLOB NOT NULL CHECK (length(role_manifest_identity) = 32),
+    role_manifest_generation INTEGER NOT NULL CHECK (
+        role_manifest_generation > 0 AND role_manifest_generation <= 9007199254740991
+    ),
+    authority_domain TEXT NOT NULL CHECK (length(authority_domain) > 0),
+    terminal_a1_identity BLOB NOT NULL CHECK (length(terminal_a1_identity) = 32),
+    current_a2_snapshot_identity BLOB NOT NULL CHECK (length(current_a2_snapshot_identity) = 32),
+    grant_or_predecessor_standing_identity BLOB NOT NULL CHECK (
+        length(grant_or_predecessor_standing_identity) = 32
+    ),
+    signer_public_key BLOB NOT NULL CHECK (length(signer_public_key) = 32),
+    signer_scope_policy_identity BLOB NOT NULL CHECK (length(signer_scope_policy_identity) = 32),
+    signer_scope_policy_version INTEGER NOT NULL CHECK (
+        signer_scope_policy_version > 0 AND signer_scope_policy_version <= 9007199254740991
+    ),
+    active_store_policy_identity BLOB NOT NULL CHECK (length(active_store_policy_identity) = 32),
+    active_store_policy_generation INTEGER NOT NULL CHECK (
+        active_store_policy_generation > 0 AND active_store_policy_generation <= 9007199254740991
+    ),
+    active_store_policy_digest BLOB NOT NULL CHECK (length(active_store_policy_digest) = 32),
+    implementation_manifest_identity BLOB NOT NULL CHECK (length(implementation_manifest_identity) = 32),
+    manifest_admission_correspondence_identity BLOB NOT NULL CHECK (length(manifest_admission_correspondence_identity) = 32),
+    qualified_candidate_identity BLOB NOT NULL CHECK (length(qualified_candidate_identity) = 32),
+    source_tree_identity BLOB NOT NULL CHECK (length(source_tree_identity) = 32),
+    runtime_artifact_identity BLOB NOT NULL CHECK (length(runtime_artifact_identity) = 32),
+    terminal_binding_identity BLOB CHECK (
+        terminal_binding_identity IS NULL OR length(terminal_binding_identity) = 32
+    ),
+    signer_key_generation INTEGER NOT NULL CHECK (
+        signer_key_generation >= 0 AND signer_key_generation <= 9007199254740991
+    ),
+    signer_key_generation_identity BLOB NOT NULL CHECK (length(signer_key_generation_identity) = 32),
+    event_predecessor_identity BLOB NOT NULL CHECK (length(event_predecessor_identity) = 32),
+    transaction_identity BLOB NOT NULL CHECK (length(transaction_identity) = 32),
+    transaction_intent_identity BLOB NOT NULL CHECK (length(transaction_intent_identity) = 32),
+    frontier_namespace_identity BLOB NOT NULL CHECK (length(frontier_namespace_identity) = 32),
+    predecessor_frontier_identity BLOB NOT NULL CHECK (length(predecessor_frontier_identity) = 32),
+    exact_content_identity BLOB NOT NULL CHECK (length(exact_content_identity) = 32),
+    resulting_frontier_identity BLOB NOT NULL UNIQUE CHECK (length(resulting_frontier_identity) = 32),
+    event_cut INTEGER NOT NULL CHECK (event_cut > 0 AND event_cut <= 9007199254740991),
+    canonical_message BLOB NOT NULL CHECK (length(canonical_message) > 0),
+    canonical_message_sha256 TEXT NOT NULL CHECK (
+        length(canonical_message_sha256) = 71
+        AND substr(canonical_message_sha256, 1, 7) = 'sha256:'
+    ),
+    signing_preimage BLOB NOT NULL CHECK (length(signing_preimage) > 0),
+    signing_preimage_sha256 TEXT NOT NULL CHECK (
+        length(signing_preimage_sha256) = 71
+        AND substr(signing_preimage_sha256, 1, 7) = 'sha256:'
+    ),
+    signature BLOB NOT NULL CHECK (length(signature) = 64),
+    effect_receipt_identity TEXT NOT NULL UNIQUE CHECK (
+        length(effect_receipt_identity) = 71
+        AND substr(effect_receipt_identity, 1, 7) = 'sha256:'
+    ),
+    effect_receipt_bytes BLOB NOT NULL CHECK (length(effect_receipt_bytes) > 0),
+    physical_carrier_bytes BLOB,
+    physical_carrier_sha256 TEXT CHECK (
+        physical_carrier_sha256 IS NULL OR (
+            length(physical_carrier_sha256) = 71
+            AND substr(physical_carrier_sha256, 1, 7) = 'sha256:'
+        )
+    ),
+    physical_carrier_length INTEGER CHECK (
+        physical_carrier_length IS NULL OR physical_carrier_length > 0
+    ),
+    committed_at TEXT NOT NULL CHECK (length(committed_at) > 0),
+    CHECK (
+        (route = 'msg02_initial_pop'
+         AND physical_carrier_bytes IS NULL
+         AND physical_carrier_sha256 IS NULL
+         AND physical_carrier_length IS NULL)
+        OR
+        (route <> 'msg02_initial_pop'
+         AND physical_carrier_bytes IS NOT NULL
+         AND physical_carrier_sha256 IS NOT NULL
+         AND physical_carrier_length IS NOT NULL
+         AND length(physical_carrier_bytes) = physical_carrier_length)
+    ),
+    UNIQUE (frontier_namespace_identity, generation_sequence),
+    UNIQUE (route, occurrence_identity, transaction_identity)
+) STRICT;
+
+-- Registry parity is enforced again at the durable boundary.  No row may
+-- relabel a family, phase, scope, authority, input, consumer, or domain.
+CREATE TRIGGER c2_signer_message_registry_exact
+BEFORE INSERT ON c2_signer_message_appends
+WHEN NOT (
+    (NEW.route = 'msg02_initial_pop' AND NEW.family = 'MSG-02'
+      AND NEW.identity_domain = 'nq.c2.store_integrity_initial_pop.identity.v1'
+      AND NEW.signature_domain = 'nq.c2.store_integrity_initial_pop.possession_signature.v1'
+      AND NEW.signer_phase = 'proposed_initial' AND NEW.scope_class = 'pre_generation'
+      AND NEW.physical_generation_identity IS NULL AND NEW.lifecycle_root_identity IS NULL
+      AND NEW.prospective_generation_preimage IS NULL AND NEW.terminal_binding_identity IS NULL
+      AND NEW.authority_class = 'proposed_key' AND NEW.input_kind = 'initial_pop_candidate'
+      AND NEW.sole_consumer = 'accepted_enrollment_wrapper')
+ OR (NEW.route = 'msg03_physical_generation_bootstrap' AND NEW.family = 'MSG-03'
+      AND NEW.identity_domain = 'nq.c2.store_generation.bootstrap.identity.v1'
+      AND NEW.signature_domain = 'nq.c2.store_generation.bootstrap.signature.v1'
+      AND NEW.signer_phase = 'bootstrap' AND NEW.scope_class = 'prospective_physical_generation'
+      AND NEW.physical_generation_identity IS NULL AND NEW.lifecycle_root_identity IS NULL
+      AND NEW.prospective_generation_preimage IS NOT NULL AND NEW.terminal_binding_identity IS NULL
+      AND NEW.authority_class = 'bootstrap' AND NEW.input_kind = 'physical_generation_bootstrap_facts'
+      AND NEW.sole_consumer = 'installation_bootstrap_append')
+ OR (NEW.route = 'msg05_active_policy_continuity' AND NEW.family = 'MSG-05'
+      AND NEW.identity_domain = 'nq.c2.active_policy_continuity.identity.v1'
+      AND NEW.signature_domain = 'nq.c2.active_policy_continuity.current_predecessor_signature.v1'
+      AND NEW.signer_phase = 'current_predecessor' AND NEW.scope_class = 'generation_bound'
+      AND NEW.physical_generation_identity IS NOT NULL AND NEW.lifecycle_root_identity IS NOT NULL
+      AND NEW.prospective_generation_preimage IS NULL AND NEW.terminal_binding_identity IS NOT NULL
+      AND NEW.authority_class = 'current_predecessor' AND NEW.input_kind = 'active_policy_continuity_facts'
+      AND NEW.sole_consumer = 'active_policy_transition_append')
+ OR (NEW.route = 'msg06_normal_rotation_continuity' AND NEW.family = 'MSG-06'
+      AND NEW.identity_domain = 'nq.c2.signer_rotation_continuity.identity.v1'
+      AND NEW.signature_domain = 'nq.c2.signer_rotation_continuity.current_predecessor_signature.v1'
+      AND NEW.signer_phase = 'current_predecessor' AND NEW.scope_class = 'generation_bound'
+      AND NEW.physical_generation_identity IS NOT NULL AND NEW.lifecycle_root_identity IS NOT NULL
+      AND NEW.prospective_generation_preimage IS NULL AND NEW.terminal_binding_identity IS NOT NULL
+      AND NEW.authority_class = 'current_predecessor' AND NEW.input_kind = 'healthy_rotation_continuity_facts'
+      AND NEW.sole_consumer = 'healthy_rotation_append')
+ OR (NEW.route = 'msg07_successor_pop' AND NEW.family = 'MSG-07'
+      AND NEW.identity_domain = 'nq.c2.store_integrity_successor_pop.identity.v1'
+      AND NEW.signature_domain = 'nq.c2.store_integrity_successor_pop.pending_possession_signature.v1'
+      AND NEW.signer_phase = 'pending_successor' AND NEW.scope_class = 'generation_bound'
+      AND NEW.physical_generation_identity IS NOT NULL AND NEW.lifecycle_root_identity IS NOT NULL
+      AND NEW.prospective_generation_preimage IS NULL AND NEW.terminal_binding_identity IS NOT NULL
+      AND NEW.authority_class = 'pending_successor' AND NEW.input_kind = 'successor_pop_challenge'
+      AND NEW.sole_consumer = 'selected_successor_pop')
+ OR (NEW.route = 'msg08_global_refusal' AND NEW.family = 'MSG-08'
+      AND NEW.identity_domain = 'nq.c2.global_refusal.identity.v1'
+      AND NEW.signature_domain = 'nq.c2.global_refusal.generation_current_signature.v1'
+      AND NEW.signer_phase = 'generation_current' AND NEW.scope_class = 'generation_bound'
+      AND NEW.physical_generation_identity IS NOT NULL AND NEW.lifecycle_root_identity IS NOT NULL
+      AND NEW.prospective_generation_preimage IS NULL AND NEW.terminal_binding_identity IS NOT NULL
+      AND NEW.authority_class = 'generation_current' AND NEW.input_kind = 'classified_global_refusal'
+      AND NEW.sole_consumer = 'global_refusal_append')
+ OR (NEW.route = 'msg09_installation_intent' AND NEW.family = 'MSG-09'
+      AND NEW.identity_domain = 'nq.c2.installation_intent.identity.v1'
+      AND NEW.signature_domain = 'nq.c2.installation_intent.store_integrity_signature.v1'
+      AND NEW.signer_phase = 'bootstrap' AND NEW.scope_class = 'pre_generation'
+      AND NEW.physical_generation_identity IS NULL AND NEW.lifecycle_root_identity IS NULL
+      AND NEW.prospective_generation_preimage IS NULL AND NEW.terminal_binding_identity IS NULL
+      AND NEW.authority_class = 'bootstrap' AND NEW.input_kind = 'installation_intent_facts'
+      AND NEW.sole_consumer = 'installation_intent_append')
+ OR (NEW.route = 'msg10_installation_receipt' AND NEW.family = 'MSG-10'
+      AND NEW.identity_domain = 'nq.c2.installation_receipt.identity.v1'
+      AND NEW.signature_domain = 'nq.c2.installation_receipt.store_integrity_signature.v1'
+      AND NEW.signer_phase = 'bootstrap' AND NEW.scope_class = 'prospective_physical_generation'
+      AND NEW.physical_generation_identity IS NULL AND NEW.lifecycle_root_identity IS NULL
+      AND NEW.prospective_generation_preimage IS NOT NULL AND NEW.terminal_binding_identity IS NULL
+      AND NEW.authority_class = 'bootstrap' AND NEW.input_kind = 'installation_completion_facts'
+      AND NEW.sole_consumer = 'bootstrap_transition_close')
+ OR (NEW.route = 'msg11_policy_transition_intent' AND NEW.family = 'MSG-11'
+      AND NEW.identity_domain = 'nq.c2.policy_transition_intent.identity.v1'
+      AND NEW.signature_domain = 'nq.c2.policy_transition_intent.current_predecessor_signature.v1'
+      AND NEW.signer_phase = 'current_predecessor' AND NEW.scope_class = 'generation_bound'
+      AND NEW.physical_generation_identity IS NOT NULL AND NEW.lifecycle_root_identity IS NOT NULL
+      AND NEW.prospective_generation_preimage IS NULL AND NEW.terminal_binding_identity IS NOT NULL
+      AND NEW.authority_class = 'current_predecessor' AND NEW.input_kind = 'policy_transition_intent_facts'
+      AND NEW.sole_consumer = 'transition_intent_append')
+ OR (NEW.route = 'msg12_receipt_current' AND NEW.family = 'MSG-12'
+      AND NEW.identity_domain = 'nq.c2.policy_transition_receipt.identity.v1'
+      AND NEW.signature_domain = 'nq.c2.policy_transition_receipt.generation_current_signature.v1'
+      AND NEW.signer_phase = 'generation_current' AND NEW.scope_class = 'generation_bound'
+      AND NEW.physical_generation_identity IS NOT NULL AND NEW.lifecycle_root_identity IS NOT NULL
+      AND NEW.prospective_generation_preimage IS NULL AND NEW.terminal_binding_identity IS NOT NULL
+      AND NEW.authority_class = 'generation_current' AND NEW.input_kind = 'transition_receipt_current_facts'
+      AND NEW.sole_consumer = 'generation_current_resolution')
+ OR (NEW.route = 'msg12_receipt_pending' AND NEW.family = 'MSG-12'
+      AND NEW.identity_domain = 'nq.c2.policy_transition_receipt.identity.v1'
+      AND NEW.signature_domain = 'nq.c2.policy_transition_receipt.pending_successor_signature.v1'
+      AND NEW.signer_phase = 'pending_successor' AND NEW.scope_class = 'generation_bound'
+      AND NEW.physical_generation_identity IS NOT NULL AND NEW.lifecycle_root_identity IS NOT NULL
+      AND NEW.prospective_generation_preimage IS NULL AND NEW.terminal_binding_identity IS NOT NULL
+      AND NEW.authority_class = 'pending_successor' AND NEW.input_kind = 'transition_receipt_pending_facts'
+      AND NEW.sole_consumer = 'pending_successor_resolution')
+)
+BEGIN
+    SELECT RAISE(ABORT, 'signer message row disagrees with the closed MSG-01 through MSG-16 registry');
+END;
+
+-- Durable governed external-carrier ingress.  One request occurrence may have
+-- exactly one canonical carrier.  Exact replay reopens this receipt; changed
+-- canonical bytes at the same occurrence are a collision and cannot insert.
+CREATE TABLE c2_external_carrier_ingress (
+    ingress_sequence INTEGER PRIMARY KEY CHECK (ingress_sequence > 0),
+    receipt_identity TEXT NOT NULL UNIQUE CHECK (
+        length(receipt_identity) = 71 AND substr(receipt_identity, 1, 7) = 'sha256:'
+    ),
+    route TEXT NOT NULL CHECK (route IN (
+        'msg01_bootstrap_grant', 'msg01_activation_successor_grant',
+        'msg01_proposal_disposition', 'msg13_restore_authorization',
+        'msg14_revocation_judgment', 'msg15_recovery_grant',
+        'msg16_quarantine_closure'
+    )),
+    family TEXT NOT NULL CHECK (family IN ('MSG-01', 'MSG-13', 'MSG-14', 'MSG-15', 'MSG-16')),
+    identity_domain TEXT NOT NULL,
+    signature_domain TEXT NOT NULL,
+    input_kind TEXT NOT NULL,
+    sole_consumer TEXT NOT NULL,
+    request_identity BLOB NOT NULL CHECK (length(request_identity) = 32),
+    carrier_identity BLOB NOT NULL UNIQUE CHECK (length(carrier_identity) = 32),
+    canonical_request BLOB NOT NULL CHECK (length(canonical_request) > 0),
+    canonical_request_sha256 TEXT NOT NULL CHECK (
+        length(canonical_request_sha256) = 71
+        AND substr(canonical_request_sha256, 1, 7) = 'sha256:'
+    ),
+    canonical_carrier BLOB NOT NULL CHECK (length(canonical_carrier) > 0),
+    canonical_carrier_sha256 TEXT NOT NULL CHECK (
+        length(canonical_carrier_sha256) = 71
+        AND substr(canonical_carrier_sha256, 1, 7) = 'sha256:'
+    ),
+    effect_identity TEXT NOT NULL UNIQUE CHECK (
+        length(effect_identity) = 71 AND substr(effect_identity, 1, 7) = 'sha256:'
+    ),
+    receipt_bytes BLOB NOT NULL CHECK (length(receipt_bytes) > 0),
+    committed_at TEXT NOT NULL CHECK (length(committed_at) > 0),
+    UNIQUE (route, request_identity)
+) STRICT;
+
+CREATE TRIGGER c2_external_carrier_registry_exact
+BEFORE INSERT ON c2_external_carrier_ingress
+WHEN NOT (
+    (NEW.route = 'msg01_bootstrap_grant' AND NEW.family = 'MSG-01'
+      AND NEW.identity_domain = 'nq.c2.store_integrity_bootstrap_grant.identity.v1'
+      AND NEW.signature_domain = 'nq.c2.store_integrity_bootstrap_grant.a1_signature.v1'
+      AND NEW.input_kind = 'bootstrap_grant_request' AND NEW.sole_consumer = 'reserve_bootstrap_attempt')
+ OR (NEW.route = 'msg01_activation_successor_grant' AND NEW.family = 'MSG-01'
+      AND NEW.identity_domain = 'nq.c2.store_integrity_activation_successor_grant.identity.v1'
+      AND NEW.signature_domain = 'nq.c2.store_integrity_activation_successor_grant.a1_signature.v1'
+      AND NEW.input_kind = 'activation_successor_grant_request'
+      AND NEW.sole_consumer = 'active_policy_transition_regrant')
+ OR (NEW.route = 'msg01_proposal_disposition' AND NEW.family = 'MSG-01'
+      AND NEW.identity_domain = 'nq.c2.store_integrity_proposal_disposition.identity.v1'
+      AND NEW.signature_domain = 'nq.c2.store_integrity_proposal_disposition.a1_signature.v1'
+      AND NEW.input_kind = 'proposal_disposition_request'
+      AND NEW.sole_consumer = 'deterministic_proposal_disposition')
+ OR (NEW.route = 'msg13_restore_authorization' AND NEW.family = 'MSG-13'
+      AND NEW.identity_domain = 'nq.c2.restore_authorization.identity.v1'
+      AND NEW.signature_domain = 'nq.c2.restore_authorization.a1_signature.v1'
+      AND NEW.input_kind = 'restore_authorization_request'
+      AND NEW.sole_consumer = 'restore_successor_continuation')
+ OR (NEW.route = 'msg14_revocation_judgment' AND NEW.family = 'MSG-14'
+      AND NEW.identity_domain = 'nq.c2.store_integrity_revocation_judgment.identity.v1'
+      AND NEW.signature_domain = 'nq.c2.store_integrity_revocation_judgment.a1_signature.v1'
+      AND NEW.input_kind = 'revocation_judgment_request'
+      AND NEW.sole_consumer = 'atomic_revocation_effect')
+ OR (NEW.route = 'msg15_recovery_grant' AND NEW.family = 'MSG-15'
+      AND NEW.identity_domain = 'nq.c2.store_integrity_recovery_grant.identity.v1'
+      AND NEW.signature_domain = 'nq.c2.store_integrity_recovery_grant.a1_signature.v1'
+      AND NEW.input_kind = 'recovery_grant_request'
+      AND NEW.sole_consumer = 'recovery_transition')
+ OR (NEW.route = 'msg16_quarantine_closure' AND NEW.family = 'MSG-16'
+      AND NEW.identity_domain = 'nq.c2.quarantine_closure_judgment.identity.v1'
+      AND NEW.signature_domain = 'nq.c2.quarantine_closure_judgment.a1_signature.v1'
+      AND NEW.input_kind = 'quarantine_closure_request'
+      AND NEW.sole_consumer = 'atomic_quarantine_closure_effect')
+)
+BEGIN
+    SELECT RAISE(ABORT, 'external carrier row disagrees with the closed MSG-01 through MSG-16 registry');
+END;
+
+-- MSG-14 is not receipt-only evidence. The Store persists the exact
+-- revocation target and unsigned effect receipt in the same transaction as
+-- the governed ingress row. Reopen resolves this table before minting current
+-- standing.
+CREATE TABLE c2_revocation_effects (
+    effect_sequence INTEGER PRIMARY KEY CHECK (effect_sequence > 0),
+    ingress_sequence INTEGER NOT NULL UNIQUE
+        REFERENCES c2_external_carrier_ingress(ingress_sequence),
+    request_identity BLOB NOT NULL UNIQUE CHECK (length(request_identity) = 32),
+    judgment_identity BLOB NOT NULL UNIQUE CHECK (length(judgment_identity) = 32),
+    physical_generation_identity TEXT NOT NULL CHECK (
+        length(physical_generation_identity) = 71
+        AND substr(physical_generation_identity, 1, 7) = 'sha256:'
+    ),
+    lifecycle_root_identity TEXT NOT NULL CHECK (
+        length(lifecycle_root_identity) = 71
+        AND substr(lifecycle_root_identity, 1, 7) = 'sha256:'
+    ),
+    scope_identity TEXT NOT NULL CHECK (
+        length(scope_identity) = 71 AND substr(scope_identity, 1, 7) = 'sha256:'
+    ),
+    active_policy_identity TEXT NOT NULL CHECK (
+        length(active_policy_identity) = 71
+        AND substr(active_policy_identity, 1, 7) = 'sha256:'
+    ),
+    active_policy_generation INTEGER NOT NULL CHECK (
+        active_policy_generation > 0 AND active_policy_generation <= 9007199254740991
+    ),
+    target_enrollment_identity TEXT NOT NULL CHECK (
+        length(target_enrollment_identity) = 71
+        AND substr(target_enrollment_identity, 1, 7) = 'sha256:'
+    ),
+    target_public_key BLOB NOT NULL CHECK (length(target_public_key) = 32),
+    target_key_generation INTEGER NOT NULL CHECK (
+        target_key_generation >= 0 AND target_key_generation <= 9007199254740991
+    ),
+    target_standing_identity TEXT NOT NULL UNIQUE CHECK (
+        length(target_standing_identity) = 71
+        AND substr(target_standing_identity, 1, 7) = 'sha256:'
+    ),
+    pre_effect_frontier_identity TEXT NOT NULL CHECK (
+        length(pre_effect_frontier_identity) = 71
+        AND substr(pre_effect_frontier_identity, 1, 7) = 'sha256:'
+    ),
+    effective_cut INTEGER NOT NULL CHECK (
+        effective_cut > 0 AND effective_cut <= 9007199254740991
+    ),
+    revocation_projection_identity TEXT NOT NULL UNIQUE CHECK (
+        length(revocation_projection_identity) = 71
+        AND substr(revocation_projection_identity, 1, 7) = 'sha256:'
+    ),
+    candidate_set_identity TEXT NOT NULL CHECK (
+        length(candidate_set_identity) = 71
+        AND substr(candidate_set_identity, 1, 7) = 'sha256:'
+    ),
+    effect_receipt_identity TEXT NOT NULL UNIQUE CHECK (
+        length(effect_receipt_identity) = 71
+        AND substr(effect_receipt_identity, 1, 7) = 'sha256:'
+    ),
+    effect_receipt_bytes BLOB NOT NULL CHECK (length(effect_receipt_bytes) > 0),
+    effect_receipt_sha256 TEXT NOT NULL CHECK (
+        length(effect_receipt_sha256) = 71
+        AND substr(effect_receipt_sha256, 1, 7) = 'sha256:'
+    ),
+    committed_at TEXT NOT NULL CHECK (length(committed_at) > 0)
+) STRICT;
+
+CREATE TRIGGER c2_revocation_effect_exact_ingress
+BEFORE INSERT ON c2_revocation_effects
+WHEN NOT EXISTS (
+    SELECT 1 FROM c2_external_carrier_ingress AS ingress
+    WHERE ingress.ingress_sequence = NEW.ingress_sequence
+      AND ingress.route = 'msg14_revocation_judgment'
+      AND ingress.family = 'MSG-14'
+      AND ingress.request_identity = NEW.request_identity
+      AND ingress.carrier_identity = NEW.judgment_identity
+)
+BEGIN
+    SELECT RAISE(ABORT, 'revocation effect is detached from exact MSG-14 ingress');
+END;
+
+CREATE TRIGGER immutable_c2_revocation_effects_update
+BEFORE UPDATE ON c2_revocation_effects
+BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
+CREATE TRIGGER immutable_c2_revocation_effects_delete
+BEFORE DELETE ON c2_revocation_effects
+BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
+
+-- MSG-16 closes one exact restore quarantine. Absence of this row leaves the
+-- restore successor closed to writes; its unsigned receipt cannot be stored
+-- independently of the exact judgment and current signer correspondence.
+CREATE TABLE c2_quarantine_closure_effects (
+    effect_sequence INTEGER PRIMARY KEY CHECK (effect_sequence > 0),
+    ingress_sequence INTEGER NOT NULL UNIQUE
+        REFERENCES c2_external_carrier_ingress(ingress_sequence),
+    request_identity BLOB NOT NULL UNIQUE CHECK (length(request_identity) = 32),
+    judgment_identity BLOB NOT NULL UNIQUE CHECK (length(judgment_identity) = 32),
+    physical_generation_identity TEXT NOT NULL CHECK (
+        length(physical_generation_identity) = 71
+        AND substr(physical_generation_identity, 1, 7) = 'sha256:'
+    ),
+    lifecycle_root_identity TEXT NOT NULL CHECK (
+        length(lifecycle_root_identity) = 71
+        AND substr(lifecycle_root_identity, 1, 7) = 'sha256:'
+    ),
+    scope_identity TEXT NOT NULL CHECK (
+        length(scope_identity) = 71 AND substr(scope_identity, 1, 7) = 'sha256:'
+    ),
+    active_policy_identity TEXT NOT NULL CHECK (
+        length(active_policy_identity) = 71
+        AND substr(active_policy_identity, 1, 7) = 'sha256:'
+    ),
+    active_policy_generation INTEGER NOT NULL CHECK (
+        active_policy_generation > 0 AND active_policy_generation <= 9007199254740991
+    ),
+    restore_authorization_identity TEXT NOT NULL UNIQUE CHECK (
+        length(restore_authorization_identity) = 71
+        AND substr(restore_authorization_identity, 1, 7) = 'sha256:'
+    ),
+    predecessor_generation_identity TEXT NOT NULL CHECK (
+        length(predecessor_generation_identity) = 71
+        AND substr(predecessor_generation_identity, 1, 7) = 'sha256:'
+    ),
+    restore_lineage_identity TEXT NOT NULL CHECK (
+        length(restore_lineage_identity) = 71
+        AND substr(restore_lineage_identity, 1, 7) = 'sha256:'
+    ),
+    restore_disposition_identity TEXT NOT NULL CHECK (
+        length(restore_disposition_identity) = 71
+        AND substr(restore_disposition_identity, 1, 7) = 'sha256:'
+    ),
+    restore_proof_identity TEXT NOT NULL CHECK (
+        length(restore_proof_identity) = 71
+        AND substr(restore_proof_identity, 1, 7) = 'sha256:'
+    ),
+    generation_commitment_identity TEXT NOT NULL CHECK (
+        length(generation_commitment_identity) = 71
+        AND substr(generation_commitment_identity, 1, 7) = 'sha256:'
+    ),
+    installation_receipt_identity TEXT NOT NULL CHECK (
+        length(installation_receipt_identity) = 71
+        AND substr(installation_receipt_identity, 1, 7) = 'sha256:'
+    ),
+    current_enrollment_identity TEXT NOT NULL CHECK (
+        length(current_enrollment_identity) = 71
+        AND substr(current_enrollment_identity, 1, 7) = 'sha256:'
+    ),
+    current_public_key BLOB NOT NULL CHECK (length(current_public_key) = 32),
+    current_key_generation INTEGER NOT NULL CHECK (
+        current_key_generation >= 0 AND current_key_generation <= 9007199254740991
+    ),
+    current_standing_identity TEXT NOT NULL CHECK (
+        length(current_standing_identity) = 71
+        AND substr(current_standing_identity, 1, 7) = 'sha256:'
+    ),
+    quarantine_identity TEXT NOT NULL UNIQUE CHECK (
+        length(quarantine_identity) = 71
+        AND substr(quarantine_identity, 1, 7) = 'sha256:'
+    ),
+    pre_effect_frontier_identity TEXT NOT NULL CHECK (
+        length(pre_effect_frontier_identity) = 71
+        AND substr(pre_effect_frontier_identity, 1, 7) = 'sha256:'
+    ),
+    closure_cut INTEGER NOT NULL CHECK (
+        closure_cut > 0 AND closure_cut <= 9007199254740991
+    ),
+    quarantine_closure_projection_identity TEXT NOT NULL UNIQUE CHECK (
+        length(quarantine_closure_projection_identity) = 71
+        AND substr(quarantine_closure_projection_identity, 1, 7) = 'sha256:'
+    ),
+    candidate_set_identity TEXT NOT NULL CHECK (
+        length(candidate_set_identity) = 71
+        AND substr(candidate_set_identity, 1, 7) = 'sha256:'
+    ),
+    effect_receipt_identity TEXT NOT NULL UNIQUE CHECK (
+        length(effect_receipt_identity) = 71
+        AND substr(effect_receipt_identity, 1, 7) = 'sha256:'
+    ),
+    effect_receipt_bytes BLOB NOT NULL CHECK (length(effect_receipt_bytes) > 0),
+    effect_receipt_sha256 TEXT NOT NULL CHECK (
+        length(effect_receipt_sha256) = 71
+        AND substr(effect_receipt_sha256, 1, 7) = 'sha256:'
+    ),
+    committed_at TEXT NOT NULL CHECK (length(committed_at) > 0)
+) STRICT;
+
+CREATE TRIGGER c2_quarantine_closure_effect_exact_ingress
+BEFORE INSERT ON c2_quarantine_closure_effects
+WHEN NOT EXISTS (
+    SELECT 1 FROM c2_external_carrier_ingress AS ingress
+    WHERE ingress.ingress_sequence = NEW.ingress_sequence
+      AND ingress.route = 'msg16_quarantine_closure'
+      AND ingress.family = 'MSG-16'
+      AND ingress.request_identity = NEW.request_identity
+      AND ingress.carrier_identity = NEW.judgment_identity
+)
+BEGIN
+    SELECT RAISE(ABORT, 'quarantine closure is detached from exact MSG-16 ingress');
+END;
+
+CREATE TRIGGER immutable_c2_quarantine_closure_effects_update
+BEFORE UPDATE ON c2_quarantine_closure_effects
+BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
+CREATE TRIGGER immutable_c2_quarantine_closure_effects_delete
+BEFORE DELETE ON c2_quarantine_closure_effects
+BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
+
+-- Canonical inert definition of a stable signer key/custody foundation.
+-- Adoption lineage and live authority are deliberately absent. A historical
+-- restore may therefore reference the same foundation identity through a new
+-- adoption event, while recovery must insert a semantically new foundation.
+CREATE TABLE c2_signer_foundations (
+    foundation_identity TEXT PRIMARY KEY CHECK (
+        length(foundation_identity) = 71 AND substr(foundation_identity, 1, 7) = 'sha256:'
+    ),
+    foundation_canonical_bytes BLOB NOT NULL CHECK (
+        length(foundation_canonical_bytes) > 0
+        AND json_valid(CAST(foundation_canonical_bytes AS TEXT))
+    ),
+    foundation_canonical_sha256 TEXT NOT NULL UNIQUE CHECK (
+        length(foundation_canonical_sha256) = 71
+        AND substr(foundation_canonical_sha256, 1, 7) = 'sha256:'
+    ),
+    algorithm TEXT NOT NULL CHECK (algorithm = 'ed25519'),
+    public_key BLOB NOT NULL CHECK (length(public_key) = 32),
+    key_generation INTEGER NOT NULL CHECK (
+        key_generation >= 0 AND key_generation <= 9007199254740991
+    ),
+    custody_evidence_identity BLOB NOT NULL CHECK (length(custody_evidence_identity) = 32),
+    committed_at TEXT NOT NULL CHECK (length(committed_at) > 0),
+    UNIQUE (public_key, key_generation, custody_evidence_identity),
+    CHECK (json_extract(CAST(foundation_canonical_bytes AS TEXT), '$.foundation_identity')
+        = foundation_identity),
+    CHECK (json_extract(CAST(foundation_canonical_bytes AS TEXT), '$.schema')
+        = 'nq.c2_store_integrity_signer_foundation.v1'),
+    CHECK (json_extract(CAST(foundation_canonical_bytes AS TEXT), '$.algorithm') = algorithm),
+    CHECK (json_extract(CAST(foundation_canonical_bytes AS TEXT), '$.key_generation')
+        = key_generation)
+) STRICT;
+
+CREATE TRIGGER immutable_c2_signer_foundations_update
+BEFORE UPDATE ON c2_signer_foundations
+BEGIN SELECT RAISE(ABORT, 'append-only signer foundation'); END;
+CREATE TRIGGER immutable_c2_signer_foundations_delete
+BEFORE DELETE ON c2_signer_foundations
+BEGIN SELECT RAISE(ABORT, 'append-only signer foundation'); END;
+
+-- Durable evidence that the Store adopted one exact stable foundation under
+-- one member of the closed four-lineage taxonomy. The canonical adoption
+-- bytes bind all lineage/Store/scope/cut coordinates. Process/actor fields are
+-- audit evidence only and never reconstruct process-local adoption authority.
+CREATE TABLE c2_foundational_enrollment_adoptions (
+    adoption_sequence INTEGER PRIMARY KEY CHECK (adoption_sequence > 0),
+    adoption_identity TEXT NOT NULL UNIQUE CHECK (
+        length(adoption_identity) = 71 AND substr(adoption_identity, 1, 7) = 'sha256:'
+    ),
+    foundation_identity TEXT NOT NULL REFERENCES c2_signer_foundations(foundation_identity) CHECK (
+        length(foundation_identity) = 71 AND substr(foundation_identity, 1, 7) = 'sha256:'
+    ),
+    adoption_canonical_bytes BLOB NOT NULL CHECK (
+        length(adoption_canonical_bytes) > 0
+        AND json_valid(CAST(adoption_canonical_bytes AS TEXT))
+    ),
+    adoption_canonical_sha256 TEXT NOT NULL UNIQUE CHECK (
+        length(adoption_canonical_sha256) = 71
+        AND substr(adoption_canonical_sha256, 1, 7) = 'sha256:'
+    ),
+    lineage TEXT NOT NULL CHECK (lineage IN (
+        'initialExternal', 'ordinarySuccessorContinuity',
+        'restoreHistorical', 'recoveryNewFoundation'
+    )),
+    foundational_enrollment_identity TEXT UNIQUE CHECK (
+        foundational_enrollment_identity IS NULL OR (
+            length(foundational_enrollment_identity) = 71
+            AND substr(foundational_enrollment_identity, 1, 7) = 'sha256:'
+        )
+    ),
+    foundational_enrollment_canonical_bytes BLOB CHECK (
+        foundational_enrollment_canonical_bytes IS NULL
+        OR length(foundational_enrollment_canonical_bytes) > 0
+    ),
+    foundational_enrollment_canonical_sha256 TEXT CHECK (
+        foundational_enrollment_canonical_sha256 IS NULL OR (
+            length(foundational_enrollment_canonical_sha256) = 71
+            AND substr(foundational_enrollment_canonical_sha256, 1, 7) = 'sha256:'
+        )
+    ),
+    msg02_message_identity BLOB UNIQUE CHECK (
+        msg02_message_identity IS NULL OR length(msg02_message_identity) = 32
+    ),
+    msg02_append_identity TEXT UNIQUE REFERENCES c2_signer_message_appends(append_identity) CHECK (
+        msg02_append_identity IS NULL OR (
+            length(msg02_append_identity) = 71
+            AND substr(msg02_append_identity, 1, 7) = 'sha256:'
+        )
+    ),
+    msg02_effect_receipt_identity TEXT UNIQUE CHECK (
+        msg02_effect_receipt_identity IS NULL OR (
+            length(msg02_effect_receipt_identity) = 71
+            AND substr(msg02_effect_receipt_identity, 1, 7) = 'sha256:'
+        )
+    ),
+    grant_identity BLOB CHECK (grant_identity IS NULL OR length(grant_identity) = 32),
+    candidate_identity BLOB NOT NULL UNIQUE CHECK (length(candidate_identity) = 32),
+    attempt_identity BLOB NOT NULL UNIQUE CHECK (length(attempt_identity) = 32),
+    custody_evidence_identity BLOB NOT NULL CHECK (length(custody_evidence_identity) = 32),
+    pre_generation_scope_identity BLOB NOT NULL CHECK (length(pre_generation_scope_identity) = 32),
+    pre_effect_store_snapshot_identity TEXT NOT NULL CHECK (
+        length(pre_effect_store_snapshot_identity) = 71
+        AND substr(pre_effect_store_snapshot_identity, 1, 7) = 'sha256:'
+    ),
+    process_identity TEXT NOT NULL CHECK (
+        length(process_identity) = 71 AND substr(process_identity, 1, 7) = 'sha256:'
+    ),
+    actor_instance_identity TEXT NOT NULL CHECK (
+        length(actor_instance_identity) = 71 AND substr(actor_instance_identity, 1, 7) = 'sha256:'
+    ),
+    actor_effect_epoch INTEGER NOT NULL CHECK (
+        actor_effect_epoch >= 0 AND actor_effect_epoch <= 9007199254740991
+    ),
+    enrollment_cut INTEGER NOT NULL CHECK (
+        enrollment_cut > 0 AND enrollment_cut <= 9007199254740991
+    ),
+    effect_identity TEXT NOT NULL UNIQUE CHECK (
+        length(effect_identity) = 71 AND substr(effect_identity, 1, 7) = 'sha256:'
+    ),
+    receipt_identity TEXT NOT NULL UNIQUE CHECK (
+        length(receipt_identity) = 71 AND substr(receipt_identity, 1, 7) = 'sha256:'
+    ),
+    receipt_bytes BLOB NOT NULL CHECK (length(receipt_bytes) > 0),
+    committed_at TEXT NOT NULL CHECK (length(committed_at) > 0),
+    CHECK (json_extract(CAST(adoption_canonical_bytes AS TEXT), '$.adoption_identity')
+        = adoption_identity),
+    CHECK (json_extract(CAST(adoption_canonical_bytes AS TEXT), '$.foundation_identity')
+        = foundation_identity),
+    CHECK (json_extract(CAST(adoption_canonical_bytes AS TEXT), '$.lineage') = lineage),
+    CHECK (json_extract(CAST(adoption_canonical_bytes AS TEXT), '$.enrollment_cut')
+        = enrollment_cut),
+    CHECK (
+        (lineage = 'initialExternal'
+         AND foundational_enrollment_identity IS NOT NULL
+         AND foundational_enrollment_canonical_bytes IS NOT NULL
+         AND foundational_enrollment_canonical_sha256 IS NOT NULL
+         AND msg02_message_identity IS NOT NULL
+         AND msg02_append_identity IS NOT NULL
+         AND msg02_effect_receipt_identity IS NOT NULL
+         AND grant_identity IS NOT NULL
+         AND json_type(CAST(adoption_canonical_bytes AS TEXT), '$.physical_generation_identity') = 'null'
+         AND json_type(CAST(adoption_canonical_bytes AS TEXT), '$.lifecycle_root_identity') = 'null'
+         AND json_type(CAST(adoption_canonical_bytes AS TEXT), '$.frontier_identity') = 'null'
+         AND json_type(CAST(adoption_canonical_bytes AS TEXT), '$.current_predecessor_identity') = 'null'
+         AND json_type(CAST(adoption_canonical_bytes AS TEXT), '$.transition_identity') = 'null')
+        OR
+        (lineage <> 'initialExternal'
+         AND foundational_enrollment_identity IS NULL
+         AND foundational_enrollment_canonical_bytes IS NULL
+         AND foundational_enrollment_canonical_sha256 IS NULL
+         AND msg02_message_identity IS NULL
+         AND msg02_append_identity IS NULL
+         AND msg02_effect_receipt_identity IS NULL
+         AND grant_identity IS NULL
+         AND json_type(CAST(adoption_canonical_bytes AS TEXT), '$.physical_generation_identity') = 'text'
+         AND json_type(CAST(adoption_canonical_bytes AS TEXT), '$.lifecycle_root_identity') = 'text'
+         AND json_type(CAST(adoption_canonical_bytes AS TEXT), '$.frontier_identity') = 'text'
+         AND json_type(CAST(adoption_canonical_bytes AS TEXT), '$.current_predecessor_identity') = 'text'
+         AND json_type(CAST(adoption_canonical_bytes AS TEXT), '$.transition_identity') = 'text')
+    )
+) STRICT;
+
+CREATE TRIGGER c2_foundational_enrollment_requires_exact_msg02_append
+BEFORE INSERT ON c2_foundational_enrollment_adoptions
+WHEN NEW.lineage = 'initialExternal' AND NOT EXISTS (
+    SELECT 1
+    FROM c2_signer_message_appends AS append
+    WHERE append.append_identity = NEW.msg02_append_identity
+      AND append.family = 'MSG-02'
+      AND append.route = 'msg02_initial_pop'
+      AND append.message_identity = NEW.msg02_message_identity
+)
+BEGIN
+    SELECT RAISE(ABORT, 'foundational enrollment adoption requires its exact consumed MSG-02 append');
+END;
+
+-- Durable later-cut signer-lifecycle acceptance.  The foreign key preserves
+-- the one-way dependency on prior Store adoption; no acceptance row can
+-- synthesize foundational enrollment evidence.
+CREATE TABLE c2_signer_enrollment_acceptances (
+    acceptance_sequence INTEGER PRIMARY KEY CHECK (acceptance_sequence > 0),
+    acceptance_effect_identity TEXT NOT NULL UNIQUE CHECK (
+        length(acceptance_effect_identity) = 71
+        AND substr(acceptance_effect_identity, 1, 7) = 'sha256:'
+    ),
+    signer_enrollment_identity TEXT NOT NULL UNIQUE CHECK (
+        length(signer_enrollment_identity) = 71
+        AND substr(signer_enrollment_identity, 1, 7) = 'sha256:'
+    ),
+    signer_enrollment_canonical_bytes BLOB NOT NULL CHECK (
+        length(signer_enrollment_canonical_bytes) > 0
+    ),
+    signer_enrollment_canonical_sha256 TEXT NOT NULL CHECK (
+        length(signer_enrollment_canonical_sha256) = 71
+        AND substr(signer_enrollment_canonical_sha256, 1, 7) = 'sha256:'
+    ),
+    foundational_adoption_identity TEXT NOT NULL UNIQUE REFERENCES c2_foundational_enrollment_adoptions(adoption_identity),
+    pre_effect_store_snapshot_identity TEXT NOT NULL CHECK (
+        length(pre_effect_store_snapshot_identity) = 71
+        AND substr(pre_effect_store_snapshot_identity, 1, 7) = 'sha256:'
+    ),
+    process_identity TEXT NOT NULL CHECK (
+        length(process_identity) = 71 AND substr(process_identity, 1, 7) = 'sha256:'
+    ),
+    actor_instance_identity TEXT NOT NULL CHECK (
+        length(actor_instance_identity) = 71 AND substr(actor_instance_identity, 1, 7) = 'sha256:'
+    ),
+    actor_effect_epoch INTEGER NOT NULL CHECK (
+        actor_effect_epoch >= 0 AND actor_effect_epoch <= 9007199254740991
+    ),
+    accepted_cut INTEGER NOT NULL CHECK (
+        accepted_cut > 0 AND accepted_cut <= 9007199254740991
+    ),
+    receipt_identity TEXT NOT NULL UNIQUE CHECK (
+        length(receipt_identity) = 71 AND substr(receipt_identity, 1, 7) = 'sha256:'
+    ),
+    receipt_bytes BLOB NOT NULL CHECK (length(receipt_bytes) > 0),
+    committed_at TEXT NOT NULL CHECK (length(committed_at) > 0)
+) STRICT;
+
+CREATE TRIGGER immutable_c2_signer_message_appends_update BEFORE UPDATE ON c2_signer_message_appends BEGIN SELECT RAISE(ABORT, 'append-only signer message ledger'); END;
+CREATE TRIGGER immutable_c2_signer_message_appends_delete BEFORE DELETE ON c2_signer_message_appends BEGIN SELECT RAISE(ABORT, 'append-only signer message ledger'); END;
+CREATE TRIGGER immutable_c2_external_carrier_ingress_update BEFORE UPDATE ON c2_external_carrier_ingress BEGIN SELECT RAISE(ABORT, 'append-only external carrier ingress'); END;
+CREATE TRIGGER immutable_c2_external_carrier_ingress_delete BEFORE DELETE ON c2_external_carrier_ingress BEGIN SELECT RAISE(ABORT, 'append-only external carrier ingress'); END;
+CREATE TRIGGER immutable_c2_foundational_enrollment_adoptions_update BEFORE UPDATE ON c2_foundational_enrollment_adoptions BEGIN SELECT RAISE(ABORT, 'append-only foundational enrollment adoption'); END;
+CREATE TRIGGER immutable_c2_foundational_enrollment_adoptions_delete BEFORE DELETE ON c2_foundational_enrollment_adoptions BEGIN SELECT RAISE(ABORT, 'append-only foundational enrollment adoption'); END;
+CREATE TRIGGER immutable_c2_signer_enrollment_acceptances_update BEFORE UPDATE ON c2_signer_enrollment_acceptances BEGIN SELECT RAISE(ABORT, 'append-only signer enrollment acceptance'); END;
+CREATE TRIGGER immutable_c2_signer_enrollment_acceptances_delete BEFORE DELETE ON c2_signer_enrollment_acceptances BEGIN SELECT RAISE(ABORT, 'append-only signer enrollment acceptance'); END;

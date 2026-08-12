@@ -1,219 +1,207 @@
-//! Closed Store-integrity signature-domain vocabulary.
+//! Read-only projection of the canonical MSG-01 through MSG-16 registry.
 //!
-//! This module deliberately models only domain selection.  It does not own a
-//! private key, expose a generic signing operation, or turn a domain value
-//! into signing standing.  The Store-private signer adapter consumes these
-//! values through its family-specific request types.
+//! The normative table lives in the Store-private signer message module.  This
+//! public module exposes inert registry metadata only; it has no parser,
+//! generic domain constructor, signing operation, key, permit, or standing.
 
-use std::fmt;
-use std::str::FromStr;
+use std::collections::BTreeSet;
 
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Exact number of Store-integrity signature domains admitted by C2.
-pub const C2_STORE_INTEGRITY_SIGNATURE_DOMAIN_COUNT: usize = 8;
+pub use super::signer::messages::{
+    C2ExternalSigningRouteV1, C2SignerPhaseV1, C2SigningAuthorityClassV1, C2SigningScopeClassV1,
+    C2SoleConsumerV1, C2StoreSigningRouteV1, C2VerifiedInputKindV1, ClosedMessageFamilyV1,
+};
 
-/// The closed Store-integrity signature-domain family.
-///
-/// There is intentionally no `Other(String)` variant and no public generic
-/// domain constructor.  Parsing accepts only the eight exact wire values.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-pub enum C2StoreIntegritySignatureDomainV1 {
-    /// Physical Store-generation bootstrap.
-    #[serde(rename = "nq.c2.store_generation.bootstrap.signature.v1")]
-    StoreGenerationBootstrap,
-    /// Old-current-key countersignature over an active-policy record.
-    #[serde(rename = "nq.c2.active_store_policy.store_integrity_countersignature.v1")]
-    ActiveStorePolicyCountersignature,
-    /// Proposed-key proof of possession over an active-policy record.
-    #[serde(rename = "nq.c2.active_store_policy.new_key_possession_signature.v1")]
-    ActiveStorePolicyNewKeyPossession,
-    /// Post-installation bounded global-refusal record.
-    #[serde(rename = "nq.c2.global_refusal.store_integrity_signature.v1")]
-    GlobalRefusal,
-    /// Store-generation installation intent.
-    #[serde(rename = "nq.c2.installation_intent.store_integrity_signature.v1")]
-    InstallationIntent,
-    /// Store-generation installation completion receipt.
-    #[serde(rename = "nq.c2.installation_receipt.store_integrity_signature.v1")]
-    InstallationReceipt,
-    /// Active-policy or signer transition intent.
-    #[serde(rename = "nq.c2.policy_transition_intent.store_integrity_signature.v1")]
-    PolicyTransitionIntent,
-    /// Active-policy or signer transition completion receipt.
-    #[serde(rename = "nq.c2.policy_transition_receipt.store_integrity_signature.v1")]
-    PolicyTransitionReceipt,
-}
+/// Exact semantic-family count.
+pub const C2_MESSAGE_FAMILY_COUNT: usize = 16;
+/// Exact Store/proposal-key signable-family count.
+pub const C2_STORE_SIGNABLE_FAMILY_COUNT: usize = 10;
+/// Exact Store/proposal-key route count; MSG-12 owns two routes.
+pub const C2_STORE_SIGNING_ROUTE_COUNT: usize = 11;
+/// Exact external terminal-A1 route count over five semantic families.
+pub const C2_EXTERNAL_SIGNING_ROUTE_COUNT: usize = 7;
+/// Exact unsigned Store-relation family count.
+pub const C2_UNSIGNED_FAMILY_COUNT: usize = 1;
 
-impl C2StoreIntegritySignatureDomainV1 {
-    /// Complete domain set in stable canonical order.
-    pub const ALL: [Self; C2_STORE_INTEGRITY_SIGNATURE_DOMAIN_COUNT] = [
-        Self::StoreGenerationBootstrap,
-        Self::ActiveStorePolicyCountersignature,
-        Self::ActiveStorePolicyNewKeyPossession,
-        Self::GlobalRefusal,
-        Self::InstallationIntent,
-        Self::InstallationReceipt,
-        Self::PolicyTransitionIntent,
-        Self::PolicyTransitionReceipt,
-    ];
-
-    /// Exact wire-domain string.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::StoreGenerationBootstrap => "nq.c2.store_generation.bootstrap.signature.v1",
-            Self::ActiveStorePolicyCountersignature => {
-                "nq.c2.active_store_policy.store_integrity_countersignature.v1"
-            }
-            Self::ActiveStorePolicyNewKeyPossession => {
-                "nq.c2.active_store_policy.new_key_possession_signature.v1"
-            }
-            Self::GlobalRefusal => "nq.c2.global_refusal.store_integrity_signature.v1",
-            Self::InstallationIntent => "nq.c2.installation_intent.store_integrity_signature.v1",
-            Self::InstallationReceipt => "nq.c2.installation_receipt.store_integrity_signature.v1",
-            Self::PolicyTransitionIntent => {
-                "nq.c2.policy_transition_intent.store_integrity_signature.v1"
-            }
-            Self::PolicyTransitionReceipt => {
-                "nq.c2.policy_transition_receipt.store_integrity_signature.v1"
-            }
-        }
-    }
-}
-
-impl fmt::Display for C2StoreIntegritySignatureDomainV1 {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-impl FromStr for C2StoreIntegritySignatureDomainV1 {
-    type Err = C2SignatureDomainErrorV1;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::ALL
-            .into_iter()
-            .find(|domain| domain.as_str() == value)
-            .ok_or_else(|| C2SignatureDomainErrorV1::UnknownDomain(value.to_owned()))
-    }
-}
-
-/// Refusal returned when bytes name something outside the closed domain set.
-#[derive(Clone, Debug, Eq, Error, PartialEq)]
-pub enum C2SignatureDomainErrorV1 {
-    /// The supplied value is not one of the eight exact domains.
-    #[error("unknown C2 Store-integrity signature domain: {0}")]
-    UnknownDomain(String),
-    /// The compile-time domain table was altered or contains a duplicate.
-    #[error("the closed C2 Store-integrity signature-domain table is malformed")]
-    MalformedClosedDomainTable,
-}
-
-/// Non-authority-bearing evidence that the exact closed domain table was
-/// enumerated and checked.
+/// One inert Store/proposal-key route projection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ClosedSignatureDomainSetV1 {
-    count: usize,
+pub struct C2StoreSigningRegistryEntryV1 {
+    /// Closed route.
+    pub route: C2StoreSigningRouteV1,
+    /// Semantic family.
+    pub family: ClosedMessageFamilyV1,
+    /// Exact identity domain.
+    pub identity_domain: &'static str,
+    /// Exact signature domain.
+    pub signature_domain: &'static str,
+    /// Required signer phase.
+    pub phase: C2SignerPhaseV1,
+    /// Required scope class.
+    pub scope_class: C2SigningScopeClassV1,
+    /// Required authority class.
+    pub authority_class: C2SigningAuthorityClassV1,
+    /// Exact verified-input class.
+    pub input_kind: C2VerifiedInputKindV1,
+    /// Sole consumer/effect.
+    pub sole_consumer: C2SoleConsumerV1,
 }
 
-impl ClosedSignatureDomainSetV1 {
-    /// Number of checked domains.
-    #[must_use]
-    pub const fn count(self) -> usize {
-        self.count
-    }
+/// One inert external-terminal-A1 route projection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct C2ExternalSigningRegistryEntryV1 {
+    /// Closed external route.
+    pub route: C2ExternalSigningRouteV1,
+    /// Semantic family.
+    pub family: ClosedMessageFamilyV1,
+    /// Exact identity domain.
+    pub identity_domain: &'static str,
+    /// Exact signature domain.
+    pub signature_domain: &'static str,
+    /// Exact verified external-input class.
+    pub input_kind: &'static str,
+    /// Sole Store consumer/effect.
+    pub sole_consumer: &'static str,
 }
 
-/// N-17 constructor target: enumerate the exact domain set.
+/// Failure of the compile-time closed registry census.
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum C2SigningRegistryErrorV1 {
+    /// A count, mapping, or uniqueness law was changed.
+    #[error("the canonical C2 MSG-01 through MSG-16 registry is malformed")]
+    MalformedClosedRegistry,
+}
+
+/// Exact 16-family inventory.
 #[must_use]
-pub const fn construct_n_17_signature_domain_enum_has_exactly_eight_named()
--> [C2StoreIntegritySignatureDomainV1; C2_STORE_INTEGRITY_SIGNATURE_DOMAIN_COUNT] {
-    C2StoreIntegritySignatureDomainV1::ALL
+pub const fn c2_message_families() -> [ClosedMessageFamilyV1; C2_MESSAGE_FAMILY_COUNT] {
+    ClosedMessageFamilyV1::ALL
 }
 
-/// N-17 verifier target: prove that the stable table contains exactly the
-/// eight distinct accepted strings.
-pub fn verify_n_17_signature_domain_enum_has_exactly_eight_named()
--> Result<ClosedSignatureDomainSetV1, C2SignatureDomainErrorV1> {
-    let domains = construct_n_17_signature_domain_enum_has_exactly_eight_named();
-    for (index, domain) in domains.iter().enumerate() {
-        if domains[..index]
-            .iter()
-            .any(|earlier| earlier.as_str() == domain.as_str())
-            || domain.as_str().parse::<C2StoreIntegritySignatureDomainV1>() != Ok(*domain)
-        {
-            return Err(C2SignatureDomainErrorV1::MalformedClosedDomainTable);
-        }
-    }
-    Ok(ClosedSignatureDomainSetV1 {
-        count: domains.len(),
+/// Exact 11-route Store/proposal-key projection mechanically derived from the
+/// normative registry.
+#[must_use]
+pub fn c2_store_signing_registry() -> [C2StoreSigningRegistryEntryV1; C2_STORE_SIGNING_ROUTE_COUNT]
+{
+    C2StoreSigningRouteV1::ALL.map(|route| C2StoreSigningRegistryEntryV1 {
+        route,
+        family: route.family(),
+        identity_domain: route.identity_domain(),
+        signature_domain: route.signature_domain(),
+        phase: route.phase(),
+        scope_class: route.scope_class(),
+        authority_class: route.authority_class(),
+        input_kind: route.input_kind(),
+        sole_consumer: route.sole_consumer(),
     })
 }
 
-/// REC-01 constructor target: parse one exact domain from canonical carrier
-/// text.  Unknown and generic strings refuse.
-pub fn construct_rec_01_signature_domain(
-    canonical_domain: &str,
-) -> Result<C2StoreIntegritySignatureDomainV1, C2SignatureDomainErrorV1> {
-    canonical_domain.parse()
+/// Exact seven-route external-terminal-A1 projection mechanically derived from
+/// the normative registry.
+#[must_use]
+pub fn c2_external_signing_registry()
+-> [C2ExternalSigningRegistryEntryV1; C2_EXTERNAL_SIGNING_ROUTE_COUNT] {
+    C2ExternalSigningRouteV1::ALL.map(|route| C2ExternalSigningRegistryEntryV1 {
+        route,
+        family: route.family(),
+        identity_domain: route.identity_domain(),
+        signature_domain: route.signature_domain(),
+        input_kind: route.input_kind(),
+        sole_consumer: route.sole_consumer(),
+    })
 }
 
-/// REC-01 verifier target: establish membership in the closed domain set.
-pub fn verify_rec_01_closed_signature_domain(
-    domain: C2StoreIntegritySignatureDomainV1,
-) -> Result<ClosedSignatureDomainSetV1, C2SignatureDomainErrorV1> {
-    let verified = verify_n_17_signature_domain_enum_has_exactly_eight_named()?;
-    if C2StoreIntegritySignatureDomainV1::ALL.contains(&domain) {
-        Ok(verified)
-    } else {
-        Err(C2SignatureDomainErrorV1::MalformedClosedDomainTable)
+/// Verify the exact family/route census and domain non-substitutability.
+pub fn verify_closed_c2_signing_registry() -> Result<(), C2SigningRegistryErrorV1> {
+    let families = c2_message_families();
+    let store = c2_store_signing_registry();
+    let external = c2_external_signing_registry();
+    let store_families = store
+        .iter()
+        .map(|entry| entry.family)
+        .collect::<BTreeSet<_>>();
+    let unsigned = families
+        .iter()
+        .filter(|family| {
+            !store_families.contains(family)
+                && !external.iter().any(|entry| entry.family == **family)
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    let unique_store_domains = store
+        .iter()
+        .map(|entry| entry.signature_domain)
+        .collect::<BTreeSet<_>>();
+    let unique_external_domains = external
+        .iter()
+        .map(|entry| entry.signature_domain)
+        .collect::<BTreeSet<_>>();
+    if families.len() != C2_MESSAGE_FAMILY_COUNT
+        || store.len() != C2_STORE_SIGNING_ROUTE_COUNT
+        || external.len() != C2_EXTERNAL_SIGNING_ROUTE_COUNT
+        || store_families.len() != C2_STORE_SIGNABLE_FAMILY_COUNT
+        || unsigned != [ClosedMessageFamilyV1::Msg04BootstrapToGenerationRelation]
+        || unique_store_domains.len() != C2_STORE_SIGNING_ROUTE_COUNT
+        || unique_external_domains.len() != C2_EXTERNAL_SIGNING_ROUTE_COUNT
+        || store.iter().any(|entry| {
+            entry.family.identity_domain() != entry.identity_domain
+                || !entry.family.is_store_signable()
+        })
+        || external.iter().any(|entry| {
+            entry.family == ClosedMessageFamilyV1::Msg04BootstrapToGenerationRelation
+                || entry.family.is_store_signable()
+        })
+    {
+        return Err(C2SigningRegistryErrorV1::MalformedClosedRegistry);
     }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
     use super::*;
 
     #[test]
-    fn exact_domain_table_is_closed_and_unique() {
-        let verification = verify_n_17_signature_domain_enum_has_exactly_eight_named().unwrap();
-        assert_eq!(verification.count(), 8);
+    fn public_projection_has_exact_16_10_11_7_1_census() {
+        verify_closed_c2_signing_registry().unwrap();
+        assert_eq!(c2_message_families().len(), 16);
         assert_eq!(
-            C2StoreIntegritySignatureDomainV1::ALL
+            c2_store_signing_registry()
                 .iter()
-                .map(|domain| domain.as_str())
+                .map(|entry| entry.family)
                 .collect::<BTreeSet<_>>()
                 .len(),
-            8
+            10
         );
+        assert_eq!(c2_store_signing_registry().len(), 11);
+        assert_eq!(c2_external_signing_registry().len(), 7);
     }
 
     #[test]
-    fn arbitrary_and_near_miss_domains_refuse() {
-        assert!(construct_rec_01_signature_domain("caller.selected.domain").is_err());
+    fn msg12_is_one_family_and_two_non_substitutable_routes() {
+        let routes = c2_store_signing_registry();
+        let current = routes
+            .iter()
+            .find(|entry| entry.route == C2StoreSigningRouteV1::Msg12ReceiptCurrent)
+            .unwrap();
+        let pending = routes
+            .iter()
+            .find(|entry| entry.route == C2StoreSigningRouteV1::Msg12ReceiptPending)
+            .unwrap();
+        assert_eq!(current.family, pending.family);
+        assert_ne!(current.phase, pending.phase);
+        assert_ne!(current.signature_domain, pending.signature_domain);
+        assert_ne!(current.authority_class, pending.authority_class);
+        assert_ne!(current.input_kind, pending.input_kind);
+        assert_ne!(current.sole_consumer, pending.sole_consumer);
+    }
+
+    #[test]
+    fn projection_exposes_no_string_to_route_or_generic_signing_constructor() {
         assert!(
-            construct_rec_01_signature_domain("nq.c2.store_generation.bootstrap.signature.v2")
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn serde_uses_the_exact_wire_value() {
-        let domain = C2StoreIntegritySignatureDomainV1::PolicyTransitionReceipt;
-        assert_eq!(
-            serde_json::to_string(&domain).unwrap(),
-            "\"nq.c2.policy_transition_receipt.store_integrity_signature.v1\""
-        );
-        assert_eq!(
-            serde_json::from_str::<C2StoreIntegritySignatureDomainV1>(
-                "\"nq.c2.policy_transition_receipt.store_integrity_signature.v1\""
-            )
-            .unwrap(),
-            domain
+            c2_store_signing_registry()
+                .iter()
+                .all(|entry| entry.signature_domain.starts_with("nq.c2."))
         );
     }
 }

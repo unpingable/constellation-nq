@@ -625,18 +625,33 @@ class RustSource:
             body_open = None
             declaration_end = None
             base_depth = self.depths[index]
+            round_depth = 0
+            square_depth = 0
             while cursor < len(self.tokens):
                 if self.depths[cursor] < base_depth:
                     break
+                value = self.tokens[cursor].value
+                if value == "(":
+                    round_depth += 1
+                elif value == ")" and round_depth:
+                    round_depth -= 1
+                elif value == "[":
+                    square_depth += 1
+                elif value == "]" and square_depth:
+                    square_depth -= 1
                 if (
                     self.depths[cursor] == base_depth
-                    and self.tokens[cursor].value == "{"
+                    and round_depth == 0
+                    and square_depth == 0
+                    and value == "{"
                 ):
                     body_open = cursor
                     break
                 if (
                     self.depths[cursor] == base_depth
-                    and self.tokens[cursor].value == ";"
+                    and round_depth == 0
+                    and square_depth == 0
+                    and value == ";"
                 ):
                     declaration_end = cursor
                     break

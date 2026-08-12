@@ -1,0 +1,495 @@
+{
+  "nodes": [
+    {
+      "call": "openat",
+      "cut": "SC-01",
+      "function": "create_fixed_file",
+      "line": 433,
+      "source": "crates/nq-store/src/store_generation/install.rs"
+    },
+    {
+      "call": "set_len",
+      "cut": "SC-02",
+      "function": "create_fixed_file",
+      "line": 452,
+      "source": "crates/nq-store/src/store_generation/install.rs"
+    },
+    {
+      "call": "sync_all",
+      "cut": "SC-03",
+      "function": "allocate_live_c2_fixed_files_v1",
+      "line": 503,
+      "source": "crates/nq-store/src/store_generation/install.rs"
+    },
+    {
+      "call": "sync_all",
+      "cut": "SC-04",
+      "function": "allocate_live_c2_fixed_files_v1",
+      "line": 516,
+      "source": "crates/nq-store/src/store_generation/install.rs"
+    },
+    {
+      "call": "sync_all",
+      "cut": "SC-05",
+      "function": "allocate_live_c2_fixed_files_v1",
+      "line": 524,
+      "source": "crates/nq-store/src/store_generation/install.rs"
+    },
+    {
+      "call": "sync_all",
+      "cut": "SC-06",
+      "function": "allocate_live_c2_fixed_files_v1",
+      "line": 529,
+      "source": "crates/nq-store/src/store_generation/install.rs"
+    },
+    {
+      "call": "execute",
+      "cut": "SC-07",
+      "function": "StoreC2SnapshotActorV1::persist_pending_installation_projection_v1",
+      "line": 5120,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "execute",
+      "cut": "SC-08",
+      "function": "StoreC2SnapshotActorV1::persist_initial_generation_current_projection_v1",
+      "line": 5392,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "execute",
+      "cut": "SC-09",
+      "function": "StoreC2SnapshotActorV1::persist_initial_generation_current_projection_v1",
+      "line": 5420,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "execute",
+      "cut": "SC-10",
+      "function": "StoreC2SnapshotActorV1::persist_initial_generation_current_projection_v1",
+      "line": 5459,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "execute",
+      "cut": "SC-11",
+      "function": "StoreC2SnapshotActorV1::persist_initial_generation_current_projection_v1",
+      "line": 5502,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "execute",
+      "cut": "SC-12",
+      "function": "StoreC2SnapshotActorV1::persist_initial_generation_current_projection_v1",
+      "line": 5554,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "execute",
+      "cut": "SC-13",
+      "function": "StoreC2SnapshotActorV1::persist_initial_generation_current_projection_v1",
+      "line": 5580,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "execute",
+      "cut": "SC-14",
+      "function": "StoreC2SnapshotActorV1::prepare_recovery_grant_request_v1",
+      "line": 6252,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "openat",
+      "cut": "SC-15",
+      "function": "StoreC2SnapshotActorV1::reopen_complete_physical_generation_v1",
+      "line": 6494,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "openat",
+      "cut": "SC-16",
+      "function": "StoreC2SnapshotActorV1::reopen_complete_physical_generation_v1",
+      "line": 6506,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "openat",
+      "cut": "SC-17",
+      "function": "StoreC2SnapshotActorV1::reopen_complete_physical_generation_v1",
+      "line": 6518,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "openat",
+      "cut": "SC-18",
+      "function": "StoreC2SnapshotActorV1::verify_same_snapshot",
+      "line": 7039,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "execute_batch",
+      "cut": "SC-19",
+      "function": "StoreC2SnapshotActorV1::with_permitted_effect",
+      "line": 7101,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "execute_batch",
+      "cut": "SC-20",
+      "function": "StoreC2SnapshotActorV1::with_permitted_effect",
+      "line": 7110,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "execute_batch",
+      "cut": "SC-21",
+      "function": "StoreC2SnapshotActorV1::with_permitted_effect",
+      "line": 7133,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "execute_batch",
+      "cut": "SC-22",
+      "function": "StoreC2SnapshotActorV1::with_permitted_effect",
+      "line": 7156,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "execute_batch",
+      "cut": "SC-23",
+      "function": "StoreC2SnapshotActorV1::with_permitted_effect",
+      "line": 7199,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "execute_batch",
+      "cut": "SC-24",
+      "function": "StoreC2SnapshotActorV1::with_permitted_effect",
+      "line": 7202,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "execute",
+      "cut": "SC-25",
+      "function": "StoreC2SnapshotActorV1::prepare_ordinary_successor_custody_v1",
+      "line": 8026,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "execute",
+      "cut": "SC-26",
+      "function": "StoreC2SnapshotActorV1::prepare_initial_bootstrap_grant_request_v1",
+      "line": 9284,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "execute_batch",
+      "cut": "SC-27",
+      "function": "StoreC2SnapshotActorV1::with_installation_bootstrap_batch_effect",
+      "line": 10288,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "execute_batch",
+      "cut": "SC-28",
+      "function": "StoreC2SnapshotActorV1::with_installation_bootstrap_batch_effect",
+      "line": 10384,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "execute_batch",
+      "cut": "SC-29",
+      "function": "StoreC2SnapshotActorV1::with_installation_bootstrap_batch_effect",
+      "line": 10457,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "execute_batch",
+      "cut": "SC-30",
+      "function": "StoreC2SnapshotActorV1::with_installation_bootstrap_batch_effect",
+      "line": 10475,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "execute_batch",
+      "cut": "SC-31",
+      "function": "StoreC2SnapshotActorV1::with_installation_bootstrap_batch_effect",
+      "line": 10479,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "commit",
+      "cut": "SC-32",
+      "function": "StoreC2SnapshotActorV1::commit",
+      "line": 10662,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "open",
+      "cut": "SC-33",
+      "function": "Store::with_c2_authority_snapshot",
+      "line": 10972,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "openat",
+      "cut": "SC-34",
+      "function": "Store::with_c2_authority_snapshot",
+      "line": 10983,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "transaction_with_behavior",
+      "cut": "SC-35",
+      "function": "Store::with_c2_authority_snapshot",
+      "line": 11005,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "commit",
+      "cut": "SC-36",
+      "function": "Store::with_c2_authority_snapshot",
+      "line": 11088,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "openat",
+      "cut": "SC-37",
+      "function": "verify_reopened_c2_fixed_descriptors_v1",
+      "line": 12413,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "open",
+      "cut": "SC-38",
+      "function": "measure_current_runtime_artifact",
+      "line": 12516,
+      "source": "crates/nq-store/src/store_generation/live_c2.rs"
+    },
+    {
+      "call": "sync_all",
+      "cut": "SC-39",
+      "function": "finalize_provisional_generation_lock_v1",
+      "line": 281,
+      "source": "crates/nq-store/src/store_generation/lock.rs"
+    },
+    {
+      "call": "openat",
+      "cut": "SC-40",
+      "function": "construct_wu_04_immutable_wu_local_lock_flock_process_registry",
+      "line": 417,
+      "source": "crates/nq-store/src/store_generation/lock.rs"
+    },
+    {
+      "call": "execute_batch",
+      "cut": "SC-41",
+      "function": "reproject_exact_durable_signer_carrier_suffix_v1",
+      "line": 2516,
+      "source": "crates/nq-store/src/store_generation/signer/coordinator.rs"
+    },
+    {
+      "call": "execute_batch",
+      "cut": "SC-42",
+      "function": "reproject_exact_durable_signer_carrier_suffix_v1",
+      "line": 2589,
+      "source": "crates/nq-store/src/store_generation/signer/coordinator.rs"
+    },
+    {
+      "call": "execute_batch",
+      "cut": "SC-43",
+      "function": "reproject_exact_durable_signer_carrier_suffix_v1",
+      "line": 2602,
+      "source": "crates/nq-store/src/store_generation/signer/coordinator.rs"
+    },
+    {
+      "call": "execute",
+      "cut": "SC-44",
+      "function": "append_prepared_signed_frame_with_physical_carrier",
+      "line": 2879,
+      "source": "crates/nq-store/src/store_generation/signer/coordinator.rs"
+    },
+    {
+      "call": "openat",
+      "cut": "SC-45",
+      "function": "C2StoreIntegrityCustodian::create_below_root",
+      "line": 1818,
+      "source": "crates/nq-store/src/store_generation/signer/custody.rs"
+    },
+    {
+      "call": "write_all",
+      "cut": "SC-46",
+      "function": "C2StoreIntegrityCustodian::create_below_root",
+      "line": 1901,
+      "source": "crates/nq-store/src/store_generation/signer/custody.rs"
+    },
+    {
+      "call": "set_len",
+      "cut": "SC-47",
+      "function": "C2StoreIntegrityCustodian::create_below_root",
+      "line": 1906,
+      "source": "crates/nq-store/src/store_generation/signer/custody.rs"
+    },
+    {
+      "call": "fsync",
+      "cut": "SC-48",
+      "function": "C2StoreIntegrityCustodian::create_below_root",
+      "line": 1928,
+      "source": "crates/nq-store/src/store_generation/signer/custody.rs"
+    },
+    {
+      "call": "open",
+      "cut": "SC-49",
+      "function": "open_production_custody_root",
+      "line": 2492,
+      "source": "crates/nq-store/src/store_generation/signer/custody.rs"
+    },
+    {
+      "call": "openat",
+      "cut": "SC-50",
+      "function": "open_directory_component",
+      "line": 2516,
+      "source": "crates/nq-store/src/store_generation/signer/custody.rs"
+    },
+    {
+      "call": "fsync",
+      "cut": "SC-51",
+      "function": "open_or_create_scope_directory",
+      "line": 2546,
+      "source": "crates/nq-store/src/store_generation/signer/custody.rs"
+    },
+    {
+      "call": "openat",
+      "cut": "SC-52",
+      "function": "open_or_create_scope_directory",
+      "line": 2554,
+      "source": "crates/nq-store/src/store_generation/signer/custody.rs"
+    },
+    {
+      "call": "openat",
+      "cut": "SC-53",
+      "function": "open_final_key",
+      "line": 2639,
+      "source": "crates/nq-store/src/store_generation/signer/custody.rs"
+    },
+    {
+      "call": "execute",
+      "cut": "SC-54",
+      "function": "append_prepared_external_ingress",
+      "line": 2059,
+      "source": "crates/nq-store/src/store_generation/signer/external_governance.rs"
+    },
+    {
+      "call": "execute",
+      "cut": "SC-55",
+      "function": "apply_verified_revocation_effect_in_transaction_v1",
+      "line": 2912,
+      "source": "crates/nq-store/src/store_generation/signer/external_governance.rs"
+    },
+    {
+      "call": "execute",
+      "cut": "SC-56",
+      "function": "apply_verified_quarantine_closure_effect_in_transaction_v1",
+      "line": 3038,
+      "source": "crates/nq-store/src/store_generation/signer/external_governance.rs"
+    },
+    {
+      "call": "execute",
+      "cut": "SC-57",
+      "function": "append_prepared_foundational_enrollment_adoption_v1",
+      "line": 2356,
+      "source": "crates/nq-store/src/store_generation/signer/records.rs"
+    },
+    {
+      "call": "execute",
+      "cut": "SC-58",
+      "function": "append_prepared_foundational_enrollment_adoption_v1",
+      "line": 2485,
+      "source": "crates/nq-store/src/store_generation/signer/records.rs"
+    },
+    {
+      "call": "execute",
+      "cut": "SC-59",
+      "function": "append_prepared_signer_enrollment_acceptance_v1",
+      "line": 3009,
+      "source": "crates/nq-store/src/store_generation/signer/records.rs"
+    },
+    {
+      "call": "execute",
+      "cut": "SC-60",
+      "function": "insert_successor_projection_plan_v1",
+      "line": 3222,
+      "source": "crates/nq-store/src/store_generation/signer/terminal.rs"
+    },
+    {
+      "call": "execute",
+      "cut": "SC-61",
+      "function": "insert_successor_projection_plan_v1",
+      "line": 3293,
+      "source": "crates/nq-store/src/store_generation/signer/terminal.rs"
+    },
+    {
+      "call": "execute",
+      "cut": "SC-62",
+      "function": "insert_successor_projection_plan_v1",
+      "line": 3350,
+      "source": "crates/nq-store/src/store_generation/signer/terminal.rs"
+    },
+    {
+      "call": "execute",
+      "cut": "SC-63",
+      "function": "insert_successor_projection_plan_v1",
+      "line": 3373,
+      "source": "crates/nq-store/src/store_generation/signer/terminal.rs"
+    },
+    {
+      "call": "execute",
+      "cut": "SC-64",
+      "function": "insert_successor_projection_plan_v1",
+      "line": 3390,
+      "source": "crates/nq-store/src/store_generation/signer/terminal.rs"
+    },
+    {
+      "call": "execute",
+      "cut": "SC-65",
+      "function": "insert_successor_projection_plan_v1",
+      "line": 3407,
+      "source": "crates/nq-store/src/store_generation/signer/terminal.rs"
+    },
+    {
+      "call": "execute_batch",
+      "cut": "SC-66",
+      "function": "append_successor_terminal_v1",
+      "line": 3442,
+      "source": "crates/nq-store/src/store_generation/signer/terminal.rs"
+    },
+    {
+      "call": "execute_batch",
+      "cut": "SC-67",
+      "function": "append_successor_terminal_v1",
+      "line": 3446,
+      "source": "crates/nq-store/src/store_generation/signer/terminal.rs"
+    },
+    {
+      "call": "execute_batch",
+      "cut": "SC-68",
+      "function": "append_successor_terminal_v1",
+      "line": 3460,
+      "source": "crates/nq-store/src/store_generation/signer/terminal.rs"
+    },
+    {
+      "call": "execute_batch",
+      "cut": "SC-69",
+      "function": "append_successor_terminal_v1",
+      "line": 3469,
+      "source": "crates/nq-store/src/store_generation/signer/terminal.rs"
+    },
+    {
+      "call": "execute_batch",
+      "cut": "SC-70",
+      "function": "append_successor_terminal_v1",
+      "line": 3478,
+      "source": "crates/nq-store/src/store_generation/signer/terminal.rs"
+    }
+  ],
+  "schema": "nq.c2_io_crash_cut_manifest.v1"
+}

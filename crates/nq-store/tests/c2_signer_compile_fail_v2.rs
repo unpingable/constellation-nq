@@ -1,4 +1,10 @@
-//! Compile-fail evidence for Matrix V3 rows SCF-17 and CSH-10.
+//! Retained compile-fail evidence for Matrix V3 rows SCF-17 and CSH-10.
+//!
+//! This file proves only the historical custody-module and fork-fence privacy
+//! boundaries named by those rows.  It is not evidence for the current
+//! Store-owned live context or governed-ingress permit.  Current live-C2
+//! noninjectability is pinned separately by
+//! `c2_live_authority_noninjectability.rs` plus the in-crate Store actor tests.
 //!
 //! SCF-17: a forked child cannot use an inherited signer capability or file
 //! handle as standing — refused at compile time because the signer custody

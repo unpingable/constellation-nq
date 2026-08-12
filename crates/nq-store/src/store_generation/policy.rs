@@ -193,6 +193,7 @@ pub struct CompleteActivePolicyResolutionV1 {
 }
 
 /// Exact pre-effect binding for P-04/N-39.
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct C2PolicyTransitionPredecessorV1 {
     old_policy_identity: Sha256Digest,
@@ -203,10 +204,12 @@ pub struct C2PolicyTransitionPredecessorV1 {
 }
 
 /// Private policy-transition brand.  It has no ordinary mutation methods.
+#[cfg(test)]
 #[derive(Debug)]
 pub struct C2PolicyTransitionBrandV1(C2PolicyTransitionPredecessorV1);
 
 /// Admissible, exact partial policy frontier.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum C2PolicyPartialFrontierV1 {
     IntentDurable,
@@ -215,6 +218,7 @@ pub enum C2PolicyPartialFrontierV1 {
 }
 
 /// Private exact-intent continuation brand.
+#[cfg(test)]
 #[derive(Debug)]
 pub struct C2PolicyTransitionContinuationBrandV1 {
     transition_intent_identity: Sha256Digest,
@@ -223,6 +227,7 @@ pub struct C2PolicyTransitionContinuationBrandV1 {
 }
 
 /// Evidence that transition and continuation brands cannot substitute.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct C2PolicyTransitionModeDisjointnessV1;
 
@@ -999,6 +1004,7 @@ pub fn verify_n_37_refusal(
 
 /// N-39 binds the exact current policy, proposal, lock and profile before any
 /// transition brand can exist.
+#[cfg(test)]
 pub(crate) fn construct_n_39_transition_predecessor(
     resolution: &CompleteActivePolicyResolutionV1,
     proposed_predecessor: &Sha256Digest,
@@ -1027,6 +1033,7 @@ pub(crate) fn construct_n_39_transition_predecessor(
 }
 
 /// N-39 rechecks the exact pre-effect tuple.
+#[cfg(test)]
 pub fn verify_n_39_predecessor_under_lock(
     predecessor: &C2PolicyTransitionPredecessorV1,
     current_policy: &Sha256Digest,
@@ -1044,12 +1051,14 @@ pub fn verify_n_39_predecessor_under_lock(
 }
 
 /// N-13/P-04 construct the sole transition brand from an exact predecessor.
+#[cfg(test)]
 pub(crate) fn construct_n_13_policy_transition_brand(
     predecessor: C2PolicyTransitionPredecessorV1,
 ) -> C2PolicyTransitionBrandV1 {
     C2PolicyTransitionBrandV1(predecessor)
 }
 
+#[cfg(test)]
 pub fn verify_n_13_old_and_proposed_tuples(
     brand: &C2PolicyTransitionBrandV1,
     expected_old: &Sha256Digest,
@@ -1064,12 +1073,14 @@ pub fn verify_n_13_old_and_proposed_tuples(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn transition_c2_active_policy(
     predecessor: C2PolicyTransitionPredecessorV1,
 ) -> C2PolicyTransitionBrandV1 {
     construct_n_13_policy_transition_brand(predecessor)
 }
 
+#[cfg(test)]
 pub fn verify_active_policy_transition_inputs(
     brand: &C2PolicyTransitionBrandV1,
     expected_intent: &Sha256Digest,
@@ -1082,6 +1093,7 @@ pub fn verify_active_policy_transition_inputs(
 }
 
 /// N-14/P-05 construct an exact-intent continuation, never a synthesized tip.
+#[cfg(test)]
 pub(crate) fn construct_n_14_transition_continuation(
     historical_intent: Sha256Digest,
     expected_intent: &Sha256Digest,
@@ -1099,6 +1111,7 @@ pub(crate) fn construct_n_14_transition_continuation(
     })
 }
 
+#[cfg(test)]
 pub fn verify_n_14_exact_partial_frontier(
     brand: &C2PolicyTransitionContinuationBrandV1,
     intent: &Sha256Digest,
@@ -1111,6 +1124,7 @@ pub fn verify_n_14_exact_partial_frontier(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn continue_c2_policy_transition(
     historical_intent: Sha256Digest,
     expected_intent: &Sha256Digest,
@@ -1127,6 +1141,7 @@ pub(crate) fn continue_c2_policy_transition(
     )
 }
 
+#[cfg(test)]
 pub fn verify_policy_transition_frontier(
     brand: &C2PolicyTransitionContinuationBrandV1,
     expected: C2PolicyPartialFrontierV1,
@@ -1139,6 +1154,7 @@ pub fn verify_policy_transition_frontier(
 }
 
 /// N-38 verifies the brand is tied to one exact predecessor and proposal.
+#[cfg(test)]
 pub fn verify_n_38_sole_transition_install_path(
     brand: &C2PolicyTransitionBrandV1,
     predecessor: &Sha256Digest,
@@ -1147,6 +1163,7 @@ pub fn verify_n_38_sole_transition_install_path(
     verify_n_13_old_and_proposed_tuples(brand, predecessor, proposal)
 }
 
+#[cfg(test)]
 pub(crate) fn construct_n_38_policy_transition_brand(
     predecessor: C2PolicyTransitionPredecessorV1,
 ) -> C2PolicyTransitionBrandV1 {
@@ -1198,11 +1215,13 @@ pub fn verify_n_42_profile_correspondence(
 }
 
 /// N-54 records the compile-time separation of transition/continuation brands.
+#[cfg(test)]
 pub(crate) fn construct_n_54_transition_mode_disjointness() -> C2PolicyTransitionModeDisjointnessV1
 {
     C2PolicyTransitionModeDisjointnessV1
 }
 
+#[cfg(test)]
 pub fn verify_n_54_transition_continuation_disjointness(
     _: C2PolicyTransitionModeDisjointnessV1,
 ) -> Result<(), PolicyRefusalV1> {

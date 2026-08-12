@@ -211,6 +211,82 @@ pub(crate) fn verify_recovery_successor_trace_cut_order_correspondence(
         .ok_or(CorrespondenceRefusalV2::TraceCutOrderMismatch)
 }
 
+/// Exact restore-specific cuts.  Restore cannot use the compact normal or
+/// recovery trace: its external MSG-13 entry, same-foundation re-adoption,
+/// later acceptance, selected phase, pending MSG-12, and durable currentness
+/// are separate load-bearing cuts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RestoreSuccessorTraceCutsV2 {
+    /// Exact restore request/proposal exists before external authorization.
+    pub(crate) proposal: u64,
+    /// Exact external MSG-13 restore authorization.
+    pub(crate) authorization: u64,
+    /// Store verification that this occurrence may use discontinuity entry.
+    pub(crate) discontinuity_eligibility: u64,
+    /// Resolution of one unambiguous historical terminal binding.
+    pub(crate) historical_terminal_resolution: u64,
+    /// Resolution of the exact stable foundation named by that terminal.
+    pub(crate) historical_foundation_resolution: u64,
+    /// Present verification that the historical key/custody basis is reusable.
+    pub(crate) reuse_verification: u64,
+    /// Store-derived pre-PoP restore entry authority.
+    pub(crate) entry: u64,
+    /// Exact pending-successor MSG-07 proof of possession.
+    pub(crate) pop: u64,
+    /// New adoption event re-adopting the same stable historical foundation.
+    pub(crate) foundation_readoption: u64,
+    /// Later signer-lifecycle acceptance of that exact adoption event.
+    pub(crate) signer_acceptance: u64,
+    /// Store resolver selection of the exact PendingSelected phase.
+    pub(crate) pending_selected: u64,
+    /// Exact pending-successor MSG-12 completion receipt.
+    pub(crate) msg12: u64,
+    /// Durable append/currentness resolution for the completed transition.
+    pub(crate) currentness: u64,
+    /// Fresh live GenerationCurrent standing may exist only afterward.
+    pub(crate) standing: u64,
+}
+
+/// Restore-specific order witness.  Its nominal type prevents callers from
+/// presenting a recovery or healthy-rotation order as a restore trace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RestoreSuccessorTraceCutOrderCorrespondenceV2 {
+    ExactRestoreOrderVerified,
+}
+
+pub(crate) fn construct_restore_successor_trace_cut_order_correspondence(
+    cuts: RestoreSuccessorTraceCutsV2,
+) -> Result<RestoreSuccessorTraceCutOrderCorrespondenceV2, CorrespondenceRefusalV2> {
+    if cuts.proposal < cuts.authorization
+        && cuts.authorization < cuts.discontinuity_eligibility
+        && cuts.discontinuity_eligibility < cuts.historical_terminal_resolution
+        && cuts.historical_terminal_resolution < cuts.historical_foundation_resolution
+        && cuts.historical_foundation_resolution < cuts.reuse_verification
+        && cuts.reuse_verification < cuts.entry
+        && cuts.entry < cuts.pop
+        && cuts.pop < cuts.foundation_readoption
+        && cuts.foundation_readoption < cuts.signer_acceptance
+        && cuts.signer_acceptance < cuts.pending_selected
+        && cuts.pending_selected < cuts.msg12
+        && cuts.msg12 < cuts.currentness
+        && cuts.currentness <= cuts.standing
+    {
+        Ok(RestoreSuccessorTraceCutOrderCorrespondenceV2::ExactRestoreOrderVerified)
+    } else {
+        Err(CorrespondenceRefusalV2::TraceCutOrderMismatch)
+    }
+}
+
+pub(crate) fn verify_restore_successor_trace_cut_order_correspondence(
+    cuts: RestoreSuccessorTraceCutsV2,
+    value: RestoreSuccessorTraceCutOrderCorrespondenceV2,
+) -> Result<RestoreSuccessorTraceCutOrderCorrespondenceV2, CorrespondenceRefusalV2> {
+    let expected = construct_restore_successor_trace_cut_order_correspondence(cuts)?;
+    (value == expected)
+        .then_some(value)
+        .ok_or(CorrespondenceRefusalV2::TraceCutOrderMismatch)
+}
+
 /// THM-04B exact resolver-current predecessor coordinates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExactCurrentRotationPredecessorCorrespondenceV2 {
@@ -470,6 +546,103 @@ mod tests {
             construct_recovery_successor_trace_cut_order_correspondence(recovery).unwrap(),
             RecoverySuccessorTraceCutOrderCorrespondenceV2::ExactOrderVerified
         );
+    }
+
+    fn exact_restore_cuts() -> RestoreSuccessorTraceCutsV2 {
+        RestoreSuccessorTraceCutsV2 {
+            proposal: 1,
+            authorization: 2,
+            discontinuity_eligibility: 3,
+            historical_terminal_resolution: 4,
+            historical_foundation_resolution: 5,
+            reuse_verification: 6,
+            entry: 7,
+            pop: 8,
+            foundation_readoption: 9,
+            signer_acceptance: 10,
+            pending_selected: 11,
+            msg12: 12,
+            currentness: 13,
+            standing: 14,
+        }
+    }
+
+    #[test]
+    fn restore_cut_order_preserves_every_authority_boundary() {
+        let cuts = exact_restore_cuts();
+        let correspondence =
+            construct_restore_successor_trace_cut_order_correspondence(cuts).unwrap();
+        assert_eq!(
+            correspondence,
+            RestoreSuccessorTraceCutOrderCorrespondenceV2::ExactRestoreOrderVerified
+        );
+        verify_restore_successor_trace_cut_order_correspondence(cuts, correspondence).unwrap();
+    }
+
+    #[test]
+    fn restore_cut_order_rejects_collapsed_or_reordered_boundaries() {
+        let valid = exact_restore_cuts();
+        let invalid = [
+            RestoreSuccessorTraceCutsV2 {
+                authorization: valid.proposal,
+                ..valid
+            },
+            RestoreSuccessorTraceCutsV2 {
+                discontinuity_eligibility: valid.authorization,
+                ..valid
+            },
+            RestoreSuccessorTraceCutsV2 {
+                historical_terminal_resolution: valid.discontinuity_eligibility,
+                ..valid
+            },
+            RestoreSuccessorTraceCutsV2 {
+                historical_foundation_resolution: valid.historical_terminal_resolution,
+                ..valid
+            },
+            RestoreSuccessorTraceCutsV2 {
+                reuse_verification: valid.historical_foundation_resolution,
+                ..valid
+            },
+            RestoreSuccessorTraceCutsV2 {
+                entry: valid.reuse_verification,
+                ..valid
+            },
+            RestoreSuccessorTraceCutsV2 {
+                pop: valid.entry,
+                ..valid
+            },
+            RestoreSuccessorTraceCutsV2 {
+                foundation_readoption: valid.pop,
+                ..valid
+            },
+            RestoreSuccessorTraceCutsV2 {
+                signer_acceptance: valid.foundation_readoption,
+                ..valid
+            },
+            RestoreSuccessorTraceCutsV2 {
+                pending_selected: valid.signer_acceptance,
+                ..valid
+            },
+            RestoreSuccessorTraceCutsV2 {
+                msg12: valid.pending_selected,
+                ..valid
+            },
+            RestoreSuccessorTraceCutsV2 {
+                currentness: valid.msg12,
+                ..valid
+            },
+            RestoreSuccessorTraceCutsV2 {
+                standing: valid.currentness - 1,
+                ..valid
+            },
+        ];
+
+        for cuts in invalid {
+            assert_eq!(
+                construct_restore_successor_trace_cut_order_correspondence(cuts),
+                Err(CorrespondenceRefusalV2::TraceCutOrderMismatch)
+            );
+        }
     }
 
     #[test]

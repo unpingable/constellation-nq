@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.c2_store_integrity_ordinary_successor_custody_preparation.v1.json",
+  "title": "nq.c2_store_integrity_ordinary_successor_custody_preparation.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "preparation_request_identity",
+    "occurrence_id",
+    "scope_identity",
+    "predecessor_binding_identity",
+    "predecessor_key_generation_identity",
+    "transition_identity",
+    "successor_proposal_identity",
+    "successor_pop_challenge_identity",
+    "successor_key_generation",
+    "active_policy_identity",
+    "active_policy_generation"
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.c2_store_integrity_ordinary_successor_custody_preparation.v1"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "preparation_request_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "occurrence_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:/@-]+$"
+    },
+    "scope_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "predecessor_binding_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "predecessor_key_generation_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "transition_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "successor_proposal_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "successor_pop_challenge_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "successor_key_generation": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "active_policy_identity": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "active_policy_generation": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    }
+  }
+}

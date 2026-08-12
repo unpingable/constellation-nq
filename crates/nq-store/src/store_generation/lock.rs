@@ -105,6 +105,34 @@ pub struct C2StoreGenerationLockV1 {
     _flock: LifetimeLockedFile,
 }
 
+/// Fresh-installation lock retained from exclusive creation through REC-29
+/// publication. It owns the process-inode reservation and OS flock but is
+/// deliberately not a completed generation lock until its one-way finalizer
+/// writes and verifies the B-genesis backlink.
+pub(crate) struct C2ProvisionalStoreGenerationLockV1 {
+    inode: LockInodeKey,
+    provisional_inode: ProvisionalHeldInode,
+    flock: LifetimeLockedFile,
+}
+
+/// Linear intermediate after the exact lock inode has entered the process
+/// nonreentrancy registry but before the OS flock is acquired.  Splitting this
+/// otherwise tiny constructor gives the installation crash observer truthful
+/// boundaries for mutex transfer and flock acquisition.
+pub(crate) struct C2ProvisionalLockInodeReservationV1 {
+    inode: LockInodeKey,
+    provisional_inode: ProvisionalHeldInode,
+    file: File,
+}
+
+impl C2ProvisionalStoreGenerationLockV1 {
+    /// Borrow the retained descriptor for exact allocation/profile checks.
+    #[must_use]
+    pub(crate) fn file(&self) -> &File {
+        &self.flock
+    }
+}
+
 impl C2StoreGenerationLockV1 {
     /// Fixed child name resolved through the retained Store-root descriptor.
     #[must_use]
@@ -173,6 +201,94 @@ impl Drop for C2StoreGenerationLockV1 {
             held.remove(&self.inode);
         }
     }
+}
+
+/// Acquire the permanent generation lock immediately after exclusive file
+/// creation, before any B/G or SQL installation effect. The empty allocated
+/// file remains an observable S1 prefix and cannot be mistaken for REC-29.
+pub(crate) fn begin_provisional_generation_lock_v1(
+    file: File,
+) -> Result<C2ProvisionalStoreGenerationLockV1, C2StoreGenerationLockErrorV1> {
+    acquire_provisional_generation_flock_v1(reserve_provisional_generation_inode_v1(file)?)
+}
+
+/// Transfer one exclusively created lock file into the process-wide inode
+/// registry.  No OS flock has been acquired when this returns.
+pub(crate) fn reserve_provisional_generation_inode_v1(
+    file: File,
+) -> Result<C2ProvisionalLockInodeReservationV1, C2StoreGenerationLockErrorV1> {
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() || metadata.nlink() != 1 {
+        return Err(C2StoreGenerationLockErrorV1::MalformedCarrier);
+    }
+    let inode = (metadata.dev(), metadata.ino());
+    let provisional_inode = ProvisionalHeldInode::insert(inode)?;
+    Ok(C2ProvisionalLockInodeReservationV1 {
+        inode,
+        provisional_inode,
+        file,
+    })
+}
+
+/// Acquire `LOCK_EX` for an inode already reserved by this process.  Failure
+/// drops the reservation and cannot leave a process-local authority alias.
+pub(crate) fn acquire_provisional_generation_flock_v1(
+    reservation: C2ProvisionalLockInodeReservationV1,
+) -> Result<C2ProvisionalStoreGenerationLockV1, C2StoreGenerationLockErrorV1> {
+    let flock = match Flock::lock(reservation.file, FlockArg::LockExclusiveNonblock) {
+        Ok(flock) => flock,
+        Err((_file, _error)) => return Err(C2StoreGenerationLockErrorV1::OperatingSystemConflict),
+    };
+    Ok(C2ProvisionalStoreGenerationLockV1 {
+        inode: reservation.inode,
+        provisional_inode: reservation.provisional_inode,
+        flock,
+    })
+}
+
+/// Publish and reverify REC-29 while retaining the original flock and inode
+/// reservation. There is no unlock/reopen gap between installation prefix
+/// and completed lock standing.
+pub(crate) fn finalize_provisional_generation_lock_v1(
+    provisional: C2ProvisionalStoreGenerationLockV1,
+    occurrence_id: String,
+    physical_store_generation_identity: Sha256Digest,
+    b_genesis_frame_identity: Sha256Digest,
+) -> Result<C2StoreGenerationLockV1, C2StoreGenerationLockErrorV1> {
+    let canonical_length = u32::try_from(provisional.flock.metadata()?.len())
+        .map_err(|_| C2StoreGenerationLockErrorV1::NoncanonicalLengthOrPadding)?;
+    let bytes = encode_rec_29_generation_lock(
+        occurrence_id,
+        physical_store_generation_identity,
+        b_genesis_frame_identity.clone(),
+        canonical_length,
+    )?;
+    let mut written = 0;
+    while written < bytes.len() {
+        let count = provisional
+            .flock
+            .write_at(&bytes[written..], written as u64)?;
+        if count == 0 {
+            return Err(C2StoreGenerationLockErrorV1::Io(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "C2 REC-29 write made no progress",
+            )));
+        }
+        written = written
+            .checked_add(count)
+            .ok_or(C2StoreGenerationLockErrorV1::NoncanonicalLengthOrPadding)?;
+    }
+    provisional.flock.sync_all()?;
+    #[cfg(test)]
+    super::source_io_crash_test_support::after_source_io_v1("SC-39");
+    let observed = read_exact_descriptor_bytes(&provisional.flock)?;
+    let carrier = verify_rec_29_generation_lock(&observed, &b_genesis_frame_identity)?;
+    provisional.provisional_inode.transfer();
+    Ok(C2StoreGenerationLockV1 {
+        inode: provisional.inode,
+        carrier,
+        _flock: provisional.flock,
+    })
 }
 
 fn domain_digest(domain: &[u8], bytes: &[u8]) -> Sha256Digest {
@@ -306,6 +422,8 @@ pub(crate) fn construct_wu_04_immutable_wu_local_lock_flock_process_registry(
         )
         .map_err(io::Error::from)?,
     );
+    #[cfg(test)]
+    super::source_io_crash_test_support::after_source_io_v1("SC-40");
     let metadata = file.metadata()?;
     if !metadata.file_type().is_file() || metadata.nlink() != 1 {
         return Err(C2StoreGenerationLockErrorV1::MalformedCarrier);
@@ -440,6 +558,51 @@ mod tests {
             .unwrap();
         file.write_all(bytes).unwrap();
         file.sync_all().unwrap();
+    }
+
+    #[test]
+    fn provisional_lock_finalizes_without_unlock_or_inode_transfer_gap() {
+        let root = tempdir().unwrap();
+        let path = root.path().join(C2_LOCK_FILE_V1);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(&path)
+            .unwrap();
+        file.set_len(4096).unwrap();
+        let inode = {
+            let metadata = file.metadata().unwrap();
+            (metadata.dev(), metadata.ino())
+        };
+        let provisional = begin_provisional_generation_lock_v1(file).unwrap();
+        assert_eq!(
+            (
+                provisional.file().metadata().unwrap().dev(),
+                provisional.file().metadata().unwrap().ino()
+            ),
+            inode
+        );
+        let b_genesis = digest('3');
+        let completed = finalize_provisional_generation_lock_v1(
+            provisional,
+            "occurrence-1".into(),
+            digest('2'),
+            b_genesis.clone(),
+        )
+        .unwrap();
+        assert_eq!(completed.inode_key(), inode);
+        verify_wu_04_immutable_wu_local_lock_flock_process_registry(&completed).unwrap();
+        assert!(matches!(
+            construct_wu_04_immutable_wu_local_lock_flock_process_registry(
+                &File::open(root.path()).unwrap(),
+                &b_genesis,
+            ),
+            Err(C2StoreGenerationLockErrorV1::ProcessAliasConflict)
+                | Err(C2StoreGenerationLockErrorV1::OperatingSystemConflict)
+        ));
     }
 
     #[test]

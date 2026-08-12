@@ -5,17 +5,112 @@
 //! none of them alone grants a writer session or signer standing.
 
 pub mod authority_geometry;
+mod candidate_qualification;
+pub mod c2_lifecycle;
 pub mod currentness;
 pub mod install;
+pub(crate) mod live_c2;
 pub mod lock;
 pub mod persistence;
 pub mod policy;
 pub mod records;
 pub mod refusal;
+// Superseded model-era ordinary restart pipeline. The production C2 reopen
+// path is Store-owned in `live_c2`; retain this only as an archaeological law
+// specimen for its local tests.
+#[cfg(test)]
 pub mod restart;
 pub mod restore;
 pub mod signer;
+
 pub mod signing;
+
+// Production-root crash/restart specimens live outside `live_c2.rs` so their
+// evidence cannot accidentally depend on that module's private model fixtures.
+#[cfg(test)]
+mod live_c2_bootstrap_crash_tests;
+#[cfg(test)]
+mod live_c2_hostile_tests;
+#[cfg(test)]
+pub(crate) mod source_io_crash_test_support {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[derive(Clone)]
+    struct SourceIoCrashObserverV1 {
+        selected: Option<&'static str>,
+        observed: Rc<RefCell<Vec<&'static str>>>,
+    }
+
+    thread_local! {
+        static SOURCE_IO_CRASH_OBSERVER_V1: RefCell<Option<SourceIoCrashObserverV1>> =
+            const { RefCell::new(None) };
+    }
+
+    /// Source-adjacent test/qualification hook for the exact SC-01..SC-70
+    /// production I/O census. A selected cut terminates a child test process
+    /// immediately after the named I/O succeeds: no Rust or SQLite destructor
+    /// may turn the specimen into an orderly rollback.
+    pub(crate) fn after_source_io_v1(cut: &'static str) {
+        SOURCE_IO_CRASH_OBSERVER_V1.with(|slot| {
+            let active = slot.borrow();
+            let Some(active) = active.as_ref() else {
+                return;
+            };
+            active.observed.borrow_mut().push(cut);
+            if active.selected == Some(cut) {
+                std::process::exit(197);
+            }
+        });
+    }
+
+    /// Whether the active child selected an error-only source cut whose
+    /// immediate precursor cannot be induced by a valid bounded runtime
+    /// input.  This is deliberately narrower than the crash hook: production
+    /// builds have no selector and callers cannot inject an I/O result.
+    pub(crate) fn selected_precursor_v1(cut: &'static str) -> bool {
+        SOURCE_IO_CRASH_OBSERVER_V1.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .is_some_and(|active| active.selected == Some(cut))
+        })
+    }
+
+    /// Activate observation only around the production operation under test.
+    /// Setup and restart verification therefore cannot accidentally consume a
+    /// cut that belongs to the consequence-bearing operation.
+    pub(crate) fn with_source_io_observer_v1<R>(
+        selected: Option<&'static str>,
+        operation: impl FnOnce() -> R,
+    ) -> (R, Vec<&'static str>) {
+        struct Reset;
+
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                SOURCE_IO_CRASH_OBSERVER_V1.with(|slot| {
+                    slot.replace(None);
+                });
+            }
+        }
+
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        SOURCE_IO_CRASH_OBSERVER_V1.with(|slot| {
+            assert!(
+                slot.borrow().is_none(),
+                "nested source-I/O crash observation is forbidden"
+            );
+            slot.replace(Some(SourceIoCrashObserverV1 {
+                selected,
+                observed: observed.clone(),
+            }));
+        });
+        let reset = Reset;
+        let result = operation();
+        let observed = observed.borrow().clone();
+        drop(reset);
+        (result, observed)
+    }
+}
 
 use std::path::Path;
 

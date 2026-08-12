@@ -1,20 +1,18 @@
-//! Matrix V3 restart/recovery evidence runner for rows SG-WU-07 and SG-N-30,
-//! plus the restart anchors of SCF-17 and CSH-10.
+//! Process-boundary and public-substrate restart evidence retained from Matrix
+//! V3 rows SG-WU-07, SG-N-30, SCF-17, and CSH-10.
 //!
 //! Anchors implemented here: `v2-sg-wu-07-restart-recovery`,
 //! `v2-sg-n-30-restart-recovery`, `v2-scf-17-restart-recovery`,
 //! `v2-csh-10-restart-recovery`.
 //!
-//! # Architectural honesty boundary
+//! # Current live-C2 evidence boundary
 //!
-//! The signer `custody`/`crash`/`restart` modules are `pub(crate)` with no
-//! public driver at this checkpoint: integration tests cannot construct a
-//! custodian, hold signer standing, or drive the crate-private C2 open
-//! pipeline (`Store::with_c2_writer_session` is `pub(crate)`; the permanent
-//! lock object `C2StoreGenerationLockV1` is only constructible in-crate).
-//! Every assertion below is therefore placed at a layer that is honestly
-//! reachable from the public surface, and the header of each test names the
-//! layer it covers:
+//! Product reopen now belongs to the Store-owned `live_c2` path. Its live
+//! context, admission, custody, actor, and reopen constructors are deliberately
+//! crate-private, so this external integration target does not pretend to
+//! exercise them. Exact GenerationCurrent reopen and every bound-coordinate
+//! mismatch belong in the in-crate `store_generation::live_c2` tests. This
+//! file covers only evidence honestly reachable from the external surface:
 //!
 //! - Public Store substrate: `Store::initialize_unqualified_storage`,
 //!   `Store::open`, `Store::open_read_only`, `Store::database_schema_version`,
@@ -25,18 +23,13 @@
 //!   (encode in the parent, re-verify exact persisted bytes after a real
 //!   process boundary in a re-exec child, with exact typed refusals for
 //!   tampered, substituted-backlink, and missing artifacts).
-//! - Public restart noncreation law: `store_generation::restart`'s RR-07
-//!   guard refuses every authority-creating restart effect with the exact
-//!   typed `C2RestartNoncreationRefusalV1`.
 //! - Fence/process boundary: `nq_helper_sandbox::C2ForkFence` across re-exec
 //!   children (observation, not enforcement, per the V3 SG-WU-07 amendment).
-//! - Compile boundary: the committed `tests/ui/c2/v2-scf-17.stderr` must
-//!   remain exactly the E0603 private-module refusal.
 //!
-//! What is NOT covered here, by design: driving the custodian across a
-//! restart, and the cross-process exclusion law of the permanent C2 lock
-//! (both crate-private; covered by in-crate unit tests in `crash.rs`,
-//! `restart.rs`, and `lock.rs`).
+//! What is NOT covered here, by design: minting or reopening live signer
+//! authority. Current compile-fail evidence for that boundary lives in the
+//! dedicated live-C2 noninjectability harness; old V2 privacy rows are not
+//! treated as proof of the new context/permit contract.
 //!
 //! The re-exec child role is gated by an environment marker and re-executes
 //! this binary with `--exact`; without the marker the child-role test is a
@@ -56,10 +49,6 @@ use nq_helper_sandbox::C2ForkFence;
 use nq_protocol::{Sha256Digest, sha256_bytes};
 use nq_store::store_generation::lock::{
     C2StoreGenerationLockErrorV1, encode_rec_29_generation_lock, verify_rec_29_generation_lock,
-};
-use nq_store::store_generation::restart::{
-    C2RestartNoncreationRefusalV1, RestartAuthorityCreatingEffectV1,
-    construct_rr_07_noncreation_guard, verify_rr_07_no_authority_creating_effect,
 };
 use nq_store::{Store, StoreError};
 
@@ -420,9 +409,8 @@ fn child_pid(line: &str) -> u32 {
 ///
 /// Layers covered: public Store substrate + public C2 lock-carrier byte law
 /// (persist in parent, re-verify exact bytes across a real exec boundary),
-/// fence/process boundary (observation half), public restart noncreation law
-/// (RR-07), and the exact premises-absent refusal. The custody-driving
-/// surface itself is crate-private at this checkpoint (see file header).
+/// fence/process boundary (observation half), and the exact premises-absent
+/// refusal. This is substrate/process evidence, not the live-C2 reopen gate.
 #[test]
 fn v2_sg_wu_07_restart_recovery() {
     // Setup: persist public-substrate C2 state — a versioned Store database
@@ -541,25 +529,6 @@ fn v2_sg_wu_07_restart_recovery() {
         &substituted,
         &["mode=backlink-mismatch", "lock-refusal=BacklinkMismatch"],
         "SG-WU-07 substituted backlink",
-    );
-
-    // Restart creates no authority: RR-07 refuses signer enrollment and
-    // session fabrication with the exact typed refusal, at the public layer.
-    assert_eq!(
-        verify_rr_07_no_authority_creating_effect(
-            construct_rr_07_noncreation_guard(),
-            RestartAuthorityCreatingEffectV1::EnrollOrRotateSigner,
-        ),
-        Err(C2RestartNoncreationRefusalV1::AuthorityCreatingEffectRequested),
-        "SG-WU-07: restart must not enroll or rotate a signer"
-    );
-    assert_eq!(
-        verify_rr_07_no_authority_creating_effect(
-            construct_rr_07_noncreation_guard(),
-            RestartAuthorityCreatingEffectV1::FabricateSession,
-        ),
-        Err(C2RestartNoncreationRefusalV1::AuthorityCreatingEffectRequested),
-        "SG-WU-07: restart must not fabricate a session"
     );
 
     // (b) fence restart observation: the parent holds its fence while the
@@ -760,27 +729,12 @@ fn v2_sg_n_30_restart_recovery() {
 /// Matrix V3 anchor `v2-scf-17-restart-recovery`: restart restores no signer
 /// standing.
 ///
-/// Layers covered: the compile boundary (the committed E0603 private-module
-/// refusal is still exact after the re-exec architecture is exercised) and
-/// the fd/fence process boundary (a re-exec child holds no custody fd and
-/// only a fresh, pid-bound fence). The custody capability itself is
-/// crate-private; the compile boundary is the honest evidence for it.
+/// Layer covered: the fd/fence process boundary (a re-exec child holds no
+/// custody-analog fd and only a fresh, pid-bound fence). Current live-context
+/// noninjectability is tested separately and is not inferred from this V2 row.
 #[test]
 fn v2_scf_17_restart_recovery() {
-    // The compile-time half: the committed expected diagnostic must still be
-    // exactly the E0603 privacy refusal and nothing else.
-    let diagnostic = std::fs::read_to_string("tests/ui/c2/v2-scf-17.stderr")
-        .expect("committed SCF-17 expected diagnostic");
-    let error_count = diagnostic.matches("error[").count() + diagnostic.matches("\nerror:").count();
-    assert!(
-        diagnostic.contains("error[E0603]")
-            && diagnostic.contains("module `custody` is private")
-            && error_count == 1
-            && !diagnostic.contains("warning"),
-        "SCF-17 restart: the compile boundary must remain exactly E0603:\n{diagnostic}"
-    );
-
-    // The runtime half: after re-exec the child holds no custody fd. The
+    // After re-exec the child holds no custody-analog fd. The
     // parent's O_CLOEXEC marker stands in for the loaded custody fd; the
     // decoy-positive control for this probe shape lives in
     // `c2_signer_hostile_v2.rs` (CSH-10 hostile) and is not repeated here.

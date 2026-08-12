@@ -1,0 +1,11 @@
+error[E0603]: module `live_c2` is private
+ --> tests/ui/c2/live-context-private.rs:3:33
+  |
+3 | use nq_store::store_generation::live_c2::C2LiveSignerContextV1;
+  |                                 ^^^^^^^ private module
+  |
+note: the module `live_c2` is defined here
+ --> src/store_generation.rs
+  |
+  | pub(crate) mod live_c2;
+  | ^^^^^^^^^^^^^^^^^^^^^^

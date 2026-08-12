@@ -1,0 +1,5 @@
+error[E0451]: field `_private` of struct `StoreC2CandidateRuntimeVerifierV1` is private
+ --> tests/ui/c2/lifecycle-facade-private.rs:4:64
+  |
+4 |     let _forged_verifier = StoreC2CandidateRuntimeVerifierV1 { _private: () };
+  |                                                                ^^^^^^^^ private field

@@ -1,0 +1,174 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nq.local/schemas/nq.c2_candidate_qualification_certificate.v1.json",
+  "title": "nq.c2_candidate_qualification_certificate.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "identity_domain",
+    "signature_domain",
+    "signature_algorithm",
+    "qualification_trust_root_identity",
+    "qualification_scope_identity",
+    "qualification_verifier_contract_identity",
+    "qualification_policy_identity",
+    "qualification_key_generation_identity",
+    "qualification_claim_identity",
+    "candidate_identity_domain",
+    "git_object_format",
+    "source_commit_oid",
+    "source_tree_oid",
+    "source_commit_identity",
+    "source_tree_identity",
+    "signer_implementation_manifest_identity",
+    "manifest_source_files_identity",
+    "runtime_artifact_identity",
+    "toolchain_identity",
+    "target_profile_identity",
+    "qualification_assumption_identities",
+    "qualified_candidate_identity",
+    "qualification_evidence_identity",
+    "signature",
+    "certificate_identity"
+  ],
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "gitObjectId": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "git_object_format": {
+            "const": "sha1"
+          }
+        },
+        "required": ["git_object_format"]
+      },
+      "then": {
+        "properties": {
+          "source_commit_oid": {
+            "pattern": "^[0-9a-f]{40}$"
+          },
+          "source_tree_oid": {
+            "pattern": "^[0-9a-f]{40}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "git_object_format": {
+            "const": "sha256"
+          }
+        },
+        "required": ["git_object_format"]
+      },
+      "then": {
+        "properties": {
+          "source_commit_oid": {
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "source_tree_oid": {
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "schema": {
+      "const": "nq.c2_candidate_qualification_certificate.v1"
+    },
+    "identity_domain": {
+      "const": "nq.c2.candidate_qualification_certificate.identity.v1"
+    },
+    "signature_domain": {
+      "const": "nq.c2.candidate_qualification_certificate.signature.v1"
+    },
+    "signature_algorithm": {
+      "const": "ed25519"
+    },
+    "qualification_trust_root_identity": {
+      "$ref": "#/$defs/digest"
+    },
+    "qualification_scope_identity": {
+      "$ref": "#/$defs/digest"
+    },
+    "qualification_verifier_contract_identity": {
+      "$ref": "#/$defs/digest"
+    },
+    "qualification_policy_identity": {
+      "$ref": "#/$defs/digest"
+    },
+    "qualification_key_generation_identity": {
+      "$ref": "#/$defs/digest"
+    },
+    "qualification_claim_identity": {
+      "$ref": "#/$defs/digest"
+    },
+    "candidate_identity_domain": {
+      "const": "nq.c2.qualified_candidate.identity.v1"
+    },
+    "git_object_format": {
+      "enum": ["sha1", "sha256"]
+    },
+    "source_commit_oid": {
+      "$ref": "#/$defs/gitObjectId"
+    },
+    "source_tree_oid": {
+      "$ref": "#/$defs/gitObjectId"
+    },
+    "source_commit_identity": {
+      "$ref": "#/$defs/digest"
+    },
+    "source_tree_identity": {
+      "$ref": "#/$defs/digest"
+    },
+    "signer_implementation_manifest_identity": {
+      "$ref": "#/$defs/digest"
+    },
+    "manifest_source_files_identity": {
+      "$ref": "#/$defs/digest"
+    },
+    "runtime_artifact_identity": {
+      "$ref": "#/$defs/digest"
+    },
+    "toolchain_identity": {
+      "$ref": "#/$defs/digest"
+    },
+    "target_profile_identity": {
+      "$ref": "#/$defs/digest"
+    },
+    "qualification_assumption_identities": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/digest"
+      }
+    },
+    "qualified_candidate_identity": {
+      "$ref": "#/$defs/digest"
+    },
+    "qualification_evidence_identity": {
+      "$ref": "#/$defs/digest"
+    },
+    "signature": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{128}$"
+    },
+    "certificate_identity": {
+      "$ref": "#/$defs/digest"
+    }
+  }
+}

@@ -71,7 +71,7 @@ CREATE TABLE c2_installation_receipt_index (
         length(installation_intent_identity) = 71
         AND substr(installation_intent_identity, 1, 7) = 'sha256:'
     ),
-    bootstrap_identity TEXT NOT NULL CHECK (
+    bootstrap_identity TEXT NOT NULL UNIQUE CHECK (
         length(bootstrap_identity) = 71
         AND substr(bootstrap_identity, 1, 7) = 'sha256:'
     ),
@@ -127,4 +127,99 @@ CREATE TRIGGER immutable_c2_installation_receipt_index_delete
 BEFORE DELETE ON c2_installation_receipt_index
 BEGIN
     SELECT RAISE(ABORT, 'c2 installation receipt index is append-only');
+END;
+
+-- Unsigned MSG-04 bootstrap-to-generation relation.  This is canonical inert
+-- evidence consumed by the generation-current resolver; it is deliberately
+-- outside the signer-message ledger and has no signature/domain column.
+CREATE TABLE c2_signer_bootstrap_transition (
+    relation_identity TEXT PRIMARY KEY CHECK (
+        length(relation_identity) = 71
+        AND substr(relation_identity, 1, 7) = 'sha256:'
+    ),
+    schema_id TEXT NOT NULL CHECK (
+        schema_id = 'nq.c2_signer_bootstrap_transition.v1'
+    ),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    identity_domain TEXT NOT NULL CHECK (
+        identity_domain = 'nq.c2.signer_bootstrap_transition.identity.v1'
+    ),
+    bootstrap_grant_identity TEXT NOT NULL CHECK (
+        length(bootstrap_grant_identity) = 71
+        AND substr(bootstrap_grant_identity, 1, 7) = 'sha256:'
+    ),
+    foundational_enrollment_identity TEXT NOT NULL CHECK (
+        length(foundational_enrollment_identity) = 71
+        AND substr(foundational_enrollment_identity, 1, 7) = 'sha256:'
+    ),
+    signer_enrollment_identity TEXT NOT NULL UNIQUE CHECK (
+        length(signer_enrollment_identity) = 71
+        AND substr(signer_enrollment_identity, 1, 7) = 'sha256:'
+    ),
+    initial_pop_identity TEXT NOT NULL UNIQUE CHECK (
+        length(initial_pop_identity) = 71
+        AND substr(initial_pop_identity, 1, 7) = 'sha256:'
+    ),
+    physical_generation_bootstrap_identity TEXT NOT NULL UNIQUE CHECK (
+        length(physical_generation_bootstrap_identity) = 71
+        AND substr(physical_generation_bootstrap_identity, 1, 7) = 'sha256:'
+    ),
+    generation_commitment_identity TEXT NOT NULL UNIQUE CHECK (
+        length(generation_commitment_identity) = 71
+        AND substr(generation_commitment_identity, 1, 7) = 'sha256:'
+    ),
+    installation_receipt_identity TEXT NOT NULL UNIQUE CHECK (
+        length(installation_receipt_identity) = 71
+        AND substr(installation_receipt_identity, 1, 7) = 'sha256:'
+    ),
+    physical_store_generation_identity TEXT NOT NULL UNIQUE CHECK (
+        length(physical_store_generation_identity) = 71
+        AND substr(physical_store_generation_identity, 1, 7) = 'sha256:'
+    ),
+    transition_cut INTEGER NOT NULL CHECK (
+        transition_cut > 0 AND transition_cut <= 9007199254740991
+    ),
+    canonical_bytes BLOB NOT NULL CHECK (
+        length(canonical_bytes) > 0
+        AND length(canonical_bytes) <= 1048576
+        AND json_valid(CAST(canonical_bytes AS TEXT))
+    ),
+    canonical_bytes_sha256 TEXT NOT NULL UNIQUE CHECK (
+        length(canonical_bytes_sha256) = 71
+        AND substr(canonical_bytes_sha256, 1, 7) = 'sha256:'
+    ),
+    canonical_bytes_length INTEGER NOT NULL CHECK (
+        canonical_bytes_length > 0 AND canonical_bytes_length <= 1048576
+    ),
+    derived_at TEXT NOT NULL,
+    CHECK (length(canonical_bytes) = canonical_bytes_length),
+    CHECK (json_extract(CAST(canonical_bytes AS TEXT), '$.schema') = schema_id),
+    CHECK (json_extract(CAST(canonical_bytes AS TEXT), '$.schema_version') = schema_version),
+    CHECK (json_extract(CAST(canonical_bytes AS TEXT), '$.identity_domain') = identity_domain),
+    CHECK (json_extract(CAST(canonical_bytes AS TEXT), '$.relation_identity') = relation_identity),
+    CHECK (json_extract(CAST(canonical_bytes AS TEXT), '$.bootstrap_grant_identity') = bootstrap_grant_identity),
+    CHECK (json_extract(CAST(canonical_bytes AS TEXT), '$.foundational_enrollment_identity') = foundational_enrollment_identity),
+    CHECK (json_extract(CAST(canonical_bytes AS TEXT), '$.signer_enrollment_identity') = signer_enrollment_identity),
+    CHECK (json_extract(CAST(canonical_bytes AS TEXT), '$.initial_pop_identity') = initial_pop_identity),
+    CHECK (json_extract(CAST(canonical_bytes AS TEXT), '$.physical_generation_bootstrap_identity') = physical_generation_bootstrap_identity),
+    CHECK (json_extract(CAST(canonical_bytes AS TEXT), '$.generation_commitment_identity') = generation_commitment_identity),
+    CHECK (json_extract(CAST(canonical_bytes AS TEXT), '$.installation_receipt_identity') = installation_receipt_identity),
+    CHECK (json_extract(CAST(canonical_bytes AS TEXT), '$.physical_store_generation_identity') = physical_store_generation_identity),
+    CHECK (json_extract(CAST(canonical_bytes AS TEXT), '$.transition_cut') = transition_cut),
+    FOREIGN KEY (installation_receipt_identity)
+        REFERENCES c2_installation_receipt_index(installation_receipt_identity),
+    FOREIGN KEY (physical_store_generation_identity)
+        REFERENCES c2_installation_receipt_index(physical_store_generation_identity)
+) STRICT;
+
+CREATE TRIGGER immutable_c2_signer_bootstrap_transition_update
+BEFORE UPDATE ON c2_signer_bootstrap_transition
+BEGIN
+    SELECT RAISE(ABORT, 'unsigned MSG-04 bootstrap transition is append-only');
+END;
+
+CREATE TRIGGER immutable_c2_signer_bootstrap_transition_delete
+BEFORE DELETE ON c2_signer_bootstrap_transition
+BEGIN
+    SELECT RAISE(ABORT, 'unsigned MSG-04 bootstrap transition is append-only');
 END;

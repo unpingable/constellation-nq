@@ -1,6 +1,10 @@
 //! Matrix V3 row CSH-10: "child process inherits loaded key/fd" — refused by
 //! the shared fork fence and the custody boundary.
 //!
+//! This retained case proves only fork-fence field privacy.  Current
+//! process-local live authority is tested by the live-C2 noninjectability and
+//! Store-owned reopen suites, not inferred from this diagnostic.
+//!
 //! This case attempts the prohibited condition at compile level: extracting
 //! the fork-fence guard's private owner field so its standing could be handed
 //! to (or forged for) a child process. The guard's fields are private and no

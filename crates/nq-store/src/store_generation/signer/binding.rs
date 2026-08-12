@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 
-use nq_protocol::{Sha256Digest, semantic_digest};
+use nq_protocol::{Sha256Digest, canonical_json_bytes, semantic_digest};
 use serde::{Deserialize, Deserializer, Serialize, de};
 use thiserror::Error;
 
@@ -77,7 +77,7 @@ pub struct StoreGenerationSignerRootBindingV1 {
     binding_id: Sha256Digest,
 }
 
-/// The only three lawful current-binding provenance routes.
+/// The only four lawful current-binding provenance routes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CurrentSignerBindingModeV1 {
@@ -85,6 +85,9 @@ pub enum CurrentSignerBindingModeV1 {
     Initial,
     /// Adjacent predecessor-authorized healthy rotation.
     NormalSuccessor,
+    /// Adjacent externally authorized restoration of an exact historical
+    /// signer foundation.
+    RestoreSuccessor,
     /// Adjacent externally authorized recovery.
     RecoverySuccessor,
 }
@@ -98,6 +101,17 @@ pub struct PersistedCurrentBindingAssociationV1 {
     append_id: String,
     resolution_id: String,
     resulting_binding_id: Sha256Digest,
+}
+
+/// One verified current binding paired with the exact receipt/append/
+/// resolution association that may be projected durably with it.
+///
+/// This is inert evidence, not standing.  Its fields remain sealed so a Store
+/// caller cannot pair an independently selected binding and association.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct PersistenceReadyCurrentSignerBindingV1 {
+    current: CurrentSignerGenerationBindingV1,
+    association: PersistedCurrentBindingAssociationV1,
 }
 
 /// One completed transition suitable for deriving a current binding.
@@ -141,11 +155,18 @@ pub struct CurrentSignerGenerationBindingV1 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InitialCurrentSignerBindingV1(CurrentSignerGenerationBindingV1);
 
-/// Normal-route proof that cannot represent an initial or recovery binding.
+/// Normal-route proof that cannot represent an initial or discontinuous
+/// binding.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NormalSuccessorCurrentSignerBindingV1(CurrentSignerGenerationBindingV1);
 
-/// Recovery-route proof that cannot represent an initial or normal binding.
+/// Restore-route proof that cannot represent an initial, normal, or recovery
+/// binding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RestoreSuccessorCurrentSignerBindingV1(CurrentSignerGenerationBindingV1);
+
+/// Recovery-route proof that cannot represent an initial, normal, or restore
+/// binding.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoverySuccessorCurrentSignerBindingV1(CurrentSignerGenerationBindingV1);
 
@@ -163,6 +184,7 @@ pub struct SignerRootPreservationWitnessV1 {
 pub enum CurrentSignerBindingInversionV1 {
     Initial(InitialCurrentSignerBindingV1),
     Normal(NormalSuccessorCurrentSignerBindingV1),
+    Restore(RestoreSuccessorCurrentSignerBindingV1),
     Recovery(RecoverySuccessorCurrentSignerBindingV1),
 }
 
@@ -440,6 +462,30 @@ pub(crate) fn construct_sb_04_initial_binding_derivation(
     Ok(InitialCurrentSignerBindingV1(binding))
 }
 
+/// Construct the initial completed-current projection together with its exact
+/// initial persisted association.  This is the sole persistence-facing
+/// initial route; no caller supplies a provenance mode or transition record.
+pub(crate) fn construct_sb_04_initial_persistence_ready_binding(
+    root: &StoreGenerationSignerRootBindingV1,
+    standing_id: String,
+    initial_resolution_id: String,
+    effective_cut: u64,
+) -> Result<PersistenceReadyCurrentSignerBindingV1, BindingRefusalV1> {
+    let current = construct_sb_04_initial_binding_derivation(
+        root,
+        standing_id,
+        initial_resolution_id,
+        effective_cut,
+    )?
+    .into_inner();
+    verify_sb_03_evolving_current_binding(root, &current)?;
+    let association = construct_sb_10_persisted_association(&current, None)?;
+    Ok(PersistenceReadyCurrentSignerBindingV1 {
+        current,
+        association,
+    })
+}
+
 fn construct_successor(
     root: &StoreGenerationSignerRootBindingV1,
     predecessor: &CurrentSignerGenerationBindingV1,
@@ -491,7 +537,7 @@ fn construct_successor(
 }
 
 /// Construct SB-05's adjacent normal-successor binding.
-pub(crate) fn construct_sb_05_normal_binding_derivation(
+pub(super) fn construct_sb_05_normal_binding_derivation(
     root: &StoreGenerationSignerRootBindingV1,
     predecessor: &CurrentSignerGenerationBindingV1,
     transition: &CompletedSignerTransitionV1,
@@ -505,8 +551,26 @@ pub(crate) fn construct_sb_05_normal_binding_derivation(
     .map(NormalSuccessorCurrentSignerBindingV1)
 }
 
+/// Construct the adjacent restore-successor binding.  The transition has
+/// already established exact external restore authority and historical-
+/// foundation identity in the lineage layer; this constructor preserves only
+/// its completed-current provenance and exact terminal adjacency.
+pub(super) fn construct_sb_06_restore_binding_derivation(
+    root: &StoreGenerationSignerRootBindingV1,
+    predecessor: &CurrentSignerGenerationBindingV1,
+    transition: &CompletedSignerTransitionV1,
+) -> Result<RestoreSuccessorCurrentSignerBindingV1, BindingRefusalV1> {
+    construct_successor(
+        root,
+        predecessor,
+        transition,
+        CurrentSignerBindingModeV1::RestoreSuccessor,
+    )
+    .map(RestoreSuccessorCurrentSignerBindingV1)
+}
+
 /// Construct SB-06's adjacent recovery-successor binding.
-pub(crate) fn construct_sb_06_recovery_binding_derivation(
+pub(super) fn construct_sb_06_recovery_binding_derivation(
     root: &StoreGenerationSignerRootBindingV1,
     predecessor: &CurrentSignerGenerationBindingV1,
     transition: &CompletedSignerTransitionV1,
@@ -551,6 +615,7 @@ pub(crate) fn verify_sb_03_evolving_current_binding(
             }
         }
         CurrentSignerBindingModeV1::NormalSuccessor
+        | CurrentSignerBindingModeV1::RestoreSuccessor
         | CurrentSignerBindingModeV1::RecoverySuccessor => {
             if binding.transition_id.as_deref().is_none_or(str::is_empty)
                 || binding.predecessor_binding_id.is_none()
@@ -563,6 +628,36 @@ pub(crate) fn verify_sb_03_evolving_current_binding(
         return Err(BindingRefusalV1::MalformedCurrentSignerBinding);
     }
     Ok(())
+}
+
+/// Decode and reverify the exact canonical immutable-root bytes retained by
+/// the Store projection. Deserialization alone is never a currentness or
+/// standing constructor.
+pub(crate) fn decode_verified_store_generation_signer_root_binding_v1(
+    bytes: &[u8],
+) -> Result<StoreGenerationSignerRootBindingV1, BindingRefusalV1> {
+    let root: StoreGenerationSignerRootBindingV1 =
+        serde_json::from_slice(bytes).map_err(|_| BindingRefusalV1::Canonicalization)?;
+    verify_sb_02_immutable_root_binding(&root)?;
+    if canonical_json_bytes(&root).map_err(|_| BindingRefusalV1::Canonicalization)? != bytes {
+        return Err(BindingRefusalV1::RootIdentityMismatch);
+    }
+    Ok(root)
+}
+
+/// Decode and reverify one exact canonical evolving-binding projection
+/// against its independently decoded immutable root.
+pub(crate) fn decode_verified_current_signer_generation_binding_v1(
+    root: &StoreGenerationSignerRootBindingV1,
+    bytes: &[u8],
+) -> Result<CurrentSignerGenerationBindingV1, BindingRefusalV1> {
+    let current: CurrentSignerGenerationBindingV1 =
+        serde_json::from_slice(bytes).map_err(|_| BindingRefusalV1::Canonicalization)?;
+    verify_sb_03_evolving_current_binding(root, &current)?;
+    if canonical_json_bytes(&current).map_err(|_| BindingRefusalV1::Canonicalization)? != bytes {
+        return Err(BindingRefusalV1::MalformedCurrentSignerBinding);
+    }
+    Ok(current)
 }
 
 /// Construct SB-07's root-preservation/key-evolution witness.
@@ -583,8 +678,8 @@ pub(crate) fn construct_sb_07_root_preservation_key_evolution(
     })
 }
 
-/// Construct SB-08's exhaustive current-binding inversion.
-pub(crate) fn construct_sb_08_binding_trichotomy_inversion(
+/// Construct SB-08's exhaustive four-route current-binding inversion.
+pub(crate) fn construct_sb_08_binding_provenance_inversion(
     root: &StoreGenerationSignerRootBindingV1,
     current: CurrentSignerGenerationBindingV1,
 ) -> Result<CurrentSignerBindingInversionV1, BindingRefusalV1> {
@@ -596,10 +691,23 @@ pub(crate) fn construct_sb_08_binding_trichotomy_inversion(
         CurrentSignerBindingModeV1::NormalSuccessor => {
             CurrentSignerBindingInversionV1::Normal(NormalSuccessorCurrentSignerBindingV1(current))
         }
+        CurrentSignerBindingModeV1::RestoreSuccessor => CurrentSignerBindingInversionV1::Restore(
+            RestoreSuccessorCurrentSignerBindingV1(current),
+        ),
         CurrentSignerBindingModeV1::RecoverySuccessor => CurrentSignerBindingInversionV1::Recovery(
             RecoverySuccessorCurrentSignerBindingV1(current),
         ),
     })
+}
+
+/// Preserve the reviewed SB-08 entry point while its historical theorem label
+/// still says "trichotomy".  The returned inversion is now exhaustive over
+/// all four canonical provenance routes.
+pub(crate) fn construct_sb_08_binding_trichotomy_inversion(
+    root: &StoreGenerationSignerRootBindingV1,
+    current: CurrentSignerGenerationBindingV1,
+) -> Result<CurrentSignerBindingInversionV1, BindingRefusalV1> {
+    construct_sb_08_binding_provenance_inversion(root, current)
 }
 
 /// Construct SB-09 only when candidate-set completeness yields one current binding.
@@ -637,7 +745,7 @@ pub(crate) fn construct_sb_09_binding_uniqueness(
 }
 
 /// Construct SB-10's exact persisted receipt/append/resolution association.
-pub(crate) fn construct_sb_10_persisted_association(
+pub(super) fn construct_sb_10_persisted_association(
     current: &CurrentSignerGenerationBindingV1,
     transition: Option<&CompletedSignerTransitionV1>,
 ) -> Result<PersistedCurrentBindingAssociationV1, BindingRefusalV1> {
@@ -653,8 +761,17 @@ pub(crate) fn construct_sb_10_persisted_association(
             Err(BindingRefusalV1::PersistedResolutionMismatch)
         }
         (_, Some(edge))
-            if edge.transition_id == current.transition_id.as_deref().unwrap_or_default()
-                && edge.resolution_id == current.persisted_resolution_id =>
+            if edge.mode == current.mode
+                && edge.root_id == current.root_binding_id
+                && Some(&edge.predecessor_binding_id)
+                    == current.predecessor_binding_id.as_ref()
+                && edge.transition_id == current.transition_id.as_deref().unwrap_or_default()
+                && edge.successor_enrollment_id == current.current_enrollment_id
+                && edge.successor_key_generation == current.current_key_generation
+                && edge.successor_policy_id == current.current_policy_id
+                && edge.successor_standing_id == current.current_standing_id
+                && edge.resolution_id == current.persisted_resolution_id
+                && edge.effective_cut == current.effective_cut =>
         {
             Ok(PersistedCurrentBindingAssociationV1 {
                 transition_id: Some(edge.transition_id.clone()),
@@ -666,6 +783,25 @@ pub(crate) fn construct_sb_10_persisted_association(
         }
         _ => Err(BindingRefusalV1::PersistedResolutionMismatch),
     }
+}
+
+/// Seal one already route-verified successor binding with the exact completed
+/// transition association needed by durable projection.  Visibility is
+/// restricted to the signer module so Store integration must enter through a
+/// route-specific lineage constructor rather than supply a raw mode or
+/// transition.
+pub(super) fn construct_sb_10_successor_persistence_ready_binding(
+    current: CurrentSignerGenerationBindingV1,
+    transition: &CompletedSignerTransitionV1,
+) -> Result<PersistenceReadyCurrentSignerBindingV1, BindingRefusalV1> {
+    if current.mode == CurrentSignerBindingModeV1::Initial {
+        return Err(BindingRefusalV1::PersistedResolutionMismatch);
+    }
+    let association = construct_sb_10_persisted_association(&current, Some(transition))?;
+    Ok(PersistenceReadyCurrentSignerBindingV1 {
+        current,
+        association,
+    })
 }
 
 /// Construct SB-11's typed malformation result without skipping resident bytes.
@@ -742,6 +878,45 @@ impl CurrentSignerGenerationBindingV1 {
     }
 }
 
+impl PersistedCurrentBindingAssociationV1 {
+    #[must_use]
+    pub fn transition_id(&self) -> Option<&str> {
+        self.transition_id.as_deref()
+    }
+
+    #[must_use]
+    pub fn receipt_id(&self) -> &str {
+        &self.receipt_id
+    }
+
+    #[must_use]
+    pub fn append_id(&self) -> &str {
+        &self.append_id
+    }
+
+    #[must_use]
+    pub fn resolution_id(&self) -> &str {
+        &self.resolution_id
+    }
+
+    #[must_use]
+    pub fn resulting_binding_id(&self) -> &Sha256Digest {
+        &self.resulting_binding_id
+    }
+}
+
+impl PersistenceReadyCurrentSignerBindingV1 {
+    #[must_use]
+    pub fn current(&self) -> &CurrentSignerGenerationBindingV1 {
+        &self.current
+    }
+
+    #[must_use]
+    pub fn association(&self) -> &PersistedCurrentBindingAssociationV1 {
+        &self.association
+    }
+}
+
 impl StoreGenerationSignerRootBindingV1 {
     #[must_use]
     pub fn binding_id(&self) -> &Sha256Digest {
@@ -767,6 +942,61 @@ impl StoreGenerationSignerRootBindingV1 {
     pub fn scope_id(&self) -> &str {
         &self.identity.scope_id
     }
+
+    #[must_use]
+    pub fn lifecycle_root_id(&self) -> &str {
+        &self.identity.lifecycle_root_id
+    }
+
+    #[must_use]
+    pub fn resident_id(&self) -> &str {
+        &self.identity.resident_id
+    }
+
+    #[must_use]
+    pub fn role_id(&self) -> &str {
+        &self.identity.role_id
+    }
+
+    #[must_use]
+    pub fn role_manifest_generation(&self) -> &str {
+        &self.identity.role_manifest_generation
+    }
+
+    #[must_use]
+    pub fn domain_id(&self) -> &str {
+        &self.identity.domain_id
+    }
+
+    #[must_use]
+    pub fn policy_lineage_root(&self) -> &str {
+        &self.identity.policy_lineage_root
+    }
+
+    #[must_use]
+    pub fn initial_enrollment_id(&self) -> &str {
+        &self.initial_enrollment_id
+    }
+
+    #[must_use]
+    pub fn initial_policy_id(&self) -> &str {
+        &self.initial_policy_id
+    }
+
+    #[must_use]
+    pub const fn genesis_digest(&self) -> &Sha256Digest {
+        &self.genesis_digest
+    }
+
+    #[must_use]
+    pub const fn generation_commitment_digest(&self) -> &Sha256Digest {
+        &self.generation_commitment_digest
+    }
+
+    #[must_use]
+    pub const fn creation_cut(&self) -> u64 {
+        self.creation_cut
+    }
 }
 
 impl InitialCurrentSignerBindingV1 {
@@ -776,6 +1006,12 @@ impl InitialCurrentSignerBindingV1 {
 }
 
 impl NormalSuccessorCurrentSignerBindingV1 {
+    pub(crate) fn into_inner(self) -> CurrentSignerGenerationBindingV1 {
+        self.0
+    }
+}
+
+impl RestoreSuccessorCurrentSignerBindingV1 {
     pub(crate) fn into_inner(self) -> CurrentSignerGenerationBindingV1 {
         self.0
     }
@@ -828,25 +1064,41 @@ mod tests {
         .into_inner()
     }
 
+    fn successor_transition(
+        root: &StoreGenerationSignerRootBindingV1,
+        predecessor: &CurrentSignerGenerationBindingV1,
+        mode: CurrentSignerBindingModeV1,
+        suffix: &str,
+        effective_cut: u64,
+    ) -> CompletedSignerTransitionV1 {
+        CompletedSignerTransitionV1 {
+            mode,
+            root_id: root.binding_id.clone(),
+            transition_id: format!("transition-{suffix}"),
+            predecessor_binding_id: predecessor.binding_id.clone(),
+            predecessor_key_generation: predecessor.key_generation().into(),
+            successor_enrollment_id: format!("enrollment-{suffix}"),
+            successor_key_generation: format!("key-{suffix}"),
+            successor_policy_id: "policy-0".into(),
+            successor_standing_id: format!("standing-{suffix}"),
+            receipt_id: format!("receipt-{suffix}"),
+            append_id: format!("append-{suffix}"),
+            resolution_id: format!("resolution-{suffix}"),
+            effective_cut,
+        }
+    }
+
     #[test]
     fn initial_key_is_provenance_not_forever_current() {
         let root = root();
         let initial = initial(&root);
-        let transition = CompletedSignerTransitionV1 {
-            mode: CurrentSignerBindingModeV1::NormalSuccessor,
-            root_id: root.binding_id.clone(),
-            transition_id: "transition-1".into(),
-            predecessor_binding_id: initial.binding_id.clone(),
-            predecessor_key_generation: "key-0".into(),
-            successor_enrollment_id: "enrollment-1".into(),
-            successor_key_generation: "key-1".into(),
-            successor_policy_id: "policy-0".into(),
-            successor_standing_id: "standing-1".into(),
-            receipt_id: "receipt-1".into(),
-            append_id: "append-1".into(),
-            resolution_id: "resolution-1".into(),
-            effective_cut: 3,
-        };
+        let transition = successor_transition(
+            &root,
+            &initial,
+            CurrentSignerBindingModeV1::NormalSuccessor,
+            "1",
+            3,
+        );
         let successor = construct_sb_05_normal_binding_derivation(&root, &initial, &transition)
             .unwrap()
             .into_inner();
@@ -857,6 +1109,111 @@ mod tests {
                 .unwrap()
                 .changed_key
         );
+    }
+
+    #[test]
+    fn initial_persistence_ready_binding_seals_exact_initial_association() {
+        let root = root();
+        let ready = construct_sb_04_initial_persistence_ready_binding(
+            &root,
+            "standing-ready".into(),
+            "resolution-ready".into(),
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(ready.current().mode(), CurrentSignerBindingModeV1::Initial);
+        assert_eq!(ready.association().transition_id(), None);
+        assert_eq!(ready.association().receipt_id(), "resolution-ready");
+        assert_eq!(ready.association().append_id(), "resolution-ready");
+        assert_eq!(ready.association().resolution_id(), "resolution-ready");
+        assert_eq!(
+            ready.association().resulting_binding_id(),
+            ready.current().binding_id()
+        );
+    }
+
+    #[test]
+    fn restore_and_recovery_are_distinct_completed_current_provenance() {
+        let root = root();
+        let initial = initial(&root);
+        let restore_transition = successor_transition(
+            &root,
+            &initial,
+            CurrentSignerBindingModeV1::RestoreSuccessor,
+            "restore",
+            3,
+        );
+        let restored =
+            construct_sb_06_restore_binding_derivation(&root, &initial, &restore_transition)
+                .unwrap()
+                .into_inner();
+        assert_eq!(
+            restored.mode(),
+            CurrentSignerBindingModeV1::RestoreSuccessor
+        );
+        assert!(matches!(
+            construct_sb_08_binding_provenance_inversion(&root, restored.clone()).unwrap(),
+            CurrentSignerBindingInversionV1::Restore(_)
+        ));
+
+        let recovery_transition = successor_transition(
+            &root,
+            &initial,
+            CurrentSignerBindingModeV1::RecoverySuccessor,
+            "recovery",
+            3,
+        );
+        let recovered =
+            construct_sb_06_recovery_binding_derivation(&root, &initial, &recovery_transition)
+                .unwrap()
+                .into_inner();
+        assert_eq!(
+            recovered.mode(),
+            CurrentSignerBindingModeV1::RecoverySuccessor
+        );
+        assert!(matches!(
+            construct_sb_08_binding_trichotomy_inversion(&root, recovered).unwrap(),
+            CurrentSignerBindingInversionV1::Recovery(_)
+        ));
+
+        assert_eq!(
+            construct_sb_06_recovery_binding_derivation(&root, &initial, &restore_transition),
+            Err(BindingRefusalV1::ModeTransitionMismatch)
+        );
+        assert_eq!(
+            construct_sb_06_restore_binding_derivation(&root, &initial, &recovery_transition),
+            Err(BindingRefusalV1::ModeTransitionMismatch)
+        );
+
+        let restored =
+            construct_sb_06_restore_binding_derivation(&root, &initial, &restore_transition)
+                .unwrap()
+                .into_inner();
+        assert_eq!(
+            construct_sb_10_successor_persistence_ready_binding(restored, &recovery_transition),
+            Err(BindingRefusalV1::PersistedResolutionMismatch)
+        );
+    }
+
+    #[test]
+    fn restore_mode_survives_canonical_serialization_and_reverification() {
+        let root = root();
+        let initial = initial(&root);
+        let transition = successor_transition(
+            &root,
+            &initial,
+            CurrentSignerBindingModeV1::RestoreSuccessor,
+            "restore-wire",
+            3,
+        );
+        let restored = construct_sb_06_restore_binding_derivation(&root, &initial, &transition)
+            .unwrap()
+            .into_inner();
+        let bytes = canonical_json_bytes(&restored).unwrap();
+        let decoded = decode_verified_current_signer_generation_binding_v1(&root, &bytes).unwrap();
+        assert_eq!(decoded, restored);
+        assert_eq!(decoded.mode(), CurrentSignerBindingModeV1::RestoreSuccessor);
     }
 
     #[test]

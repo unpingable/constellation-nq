@@ -4,17 +4,31 @@
 //! S0--S5 durable-result law.  Its brands are crate-private to construct,
 //! linear to consume, and expose no ordinary Store mutation surface.
 
+use std::fs::File;
+use std::io;
+#[cfg(test)]
 use std::marker::PhantomData;
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::MetadataExt;
 
+use nix::fcntl::{FallocateFlags, fallocate};
 use nq_protocol::Sha256Digest;
+use rustix::fs::{Mode, OFlags, openat};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use super::lock::{
+    C2ProvisionalStoreGenerationLockV1, acquire_provisional_generation_flock_v1,
+    reserve_provisional_generation_inode_v1,
+};
+
 /// Type-level fresh-installation mode.
+#[cfg(test)]
 #[derive(Debug)]
 pub enum FreshV1 {}
 
 /// Type-level restore-successor installation mode.
+#[cfg(test)]
 #[derive(Debug)]
 pub enum RestoreSuccessorV1 {}
 
@@ -27,11 +41,13 @@ pub enum C2BootstrapModeV1 {
 }
 
 /// Proof that fresh and restore brands are not interchangeable.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct C2BootstrapModeDisjointnessV1;
 
 /// Exact restore predecessor tuple.  It is absent in fresh mode and complete
 /// in restore-successor mode.
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct C2RestoreInstallationPredecessorV1 {
     physical_generation_identity: Sha256Digest,
@@ -43,6 +59,7 @@ pub struct C2RestoreInstallationPredecessorV1 {
 }
 
 /// Every pre-write fact consumed by the mode-specific brand constructor.
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct C2InstallationPrerequisitesV1 {
     pub mode: C2BootstrapModeV1,
@@ -61,6 +78,7 @@ pub(crate) struct C2InstallationPrerequisitesV1 {
 }
 
 /// Private bootstrap brand; callers cannot construct its field.
+#[cfg(test)]
 #[derive(Debug)]
 pub struct C2BootstrapBrandV1<Mode> {
     prerequisites: C2InstallationPrerequisitesV1,
@@ -69,6 +87,7 @@ pub struct C2BootstrapBrandV1<Mode> {
 
 /// Linear bootstrap session.  It exposes only `run_installation`, which
 /// consumes the session and returns a durable result.
+#[cfg(test)]
 #[derive(Debug)]
 pub struct C2BootstrapSessionV1<Mode> {
     brand: C2BootstrapBrandV1<Mode>,
@@ -83,12 +102,14 @@ pub struct C2BootstrapSessionV1<Mode> {
 /// and prefix-sync witnesses assigned to the `PersistPendingSqlProjection`
 /// step.  Until that driver exists, the schema mutator is unreachable from
 /// production code rather than being exposed through a path-only shortcut.
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct C2PendingSqlProjectionPermitV1<Mode> {
     verified_source: crate::schema::VerifiedC2SchemaV8ToV9Sequential,
     _mode: PhantomData<Mode>,
 }
 
+#[cfg(test)]
 impl<Mode> C2PendingSqlProjectionPermitV1<Mode> {
     pub(crate) fn into_verified_source(self) -> crate::schema::VerifiedC2SchemaV8ToV9Sequential {
         self.verified_source
@@ -110,6 +131,7 @@ pub(crate) fn c2_pending_sql_projection_permit_for_test<Mode>(
 }
 
 /// Exact admissible installation-continuation prefix.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum C2InstallationPrefixStageV1 {
@@ -118,6 +140,7 @@ pub enum C2InstallationPrefixStageV1 {
 }
 
 /// One Store-observed installation prefix.
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct C2InstallationPrefixV1 {
     signed_intent_identity: Option<Sha256Digest>,
@@ -127,6 +150,7 @@ pub struct C2InstallationPrefixV1 {
 }
 
 /// Private exact-intent continuation brand.
+#[cfg(test)]
 #[derive(Debug)]
 pub struct C2InstallationContinuationBrandV1 {
     signed_intent_identity: Sha256Digest,
@@ -273,6 +297,242 @@ pub enum InstallationRefusalV1 {
     UnclassifiedIoCut,
 }
 
+/// Typed I/O refusal for the production installation prefix.  A failure never
+/// removes or rewrites an already-created fixed carrier: the exact prefix is
+/// retained for restart classification and generic-writer refusal.
+#[derive(Debug, Error)]
+pub(crate) enum C2LiveInstallationRefusalV1 {
+    #[error("a fixed C2 carrier already exists; installation is partial or complete")]
+    ExistingC2Footprint,
+    #[error("a fixed C2 carrier is not an exact one-link allocated regular file")]
+    CarrierShapeMismatch,
+    #[error("the installation I/O failed: {0}")]
+    Io(#[from] io::Error),
+    #[error("the installation crash specimen stopped after {0:?}")]
+    InjectedCrash(C2IoCutV1),
+}
+
+/// Test/qualification observation point for every reachable production I/O
+/// cut. Production uses `NoC2InstallationCrashV1`; only tests can request an
+/// abrupt stop. The hook runs after the named durable/observable effect, so
+/// the next cut's entry is also the exact "before" boundary.
+pub(super) trait C2InstallationCrashObserverV1 {
+    fn after_cut(&mut self, cut: C2IoCutV1) -> Result<(), C2LiveInstallationRefusalV1>;
+}
+
+pub(super) struct NoC2InstallationCrashV1;
+
+impl C2InstallationCrashObserverV1 for NoC2InstallationCrashV1 {
+    fn after_cut(&mut self, _cut: C2IoCutV1) -> Result<(), C2LiveInstallationRefusalV1> {
+        #[cfg(test)]
+        if observe_test_bootstrap_installation_cut_v1(_cut) {
+            return Err(C2LiveInstallationRefusalV1::InjectedCrash(_cut));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct TestBootstrapInstallationObserverV1 {
+    stop_after: Option<C2IoCutV1>,
+    observed: std::rc::Rc<std::cell::RefCell<Vec<C2IoCutV1>>>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_BOOTSTRAP_INSTALLATION_OBSERVER_V1:
+        std::cell::RefCell<Option<TestBootstrapInstallationObserverV1>> = const {
+            std::cell::RefCell::new(None)
+        };
+}
+
+#[cfg(test)]
+fn observe_test_bootstrap_installation_cut_v1(cut: C2IoCutV1) -> bool {
+    TEST_BOOTSTRAP_INSTALLATION_OBSERVER_V1.with(|slot| {
+        let active = slot.borrow();
+        let Some(active) = active.as_ref() else {
+            return false;
+        };
+        active.observed.borrow_mut().push(cut);
+        active.stop_after == Some(cut)
+    })
+}
+
+/// Test-only injection around the production `NoC2InstallationCrashV1`
+/// observer. The thread-local scope cannot affect another test thread or any
+/// non-test build, and the guard clears the injection during unwinding.
+#[cfg(test)]
+pub(super) fn with_test_bootstrap_installation_observer_v1<R>(
+    stop_after: Option<C2IoCutV1>,
+    operation: impl FnOnce() -> R,
+) -> (R, Vec<C2IoCutV1>) {
+    struct Reset;
+
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_BOOTSTRAP_INSTALLATION_OBSERVER_V1.with(|slot| {
+                slot.replace(None);
+            });
+        }
+    }
+
+    let observed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    TEST_BOOTSTRAP_INSTALLATION_OBSERVER_V1.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "nested C2 crash injection is forbidden"
+        );
+        slot.replace(Some(TestBootstrapInstallationObserverV1 {
+            stop_after,
+            observed: observed.clone(),
+        }));
+    });
+    let reset = Reset;
+    let result = operation();
+    let observed = observed.borrow().clone();
+    drop(reset);
+    (result, observed)
+}
+
+/// Exact newly allocated fixed C2 footprint. It owns the descriptors and is
+/// inert until the Store driver authenticates headers, signed intent and the
+/// complete S4 receipt. Raw allocation never constructs writer/signer
+/// standing.
+pub(super) struct C2AllocatedFixedFilesV1 {
+    lock: C2ProvisionalStoreGenerationLockV1,
+    b: File,
+    g: File,
+}
+
+impl C2AllocatedFixedFilesV1 {
+    pub(super) fn lock(&self) -> &File {
+        self.lock.file()
+    }
+
+    pub(super) const fn b(&self) -> &File {
+        &self.b
+    }
+
+    pub(super) const fn g(&self) -> &File {
+        &self.g
+    }
+
+    /// Consume the allocation only when the Store-owned driver is ready to
+    /// publish REC-29. B/G descriptors remain owned by the same result.
+    pub(super) fn into_parts(self) -> (C2ProvisionalStoreGenerationLockV1, File, File) {
+        (self.lock, self.b, self.g)
+    }
+}
+
+fn create_fixed_file(
+    root: &File,
+    name: &str,
+    length: u64,
+) -> Result<File, C2LiveInstallationRefusalV1> {
+    let raw = openat(
+        root,
+        name,
+        OFlags::CREATE | OFlags::EXCL | OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    )
+    .map_err(|error| {
+        if error == rustix::io::Errno::EXIST {
+            C2LiveInstallationRefusalV1::ExistingC2Footprint
+        } else {
+            C2LiveInstallationRefusalV1::Io(io::Error::from(error))
+        }
+    })?;
+    #[cfg(test)]
+    super::source_io_crash_test_support::after_source_io_v1("SC-01");
+    let file = File::from(raw);
+    let length_i64 =
+        i64::try_from(length).map_err(|_| C2LiveInstallationRefusalV1::CarrierShapeMismatch)?;
+    fallocate(file.as_raw_fd(), FallocateFlags::empty(), 0, length_i64).map_err(io::Error::from)?;
+    file.set_len(length)?;
+    #[cfg(test)]
+    super::source_io_crash_test_support::after_source_io_v1("SC-02");
+    Ok(file)
+}
+
+fn verify_allocated_file(
+    file: &File,
+    length: u64,
+    root_device: u64,
+) -> Result<(), C2LiveInstallationRefusalV1> {
+    let metadata = file.metadata()?;
+    let allocated = metadata
+        .blocks()
+        .checked_mul(512)
+        .ok_or(C2LiveInstallationRefusalV1::CarrierShapeMismatch)?;
+    if !metadata.file_type().is_file()
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.dev() != root_device
+        || metadata.len() != length
+        || allocated < length
+    {
+        return Err(C2LiveInstallationRefusalV1::CarrierShapeMismatch);
+    }
+    Ok(())
+}
+
+/// Create and physically allocate the exact fixed lock/B/G footprint.
+///
+/// This helper is visible only inside `store_generation`; the sole production
+/// caller is `StoreC2SnapshotActorV1::install_c2_live_v1`, which already owns
+/// authority, the maintenance lock and the retained root descriptor. Any
+/// failure intentionally leaves the observable partial prefix in place.
+pub(super) fn allocate_live_c2_fixed_files_v1(
+    root: &File,
+    lock_length: u64,
+    b_length: u64,
+    g_length: u64,
+    observer: &mut impl C2InstallationCrashObserverV1,
+) -> Result<C2AllocatedFixedFilesV1, C2LiveInstallationRefusalV1> {
+    let root_metadata = root.metadata()?;
+    if !root_metadata.file_type().is_dir() {
+        return Err(C2LiveInstallationRefusalV1::CarrierShapeMismatch);
+    }
+    observer.after_cut(C2IoCutV1::RootShapeObservation)?;
+
+    let lock_file = create_fixed_file(root, super::C2_LOCK_FILE_V1, lock_length)?;
+    observer.after_cut(C2IoCutV1::PermanentLockCreate)?;
+    verify_allocated_file(&lock_file, lock_length, root_metadata.dev())?;
+    observer.after_cut(C2IoCutV1::PermanentLockFstat)?;
+    lock_file.sync_all()?;
+    #[cfg(test)]
+    super::source_io_crash_test_support::after_source_io_v1("SC-03");
+    let lock_reservation = reserve_provisional_generation_inode_v1(lock_file)
+        .map_err(|error| C2LiveInstallationRefusalV1::Io(io::Error::other(error)))?;
+    observer.after_cut(C2IoCutV1::LockMutexTransfer)?;
+    let lock = acquire_provisional_generation_flock_v1(lock_reservation)
+        .map_err(|error| C2LiveInstallationRefusalV1::Io(io::Error::other(error)))?;
+    observer.after_cut(C2IoCutV1::PermanentFlockAcquisition)?;
+
+    let b = create_fixed_file(root, super::C2_BOOTSTRAP_EXTENT_V1, b_length)?;
+    observer.after_cut(C2IoCutV1::BCarrierCreate)?;
+    verify_allocated_file(&b, b_length, root_metadata.dev())?;
+    b.sync_all()?;
+    #[cfg(test)]
+    super::source_io_crash_test_support::after_source_io_v1("SC-04");
+    observer.after_cut(C2IoCutV1::BCarrierAllocation)?;
+
+    let g = create_fixed_file(root, super::C2_GLOBAL_REFUSAL_EXTENT_V1, g_length)?;
+    observer.after_cut(C2IoCutV1::GCarrierCreate)?;
+    verify_allocated_file(&g, g_length, root_metadata.dev())?;
+    g.sync_all()?;
+    #[cfg(test)]
+    super::source_io_crash_test_support::after_source_io_v1("SC-05");
+    observer.after_cut(C2IoCutV1::GCarrierAllocation)?;
+
+    root.sync_all()?;
+    #[cfg(test)]
+    super::source_io_crash_test_support::after_source_io_v1("SC-06");
+    observer.after_cut(C2IoCutV1::DirectorySync)?;
+    Ok(C2AllocatedFixedFilesV1 { lock, b, g })
+}
+
 const EXACT_INSTALLATION_SEQUENCE: [C2InstallationStepV1; 17] = [
     C2InstallationStepV1::AuthenticateAuthorityAndPolicy,
     C2InstallationStepV1::VerifyPhysicalLineage,
@@ -293,6 +553,7 @@ const EXACT_INSTALLATION_SEQUENCE: [C2InstallationStepV1; 17] = [
     C2InstallationStepV1::ConstructClosedBackend,
 ];
 
+#[cfg(test)]
 fn verify_mode_prerequisites(
     prerequisites: &C2InstallationPrerequisitesV1,
 ) -> Result<(), InstallationRefusalV1> {
@@ -315,10 +576,12 @@ fn verify_mode_prerequisites(
 }
 
 /// N-51 records type-level mode disjointness.
+#[cfg(test)]
 pub(crate) fn construct_n_51_bootstrap_mode_disjointness() -> C2BootstrapModeDisjointnessV1 {
     C2BootstrapModeDisjointnessV1
 }
 
+#[cfg(test)]
 pub fn verify_n_51_fresh_restore_bootstrap_disjointness(
     _: C2BootstrapModeDisjointnessV1,
 ) -> Result<(), InstallationRefusalV1> {
@@ -326,6 +589,7 @@ pub fn verify_n_51_fresh_restore_bootstrap_disjointness(
 }
 
 /// P-01 constructs the fresh brand before any durable effect.
+#[cfg(test)]
 pub(crate) fn install_c2_fresh(
     prerequisites: C2InstallationPrerequisitesV1,
 ) -> Result<C2BootstrapSessionV1<FreshV1>, InstallationRefusalV1> {
@@ -342,6 +606,7 @@ pub(crate) fn install_c2_fresh(
 }
 
 /// P-02 constructs the restore-successor brand before any durable effect.
+#[cfg(test)]
 pub(crate) fn install_c2_restore_successor(
     prerequisites: C2InstallationPrerequisitesV1,
 ) -> Result<C2BootstrapSessionV1<RestoreSuccessorV1>, InstallationRefusalV1> {
@@ -355,6 +620,7 @@ pub(crate) fn install_c2_restore_successor(
 }
 
 /// P-01 verifier for the exact fresh prerequisite set.
+#[cfg(test)]
 pub(crate) fn verify_fresh_install_inputs(
     prerequisites: &C2InstallationPrerequisitesV1,
 ) -> Result<(), InstallationRefusalV1> {
@@ -367,6 +633,7 @@ pub(crate) fn verify_fresh_install_inputs(
 }
 
 /// P-02 verifier for the exact restore-successor prerequisite set.
+#[cfg(test)]
 pub(crate) fn verify_restore_successor_install_inputs(
     prerequisites: &C2InstallationPrerequisitesV1,
 ) -> Result<(), InstallationRefusalV1> {
@@ -378,6 +645,7 @@ pub(crate) fn verify_restore_successor_install_inputs(
     }
 }
 
+#[cfg(test)]
 impl<Mode> C2BootstrapSessionV1<Mode> {
     /// Consume the special session into one closed durable result.
     pub(crate) fn run_installation(
@@ -398,6 +666,7 @@ impl<Mode> C2BootstrapSessionV1<Mode> {
 }
 
 /// P-03/N-12 select exactly one signed admissible S2/S3 prefix.
+#[cfg(test)]
 pub(crate) fn construct_n_12_installation_continuation(
     expected_intent: &Sha256Digest,
     expected_prefix: &Sha256Digest,
@@ -422,6 +691,7 @@ pub(crate) fn construct_n_12_installation_continuation(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn continue_c2_installation(
     expected_intent: &Sha256Digest,
     expected_prefix: &Sha256Digest,
@@ -436,6 +706,7 @@ pub(crate) fn continue_c2_installation(
     )
 }
 
+#[cfg(test)]
 pub fn verify_n_12_exact_signed_prefix(
     brand: &C2InstallationContinuationBrandV1,
     expected_intent: &Sha256Digest,
@@ -449,6 +720,7 @@ pub fn verify_n_12_exact_signed_prefix(
     }
 }
 
+#[cfg(test)]
 pub fn verify_installation_continuation_frontier(
     brand: &C2InstallationContinuationBrandV1,
     expected_stage: C2InstallationPrefixStageV1,
@@ -495,6 +767,7 @@ pub fn verify_wu_07_immutable_wu_five_special_roots_s0_s5(
 
 /// N-52's runtime verifier is intentionally observational; structural
 /// non-convertibility is demonstrated by compile-fail evidence.
+#[cfg(test)]
 pub fn verify_n_52_bootstrap_session_surface<Mode>(
     session: &C2BootstrapSessionV1<Mode>,
 ) -> Result<(), InstallationRefusalV1> {
@@ -502,6 +775,7 @@ pub fn verify_n_52_bootstrap_session_surface<Mode>(
 }
 
 /// N-53 verifies that the continuation still names its exact intent/prefix.
+#[cfg(test)]
 pub fn verify_n_53_exact_intent_continuation_surface(
     brand: &C2InstallationContinuationBrandV1,
     intent: &Sha256Digest,
@@ -512,6 +786,7 @@ pub fn verify_n_53_exact_intent_continuation_surface(
 
 /// N-68 verifies that installation is rooted in an established Gen4
 /// resolution and does not substitute that evidence with C2 outputs.
+#[cfg(test)]
 pub(crate) fn construct_n_68_installation_applies_established_gen4_store_closed_fresh(
     prerequisites: C2InstallationPrerequisitesV1,
 ) -> Result<C2InstallationPrerequisitesV1, InstallationRefusalV1> {
@@ -519,6 +794,7 @@ pub(crate) fn construct_n_68_installation_applies_established_gen4_store_closed_
     Ok(prerequisites)
 }
 
+#[cfg(test)]
 pub(crate) fn verify_n_68_installation_applies_established_gen4_store_closed_fresh(
     prerequisites: &C2InstallationPrerequisitesV1,
 ) -> Result<(), InstallationRefusalV1> {
@@ -805,6 +1081,11 @@ pub fn verify_seam_13_immutable_seam_finite_i_o_finite_crash(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
+    use nix::fcntl::{Flock, FlockArg};
+    use tempfile::tempdir;
+
     use super::*;
 
     fn digest(byte: char) -> Sha256Digest {
@@ -891,5 +1172,118 @@ mod tests {
             verify_n_80_refusal(&s5, &s1).unwrap_err(),
             InstallationRefusalV1::PhaseDowngrade
         );
+    }
+
+    struct StopAfterCut(C2IoCutV1);
+
+    impl C2InstallationCrashObserverV1 for StopAfterCut {
+        fn after_cut(&mut self, cut: C2IoCutV1) -> Result<(), C2LiveInstallationRefusalV1> {
+            if cut == self.0 {
+                Err(C2LiveInstallationRefusalV1::InjectedCrash(cut))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn retained_root(path: &Path) -> File {
+        File::open(path).unwrap()
+    }
+
+    #[test]
+    fn production_prefix_acquires_flock_and_allocates_exact_files() {
+        let directory = tempdir().unwrap();
+        let root = retained_root(directory.path());
+        let allocated = allocate_live_c2_fixed_files_v1(
+            &root,
+            4096,
+            8192,
+            12_288,
+            &mut NoC2InstallationCrashV1,
+        )
+        .unwrap();
+        assert_eq!(allocated.lock().metadata().unwrap().len(), 4096);
+        assert_eq!(allocated.b().metadata().unwrap().len(), 8192);
+        assert_eq!(allocated.g().metadata().unwrap().len(), 12_288);
+
+        // The retained Flock is real: a second descriptor cannot acquire the
+        // exclusive generation lock while this allocation prefix is live.
+        let competing = File::open(directory.path().join(super::super::C2_LOCK_FILE_V1)).unwrap();
+        assert!(Flock::lock(competing, FlockArg::LockExclusiveNonblock).is_err());
+
+        assert!(matches!(
+            allocate_live_c2_fixed_files_v1(
+                &root,
+                4096,
+                8192,
+                12_288,
+                &mut NoC2InstallationCrashV1,
+            ),
+            Err(C2LiveInstallationRefusalV1::ExistingC2Footprint)
+        ));
+    }
+
+    #[test]
+    fn every_reachable_allocation_cut_leaves_an_observable_prefix() {
+        let cuts = [
+            C2IoCutV1::RootShapeObservation,
+            C2IoCutV1::PermanentLockCreate,
+            C2IoCutV1::PermanentLockFstat,
+            C2IoCutV1::LockMutexTransfer,
+            C2IoCutV1::PermanentFlockAcquisition,
+            C2IoCutV1::BCarrierCreate,
+            C2IoCutV1::BCarrierAllocation,
+            C2IoCutV1::GCarrierCreate,
+            C2IoCutV1::GCarrierAllocation,
+            C2IoCutV1::DirectorySync,
+        ];
+        for cut in cuts {
+            let directory = tempdir().unwrap();
+            let root = retained_root(directory.path());
+            let error = match allocate_live_c2_fixed_files_v1(
+                &root,
+                4096,
+                8192,
+                12_288,
+                &mut StopAfterCut(cut),
+            ) {
+                Err(error) => error,
+                Ok(_) => panic!("the selected crash cut must stop allocation"),
+            };
+            assert!(matches!(
+                error,
+                C2LiveInstallationRefusalV1::InjectedCrash(observed) if observed == cut
+            ));
+            let lock_exists = directory
+                .path()
+                .join(super::super::C2_LOCK_FILE_V1)
+                .exists();
+            let b_exists = directory
+                .path()
+                .join(super::super::C2_BOOTSTRAP_EXTENT_V1)
+                .exists();
+            let g_exists = directory
+                .path()
+                .join(super::super::C2_GLOBAL_REFUSAL_EXTENT_V1)
+                .exists();
+            match cut {
+                C2IoCutV1::RootShapeObservation => {
+                    assert!(!lock_exists && !b_exists && !g_exists)
+                }
+                C2IoCutV1::PermanentLockCreate
+                | C2IoCutV1::PermanentLockFstat
+                | C2IoCutV1::LockMutexTransfer
+                | C2IoCutV1::PermanentFlockAcquisition => {
+                    assert!(lock_exists && !b_exists && !g_exists)
+                }
+                C2IoCutV1::BCarrierCreate | C2IoCutV1::BCarrierAllocation => {
+                    assert!(lock_exists && b_exists && !g_exists)
+                }
+                C2IoCutV1::GCarrierCreate
+                | C2IoCutV1::GCarrierAllocation
+                | C2IoCutV1::DirectorySync => assert!(lock_exists && b_exists && g_exists),
+                _ => unreachable!("only allocation-prefix cuts are enumerated"),
+            }
+        }
     }
 }

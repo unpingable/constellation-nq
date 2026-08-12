@@ -229,6 +229,7 @@ class SourceInventory:
 
 
 INSTALL = "crates/nq-store/src/store_generation/install.rs"
+LIVE_C2 = "crates/nq-store/src/store_generation/live_c2.rs"
 POLICY = "crates/nq-store/src/store_generation/policy.rs"
 STORE_LIB = "crates/nq-store/src/lib.rs"
 HOST_RUNTIME = "crates/nq-host-role-runtime/src/runtime.rs"
@@ -240,6 +241,11 @@ HELPER_SANDBOX = "crates/nq-helper-sandbox/src/lib.rs"
 HELPER_SANDBOX_MANIFEST = "crates/nq-helper-sandbox/Cargo.toml"
 STORE_MANIFEST = "crates/nq-store/Cargo.toml"
 WRITER = "crates/nq-store/src/writer_session.rs"
+STORE_GENERATION_MOD = "crates/nq-store/src/store_generation.rs"
+CANDIDATE_QUALIFICATION = (
+    "crates/nq-store/src/store_generation/candidate_qualification.rs"
+)
+C2_LIFECYCLE = "crates/nq-store/src/store_generation/c2_lifecycle.rs"
 LOCK = "crates/nq-store/src/store_generation/lock.rs"
 RESTORE = "crates/nq-store/src/store_generation/restore.rs"
 SIGNER_PREFIX = "crates/nq-store/src/store_generation/signer/"
@@ -251,65 +257,113 @@ SIGNER_RESTART = SIGNER_PREFIX + "restart.rs"
 SIGNER_LINEAGE = SIGNER_PREFIX + "lineage.rs"
 SIGNER_GOVERNANCE = SIGNER_PREFIX + "external_governance.rs"
 SIGNER_AUTHORITY = SIGNER_PREFIX + "authority.rs"
+SIGNER_MANIFEST = SIGNER_PREFIX + "manifest.rs"
+SIGNER_RECORDS = SIGNER_PREFIX + "records.rs"
+SIGNER_TERMINAL = SIGNER_PREFIX + "terminal.rs"
+C2_SIGNING_PROJECTION = "crates/nq-store/src/store_generation/signing.rs"
 
 SPECIAL_ROOT_SPECS = (
-    ("P-01", INSTALL, None, "install_c2_fresh", "C2BootstrapBrandV1"),
-    ("P-02", INSTALL, None, "install_c2_restore_successor", "C2BootstrapBrandV1"),
     (
-        "P-03",
-        INSTALL,
-        None,
-        "continue_c2_installation",
-        "C2InstallationContinuationBrandV1",
+        "LIVE-BOOTSTRAP-PREPARE",
+        LIVE_C2,
+        "Store",
+        "prepare_c2_live_bootstrap_v1",
+        "StorePreparedBootstrapGrantRequestV1",
     ),
     (
-        "P-04",
-        POLICY,
-        None,
-        "transition_c2_active_policy",
-        "C2PolicyTransitionBrandV1",
+        "LIVE-BOOTSTRAP-INSTALL",
+        LIVE_C2,
+        "Store",
+        "install_c2_live_from_bootstrap_grant_v1",
+        "BootstrapV1",
     ),
     (
-        "P-05",
-        POLICY,
-        None,
-        "continue_c2_policy_transition",
-        "C2PolicyTransitionContinuationBrandV1",
+        "LIVE-HEALTHY-SUCCESSOR",
+        LIVE_C2,
+        "Store",
+        "rotate_c2_live_healthy_successor_v1",
+        "C2HealthySuccessorIntentV1",
+    ),
+    (
+        "LIVE-HEALTHY-SUCCESSOR-POLICY-CHANGE",
+        LIVE_C2,
+        "Store",
+        "rotate_c2_live_healthy_successor_with_activation_grant_v1",
+        "StoreIntegrityActivationSuccessorGrantV1",
+    ),
+    (
+        "LIVE-RESTORE",
+        LIVE_C2,
+        "Store",
+        "restore_c2_live_historical_foundation_v1",
+        "StoreIntegrityRestoreAuthorizationV1",
+    ),
+    (
+        "LIVE-RECOVERY-PREPARE",
+        LIVE_C2,
+        "Store",
+        "prepare_c2_live_recovery_v1",
+        "StorePreparedRecoveryGrantRequestV1",
+    ),
+    (
+        "LIVE-RECOVERY",
+        LIVE_C2,
+        "Store",
+        "recover_c2_live_new_foundation_v1",
+        "StoreIntegrityRecoveryGrantV1",
     ),
 )
 
-ORDINARY_ROOT_SPEC = ("P-06", STORE_LIB, "Store", "with_c2_writer_session")
+ORDINARY_ROOT_SPEC = (
+    "LIVE-REOPEN",
+    LIVE_C2,
+    "Store",
+    "with_reopened_c2_generation_current_v1",
+)
 
 SIGNER_ROUTE_METHODS = (
-    "append_initial_proposal_pop",
-    "append_physical_generation_bootstrap",
+    "append_initial_proposal_pop_v1",
+    "append_installation_bootstrap_batch",
+    "append_installation_receipt",
     "append_active_policy_continuity",
     "append_normal_rotation_continuity",
-    "append_successor_pop",
     "append_global_refusal",
-    "append_installation_intent",
-    "append_installation_receipt",
     "append_policy_transition_intent",
     "append_current_policy_transition_receipt",
-    "append_pending_policy_transition_receipt",
+    "append_successor_possession",
+    "append_pending_healthy_rotation_receipt",
 )
 
 PROTECTED_TYPES = frozenset(
     {
         "C2StoreIntegrityCustodian",
         "C2SignerTransitionCoordinator",
-        "C2SignerDurableAppendPermitV1",
-        "C2SignerDurableAppendConsumerV1",
-        "NonescapingSignedFrameV1",
+        "C2PreparedSignedAppendV1",
+        "C2FinalizedSignedAppendV1",
+        "StoreC2SignerAppendPermitV1",
+        "StoreC2InitialPossessionAppendPermitV1",
+        "StoreC2SnapshotActorV1",
+        "C2LiveSignerContextV1",
+        "C2LiveSigningViewV1",
+        "C2LiveWriterSessionV1",
+        "GenerationCurrentV1",
+        "PendingPossessionV1",
+        "PendingSelectedV1",
+        "StoreVerifiedCurrentPredecessorAuthorityV1",
+        "StoreVerifiedOrdinarySuccessorFoundationAuthorityV1",
+        "StoreVerifiedRestoreEntryAuthorityV1",
+        "StoreVerifiedRecoveryEntryAuthorityV1",
+        "StoreVerifiedRestorePossessionPermitV1",
+        "StoreVerifiedRecoveryPossessionPermitV1",
+        "StoreVerifiedRestoreFoundationAuthorityV1",
+        "StoreVerifiedRecoveryFoundationAuthorityV1",
+        "ConsumedStoreFoundationAdoptionAuthorityV1",
+        "SignerMessageV1",
+        "C2PreparedExternalIngressV1",
+        "ExternalCarrierVerificationPermitV1",
         "C2BootstrapSignerCapability",
         "C2GenerationSignerCapability",
         "C2PendingSuccessorCapability",
-        "CompleteSignerRestartSnapshotV1",
-        "ReconstructedTerminalSignerCapabilityV1",
-        "C2BootstrapBrandV1",
-        "C2InstallationContinuationBrandV1",
-        "C2PolicyTransitionBrandV1",
-        "C2PolicyTransitionContinuationBrandV1",
     }
 )
 
@@ -379,11 +433,14 @@ def _item_visibility(source: RustSource, kind: str, name: str) -> str:
             continue
         if source.tokens[index + 1].value != name:
             continue
-        prefix = [candidate.value for candidate in source.tokens[max(0, index - 5) : index]]
+        prefix = [candidate.value for candidate in source.tokens[max(0, index - 16) : index]]
+        compact_prefix = "".join(prefix)
         if prefix[-4:] == ["pub", "(", "crate", ")"]:
             matches.append("pub(crate)")
         elif prefix[-4:] == ["pub", "(", "super", ")"]:
             matches.append("pub(super)")
+        elif compact_prefix.endswith("pub(incrate::store_generation)"):
+            matches.append("pub(in crate::store_generation)")
         elif prefix and prefix[-1] == "pub":
             matches.append("pub")
         else:
@@ -466,6 +523,41 @@ def _item_body_token_count(
     )
 
 
+def _item_header_code(source: RustSource, kind: str, name: str) -> str:
+    """Return one named item's attributes/visibility/header, without its body."""
+
+    starts = [
+        index
+        for index, token in enumerate(source.tokens[:-1])
+        if token.value == kind and source.tokens[index + 1].value == name
+    ]
+    require(len(starts) == 1, f"{kind} {name} is absent or ambiguous in {source.path}")
+    item = starts[0]
+    depth = source.depths[item]
+    start = item
+    while start > 0:
+        prior = start - 1
+        if (
+            source.tokens[prior].value == ";"
+            and source.depths[prior] == depth
+        ) or (
+            source.tokens[prior].value == "}"
+            and source.depths[prior] == depth + 1
+        ):
+            break
+        start = prior
+    body = next(
+        (
+            index
+            for index in range(item + 2, len(source.tokens))
+            if source.depths[index] == depth and source.tokens[index].value in ("{", ";")
+        ),
+        None,
+    )
+    require(body is not None, f"{kind} {name} has no body terminator in {source.path}")
+    return compact_tokens(source.tokens[start:body], include_literals=False)
+
+
 def _require_no_public_protected_surface(inventory: SourceInventory) -> None:
     exports = inventory.public_reexports(PROTECTED_TYPES)
     require(not exports, "protected C2 types are publicly re-exported: " + ", ".join(exports))
@@ -480,33 +572,84 @@ def _require_no_public_protected_surface(inventory: SourceInventory) -> None:
         (
             SIGNER_COORDINATOR,
             "struct",
-            "C2SignerDurableAppendPermitV1",
-            {"pub(super)"},
+            "C2PreparedSignedAppendV1",
+            {"pub(crate)"},
         ),
         (
             SIGNER_COORDINATOR,
             "struct",
-            "C2SignerDurableAppendConsumerV1",
+            "C2FinalizedSignedAppendV1",
             {"pub(crate)"},
         ),
-        (SIGNER_COORDINATOR, "struct", "NonescapingSignedFrameV1", {"pub(crate)"}),
+        (LIVE_C2, "struct", "StoreC2SignerAppendPermitV1", {"pub(crate)"}),
         (
-            SIGNER_RESTART,
+            LIVE_C2,
             "struct",
-            "CompleteSignerRestartSnapshotV1",
+            "StoreC2InitialPossessionAppendPermitV1",
+            {"pub(crate)"},
+        ),
+        (LIVE_C2, "struct", "StoreC2SnapshotActorV1", {"pub(crate)"}),
+        (LIVE_C2, "struct", "C2LiveSignerContextV1", {"pub(crate)"}),
+        (LIVE_C2, "struct", "C2LiveSigningViewV1", {"pub(crate)"}),
+        (LIVE_C2, "struct", "C2LiveWriterSessionV1", {"pub(crate)"}),
+        (LIVE_C2, "enum", "GenerationCurrentV1", {"pub(crate)"}),
+        (LIVE_C2, "enum", "PendingPossessionV1", {"pub(crate)"}),
+        (LIVE_C2, "enum", "PendingSelectedV1", {"pub(crate)"}),
+        (
+            LIVE_C2,
+            "struct",
+            "StoreVerifiedCurrentPredecessorAuthorityV1",
             {"pub(crate)"},
         ),
         (
-            SIGNER_RESTART,
+            LIVE_C2,
             "struct",
-            "ReconstructedTerminalSignerCapabilityV1",
+            "StoreVerifiedOrdinarySuccessorFoundationAuthorityV1",
+            {"pub(crate)"},
+        ),
+        (LIVE_C2, "struct", "StoreVerifiedRestoreEntryAuthorityV1", {"pub(crate)"}),
+        (LIVE_C2, "struct", "StoreVerifiedRecoveryEntryAuthorityV1", {"pub(crate)"}),
+        (
+            LIVE_C2,
+            "struct",
+            "StoreVerifiedRestorePossessionPermitV1",
             {"pub(crate)"},
         ),
         (
-            INSTALL,
+            LIVE_C2,
             "struct",
-            "C2PendingSqlProjectionPermitV1",
+            "StoreVerifiedRecoveryPossessionPermitV1",
             {"pub(crate)"},
+        ),
+        (
+            LIVE_C2,
+            "struct",
+            "StoreVerifiedRestoreFoundationAuthorityV1",
+            {"pub(crate)"},
+        ),
+        (
+            LIVE_C2,
+            "struct",
+            "StoreVerifiedRecoveryFoundationAuthorityV1",
+            {"pub(crate)"},
+        ),
+        (
+            LIVE_C2,
+            "struct",
+            "ConsumedStoreFoundationAdoptionAuthorityV1",
+            {"pub(crate)"},
+        ),
+        (
+            SIGNER_GOVERNANCE,
+            "struct",
+            "C2PreparedExternalIngressV1",
+            {"pub(crate)"},
+        ),
+        (
+            SIGNER_GOVERNANCE,
+            "struct",
+            "ExternalCarrierVerificationPermitV1",
+            {"pub(in crate::store_generation)"},
         ),
     ):
         visibility = _item_visibility(inventory.source(path), kind, name)
@@ -516,11 +659,260 @@ def _require_no_public_protected_surface(inventory: SourceInventory) -> None:
         )
 
 
+def _verify_live_authority_noninjectability(
+    inventory: SourceInventory,
+) -> tuple[str, ...]:
+    """Pin the process-local live types and their sole Store-owned mints."""
+
+    forbidden_traits = ("Clone", "Copy", "Default", "Serialize", "Deserialize")
+    protected_items = (
+        (LIVE_C2, "C2LiveSignerContextV1"),
+        (LIVE_C2, "C2LiveSigningViewV1"),
+        (LIVE_C2, "C2LiveWriterSessionV1"),
+        (LIVE_C2, "StoreC2SignerAppendPermitV1"),
+        (LIVE_C2, "StoreC2InitialPossessionAppendPermitV1"),
+        (LIVE_C2, "StoreVerifiedCurrentPredecessorAuthorityV1"),
+        (LIVE_C2, "StoreVerifiedOrdinarySuccessorFoundationAuthorityV1"),
+        (LIVE_C2, "StoreVerifiedRestoreEntryAuthorityV1"),
+        (LIVE_C2, "StoreVerifiedRecoveryEntryAuthorityV1"),
+        (LIVE_C2, "StoreVerifiedRestorePossessionPermitV1"),
+        (LIVE_C2, "StoreVerifiedRecoveryPossessionPermitV1"),
+        (LIVE_C2, "StoreVerifiedRestoreFoundationAuthorityV1"),
+        (LIVE_C2, "StoreVerifiedRecoveryFoundationAuthorityV1"),
+        (LIVE_C2, "ConsumedStoreFoundationAdoptionAuthorityV1"),
+        (SIGNER_GOVERNANCE, "ExternalCarrierVerificationPermitV1"),
+        (SIGNER_GOVERNANCE, "StoreAdoptedBootstrapGrantV1"),
+        (SIGNER_MANIFEST, "StoreAdmittedSignerImplementationManifestV1"),
+        (SIGNER_CUSTODY, "VerifiedFoundationalCustodyV1"),
+        (SIGNER_RECORDS, "StoreAdoptedFoundationalEnrollmentV1"),
+        (SIGNER_RECORDS, "StoreAcceptedSignerEnrollmentV1"),
+    )
+    for path, name in protected_items:
+        source = inventory.source(path)
+        header = _item_header_code(source, "struct", name)
+        derived = [trait for trait in forbidden_traits if trait in header]
+        explicit = sorted(
+            scope.trait_name
+            for scope in source.impl_scopes
+            if scope.owner == name and scope.trait_name in forbidden_traits
+        )
+        require(
+            not derived and not explicit,
+            f"authority-bearing {name} implements a transferable/serializable trait: "
+            f"derive={derived}, explicit={explicit}",
+        )
+
+    signer_module = inventory.source(SIGNER_MOD)
+    messages = inventory.source(SIGNER_MESSAGES)
+    signing_projection = inventory.source(C2_SIGNING_PROJECTION)
+    require(
+        _source_token_count(signer_module, ("pub", "(", "crate", ")", "mod", "messages"))
+        == 1
+        and _item_visibility(messages, "trait", "SignerMessageV1") == "pub(super)"
+        and _item_visibility(messages, "enum", "C2StoreSigningRouteV1") == "pub",
+        "generic signer route/trait escaped the crate-private messages module",
+    )
+    public_projection_functions = {
+        function.name
+        for function in inventory.functions
+        if function.source.path.as_posix() == C2_SIGNING_PROJECTION
+        and function.visibility == "pub"
+    }
+    require(
+        public_projection_functions
+        == {
+            "c2_message_families",
+            "c2_store_signing_registry",
+            "c2_external_signing_registry",
+            "verify_closed_c2_signing_registry",
+        }
+        and _source_token_count(
+            signing_projection, ("pub", "use", "super", "::", "signer", "::", "messages")
+        )
+        == 1
+        and _source_token_count(signing_projection, ("SignerMessageV1",)) == 0,
+        "public signing projection is not restricted to inert registry metadata",
+    )
+
+    context_constructors = [
+        function
+        for function in inventory.functions
+        if _code_contains(function, "C2LiveSignerContextV1{")
+    ]
+    expected_context_constructors = {
+        "mint_bootstrap_signer_context",
+        "mint_generation_current_from_bootstrap_v1",
+        "mint_reopened_terminal_generation_current_v1",
+        "mint_ordinary_successor_pending_possession_v1",
+        "mint_pending_selected_from_consumed_acceptance_v1",
+        "mint_restore_pending_possession_v1",
+        "mint_recovery_pending_possession_v1",
+    }
+    require(
+        {function.name for function in context_constructors}
+        == expected_context_constructors
+        and all(
+            function.source.path.as_posix() == LIVE_C2
+            and function.owner == "StoreC2SnapshotActorV1"
+            for function in context_constructors
+        ),
+        "live signer context has a constructor outside the seven Store-owned phase mints: "
+        + ", ".join(function.location for function in context_constructors),
+    )
+    reopen = inventory.require_function(
+        LIVE_C2,
+        "mint_reopened_terminal_generation_current_v1",
+        "StoreC2SnapshotActorV1",
+    )
+    require(
+        reopen.visibility == "private"
+        and len(reopen.calls("verify_authority_lineage")) == 1
+        and len(reopen.calls("verify_store_admitted_signer_implementation_manifest_v1")) == 1
+        and len(reopen.calls("verify_same_process")) == 1,
+        "fresh-process reopen mint omits authority/manifest/custody correspondence",
+    )
+    reopen_code = compact_tokens(reopen.item_tokens)
+    for lineage in (
+        "InitialExternal",
+        "OrdinarySuccessorContinuity",
+        "RestoreHistorical",
+        "RecoveryNewFoundation",
+    ):
+        require(
+            f"FoundationalAdoptionLineageV1::{lineage}" in reopen_code,
+            f"fresh-process reopen omits the closed {lineage} lineage",
+        )
+
+    authority_constructors = {
+        "StoreVerifiedCurrentPredecessorAuthorityV1": "mint_current_predecessor_authority_v1",
+        "StoreVerifiedOrdinarySuccessorFoundationAuthorityV1": "append_healthy_rotation_intent_v1",
+        "StoreVerifiedRestoreEntryAuthorityV1": "begin_restore_successor_v1",
+        "StoreVerifiedRecoveryEntryAuthorityV1": "begin_recovery_entry_v1",
+        "StoreVerifiedRestorePossessionPermitV1": "seal_restore_possession_permit_v1",
+        "StoreVerifiedRecoveryPossessionPermitV1": "seal_recovery_possession_permit_v1",
+        "StoreVerifiedRestoreFoundationAuthorityV1": "refine_restore_foundation_after_msg07_v1",
+        "StoreVerifiedRecoveryFoundationAuthorityV1": "refine_recovery_foundation_after_msg07_v1",
+    }
+    for type_name, expected_constructor in authority_constructors.items():
+        constructors = [
+            function
+            for function in inventory.functions
+            if function.source.path.as_posix() == LIVE_C2
+            and _code_contains(function, f"{type_name}{{")
+            and not _code_contains(function, f"let{type_name}{{")
+        ]
+        require(
+            len(constructors) == 1
+            and constructors[0].owner == "StoreC2SnapshotActorV1"
+            and constructors[0].name == expected_constructor,
+            f"{type_name} does not have exactly one nominal Store-actor constructor: "
+            + (", ".join(function.location for function in constructors) or "none"),
+        )
+
+    consumed_authority_constructors = [
+        function
+        for function in inventory.functions
+        if function.source.path.as_posix() == LIVE_C2
+        and _code_contains(function, "ConsumedStoreFoundationAdoptionAuthorityV1{")
+    ]
+    require(
+        {function.name for function in consumed_authority_constructors}
+        == {
+            "consume_ordinary_successor_foundation_authority_v1",
+            "consume_restore_foundation_authority_v1",
+            "consume_recovery_foundation_authority_v1",
+        }
+        and all(
+            function.owner == "StoreC2SnapshotActorV1"
+            for function in consumed_authority_constructors
+        ),
+        "consumed foundation-adoption authority has a generic or alternate constructor: "
+        + ", ".join(function.location for function in consumed_authority_constructors),
+    )
+
+    writer_constructor = inventory.require_function(
+        LIVE_C2, "from_exact_generation_current", "C2LiveWriterSessionV1"
+    )
+    writer_callers = inventory.callers_of("from_exact_generation_current")
+    require(
+        writer_constructor.visibility == "private"
+        and len(writer_constructor.calls("verify_same_snapshot")) == 1
+        and len(writer_constructor.calls("verify_live")) == 1
+        and len(
+            writer_constructor.calls(
+                "verify_wu_04_immutable_wu_local_lock_flock_process_registry"
+            )
+        )
+        == 1
+        and len(writer_callers) == 1
+        and writer_callers[0].source.path.as_posix() == LIVE_C2
+        and writer_callers[0].owner == "Store"
+        and writer_callers[0].name == "with_reopened_c2_generation_current_v1",
+        "writer-session authority is not confined to exact complete-current reopen",
+    )
+    verify_live = inventory.require_function(
+        LIVE_C2, "verify_live", "C2LiveSignerContextV1"
+    )
+    require(
+        "std::process::id" in compact_tokens(verify_live.item_tokens)
+        and "actor_instance_identity" in compact_tokens(verify_live.item_tokens)
+        and "actor_snapshot_identity" in compact_tokens(verify_live.item_tokens)
+        and "actor_effect_epoch" in compact_tokens(verify_live.item_tokens),
+        "live context verification omits process/actor/snapshot/effect correspondence",
+    )
+
+    ingress_permit_constructors = [
+        function
+        for function in inventory.functions
+        if _code_contains(function, "ExternalCarrierVerificationPermitV1{")
+        or (
+            function.owner == "ExternalCarrierVerificationPermitV1"
+            and _code_contains(function, "Self{")
+        )
+    ]
+    require(
+        len(ingress_permit_constructors) == 1
+        and ingress_permit_constructors[0].source.path.as_posix() == SIGNER_GOVERNANCE
+        and ingress_permit_constructors[0].owner == "ExternalCarrierVerificationPermitV1"
+        and ingress_permit_constructors[0].name == "from_store_actor",
+        "external ingress permit has a constructor outside its Store-actor gate: "
+        + ", ".join(function.location for function in ingress_permit_constructors),
+    )
+    adopted_grant_constructors = [
+        function
+        for function in inventory.functions
+        if _code_contains(function, "StoreAdoptedBootstrapGrantV1{")
+        or (
+            function.owner == "StoreAdoptedBootstrapGrantV1"
+            and _code_contains(function, "Self{")
+        )
+    ]
+    require(
+        len(adopted_grant_constructors) == 1
+        and adopted_grant_constructors[0].source.path.as_posix() == SIGNER_GOVERNANCE
+        and adopted_grant_constructors[0].owner == "StoreAdoptedBootstrapGrantV1"
+        and adopted_grant_constructors[0].name == "from_actor_append",
+        "Store-adopted bootstrap grant has an alternate constructor: "
+        + ", ".join(function.location for function in adopted_grant_constructors),
+    )
+    return (
+        "live-context-constructors=7-store-owned",
+        "live-authority-transfer-traits=absent",
+        "nominal-live-authority-constructors=8-store-owned",
+        "foundation-adoption-authority-constructors=3-route-specific",
+        "writer-session-constructor=complete-current-only",
+        "reopen-premises=authority+manifest+terminal-enrollment+custody",
+        "external-ingress-permit-constructors=1",
+        "adopted-bootstrap-grant-constructors=1",
+    )
+
+
 def _verify_private_signer_graph(inventory: SourceInventory) -> tuple[str, ...]:
     unsafe_boundary = _verify_signer_module_unsafe_boundary(inventory)
     _require_no_public_protected_surface(inventory)
-    pending_append = _verify_pending_signer_append_gate(inventory)
-    external_ingress = _verify_pending_external_carrier_ingress_gate(inventory)
+    noninjectability = _verify_live_authority_noninjectability(inventory)
+    live_append = _verify_live_signer_append_gate(inventory)
+    external_ingress = _verify_live_external_carrier_ingress_gate(inventory)
     process_fence = _verify_signer_process_fence(inventory)
     custodian_sign = inventory.require_function(
         SIGNER_CUSTODY, "sign", "C2StoreIntegrityCustodian"
@@ -535,20 +927,34 @@ def _verify_private_signer_graph(inventory: SourceInventory) -> tuple[str, ...]:
         ]
     )
     require(
-        "<M:SignerMessageV1>" in signature and "message:&M" in signature,
+        "M:SignerMessageV1" in signature and "message:&M" in signature,
         "custodian signing entry is not sealed to SignerMessageV1",
     )
     require(
         "[u8]" not in signature and "Vec<u8>" not in signature,
         "custodian accepts a raw-byte signing input",
     )
-
-    coordinator_new = inventory.require_function(
-        SIGNER_COORDINATOR, "new", "C2SignerTransitionCoordinator"
+    initial_sign = inventory.require_function(
+        SIGNER_CUSTODY, "sign_initial_possession", "C2StoreIntegrityCustodian"
+    )
+    initial_signature = compact_tokens(
+        initial_sign.source.tokens[initial_sign.start_token : initial_sign.body_open_token]
     )
     require(
-        coordinator_new.visibility == "pub(super)",
-        "transition coordinator construction escapes its owning signer module",
+        initial_sign.visibility == "pub(super)"
+        and "StoreC2InitialPossessionAppendPermitV1" in initial_signature
+        and "VerifiedInitialPossessionRequestV1" in initial_signature
+        and "[u8]" not in initial_signature
+        and "Vec<u8>" not in initial_signature,
+        "MSG-02 custody entry is not purpose-locked to the actor request/permit",
+    )
+
+    coordinator_new = inventory.require_function(
+        SIGNER_COORDINATOR, "from_store_actor", "C2SignerTransitionCoordinator"
+    )
+    require(
+        coordinator_new.visibility == "pub(crate)",
+        "transition coordinator has the wrong Store-private visibility",
     )
     coordinator_signature = compact_tokens(
         coordinator_new.source.tokens[
@@ -556,66 +962,97 @@ def _verify_private_signer_graph(inventory: SourceInventory) -> tuple[str, ...]:
         ]
     )
     require(
-        "append_permit:C2SignerDurableAppendPermitV1" in coordinator_signature,
-        "transition coordinator does not consume the unforgeable append permit",
+        "actor:&'opmutStoreC2SnapshotActorV1<'actor_store>" in coordinator_signature
+        and "context:&'opmutC2LiveSignerContextV1<'context_live,'context_store,Phase>"
+        in coordinator_signature
+        and "custodian:" not in coordinator_signature
+        and len(coordinator_new.calls("verify_live")) == 1
+        and len(coordinator_new.calls("retained_custodian")) == 1,
+        "transition coordinator does not derive its sole custodian from the verified live context",
     )
     bridge = inventory.require_function(
-        SIGNER_COORDINATOR, "sign_and_consume", "C2SignerTransitionCoordinator"
+        SIGNER_COORDINATOR, "prepare_typed_signed_frame"
     )
-    require(bridge.visibility == "private", "generic signer bridge is not private")
+    require(bridge.visibility == "private", "typed signer preparation bridge is not private")
     _require_calls_in_order(
         bridge,
         (
-            "construct_sg_n_18_signing_method_accepts_private_typed_payload_semantic",
+            "construct_signing_brand",
             "sign",
-            "construct_sg_n_20_signature_response_is_nonescaping_typed_value_consumed",
-            "consume",
+            "construct_nonescaping_frame",
         ),
     )
-    sign_call = bridge.calls("sign")[0]
-    consume_call = bridge.calls("consume")[0]
     require(
-        sign_call.receiver == "self.custodian",
-        "signing does not flow through the owned C2StoreIntegrityCustodian",
-    )
-    require(
-        consume_call.receiver == "self.append_consumer",
-        "signed frame does not flow directly to the owned append consumer",
+        "<M:SignerMessageV1,Phase>" in compact_tokens(
+            bridge.source.tokens[bridge.start_token : bridge.body_open_token]
+        ),
+        "typed signer preparation bridge is not sealed to SignerMessageV1",
     )
 
-    route_callers = {
-        function.name
-        for function in inventory.callers_of(
-            "sign_and_consume", source_prefix=SIGNER_COORDINATOR
-        )
-    }
-    require(
-        route_callers == set(SIGNER_ROUTE_METHODS),
-        "typed signer route census changed: "
-        f"expected {sorted(SIGNER_ROUTE_METHODS)}, found {sorted(route_callers)}",
+    route_specs = (
+        ("append_initial_proposal_pop_v1", None, "pub(crate)", ("InitialProposalPoPFrameV1",), "with_initial_possession_append_effect"),
+        ("append_installation_bootstrap_batch", "C2SignerTransitionCoordinator", "pub(incrate::store_generation)", ("StoreGenerationInstallationIntentFrameV1", "PhysicalGenerationBootstrapFrameV1"), "with_installation_bootstrap_batch_effect"),
+        ("append_installation_receipt", "C2SignerTransitionCoordinator", "pub(incrate::store_generation)", ("StoreGenerationInstallationReceiptFrameV1",), "sign_and_append_prospective_generation"),
+        ("append_active_policy_continuity", "C2SignerTransitionCoordinator", "private", ("ActivePolicyContinuityFrameV1",), "sign_and_append_current_predecessor"),
+        ("append_normal_rotation_continuity", "C2SignerTransitionCoordinator", "private", ("NormalRotationContinuityFrameV1",), "sign_and_append_current_predecessor"),
+        ("append_global_refusal", "C2SignerTransitionCoordinator", "private", ("GlobalRefusalFrameV1",), "sign_and_append"),
+        ("append_policy_transition_intent", "C2SignerTransitionCoordinator", "private", ("PolicyTransitionIntentFrameV1",), "sign_and_append_current_predecessor"),
+        ("append_current_policy_transition_receipt", "C2SignerTransitionCoordinator", "private", ("CurrentPolicyTransitionReceiptFrameV1",), "sign_and_append"),
+        ("append_successor_possession", "C2SignerTransitionCoordinator", "pub(incrate::store_generation)", ("SuccessorPoPFrameV1",), "sign_and_append"),
+        ("append_pending_healthy_rotation_receipt", "C2SignerTransitionCoordinator", "pub(incrate::store_generation)", ("PendingPolicyTransitionReceiptFrameV1",), "sign_and_append"),
     )
-    for method in SIGNER_ROUTE_METHODS:
-        function = inventory.require_function(
-            SIGNER_COORDINATOR, method, "C2SignerTransitionCoordinator"
+    require(
+        tuple(spec[0] for spec in route_specs) == SIGNER_ROUTE_METHODS,
+        "verifier's closed typed-route specification drifted",
+    )
+    realized_routes = 0
+    for method, owner, visibility, message_types, sink in route_specs:
+        function = inventory.require_function(SIGNER_COORDINATOR, method, owner)
+        require(
+            function.visibility == visibility and len(function.calls(sink)) == 1,
+            f"typed signer route {method} does not enter its one Store-owned sink {sink}",
+        )
+        for message_type in message_types:
+            require(
+                _code_contains(function, f"{message_type}::from_store_verified("),
+                f"typed signer route {method} does not construct exact {message_type}",
+            )
+            constructors = {
+                _function_identity(candidate)
+                for candidate in inventory.functions
+                if candidate.source.path.as_posix() == SIGNER_COORDINATOR
+                and _code_contains(candidate, f"{message_type}::from_store_verified(")
+            }
+            require(
+                constructors == {_function_identity(function)},
+                f"typed signer message {message_type} has an alternate constructor: "
+                + ", ".join(
+                    identity.display()
+                    for identity in sorted(constructors, key=lambda value: value.display())
+                ),
+            )
+        function_signature = compact_tokens(
+            function.source.tokens[function.start_token : function.body_open_token]
         )
         require(
-            function.visibility == "pub(crate)"
-            and len(function.calls("sign_and_consume")) == 1,
-            f"typed signer route {method} is not one crate-private consuming bridge call",
+            "&[u8]" not in function_signature
+            and "Vec<u8>" not in function_signature
+            and "domain:&str" not in function_signature
+            and "C2StoreSigningRouteV1" not in function_signature
+            and "ClosedMessageFamilyV1" not in function_signature,
+            f"typed signer route {method} accepts a generic bytes/domain/family selector",
         )
-
-    consumer = inventory.require_function(
-        SIGNER_COORDINATOR, "consume", "C2SignerDurableAppendConsumerV1"
-    )
-    require(consumer.visibility == "private", "signed-frame consumer is not private")
-    consumer_callers = inventory.callers_of(
-        "consume", receiver="self.append_consumer", source_prefix=SIGNER_PREFIX
-    )
-    require(
-        tuple(_function_identity(function) for function in consumer_callers)
-        == (_function_identity(bridge),),
-        "nonescaping signed-frame consumer has an alternate caller",
-    )
+        realized_routes += len(message_types)
+    require(realized_routes == 11, "Store-signable route census is not exactly 11")
+    for obsolete in ("append_physical_generation_bootstrap", "append_installation_intent"):
+        require(
+            not [
+                function
+                for function in inventory.functions_named(obsolete)
+                if function.source.path.as_posix() == SIGNER_COORDINATOR
+            ],
+            f"obsolete parallel signer route remains in product: {obsolete}",
+        )
 
     messages = inventory.source(SIGNER_MESSAGES)
     for ordinal in range(1, 17):
@@ -641,11 +1078,13 @@ def _verify_private_signer_graph(inventory: SourceInventory) -> tuple[str, ...]:
     )
     return (
         "custodian=private-purpose-locked",
-        f"typed-routes={len(SIGNER_ROUTE_METHODS)}",
-        "append-consumer=one",
+        f"typed-route-methods={len(SIGNER_ROUTE_METHODS)}",
+        "store-signable-routes=11",
+        "append-owner=live-store-actor",
         "message-family=MSG-01..MSG-16",
         *unsafe_boundary,
-        *pending_append,
+        *noninjectability,
+        *live_append,
         *external_ingress,
         *process_fence,
     )
@@ -668,109 +1107,197 @@ def _verify_signer_module_unsafe_boundary(
     return ("signer-unsafe-code=forbidden-at-module-root",)
 
 
-def _verify_pending_signer_append_gate(
+def _verify_live_signer_append_gate(
     inventory: SourceInventory,
 ) -> tuple[str, ...]:
-    """Prove the in-memory consumer is unreachable before durable B/G wiring."""
+    """Prove typed signing reaches only the live actor's durable append roots."""
 
-    source = inventory.source(SIGNER_COORDINATOR)
-    permit_visibility = _item_visibility(
-        source, "struct", "C2SignerDurableAppendPermitV1"
+    actor_source = inventory.source(LIVE_C2)
+    coordinator = inventory.source(SIGNER_COORDINATOR)
+    require(
+        _item_visibility(actor_source, "struct", "StoreC2SignerAppendPermitV1")
+        == "pub(crate)"
+        and _item_visibility(
+            actor_source, "struct", "StoreC2InitialPossessionAppendPermitV1"
+        )
+        == "pub(crate)",
+        "live signer append permits have invalid visibility",
     )
     require(
-        permit_visibility == "pub(super)",
-        "pending signer append permit has invalid visibility",
+        not inventory.public_reexports(
+            {"StoreC2SignerAppendPermitV1", "StoreC2InitialPossessionAppendPermitV1"}
+        ),
+        "live signer append permit is publicly re-exported",
     )
-    require(
-        not inventory.public_reexports({"C2SignerDurableAppendPermitV1"}),
-        "pending signer append permit is publicly re-exported",
-    )
-    constructors = [
+    live_constructors = [
         function
         for function in inventory.functions
-        if _code_contains(function, "C2SignerDurableAppendPermitV1{")
+        if _code_contains(function, "StoreC2SignerAppendPermitV1{")
+    ]
+    expected_live_constructors = {
+        "with_signer_append_effect",
+        "with_installation_bootstrap_batch_effect",
+        "with_prospective_generation_append_effect",
+        "with_current_predecessor_append_effect",
+    }
+    require(
+        {function.name for function in live_constructors} == expected_live_constructors
+        and all(
+            function.source.path.as_posix() == LIVE_C2
+            and function.owner == "StoreC2SnapshotActorV1"
+            for function in live_constructors
+        ),
+        "live signer append permit has a constructor outside the closed actor roots: "
+        + ", ".join(function.location for function in live_constructors),
+    )
+    initial_constructors = [
+        function
+        for function in inventory.functions
+        if _code_contains(function, "StoreC2InitialPossessionAppendPermitV1{")
     ]
     require(
-        not constructors,
-        "pending signer append permit has a production constructor before durable wiring: "
-        + ", ".join(function.location for function in constructors),
+        len(initial_constructors) == 1
+        and initial_constructors[0].source.path.as_posix() == LIVE_C2
+        and initial_constructors[0].owner == "StoreC2SnapshotActorV1"
+        and initial_constructors[0].name == "with_initial_possession_append_effect",
+        "MSG-02 permit has a constructor outside its purpose-locked actor root",
     )
-    consumer_new = inventory.require_function(
-        SIGNER_COORDINATOR, "new", "C2SignerDurableAppendConsumerV1"
-    )
-    consumer_signature = compact_tokens(
-        consumer_new.source.tokens[
-            consumer_new.start_token : consumer_new.body_open_token
-        ]
-    )
-    require(
-        consumer_new.visibility == "private"
-        and "permit:C2SignerDurableAppendPermitV1" in consumer_signature,
-        "pending signer append consumer does not consume the linear permit",
-    )
-    consumer_callers = tuple(
+
+    frame_constructors = [
         function
-        for function in inventory.callers_of("new", source_prefix=SIGNER_PREFIX)
-        if _code_contains(function, "C2SignerDurableAppendConsumerV1::new(")
+        for function in inventory.functions
+        if _code_contains(function, "C2PreparedSignedAppendV1{")
+    ]
+    expected_frame_constructors = {
+        FunctionIdentity(SIGNER_COORDINATOR, None, "construct_nonescaping_frame"),
+        FunctionIdentity(
+            SIGNER_COORDINATOR,
+            None,
+            "reproject_exact_durable_signer_carrier_suffix_v1",
+        ),
+    }
+    require(
+        {_function_identity(function) for function in frame_constructors}
+        == expected_frame_constructors,
+        "prepared signed append has an alternate constructor: "
+        + ", ".join(function.location for function in frame_constructors),
+    )
+    reprojection = inventory.require_function(
+        SIGNER_COORDINATOR, "reproject_exact_durable_signer_carrier_suffix_v1"
     )
     require(
-        len(consumer_callers) == 1
-        and consumer_callers[0].owner == "C2SignerTransitionCoordinator"
-        and consumer_callers[0].name == "new",
-        "pending signer append consumer has an alternate production constructor caller",
+        len(reprojection.calls("verify_durable_signer_carrier_envelope_v1")) == 1
+        and len(
+            reprojection.calls("append_prepared_signed_frame_with_physical_carrier")
+        )
+        == 1
+        and not reprojection.calls("sign"),
+        "durable reprojection can construct a prepared frame without authenticated carrier verification",
     )
     require(
         _item_body_token_count(
-            source,
+            coordinator,
             "struct",
-            "NonescapingSignedFrameV1",
-            ("canonical_payload", ":", "Vec", "<", "u8", ">"),
+            "C2PreparedSignedAppendV1",
+            ("canonical_message", ":", "Vec", "<", "u8", ">"),
         )
         == 1,
-        "nonescaping signed frame does not own exactly one canonical payload",
+        "prepared signed append does not own exactly one canonical message",
+    )
+
+    append_effect = inventory.require_function(
+        LIVE_C2, "append_prepared_signer_effect", "StoreC2SnapshotActorV1"
+    )
+    require(append_effect.visibility == "private", "durable signer append root escapes actor")
+    _require_calls_in_order(
+        append_effect,
+        (
+            "finalize_prepared_signed_frame",
+            "append_or_replay_exact",
+            "append_finalized_signed_frame_projection",
+        ),
+    )
+    batch = inventory.require_function(
+        LIVE_C2, "with_installation_bootstrap_batch_effect", "StoreC2SnapshotActorV1"
+    )
+    require(
+        len(batch.calls("finalize_prepared_signed_frame")) == 2
+        and len(batch.calls("append_or_replay_exact")) == 2
+        and len(batch.calls("append_finalized_signed_frame_projection")) == 2,
+        "installation batch does not own exactly two typed finalize/B/project append lanes",
+    )
+    initial = inventory.require_function(
+        LIVE_C2, "with_initial_possession_append_effect", "StoreC2SnapshotActorV1"
+    )
+    require(
+        len(initial.calls("append_prepared_signed_frame")) == 1,
+        "MSG-02 actor root does not own exactly one durable proposal append",
+    )
+    bootstrap = inventory.require_function(
+        LIVE_C2, "install_c2_live_from_bootstrap_grant_v1", "Store"
+    )
+    require(
+        len(bootstrap.calls("append_initial_proposal_pop_v1")) == 1,
+        "sole live bootstrap driver does not reach MSG-02 exactly once",
     )
     return (
-        "signer-append-permit-production-constructors=0",
-        "signed-frame-owned-payload=one",
-        "durable-append-status=not-yet-wired",
+        f"signer-live-permit-actor-roots={len(expected_live_constructors)}",
+        "initial-possession-permit-actor-roots=1",
+        "prepared-signed-append-constructors=1-live+1-authenticated-reprojection",
+        "durable-bg-append-owner=live-store-actor",
+        "msg02-durable-proposal-append-owner=live-store-actor",
     )
 
 
-def _verify_pending_external_carrier_ingress_gate(
+def _verify_live_external_carrier_ingress_gate(
     inventory: SourceInventory,
 ) -> tuple[str, ...]:
-    """Prove only terminal-A1-verified carriers can reach the pending ingress.
-
-    Durable replay persistence and the Store-owned consumer are not wired yet,
-    so the linear ingress permit intentionally has no production constructor.
-    """
+    """Prove governed carriers enter through one same-snapshot durable actor root."""
 
     source = inventory.source(SIGNER_GOVERNANCE)
+    actor_source = inventory.source(LIVE_C2)
     require(
         _item_visibility(source, "struct", "ExternalCarrierVerificationPermitV1")
-        == "pub(super)",
-        "external-carrier verification permit has invalid visibility",
+        == "pub(in crate::store_generation)",
+        "external-carrier verification permit is not confined to the Store generation owner",
     )
     require(
-        not inventory.public_reexports({"ExternalCarrierVerificationPermitV1"}),
-        "external-carrier verification permit is publicly re-exported",
+        not inventory.public_reexports(
+            {
+                "ExternalCarrierVerificationPermitV1",
+                "C2PreparedExternalIngressV1",
+                "DurableExternalIngressReceiptV1",
+            }
+        ),
+        "governed external-ingress authority/evidence is publicly re-exported",
+    )
+    permit_constructor = inventory.require_function(
+        SIGNER_GOVERNANCE,
+        "from_store_actor",
+        "ExternalCarrierVerificationPermitV1",
+    )
+    require(
+        permit_constructor.visibility == "pub(incrate::store_generation)"
+        and len(permit_constructor.calls("verify_same_snapshot")) == 1,
+        "external verification permit is not minted from an exact live Store actor",
     )
     verification_constructors = [
         function
         for function in inventory.functions
         if _code_contains(function, "ExternalCarrierVerificationPermitV1{")
+        or (
+            function.owner == "ExternalCarrierVerificationPermitV1"
+            and _code_contains(function, "Self{")
+        )
     ]
     require(
-        not verification_constructors,
-        "external-carrier verification permit has a production constructor before "
-        "the Store-owned terminal-A1 resolver: "
+        len(verification_constructors) == 1
+        and _function_identity(verification_constructors[0])
+        == _function_identity(permit_constructor),
+        "external verification permit has an alternate production constructor: "
         + ", ".join(function.location for function in verification_constructors),
     )
-    require(
-        _item_visibility(source, "trait", "TerminalA1AuthenticityVerifierV1")
-        == "pub(super)",
-        "pending terminal-A1 verifier hook escapes the signer module",
-    )
+
     terminal_verifiers = tuple(
         function
         for function in inventory.functions_named("verify_unique_terminal_a1")
@@ -778,242 +1305,221 @@ def _verify_pending_external_carrier_ingress_gate(
     )
     require(
         len(terminal_verifiers) == 1
-        and terminal_verifiers[0].source.path.as_posix() == SIGNER_AUTHORITY
-        and terminal_verifiers[0].owner == "TerminalA1AuthoritySnapshotV1",
-        "terminal-A1 authenticity must have exactly one private Store-owned snapshot implementation: "
+        and terminal_verifiers[0].source.path.as_posix() == LIVE_C2
+        and terminal_verifiers[0].owner == "StoreTerminalA1VerifierV1",
+        "terminal-A1 authenticity must have exactly one live Store same-snapshot implementation: "
         + (", ".join(function.location for function in terminal_verifiers) or "none"),
     )
-    terminal_constructor = inventory.require_function(
-        SIGNER_AUTHORITY,
-        "construct_sg_n_03_issuer_currentness_is_resolved_complete_store_owned",
-    )
-    authority_source = inventory.source(SIGNER_AUTHORITY)
-    authority_tokens = compact_tokens(authority_source.tokens)
-    require(
-        "structTerminalA1AuthoritySnapshotV1<'snapshot>{"
-        "input:&'snapshotCurrentActivationResolverInputV1<'snapshot>,"
-        "resolved:&'snapshotControllingActivationSnapshot,}" in authority_tokens,
-        "terminal-A1 authority snapshot does not retain both complete same-snapshot inputs",
-    )
-    require(
-        "TerminalA1CandidateV1" not in authority_tokens
-        and "terminal:bool" not in authority_tokens
-        and "current_at_cut:bool" not in authority_tokens,
-        "terminal-A1 projection regained a caller-selected candidate or currentness Boolean",
-    )
-    require(
-        "implCloneforTerminalA1AuthoritySnapshotV1" not in authority_tokens
-        and "implCopyforTerminalA1AuthoritySnapshotV1" not in authority_tokens
-        and "implDefaultforTerminalA1AuthoritySnapshotV1" not in authority_tokens
-        and not re.search(
-            r"#\[derive\([^\]]*(?:Clone|Copy|Default|Serialize|Deserialize)[^\]]*\)\]"
-            r"\s*pub\(crate\)\s+struct\s+TerminalA1AuthoritySnapshotV1",
-            authority_source.text,
-        )
-        and not inventory.public_reexports({"TerminalA1AuthoritySnapshotV1"}),
-        "terminal-A1 authority snapshot regained a detached construction or escape surface",
-    )
-    terminal_constructor_signature = compact_tokens(
-        terminal_constructor.source.tokens[
-            terminal_constructor.start_token : terminal_constructor.body_open_token
-        ]
-    )
-    require(
-        "input:&'snapshotCurrentActivationResolverInputV1<'snapshot>"
-        in terminal_constructor_signature
-        and "resolved:&'snapshotControllingActivationSnapshot"
-        in terminal_constructor_signature
-        and "Vec<" not in terminal_constructor_signature
-        and "bool" not in terminal_constructor_signature,
-        "terminal-A1 projection constructor is not tied to the complete same-snapshot inputs",
-    )
-    terminal_constructor_callers = inventory.callers_of(
-        "construct_sg_n_03_issuer_currentness_is_resolved_complete_store_owned"
-    )
-    require(
-        len(terminal_constructor_callers) == 1
-        and terminal_constructor_callers[0].source.path.as_posix() == HOST_RUNTIME
-        and terminal_constructor_callers[0].name == "resolve_store_runtime_authority",
-        "terminal-A1 projection constructor has an alternate production caller: "
-        + (
-            ", ".join(function.location for function in terminal_constructor_callers)
-            or "none"
-        ),
-    )
-    runtime_projection = inventory.require_function(
-        HOST_RUNTIME, "resolve_store_runtime_authority"
-    )
-    _require_calls_in_order(
-        runtime_projection,
+    route_specs = (
         (
-            "project_current_activation_for_c2",
-            "construct_sg_n_03_issuer_currentness_is_resolved_complete_store_owned",
-            "verify_sg_n_03_issuer_currentness_is_resolved_complete_store_owned",
+            "adopt_bootstrap_grant_v1",
+            "verify_bootstrap_grant_terminal_a1_signature_scope_policy_cut_request_identity",
+            "prepare_bootstrap_grant_ingress",
+        ),
+        (
+            "adopt_activation_successor_grant_v1",
+            "verify_activation_successor_grant_terminal_a1_signature_scope_policy_cut_request_identity",
+            "prepare_activation_successor_grant_ingress",
+        ),
+        (
+            "adopt_proposal_disposition_v1",
+            "verify_proposal_disposition_terminal_a1_signature_scope_policy_cut_request_identity",
+            "prepare_proposal_disposition_ingress",
+        ),
+        (
+            "adopt_restore_authorization_v1",
+            "verify_restore_authorization_terminal_a1_signature_scope_policy_cut_request_identity",
+            "prepare_restore_authorization_ingress",
+        ),
+        (
+            "apply_revocation_judgment_v1",
+            "verify_revocation_judgment_terminal_a1_signature_scope_policy_cut_request_identity",
+            "prepare_verified_revocation_effect_v1",
+        ),
+        (
+            "adopt_recovery_grant_v1",
+            "verify_recovery_grant_terminal_a1_signature_scope_policy_cut_predecessor_successor_request_identity",
+            "prepare_recovery_grant_ingress",
+        ),
+        (
+            "apply_quarantine_closure_judgment_v1",
+            "verify_quarantine_closure_terminal_a1_signature_scope_policy_cut_request_identity",
+            "prepare_verified_quarantine_closure_effect_v1",
         ),
     )
-    expectation_new = inventory.require_function(
-        SIGNER_GOVERNANCE, "new", "ExternalGovernanceExpectationV1"
+    actor_routes = tuple(
+        inventory.require_function(LIVE_C2, method, "StoreC2SnapshotActorV1")
+        for method, _, _ in route_specs
     )
-    require(
-        expectation_new.visibility == "private",
-        "caller-selected external-governance expectation construction is reachable",
-    )
-    require(
-        _item_visibility(source, "struct", "ExternalCarrierStoreIngressPermitV1")
-        == "pub(super)",
-        "external-carrier Store-ingress permit has invalid visibility",
-    )
-    require(
-        not inventory.public_reexports({"ExternalCarrierStoreIngressPermitV1"}),
-        "external-carrier Store-ingress permit is publicly re-exported",
-    )
-    constructors = [
-        function
+    terminal_literals = {
+        _function_identity(function)
         for function in inventory.functions
-        if _code_contains(function, "ExternalCarrierStoreIngressPermitV1{")
-    ]
+        if _code_contains(function, "StoreTerminalA1VerifierV1{")
+    }
     require(
-        not constructors,
-        "external-carrier Store-ingress permit has a production constructor before "
-        "durable replay wiring: "
-        + ", ".join(function.location for function in constructors),
+        terminal_literals == {_function_identity(function) for function in actor_routes},
+        "terminal-A1 adapter constructors differ from the seven typed Store routes: "
+        + ", ".join(identity.display() for identity in sorted(terminal_literals, key=lambda value: value.display())),
     )
-    replay_new = inventory.require_function(
-        SIGNER_GOVERNANCE, "new", "ExternalCarrierReplayGuardV1"
-    )
-    replay_signature = compact_tokens(
-        replay_new.source.tokens[replay_new.start_token : replay_new.body_open_token]
+    for function, (_, verifier, consumer) in zip(actor_routes, route_specs, strict=True):
+        require(
+            function.visibility == "pub(crate)",
+            f"governed-carrier route is not crate-owned: {function.location}",
+        )
+        signature = compact_tokens(
+            function.source.tokens[function.start_token : function.body_open_token]
+        )
+        forbidden_inputs = (
+            "BTreeMap",
+            "ExternalGovernanceExpectationV1",
+            "ExternalCarrierVerificationPermitV1",
+            "C2PreparedExternalIngressV1",
+            "DurableExternalIngressReceiptV1",
+        )
+        require(
+            not any(name in signature for name in forbidden_inputs),
+            f"{function.location} exposes caller-authored ingress internals",
+        )
+        _require_calls_in_order(
+            function,
+            ("new", "from_store_actor", verifier, consumer),
+        )
+
+    bootstrap_install = inventory.require_function(
+        LIVE_C2, "install_c2_live_from_bootstrap_grant_v1", "Store"
     )
     require(
-        replay_new.visibility == "pub(super)"
-        and "permit:ExternalCarrierStoreIngressPermitV1" in replay_signature,
-        "external-carrier replay guard does not consume the linear Store-ingress permit",
+        len(bootstrap_install.calls("adopt_bootstrap_grant_v1")) == 1,
+        "bootstrap resume does not enter its exact Store-owned MSG-01 route once",
     )
+
+    durable_callers = {
+        _function_identity(function)
+        for function in inventory.callers_of("append_prepared_external_ingress")
+    }
+    expected_durable_callers = {
+        FunctionIdentity(
+            LIVE_C2,
+            "StoreC2SnapshotActorV1",
+            "append_verified_governed_carrier_effect",
+        ),
+        FunctionIdentity(
+            SIGNER_GOVERNANCE,
+            "StorePreparedRevocationEffectV1",
+            "apply",
+        ),
+        FunctionIdentity(
+            SIGNER_GOVERNANCE,
+            "StorePreparedQuarantineClosureEffectV1",
+            "apply",
+        ),
+    }
     require(
-        "implDefaultforExternalCarrierReplayGuardV1" not in compact_tokens(source.tokens),
-        "process-local pending replay guard regained a Default construction path",
-    )
-    bootstrap_verifier = inventory.require_function(
-        SIGNER_GOVERNANCE,
-        "verify_bootstrap_grant_terminal_a1_signature_scope_policy_cut_request_identity",
-    )
-    bootstrap_signature = compact_tokens(
-        bootstrap_verifier.source.tokens[
-            bootstrap_verifier.start_token : bootstrap_verifier.body_open_token
-        ]
-    )
-    require(
-        "_permit:&ExternalCarrierVerificationPermitV1" in bootstrap_signature,
-        "bootstrap verified projection bypasses the Store-owned verification permit",
+        durable_callers == expected_durable_callers,
+        "durable governed-carrier ingress caller set changed: "
+        + ", ".join(identity.display() for identity in sorted(durable_callers, key=lambda value: value.display())),
     )
 
     exact_routes = (
-        (
-            "VerifiedProposalDispositionV1",
-            "StoreIntegrityProposalDispositionV1",
-            "ProposalDispositionIngressV1",
-            "ProposalDispositionIngressReceiptV1",
-            "ProposalDispositionConsumed",
-        ),
-        (
-            "VerifiedBootstrapGrantV1",
-            "StoreIntegrityBootstrapGrantV1",
-            "BootstrapGrantIngressV1",
-            "BootstrapGrantIngressReceiptV1",
-            "BootstrapGrantConsumed",
-        ),
-        (
-            "VerifiedActivationSuccessorGrantV1",
-            "StoreIntegrityActivationSuccessorGrantV1",
-            "ActivationSuccessorGrantIngressV1",
-            "ActivationSuccessorGrantIngressReceiptV1",
-            "ActivationSuccessorGrantConsumed",
-        ),
-        (
-            "VerifiedRevocationJudgmentV1",
-            "StoreIntegrityRevocationJudgmentV1",
-            "RevocationJudgmentIngressV1",
-            "RevocationJudgmentIngressReceiptV1",
-            "RevocationJudgmentConsumed",
-        ),
-        (
-            "VerifiedRecoveryGrantV1",
-            "StoreIntegrityRecoveryGrantV1",
-            "RecoveryGrantIngressV1",
-            "RecoveryGrantIngressReceiptV1",
-            "RecoveryGrantConsumed",
-        ),
-        (
-            "VerifiedRestoreAuthorizationV1",
-            "StoreIntegrityRestoreAuthorizationV1",
-            "RestoreAuthorizationIngressV1",
-            "RestoreAuthorizationIngressReceiptV1",
-            "RestoreAuthorizationConsumed",
-        ),
-        (
-            "VerifiedQuarantineClosureJudgmentV1",
-            "StoreIntegrityQuarantineClosureJudgmentV1",
-            "QuarantineClosureIngressV1",
-            "QuarantineClosureIngressReceiptV1",
-            "QuarantineClosureJudgmentConsumed",
-        ),
+        ("prepare_bootstrap_grant_ingress", "VerifiedBootstrapGrantV1"),
+        ("prepare_activation_successor_grant_ingress", "VerifiedActivationSuccessorGrantV1"),
+        ("prepare_proposal_disposition_ingress", "VerifiedProposalDispositionV1"),
+        ("prepare_restore_authorization_ingress", "VerifiedRestoreAuthorizationV1"),
+        ("prepare_revocation_judgment_ingress", "VerifiedRevocationJudgmentV1"),
+        ("prepare_recovery_grant_ingress", "VerifiedRecoveryGrantV1"),
+        ("prepare_quarantine_closure_ingress", "VerifiedQuarantineClosureJudgmentV1"),
     )
     tokens = compact_tokens(source.tokens)
+    for constructor, verified in exact_routes:
+        require(
+            f"{constructor},{verified}," in tokens,
+            f"durable external-ingress route {constructor} does not consume {verified}",
+        )
     require(
-        "_permit:&ExternalCarrierVerificationPermitV1" in tokens,
-        "paired carrier verifiers bypass the Store-owned verification permit",
-    )
-    require(
-        _item_visibility(source, "enum", "ExternalCarrierIngressResultV2")
+        _item_visibility(source, "struct", "C2PreparedExternalIngressV1")
         == "pub(crate)",
-        "matrix-assigned external-carrier result vocabulary has invalid visibility",
+        "opaque prepared external ingress has invalid visibility",
+    )
+    prepared_body = compact_tokens(source.tokens)
+    require(
+        "pub(crate)structC2PreparedExternalIngressV1{route:C2ExternalSigningRouteV1,"
+        "request_identity:ExternalCarrierIdentityV1,"
+        "carrier_identity:ExternalCarrierIdentityV1,canonical_request:Vec<u8>,"
+        "canonical_carrier:Vec<u8>,}"
+        in prepared_body,
+        "prepared external ingress does not retain exact route/request/carrier/content",
+    )
+    expectation_join = inventory.require_function(
+        SIGNER_GOVERNANCE,
+        "verify_expectation_basis",
+        "ExternalCarrierVerificationPermitV1",
+    )
+    expectation_join_code = compact_tokens(expectation_join.item_tokens)
+    require(
+        expectation_join.visibility == "private"
+        and len(expectation_join.calls("verify_current_actor")) == 1
+        and all(
+            coordinate in expectation_join_code
+            for coordinate in (
+                "creator_pid",
+                "actor_instance_identity",
+                "actor_snapshot_identity",
+                "actor_effect_epoch",
+            )
+        ),
+        "carrier verification does not join permit and expectation actor/snapshot/epoch/process seals",
     )
     require(
-        "#[derive(Debug)]pub(crate)enumExternalCarrierIngressResultV2" in tokens,
-        "external-carrier result regained a cloneable or copyable witness",
+        _source_token_count(
+            source,
+            ("permit", ".", "verify_expectation_basis", "(", "expectation", ")", "?"),
+        )
+        == 2,
+        "bootstrap and macro-generated pair verifiers do not both enforce the expectation join",
+    )
+    for preparer in (
+        "prepare_verified_revocation_effect_v1",
+        "prepare_verified_quarantine_closure_effect_v1",
+    ):
+        function = inventory.require_function(SIGNER_GOVERNANCE, preparer)
+        require(
+            function.visibility == "pub(incrate::store_generation)"
+            and len(function.calls("verify_for_actor")) == 1,
+            f"{preparer} does not bind its prepared effect to the exact Store actor",
+        )
+    durable_append = inventory.require_function(
+        SIGNER_GOVERNANCE, "append_prepared_external_ingress"
     )
     require(
-        "#[derive(Debug,PartialEq,Eq)]pub(crate)struct$receipt{"
-        "carrier_identity:ExternalCarrierIdentityV1,_private:(),}"
-        in tokens,
-        "route-specific external-carrier ingress receipt is not opaque",
+        durable_append.visibility == "pub(crate)"
+        and len(durable_append.calls("execute")) == 1
+        and len(durable_append.calls("load_external_ingress_for_request")) == 1,
+        "durable external ingress lacks one exact replay/collision/insert boundary",
     )
-    for verified, decoded, ingress, receipt, result in exact_routes:
-        if verified != "VerifiedBootstrapGrantV1":
-            require(
-                f"verified_pair_type!({verified},{decoded});" in tokens,
-                f"verified external-carrier projection is absent for {decoded}",
-            )
-        require(
-            f"ingress_type!({ingress},{verified},{receipt},{result}," in tokens,
-            f"external-carrier ingress {ingress} does not require {verified}",
-        )
-        require(
-            f"{result}({receipt})" in tokens,
-            f"matrix-assigned result {result} does not carry its opaque route receipt",
-        )
-        require(
-            f"ingress_type!({ingress},{decoded}," not in tokens,
-            f"decoded but unverified carrier {decoded} reaches {ingress}",
-        )
-        for other_source in inventory.sources:
-            if other_source.path.as_posix() == SIGNER_GOVERNANCE:
-                continue
-            require(
-                not other_source.identifier_occurrences(receipt),
-                f"opaque external-carrier receipt {receipt} escapes its owning module",
-            )
 
+    obsolete_product = [
+        function
+        for function in inventory.functions
+        if not function.cfg_test
+        and (
+            function.owner == "ExternalCarrierReplayGuardV1"
+            or "ExternalCarrierStoreIngressPermitV1" in function.signature_code
+        )
+    ]
+    require(
+        not obsolete_product,
+        "obsolete process-local external replay path remains product-reachable: "
+        + ", ".join(function.location for function in obsolete_product),
+    )
     return (
-        "external-verification-permit-production-constructors=0",
-        "terminal-A1-production-verifiers=1-store-owned-same-snapshot",
-        "external-ingress-permit-production-constructors=0",
-        "external-ingress-routes=7-terminal-A1-verified-only",
-        "external-ingress-receipts=7-opaque",
-        "external-replay-status=process-local-pending-not-durable",
+        "external-verification-permit-constructors=1-live-actor",
+        "terminal-A1-production-verifiers=1-live-store-same-snapshot",
+        f"durable-external-ingress-routes={len(exact_routes)}",
+        "governed-route-actor-roots=7",
+        "durable-external-ingress-consumers=3-sealed",
+        "permit-expectation-join=actor+snapshot+epoch+process",
+        "external-replay-status=durable-exact-replay-vs-collision",
     )
-
-
 FENCE_ROW_CONSTRUCTOR = (
     "construct_sg_wu_02_fence_shared_process_global_fork_fence_primitive"
 )
@@ -1479,7 +1985,11 @@ def _verify_signer_process_fence(
     create = inventory.require_function(
         SIGNER_CUSTODY, "create_below_root", "C2StoreIntegrityCustodian"
     )
-    sign = inventory.require_function(SIGNER_CUSTODY, "sign", "C2StoreIntegrityCustodian")
+    sign_crypto = inventory.require_function(
+        SIGNER_CUSTODY,
+        "sign_after_authority_checks",
+        "C2StoreIntegrityCustodian",
+    )
     for function, sequence in (
         (
             create,
@@ -1495,7 +2005,7 @@ def _verify_signer_process_fence(
             ),
         ),
         (
-            sign,
+            sign_crypto,
             (
                 "C2ForkFence::acquire()",
                 "self.load_seed_for_signing()",
@@ -1514,6 +2024,22 @@ def _verify_signer_process_fence(
             and len(set(positions)) == len(positions),
             f"{function.location} does not fence its complete live-secret interval",
         )
+
+    # Public/purpose-locked signing entry points perform only authority checks;
+    # every route that actually reloads secret custody is centralized in the
+    # private fenced helper above.  Pin its complete caller set so moving the
+    # fence out of an entry point cannot create an alternate secret-live lane.
+    sign_crypto_callers = {
+        function.name
+        for function in inventory.callers_of("sign_after_authority_checks")
+        if function.source.path.as_posix() == SIGNER_CUSTODY
+    }
+    require(
+        sign_crypto_callers
+        == {"sign", "sign_initial_possession"},
+        "custody cryptographic helper has an alternate or missing caller: "
+        + ", ".join(sorted(sign_crypto_callers)),
+    )
 
     # 10. No secret-live path performs process creation.
     custody_source = inventory.source(SIGNER_CUSTODY)
@@ -1609,142 +2135,570 @@ def _verify_signer_process_fence(
 
 
 def _verify_restart_noncreation_graph(inventory: SourceInventory) -> tuple[str, ...]:
-    restart = inventory.source(SIGNER_RESTART)
-    reconstruct = inventory.require_function(SIGNER_RESTART, "reconstruct")
-    require(reconstruct.visibility == "private", "restart reconstruction is not private")
-    _require_call_once(reconstruct, "verify_snapshot")
+    legacy_product = [
+        function
+        for function in inventory.functions
+        if function.source.path.as_posix() == SIGNER_RESTART
+    ]
     require(
-        _code_contains(reconstruct, "ReconstructedTerminalSignerCapabilityV1{"),
-        "restart does not construct the sealed terminal capability after verification",
+        not legacy_product,
+        "superseded raw restart model remains product-compiled: "
+        + ", ".join(function.location for function in legacy_product),
     )
-    callers = {
-        function.name
-        for function in inventory.callers_of(
-            "reconstruct", source_prefix=SIGNER_RESTART
-        )
-    }
-    expected = {
+    prohibited = {
+        "CompleteSignerRestartSnapshotV1",
+        "ReconstructedTerminalSignerCapabilityV1",
+        "construct_complete_signer_restart_snapshot",
         "construct_sg_n_29_restart_reconstructs_capability_complete_durable_authority_plus",
-        "verify_sg_n_29_restart_reconstructs_capability_complete_durable_authority_plus",
-        "require_route",
     }
+    leaks: list[str] = []
+    for function in inventory.functions:
+        code = compact_tokens(function.item_tokens)
+        overlap = sorted(name for name in prohibited if name in code)
+        if overlap:
+            leaks.append(f"{function.location}:{','.join(overlap)}")
     require(
-        callers == expected,
-        f"restart reconstruction caller set changed: expected {sorted(expected)}, found {sorted(callers)}",
+        not leaks,
+        "raw restart evidence/capability shape remains product-reachable: "
+        + ", ".join(leaks),
     )
-    prohibited_calls = {
-        "create",
-        "issue",
-        "grant",
-        "rotate",
-        "recover",
-        "append_recovery",
-        "construct_recovery_grant",
-    }
-    used = prohibited_calls.intersection(_function_call_names(reconstruct))
-    require(not used, f"restart reconstruction reaches authority creation: {sorted(used)}")
-    for source_path in (SIGNER_RESTART, SIGNER_LINEAGE):
-        source = inventory.source(source_path)
-        production = [function for function in source.functions if not function.cfg_test]
-        for function in production:
-            sorting = {"sort", "sort_by", "sort_by_key", "max", "max_by", "max_by_key"}.intersection(
-                _function_call_names(function)
-            )
-            require(
-                not sorting,
-                f"restart/lineage selects authority by sorting or maximum at {function.location}: {sorted(sorting)}",
-            )
+    reopen = inventory.require_function(
+        LIVE_C2, "with_reopened_c2_generation_current_v1", "Store"
+    )
     require(
-        "currentness" not in reconstruct.name.lower()
-        and "custody_only" not in reconstruct.name.lower(),
-        "generic currentness/custody restart route is present",
+        reopen.visibility == "pub(crate)"
+        and len(reopen.calls("with_c2_authority_snapshot")) == 1,
+        "fresh-process reopen is not owned by the sole Store snapshot actor factory",
     )
-    return ("reconstruct-callers=3", "route=terminal-only", "sorting=absent")
+    actor_reopen = inventory.require_function(
+        LIVE_C2, "with_reopened_generation_current_v1", "StoreC2SnapshotActorV1"
+    )
+    require(
+        actor_reopen.visibility == "private"
+        and len(reopen.calls("with_reopened_generation_current_v1")) == 1
+        and len(actor_reopen.calls("resolve_generation_current_evidence_v1")) == 1
+        and len(actor_reopen.calls("reopen_complete_physical_substrate_v1")) == 1
+        and len(actor_reopen.calls("reopen_terminal_foundation_custodian_v1")) == 1
+        and len(actor_reopen.calls("verify_generation_current_custody")) == 1
+        and len(
+            actor_reopen.calls("mint_reopened_terminal_generation_current_v1")
+        )
+        == 1,
+        "fresh Store reopen does not re-resolve complete evidence inside the sole actor",
+    )
+    code = compact_tokens((*reopen.item_tokens, *actor_reopen.item_tokens))
+    require(
+        "GenerationCurrentV1" in code
+        and "CompleteSignerRestartSnapshotV1" not in code
+        and "ReconstructedTerminalSignerCapabilityV1" not in code,
+        "fresh Store reopen delegates authority to the superseded raw restart model",
+    )
+    lineage = inventory.source(SIGNER_LINEAGE)
+    for function in [function for function in lineage.functions if not function.cfg_test]:
+        sorting = {
+            "sort",
+            "sort_by",
+            "sort_by_key",
+            "max",
+            "max_by",
+            "max_by_key",
+        }.intersection(_function_call_names(function))
+        require(
+            not sorting,
+            f"lineage selects authority by sorting or maximum at {function.location}: {sorted(sorting)}",
+        )
+    return (
+        "legacy-raw-restart-model=compile-confined",
+        "reopen-owner=live-store-snapshot-actor",
+        "lineage-sorting=absent",
+    )
+
+
+def _verify_post_msg07_predecessor_refresh_before_msg06(
+    inventory: SourceInventory,
+) -> tuple[str, ...]:
+    """Pin the linear MSG-07 -> refreshed predecessor -> MSG-06 seam.
+
+    MSG-07 advances the retained actor snapshot.  The former current context
+    is therefore stale and must be refined in place before it can mint the
+    predecessor authority consumed by the mandatory MSG-06 route.  This
+    verifier binds all three layers of that dependency rather than merely
+    checking that the refresh helper happens to exist.
+    """
+
+    driver = inventory.require_function(
+        LIVE_C2, "complete_healthy_successor_v1", "StoreC2SnapshotActorV1"
+    )
+    require(
+        len(driver.calls("append_successor_possession_v1")) == 1
+        and len(driver.calls("append_healthy_rotation_intent_v1")) == 1,
+        "healthy successor does not have exactly one MSG-07 and one continuity step",
+    )
+    driver_code = compact_tokens(driver.item_tokens)
+    driver_code_with_literals = compact_tokens(driver.item_tokens, include_literals=True)
+    terminal_one_use = (
+        "FROM c2_signer_succession_projection\n"
+        "                    WHERE transition_identity = ?1"
+    )
+    require(
+        terminal_one_use in driver_code_with_literals
+        and "LineageRefusalV1::DuplicateTransition" in driver_code
+        and driver_code_with_literals.index(terminal_one_use)
+        < driver_code_with_literals.index("prepare_ordinary_successor_custody_v1"),
+        "healthy successor lacks the pre-custody terminal-transition one-use refusal",
+    )
+    _require_calls_in_order(
+        driver,
+        (
+            "append_successor_possession_v1",
+            "append_healthy_rotation_intent_v1",
+            "consume_ordinary_successor_foundation_authority_v1",
+        ),
+    )
+
+    continuity = inventory.require_function(
+        LIVE_C2, "append_healthy_rotation_intent_v1", "StoreC2SnapshotActorV1"
+    )
+    required_once = (
+        "refresh_current_predecessor_after_msg07_v1",
+        "mint_current_predecessor_authority_v1",
+        "consume_current_predecessor_authority_v1",
+        "from_store_actor_resolution",
+        "append_healthy_rotation_intent",
+    )
+    require(
+        all(len(continuity.calls(name)) == 1 for name in required_once),
+        "post-MSG-07 continuity seam omits or duplicates refresh/authority/MSG-06 construction",
+    )
+    _require_calls_in_order(continuity, required_once)
+    continuity_code = compact_tokens(continuity.item_tokens)
+    require(
+        "refresh_current_predecessor_after_msg07_v1(current,pending,&possession)?"
+        in continuity_code
+        and "mint_current_predecessor_authority_v1(current)?" in continuity_code
+        and "consume_current_predecessor_authority_v1(predecessor,current)?"
+        in continuity_code,
+        "refresh output is not the exact predecessor context consumed before MSG-06",
+    )
+
+    refresh = inventory.require_function(
+        LIVE_C2,
+        "refresh_current_predecessor_after_msg07_v1",
+        "StoreC2SnapshotActorV1",
+    )
+    refresh_signature = compact_tokens(
+        refresh.source.tokens[refresh.start_token : refresh.body_open_token]
+    )
+    refresh_code = compact_tokens(refresh.item_tokens)
+    require(
+        "possession:&ConsumedSuccessorPossessionV1" in refresh_signature
+        and len(refresh.calls("verify_same_snapshot")) == 1
+        and len(refresh.calls("verify_for_actor")) == 1
+        and len(refresh.calls("verify_live")) == 2
+        and (
+            "current.coordinates.predecessor_frontier_identity="
+            "possession.resulting_frontier_identity()"
+        )
+        in refresh_code
+        and (
+            "current.coordinates.predecessor_event_identity="
+            "Some(possession.message_identity())"
+        )
+        in refresh_code
+        and "possession.append_identity().as_bytes()" in refresh_code
+        and "possession.effect_receipt_identity().as_bytes()" in refresh_code,
+        "predecessor refresh does not bind the exact consumed MSG-07 result",
+    )
+
+    coordinator = inventory.require_function(
+        SIGNER_COORDINATOR,
+        "append_healthy_rotation_intent",
+        "C2SignerTransitionCoordinator",
+    )
+    require(
+        len(coordinator.calls("append_normal_rotation_continuity")) == 1
+        and len(coordinator.calls("append_policy_transition_intent")) == 1,
+        "healthy coordinator does not append exactly one mandatory MSG-06 before MSG-11",
+    )
+    _require_calls_in_order(
+        coordinator,
+        (
+            "verify_for_actor",
+            "append_normal_rotation_continuity",
+            "append_policy_transition_intent",
+        ),
+    )
+    coordinator_code = compact_tokens(coordinator.item_tokens)
+    require(
+        "mandatory_msg06.message_identity" in coordinator_code
+        and "mandatory_msg06," in coordinator_code,
+        "MSG-06 consumption is not retained in the healthy continuity result",
+    )
+    return (
+        "terminal-transition-one-use=before-custody",
+        "healthy-order=MSG07<refresh<predecessor-authority<MSG06",
+        "msg07-refresh-binding=frontier+event+append+receipt",
+        "mandatory-msg06-count=1",
+    )
 
 
 def _special_path_inventory(inventory: SourceInventory) -> C2ConstructorPathInventoryV2:
-    special: list[FunctionIdentity] = []
-    for row, path, owner, name, _brand in SPECIAL_ROOT_SPECS:
-        function = inventory.require_function(path, name, owner)
-        require(
-            function.visibility == "pub(crate)",
-            f"{row} special wrapper {name} is not crate-private",
-        )
-        signature = compact_tokens(
-            function.source.tokens[function.start_token : function.body_open_token]
-        )
-        require("bool" not in signature, f"{row} special wrapper accepts Boolean authority")
-        forbidden = WRAPPER_FORBIDDEN_IO.intersection(_function_call_names(function))
-        require(
-            not forbidden,
-            f"{row} special wrapper performs I/O directly: {sorted(forbidden)}",
-        )
-        special.append(_function_identity(function))
+    """Inventory every Store-owned live-C2 entry plus fresh reopen root.
 
-    fresh = inventory.require_function(INSTALL, "install_c2_fresh")
-    restore = inventory.require_function(INSTALL, "install_c2_restore_successor")
-    require(
-        len(fresh.calls("verify_mode_prerequisites")) == 1
-        and _code_contains(fresh, "C2BootstrapBrandV1{"),
-        "P-01 does not verify fresh prerequisites before constructing its brand",
-    )
-    require(
-        len(restore.calls("verify_restore_successor_install_inputs")) == 1
-        and _code_contains(restore, "C2BootstrapBrandV1{"),
-        "P-02 does not verify complete restore-successor inputs before constructing its brand",
-    )
-    require(
-        len(
-            inventory.require_function(INSTALL, "continue_c2_installation").calls(
-                "construct_n_12_installation_continuation"
-            )
-        )
-        == 1,
-        "P-03 does not consume the exact signed-intent continuation constructor",
-    )
-    require(
-        len(
-            inventory.require_function(POLICY, "transition_c2_active_policy").calls(
-                "construct_n_13_policy_transition_brand"
-            )
-        )
-        == 1,
-        "P-04 does not consume the exact current-policy predecessor constructor",
-    )
-    require(
-        len(
-            inventory.require_function(POLICY, "continue_c2_policy_transition").calls(
-                "construct_n_14_transition_continuation"
-            )
-        )
-        == 1,
-        "P-05 does not consume the exact unresolved-intent frontier constructor",
-    )
+    Terminal-A1 signing is asynchronous, so a SQLite transaction, OS lock, or
+    process-local authority object cannot honestly span the request/carrier
+    boundary.  The canonical fresh lifecycle therefore has two Store-owned
+    entry roots: a durable inert preparation and an exact resume/install.  The
+    pair is one bootstrap lifecycle path, not two alternate installers.  The
+    two healthy-successor roots are likewise one nominal lifecycle with
+    distinct unchanged-policy and governed-MSG-01 entry contracts.  Restore
+    and recovery remain nominally distinct discontinuity paths.
+    """
 
-    _, path, owner, name = ORDINARY_ROOT_SPEC
-    ordinary = inventory.require_function(path, name, owner)
+    prepare_row, prepare_path, prepare_owner, prepare_name, _ = SPECIAL_ROOT_SPECS[0]
+    prepare = inventory.require_function(prepare_path, prepare_name, prepare_owner)
     require(
-        ordinary.visibility in {"pub", "pub(crate)"},
-        "P-06 ordinary completed-open entry is absent",
+        prepare.visibility == "pub(crate)",
+        f"{prepare_row} root is not crate-private",
+    )
+    prepare_signature = compact_tokens(
+        prepare.source.tokens[prepare.start_token : prepare.body_open_token]
+    )
+    require(
+        "bool" not in prepare_signature
+        and "&mutself" in prepare_signature
+        and "StoreC2QualifiedRuntimeEvidenceV1" in prepare_signature
+        and "StoreIntegritySignerImplementationManifestV1" in prepare_signature
+        and "StorePreparedBootstrapGrantRequestV1" in prepare_signature,
+        "bootstrap preparation accepts raw authority or returns something other than inert request evidence",
     )
     _require_calls_in_order(
-        ordinary,
-        ("verify_completed_c2_open_inputs", "new_verified", "begin"),
+        prepare,
+        (
+            "with_c2_authority_snapshot",
+            "admit_signer_implementation_manifest_v1",
+            "prepare_initial_bootstrap_grant_request_v1",
+        ),
     )
     require(
-        not any(brand in compact_tokens(ordinary.item_tokens) for *_, brand in SPECIAL_ROOT_SPECS),
-        "P-06 ordinary path constructs a special brand",
+        not prepare.calls("mint_bootstrap_signer_context")
+        and not prepare.calls("install_c2_live_v1"),
+        "asynchronous bootstrap preparation minted live standing or entered installation",
     )
-    ordinary_forbidden = WRAPPER_FORBIDDEN_IO.intersection(
-        call.name for call in ordinary.calls() if call.name != "begin_writer_session"
+
+    install_row, install_path, install_owner, install_name, _ = SPECIAL_ROOT_SPECS[1]
+    install = inventory.require_function(install_path, install_name, install_owner)
+    require(
+        install.visibility == "pub(crate)",
+        f"{install_row} root is not crate-private",
+    )
+    install_signature = compact_tokens(
+        install.source.tokens[install.start_token : install.body_open_token]
     )
     require(
-        not ordinary_forbidden,
-        f"P-06 ordinary-open wrapper writes before its session: {sorted(ordinary_forbidden)}",
+        "bool" not in install_signature
+        and "&mutself" in install_signature
+        and "StoreC2QualifiedRuntimeEvidenceV1" in install_signature
+        and "StoreIntegritySignerImplementationManifestV1" in install_signature
+        and "StoreIntegrityBootstrapGrantV1" in install_signature
+        and "StorePreparedBootstrapGrantRequestV1" not in install_signature,
+        "bootstrap resume accepts raw authority or caller-supplied prepared custody/request state",
     )
-    return C2ConstructorPathInventoryV2(tuple(special), _function_identity(ordinary))
+    _require_calls_in_order(
+        install,
+        (
+            "with_c2_authority_snapshot",
+            "admit_signer_implementation_manifest_v1",
+            "reopen_prepared_bootstrap_custodian_v1",
+            "seal_reopened_foundational_custody",
+            "adopt_bootstrap_grant_v1",
+            "construct_initial_enrollment_candidate_v1",
+            "construct_verified_initial_possession_request_v1",
+            "append_initial_proposal_pop_v1",
+            "derive_initial_foundational_enrollment_v1",
+            "adopt_foundational_enrollment_v1",
+            "accept_signer_enrollment_v1",
+            "derive_final_install_policy_v1",
+            "mint_bootstrap_signer_context",
+            "install_c2_live_v1",
+        ),
+    )
 
+    transition_root_specs = (
+        (
+            SPECIAL_ROOT_SPECS[2],
+            (
+                "StoreC2QualifiedRuntimeEvidenceV1",
+                "StoreIntegritySignerImplementationManifestV1",
+                "C2HealthySuccessorIntentV1",
+            ),
+            (
+                "with_c2_authority_snapshot",
+                "admit_signer_implementation_manifest_v1",
+                "with_reopened_generation_current_v1",
+                "complete_healthy_successor_v1",
+            ),
+            (
+                "complete_store_restore_lifecycle_v1",
+                "complete_store_recovery_lifecycle_v1",
+                "adopt_activation_successor_grant_v1",
+            ),
+        ),
+        (
+            SPECIAL_ROOT_SPECS[3],
+            (
+                "StoreC2QualifiedRuntimeEvidenceV1",
+                "StoreIntegritySignerImplementationManifestV1",
+                "C2HealthySuccessorIntentV1",
+                "StoreIntegrityActivationSuccessorGrantRequestV1",
+                "StoreIntegrityActivationSuccessorGrantV1",
+            ),
+            (
+                "with_c2_authority_snapshot",
+                "admit_signer_implementation_manifest_v1",
+                "with_reopened_generation_current_v1",
+                "adopt_activation_successor_grant_v1",
+                "refresh_current_after_external_ingress_v1",
+                "from_store_adopted_activation_successor_grant",
+                "complete_healthy_successor_v1",
+            ),
+            (
+                "complete_store_restore_lifecycle_v1",
+                "complete_store_recovery_lifecycle_v1",
+            ),
+        ),
+        (
+            SPECIAL_ROOT_SPECS[4],
+            (
+                "StoreC2QualifiedRuntimeEvidenceV1",
+                "StoreIntegritySignerImplementationManifestV1",
+                "StoreIntegrityRestoreAuthorizationRequestV1",
+                "StoreIntegrityRestoreAuthorizationV1",
+            ),
+            (
+                "with_c2_authority_snapshot",
+                "admit_signer_implementation_manifest_v1",
+                "complete_store_restore_lifecycle_v1",
+            ),
+            (
+                "complete_healthy_successor_v1",
+                "complete_store_recovery_lifecycle_v1",
+            ),
+        ),
+        (
+            SPECIAL_ROOT_SPECS[5],
+            (
+                "StoreC2QualifiedRuntimeEvidenceV1",
+                "StoreIntegritySignerImplementationManifestV1",
+                "C2RecoveryPreparationIntentV1",
+            ),
+            (
+                "with_c2_authority_snapshot",
+                "admit_signer_implementation_manifest_v1",
+                "prepare_recovery_grant_request_v1",
+            ),
+            (
+                "complete_healthy_successor_v1",
+                "complete_store_restore_lifecycle_v1",
+                "complete_store_recovery_lifecycle_v1",
+            ),
+        ),
+        (
+            SPECIAL_ROOT_SPECS[6],
+            (
+                "StoreC2QualifiedRuntimeEvidenceV1",
+                "StoreIntegritySignerImplementationManifestV1",
+                "StoreIntegrityRecoveryRequestV1",
+                "StoreIntegrityRecoveryGrantV1",
+            ),
+            (
+                "with_c2_authority_snapshot",
+                "admit_signer_implementation_manifest_v1",
+                "complete_store_recovery_lifecycle_v1",
+            ),
+            (
+                "complete_healthy_successor_v1",
+                "complete_store_restore_lifecycle_v1",
+            ),
+        ),
+    )
+    transition_roots: list[Function] = []
+    for (row, path, owner, name, _), signature_types, ordered, forbidden_calls in transition_root_specs:
+        root = inventory.require_function(path, name, owner)
+        transition_roots.append(root)
+        signature = compact_tokens(
+            root.source.tokens[root.start_token : root.body_open_token]
+        )
+        require(
+            root.visibility == "pub(crate)"
+            and "&mutself" in signature
+            and "bool" not in signature
+            and all(type_name in signature for type_name in signature_types),
+            f"{row} is not a crate-private typed Store root",
+        )
+        _require_calls_in_order(root, ordered)
+        require(
+            not any(root.calls(name) for name in forbidden_calls)
+            and not WRAPPER_FORBIDDEN_IO.intersection(_function_call_names(root)),
+            f"{row} crosses another lifecycle route or performs direct wrapper I/O",
+        )
 
+    _, reopen_path, reopen_owner, reopen_name = ORDINARY_ROOT_SPEC
+    reopen = inventory.require_function(reopen_path, reopen_name, reopen_owner)
+    require(
+        reopen.visibility == "pub(crate)",
+        "live GenerationCurrent reopen root is not crate-private",
+    )
+    reopen_signature = compact_tokens(
+        reopen.source.tokens[reopen.start_token : reopen.body_open_token]
+    )
+    require(
+        "bool" not in reopen_signature
+        and "&mutself" in reopen_signature
+        and "StoreC2QualifiedRuntimeEvidenceV1" in reopen_signature
+        and "StoreIntegritySignerImplementationManifestV1" in reopen_signature,
+        "live reopen root accepts Boolean/raw authority or omits qualified runtime/manifest evidence",
+    )
+    _require_calls_in_order(
+        reopen,
+        (
+            "with_c2_authority_snapshot",
+            "admit_signer_implementation_manifest_v1",
+            "with_reopened_generation_current_v1",
+        ),
+    )
+    actor_reopen = inventory.require_function(
+        LIVE_C2, "with_reopened_generation_current_v1", "StoreC2SnapshotActorV1"
+    )
+    require(
+        actor_reopen.visibility == "private",
+        "fresh-process generation resolver escapes the Store actor",
+    )
+    call_groups = {
+        name: actor_reopen.calls(name)
+        for name in (
+            "verify_authority_snapshot",
+            "resolve_generation_current_evidence_v1",
+            "reopen_complete_physical_substrate_v1",
+            "reopen_terminal_foundation_custodian_v1",
+            "verify_generation_current_custody",
+            "mint_reopened_terminal_generation_current_v1",
+        )
+    }
+    require(
+        {name: len(calls) for name, calls in call_groups.items()}
+        == {
+            "verify_authority_snapshot": 1,
+            "resolve_generation_current_evidence_v1": 1,
+            "reopen_complete_physical_substrate_v1": 1,
+            "reopen_terminal_foundation_custodian_v1": 1,
+            "verify_generation_current_custody": 1,
+            "mint_reopened_terminal_generation_current_v1": 1,
+        },
+        "reopen correspondence census changed",
+    )
+    ordered_positions = (
+        call_groups["verify_authority_snapshot"][0].start,
+        call_groups["resolve_generation_current_evidence_v1"][0].start,
+        call_groups["reopen_complete_physical_substrate_v1"][0].start,
+        call_groups["reopen_terminal_foundation_custodian_v1"][0].start,
+        call_groups["verify_generation_current_custody"][0].start,
+        call_groups["mint_reopened_terminal_generation_current_v1"][0].start,
+    )
+    require(
+        list(ordered_positions) == sorted(ordered_positions),
+        "reopen does not re-resolve and re-seal exact evidence after physical B/G reconciliation",
+    )
+
+    physical_reopen = inventory.require_function(
+        LIVE_C2, "reopen_complete_physical_substrate_v1", "StoreC2SnapshotActorV1"
+    )
+    physical_groups = {
+        name: physical_reopen.calls(name)
+        for name in (
+            "load_verified_durable_enrollment_bridge_v1",
+            "reopen_from_foundational_evidence",
+            "seal_reopened_foundational_custody",
+            "load_durable_bootstrap_grant_pair_for_reopen_v1",
+            "adopt_bootstrap_grant_v1",
+            "rewrap_verified_durable_enrollment_bridge_v1",
+            "reopen_complete_physical_generation_v1",
+            "load_generation_current_evidence_before_governance_v1",
+        )
+    }
+    require(
+        all(len(calls) == 1 for calls in physical_groups.values()),
+        "physical reopen substrate correspondence census changed",
+    )
+    _require_calls_in_order(
+        physical_reopen,
+        (
+            "load_verified_durable_enrollment_bridge_v1",
+            "reopen_from_foundational_evidence",
+            "seal_reopened_foundational_custody",
+            "load_durable_bootstrap_grant_pair_for_reopen_v1",
+            "adopt_bootstrap_grant_v1",
+            "rewrap_verified_durable_enrollment_bridge_v1",
+            "reopen_complete_physical_generation_v1",
+            "load_generation_current_evidence_before_governance_v1",
+        ),
+    )
+
+    # The old five wrapper functions are retained only as archaeological
+    # model/specimen code during this campaign. They are not canonical roots
+    # and may have no production caller.
+    superseded = (
+        "install_c2_fresh",
+        "install_c2_restore_successor",
+        "continue_c2_installation",
+        "transition_c2_active_policy",
+        "continue_c2_policy_transition",
+    )
+    stale_callers = {
+        name: [function.location for function in inventory.callers_of(name)]
+        for name in superseded
+        if inventory.callers_of(name)
+    }
+    require(
+        not stale_callers,
+        "superseded model-era C2 wrapper regained production reachability: "
+        + json.dumps(stale_callers, sort_keys=True),
+    )
+    store_methods = {
+        function.name: function
+        for function in inventory.functions
+        if function.source.path.as_posix() == LIVE_C2 and function.owner == "Store"
+    }
+    expected_public_roots = {
+        spec[3] for spec in SPECIAL_ROOT_SPECS
+    } | {ORDINARY_ROOT_SPEC[3]}
+    require(
+        {
+            name
+            for name, function in store_methods.items()
+            if function.visibility == "pub(crate)"
+        }
+        == expected_public_roots
+        and {
+            name
+            for name, function in store_methods.items()
+            if function.visibility == "private"
+        }
+        == {"with_c2_authority_snapshot"},
+        "live C2 Store production surface differs from the closed eight-root API: "
+        + ", ".join(
+            f"{name}:{function.visibility}"
+            for name, function in sorted(store_methods.items())
+        ),
+    )
+    return C2ConstructorPathInventoryV2(
+        (
+            _function_identity(prepare),
+            _function_identity(install),
+            *(_function_identity(root) for root in transition_roots),
+        ),
+        _function_identity(reopen),
+    )
 def _run_inherited_verifier(script: str) -> str:
     path = ROOT / "crates/nq-store/tests" / script
     require(path.is_file(), f"inherited verifier is absent: {path.relative_to(ROOT)}")
@@ -1773,6 +2727,24 @@ def _collect_io_nodes(inventory: SourceInventory) -> C2IoCallGraphInventoryV2:
         path = function.source.path.as_posix()
         if not path.startswith("crates/nq-store/src/store_generation"):
             continue
+        # Candidate-certificate verification runs before Store admission and
+        # has no durable mutation surface. Its fixed-path read-only trust I/O
+        # is pinned separately by the facade/trust verifier below; including
+        # those reads here would misclassify a precondition failure as a
+        # lifecycle crash cut.
+        if path == CANDIDATE_QUALIFICATION:
+            continue
+        # The manifest inventories production crash cuts.  Executable crash
+        # specimens are evidence *about* those cuts, not additional product
+        # mutation sites.  Module-level `#[cfg(test)]` is not propagated into
+        # a separately parsed source file, so exclude both directly annotated
+        # test functions and the conventional test-only module suffix.
+        if (
+            function.cfg_test
+            or "test" in function.attributes
+            or function.source.path.name.endswith("_tests.rs")
+        ):
+            continue
         for call in function.calls():
             if call.name in IO_CALLS:
                 nodes.append(
@@ -1788,6 +2760,34 @@ def _collect_io_nodes(inventory: SourceInventory) -> C2IoCallGraphInventoryV2:
     require(len(identities) == len(set(identities)), "C2 I/O node identities collide")
     require(nodes, "C2 I/O inventory is empty")
     return C2IoCallGraphInventoryV2(tuple(nodes))
+
+
+def source_derived_io_manifest(inventory: SourceInventory) -> dict:
+    """Return the deterministic development crash-cut manifest on stdout.
+
+    Cut labels are inventory ordinals, not semantic claims.  Regeneration is
+    deliberately explicit because line/call changes require hostile review;
+    this function never writes the checked-in artifact itself.
+    """
+
+    nodes = _collect_io_nodes(inventory).nodes
+    require(
+        len(nodes) <= 99,
+        "C2 I/O inventory exceeds the two-digit development cut namespace",
+    )
+    return {
+        "nodes": [
+            {
+                "call": node.call,
+                "cut": f"SC-{index:02d}",
+                "function": node.function,
+                "line": node.line,
+                "source": node.path,
+            }
+            for index, node in enumerate(nodes, start=1)
+        ],
+        "schema": "nq.c2_io_crash_cut_manifest.v1",
+    }
 
 
 def _verify_io_manifest(inventory: SourceInventory) -> tuple[str, ...]:
@@ -1887,22 +2887,10 @@ def _verify_current_activation_projection(inventory: SourceInventory) -> tuple[s
 
 def _verify_no_raw_restart_snapshot(inventory: SourceInventory) -> tuple[str, ...]:
     _verify_restart_noncreation_graph(inventory)
-    snapshot = inventory.source(SIGNER_RESTART)
-    require(
-        _item_visibility(snapshot, "struct", "CompleteSignerRestartSnapshotV1") == "pub(crate)",
-        "restart snapshot has public visibility",
+    return (
+        "raw-restart-snapshot=absent-from-product",
+        "authority-constructor=fresh-store-reopen-only",
     )
-    for function in inventory.functions:
-        if function.source.path.as_posix() == SIGNER_RESTART:
-            continue
-        signature = compact_tokens(
-            function.source.tokens[function.start_token : function.body_open_token]
-        )
-        require(
-            "CompleteSignerRestartSnapshotV1" not in signature,
-            f"raw restart snapshot escapes signer restart module: {function.location}",
-        )
-    return ("snapshot=signer-module-confined", "constructor=verified-terminal-only")
 
 
 def _verify_anchor_nonduplication(inventory: SourceInventory) -> tuple[str, ...]:
@@ -1926,31 +2914,171 @@ def _verify_anchor_nonduplication(inventory: SourceInventory) -> tuple[str, ...]
 
 def _verify_restore_authority_route(inventory: SourceInventory) -> tuple[str, ...]:
     inventory.require_function(RESTORE, "construct_rr_11_restore_successor_lineage")
-    inventory.require_function(
-        SIGNER_GOVERNANCE, "verify_restore_authorization_ingress_consumption"
-    )
     governance = inventory.source(SIGNER_GOVERNANCE)
-    require(
-        len(governance.identifier_occurrences("StoreIntegrityRestoreAuthorizationV1")) > 0,
-        "exact external restore-authorization carrier is absent",
+    route_specs = (
+        (
+            "restore",
+            "StoreIntegrityRestoreAuthorizationV1",
+            "adopt_restore_authorization",
+            "adopt_restore_authorization_v1",
+            "complete_store_restore_lifecycle_v1",
+            "restore_c2_live_historical_foundation_v1",
+            "prepare_restore_authorization_ingress",
+            "verify_restore_authorization_terminal_a1_signature_scope_policy_cut_request_identity",
+            "verify_restore_authorization_ingress_consumption",
+            "begin_restore_successor_v1",
+        ),
+        (
+            "recovery",
+            "StoreIntegrityRecoveryGrantV1",
+            "adopt_recovery_grant",
+            "adopt_recovery_grant_v1",
+            "complete_store_recovery_lifecycle_v1",
+            "recover_c2_live_new_foundation_v1",
+            "prepare_recovery_grant_ingress",
+            "verify_recovery_grant_terminal_a1_signature_scope_policy_cut_predecessor_successor_request_identity",
+            "verify_recovery_grant_ingress_consumption",
+            "begin_recovery_entry_v1",
+        ),
     )
-    for source in inventory.sources:
-        path = source.path.as_posix()
-        if path in {SIGNER_GOVERNANCE, RESTORE}:
-            continue
+    for (
+        route,
+        raw_type,
+        session_name,
+        adoption_name,
+        driver_name,
+        root_name,
+        prepare_name,
+        verification_name,
+        consumption_name,
+        entry_name,
+    ) in route_specs:
         require(
-            not source.identifier_occurrences("StoreIntegrityRestoreAuthorizationV1"),
-            f"parallel restore-authority route exists in {path}",
+            governance.identifier_occurrences(raw_type),
+            f"exact external {route} carrier is absent",
         )
-    return ("external-ingress=one", "physical-restore-owner=one")
+        session_entry = inventory.require_function(
+            LIVE_C2, session_name, "C2LiveWriterSessionV1"
+        )
+        actor_adoption = inventory.require_function(
+            LIVE_C2, adoption_name, "StoreC2SnapshotActorV1"
+        )
+        actor_driver = inventory.require_function(
+            LIVE_C2, driver_name, "StoreC2SnapshotActorV1"
+        )
+        store_root = inventory.require_function(LIVE_C2, root_name, "Store")
+        raw_carrier_consumers = [
+            function
+            for function in inventory.functions
+            if raw_type in compact_tokens(function.item_tokens)
+        ]
+        require(
+            {_function_identity(function) for function in raw_carrier_consumers}
+            == {
+                _function_identity(session_entry),
+                _function_identity(actor_adoption),
+                _function_identity(actor_driver),
+                _function_identity(store_root),
+            },
+            f"raw {route} carrier escapes its exact session/adoption/driver/root chain: "
+            + ", ".join(function.location for function in raw_carrier_consumers),
+        )
+        require(
+            session_entry.visibility == "pub(crate)"
+            and len(session_entry.calls(adoption_name)) == 1
+            and not (
+                set(_function_call_names(session_entry))
+                & ({prepare_name} | WRAPPER_FORBIDDEN_IO)
+            ),
+            f"{route} writer-session ingress does not delegate without independently verifying or mutating",
+        )
+        _require_calls_in_order(
+            actor_adoption,
+            ("new", "from_store_actor", verification_name),
+        )
+        require(
+            len(actor_adoption.calls(prepare_name)) == 1
+            and len(actor_adoption.calls("append_verified_governed_carrier_effect")) == 1,
+            f"{route} adoption does not append its exact verified preparation",
+        )
+        _require_calls_in_order(actor_driver, (adoption_name, entry_name))
+        require(
+            len(store_root.calls(driver_name)) == 1
+            and not WRAPPER_FORBIDDEN_IO.intersection(_function_call_names(store_root)),
+            f"{route} Store root bypasses its nominal actor driver",
+        )
+        consumption = inventory.require_function(SIGNER_GOVERNANCE, consumption_name)
+        consumers = inventory.callers_of(consumption_name)
+        require(
+            consumption.visibility == "pub(crate)"
+            and len(consumers) == 1
+            and consumers[0].source.path.as_posix() == LIVE_C2
+            and consumers[0].owner == "StoreC2SnapshotActorV1"
+            and consumers[0].name == entry_name,
+            f"Store-adopted {route} evidence has an alternate live-authority consumer",
+        )
+    return (
+        "raw-discontinuity-carrier-consumers=2x4-exact-chain",
+        "store-adopted-discontinuity-consumers=2x1-nominal-entry",
+        "physical-restore-owner=one",
+    )
 
 
 def _verify_new_mutator_branding(inventory: SourceInventory) -> tuple[str, ...]:
     receipt = _run_inherited_verifier("verify_mutator_census.py")
-    # C2-specific filesystem/SQL primitives must carry a special brand or an
-    # ordinary StoreWriterSession in their signature.  Read-only calls are
-    # excluded; names below are the closed mutating lexeme set.
+    # The current live path owns mutation through one nonescaping Store actor,
+    # not through the superseded model-era brands. Exact lower helpers may
+    # accept a transaction/descriptor only when their complete caller set is
+    # pinned below to that actor graph.
     mutating = IO_CALLS - {"open", "openat", "read_exact", "read_to_end"}
+    exact_helpers = {
+        FunctionIdentity(INSTALL, None, "create_fixed_file"),
+        FunctionIdentity(INSTALL, None, "allocate_live_c2_fixed_files_v1"),
+        FunctionIdentity(LOCK, None, "finalize_provisional_generation_lock_v1"),
+        FunctionIdentity(
+            SIGNER_COORDINATOR,
+            None,
+            "append_prepared_signed_frame_with_physical_carrier",
+        ),
+        FunctionIdentity(
+            SIGNER_COORDINATOR,
+            None,
+            "reproject_exact_durable_signer_carrier_suffix_v1",
+        ),
+        FunctionIdentity(
+            SIGNER_GOVERNANCE, None, "append_prepared_external_ingress"
+        ),
+        FunctionIdentity(
+            SIGNER_GOVERNANCE,
+            None,
+            "apply_verified_revocation_effect_in_transaction_v1",
+        ),
+        FunctionIdentity(
+            SIGNER_GOVERNANCE,
+            None,
+            "apply_verified_quarantine_closure_effect_in_transaction_v1",
+        ),
+        FunctionIdentity(
+            SIGNER_PREFIX + "records.rs",
+            None,
+            "append_prepared_foundational_enrollment_adoption_v1",
+        ),
+        FunctionIdentity(
+            SIGNER_PREFIX + "records.rs",
+            None,
+            "append_prepared_signer_enrollment_acceptance_v1",
+        ),
+        FunctionIdentity(
+            SIGNER_TERMINAL,
+            None,
+            "insert_successor_projection_plan_v1",
+        ),
+        FunctionIdentity(
+            SIGNER_TERMINAL,
+            None,
+            "append_successor_terminal_v1",
+        ),
+    }
     violations: list[str] = []
     for function in inventory.functions:
         path = function.source.path.as_posix()
@@ -1961,81 +3089,269 @@ def _verify_new_mutator_branding(inventory: SourceInventory) -> tuple[str, ...]:
         signature = compact_tokens(
             function.source.tokens[function.start_token : function.body_open_token]
         )
-        branded = any(
-            token in signature
-            for token in (
-                "C2BootstrapBrandV1",
-                "C2InstallationContinuationBrandV1",
-                "C2PolicyTransitionBrandV1",
-                "C2PolicyTransitionContinuationBrandV1",
-                "StoreWriterSession",
-            )
+        branded = "StoreWriterSession" in signature
+        actor_owned = (
+            path == LIVE_C2 and function.owner == "StoreC2SnapshotActorV1"
         )
+        actor_factory = (
+            path == LIVE_C2
+            and function.owner == "Store"
+            and function.name == "with_c2_authority_snapshot"
+        )
+        exact_helper = _function_identity(function) in exact_helpers
         # Custody writes are purpose-locked by the private custodian rather
         # than Store mutation brands; only its exact private helpers qualify.
         custody_owned = path == SIGNER_CUSTODY and function.visibility == "private"
-        if not branded and not custody_owned:
+        if not (
+            branded or actor_owned or actor_factory or exact_helper or custody_owned
+        ):
             violations.append(function.location)
     require(
         not violations,
-        "C2 mutating primitive lacks an exact brand/session owner: " + ", ".join(violations),
+        "C2 mutating primitive lacks an exact live-actor/session owner: "
+        + ", ".join(violations),
     )
+
+    helper_callers = {
+        FunctionIdentity(INSTALL, None, "create_fixed_file"): {
+            FunctionIdentity(INSTALL, None, "allocate_live_c2_fixed_files_v1")
+        },
+        FunctionIdentity(INSTALL, None, "allocate_live_c2_fixed_files_v1"): {
+            FunctionIdentity(
+                LIVE_C2, "StoreC2SnapshotActorV1", "install_c2_live_with_observer_v1"
+            )
+        },
+        FunctionIdentity(LOCK, None, "finalize_provisional_generation_lock_v1"): {
+            FunctionIdentity(
+                LIVE_C2, "StoreC2SnapshotActorV1", "install_c2_live_with_observer_v1"
+            )
+        },
+        FunctionIdentity(
+            SIGNER_COORDINATOR,
+            None,
+            "append_prepared_signed_frame_with_physical_carrier",
+        ): {
+            FunctionIdentity(
+                SIGNER_COORDINATOR, None, "append_finalized_signed_frame_projection"
+            ),
+            FunctionIdentity(
+                SIGNER_COORDINATOR, None, "append_prepared_signed_frame"
+            ),
+            FunctionIdentity(
+                SIGNER_COORDINATOR,
+                None,
+                "reproject_exact_durable_signer_carrier_suffix_v1",
+            ),
+        },
+        FunctionIdentity(
+            SIGNER_COORDINATOR,
+            None,
+            "reproject_exact_durable_signer_carrier_suffix_v1",
+        ): {
+            FunctionIdentity(
+                LIVE_C2,
+                "StoreC2SnapshotActorV1",
+                "reopen_complete_physical_generation_v1",
+            )
+        },
+        FunctionIdentity(
+            SIGNER_GOVERNANCE, None, "append_prepared_external_ingress"
+        ): {
+            FunctionIdentity(
+                LIVE_C2,
+                "StoreC2SnapshotActorV1",
+                "append_verified_governed_carrier_effect",
+            ),
+            FunctionIdentity(
+                SIGNER_GOVERNANCE,
+                "StorePreparedRevocationEffectV1",
+                "apply",
+            ),
+            FunctionIdentity(
+                SIGNER_GOVERNANCE,
+                "StorePreparedQuarantineClosureEffectV1",
+                "apply",
+            ),
+        },
+        FunctionIdentity(
+            SIGNER_GOVERNANCE,
+            None,
+            "apply_verified_revocation_effect_in_transaction_v1",
+        ): {
+            FunctionIdentity(
+                SIGNER_GOVERNANCE,
+                "StorePreparedRevocationEffectV1",
+                "apply",
+            )
+        },
+        FunctionIdentity(
+            SIGNER_GOVERNANCE,
+            None,
+            "apply_verified_quarantine_closure_effect_in_transaction_v1",
+        ): {
+            FunctionIdentity(
+                SIGNER_GOVERNANCE,
+                "StorePreparedQuarantineClosureEffectV1",
+                "apply",
+            )
+        },
+        FunctionIdentity(
+            SIGNER_PREFIX + "records.rs",
+            None,
+            "append_prepared_foundational_enrollment_adoption_v1",
+        ): {
+            FunctionIdentity(
+                LIVE_C2,
+                "StoreC2SnapshotActorV1",
+                "adopt_foundational_enrollment_v1",
+            ),
+            FunctionIdentity(
+                LIVE_C2,
+                "StoreC2SnapshotActorV1",
+                "adopt_consumed_foundational_enrollment_v1",
+            ),
+        },
+        FunctionIdentity(
+            SIGNER_PREFIX + "records.rs",
+            None,
+            "append_prepared_signer_enrollment_acceptance_v1",
+        ): {
+            FunctionIdentity(
+                LIVE_C2,
+                "StoreC2SnapshotActorV1",
+                "accept_signer_enrollment_v1",
+            ),
+            FunctionIdentity(
+                LIVE_C2,
+                "StoreC2SnapshotActorV1",
+                "accept_consumed_signer_enrollment_v1",
+            ),
+        },
+        FunctionIdentity(
+            SIGNER_TERMINAL,
+            None,
+            "insert_successor_projection_plan_v1",
+        ): {
+            FunctionIdentity(
+                SIGNER_TERMINAL,
+                None,
+                "append_successor_terminal_v1",
+            )
+        },
+        FunctionIdentity(
+            SIGNER_TERMINAL,
+            None,
+            "append_successor_terminal_v1",
+        ): {
+            FunctionIdentity(
+                SIGNER_TERMINAL,
+                None,
+                "append_healthy_successor_terminal_v1",
+            ),
+            FunctionIdentity(
+                SIGNER_TERMINAL,
+                None,
+                "append_restore_successor_terminal_v1",
+            ),
+            FunctionIdentity(
+                SIGNER_TERMINAL,
+                None,
+                "append_recovery_successor_terminal_v1",
+            ),
+        },
+        FunctionIdentity(
+            SIGNER_TERMINAL,
+            None,
+            "append_healthy_successor_terminal_v1",
+        ): {
+            FunctionIdentity(
+                LIVE_C2,
+                "StoreC2SnapshotActorV1",
+                "persist_healthy_successor_terminal_v1",
+            )
+        },
+        FunctionIdentity(
+            SIGNER_TERMINAL,
+            None,
+            "append_restore_successor_terminal_v1",
+        ): {
+            FunctionIdentity(
+                LIVE_C2,
+                "StoreC2SnapshotActorV1",
+                "persist_restore_successor_terminal_v1",
+            )
+        },
+        FunctionIdentity(
+            SIGNER_TERMINAL,
+            None,
+            "append_recovery_successor_terminal_v1",
+        ): {
+            FunctionIdentity(
+                LIVE_C2,
+                "StoreC2SnapshotActorV1",
+                "persist_recovery_successor_terminal_v1",
+            )
+        },
+    }
+    for helper, expected in helper_callers.items():
+        actual = {
+            _function_identity(function)
+            for function in inventory.callers_of(helper.name)
+            if function.source.path.as_posix().startswith(
+                "crates/nq-store/src/store_generation"
+            )
+        }
+        require(
+            actual == expected,
+            f"live C2 mutation helper caller set changed for {helper.display()}: "
+            f"expected {[value.display() for value in sorted(expected, key=lambda value: value.display())]}, "
+            f"found {[value.display() for value in sorted(actual, key=lambda value: value.display())]}",
+        )
     migration = _verify_schema_projection_gate(inventory)
-    return (receipt, "c2-mutator-signatures=branded", *migration)
+    return (
+        receipt,
+        "c2-mutator-owner=live-store-actor",
+        f"live-c2-lower-helper-caller-sets={len(helper_callers)}",
+        *migration,
+    )
 
 
 def _verify_schema_projection_gate(inventory: SourceInventory) -> tuple[str, ...]:
-    """Prove the incomplete schema mutator has no path-only product route."""
+    """Prove obsolete path-only/provisional schema authority is not product code."""
 
     require(
         not inventory.functions_named("migrate_c1_gen4_to_c2_schema_projection"),
         "HostRoleRuntime still exposes the path-only schema-v9 projection bypass",
     )
-    permit_visibility = _item_visibility(
-        inventory.source(INSTALL), "struct", "C2PendingSqlProjectionPermitV1"
-    )
-    require(
-        permit_visibility == "pub(crate)",
-        "pending SQL projection permit has an invalid visibility",
-    )
     require(
         not inventory.public_reexports({"C2PendingSqlProjectionPermitV1"}),
         "pending SQL projection permit is publicly re-exported",
     )
-    apply = inventory.require_function(STORE_LIB, "apply_c2_schema_v8_to_v9")
-    signature = compact_tokens(
-        apply.source.tokens[apply.start_token : apply.body_open_token]
-    )
-    require(
-        apply.visibility == "pub(crate)"
-        and "C2PendingSqlProjectionPermitV1<Mode>" in signature
-        and "VerifiedC2SchemaV8ToV9Sequential" not in signature,
-        "schema-v9 projection mutator does not consume only the installation permit",
-    )
-    require(
-        not apply.calls("acquire_maintenance_locks"),
-        "schema-v9 projection mutator still self-authorizes through generic maintenance locks",
-    )
-    callers = inventory.callers_of("apply_c2_schema_v8_to_v9")
-    require(
-        not callers,
-        "incomplete schema-v9 projection mutator has a production caller: "
-        + ", ".join(function.location for function in callers),
-    )
-    constructors = [
+    product_permit_users = [
         function
         for function in inventory.functions
-        if _code_contains(function, "C2PendingSqlProjectionPermitV1{")
+        if "C2PendingSqlProjectionPermitV1" in compact_tokens(function.item_tokens)
     ]
     require(
-        not constructors,
-        "pending SQL projection permit has a production constructor before the ordered driver: "
-        + ", ".join(function.location for function in constructors),
+        not product_permit_users,
+        "obsolete unconstructible schema-v9 permit remains in product: "
+        + ", ".join(function.location for function in product_permit_users),
+    )
+    require(
+        not inventory.functions_named("apply_c2_schema_v8_to_v9"),
+        "obsolete detached schema-v9 projection mutator remains product-compiled",
+    )
+    live_driver = inventory.require_function(
+        LIVE_C2, "install_c2_live_v1", "StoreC2SnapshotActorV1"
+    )
+    require(
+        len(live_driver.calls("install_c2_live_with_observer_v1")) == 1,
+        "live C2 installation driver no longer owns schema/projection sequencing",
     )
     return (
         "schema-v9-path-only-route=absent",
-        "schema-v9-permit-production-constructors=0",
-        "schema-v9-production-apply-callers=0",
+        "obsolete-schema-v9-permit=compile-confined",
+        "schema-v9-sequencing=live-install-driver-owned",
     )
 
 
@@ -2154,15 +3470,58 @@ def _verify_s5_nonretrogression(inventory: SourceInventory) -> tuple[str, ...]:
 
 
 def _verify_restore_before_effect(inventory: SourceInventory) -> tuple[str, ...]:
-    function = inventory.require_function(INSTALL, "install_c2_restore_successor")
-    _require_call_once(function, "verify_restore_successor_install_inputs")
-    forbidden = WRAPPER_FORBIDDEN_IO.intersection(_function_call_names(function))
-    require(not forbidden, f"restore wrapper writes before verification: {sorted(forbidden)}")
-    require(
-        not any(name in compact_tokens(function.item_tokens) for name in ("latest", "maximum", "sort")),
-        "restore wrapper infers predecessor by order rather than exact lineage",
+    route_specs = (
+        (
+            "restore",
+            "restore_c2_live_historical_foundation_v1",
+            "complete_store_restore_lifecycle_v1",
+            "begin_restore_successor_v1",
+            "verify_restore_authorization_ingress_consumption",
+        ),
+        (
+            "recovery",
+            "recover_c2_live_new_foundation_v1",
+            "complete_store_recovery_lifecycle_v1",
+            "begin_recovery_entry_v1",
+            "verify_recovery_grant_ingress_consumption",
+        ),
     )
-    return ("restore-verifier=pre-effect", "predecessor-inference=absent")
+    for route, root_name, driver_name, entry_name, verifier_name in route_specs:
+        root = inventory.require_function(LIVE_C2, root_name, "Store")
+        driver = inventory.require_function(
+            LIVE_C2, driver_name, "StoreC2SnapshotActorV1"
+        )
+        entry = inventory.require_function(
+            LIVE_C2, entry_name, "StoreC2SnapshotActorV1"
+        )
+        require(
+            root.visibility == "pub(crate)"
+            and driver.visibility == "private"
+            and entry.visibility in {"private", "pub(crate)"}
+            and len(root.calls(driver_name)) == 1
+            and len(driver.calls(entry_name)) == 1
+            and len(entry.calls(verifier_name)) == 1,
+            f"live {route} route does not verify consumed external authority before entry",
+        )
+        for function in (root, driver, entry):
+            forbidden = WRAPPER_FORBIDDEN_IO.intersection(
+                _function_call_names(function)
+            )
+            require(
+                not forbidden,
+                f"{route} wrapper writes before nominal verification: {sorted(forbidden)}",
+            )
+            require(
+                not any(
+                    name in compact_tokens(function.item_tokens)
+                    for name in ("latest", "maximum", "sort_by", "max_by")
+                ),
+                f"{route} wrapper infers predecessor by non-exact order",
+            )
+    return (
+        "discontinuity-verifiers=2-pre-effect",
+        "predecessor-inference=absent",
+    )
 
 
 def _verify_no_downstream_mint(inventory: SourceInventory) -> tuple[str, ...]:
@@ -2195,6 +3554,12 @@ def _verify_test_confinement(inventory: SourceInventory) -> tuple[str, ...]:
     for source in inventory.sources:
         if not source.path.as_posix().startswith("crates/nq-store/src/store_generation"):
             continue
+        # A sibling module can apply `#[cfg(test)]` at the `mod` declaration,
+        # which is not propagated into this independently parsed source file.
+        # Keep the same conventional test-module confinement rule as the I/O
+        # crash-cut census; product files remain subject to per-function cfg.
+        if source.path.name.endswith("_tests.rs"):
+            continue
         for function in source.functions:
             if "for_test" in function.name and not function.cfg_test:
                 violations.append(function.location)
@@ -2203,7 +3568,19 @@ def _verify_test_confinement(inventory: SourceInventory) -> tuple[str, ...]:
 
 
 def _verify_no_alternate_protected_roots(inventory: SourceInventory) -> tuple[str, ...]:
-    protected_sources = {INSTALL, POLICY, SIGNER_CUSTODY, SIGNER_COORDINATOR, SIGNER_RESTART}
+    facade_evidence = _verify_public_c2_lifecycle_facade(inventory)
+    protected_sources = {
+        INSTALL,
+        POLICY,
+        LIVE_C2,
+        C2_LIFECYCLE,
+        SIGNER_CUSTODY,
+        SIGNER_COORDINATOR,
+        SIGNER_MESSAGES,
+        SIGNER_PREFIX + "records.rs",
+        SIGNER_RESTART,
+        SIGNER_GOVERNANCE,
+    }
     violations: list[str] = []
     for source in inventory.sources:
         path = source.path.as_posix()
@@ -2217,7 +3594,610 @@ def _verify_no_alternate_protected_roots(inventory: SourceInventory) -> tuple[st
         "binary/feature/fixture/administrative source reaches protected C2 surface: "
         + ", ".join(violations),
     )
-    return ("alternate-protected-roots=absent",)
+    superseded_authority_shapes = {
+        "C2BootstrapBrandV1",
+        "C2BootstrapSessionV1",
+        "C2InstallationContinuationBrandV1",
+        "C2PolicyTransitionBrandV1",
+        "C2PolicyTransitionContinuationBrandV1",
+        "C2OrdinaryRestartPipelineV1",
+        "ReconstructedTerminalSignerCapabilityV1",
+    }
+    obsolete_product: list[str] = []
+    for function in inventory.functions:
+        overlap = sorted(
+            name
+            for name in superseded_authority_shapes
+            if name in compact_tokens(function.item_tokens)
+        )
+        if overlap:
+            obsolete_product.append(f"{function.location}:{','.join(overlap)}")
+    require(
+        not obsolete_product,
+        "model-era C2 authority shape remains product-compiled: "
+        + ", ".join(obsolete_product),
+    )
+    return (
+        "alternate-protected-roots=absent",
+        "model-era-authority-shapes=compile-confined",
+        *facade_evidence,
+    )
+
+
+def _verify_public_c2_lifecycle_facade(
+    inventory: SourceInventory,
+) -> tuple[str, ...]:
+    """Pin the sole public facade without widening any internal constructor root."""
+
+    module = inventory.source(STORE_GENERATION_MOD)
+    qualification = inventory.source(CANDIDATE_QUALIFICATION)
+    facade = inventory.source(C2_LIFECYCLE)
+    require(
+        _source_token_count(
+            module, ("pub", "mod", "c2_lifecycle", ";")
+        )
+        == 1,
+        "the nominal C2 lifecycle facade is not the sole public lifecycle module",
+    )
+    protected_in_facade = {
+        protected
+        for protected in PROTECTED_TYPES
+        if facade.identifier_occurrences(protected)
+    }
+    require(
+        protected_in_facade == {"C2LiveWriterSessionV1"},
+        "public facade references authority-bearing implementation types beyond its borrowed writer shell: "
+        + ", ".join(sorted(protected_in_facade)),
+    )
+    require(
+        not facade.identifier_occurrences("C2InstallAuthorityTupleV1"),
+        "public facade exposes a caller-authored bootstrap authority tuple",
+    )
+    bootstrap_intent = inventory.require_function(
+        C2_LIFECYCLE, "new", "C2BootstrapIntentV1"
+    )
+    require(
+        len(bootstrap_intent.calls("from_operator_install_selection")) == 1
+        and not bootstrap_intent.calls("C2InstallAuthorityTupleV1"),
+        "bootstrap intent does not defer authority-tuple derivation to Store resolution",
+    )
+
+    entry = inventory.require_function(C2_LIFECYCLE, "c2_lifecycle_v1", "Store")
+    entry_signature = compact_tokens(
+        entry.source.tokens[entry.start_token : entry.body_open_token]
+    )
+    require(
+        entry.visibility == "pub"
+        and "&'storemutself" in entry_signature
+        and "&'storeStoreC2CandidateVerifierResultV1" in entry_signature
+        and "&'storeC2SignerImplementationManifestV1" in entry_signature
+        and "->StoreC2LifecycleV1<'store>" in entry_signature,
+        "Store does not expose exactly one borrowed candidate+manifest lifecycle facade",
+    )
+    facade_entries = [
+        function
+        for function in inventory.functions
+        if function.source.path.as_posix() == C2_LIFECYCLE
+        and function.owner == "Store"
+        and function.visibility == "pub"
+    ]
+    require(
+        [_function_identity(function) for function in facade_entries]
+        == [_function_identity(entry)],
+        "public facade defines an alternate Store entry point",
+    )
+
+    root_specs = (
+        ("prepare_bootstrap", "prepare_c2_live_bootstrap_v1"),
+        ("complete_bootstrap", "install_c2_live_from_bootstrap_grant_v1"),
+        ("rotate_healthy_successor", "rotate_c2_live_healthy_successor_v1"),
+        (
+            "rotate_healthy_successor_with_activation_grant",
+            "rotate_c2_live_healthy_successor_with_activation_grant_v1",
+        ),
+        (
+            "restore_historical_foundation",
+            "restore_c2_live_historical_foundation_v1",
+        ),
+        ("prepare_recovery", "prepare_c2_live_recovery_v1"),
+        ("complete_recovery", "recover_c2_live_new_foundation_v1"),
+        ("with_current_writer", "with_reopened_c2_generation_current_v1"),
+    )
+    root_names = {root for _, root in root_specs}
+    for method_name, root_name in root_specs:
+        method = inventory.require_function(
+            C2_LIFECYCLE, method_name, "StoreC2LifecycleV1"
+        )
+        signature = compact_tokens(
+            method.source.tokens[method.start_token : method.body_open_token]
+        )
+        require(
+            method.visibility == "pub"
+            and len(method.calls(root_name)) == 1
+            and not (
+                (root_names - {root_name})
+                & set(_function_call_names(method))
+            )
+            and not WRAPPER_FORBIDDEN_IO.intersection(_function_call_names(method))
+            and "C2StoreSigningRouteV1" not in signature
+            and "ClosedMessageFamilyV1" not in signature
+            and "SignerMessageV1" not in signature
+            and "&[u8]" not in signature
+            and "Vec<u8>" not in signature,
+            f"public facade method {method_name} does not delegate once through its exact typed Store root",
+        )
+        callers = inventory.callers_of(root_name)
+        require(
+            len(callers) == 1 and _function_identity(callers[0]) == _function_identity(method),
+            f"internal Store root {root_name} has a non-facade or duplicate production caller: "
+            + ", ".join(function.location for function in callers),
+        )
+
+    writer_view = _item_header_code(facade, "struct", "C2CurrentWriterV1")
+    require(
+        all(
+            trait not in writer_view
+            for trait in ("Clone", "Copy", "Default", "Serialize", "Deserialize")
+        )
+        and _item_body_token_count(
+            facade,
+            "struct",
+            "C2CurrentWriterV1",
+            ("inner", ":", "&", "'", "borrow", "mut", "C2LiveWriterSessionV1"),
+        )
+        == 1,
+        "public writer view is not one private borrowed nontransferable live-session shell",
+    )
+    writer_constructors = [
+        function
+        for function in inventory.functions
+        if _code_contains(function, "C2CurrentWriterV1{inner:session}")
+    ]
+    require(
+        len(writer_constructors) == 1
+        and writer_constructors[0].source.path.as_posix() == C2_LIFECYCLE
+        and writer_constructors[0].owner == "StoreC2LifecycleV1"
+        and writer_constructors[0].name == "with_current_writer",
+        "public writer shell has an alternate constructor",
+    )
+
+    route_specs = (
+        (
+            "adopt_proposal_disposition",
+            "adopt_proposal_disposition",
+        ),
+        (
+            "apply_revocation_judgment",
+            "apply_revocation_judgment",
+        ),
+        (
+            "apply_quarantine_closure",
+            "apply_quarantine_closure_judgment",
+        ),
+    )
+    for facade_name, session_consumer in route_specs:
+        top = inventory.require_function(
+            C2_LIFECYCLE, facade_name, "StoreC2LifecycleV1"
+        )
+        writer = inventory.require_function(
+            C2_LIFECYCLE, facade_name, "C2CurrentWriterV1"
+        )
+        require(
+            top.visibility == "pub"
+            and len(top.calls("with_current_writer")) == 1
+            and len(top.calls(facade_name)) == 1
+            and writer.visibility == "pub"
+            and len(writer.calls(session_consumer)) == 1
+            and not WRAPPER_FORBIDDEN_IO.intersection(_function_call_names(top))
+            and not WRAPPER_FORBIDDEN_IO.intersection(_function_call_names(writer)),
+            f"route-specific public facade {facade_name} bypasses its borrowed typed writer consumer",
+        )
+    quarantine = inventory.require_function(
+        C2_LIFECYCLE, "apply_quarantine_closure", "C2CurrentWriterV1"
+    )
+    _require_calls_in_order(
+        quarantine,
+        ("adopt_restore_authorization", "apply_quarantine_closure_judgment"),
+    )
+
+    require(
+        not facade.identifier_occurrences("C2StoreSigningRouteV1")
+        and not facade.identifier_occurrences("SignerMessageV1")
+        and not facade.identifier_occurrences("ClosedMessageFamilyV1")
+        and not [
+            function
+            for function in inventory.functions
+            if function.source.path.as_posix() == C2_LIFECYCLE
+            and function.calls("sign")
+        ],
+        "public lifecycle facade exposes a generic family/route/signing operation",
+    )
+
+    candidate = _item_header_code(
+        facade, "struct", "StoreC2CandidateVerifierResultV1"
+    )
+    verifier = _item_header_code(
+        facade, "struct", "StoreC2CandidateRuntimeVerifierV1"
+    )
+    verified_certificate = _item_header_code(
+        qualification, "struct", "StoreVerifiedCandidateCertificateV1"
+    )
+    verify_runtime = inventory.require_function(
+        C2_LIFECYCLE,
+        "verify_candidate_runtime",
+        "StoreC2CandidateRuntimeVerifierV1",
+    )
+    with_lifecycle = inventory.require_function(
+        C2_LIFECYCLE,
+        "with_verified_c2_lifecycle",
+        "StoreC2CandidateRuntimeVerifierV1",
+    )
+    seal = inventory.require_function(
+        C2_LIFECYCLE,
+        "seal_verified_candidate_runtime",
+        "StoreC2CandidateRuntimeVerifierV1",
+    )
+    verify_certificate = inventory.require_function(
+        CANDIDATE_QUALIFICATION,
+        "verify_candidate_certificate_for_current_runtime_v1",
+    )
+    decode_certificate = inventory.require_function(
+        CANDIDATE_QUALIFICATION, "decode_candidate_certificate_v1"
+    )
+    decode_trust_root = inventory.require_function(
+        CANDIDATE_QUALIFICATION, "decode_qualification_trust_root_v1"
+    )
+    validate_trust_directory = inventory.require_function(
+        CANDIDATE_QUALIFICATION, "validate_trust_directory"
+    )
+    open_trust_directory_component = inventory.require_function(
+        CANDIDATE_QUALIFICATION, "open_fixed_trust_directory_component"
+    )
+    fixed_trust_source = inventory.require_function(
+        CANDIDATE_QUALIFICATION, "fixed_trust_source_bytes"
+    )
+    load_fixed_trust = inventory.require_function(
+        CANDIDATE_QUALIFICATION, "load_fixed_qualification_trust_root_v1"
+    )
+    authenticated_conversion = inventory.require_function(
+        LIVE_C2,
+        "from_authenticated_candidate_certificate",
+        "VerifiedC2ExternalCandidateRuntimeRecordV1",
+    )
+    candidate_constructors = [
+        function
+        for function in inventory.functions
+        if _code_contains(function, "StoreC2CandidateVerifierResultV1{evidence:")
+    ]
+    verified_certificate_constructors = [
+        function
+        for function in inventory.functions
+        if _code_contains(
+            function,
+            "StoreVerifiedCandidateCertificateV1{qualified_candidate_identity:",
+        )
+    ]
+    external_record_constructors = [
+        function
+        for function in inventory.functions
+        if function.owner == "VerifiedC2ExternalCandidateRuntimeRecordV1"
+        and "->Self" in compact_tokens(
+            function.source.tokens[function.start_token : function.body_open_token]
+        )
+    ]
+    seal_signature = compact_tokens(
+        seal.source.tokens[seal.start_token : seal.body_open_token]
+    )
+    verify_runtime_signature = compact_tokens(
+        verify_runtime.source.tokens[
+            verify_runtime.start_token : verify_runtime.body_open_token
+        ]
+    )
+    with_lifecycle_signature = compact_tokens(
+        with_lifecycle.source.tokens[
+            with_lifecycle.start_token : with_lifecycle.body_open_token
+        ]
+    )
+    verify_certificate_signature = compact_tokens(
+        verify_certificate.source.tokens[
+            verify_certificate.start_token : verify_certificate.body_open_token
+        ]
+    )
+    authenticated_conversion_signature = compact_tokens(
+        authenticated_conversion.source.tokens[
+            authenticated_conversion.start_token
+            : authenticated_conversion.body_open_token
+        ]
+    )
+    public_verifier_methods = {
+        function.name
+        for function in inventory.functions
+        if function.source.path.as_posix() == C2_LIFECYCLE
+        and function.owner == "StoreC2CandidateRuntimeVerifierV1"
+        and function.visibility == "pub"
+    }
+    require(
+        all(
+            trait not in candidate
+            and trait not in verifier
+            and trait not in verified_certificate
+            for trait in ("Clone", "Copy", "Default", "Serialize", "Deserialize")
+        )
+        and seal.visibility == "pub(crate)"
+        and "VerifiedC2ExternalCandidateRuntimeRecordV1" in seal_signature
+        and len(candidate_constructors) == 1
+        and _function_identity(candidate_constructors[0]) == _function_identity(seal)
+        and _item_visibility(
+            qualification, "struct", "StoreVerifiedCandidateCertificateV1"
+        )
+        == "pub(crate)",
+        "candidate/runtime evidence types or opaque seal are externally constructible",
+    )
+    require(
+        _source_token_count(module, ("mod", "candidate_qualification", ";")) == 1
+        and _source_token_count(
+            module, ("pub", "mod", "candidate_qualification", ";")
+        )
+        == 0,
+        "candidate qualification verifier is not one private production module",
+    )
+    require(
+        public_verifier_methods
+        == {"verify_candidate_runtime", "with_verified_c2_lifecycle"}
+        and verify_runtime_signature
+        == "pubfnverify_candidate_runtime(certificate_bytes:&[u8],manifest:&C2SignerImplementationManifestV1,)->Result<StoreC2CandidateVerifierResultV1,C2CandidateVerificationRefusalV1>"
+        and with_lifecycle_signature
+        == "pubfnwith_verified_c2_lifecycle<R>(store:&mutStore,certificate_bytes:&[u8],manifest:&C2SignerImplementationManifestV1,operation:implFnOnce(&mutStoreC2LifecycleV1<'_>)->R,)->Result<R,C2CandidateVerificationRefusalV1>",
+        "candidate verifier public surface accepts a caller-selected trust key or raw coordinate",
+    )
+    _require_calls_in_order(
+        verify_runtime,
+        (
+            "verify_candidate_certificate_for_current_runtime_v1",
+            "from_authenticated_candidate_certificate",
+            "seal_verified_candidate_runtime",
+        ),
+    )
+    _require_calls_in_order(
+        with_lifecycle,
+        ("verify_candidate_runtime", "c2_lifecycle_v1", "operation"),
+    )
+    require(
+        {_function_identity(function) for function in inventory.callers_of(
+            "verify_candidate_certificate_for_current_runtime_v1"
+        )}
+        == {_function_identity(verify_runtime)}
+        and {_function_identity(function) for function in inventory.callers_of(
+            "from_authenticated_candidate_certificate"
+        )}
+        == {_function_identity(verify_runtime)}
+        and {_function_identity(function) for function in inventory.callers_of(
+            "seal_verified_candidate_runtime"
+        )}
+        == {_function_identity(verify_runtime)}
+        and {_function_identity(function) for function in inventory.callers_of(
+            "verify_candidate_runtime"
+        )}
+        == {_function_identity(with_lifecycle)},
+        "candidate verifier chain has an alternate production caller or bypass",
+    )
+    require(
+        verify_certificate.visibility == "pub(crate)"
+        and verify_certificate_signature
+        == "pub(crate)fnverify_candidate_certificate_for_current_runtime_v1(certificate_bytes:&[u8],manifest:&StoreIntegritySignerImplementationManifestV1,)->Result<StoreVerifiedCandidateCertificateV1,C2CandidateVerificationRefusalV1>"
+        and len(verified_certificate_constructors) == 1
+        and _function_identity(verified_certificate_constructors[0])
+        == _function_identity(verify_certificate),
+        "authenticated candidate certificate has an alternate or raw-coordinate constructor",
+    )
+    _require_calls_in_order(
+        verify_certificate,
+        (
+            "load_fixed_qualification_trust_root_v1",
+            "decode_candidate_certificate_v1",
+            "verify_strict",
+            "manifest_identity",
+            "measure_current_runtime_artifact",
+        ),
+    )
+    require(
+        len(verify_certificate.calls("verify_strict")) == 1
+        and len(verify_certificate.calls("measure_current_runtime_artifact")) == 1
+        and all(
+            len(verify_certificate.calls(method)) == 1
+            for method in (
+                "manifest_identity",
+                "manifest_source_files_identity",
+                "toolchain_identity",
+                "target_profile_identity",
+                "qualification_assumption_identities",
+            )
+        )
+        and {_function_identity(function) for function in inventory.callers_of(
+            "load_fixed_qualification_trust_root_v1"
+        )}
+        == {_function_identity(verify_certificate)},
+        "candidate verifier omits the fixed-root signature, manifest, or runtime-measurement chain",
+    )
+    decode_certificate_code = compact_tokens(decode_certificate.item_tokens)
+    require(
+        decode_certificate_code.count("exact_git_object_id(") == 2
+        and len(decode_certificate.calls("git_object_identity")) == 2
+        and len(decode_certificate.calls("qualified_candidate_identity")) == 1
+        and _code_contains(
+            decode_certificate,
+            "wire.unsigned.source_commit_identity||git_object_identity",
+        )
+        and _code_contains(
+            decode_certificate,
+            "wire.unsigned.source_tree_identity||qualified_candidate_identity",
+        )
+        and _code_contains(
+            decode_certificate,
+            "wire.unsigned.qualified_candidate_identity{returnErr(C2CandidateVerificationRefusalV1::CandidateBasisIdentityMismatch)",
+        )
+        and all(
+            identifier in decode_certificate_code
+            for identifier in (
+                "C2_SOURCE_COMMIT_IDENTITY_DOMAIN_V1",
+                "C2_SOURCE_TREE_IDENTITY_DOMAIN_V1",
+                "C2_QUALIFIED_CANDIDATE_IDENTITY_DOMAIN_V1",
+            )
+        ),
+        "candidate certificate does not mechanically derive its exact commit/tree/candidate basis",
+    )
+    require(
+        all(
+            len(decode_trust_root.calls(method)) == 1
+            for method in (
+                "qualification_scope_identity_v1",
+                "qualification_verifier_contract_identity_v1",
+                "qualification_policy_identity_v1",
+                "qualification_key_generation_identity_v1",
+                "trust_root_identity",
+            )
+        )
+        and all(
+            coordinate in compact_tokens(verify_certificate.item_tokens)
+            for coordinate in (
+                "qualification_trust_root_identity",
+                "qualification_scope_identity",
+                "qualification_verifier_contract_identity",
+                "qualification_policy_identity",
+                "qualification_key_generation_identity",
+            )
+        ),
+        "qualification trust root or certificate omits its closed scope/policy/key-generation binding",
+    )
+    fixed_trust_literals = [
+        token.value
+        for token in fixed_trust_source.item_tokens
+        if token.kind == "literal"
+    ]
+    require(
+        compact_tokens(
+            fixed_trust_source.source.tokens[
+                fixed_trust_source.start_token : fixed_trust_source.body_open_token
+            ]
+        )
+        == "fnfixed_trust_source_bytes()->Result<Vec<u8>,C2CandidateVerificationRefusalV1>"
+        and len(fixed_trust_source.calls("open")) == 1
+        and len(fixed_trust_source.calls("openat")) == 1
+        and len(
+            fixed_trust_source.calls("open_fixed_trust_directory_component")
+        )
+        == 2
+        and fixed_trust_literals
+        == [
+            '"/"',
+            '"etc"',
+            '"nq"',
+            '"c2-qualification-trust-root.v1.json"',
+        ]
+        and _code_contains(
+            fixed_trust_source,
+            "open(<literal>,OFlags::RDONLY|OFlags::DIRECTORY|OFlags::NOFOLLOW|OFlags::CLOEXEC",
+        )
+        and _code_contains(
+            fixed_trust_source,
+            "openat(&nq,<literal>,OFlags::RDONLY|OFlags::NOFOLLOW|OFlags::CLOEXEC",
+        )
+        and len(fixed_trust_source.calls("validate_trust_directory")) == 1
+        and _code_contains(fixed_trust_source, "metadata.uid()!=0")
+        and _code_contains(fixed_trust_source, "metadata.mode()&0o022!=0")
+        and _code_contains(fixed_trust_source, "metadata.nlink()!=1")
+        and {_function_identity(function) for function in inventory.callers_of(
+            "fixed_trust_source_bytes"
+        )}
+        == {_function_identity(load_fixed_trust)},
+        "candidate verifier trust root is caller-selected or lacks component-wise fixed-path custody",
+    )
+    require(
+        open_trust_directory_component.visibility == "private"
+        and len(open_trust_directory_component.calls("openat")) == 1
+        and len(open_trust_directory_component.calls("validate_trust_directory"))
+        == 1
+        and _code_contains(
+            open_trust_directory_component,
+            "OFlags::RDONLY|OFlags::DIRECTORY|OFlags::NOFOLLOW|OFlags::CLOEXEC",
+        )
+        and validate_trust_directory.visibility == "private"
+        and _code_contains(validate_trust_directory, "metadata.file_type().is_dir()")
+        and _code_contains(validate_trust_directory, "metadata.uid()!=0")
+        and _code_contains(validate_trust_directory, "metadata.mode()&0o022!=0")
+        and {_function_identity(function) for function in inventory.callers_of(
+            "open_fixed_trust_directory_component"
+        )}
+        == {_function_identity(fixed_trust_source)}
+        and {_function_identity(function) for function in inventory.callers_of(
+            "validate_trust_directory"
+        )}
+        == {
+            _function_identity(open_trust_directory_component),
+            _function_identity(fixed_trust_source),
+        },
+        "qualification trust path does not verify every root-owned directory component",
+    )
+    require(
+        len(external_record_constructors) == 1
+        and _function_identity(external_record_constructors[0])
+        == _function_identity(authenticated_conversion)
+        and "certificate:StoreVerifiedCandidateCertificateV1"
+        in authenticated_conversion_signature
+        and authenticated_conversion.visibility != "pub",
+        "candidate raw-to-record bridge does not require the authenticated typed certificate",
+    )
+    qualification_mutation_calls = {
+        "append",
+        "commit",
+        "create_dir",
+        "create_dir_all",
+        "execute",
+        "execute_batch",
+        "fsync",
+        "hard_link",
+        "persist",
+        "remove_dir",
+        "remove_file",
+        "rename",
+        "set_len",
+        "set_permissions",
+        "sync_all",
+        "sync_data",
+        "transaction",
+        "transaction_with_behavior",
+        "write",
+        "write_all",
+    }
+    qualification_product_functions = [
+        function
+        for function in inventory.functions
+        if function.source.path.as_posix() == CANDIDATE_QUALIFICATION
+        and not function.cfg_test
+    ]
+    require(
+        qualification_product_functions
+        and all(
+            not qualification_mutation_calls.intersection(
+                _function_call_names(function)
+            )
+            and "&mutStore" not in compact_tokens(function.item_tokens)
+            for function in qualification_product_functions
+        ),
+        "candidate qualification verifier gained a Store or durable mutation path",
+    )
+    return (
+        "public-c2-facade=one-borrowed-store-entry",
+        "public-c2-root-delegations=8/8",
+        "public-governed-writer-routes=3-nominal",
+        "public-writer-shell=borrowed-nonescaping",
+        "candidate-runtime-verifier=fixed-root+signature+candidate-basis+manifest+self-measurement",
+        "qualification-root-custody=root+etc+nq+file-nofollow",
+        "qualification-trust-io=read-only-pre-admission",
+        "candidate-runtime-bridge=authenticated-certificate-only",
+        "candidate-lifecycle-entry=one-scoped-production-chain",
+        "bootstrap-authority-tuple=store-derived-not-public-input",
+    )
 
 
 def _evidence(row: str, *facts: str) -> RowEvidence:
@@ -2315,7 +4295,8 @@ def verify_n_61_exhaustive_special_roots_are_fresh_installation_continuation(
     return _evidence(
         "N-61",
         "special-roots=" + ",".join(identity.name for identity in paths.special_roots),
-        "special-root-count=5",
+        "live-c2-special-root-count=7",
+        "live-c2-nonreopen-lifecycle-path-count=4",
     )
 
 
@@ -2342,7 +4323,12 @@ def verify_n_63_each_wrapper_is_non_mutating_creates_proper(
     inventory: SourceInventory | None = None,
 ) -> RowEvidence:
     paths = construct_n_63_each_wrapper_is_non_mutating_creates_proper(inventory)
-    return _evidence("N-63", f"nonwriting-special-wrappers={len(paths.special_roots)}", "boolean-substitute=absent")
+    return _evidence(
+        "N-63",
+        f"bounded-live-c2-roots={len(paths.special_roots)}",
+        "preparation-returns-inert-evidence=true",
+        "boolean-substitute=absent",
+    )
 
 
 def verify_n_64_exact_six_path_census(
@@ -2351,7 +4337,13 @@ def verify_n_64_exact_six_path_census(
     inventory = inventory or SourceInventory.load()
     paths = _special_path_inventory(inventory)
     _verify_no_alternate_protected_roots(inventory)
-    return _evidence("N-64", f"special={len(paths.special_roots)}", "ordinary=1", "total=6")
+    return _evidence(
+        "N-64",
+        f"special-entry-roots={len(paths.special_roots)}",
+        "special-lifecycle-paths=4",
+        "reopen=1",
+        "canonical-lifecycle-total=5",
+    )
 
 
 def verify_n_84_every_mutator_has_exact_session_owner(
@@ -2360,7 +4352,7 @@ def verify_n_84_every_mutator_has_exact_session_owner(
     inventory = inventory or SourceInventory.load()
     facts = _verify_new_mutator_branding(inventory)
     _special_path_inventory(inventory)
-    return _evidence("N-84", *facts, "cap-h23-roots=6")
+    return _evidence("N-84", *facts, "live-c2-entry-roots=8", "live-c2-lifecycles=5")
 
 
 def verify_hr28_28_complete_cap_h23_inventory(
@@ -2368,8 +4360,16 @@ def verify_hr28_28_complete_cap_h23_inventory(
 ) -> RowEvidence:
     inventory = inventory or SourceInventory.load()
     paths = _special_path_inventory(inventory)
-    require(len(paths.special_roots) == 5, "HR28-28 missing one or more CAP-H23 special roots")
-    return _evidence("HR28-28", "incomplete-inventory-refusal=armed", "positive-control-paths=6")
+    require(
+        len(paths.special_roots) == 7,
+        "HR28-28 closed live C2 root protocol is incomplete",
+    )
+    return _evidence(
+        "HR28-28",
+        "incomplete-inventory-refusal=armed",
+        "canonical-live-entry-roots=8",
+        "canonical-live-lifecycles=5",
+    )
 
 
 def construct_am_01_amendment_crosswalk_am_charter_close_unrestricted_self(
@@ -2384,7 +4384,12 @@ def verify_am_01_amendment_crosswalk_am_charter_close_unrestricted_self(
     inventory = inventory or SourceInventory.load()
     paths = construct_am_01_amendment_crosswalk_am_charter_close_unrestricted_self(inventory)
     mutators = _verify_new_mutator_branding(inventory)
-    return _evidence("AM-01", f"paths={len(paths.special_roots) + 1}", *mutators)
+    return _evidence(
+        "AM-01",
+        f"entry-roots={len(paths.special_roots) + 1}",
+        "lifecycle-paths=5",
+        *mutators,
+    )
 
 
 def verify_rr_10_single_restore_authority_and_recovery_owner(
@@ -2428,7 +4433,22 @@ def verify_cg_04_bootstrap_brand_callers_are_exactly_fresh_restore(
 ) -> RowEvidence:
     inventory = inventory or SourceInventory.load()
     paths = _special_path_inventory(inventory)
-    return _evidence("CG-04", "bootstrap-brand-callers=" + ",".join(path.name for path in paths.special_roots[:2]))
+    constructor_callers = inventory.callers_of("mint_bootstrap_signer_context")
+    install_root = next(
+        identity
+        for identity in paths.special_roots
+        if identity.name == "install_c2_live_from_bootstrap_grant_v1"
+    )
+    require(
+        {_function_identity(function) for function in constructor_callers}
+        == {install_root},
+        "bootstrap live context has a caller outside the Store resume/install root",
+    )
+    return _evidence(
+        "CG-04",
+        "bootstrap-context-caller=install_c2_live_from_bootstrap_grant_v1",
+        "preparation-context-mints=0",
+    )
 
 
 def verify_cg_05_install_continuation_brand_has_intent_frontier_verifier(
@@ -2436,9 +4456,23 @@ def verify_cg_05_install_continuation_brand_has_intent_frontier_verifier(
 ) -> RowEvidence:
     inventory = inventory or SourceInventory.load()
     _special_path_inventory(inventory)
-    function = inventory.require_function(INSTALL, "construct_n_12_installation_continuation")
-    require(function.visibility == "pub(crate)", "install-continuation constructor visibility changed")
-    return _evidence("CG-05", f"constructor={function.location}", "caller=continue_c2_installation")
+    function = inventory.require_function(
+        LIVE_C2, "install_c2_live_v1", "StoreC2SnapshotActorV1"
+    )
+    implementation = inventory.require_function(
+        LIVE_C2, "install_c2_live_with_observer_v1", "StoreC2SnapshotActorV1"
+    )
+    require(
+        len(function.calls("install_c2_live_with_observer_v1")) == 1
+        and len(implementation.calls("append_installation_bootstrap_batch")) == 1,
+        "live installation does not consume the ordered MSG-09/MSG-03 batch",
+    )
+    return _evidence(
+        "CG-05",
+        f"constructor={function.location}",
+        f"implementation={implementation.location}",
+        "intent-frontier=typed-batch",
+    )
 
 
 def verify_cg_06_policy_transition_brand_has_initial_transition_caller(
@@ -2446,13 +4480,41 @@ def verify_cg_06_policy_transition_brand_has_initial_transition_caller(
 ) -> RowEvidence:
     inventory = inventory or SourceInventory.load()
     _special_path_inventory(inventory)
-    constructor = inventory.require_function(POLICY, "construct_n_13_policy_transition_brand")
-    callers = inventory.callers_of("construct_n_13_policy_transition_brand", source_prefix=POLICY)
-    require(
-        {_function_identity(function).name for function in callers} == {"transition_c2_active_policy"},
-        "initial policy-transition brand has an alternate production caller",
+    post_msg07_refresh = _verify_post_msg07_predecessor_refresh_before_msg06(inventory)
+    constructor = inventory.require_function(
+        SIGNER_COORDINATOR,
+        "append_policy_transition_intent",
+        "C2SignerTransitionCoordinator",
     )
-    return _evidence("CG-06", f"constructor={constructor.location}", "caller=transition_c2_active_policy")
+    require(
+        len(constructor.calls("sign_and_append_current_predecessor")) == 1,
+        "policy transition intent bypasses the current-predecessor live projection",
+    )
+    sequence = inventory.require_function(
+        SIGNER_COORDINATOR,
+        "append_healthy_rotation_intent",
+        "C2SignerTransitionCoordinator",
+    )
+    require(
+        len(sequence.calls("append_policy_transition_intent")) == 1,
+        "healthy rotation does not consume its exact MSG-11 transition intent",
+    )
+    callers = inventory.callers_of("append_healthy_rotation_intent")
+    require(
+        len(callers) == 1
+        and callers[0].source.path.as_posix() == LIVE_C2
+        and callers[0].owner == "StoreC2SnapshotActorV1",
+        "healthy-rotation intent has no exact Store-actor production caller: "
+        + (", ".join(function.location for function in callers) or "none"),
+    )
+    return _evidence(
+        "CG-06",
+        f"constructor={constructor.location}",
+        f"sequence={sequence.location}",
+        f"actor-caller={callers[0].location}",
+        "authority=current-predecessor",
+        *post_msg07_refresh,
+    )
 
 
 def verify_cg_07_transition_continuation_brand_has_unresolved_intent_frontier(
@@ -2460,48 +4522,92 @@ def verify_cg_07_transition_continuation_brand_has_unresolved_intent_frontier(
 ) -> RowEvidence:
     inventory = inventory or SourceInventory.load()
     _special_path_inventory(inventory)
-    constructor = inventory.require_function(POLICY, "construct_n_14_transition_continuation")
-    callers = inventory.callers_of("construct_n_14_transition_continuation", source_prefix=POLICY)
-    require(
-        {_function_identity(function).name for function in callers} == {"continue_c2_policy_transition"},
-        "policy-transition continuation brand has an alternate production caller",
+    reopen = inventory.require_function(
+        LIVE_C2, "with_reopened_c2_generation_current_v1", "Store"
     )
-    return _evidence("CG-07", f"constructor={constructor.location}", "caller=continue_c2_policy_transition")
+    actor_reopen = inventory.require_function(
+        LIVE_C2, "with_reopened_generation_current_v1", "StoreC2SnapshotActorV1"
+    )
+    code = compact_tokens((*reopen.item_tokens, *actor_reopen.item_tokens))
+    require(
+        "GenerationCurrentV1" in code
+        and "PendingPossessionV1" not in code
+        and "PendingSelectedV1" not in code,
+        "restart reopen can reconstruct a pending successor phase",
+    )
+    require(
+        len(reopen.calls("with_reopened_generation_current_v1")) == 1
+        and len(
+            actor_reopen.calls("mint_reopened_terminal_generation_current_v1")
+        )
+        == 1,
+        "restart reopen does not delegate exclusively to the complete GenerationCurrent resolver",
+    )
+    continuation_callers: dict[str, Sequence[Function]] = {
+        route: inventory.callers_of(route)
+        for route in (
+            "append_successor_possession",
+            "append_pending_healthy_rotation_receipt",
+        )
+    }
+    for route, callers in continuation_callers.items():
+        require(
+            len(callers) == 1
+            and callers[0].source.path.as_posix() == LIVE_C2
+            and callers[0].owner == "StoreC2SnapshotActorV1",
+            f"{route} has no exact Store-actor production continuation caller: "
+            + (", ".join(function.location for function in callers) or "none"),
+        )
+    return _evidence(
+        "CG-07",
+        f"reopen={reopen.location}",
+        f"resolver={actor_reopen.location}",
+        "pending-continuation-callers=2-store-actor",
+        "pending-reconstruction=absent",
+    )
 
 
 def verify_cg_08_install_continuation_explicit_entry_unreachable_ordinary_open(
     inventory: SourceInventory | None = None,
 ) -> RowEvidence:
     inventory = inventory or SourceInventory.load()
-    root = inventory.require_function(INSTALL, "continue_c2_installation")
-    forbidden = {
-        function.location
-        for function in inventory.callers_of("continue_c2_installation")
-        if any(word in function.name for word in ("open", "restart", "recover"))
-    }
-    require(not forbidden, "install continuation is reachable from ordinary/restart/recovery: " + ", ".join(sorted(forbidden)))
-    return _evidence("CG-08", f"explicit-root={root.location}", "implicit-callers=0")
+    paths = _special_path_inventory(inventory)
+    reopen = inventory.require_function(
+        paths.ordinary_root.path,
+        paths.ordinary_root.name,
+        paths.ordinary_root.owner,
+    )
+    require(
+        not reopen.calls("install_c2_live_v1"),
+        "restart reopen can enter fresh installation",
+    )
+    return _evidence("CG-08", f"reopen-root={reopen.location}", "fresh-install-callers=0")
 
 
 def verify_cg_10_ordinary_session_construction_occurs_after_complete_closed(
     inventory: SourceInventory | None = None,
 ) -> RowEvidence:
     paths = _special_path_inventory(inventory or SourceInventory.load())
-    return _evidence("CG-10", f"ordinary-root={paths.ordinary_root.display()}", "closed-before-session=true")
+    return _evidence("CG-10", f"reopen-root={paths.ordinary_root.display()}", "complete-generation-current-before-context=true")
 
 
 def verify_cg_11_exactly_five_nonwriting_special_roots_each_correct(
     inventory: SourceInventory | None = None,
 ) -> RowEvidence:
     paths = _special_path_inventory(inventory or SourceInventory.load())
-    return _evidence("CG-11", f"special-root-count={len(paths.special_roots)}", "wrapper-io=0")
+    return _evidence(
+        "CG-11",
+        f"live-c2-special-root-count={len(paths.special_roots)}",
+        "live-c2-nonreopen-lifecycle-path-count=4",
+        "store-owned=true",
+    )
 
 
 def verify_cg_12_exactly_nonwriting_ordinary_open_session_root_p(
     inventory: SourceInventory | None = None,
 ) -> RowEvidence:
     paths = _special_path_inventory(inventory or SourceInventory.load())
-    return _evidence("CG-12", f"ordinary-root={paths.ordinary_root.display()}", "pre-session-io=0")
+    return _evidence("CG-12", f"reopen-root={paths.ordinary_root.display()}", "fresh-verification-before-context=true")
 
 
 def verify_cg_13_effectful_primitive_descends_exactly_special_brand_ordinary(
@@ -2627,8 +4733,16 @@ def verify_xh_53_complete_cap_h23_inventory(
     inventory: SourceInventory | None = None,
 ) -> RowEvidence:
     paths = _special_path_inventory(inventory or SourceInventory.load())
-    require(len(paths.special_roots) + 1 == 6, "one-path CAP-H23 substitution was accepted")
-    return _evidence("XH-53", "missing-path-refusal=armed", "complete-paths=6")
+    require(
+        len(paths.special_roots) == 7,
+        "one closed live C2 root was substituted",
+    )
+    return _evidence(
+        "XH-53",
+        "missing-path-refusal=armed",
+        "canonical-live-entry-roots=8",
+        "canonical-live-lifecycles=5",
+    )
 
 
 def construct_seam_10_immutable_seam_direct_open_census_core_runtime(
@@ -2644,7 +4758,7 @@ def verify_seam_10_immutable_seam_direct_open_census_core_runtime(
     direct = construct_seam_10_immutable_seam_direct_open_census_core_runtime(inventory)
     _special_path_inventory(inventory)
     _run_inherited_verifier("verify_mutator_census.py")
-    return _evidence("SEAM-10", f"direct-open-classifications={len(direct.direct_open_sites)}", "c2-mutation-path=P-06")
+    return _evidence("SEAM-10", f"direct-open-classifications={len(direct.direct_open_sites)}", "c2-mutation-path=live-reopen")
 
 
 ASSIGNED_VERIFIERS: tuple[Callable[[SourceInventory | None], RowEvidence], ...] = (
@@ -2721,12 +4835,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="emit canonical row results")
     parser.add_argument("--list-rows", action="store_true", help="list the 39 exact V2 rows")
+    parser.add_argument(
+        "--emit-io-manifest",
+        action="store_true",
+        help="emit the current source-derived development crash-cut manifest to stdout",
+    )
     arguments = parser.parse_args(argv)
+    if sum((arguments.json, arguments.list_rows, arguments.emit_io_manifest)) > 1:
+        parser.error("--json, --list-rows, and --emit-io-manifest are mutually exclusive")
     if arguments.list_rows:
         for verifier in ASSIGNED_VERIFIERS:
             print(verifier.__name__)
         return 0
     inventory = SourceInventory.load()
+    if arguments.emit_io_manifest:
+        print(json.dumps(source_derived_io_manifest(inventory), indent=2, sort_keys=True))
+        return 0
     passed, failed = run_all(inventory)
     digest = canonical_result_digest(passed, failed)
     if arguments.json:
