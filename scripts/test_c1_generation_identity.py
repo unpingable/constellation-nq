@@ -195,6 +195,94 @@ class C1GenerationIdentityTest(unittest.TestCase):
             "prepared-pre-review-projection-old-verdict-is-not-evidence",
         )
 
+    def test_review_preparation_refreshes_only_exact_censused_source_bindings(
+        self,
+    ) -> None:
+        source_path = "crates/nq-core/src/identity.rs"
+        old_digest = reanchor.sha256_bytes(
+            reanchor.git_object(self.repo, self.gen3, source_path)
+        )
+        new_digest = reanchor.sha256_bytes(b"candidate identity implementation")
+        generated, receipt = reanchor.reanchor_bundle(
+            self.baseline,
+            self.old_engine,
+            self.old_engine,
+            source_binding_replacements=(
+                (source_path, old_digest, new_digest, 11),
+            ),
+            prepare_review=True,
+        )
+        for manifest_path in (
+            reanchor.MANIFEST_V1_PATH,
+            reanchor.MANIFEST_V2_PATH,
+        ):
+            manifest = reanchor.load_json(
+                generated[manifest_path], "refreshed source-binding manifest"
+            )
+            nodes = reanchor.source_binding_nodes(manifest, source_path)
+            self.assertEqual(len(nodes), 11)
+            self.assertEqual(
+                {node["source_sha256"] for node in nodes}, {new_digest}
+            )
+        self.assertEqual(
+            receipt["exact_source_binding_replacements"][source_path],
+            {
+                "baseline_sha256": old_digest,
+                "candidate_sha256": new_digest,
+                "binding_replacements": {
+                    "manifest_v1": 11,
+                    "manifest_v2": 11,
+                    "assets_rs": 1,
+                },
+            },
+        )
+        assets_rs = generated[reanchor.ASSETS_RS_PATH].decode("utf-8")
+        self.assertEqual(
+            assets_rs.count(reanchor.source_closure_pin(source_path, new_digest)), 1
+        )
+        self.assertNotIn(reanchor.source_closure_pin(source_path, old_digest), assets_rs)
+
+    def test_source_binding_refresh_refuses_an_inexact_census(self) -> None:
+        source_path = "crates/nq-core/src/identity.rs"
+        old_digest = reanchor.sha256_bytes(
+            reanchor.git_object(self.repo, self.gen3, source_path)
+        )
+        manifest = reanchor.load_json(
+            self.baseline[reanchor.MANIFEST_V1_PATH], "source-binding census control"
+        )
+        with self.assertRaisesRegex(reanchor.Refusal, "expected exactly 12"):
+            reanchor.replace_exact_source_bindings(
+                manifest,
+                source_path,
+                old_digest,
+                reanchor.sha256_bytes(b"replacement"),
+                12,
+                "source-binding census control",
+            )
+
+    def test_source_binding_refresh_refuses_duplicate_or_noop_specs(self) -> None:
+        source_path = "crates/nq-core/src/identity.rs"
+        old_digest = reanchor.sha256_bytes(
+            reanchor.git_object(self.repo, self.gen3, source_path)
+        )
+        replacement = (source_path, old_digest, reanchor.sha256_bytes(b"new"), 11)
+        with self.assertRaisesRegex(reanchor.Refusal, "must be unique"):
+            reanchor.reanchor_bundle(
+                self.baseline,
+                self.old_engine,
+                self.old_engine,
+                source_binding_replacements=(replacement, replacement),
+                prepare_review=True,
+            )
+        with self.assertRaisesRegex(reanchor.Refusal, "is a no-op"):
+            reanchor.reanchor_bundle(
+                self.baseline,
+                self.old_engine,
+                self.old_engine,
+                source_binding_replacements=((source_path, old_digest, old_digest, 11),),
+                prepare_review=True,
+            )
+
     def test_check_mode_selects_no_write_path(self) -> None:
         def baseline_file(_repo: Path, relative: str) -> bytes:
             if relative in (reanchor.ENGINE_PATH, reanchor.EVALUATOR_PATH):

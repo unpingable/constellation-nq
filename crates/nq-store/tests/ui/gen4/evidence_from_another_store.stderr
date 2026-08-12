@@ -26,7 +26,7 @@ error: lifetime may not live long enough
   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ argument requires that `'evidence_id` must outlive `'session_id`
   |
   = help: consider adding the following bound: `'evidence_id: 'session_id`
-  = note: requirement occurs because of a mutable reference to `StoreWriterSession<'_, VerificationBrand<'_>>`
+  = note: requirement occurs because of a mutable reference to `nq_store::StoreWriterSession<'_, VerificationBrand<'_>>`
   = note: mutable references are invariant over their type parameter
   = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance
 

@@ -10,12 +10,12 @@ the complete result in memory, stages every replacement, and then uses
 same-directory atomic replacements with rollback on a reported error.
 
 ``--prepare-review`` is a distinct non-qualification mutation mode.  It may
-update the CAP-H14 evaluator source binding and mechanically keeps the prior
-review object structurally joined only so an exact committed pre-review
-projection can be independently reviewed.  Its receipt explicitly says that
-the old verdict is not evidence for the prepared cut.  A later ``--write``
-with a fresh accepted review binding must replace that object before the cut
-can be a qualification candidate.
+update the CAP-H14 evaluator and an explicitly censused set of exact source
+bindings, and mechanically keeps the prior review object structurally joined
+only so an exact committed pre-review projection can be independently
+reviewed.  Its receipt explicitly says that the old verdict is not evidence
+for the prepared cut.  A later ``--write`` with a fresh accepted review
+binding must replace that object before the cut can earn qualification.
 
 The JSON projections used here contain no floating-point values.  The local
 canonicalizer deliberately refuses floats and unsafe integers while matching
@@ -484,6 +484,25 @@ def engine_binding_nodes(value: Any) -> list[dict[str, Any]]:
     return found
 
 
+def source_binding_nodes(value: Any, source_path: str) -> list[dict[str, Any]]:
+    """Return every exact-source binding for one repository-relative path."""
+
+    found: list[dict[str, Any]] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            if node.get("source_path") == source_path:
+                found.append(node)
+            for child in node.values():
+                walk(child)
+        elif isinstance(node, list):
+            for child in node:
+                walk(child)
+
+    walk(value)
+    return found
+
+
 def string_occurrences(value: Any, target: str) -> int:
     count = 0
 
@@ -718,6 +737,35 @@ def replace_engine_bindings(
         node["source_sha256"] = new_digest
 
 
+def replace_exact_source_bindings(
+    manifest: Any,
+    source_path: str,
+    old_digest: str,
+    new_digest: str,
+    expected: int,
+    label: str,
+) -> int:
+    nodes = source_binding_nodes(manifest, source_path)
+    if len(nodes) != expected:
+        refuse(
+            f"{label} has {len(nodes)} bindings for {source_path}; "
+            f"expected exactly {expected}"
+        )
+    for index, node in enumerate(nodes):
+        if node.get("source_sha256") != old_digest:
+            refuse(
+                f"{label} binding {index} for {source_path} is not pinned to "
+                "the immutable baseline digest"
+            )
+    for node in nodes:
+        node["source_sha256"] = new_digest
+    return len(nodes)
+
+
+def source_closure_pin(source_path: str, digest: str) -> str:
+    return f'            "{source_path}",\n            "{digest}",'
+
+
 def replace_cap_h14_evaluator_bindings(
     carrier: Any, old_digest: str, new_digest: str
 ) -> None:
@@ -759,6 +807,7 @@ def reanchor_bundle(
     *,
     old_evaluator_digest: str | None = None,
     new_evaluator_digest: str | None = None,
+    source_binding_replacements: Iterable[tuple[str, str, str, int]] = (),
     prepare_review: bool = False,
 ) -> tuple[dict[str, bytes], dict[str, Any]]:
     if prepare_review and review_binding is not None:
@@ -779,6 +828,42 @@ def reanchor_bundle(
     replace_engine_bindings(
         manifest_v2, old_engine_digest, new_engine_digest, "manifest v2"
     )
+    replacements = sorted(tuple(source_binding_replacements), key=lambda row: row[0])
+    replacement_paths = [row[0] for row in replacements]
+    if len(replacement_paths) != len(set(replacement_paths)):
+        refuse("exact source-binding replacement paths must be unique")
+    replacement_receipt: dict[str, Any] = {}
+    for source_path, old_digest, new_digest, expected in replacements:
+        safe_relative_path(source_path, "exact source-binding replacement path")
+        require_sha256(old_digest, f"baseline source digest for {source_path}")
+        require_sha256(new_digest, f"candidate source digest for {source_path}")
+        if expected <= 0:
+            refuse(f"source-binding census for {source_path} must be positive")
+        if old_digest == new_digest:
+            refuse(f"source-binding refresh for {source_path} is a no-op")
+        counts = {
+            "manifest_v1": replace_exact_source_bindings(
+                manifest_v1,
+                source_path,
+                old_digest,
+                new_digest,
+                expected,
+                "manifest v1",
+            ),
+            "manifest_v2": replace_exact_source_bindings(
+                manifest_v2,
+                source_path,
+                old_digest,
+                new_digest,
+                expected,
+                "manifest v2",
+            ),
+        }
+        replacement_receipt[source_path] = {
+            "baseline_sha256": old_digest,
+            "candidate_sha256": new_digest,
+            "binding_replacements": counts,
+        }
     baseline_evaluator = old_evaluator_digest or require_string(
         carrier["implementation_bindings"]["evaluator"].get("sha256"),
         "baseline CAP-H14 evaluator digest",
@@ -880,6 +965,15 @@ def reanchor_bundle(
         1,
         "assets.rs CAP-H14 evaluator source pin",
     )
+    for source_path, old_digest, new_digest, _expected in replacements:
+        assets_rs = replace_exact(
+            assets_rs,
+            source_closure_pin(source_path, old_digest),
+            source_closure_pin(source_path, new_digest),
+            1,
+            f"assets.rs exact source-closure pin for {source_path}",
+        )
+        replacement_receipt[source_path]["binding_replacements"]["assets_rs"] = 1
     for field in ("identity", "path", "sha256"):
         assets_rs = replace_exact(
             assets_rs,
@@ -911,6 +1005,28 @@ def reanchor_bundle(
         label="generated",
         review_binding=review_binding,
     )
+    generated_manifest_v1 = load_json(
+        generated[MANIFEST_V1_PATH], "generated manifest v1 source-binding audit"
+    )
+    generated_manifest_v2 = load_json(
+        generated[MANIFEST_V2_PATH], "generated manifest v2 source-binding audit"
+    )
+    for source_path, _old_digest, new_digest, expected in replacements:
+        for manifest, label in (
+            (generated_manifest_v1, "generated manifest v1"),
+            (generated_manifest_v2, "generated manifest v2"),
+        ):
+            nodes = source_binding_nodes(manifest, source_path)
+            if len(nodes) != expected or any(
+                node.get("source_sha256") != new_digest for node in nodes
+            ):
+                refuse(f"{label} source-binding postcondition failed for {source_path}")
+        exact_text_pin(
+            assets_rs,
+            source_closure_pin(source_path, new_digest),
+            1,
+            f"generated assets.rs exact source-closure pin for {source_path}",
+        )
     receipt["review_disposition"] = (
         "prepared-pre-review-projection-old-verdict-is-not-evidence"
         if prepare_review
@@ -918,6 +1034,7 @@ def reanchor_bundle(
         if review_binding is not None
         else "unchanged-reviewed-projection"
     )
+    receipt["exact_source_binding_replacements"] = replacement_receipt
     return generated, receipt
 
 
@@ -1072,7 +1189,7 @@ def receipt_document(
         "schema": "nq.c1_generation_reanchor_receipt.v1",
         "status": (
             "prepared-for-independent-review-not-qualified"
-            if mode == "prepare-review"
+            if mode in ("prepare-review", "check-prepared-review")
             else "verified"
             if mode == "check"
             else "written-and-verified"
@@ -1117,8 +1234,26 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
             "the qualification basis or pre-review projection changes"
         ),
     )
+    parser.add_argument(
+        "--refresh-source-binding",
+        action="append",
+        default=[],
+        metavar="PATH=COUNT",
+        help=(
+            "replace exactly COUNT manifest bindings for PATH using the immutable "
+            "baseline blob and current worktree bytes; may be repeated"
+        ),
+    )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true", help="verify only; never write")
+    mode.add_argument(
+        "--check-prepared-review",
+        action="store_true",
+        help=(
+            "verify an exact prepared pre-review projection; never write and never "
+            "treat the retained prior review as evidence"
+        ),
+    )
     mode.add_argument(
         "--write", action="store_true", help="explicitly write all six outputs"
     )
@@ -1150,6 +1285,37 @@ def main(arguments: list[str] | None = None) -> int:
             baseline, baseline_engine_digest, label="baseline"
         )
         validate_gen3_receipt(baseline_commit, baseline_tree, baseline_receipt)
+
+        source_binding_replacements: list[tuple[str, str, str, int]] = []
+        seen_source_paths: set[str] = set()
+        for specification in args.refresh_source_binding:
+            path_text, separator, count_text = specification.rpartition("=")
+            if not separator:
+                refuse("--refresh-source-binding must have exact PATH=COUNT shape")
+            source_path = safe_relative_path(
+                path_text, "--refresh-source-binding path"
+            )
+            if source_path in seen_source_paths:
+                refuse(f"duplicate --refresh-source-binding path: {source_path}")
+            seen_source_paths.add(source_path)
+            try:
+                expected = int(count_text, 10)
+            except ValueError:
+                refuse(
+                    f"--refresh-source-binding count for {source_path} is not an integer"
+                )
+            if expected <= 0:
+                refuse(
+                    f"--refresh-source-binding count for {source_path} must be positive"
+                )
+            source_binding_replacements.append(
+                (
+                    source_path,
+                    sha256_bytes(git_object(repo, baseline_commit, source_path)),
+                    sha256_bytes(read_worktree_file(repo, source_path)),
+                    expected,
+                )
+            )
 
         requested = (
             parse_digest(args.new_engine_sha256)
@@ -1188,12 +1354,15 @@ def main(arguments: list[str] | None = None) -> int:
             review_binding=review_binding,
             old_evaluator_digest=baseline_evaluator_digest,
             new_evaluator_digest=sha256_bytes(read_worktree_file(repo, EVALUATOR_PATH)),
-            prepare_review=args.prepare_review,
+            source_binding_replacements=source_binding_replacements,
+            prepare_review=args.prepare_review or args.check_prepared_review,
         )
 
-        if args.check:
+        if args.check or args.check_prepared_review:
             compare_bundle(read_worktree_bundle(repo), generated, "check: worktree")
-            mode = "check"
+            mode = (
+                "check-prepared-review" if args.check_prepared_review else "check"
+            )
         else:
             if all(generated[path] == baseline[path] for path in OUTPUT_PATHS):
                 refuse("--write refuses a no-op re-anchor or review rebinding")

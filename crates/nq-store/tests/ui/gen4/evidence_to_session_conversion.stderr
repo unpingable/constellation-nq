@@ -1,7 +1,7 @@
-error[E0277]: the trait bound `StoreWriterSession<'_, VerificationBrand<'id>>: From<ResolvedControllingActivation<'id>>` is not satisfied
+error[E0277]: the trait bound `nq_store::StoreWriterSession<'_, VerificationBrand<'id>>: From<ResolvedControllingActivation<'id>>` is not satisfied
  --> tests/ui/gen4/evidence_to_session_conversion.rs:5:75
   |
 5 |     let _: StoreWriterSession<'static, VerificationBrand<'id>> = evidence.into();
-  |                                                                           ^^^^ the trait `From<ResolvedControllingActivation<'id>>` is not implemented for `StoreWriterSession<'_, VerificationBrand<'id>>`
+  |                                                                           ^^^^ the trait `From<ResolvedControllingActivation<'id>>` is not implemented for `nq_store::StoreWriterSession<'_, VerificationBrand<'id>>`
   |
-  = note: required for `ResolvedControllingActivation<'id>` to implement `Into<StoreWriterSession<'_, VerificationBrand<'id>>>`
+  = note: required for `ResolvedControllingActivation<'id>` to implement `Into<nq_store::StoreWriterSession<'_, VerificationBrand<'id>>>`

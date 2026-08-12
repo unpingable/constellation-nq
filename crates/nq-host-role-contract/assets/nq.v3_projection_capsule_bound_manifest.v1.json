@@ -88,7 +88,7 @@
       "variant_family": "artifact_role",
       "source_identity": "nq.core.ArtifactRole.v1",
       "source_path": "crates/nq-core/src/identity.rs",
-      "source_sha256": "sha256:995d525c057d476d6e9ff62c0894b9e7cd51add2acb6d47bfe06e095b479d920",
+      "source_sha256": "sha256:9d0aa94cd53a0e17d7ce3908d7c0f1234dc44a9fcb3782c7097452ce822c16ca",
       "representation_location": "nested_runtime_record_bytes",
       "variant_count": 3,
       "variants": [
@@ -1974,7 +1974,7 @@
       "descriptor_key": "run_execution_identity",
       "source_identity": "nq.core.ExecutionIdentity.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/identity.rs",
-      "source_sha256": "sha256:995d525c057d476d6e9ff62c0894b9e7cd51add2acb6d47bfe06e095b479d920",
+      "source_sha256": "sha256:9d0aa94cd53a0e17d7ce3908d7c0f1234dc44a9fcb3782c7097452ce822c16ca",
       "json_pointer": "/configured_path",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1982,7 +1982,7 @@
       "descriptor_key": "run_execution_identity",
       "source_identity": "nq.core.ExecutionIdentity.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/identity.rs",
-      "source_sha256": "sha256:995d525c057d476d6e9ff62c0894b9e7cd51add2acb6d47bfe06e095b479d920",
+      "source_sha256": "sha256:9d0aa94cd53a0e17d7ce3908d7c0f1234dc44a9fcb3782c7097452ce822c16ca",
       "json_pointer": "/execution_chain/*/fixed_argument",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1990,7 +1990,7 @@
       "descriptor_key": "run_execution_identity",
       "source_identity": "nq.core.ExecutionIdentity.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/identity.rs",
-      "source_sha256": "sha256:995d525c057d476d6e9ff62c0894b9e7cd51add2acb6d47bfe06e095b479d920",
+      "source_sha256": "sha256:9d0aa94cd53a0e17d7ce3908d7c0f1234dc44a9fcb3782c7097452ce822c16ca",
       "json_pointer": "/execution_chain/*/path",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -1998,7 +1998,7 @@
       "descriptor_key": "run_execution_identity",
       "source_identity": "nq.core.ExecutionIdentity.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/identity.rs",
-      "source_sha256": "sha256:995d525c057d476d6e9ff62c0894b9e7cd51add2acb6d47bfe06e095b479d920",
+      "source_sha256": "sha256:9d0aa94cd53a0e17d7ce3908d7c0f1234dc44a9fcb3782c7097452ce822c16ca",
       "json_pointer": "/fixed_argv/*",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -2006,7 +2006,7 @@
       "descriptor_key": "run_execution_identity",
       "source_identity": "nq.core.ExecutionIdentity.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/identity.rs",
-      "source_sha256": "sha256:995d525c057d476d6e9ff62c0894b9e7cd51add2acb6d47bfe06e095b479d920",
+      "source_sha256": "sha256:9d0aa94cd53a0e17d7ce3908d7c0f1234dc44a9fcb3782c7097452ce822c16ca",
       "json_pointer": "/modified_ns",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -2014,7 +2014,7 @@
       "descriptor_key": "run_execution_identity",
       "source_identity": "nq.core.ExecutionIdentity.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/identity.rs",
-      "source_sha256": "sha256:995d525c057d476d6e9ff62c0894b9e7cd51add2acb6d47bfe06e095b479d920",
+      "source_sha256": "sha256:9d0aa94cd53a0e17d7ce3908d7c0f1234dc44a9fcb3782c7097452ce822c16ca",
       "json_pointer": "/resolved_path",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -2022,7 +2022,7 @@
       "descriptor_key": "run_execution_identity",
       "source_identity": "nq.core.ExecutionIdentity.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/identity.rs",
-      "source_sha256": "sha256:995d525c057d476d6e9ff62c0894b9e7cd51add2acb6d47bfe06e095b479d920",
+      "source_sha256": "sha256:9d0aa94cd53a0e17d7ce3908d7c0f1234dc44a9fcb3782c7097452ce822c16ca",
       "json_pointer": "/working_directory",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -2030,7 +2030,7 @@
       "descriptor_key": "run_execution_identity",
       "source_identity": "nq.core.ExecutionIdentity.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/identity.rs",
-      "source_sha256": "sha256:995d525c057d476d6e9ff62c0894b9e7cd51add2acb6d47bfe06e095b479d920",
+      "source_sha256": "sha256:9d0aa94cd53a0e17d7ce3908d7c0f1234dc44a9fcb3782c7097452ce822c16ca",
       "json_pointer": "/working_directory_identity/ancestry/*/path",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -2038,7 +2038,7 @@
       "descriptor_key": "run_execution_identity",
       "source_identity": "nq.core.ExecutionIdentity.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/identity.rs",
-      "source_sha256": "sha256:995d525c057d476d6e9ff62c0894b9e7cd51add2acb6d47bfe06e095b479d920",
+      "source_sha256": "sha256:9d0aa94cd53a0e17d7ce3908d7c0f1234dc44a9fcb3782c7097452ce822c16ca",
       "json_pointer": "/working_directory_identity/ancestry/*/resolved_path",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -2046,7 +2046,7 @@
       "descriptor_key": "run_execution_identity",
       "source_identity": "nq.core.ExecutionIdentity.open_runtime_tokens.v1",
       "source_path": "crates/nq-core/src/identity.rs",
-      "source_sha256": "sha256:995d525c057d476d6e9ff62c0894b9e7cd51add2acb6d47bfe06e095b479d920",
+      "source_sha256": "sha256:9d0aa94cd53a0e17d7ce3908d7c0f1234dc44a9fcb3782c7097452ce822c16ca",
       "json_pointer": "/working_directory_identity/path",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -2134,7 +2134,7 @@
       "descriptor_key": "run_execution_identity",
       "source_identity": "nq.helper_sandbox.ExecutionAccount.open_runtime_tokens.v1",
       "source_path": "crates/nq-helper-sandbox/src/lib.rs",
-      "source_sha256": "sha256:6dd38a905fa10233d53b4793015c020a572087f9eec60af9e8126d8207fab208",
+      "source_sha256": "sha256:39cc09d634c566b8ee46c0095dd379836fdd2584c9aabd3e43a2d674d550904a",
       "json_pointer": "/execution_account/configured",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },
@@ -2142,7 +2142,7 @@
       "descriptor_key": "run_execution_identity",
       "source_identity": "nq.helper_sandbox.ExecutionAccount.open_runtime_tokens.v1",
       "source_path": "crates/nq-helper-sandbox/src/lib.rs",
-      "source_sha256": "sha256:6dd38a905fa10233d53b4793015c020a572087f9eec60af9e8126d8207fab208",
+      "source_sha256": "sha256:39cc09d634c566b8ee46c0095dd379836fdd2584c9aabd3e43a2d674d550904a",
       "json_pointer": "/execution_account/name",
       "reason": "production identity, topology, or runtime token is bounded structurally and bytewise by the exact pre-effect descriptor; that bound does not establish semantic validity, continuity, standing, or authorization, and the token is not a closed NQ semantic family"
     },

@@ -1176,7 +1176,7 @@ fn validate_v3_projection_capsule_bound_manifest(value: &serde_json::Value) -> R
         (
             semantic_outcome_variants,
             50,
-            "sha256:18d53b6cd5833ad2db623a1365134fe2a0b6333ca9d22cd5b91d7cfdf14e133f",
+            "sha256:4a6b0bdb1699539ac8ea3e279d346325eb9b254f22e709f0c911320c72c5c2e2",
         ),
         (
             semantic_exclusions,
@@ -1186,7 +1186,7 @@ fn validate_v3_projection_capsule_bound_manifest(value: &serde_json::Value) -> R
         (
             descriptor_governed_open_semantics,
             276,
-            "sha256:e13bc5ca615327761b9ec5cddb866fd060f5ca27a525dc4b02065961b84d377f",
+            "sha256:b520701a84bdd66a791b072604454bb572467d33da1ab6fef5dfe6feb2896feb",
         ),
     ];
     for (rows, expected_len, expected_digest) in exact_semantic_sections {
@@ -1214,7 +1214,7 @@ fn validate_v3_projection_capsule_bound_manifest(value: &serde_json::Value) -> R
         ),
         (
             "crates/nq-core/src/identity.rs",
-            "sha256:995d525c057d476d6e9ff62c0894b9e7cd51add2acb6d47bfe06e095b479d920",
+            "sha256:9d0aa94cd53a0e17d7ce3908d7c0f1234dc44a9fcb3782c7097452ce822c16ca",
         ),
         (
             "crates/nq-core/src/provider_intake.rs",
@@ -1230,7 +1230,7 @@ fn validate_v3_projection_capsule_bound_manifest(value: &serde_json::Value) -> R
         ),
         (
             "crates/nq-helper-sandbox/src/lib.rs",
-            "sha256:6dd38a905fa10233d53b4793015c020a572087f9eec60af9e8126d8207fab208",
+            "sha256:39cc09d634c566b8ee46c0095dd379836fdd2584c9aabd3e43a2d674d550904a",
         ),
         (
             "crates/nq-host-role-contract/src/identity.rs",
@@ -2473,7 +2473,7 @@ fn expected_capacity_static_assets()
             (
                 "nq.v3_projection_capsule_bound_manifest.v1",
                 "nq.v3_projection_capsule_bound_manifest.v1.json",
-                "sha256:d0def7c39dfc31a695c09e2f2bddbecf50b846c53b593bef2f3065b5e17003e0",
+                "sha256:e470d4245d2c660a6fcee26549c53dd205a3884d9f279815405c83b2ae02528b",
             ),
         ),
         (
@@ -2481,7 +2481,7 @@ fn expected_capacity_static_assets()
             (
                 "nq.v3_projection_capsule_bound_manifest.v2",
                 "nq.v3_projection_capsule_bound_manifest.v2.json",
-                "sha256:72ab46189f6c9b2c23df433fbee6e1ddc9c5129772ad9f6896dfec7e181d8af7",
+                "sha256:a91bae86a5956f6a63edccf562a0373958fd4174d7319d9b2830694ff311b51b",
             ),
         ),
         (
@@ -2489,7 +2489,7 @@ fn expected_capacity_static_assets()
             (
                 "nq.v3_projection_capsule_bound_qualification.v1",
                 "nq.v3_projection_capsule_bound_qualification.v1.json",
-                "sha256:a43af95a6b4565f4c13b15f49267ae2e97951b282fbb894c0e0ec08b5f24005d",
+                "sha256:97b5d4c0025cc26093d514df1a192510dc14af9f74444e5d56066a85da4353d2",
             ),
         ),
     ]
@@ -2706,7 +2706,7 @@ mod tests {
             .expect("exact v2 manifest and separate qualification carrier");
         assert_eq!(
             qualified.qualification_basis_sha256.as_str(),
-            "sha256:de440ec2fe3141d794bbb28c778eb273fc209a007691413953198d94ced669e3"
+            "sha256:f5945a389d9fd94ce9e2b3625cc0970acf904628793028f5adfbce27dcad82cb"
         );
 
         let historical = require_qualified_v3_projection_capsule_bound_manifest()
