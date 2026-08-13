@@ -2,7 +2,7 @@
 //!
 //! The runtime authorization object in this module is deliberately sealed. A
 //! serializable provider identity is historical evidence; it is not sufficient
-//! to authorize a provider. Only the engine can construct [`VerifiedProvider`]
+//! to authorize a provider. Only the engine can construct `VerifiedProvider`
 //! after independently checking the active admission and the exact opened
 //! executable identity.
 

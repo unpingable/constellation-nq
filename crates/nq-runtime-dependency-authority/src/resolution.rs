@@ -665,42 +665,16 @@ fn resolve_fields(
         &event_positions,
     )?;
 
-    let terminal_event_digest = event_order
-        .last()
-        .ok_or(AuthorityError::AuthorityEventGap)?;
-    let terminal_cut = if let Some(receipt) = migration_receipt.as_ref()
-        && receipt.receipt_digest() == terminal_event_digest
-    {
-        receipt.cut().clone()
-    } else {
-        event_cut(&parsed, terminal_event_digest)?.clone()
-    };
+    let (terminal_event_digest, terminal_cut, tip) = resolve_terminal_activation(
+        &parsed,
+        migration_receipt.as_ref(),
+        &event_order,
+        &activation_tips,
+        tip_requirement,
+    )?;
     let establishment_cut = migration_receipt
         .as_ref()
         .map_or_else(|| terminal_cut.clone(), |receipt| receipt.cut().clone());
-    let activation_tip_refs: Vec<_> = activation_tips.iter().collect();
-    let tip_digest = select_unique_tip(&activation_tip_refs)?;
-    let tip = parsed
-        .a2
-        .get(tip_digest)
-        .ok_or(AuthorityError::NoLiveActivation)?;
-    let revoked = parsed
-        .revocations
-        .values()
-        .any(|record| record.target_activation_digest() == tip.activation_digest());
-    let expired = tip
-        .expiry_cut()
-        .is_some_and(|expiry| terminal_cut.sequence() >= expiry);
-    match (tip_requirement, revoked, expired) {
-        (TipRequirement::UniqueLive, true, _) => {
-            return Err(AuthorityError::ControllingActivationRevoked);
-        }
-        (TipRequirement::UniqueLive, false, true) => {
-            return Err(AuthorityError::ControllingActivationExpired);
-        }
-        (TipRequirement::AllowTerminalNonLive, _, _)
-        | (TipRequirement::UniqueLive, false, false) => {}
-    }
 
     let candidate_set_digest = digest_presented_authority_set(presented)?;
     let custody_digest = digest_genesis_authority_custody(custody)?;
@@ -745,6 +719,50 @@ fn resolve_fields(
         migration_receipt_digest,
         migration_receipt_canonical_bytes,
     })
+}
+
+fn resolve_terminal_activation<'parsed, 'events>(
+    parsed: &'parsed ParsedAuthority,
+    migration_receipt: Option<&MigrationReceipt>,
+    event_order: &'events [Sha256Digest],
+    activation_tips: &[Sha256Digest],
+    tip_requirement: TipRequirement,
+) -> Result<(&'events Sha256Digest, AuthorityCut, &'parsed ResidentActivationRecord), AuthorityError>
+{
+    let terminal_event_digest = event_order
+        .last()
+        .ok_or(AuthorityError::AuthorityEventGap)?;
+    let terminal_cut = if let Some(receipt) = migration_receipt
+        && receipt.receipt_digest() == terminal_event_digest
+    {
+        receipt.cut().clone()
+    } else {
+        event_cut(parsed, terminal_event_digest)?.clone()
+    };
+    let activation_tip_refs: Vec<_> = activation_tips.iter().collect();
+    let tip_digest = select_unique_tip(&activation_tip_refs)?;
+    let tip = parsed
+        .a2
+        .get(tip_digest)
+        .ok_or(AuthorityError::NoLiveActivation)?;
+    let revoked = parsed
+        .revocations
+        .values()
+        .any(|record| record.target_activation_digest() == tip.activation_digest());
+    let expired = tip
+        .expiry_cut()
+        .is_some_and(|expiry| terminal_cut.sequence() >= expiry);
+    match (tip_requirement, revoked, expired) {
+        (TipRequirement::UniqueLive, true, _) => {
+            return Err(AuthorityError::ControllingActivationRevoked);
+        }
+        (TipRequirement::UniqueLive, false, true) => {
+            return Err(AuthorityError::ControllingActivationExpired);
+        }
+        (TipRequirement::AllowTerminalNonLive, _, _)
+        | (TipRequirement::UniqueLive, false, false) => {}
+    }
+    Ok((terminal_event_digest, terminal_cut, tip))
 }
 
 fn validate_expectations(

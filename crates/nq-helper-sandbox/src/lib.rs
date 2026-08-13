@@ -132,6 +132,7 @@ impl Drop for C2ForkFenceGuard {
 }
 
 /// Construct the authority-neutral shared process-global fork-fence primitive.
+#[must_use = "the constructed fork fence must be retained for the protected process interval"]
 pub fn construct_sg_wu_02_fence_shared_process_global_fork_fence_primitive() -> C2ForkFence {
     C2ForkFence
 }

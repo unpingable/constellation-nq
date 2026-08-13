@@ -114,7 +114,7 @@ pub struct WatcherConfig {
 pub struct CommandConfig {
     /// Absolute executable path.
     pub executable: PathBuf,
-    /// Fixed arguments following argv[0].
+    /// Fixed arguments following `argv[0]`.
     #[serde(default)]
     pub args: Vec<String>,
     /// Minimal explicit environment additions after sanitization.

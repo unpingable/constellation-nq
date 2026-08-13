@@ -2368,6 +2368,8 @@ pub struct NonSuccessCollectionArtifactCommit {
 thread_local! {
     static FAIL_NON_SUCCESS_AFTER_ARTIFACT_INSERT: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
+    static FAIL_CURRENT_SCHEMA_PROJECTION_AFTER_V8: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 /// One NQ-derived admission of the local helper as a candidate-evidence
@@ -2947,6 +2949,13 @@ struct V7AuthorityMigrationPreflight {
     backup_sha256: String,
     source_logical_digest: String,
     restore_declaration_digest: Option<Sha256Digest>,
+    target: V7AuthorityMigrationTarget,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum V7AuthorityMigrationTarget {
+    ExactV8,
+    CurrentV9,
 }
 
 impl Store {
@@ -3364,6 +3373,36 @@ impl Store {
         path: impl AsRef<Path>,
         backup: &BackupArtifact,
     ) -> Result<Self, StoreError> {
+        Self::open_v7_runtime_authority_migration_source_for_target(
+            path,
+            backup,
+            V7AuthorityMigrationTarget::ExactV8,
+        )
+    }
+
+    /// Open the exact backup-verified schema-v7 source for the sole runtime
+    /// route that composes authority establishment with projection to the
+    /// current schema in one Store-owned transaction.
+    ///
+    /// This is deliberately crate-private.  It does not expose either schema
+    /// transition as independent migration authority and cannot be used by an
+    /// ordinary opener or a caller holding only a path or schema digest.
+    pub(crate) fn open_v7_runtime_authority_migration_to_current_source(
+        path: impl AsRef<Path>,
+        backup: &BackupArtifact,
+    ) -> Result<Self, StoreError> {
+        Self::open_v7_runtime_authority_migration_source_for_target(
+            path,
+            backup,
+            V7AuthorityMigrationTarget::CurrentV9,
+        )
+    }
+
+    fn open_v7_runtime_authority_migration_source_for_target(
+        path: impl AsRef<Path>,
+        backup: &BackupArtifact,
+        target: V7AuthorityMigrationTarget,
+    ) -> Result<Self, StoreError> {
         let path = path.as_ref();
         let backup_path = backup.path.as_path();
         let _maintenance_guards = writer_session::acquire_maintenance_locks(&[path, backup_path])?;
@@ -3416,6 +3455,7 @@ impl Store {
                 backup_sha256: backup.sha256.clone(),
                 source_logical_digest,
                 restore_declaration_digest,
+                target,
             }),
             runtime_authority_initialization_candidate: false,
         })
@@ -4489,6 +4529,26 @@ impl Store {
             )?;
         }
         validate_runtime_authority_invariants(&transaction)?;
+        if starting_version == 7
+            && migration_preflight
+                .as_ref()
+                .is_some_and(|preflight| preflight.target == V7AuthorityMigrationTarget::CurrentV9)
+        {
+            // The current-schema projection is part of the same IMMEDIATE
+            // transaction as v7-to-v8 authority establishment.  No ordinary
+            // opener can therefore observe a successfully committed v8
+            // intermediate, and any projection refusal rolls the entire
+            // authority migration back to its exact v7 source.
+            #[cfg(test)]
+            if FAIL_CURRENT_SCHEMA_PROJECTION_AFTER_V8.with(std::cell::Cell::take) {
+                return Err(StoreError::Invariant(
+                    "injected failure between schema-v8 authority establishment and schema-v9 projection"
+                        .into(),
+                ));
+            }
+            upgrade_v8_to_v9_c2_schema(&transaction)?;
+            validate_runtime_authority_invariants(&transaction)?;
+        }
         transaction.commit()?;
         self.v7_authority_migration = None;
         Ok(RuntimeDependencyEstablishmentReceipt {
@@ -15593,6 +15653,15 @@ fn upgrade_v7_to_v8_authority_schema(transaction: &Transaction<'_>) -> Result<()
 
 fn upgrade_v8_to_v9_c2_schema(transaction: &Transaction<'_>) -> Result<(), StoreError> {
     validate_v8_upgrade_source_connection(transaction)?;
+    if sha256_digest(SCHEMA_V8_TO_V9_C2_STORE_GENERATION.as_bytes())
+        != SCHEMA_V8_TO_V9_C2_STORE_GENERATION_SHA256
+        || sha256_digest(SCHEMA_V9_C2_SIGNER_LINEAGE.as_bytes())
+            != SCHEMA_V9_C2_SIGNER_LINEAGE_SHA256
+    {
+        return Err(StoreError::Invariant(
+            "compiled C2 schema-v9 projection migration identity mismatch".into(),
+        ));
+    }
     transaction.execute_batch(
         "DROP TRIGGER immutable_schema_metadata_update;
          DROP TRIGGER immutable_schema_metadata_delete;

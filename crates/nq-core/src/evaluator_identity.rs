@@ -5,7 +5,7 @@
 //!
 //! This module is the *only* place an [`EvaluatorRuntimeIdentity`] can come into
 //! being. In production it is produced solely by the platform provider
-//! ([`resolve`]) reached through [`resolved`]; there is no public constructor, no
+//! (`resolve`) reached through `resolved`; there is no public constructor, no
 //! public field, no public provider trait a caller could implement, and no
 //! public injection point. A production caller therefore cannot manufacture a
 //! "trusted" identity — the door is locked and there is no key-cutting machine

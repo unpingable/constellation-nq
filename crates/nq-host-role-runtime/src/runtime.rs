@@ -377,7 +377,8 @@ impl HostRoleRuntime {
                 let _ = Self::reopen_state(&source, &dependencies)?;
             }
         }
-        let mut store = Store::open_v7_runtime_authority_migration_source(path, backup)?;
+        let mut store =
+            Store::open_v7_runtime_authority_migration_to_current_source(path, backup)?;
         let occurrence = store.sole_genesis_id()?;
         let trust_root = dependencies.custody().trust_anchor_id()?;
         let migration = store.runtime_authority_migration_expectations()?;
