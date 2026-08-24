@@ -26,9 +26,11 @@ use thiserror::Error;
 const SCHEMA: &str = include_str!("schema.sql");
 const SCHEMA_V3: &str = include_str!("schema_v3.sql");
 const SCHEMA_V4: &str = include_str!("schema_v4.sql");
+const SCHEMA_V5: &str = include_str!("schema_v5.sql");
 const SCHEMA_V3_TO_V4_PROVIDER: &str = include_str!("schema_v3_to_v4_provider.sql");
 const SCHEMA_V4_TO_V5_DIAGNOSTIC_ARTIFACTS: &str =
     include_str!("schema_v4_to_v5_diagnostic_artifacts.sql");
+const SCHEMA_V5_TO_V6_CONTINUITY: &str = include_str!("schema_v5_to_v6_continuity.sql");
 const APPLICATION_ID: i64 = 1_313_951_303;
 
 const SCHEMA_METADATA_V4: &str = r"CREATE TABLE schema_metadata (
@@ -61,6 +63,21 @@ const SCHEMA_METADATA_V5: &str = r"CREATE TABLE schema_metadata (
 const SCHEMA_METADATA_V5_TRIGGERS: &str = "CREATE TRIGGER immutable_schema_metadata_update BEFORE UPDATE ON schema_metadata BEGIN SELECT RAISE(ABORT, 'append-only table'); END;\n\
      CREATE TRIGGER immutable_schema_metadata_delete BEFORE DELETE ON schema_metadata BEGIN SELECT RAISE(ABORT, 'append-only table'); END;";
 
+const SCHEMA_METADATA_V6: &str = r"CREATE TABLE schema_metadata (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    product TEXT NOT NULL CHECK (product = 'nq-ng'),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 6),
+    -- Digest of the exact schema.sql artifact compiled into the writing binary.
+    -- Rejects stale provisional-candidate databases at startup; it is NOT a
+    -- tamper attestation of the live SQLite schema (which the structural
+    -- fingerprint checks separately).
+    schema_artifact_digest TEXT NOT NULL CHECK (length(schema_artifact_digest) = 71 AND substr(schema_artifact_digest, 1, 7) = 'sha256:'),
+    initialized_at TEXT NOT NULL
+) STRICT;";
+
+const SCHEMA_METADATA_V6_TRIGGERS: &str = "CREATE TRIGGER immutable_schema_metadata_update BEFORE UPDATE ON schema_metadata BEGIN SELECT RAISE(ABORT, 'append-only table'); END;\n\
+     CREATE TRIGGER immutable_schema_metadata_delete BEFORE DELETE ON schema_metadata BEGIN SELECT RAISE(ABORT, 'append-only table'); END;";
+
 /// Exact schema-artifact digest of the qualified v0.1.0 store. It is retained
 /// only to validate an explicit v3-to-v4 upgrade source; normal opening never
 /// interprets v3 bytes as current storage.
@@ -71,6 +88,10 @@ pub const SCHEMA_V3_ARTIFACT_DIGEST: &str =
 /// retained only to validate an explicit v4-to-v5 upgrade source.
 pub const SCHEMA_V4_ARTIFACT_DIGEST: &str =
     "sha256:649b514a7cacddf4dbd55dad587947edd8499e9dc1ee6785370654075951cfa1";
+
+/// Exact schema-artifact digest of the qualified schema-v5 store.
+pub const SCHEMA_V5_ARTIFACT_DIGEST: &str =
+    "sha256:91455172d1bed3b5e67ae25b7122015fc3d1197ab9b676511a938d4eb658e94b";
 
 /// Schema tag bound into every admission-context digest preimage. Bump only when
 /// the constituent set or its canonicalization changes.
@@ -113,9 +134,16 @@ static EXPECTED_SCHEMA_V4_FINGERPRINT: LazyLock<Result<String, String>> = LazyLo
         .map_err(|error| error.to_string())?;
     schema_fingerprint(&connection).map_err(|error| error.to_string())
 });
+static EXPECTED_SCHEMA_V5_FINGERPRINT: LazyLock<Result<String, String>> = LazyLock::new(|| {
+    let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    connection
+        .execute_batch(SCHEMA_V5)
+        .map_err(|error| error.to_string())?;
+    schema_fingerprint(&connection).map_err(|error| error.to_string())
+});
 
 /// The only schema version understood by this crate.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Hard ceiling for one page returned through the public read model helpers.
 pub const MAX_PUBLIC_QUERY_ROWS: u32 = 1_000;
@@ -944,6 +972,55 @@ pub struct ProviderIntakeInput {
     pub started_at: String,
     pub finished_at: String,
     pub received_at: String,
+}
+
+/// Exact NQ-owned continuity prerequisite intent persisted before invocation.
+#[derive(Clone, Debug)]
+pub struct ContinuityAcquisitionIntentInput {
+    pub intent_id: String,
+    pub acquisition_id: String,
+    pub intake_id: String,
+    pub authority_occurrence_ref: String,
+    pub authority_digest: String,
+    pub commitment_occurrence_ref: String,
+    pub commitment_digest: String,
+    pub acquisition_basis_digest: String,
+    pub intent: CanonicalDocument,
+}
+
+/// Reopened immutable continuity acquisition intent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContinuityAcquisitionIntentRow {
+    pub intent_id: String,
+    pub acquisition_id: String,
+    pub intake_id: String,
+    pub authority_occurrence_ref: String,
+    pub authority_digest: String,
+    pub commitment_occurrence_ref: String,
+    pub commitment_digest: String,
+    pub acquisition_basis_digest: String,
+    pub intent_json: Vec<u8>,
+    pub intent_digest: String,
+    pub committed_at: String,
+}
+
+/// Append-only lifecycle event for a precommitted acquisition.
+#[derive(Clone, Debug)]
+pub struct ContinuityAcquisitionEventInput {
+    pub event_id: String,
+    pub intent_id: String,
+    pub phase: String,
+    pub event: CanonicalDocument,
+    pub occurred_at: String,
+}
+
+/// Outcome of exact intent/event insertion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExactContinuityCommit {
+    /// A new immutable row was appended.
+    Committed,
+    /// Exact retry found the byte-identical row.
+    Replayed,
 }
 
 /// A typed refusal retained at its exact boundary and responsible instance.
@@ -1869,6 +1946,27 @@ impl Store {
         Ok(store)
     }
 
+    /// Open the exact qualified schema-v5 store read-only for the separately
+    /// authorized v5-to-v6 continuity-custody migration.
+    pub fn open_v5_upgrade_source_read_only(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        if !path.is_file() || std::fs::metadata(path)?.len() == 0 {
+            return Err(StoreError::NotInitialized(path.to_path_buf()));
+        }
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        connection.pragma_update(None, "query_only", "ON")?;
+        let store = Self {
+            connection,
+            path: Some(path.to_path_buf()),
+        };
+        validate_v5_upgrade_source_connection(&store.connection)?;
+        Ok(store)
+    }
+
     /// Checkpoint a writable backup copy and leave it in rollback-journal mode
     /// before archive inventory and sealing.
     pub fn prepare_archive_copy(&self) -> Result<(), StoreError> {
@@ -1998,6 +2096,7 @@ impl Store {
         validate_all_admission_context_digests(&self.connection)?;
         validate_local_provider_admissions(&self.connection)?;
         validate_provider_intake_invariants(&self.connection)?;
+        validate_continuity_acquisition_invariants(&self.connection)?;
         validate_refusal_invariants(&self.connection)?;
         validate_run_results(&self.connection)?;
         validate_evaluation_refusal_invariants(&self.connection)?;
@@ -2966,6 +3065,330 @@ impl Store {
             disposition,
             imported_at: input.imported_at.clone(),
         })
+    }
+
+    /// Persist an exact continuity acquisition prerequisite before provider invocation.
+    ///
+    /// Exact replay converges. Reuse of the acquisition or intent identity for
+    /// different bytes refuses. This method grants no provider, continuity, or
+    /// reliance authority; it records the prerequisite already verified by NQ.
+    pub fn commit_continuity_acquisition_intent(
+        &mut self,
+        input: &ContinuityAcquisitionIntentInput,
+    ) -> Result<ExactContinuityCommit, StoreError> {
+        validate_digest("continuity intent_id", &input.intent_id)?;
+        validate_digest("continuity authority_digest", &input.authority_digest)?;
+        validate_digest("continuity commitment_digest", &input.commitment_digest)?;
+        validate_digest(
+            "continuity acquisition_basis_digest",
+            &input.acquisition_basis_digest,
+        )?;
+        for (field, value) in [
+            ("continuity acquisition_id", &input.acquisition_id),
+            ("continuity intake_id", &input.intake_id),
+            (
+                "continuity authority_occurrence_ref",
+                &input.authority_occurrence_ref,
+            ),
+            (
+                "continuity commitment_occurrence_ref",
+                &input.commitment_occurrence_ref,
+            ),
+        ] {
+            validate_bounded_identity(field, value)?;
+        }
+        let transaction = self.immediate_transaction()?;
+        let existing = transaction
+            .query_row(
+                "SELECT intent_id, acquisition_id, intake_id,
+                        authority_occurrence_ref, authority_digest,
+                        commitment_occurrence_ref, commitment_digest,
+                        acquisition_basis_digest, intent_json, intent_digest,
+                        committed_at
+                 FROM continuity_acquisition_intents
+                 WHERE intent_id = ?1 OR acquisition_id = ?2 OR intake_id = ?3",
+                params![input.intent_id, input.acquisition_id, input.intake_id],
+                continuity_intent_row,
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            if existing.intent_id == input.intent_id
+                && existing.acquisition_id == input.acquisition_id
+                && existing.intake_id == input.intake_id
+                && existing.authority_occurrence_ref == input.authority_occurrence_ref
+                && existing.authority_digest == input.authority_digest
+                && existing.commitment_occurrence_ref == input.commitment_occurrence_ref
+                && existing.commitment_digest == input.commitment_digest
+                && existing.acquisition_basis_digest == input.acquisition_basis_digest
+                && existing.intent_json == input.intent.as_bytes()
+                && existing.intent_digest == input.intent.digest()
+            {
+                return Ok(ExactContinuityCommit::Replayed);
+            }
+            return Err(StoreError::ReplayConflict(
+                "continuity acquisition intent identity was reused for different bytes".into(),
+            ));
+        }
+        transaction.execute(
+            "INSERT INTO continuity_acquisition_intents (
+                intent_id, schema_id, acquisition_id, intake_id,
+                authority_occurrence_ref, authority_digest,
+                commitment_occurrence_ref, commitment_digest,
+                acquisition_basis_digest, intent_json, intent_digest, committed_at
+             ) VALUES (?1, 'nq.provider_acquisition_intent.v1', ?2, ?3, ?4, ?5,
+                       ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                input.intent_id,
+                input.acquisition_id,
+                input.intake_id,
+                input.authority_occurrence_ref,
+                input.authority_digest,
+                input.commitment_occurrence_ref,
+                input.commitment_digest,
+                input.acquisition_basis_digest,
+                input.intent.as_bytes(),
+                input.intent.digest(),
+                now_utc(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(ExactContinuityCommit::Committed)
+    }
+
+    /// Atomically persist an exact intent and its pre-invocation dispatch
+    /// fence. A committed intent can therefore never be mistaken for a safe
+    /// post-restart resume after provider invocation may have begun.
+    #[allow(clippy::too_many_lines)]
+    pub fn commit_continuity_dispatch(
+        &mut self,
+        intent: &ContinuityAcquisitionIntentInput,
+        event: &ContinuityAcquisitionEventInput,
+    ) -> Result<ExactContinuityCommit, StoreError> {
+        if event.phase != "provider_invocation_started" || event.intent_id != intent.intent_id {
+            return Err(StoreError::Invariant(
+                "continuity dispatch must bind the exact intent and invocation-start phase".into(),
+            ));
+        }
+        validate_digest("continuity intent_id", &intent.intent_id)?;
+        validate_digest("continuity authority_digest", &intent.authority_digest)?;
+        validate_digest("continuity commitment_digest", &intent.commitment_digest)?;
+        validate_digest(
+            "continuity acquisition_basis_digest",
+            &intent.acquisition_basis_digest,
+        )?;
+        validate_digest("continuity event_id", &event.event_id)?;
+        if event.event_id != event.event.digest() {
+            return Err(StoreError::Invariant(
+                "continuity event identity differs from exact canonical bytes".into(),
+            ));
+        }
+        for (field, value) in [
+            ("continuity acquisition_id", &intent.acquisition_id),
+            ("continuity intake_id", &intent.intake_id),
+            (
+                "continuity authority_occurrence_ref",
+                &intent.authority_occurrence_ref,
+            ),
+            (
+                "continuity commitment_occurrence_ref",
+                &intent.commitment_occurrence_ref,
+            ),
+        ] {
+            validate_bounded_identity(field, value)?;
+        }
+
+        let transaction = self.immediate_transaction()?;
+        let existing_intent = transaction
+            .query_row(
+                "SELECT intent_id, acquisition_id, intake_id,
+                        authority_occurrence_ref, authority_digest,
+                        commitment_occurrence_ref, commitment_digest,
+                        acquisition_basis_digest, intent_json, intent_digest,
+                        committed_at
+                 FROM continuity_acquisition_intents
+                 WHERE intent_id = ?1 OR acquisition_id = ?2 OR intake_id = ?3",
+                params![intent.intent_id, intent.acquisition_id, intent.intake_id],
+                continuity_intent_row,
+            )
+            .optional()?;
+        let intent_replayed = if let Some(existing) = existing_intent {
+            if existing.intent_id != intent.intent_id
+                || existing.acquisition_id != intent.acquisition_id
+                || existing.intake_id != intent.intake_id
+                || existing.authority_occurrence_ref != intent.authority_occurrence_ref
+                || existing.authority_digest != intent.authority_digest
+                || existing.commitment_occurrence_ref != intent.commitment_occurrence_ref
+                || existing.commitment_digest != intent.commitment_digest
+                || existing.acquisition_basis_digest != intent.acquisition_basis_digest
+                || existing.intent_json != intent.intent.as_bytes()
+                || existing.intent_digest != intent.intent.digest()
+            {
+                return Err(StoreError::ReplayConflict(
+                    "continuity acquisition intent identity was reused for different bytes".into(),
+                ));
+            }
+            true
+        } else {
+            transaction.execute(
+                "INSERT INTO continuity_acquisition_intents (
+                    intent_id, schema_id, acquisition_id, intake_id,
+                    authority_occurrence_ref, authority_digest,
+                    commitment_occurrence_ref, commitment_digest,
+                    acquisition_basis_digest, intent_json, intent_digest, committed_at
+                 ) VALUES (?1, 'nq.provider_acquisition_intent.v1', ?2, ?3, ?4, ?5,
+                           ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    intent.intent_id,
+                    intent.acquisition_id,
+                    intent.intake_id,
+                    intent.authority_occurrence_ref,
+                    intent.authority_digest,
+                    intent.commitment_occurrence_ref,
+                    intent.commitment_digest,
+                    intent.acquisition_basis_digest,
+                    intent.intent.as_bytes(),
+                    intent.intent.digest(),
+                    now_utc(),
+                ],
+            )?;
+            false
+        };
+        let existing_event: Option<(String, String, Vec<u8>, String)> = transaction
+            .query_row(
+                "SELECT event_id, phase, event_json, event_digest
+                 FROM continuity_acquisition_events
+                 WHERE event_id = ?1 OR (intent_id = ?2 AND phase = ?3)",
+                params![event.event_id, event.intent_id, event.phase],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let event_replayed = if let Some((event_id, phase, bytes, digest)) = existing_event {
+            if event_id != event.event_id
+                || phase != event.phase
+                || bytes != event.event.as_bytes()
+                || digest != event.event.digest()
+            {
+                return Err(StoreError::ReplayConflict(
+                    "continuity acquisition event was reused for different bytes".into(),
+                ));
+            }
+            true
+        } else {
+            transaction.execute(
+                "INSERT INTO continuity_acquisition_events (
+                    event_id, intent_id, phase, event_json, event_digest, occurred_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    event.event_id,
+                    event.intent_id,
+                    event.phase,
+                    event.event.as_bytes(),
+                    event.event.digest(),
+                    event.occurred_at,
+                ],
+            )?;
+            false
+        };
+        transaction.commit()?;
+        Ok(if intent_replayed && event_replayed {
+            ExactContinuityCommit::Replayed
+        } else {
+            ExactContinuityCommit::Committed
+        })
+    }
+
+    /// Append one exact pre-invocation or completion event.
+    pub fn commit_continuity_acquisition_event(
+        &mut self,
+        input: &ContinuityAcquisitionEventInput,
+    ) -> Result<ExactContinuityCommit, StoreError> {
+        if !matches!(
+            input.phase.as_str(),
+            "provider_invocation_started" | "provider_intake_completed"
+        ) {
+            return Err(StoreError::Invariant(
+                "unsupported continuity acquisition event phase".into(),
+            ));
+        }
+        validate_digest("continuity event_id", &input.event_id)?;
+        validate_digest("continuity event digest", input.event.digest())?;
+        if input.event_id != input.event.digest() {
+            return Err(StoreError::Invariant(
+                "continuity event identity differs from exact canonical bytes".into(),
+            ));
+        }
+        let transaction = self.immediate_transaction()?;
+        let existing: Option<(String, String, Vec<u8>, String)> = transaction
+            .query_row(
+                "SELECT event_id, phase, event_json, event_digest
+                 FROM continuity_acquisition_events
+                 WHERE event_id = ?1 OR (intent_id = ?2 AND phase = ?3)",
+                params![input.event_id, input.intent_id, input.phase],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        if let Some((event_id, phase, bytes, digest)) = existing {
+            if event_id == input.event_id
+                && phase == input.phase
+                && bytes == input.event.as_bytes()
+                && digest == input.event.digest()
+            {
+                return Ok(ExactContinuityCommit::Replayed);
+            }
+            return Err(StoreError::ReplayConflict(
+                "continuity acquisition event was reused for different bytes".into(),
+            ));
+        }
+        transaction.execute(
+            "INSERT INTO continuity_acquisition_events (
+                event_id, intent_id, phase, event_json, event_digest, occurred_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                input.event_id,
+                input.intent_id,
+                input.phase,
+                input.event.as_bytes(),
+                input.event.digest(),
+                input.occurred_at,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(ExactContinuityCommit::Committed)
+    }
+
+    /// Reopen the exact continuity intent bound to one provider intake.
+    pub fn continuity_acquisition_intent_for_intake(
+        &self,
+        intake_id: &str,
+    ) -> Result<Option<ContinuityAcquisitionIntentRow>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT intent_id, acquisition_id, intake_id,
+                        authority_occurrence_ref, authority_digest,
+                        commitment_occurrence_ref, commitment_digest,
+                        acquisition_basis_digest, intent_json, intent_digest,
+                        committed_at
+                 FROM continuity_acquisition_intents WHERE intake_id = ?1",
+                [intake_id],
+                continuity_intent_row,
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    /// Return append-only event phases for one exact intent.
+    pub fn continuity_acquisition_event_phases(
+        &self,
+        intent_id: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT phase FROM continuity_acquisition_events
+             WHERE intent_id = ?1 ORDER BY event_sequence",
+        )?;
+        statement
+            .query_map([intent_id], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     /// Atomically append an admitted run, custody, report, detector results,
@@ -4340,6 +4763,47 @@ impl Store {
         result
     }
 
+    /// Create and verify the mandatory pre-upgrade backup of the exact
+    /// qualified schema-v5 store.
+    pub fn backup_v5_verified(
+        source: impl AsRef<Path>,
+        destination: impl AsRef<Path>,
+    ) -> Result<BackupArtifact, StoreError> {
+        let source_store = Self::open_v5_upgrade_source_read_only(source)?;
+        let destination = destination.as_ref();
+        if destination.exists() {
+            return Err(StoreError::Invariant(format!(
+                "backup destination already exists: {}",
+                destination.display()
+            )));
+        }
+        drop(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(destination)?,
+        );
+        let result = (|| {
+            let mut target =
+                Connection::open_with_flags(destination, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+            {
+                let backup = rusqlite::backup::Backup::new(&source_store.connection, &mut target)?;
+                backup.run_to_completion(64, std::time::Duration::from_millis(10), None)?;
+            }
+            drop(target);
+            drop(Self::open_v5_upgrade_source_read_only(destination)?);
+            Ok(BackupArtifact {
+                path: destination.to_path_buf(),
+                sha256: sha256_file(destination)?,
+                size_bytes: std::fs::metadata(destination)?.len(),
+            })
+        })();
+        if result.is_err() {
+            remove_database_artifact(destination);
+        }
+        result
+    }
+
     /// Explicitly migrate the exact qualified v0.1.0 schema-v3 store to v4.
     ///
     /// The caller must first create the verified backup named in `receipt`.
@@ -4574,16 +5038,16 @@ impl Store {
                  )
                  SELECT singleton, product, 5, ?1, initialized_at
                  FROM schema_metadata_v4",
-                [schema_artifact_digest()],
+                [SCHEMA_V5_ARTIFACT_DIGEST],
             )?;
             transaction.execute("DROP TABLE schema_metadata_v4", [])?;
             transaction.execute_batch(SCHEMA_METADATA_V5_TRIGGERS)?;
             transaction.execute_batch(SCHEMA_V4_TO_V5_DIAGNOSTIC_ARTIFACTS)?;
-            transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            transaction.pragma_update(None, "user_version", 5)?;
 
-            let expected = EXPECTED_SCHEMA_FINGERPRINT.as_ref().map_err(|error| {
+            let expected = EXPECTED_SCHEMA_V5_FINGERPRINT.as_ref().map_err(|error| {
                 StoreError::Integrity(format!(
-                    "compiled schema cannot be fingerprinted after migration: {error}"
+                    "compiled v5 schema cannot be fingerprinted after migration: {error}"
                 ))
             })?;
             let actual = schema_fingerprint(&transaction)?;
@@ -4609,8 +5073,126 @@ impl Store {
             validate_upgrade_receipts(&transaction)?;
             transaction.commit()?;
         }
+        validate_v5_upgrade_source_connection(&store.connection)?;
+        Ok(store)
+    }
+
+    /// Explicitly migrate the exact qualified schema-v5 store to schema v6.
+    ///
+    /// Existing history receives no synthetic continuity prerequisite. Only
+    /// acquisitions made through the new proof-bearing path populate the new
+    /// append-only tables.
+    #[allow(clippy::too_many_lines)]
+    pub fn upgrade_v5_to_v6(
+        path: impl AsRef<Path>,
+        receipt: &UpgradeReceiptInput,
+    ) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        validate_v5_to_v6_receipt(receipt)?;
+        let backup_path = Path::new(&receipt.backup_location);
+        if !backup_path.is_file() || sha256_file(backup_path)? != receipt.backup_digest {
+            return Err(StoreError::Invariant(
+                "v5-to-v6 migration requires the exact verified backup named by its receipt".into(),
+            ));
+        }
+        let source_metadata = std::fs::metadata(path)?;
+        let backup_metadata = std::fs::metadata(backup_path)?;
+        if std::fs::canonicalize(path)? == std::fs::canonicalize(backup_path)?
+            || (source_metadata.dev(), source_metadata.ino())
+                == (backup_metadata.dev(), backup_metadata.ino())
+        {
+            return Err(StoreError::Invariant(
+                "v5-to-v6 migration backup must be distinct from the source database".into(),
+            ));
+        }
+        let backup_store = Self::open_v5_upgrade_source_read_only(backup_path)?;
+        let backup_logical_digest = v5_logical_state_digest(&backup_store.connection)?;
+        let source_store = Self::open_v5_upgrade_source_read_only(path)?;
+        let source_logical_digest = v5_logical_state_digest(&source_store.connection)?;
+        if source_logical_digest != backup_logical_digest {
+            return Err(StoreError::Invariant(format!(
+                "v5-to-v6 migration backup logical state {backup_logical_digest} does not match source {source_logical_digest}"
+            )));
+        }
+        drop(source_store);
+        drop(backup_store);
+
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        configure_connection(&connection, false)?;
+        let mut store = Self {
+            connection,
+            path: Some(path.to_path_buf()),
+        };
+        validate_v5_upgrade_source_connection(&store.connection)?;
+        {
+            let transaction = store.immediate_transaction()?;
+            validate_v5_upgrade_source_connection(&transaction)?;
+            if sha256_file(backup_path)? != receipt.backup_digest {
+                return Err(StoreError::Invariant(
+                    "v5-to-v6 migration backup changed after preflight validation".into(),
+                ));
+            }
+            let locked_backup = Self::open_v5_upgrade_source_read_only(backup_path)?;
+            let locked_backup_digest = v5_logical_state_digest(&locked_backup.connection)?;
+            let locked_source_digest = v5_logical_state_digest(&transaction)?;
+            if locked_source_digest != locked_backup_digest {
+                return Err(StoreError::Invariant(format!(
+                    "v5-to-v6 migration backup logical state {locked_backup_digest} does not match locked source {locked_source_digest}"
+                )));
+            }
+            drop(locked_backup);
+
+            transaction.execute_batch(
+                "DROP TRIGGER immutable_schema_metadata_update;
+                 DROP TRIGGER immutable_schema_metadata_delete;
+                 ALTER TABLE schema_metadata RENAME TO schema_metadata_v5;",
+            )?;
+            transaction.execute_batch(SCHEMA_METADATA_V6)?;
+            transaction.execute(
+                "INSERT INTO schema_metadata (
+                    singleton, product, schema_version, schema_artifact_digest, initialized_at
+                 )
+                 SELECT singleton, product, 6, ?1, initialized_at
+                 FROM schema_metadata_v5",
+                [schema_artifact_digest()],
+            )?;
+            transaction.execute("DROP TABLE schema_metadata_v5", [])?;
+            transaction.execute_batch(SCHEMA_METADATA_V6_TRIGGERS)?;
+            transaction.execute_batch(SCHEMA_V5_TO_V6_CONTINUITY)?;
+            transaction.pragma_update(None, "user_version", 6)?;
+
+            let expected = EXPECTED_SCHEMA_FINGERPRINT.as_ref().map_err(|error| {
+                StoreError::Integrity(format!(
+                    "compiled v6 schema cannot be fingerprinted after migration: {error}"
+                ))
+            })?;
+            let actual = schema_fingerprint(&transaction)?;
+            if &actual != expected {
+                return Err(StoreError::Integrity(format!(
+                    "migrated v6 schema fingerprint {actual} differs from fresh v6 {expected}"
+                )));
+            }
+            validate_stored_digests(&transaction)?;
+            validate_upgrade_receipts(&transaction)?;
+            validate_all_admission_context_digests(&transaction)?;
+            validate_local_provider_admissions(&transaction)?;
+            validate_provider_intake_invariants(&transaction)?;
+            validate_refusal_invariants(&transaction)?;
+            validate_run_results(&transaction)?;
+            validate_evaluation_refusal_invariants(&transaction)?;
+            validate_diagnostic_artifact_invariants(&transaction)?;
+            validate_status_sequence_lower_bound(&transaction)?;
+            validate_projection_invariants(&transaction)?;
+            let mut committed_receipt = receipt.clone();
+            committed_receipt.finished_at = now_utc();
+            insert_upgrade_receipt(&transaction, &committed_receipt)?;
+            validate_upgrade_receipts(&transaction)?;
+            transaction.commit()?;
+        }
         store.validate()?;
-        configure_connection(&store.connection, true)?;
         Ok(store)
     }
 
@@ -5402,6 +5984,7 @@ fn insert_upgrade_receipt(
     match (receipt.from_schema_version, receipt.to_schema_version) {
         (3, 4) => validate_v3_to_v4_receipt(receipt)?,
         (4, 5) => validate_v4_to_v5_receipt(receipt)?,
+        (5, 6) => validate_v5_to_v6_receipt(receipt)?,
         _ => {}
     }
     transaction.execute(
@@ -5518,6 +6101,44 @@ fn validate_v4_to_v5_receipt(receipt: &UpgradeReceiptInput) -> Result<(), StoreE
     Ok(())
 }
 
+fn validate_v5_to_v6_receipt(receipt: &UpgradeReceiptInput) -> Result<(), StoreError> {
+    if receipt.from_schema_version != 5 || receipt.to_schema_version != 6 {
+        return Err(StoreError::Invariant(
+            "v5-to-v6 migration receipt names the wrong version transition".into(),
+        ));
+    }
+    validate_digest("binary_digest", &receipt.binary_digest)?;
+    validate_digest("backup_digest", &receipt.backup_digest)?;
+    validate_upgrade_receipt_times(receipt)?;
+    let expected_migrations =
+        CanonicalDocument::from_serializable(&["schema_v5_to_v6_continuity_prerequisites"])?;
+    if receipt.migrations != expected_migrations {
+        return Err(StoreError::Invariant(
+            "v5-to-v6 migration receipt does not name the exact migration vocabulary".into(),
+        ));
+    }
+    if receipt.result != "migrated" {
+        return Err(StoreError::Invariant(
+            "v5-to-v6 migration receipt result must be exactly migrated".into(),
+        ));
+    }
+    let expected_verification = CanonicalDocument::from_serializable(&serde_json::json!({
+        "integrity": "ok",
+        "source_schema_version": 5,
+        "source_schema_artifact_digest": SCHEMA_V5_ARTIFACT_DIGEST,
+        "backup_reopened": true,
+        "historical_continuity_prerequisites": "absent_not_synthesized",
+        "continuity_intents_synthesized": false,
+    }))?;
+    if receipt.verification != expected_verification {
+        return Err(StoreError::Invariant(
+            "v5-to-v6 migration receipt verification does not match the exact closed vocabulary"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_upgrade_receipts(connection: &Connection) -> Result<(), StoreError> {
     let mut statement = connection.prepare(
         "SELECT receipt_id, from_schema_version, to_schema_version,
@@ -5571,6 +6192,8 @@ fn validate_upgrade_receipts(connection: &Connection) -> Result<(), StoreError> 
             (3, 4) => validate_v3_to_v4_receipt(&receipt)
                 .map_err(|error| StoreError::Integrity(format!("{receipt_id}: {error}")))?,
             (4, 5) => validate_v4_to_v5_receipt(&receipt)
+                .map_err(|error| StoreError::Integrity(format!("{receipt_id}: {error}")))?,
+            (5, 6) => validate_v5_to_v6_receipt(&receipt)
                 .map_err(|error| StoreError::Integrity(format!("{receipt_id}: {error}")))?,
             _ => {}
         }
@@ -6701,6 +7324,76 @@ fn validate_v4_upgrade_source_connection(connection: &Connection) -> Result<(), 
     validate_projection_invariants(connection)
 }
 
+fn validate_v5_upgrade_source_connection(connection: &Connection) -> Result<(), StoreError> {
+    let version = pragma_i64(connection, "user_version")?;
+    if version != 5 {
+        return Err(StoreError::SchemaVersionMismatch {
+            found: version,
+            supported: 5,
+        });
+    }
+    let application_id = pragma_i64(connection, "application_id")?;
+    if application_id != APPLICATION_ID {
+        return Err(StoreError::ApplicationIdMismatch {
+            found: application_id,
+            expected: APPLICATION_ID,
+        });
+    }
+    let metadata: (i64, String) = connection.query_row(
+        "SELECT schema_version, schema_artifact_digest
+         FROM schema_metadata WHERE singleton = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if metadata.0 != 5 || metadata.1 != SCHEMA_V5_ARTIFACT_DIGEST {
+        return Err(StoreError::Integrity(
+            "schema-v5 metadata does not identify the exact qualified schema artifact".into(),
+        ));
+    }
+    if sha256_digest(SCHEMA_V5.as_bytes()) != SCHEMA_V5_ARTIFACT_DIGEST {
+        return Err(StoreError::Integrity(
+            "compiled schema_v5.sql does not match its pinned digest".into(),
+        ));
+    }
+    let quick_check: String =
+        connection.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+    if quick_check != "ok" {
+        return Err(StoreError::Integrity(quick_check));
+    }
+    let foreign_key_failures: i64 =
+        connection.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })?;
+    if foreign_key_failures != 0 {
+        return Err(StoreError::Integrity(format!(
+            "{foreign_key_failures} schema-v5 foreign-key violations"
+        )));
+    }
+    let expected = EXPECTED_SCHEMA_V5_FINGERPRINT.as_ref().map_err(|error| {
+        StoreError::Integrity(format!(
+            "compiled v5 schema cannot be fingerprinted: {error}"
+        ))
+    })?;
+    let actual = schema_fingerprint(connection)?;
+    if &actual != expected {
+        return Err(StoreError::Integrity(format!(
+            "schema-v5 definition fingerprint {actual} differs from exact qualified v5 {expected}"
+        )));
+    }
+    validate_stored_digests(connection)?;
+    validate_upgrade_receipts(connection)?;
+    validate_all_admission_context_digests(connection)?;
+    validate_local_provider_admissions(connection)?;
+    validate_provider_intake_invariants(connection)?;
+    validate_refusal_invariants(connection)?;
+    validate_run_results(connection)?;
+    validate_evaluation_refusal_invariants(connection)?;
+    validate_diagnostic_artifact_invariants(connection)?;
+    validate_admitted_report_associations_connection(connection)?;
+    validate_status_sequence_lower_bound(connection)?;
+    validate_projection_invariants(connection)
+}
+
 fn validate_admitted_report_associations_connection(
     connection: &Connection,
 ) -> Result<(), StoreError> {
@@ -6787,6 +7480,10 @@ fn v3_logical_state_digest(connection: &Connection) -> Result<String, StoreError
 
 fn v4_logical_state_digest(connection: &Connection) -> Result<String, StoreError> {
     logical_state_digest(connection, b"nq.schema_v4.logical_state.v1\0")
+}
+
+fn v5_logical_state_digest(connection: &Connection) -> Result<String, StoreError> {
+    logical_state_digest(connection, b"nq.schema_v5.logical_state.v1\0")
 }
 
 fn logical_state_digest(connection: &Connection, domain: &[u8]) -> Result<String, StoreError> {
@@ -6877,6 +7574,8 @@ fn validate_required_objects(connection: &Connection) -> Result<(), StoreError> 
         "instance_binding_events",
         "binding_materialization_events",
         "watcher_runs",
+        "continuity_acquisition_intents",
+        "continuity_acquisition_events",
         "provider_intake_attempts",
         "local_watcher_provider_intakes",
         "legacy_v3_watcher_run_intake_gaps",
@@ -7068,6 +7767,178 @@ fn stored_provider_intake_row(
         source_capability_grant_json: row.get(39)?,
         source_lock_json: row.get(40)?,
     })
+}
+
+fn continuity_intent_row(
+    row: &rusqlite::Row<'_>,
+) -> Result<ContinuityAcquisitionIntentRow, rusqlite::Error> {
+    Ok(ContinuityAcquisitionIntentRow {
+        intent_id: row.get(0)?,
+        acquisition_id: row.get(1)?,
+        intake_id: row.get(2)?,
+        authority_occurrence_ref: row.get(3)?,
+        authority_digest: row.get(4)?,
+        commitment_occurrence_ref: row.get(5)?,
+        commitment_digest: row.get(6)?,
+        acquisition_basis_digest: row.get(7)?,
+        intent_json: row.get(8)?,
+        intent_digest: row.get(9)?,
+        committed_at: row.get(10)?,
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn validate_continuity_acquisition_invariants(connection: &Connection) -> Result<(), StoreError> {
+    let mut intents = connection.prepare(
+        "SELECT intent_id, acquisition_id, intake_id,
+                authority_occurrence_ref, authority_digest,
+                commitment_occurrence_ref, commitment_digest,
+                acquisition_basis_digest, intent_json, intent_digest,
+                committed_at
+         FROM continuity_acquisition_intents ORDER BY intent_id",
+    )?;
+    let rows = intents
+        .query_map([], continuity_intent_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(intents);
+    for row in rows {
+        let document =
+            CanonicalDocument::from_canonical_bytes(row.intent_json.clone()).map_err(|error| {
+                StoreError::Integrity(format!("continuity intent {}: {error}", row.intent_id))
+            })?;
+        if document.digest() != row.intent_digest {
+            return Err(StoreError::Integrity(format!(
+                "continuity intent {} bytes hash to {}, not stored {}",
+                row.intent_id,
+                document.digest(),
+                row.intent_digest
+            )));
+        }
+        let value: Value = serde_json::from_slice(document.as_bytes()).map_err(|error| {
+            StoreError::Integrity(format!("continuity intent {} JSON: {error}", row.intent_id))
+        })?;
+        let text = |pointer: &str| -> Result<&str, StoreError> {
+            value
+                .pointer(pointer)
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    StoreError::Integrity(format!(
+                        "continuity intent {} lacks string {pointer}",
+                        row.intent_id
+                    ))
+                })
+        };
+        let expected_authority = format!("sha256:{}", text("/carrier/authority/payload_digest")?);
+        let expected_commitment = format!("sha256:{}", text("/carrier/commitment/payload_digest")?);
+        let expected_basis = format!("sha256:{}", text("/basis_digest")?);
+        if text("/schema")? != "nq.provider_acquisition_intent.v1"
+            || text("/intent_id")? != row.intent_id
+            || text("/basis/acquisition_id")? != row.acquisition_id
+            || text("/intake_id")? != row.intake_id
+            || row.acquisition_id != row.intake_id
+            || text("/carrier/authority/payload/authority_occurrence_ref")?
+                != row.authority_occurrence_ref
+            || expected_authority != row.authority_digest
+            || text("/carrier/commitment/payload/commitment_occurrence_ref")?
+                != row.commitment_occurrence_ref
+            || expected_commitment != row.commitment_digest
+            || expected_basis != row.acquisition_basis_digest
+            || text("/carrier/commitment/payload/acquisition_id")? != row.acquisition_id
+            || text("/carrier/commitment/payload/acquisition_basis_digest")?
+                != text("/basis_digest")?
+        {
+            return Err(StoreError::Integrity(format!(
+                "continuity intent {} columns do not match its exact prerequisite bytes",
+                row.intent_id
+            )));
+        }
+
+        let mut events = connection.prepare(
+            "SELECT event_id, phase, event_json, event_digest
+             FROM continuity_acquisition_events
+             WHERE intent_id = ?1 ORDER BY event_sequence",
+        )?;
+        let event_rows = events
+            .query_map([&row.intent_id], |event| {
+                Ok((
+                    event.get::<_, String>(0)?,
+                    event.get::<_, String>(1)?,
+                    event.get::<_, Vec<u8>>(2)?,
+                    event.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        if !matches!(
+            event_rows
+                .iter()
+                .map(|item| item.1.as_str())
+                .collect::<Vec<_>>()
+                .as_slice(),
+            ["provider_invocation_started"]
+                | ["provider_invocation_started", "provider_intake_completed"]
+        ) {
+            return Err(StoreError::Integrity(format!(
+                "continuity intent {} has an invalid acquisition phase prefix",
+                row.intent_id
+            )));
+        }
+        for (event_id, phase, bytes, digest) in &event_rows {
+            let event =
+                CanonicalDocument::from_canonical_bytes(bytes.clone()).map_err(|error| {
+                    StoreError::Integrity(format!("continuity event {event_id}: {error}"))
+                })?;
+            let event_value: Value = serde_json::from_slice(event.as_bytes()).map_err(|error| {
+                StoreError::Integrity(format!("continuity event {event_id} JSON: {error}"))
+            })?;
+            if event.digest() != digest
+                || event_id != digest
+                || event_value.pointer("/intent_id").and_then(Value::as_str)
+                    != Some(row.intent_id.as_str())
+                || event_value.pointer("/phase").and_then(Value::as_str) != Some(phase.as_str())
+                || event_value.pointer("/intake_id").and_then(Value::as_str)
+                    != Some(row.intake_id.as_str())
+            {
+                return Err(StoreError::Integrity(format!(
+                    "continuity event {event_id} does not bind its exact intent/phase/intake"
+                )));
+            }
+        }
+        if event_rows.len() == 2 {
+            let intake_coordinates: Option<(String, String, String)> = connection
+                .query_row(
+                    "SELECT p.attempt_id, p.request_id, l.run_id
+                     FROM provider_intake_attempts p
+                     JOIN local_watcher_provider_intakes l USING (intake_id)
+                     WHERE p.intake_id = ?1",
+                    [&row.intake_id],
+                    |found| Ok((found.get(0)?, found.get(1)?, found.get(2)?)),
+                )
+                .optional()?;
+            let acknowledgment_present: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM provider_intake_acknowledgments WHERE intake_id = ?1)",
+                [&row.intake_id],
+                |found| found.get(0),
+            )?;
+            let expected_attempt = text("/attempt_id")?;
+            let expected_request = text("/request/request_id")?;
+            let expected_run = text("/run_id")?;
+            if intake_coordinates
+                .as_ref()
+                .is_none_or(|(attempt, request, run)| {
+                    attempt != expected_attempt
+                        || request != expected_request
+                        || run != expected_run
+                })
+                || !acknowledgment_present
+            {
+                return Err(StoreError::Integrity(format!(
+                    "completed continuity intent {} lacks exact intake/run/request custody",
+                    row.intent_id
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Prove that provider-intake custody is exact and every run is explicitly
@@ -10435,6 +11306,30 @@ mod tests {
                 "backup_reopened": true,
                 "historical_diagnostic_artifacts": "no_durable_commitments",
                 "diagnostic_artifacts_synthesized": false,
+            })),
+        }
+    }
+
+    fn exact_v5_to_v6_receipt(backup: &BackupArtifact) -> UpgradeReceiptInput {
+        UpgradeReceiptInput {
+            receipt_id: "upgrade-v5-v6-continuity".to_owned(),
+            from_schema_version: 5,
+            to_schema_version: 6,
+            migrations: document(json!(["schema_v5_to_v6_continuity_prerequisites"])),
+            binary_digest: digest("migration-binary-v6"),
+            backup_digest: backup.sha256.clone(),
+            backup_location: backup.path.to_string_lossy().into_owned(),
+            started_at: "2026-08-24T12:00:00Z".to_owned(),
+            finished_at: "2026-08-24T12:00:01Z".to_owned(),
+            result: "migrated".to_owned(),
+            operator_identity: document(json!({"uid": 991})),
+            verification: document(json!({
+                "integrity": "ok",
+                "source_schema_version": 5,
+                "source_schema_artifact_digest": SCHEMA_V5_ARTIFACT_DIGEST,
+                "backup_reopened": true,
+                "historical_continuity_prerequisites": "absent_not_synthesized",
+                "continuity_intents_synthesized": false,
             })),
         }
     }
@@ -15522,6 +16417,7 @@ mod tests {
         let directory = tempdir().expect("temporary directory");
         let source = directory.path().join("source-v4.db");
         let backup_path = directory.path().join("backup-v4.db");
+        let backup_v5_path = directory.path().join("backup-v5.db");
         write_empty_exact_v4(&source);
         let backup = Store::backup_v4_verified(&source, &backup_path).expect("verified v4 backup");
         let receipt = exact_v4_to_v5_receipt(&backup);
@@ -15546,6 +16442,129 @@ mod tests {
             commitment_count, 0,
             "migration synthesized artifacts from schema-v4 absence"
         );
-        migrated.validate().expect("migrated v5 validates");
+        validate_v5_upgrade_source_connection(&migrated.connection)
+            .expect("migrated exact v5 validates");
+        drop(migrated);
+
+        let backup_v5 =
+            Store::backup_v5_verified(&source, &backup_v5_path).expect("verified v5 backup");
+        let receipt_v6 = exact_v5_to_v6_receipt(&backup_v5);
+        let current =
+            Store::upgrade_v5_to_v6(&source, &receipt_v6).expect("exact v5 upgrades to v6");
+        current.validate().expect("migrated v6 validates");
+        let continuity_count: i64 = current
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM continuity_acquisition_intents",
+                [],
+                |row| row.get(0),
+            )
+            .expect("continuity intent count");
+        assert_eq!(
+            continuity_count, 0,
+            "migration synthesized authority prerequisites for historical acquisitions"
+        );
+    }
+
+    #[test]
+    fn continuity_intent_and_dispatch_fence_commit_atomically_and_replay_exactly() {
+        let mut store = Store::initialize_in_memory().expect("store initializes");
+        let intent_id = digest("continuity-intent");
+        let acquisition_id = "acquisition-a";
+        let authority_occurrence = "authority-a";
+        let commitment_occurrence = "commitment-a";
+        let authority_payload_digest = "a".repeat(64);
+        let commitment_payload_digest = "b".repeat(64);
+        let basis_digest = "c".repeat(64);
+        let intent = document(json!({
+            "schema": "nq.provider_acquisition_intent.v1",
+            "intent_id": intent_id,
+            "basis": {
+                "schema": "nq.continuity_acquisition_basis.v1",
+                "acquisition_id": acquisition_id,
+                "nq_audience": "nq:fixture.primary",
+                "watcher_instance_id": "fixture.primary",
+                "watcher_config_digest": "d".repeat(64),
+                "authority_occurrence_ref": authority_occurrence,
+                "authority_digest": authority_payload_digest,
+                "edge": {
+                    "subject_ref": "observer:test-office",
+                    "relation": "substrate_incarnation",
+                    "predecessor_ref": "substrate:test-a",
+                    "successor_ref": "substrate:test-b"
+                }
+            },
+            "basis_digest": basis_digest,
+            "carrier": {
+                "schema": "standing.continuity_acquisition_bundle.v1",
+                "authority": {
+                    "schema": "standing.signed_continuity_authority.v1",
+                    "payload": {"authority_occurrence_ref": authority_occurrence},
+                    "payload_digest": authority_payload_digest
+                },
+                "commitment": {
+                    "schema": "standing.signed_continuity_acquisition_commitment.v1",
+                    "payload": {
+                        "commitment_occurrence_ref": commitment_occurrence,
+                        "acquisition_id": acquisition_id,
+                        "acquisition_basis_digest": basis_digest
+                    },
+                    "payload_digest": commitment_payload_digest
+                }
+            },
+            "intake_id": acquisition_id,
+            "attempt_id": "attempt-a",
+            "run_id": "run-a",
+            "request": {},
+            "provider": {},
+            "origin_carrier": "stdio",
+            "checkpoint_contract_digest": digest("checkpoint")
+        }));
+        let input = ContinuityAcquisitionIntentInput {
+            intent_id: intent_id.clone(),
+            acquisition_id: acquisition_id.into(),
+            intake_id: acquisition_id.into(),
+            authority_occurrence_ref: authority_occurrence.into(),
+            authority_digest: format!("sha256:{authority_payload_digest}"),
+            commitment_occurrence_ref: commitment_occurrence.into(),
+            commitment_digest: format!("sha256:{commitment_payload_digest}"),
+            acquisition_basis_digest: format!("sha256:{basis_digest}"),
+            intent,
+        };
+        let event = document(json!({
+            "schema": "nq.continuity_acquisition_event.v1",
+            "intent_id": intent_id,
+            "phase": "provider_invocation_started",
+            "intake_id": acquisition_id,
+            "authority_occurrence_ref": authority_occurrence,
+            "commitment_occurrence_ref": commitment_occurrence,
+        }));
+        let event_input = ContinuityAcquisitionEventInput {
+            event_id: event.digest().to_owned(),
+            intent_id: intent_id.clone(),
+            phase: "provider_invocation_started".into(),
+            event,
+            occurred_at: TIME.into(),
+        };
+        assert_eq!(
+            store
+                .commit_continuity_dispatch(&input, &event_input)
+                .expect("first exact dispatch commits"),
+            ExactContinuityCommit::Committed
+        );
+        assert_eq!(
+            store
+                .commit_continuity_dispatch(&input, &event_input)
+                .expect("exact replay converges"),
+            ExactContinuityCommit::Replayed
+        );
+        store.validate().expect("exact dispatch reopens");
+
+        let mut substituted = input.clone();
+        substituted.authority_occurrence_ref = "authority-b".into();
+        assert!(matches!(
+            store.commit_continuity_dispatch(&substituted, &event_input),
+            Err(StoreError::ReplayConflict(_))
+        ));
     }
 }

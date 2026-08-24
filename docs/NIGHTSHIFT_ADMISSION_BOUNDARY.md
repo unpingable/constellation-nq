@@ -18,7 +18,10 @@ nq --config CONFIG --json diagnostics qualify ARTIFACT_ID
 ```
 
 The read-only operation reopens the exact local history and emits
-`nq.diagnostic_admission_provenance.v1`. The carrier binds:
+`nq.diagnostic_admission_provenance.v1` for historical ordinary acquisitions,
+or `nq.diagnostic_admission_provenance.v2` when the original acquisition
+committed a signed Standing continuity prerequisite before provider
+invocation. The common carrier binds:
 
 - the NQ store-genesis source identity;
 - the exact v2 artifact identity, canonical-byte digest, and length;
@@ -35,6 +38,14 @@ observation or refresh any evidence time.
 The carrier establishes historical evidence eligibility only. Nightshift owns
 observation composition and currentness. NQ-NG grants no standing,
 authorization, action, or permission to execute through this boundary.
+
+The v2 form additionally embeds the exact signed Standing authority and
+acquisition commitment, NQ-owned acquisition basis and intent, and the closed
+invocation-start/intake-complete phase chain. See
+`CONTINUITY_AUTHORITY_CARRIER_V1.md`. It cannot be retrofitted to a historical
+v1 acquisition. In the absence of independently authenticated substrate-origin
+evidence, Nightshift retains the carrier but leaves physical attribution
+unresolved.
 
 ## Relation to Classic NQ
 

@@ -200,6 +200,49 @@ pub struct InstanceArg {
 pub enum DiagnosticsCommand {
     /// Collect, evaluate, and emit one exact supported diagnostic artifact.
     Execute(InstanceArg),
+    /// Derive the exact static basis that Standing must sign before invocation.
+    ContinuityBasis {
+        /// Configured watcher instance.
+        instance_id: String,
+        /// Standing-signed exact continuity authority JSON.
+        #[arg(long)]
+        authority: PathBuf,
+        /// Caller-preallocated provider-intake/acquisition identity.
+        #[arg(long)]
+        acquisition_id: String,
+        /// Pinned Standing instance identity (raw SHA-256 hex).
+        #[arg(long)]
+        standing_instance: String,
+        /// Pinned Standing audience for this NQ workload identity.
+        #[arg(long)]
+        nq_audience: String,
+        /// Pinned Standing signing-key identity.
+        #[arg(long)]
+        standing_key_id: String,
+        /// File containing the pinned 32-byte Ed25519 public key in hex.
+        #[arg(long)]
+        standing_public_key: PathBuf,
+    },
+    /// Execute only after verifying the exact Standing authority/commitment bundle.
+    ExecuteContinuity {
+        /// Configured watcher instance.
+        instance_id: String,
+        /// Exact signed Standing acquisition bundle JSON.
+        #[arg(long)]
+        carrier: PathBuf,
+        /// Pinned Standing instance identity (raw SHA-256 hex).
+        #[arg(long)]
+        standing_instance: String,
+        /// Pinned Standing audience for this NQ workload identity.
+        #[arg(long)]
+        nq_audience: String,
+        /// Pinned Standing signing-key identity.
+        #[arg(long)]
+        standing_key_id: String,
+        /// File containing the pinned 32-byte Ed25519 public key in hex.
+        #[arg(long)]
+        standing_public_key: PathBuf,
+    },
     /// Inspect one immutable artifact commitment without changing it.
     Inspect {
         /// Exact contract-owned artifact identity.
@@ -601,6 +644,44 @@ async fn diagnostics_command(
         DiagnosticsCommand::Execute(instance) => {
             diagnostic_execute(config_path, &instance.instance_id).await
         }
+        DiagnosticsCommand::ContinuityBasis {
+            instance_id,
+            authority,
+            acquisition_id,
+            standing_instance,
+            nq_audience,
+            standing_key_id,
+            standing_public_key,
+        } => diagnostic_continuity_basis(
+            config_path,
+            &instance_id,
+            &authority,
+            &acquisition_id,
+            &standing_instance,
+            &nq_audience,
+            &standing_key_id,
+            &standing_public_key,
+            json_output,
+        ),
+        DiagnosticsCommand::ExecuteContinuity {
+            instance_id,
+            carrier,
+            standing_instance,
+            nq_audience,
+            standing_key_id,
+            standing_public_key,
+        } => {
+            diagnostic_execute_continuity(
+                config_path,
+                &instance_id,
+                &carrier,
+                &standing_instance,
+                &nq_audience,
+                &standing_key_id,
+                &standing_public_key,
+            )
+            .await
+        }
         DiagnosticsCommand::Inspect { artifact_id } => {
             diagnostic_inspect(config_path, &artifact_id, json_output)
         }
@@ -619,7 +700,7 @@ fn diagnostic_qualify(config_path: &Path, artifact_id: &str, json_output: bool) 
     let config = NqConfig::load(config_path)?;
     let artifact_id = nq_protocol::Sha256Digest::parse(artifact_id.to_owned())?;
     let store = Store::open_read_only(&config.database_path)?;
-    let provenance = nq_core::qualify_diagnostic_admission(&store, &artifact_id)?;
+    let provenance = nq_core::qualify_diagnostic_admission_supported(&store, &artifact_id)?;
     print_value(&provenance, json_output)
 }
 
@@ -632,6 +713,91 @@ async fn diagnostic_execute(config_path: &Path, instance_id: &str) -> Result<()>
     let artifact = tokio::task::spawn_blocking(move || {
         let mut engine = nq_core::CollectionEngine::open(&config)?;
         engine.diagnostic_execute(&watcher)
+    })
+    .await??;
+    std::io::stdout()
+        .lock()
+        .write_all(&artifact.canonical_bytes()?)?;
+    Ok(())
+}
+
+fn continuity_verifier(path: &Path) -> Result<ed25519_dalek::VerifyingKey> {
+    let bytes = read_bounded_artifact_file(path)?;
+    let value = std::str::from_utf8(&bytes).context("Standing public key is not UTF-8")?;
+    nq_core::parse_verifying_key(value).map_err(Into::into)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn diagnostic_continuity_basis(
+    config_path: &Path,
+    instance_id: &str,
+    authority_path: &Path,
+    acquisition_id: &str,
+    standing_instance: &str,
+    nq_audience: &str,
+    standing_key_id: &str,
+    public_key_path: &Path,
+    json_output: bool,
+) -> Result<()> {
+    let config = NqConfig::load(config_path)?;
+    let watcher = config
+        .watcher(instance_id)
+        .with_context(|| format!("unknown instance {instance_id}"))?;
+    let authority: nq_core::SignedContinuityAuthorityV1 =
+        serde_json::from_slice(&read_bounded_artifact_file(authority_path)?)
+            .context("decode signed Standing continuity authority")?;
+    let verifier = continuity_verifier(public_key_path)?;
+    authority.verify_for_watcher(
+        watcher,
+        standing_instance,
+        nq_audience,
+        standing_key_id,
+        &verifier,
+    )?;
+    let basis = nq_core::ContinuityAcquisitionBasisV1::for_watcher(
+        watcher,
+        acquisition_id.to_owned(),
+        &authority,
+    )?;
+    let export = basis.export()?;
+    if json_output {
+        print_value(&export, true)
+    } else {
+        std::io::stdout()
+            .lock()
+            .write_all(&nq_protocol::canonical_json_bytes(&export)?)?;
+        Ok(())
+    }
+}
+
+async fn diagnostic_execute_continuity(
+    config_path: &Path,
+    instance_id: &str,
+    carrier_path: &Path,
+    standing_instance: &str,
+    nq_audience: &str,
+    standing_key_id: &str,
+    public_key_path: &Path,
+) -> Result<()> {
+    let config = NqConfig::load(config_path)?;
+    let watcher = config
+        .watcher(instance_id)
+        .with_context(|| format!("unknown instance {instance_id}"))?
+        .clone();
+    let carrier: nq_core::ContinuityAcquisitionCarrierV1 =
+        serde_json::from_slice(&read_bounded_artifact_file(carrier_path)?)
+            .context("decode signed Standing continuity acquisition bundle")?;
+    let verifier = continuity_verifier(public_key_path)?;
+    let verified_carrier = carrier.verify_for_watcher(
+        &watcher,
+        standing_instance,
+        nq_audience,
+        standing_key_id,
+        &verifier,
+    )?;
+    let artifact = tokio::task::spawn_blocking(move || {
+        let mut engine = nq_core::CollectionEngine::open(&config)?;
+        engine.diagnostic_execute_with_continuity(&watcher, &verified_carrier)
     })
     .await??;
     std::io::stdout()
@@ -1408,18 +1574,18 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                     let v4_receipt = UpgradeReceiptInput {
                         receipt_id: uuid::Uuid::new_v4().to_string(),
                         from_schema_version: 4,
-                        to_schema_version: u32::try_from(nq_store::SCHEMA_VERSION)?,
+                        to_schema_version: 5,
                         migrations: CanonicalDocument::from_serializable(&[
                             "schema_v4_to_v5_diagnostic_artifacts",
                         ])?,
-                        binary_digest,
+                        binary_digest: binary_digest.clone(),
                         backup_digest: v4_artifact.sha256.clone(),
                         backup_location: v4_backup.display().to_string(),
                         started_at: v4_started_at.to_rfc3339(),
                         // The store owns the durable terminal timestamp.
                         finished_at: v4_started_at.to_rfc3339(),
                         result: "migrated".into(),
-                        operator_identity,
+                        operator_identity: operator_identity.clone(),
                         verification: CanonicalDocument::from_serializable(&json!({
                             "integrity": "ok",
                             "source_schema_version": 4,
@@ -1429,8 +1595,13 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                             "diagnostic_artifacts_synthesized": false,
                         }))?,
                     };
-                    let store = Store::upgrade_v4_to_v5(&config.database_path, &v4_receipt)?;
-                    store.validate()?;
+                    drop(Store::upgrade_v4_to_v5(&config.database_path, &v4_receipt)?);
+                    let (v5_backup, v5_backup_digest) = upgrade_v5_to_current(
+                        &config.database_path,
+                        &backup_directory,
+                        &binary_digest,
+                        &operator_identity,
+                    )?;
                     print_value(
                         &json!({
                             "result": "migrated",
@@ -1440,6 +1611,8 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                             "v3_backup_digest": v3_artifact.sha256,
                             "v4_backup": v4_backup,
                             "v4_backup_digest": v4_artifact.sha256,
+                            "v5_backup": v5_backup,
+                            "v5_backup_digest": v5_backup_digest,
                             "historical_provider_intake": "explicit_gap_only",
                             "historical_diagnostic_artifacts": "no_durable_commitments",
                         }),
@@ -1457,18 +1630,18 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                     let receipt = UpgradeReceiptInput {
                         receipt_id: uuid::Uuid::new_v4().to_string(),
                         from_schema_version: 4,
-                        to_schema_version: u32::try_from(nq_store::SCHEMA_VERSION)?,
+                        to_schema_version: 5,
                         migrations: CanonicalDocument::from_serializable(&[
                             "schema_v4_to_v5_diagnostic_artifacts",
                         ])?,
-                        binary_digest,
+                        binary_digest: binary_digest.clone(),
                         backup_digest: artifact.sha256.clone(),
                         backup_location: backup.display().to_string(),
                         started_at: started_at.to_rfc3339(),
                         // The store owns the durable terminal timestamp.
                         finished_at: started_at.to_rfc3339(),
                         result: "migrated".into(),
-                        operator_identity,
+                        operator_identity: operator_identity.clone(),
                         verification: CanonicalDocument::from_serializable(&json!({
                             "integrity": "ok",
                             "source_schema_version": 4,
@@ -1478,8 +1651,13 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                             "diagnostic_artifacts_synthesized": false,
                         }))?,
                     };
-                    let store = Store::upgrade_v4_to_v5(&config.database_path, &receipt)?;
-                    store.validate()?;
+                    drop(Store::upgrade_v4_to_v5(&config.database_path, &receipt)?);
+                    let (v5_backup, v5_backup_digest) = upgrade_v5_to_current(
+                        &config.database_path,
+                        &backup_directory,
+                        &binary_digest,
+                        &operator_identity,
+                    )?;
                     print_value(
                         &json!({
                             "result": "migrated",
@@ -1487,7 +1665,28 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                             "schema_version": nq_store::SCHEMA_VERSION,
                             "backup": backup,
                             "backup_digest": artifact.sha256,
+                            "v5_backup": v5_backup,
+                            "v5_backup_digest": v5_backup_digest,
                             "historical_diagnostic_artifacts": "no_durable_commitments",
+                        }),
+                        json_output,
+                    )
+                }
+                5 => {
+                    let (backup, backup_digest) = upgrade_v5_to_current(
+                        &config.database_path,
+                        &backup_directory,
+                        &binary_digest,
+                        &operator_identity,
+                    )?;
+                    print_value(
+                        &json!({
+                            "result": "migrated",
+                            "from_schema_version": 5,
+                            "schema_version": nq_store::SCHEMA_VERSION,
+                            "backup": backup,
+                            "backup_digest": backup_digest,
+                            "historical_continuity_prerequisites": "absent_not_synthesized",
                         }),
                         json_output,
                     )
@@ -1501,6 +1700,44 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
             }
         }
     }
+}
+
+fn upgrade_v5_to_current(
+    database_path: &Path,
+    backup_directory: &Path,
+    binary_digest: &str,
+    operator_identity: &CanonicalDocument,
+) -> Result<(PathBuf, String)> {
+    let started_at = chrono::Utc::now();
+    let temporary = backup_directory.join(format!(".nq-upgrade-{}.db", uuid::Uuid::new_v4()));
+    let artifact = Store::backup_v5_verified(database_path, &temporary)?;
+    let backup = finalize_upgrade_backup(&temporary, backup_directory, &artifact.sha256)?;
+    let receipt = UpgradeReceiptInput {
+        receipt_id: uuid::Uuid::new_v4().to_string(),
+        from_schema_version: 5,
+        to_schema_version: 6,
+        migrations: CanonicalDocument::from_serializable(&[
+            "schema_v5_to_v6_continuity_prerequisites",
+        ])?,
+        binary_digest: binary_digest.to_owned(),
+        backup_digest: artifact.sha256.clone(),
+        backup_location: backup.display().to_string(),
+        started_at: started_at.to_rfc3339(),
+        finished_at: started_at.to_rfc3339(),
+        result: "migrated".into(),
+        operator_identity: operator_identity.clone(),
+        verification: CanonicalDocument::from_serializable(&json!({
+            "integrity": "ok",
+            "source_schema_version": 5,
+            "source_schema_artifact_digest": nq_store::SCHEMA_V5_ARTIFACT_DIGEST,
+            "backup_reopened": true,
+            "historical_continuity_prerequisites": "absent_not_synthesized",
+            "continuity_intents_synthesized": false,
+        }))?,
+    };
+    let store = Store::upgrade_v5_to_v6(database_path, &receipt)?;
+    store.validate()?;
+    Ok((backup, artifact.sha256))
 }
 
 fn findings_command(config_path: &Path, command: &FindingsCommand) -> Result<()> {

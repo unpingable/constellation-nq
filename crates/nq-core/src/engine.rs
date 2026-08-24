@@ -21,14 +21,16 @@ use nq_protocol::{
 };
 use nq_store::{
     AdmissionIdentity, AdmissionInput, AdmittedCollectionCompletion, BindingEventInput,
-    BindingMaterializationInput, CanonicalDocument, CollectionInput, CoverageInput,
+    BindingMaterializationInput, CanonicalDocument, CollectionInput,
+    ContinuityAcquisitionEventInput, ContinuityAcquisitionIntentInput, CoverageInput,
     DiagnosticArtifactByteState, DiagnosticArtifactCommitInput, DiagnosticArtifactLocalOriginInput,
     DiagnosticArtifactLookup, DiagnosticArtifactOrigin, DiagnosticArtifactSchemaSupport,
     EvaluationCommitInput, EvaluationInput, EvaluationProfileBinding, EvidenceSnapshot,
-    FindingEventInput, FindingEvidenceInput, FindingSnapshotRow, GenesisInput, ObservationInput,
-    ProfileDescriptorInput, ProviderIntakeCommit, ProviderIntakeInput, ProviderIntakePreflight,
-    RefusalInput, ReportErrorInput, ReportInput, RunInput, RunResultStatusInput, StatusEventInput,
-    Store, SubmissionDisposition, SubmissionInput,
+    ExactContinuityCommit, FindingEventInput, FindingEvidenceInput, FindingSnapshotRow,
+    GenesisInput, ObservationInput, ProfileDescriptorInput, ProviderIntakeCommit,
+    ProviderIntakeInput, ProviderIntakePreflight, RefusalInput, ReportErrorInput, ReportInput,
+    RunInput, RunResultStatusInput, StatusEventInput, Store, SubmissionDisposition,
+    SubmissionInput,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -41,11 +43,15 @@ use crate::admission::{
 use crate::config::{
     Carrier, CheckpointPolicy, NqConfig, ScopeConfig, VantageConfig, WatcherConfig,
 };
+use crate::continuity::{
+    ContinuityCarrierError, ProviderAcquisitionIntentV1, VerifiedContinuityCarrierV1,
+};
 use crate::coordination::{CoordinationError, InstanceGuard};
 use crate::diagnostic_admission::{
-    DiagnosticAdmissionArtifactV1, DiagnosticAdmissionJudgmentV1, DiagnosticAdmissionOriginV1,
-    DiagnosticAdmissionProvenanceV1, DiagnosticAdmissionProviderV1, DiagnosticAdmissionSourceV1,
-    DiagnosticSourceDispositionV1,
+    DiagnosticAdmissionArtifactV1, DiagnosticAdmissionContinuityV2, DiagnosticAdmissionJudgmentV1,
+    DiagnosticAdmissionOriginV1, DiagnosticAdmissionProvenanceV1, DiagnosticAdmissionProvenanceV2,
+    DiagnosticAdmissionProviderV1, DiagnosticAdmissionSourceV1, DiagnosticSourceDispositionV1,
+    SupportedDiagnosticAdmissionProvenance,
 };
 use crate::diagnostic_execution::{
     AdmittedInputV1, DiagnosticArtifactId, DiagnosticClaimStatusV1, DiagnosticCoherenceV1,
@@ -102,6 +108,9 @@ pub enum EngineError {
     /// Provider identity, attempt, or raw-custody construction failed.
     #[error(transparent)]
     ProviderIntake(#[from] ProviderIntakeError),
+    /// Standing continuity prerequisite verification failed before invocation.
+    #[error(transparent)]
+    Continuity(#[from] ContinuityCarrierError),
     /// Local filesystem failure.
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -2558,7 +2567,7 @@ impl CollectionEngine {
     /// Returns only local engine/storage failures. Expected helper, protocol,
     /// and admission outcomes are retained and returned as `CollectionOutcome`.
     pub fn collect(&mut self, watcher: &WatcherConfig) -> Result<CollectionOutcome, EngineError> {
-        self.collect_internal(watcher, false)
+        self.collect_internal(watcher, false, None)
             .map(|execution| execution.outcome)
     }
 
@@ -2584,7 +2593,7 @@ impl CollectionEngine {
         &mut self,
         watcher: &WatcherConfig,
     ) -> Result<SupportedDiagnosticExecution, EngineError> {
-        let execution = self.collect_internal(watcher, true)?;
+        let execution = self.collect_internal(watcher, true, None)?;
         execution.diagnostic.ok_or_else(|| {
             EngineError::DiagnosticUnsupported(format!(
                 "collection for {} produced no admitted determinate diagnostic execution; inspect the retained collection outcome",
@@ -2593,11 +2602,105 @@ impl CollectionEngine {
         })
     }
 
+    /// Execute one diagnostic only after durably committing an authenticated
+    /// Standing continuity prerequisite for the exact provider intake.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the carrier conflicts with durable acquisition history,
+    /// provider outcome is unknown, collection fails, or exact replay cannot
+    /// reopen the original diagnostic artifact.
+    pub fn diagnostic_execute_with_continuity(
+        &mut self,
+        watcher: &WatcherConfig,
+        carrier: &VerifiedContinuityCarrierV1,
+    ) -> Result<SupportedDiagnosticExecution, EngineError> {
+        if let Some(existing) = self
+            .store
+            .continuity_acquisition_intent_for_intake(&carrier.basis.acquisition_id)?
+        {
+            let phases = self
+                .store
+                .continuity_acquisition_event_phases(&existing.intent_id)?;
+            if phases
+                .last()
+                .is_some_and(|phase| phase == "provider_intake_completed")
+            {
+                let intent: ProviderAcquisitionIntentV1 =
+                    serde_json::from_slice(&existing.intent_json).map_err(|error| {
+                        EngineError::Invariant(format!(
+                            "stored continuity intent cannot decode: {error}"
+                        ))
+                    })?;
+                intent.validate()?;
+                return self
+                    .store
+                    .diagnostic_artifact_id_for_run(&intent.run_id)?
+                    .ok_or_else(|| {
+                        EngineError::Invariant(
+                            "completed continuity acquisition lacks diagnostic artifact".into(),
+                        )
+                    })
+                    .and_then(|artifact_id| reopen_diagnostic_artifact(&self.store, &artifact_id));
+            }
+            if phases
+                .iter()
+                .any(|phase| phase == "provider_invocation_started")
+            {
+                return Err(EngineError::Invariant(
+                    "continuity provider outcome is unknown; a new acquisition and Standing commitment are required"
+                        .into(),
+                ));
+            }
+            return Err(EngineError::Invariant(
+                "continuity intent was committed but not dispatched; exact resume is not yet available"
+                    .into(),
+            ));
+        }
+        let execution = self.collect_internal(watcher, true, Some(carrier))?;
+        let diagnostic = execution.diagnostic.ok_or_else(|| {
+            EngineError::DiagnosticUnsupported(format!(
+                "continuity collection for {} produced no diagnostic artifact",
+                watcher.instance_id
+            ))
+        })?;
+        let intake = self
+            .store
+            .provider_intake(&carrier.basis.acquisition_id)?
+            .ok_or_else(|| {
+                EngineError::Invariant(
+                    "continuity collection returned without its exact provider intake".into(),
+                )
+            })?;
+        let intent = self
+            .store
+            .continuity_acquisition_intent_for_intake(&carrier.basis.acquisition_id)?
+            .ok_or_else(|| EngineError::Invariant("continuity intent disappeared".into()))?;
+        let event = CanonicalDocument::from_serializable(&json!({
+            "schema": "nq.continuity_acquisition_event.v1",
+            "intent_id": intent.intent_id,
+            "phase": "provider_intake_completed",
+            "intake_id": intake.intake_id,
+            "intake_digest": intake.intake_digest,
+            "acknowledgment_id": intake.acknowledgment.acknowledgment_id,
+        }))?;
+        self.store
+            .commit_continuity_acquisition_event(&ContinuityAcquisitionEventInput {
+                event_id: event.digest().to_owned(),
+                intent_id: intent.intent_id,
+                phase: "provider_intake_completed".into(),
+                event,
+                occurred_at: intake.acknowledgment.committed_at,
+            })?;
+        Ok(diagnostic)
+    }
+
     #[allow(clippy::too_many_lines)]
     fn collect_internal(
         &mut self,
         watcher: &WatcherConfig,
         emit_diagnostic: bool,
+        continuity: Option<&VerifiedContinuityCarrierV1>,
     ) -> Result<CollectionExecution, EngineError> {
         let _guard =
             InstanceGuard::acquire(&self.config.database_path, &watcher.instance_id, "collect")?;
@@ -2702,9 +2805,72 @@ impl CollectionEngine {
         // These are three independent identities: the provider intake and
         // application-level attempt are fixed before dispatch, while the
         // watcher run remains the current local-origin subtype.
-        let intake_id = Uuid::new_v4().to_string();
+        let intake_id = continuity.map_or_else(
+            || Uuid::new_v4().to_string(),
+            |value| value.basis.acquisition_id.clone(),
+        );
         let attempt_id = Uuid::new_v4().to_string();
         let run_id = Uuid::new_v4().to_string();
+        if let Some(continuity) = continuity {
+            let intent = ProviderAcquisitionIntentV1::new(
+                continuity,
+                attempt_id.clone(),
+                run_id.clone(),
+                request.clone(),
+                provider_identity.clone(),
+                carrier_name(watcher.carrier).to_owned(),
+                checkpoint_contract_digest.clone(),
+            )?;
+            let intent_document = CanonicalDocument::from_serializable(&intent)?;
+            let intent_input = ContinuityAcquisitionIntentInput {
+                intent_id: intent.intent_id.clone(),
+                acquisition_id: continuity.basis.acquisition_id.clone(),
+                intake_id: intake_id.clone(),
+                authority_occurrence_ref: continuity
+                    .carrier
+                    .authority
+                    .payload
+                    .authority_occurrence_ref
+                    .clone(),
+                authority_digest: format!("sha256:{}", continuity.carrier.authority.payload_digest),
+                commitment_occurrence_ref: continuity
+                    .carrier
+                    .commitment
+                    .payload
+                    .commitment_occurrence_ref
+                    .clone(),
+                commitment_digest: format!(
+                    "sha256:{}",
+                    continuity.carrier.commitment.payload_digest
+                ),
+                acquisition_basis_digest: format!("sha256:{}", continuity.basis_digest),
+                intent: intent_document,
+            };
+            let event = CanonicalDocument::from_serializable(&json!({
+                "schema": "nq.continuity_acquisition_event.v1",
+                "intent_id": intent.intent_id.clone(),
+                "phase": "provider_invocation_started",
+                "intake_id": intake_id.clone(),
+                "authority_occurrence_ref": continuity.carrier.authority.payload.authority_occurrence_ref,
+                "commitment_occurrence_ref": continuity.carrier.commitment.payload.commitment_occurrence_ref,
+            }))?;
+            let event_input = ContinuityAcquisitionEventInput {
+                event_id: event.digest().to_owned(),
+                intent_id: intent.intent_id.clone(),
+                phase: "provider_invocation_started".into(),
+                event,
+                occurred_at: timestamp(Utc::now()),
+            };
+            let committed = self
+                .store
+                .commit_continuity_dispatch(&intent_input, &event_input)?;
+            if committed == ExactContinuityCommit::Replayed {
+                return Err(EngineError::Invariant(
+                    "continuity dispatch replay reached provider invocation without prior reconciliation"
+                        .into(),
+                ));
+            }
+        }
         let attempt = ProviderAttempt::new(
             intake_id,
             attempt_id,
@@ -4136,6 +4302,69 @@ pub fn qualify_diagnostic_admission(
         nonclaims: Vec::new(),
     }
     .seal()
+    .map_err(EngineError::Invariant)
+}
+
+/// Emit the strongest exact local admission provenance available for an artifact.
+///
+/// Historical acquisitions without a pre-invocation continuity intent remain
+/// V1. A V2 carrier is emitted only when the exact intent, both append-only
+/// phases, and provider-intake relation reopen from local custody.
+///
+/// # Errors
+///
+/// Returns when local custody does not reopen exactly, the continuity phase
+/// chain is incomplete, or any stored intent/provider relation is substituted.
+pub fn qualify_diagnostic_admission_supported(
+    store: &Store,
+    artifact_id: &Sha256Digest,
+) -> Result<SupportedDiagnosticAdmissionProvenance, EngineError> {
+    let v1 = qualify_diagnostic_admission(store, artifact_id)?;
+    let Some(row) =
+        store.continuity_acquisition_intent_for_intake(&v1.provider.provider_intake_id)?
+    else {
+        return Ok(SupportedDiagnosticAdmissionProvenance::V1(Box::new(v1)));
+    };
+    let phases = store.continuity_acquisition_event_phases(&row.intent_id)?;
+    if phases != ["provider_invocation_started", "provider_intake_completed"] {
+        return Err(EngineError::Invariant(
+            "continuity-bound diagnostic lacks its complete append-only acquisition phases".into(),
+        ));
+    }
+    let intent: ProviderAcquisitionIntentV1 =
+        serde_json::from_slice(&row.intent_json).map_err(|error| {
+            EngineError::Invariant(format!("continuity intent cannot decode: {error}"))
+        })?;
+    intent.validate()?;
+    if intent.intent_id != row.intent_id
+        || intent.canonical_digest()? != row.intent_digest
+        || intent.intake_id != v1.provider.provider_intake_id
+        || intent.run_id != v1.origin.run_id
+    {
+        return Err(EngineError::Invariant(
+            "continuity intent/store/provider relation was substituted".into(),
+        ));
+    }
+    let intent_digest = parse_digest("continuity intent_digest", &row.intent_digest)?;
+    DiagnosticAdmissionProvenanceV2 {
+        schema: String::new(),
+        provenance_id: nq_protocol::sha256_bytes(b"pending v2 provenance identity"),
+        source: v1.source,
+        artifact: v1.artifact,
+        origin: v1.origin,
+        provider: v1.provider,
+        continuity: DiagnosticAdmissionContinuityV2 {
+            intent,
+            intent_digest,
+            phases,
+        },
+        disposition: v1.disposition,
+        judgment: v1.judgment,
+        nonclaims: Vec::new(),
+    }
+    .seal()
+    .map(Box::new)
+    .map(SupportedDiagnosticAdmissionProvenance::V2)
     .map_err(EngineError::Invariant)
 }
 
@@ -6951,6 +7180,13 @@ fn admission_refusal_from_engine(
         ),
         EngineError::ProviderIntake(error) => (
             AdmissionRefusalBoundary::Internal,
+            AdmissionRefusalCode::InvariantViolation,
+            AdmissionRefusalDetails::Invariant {
+                message: error.to_string(),
+            },
+        ),
+        EngineError::Continuity(error) => (
+            AdmissionRefusalBoundary::ActiveBinding,
             AdmissionRefusalCode::InvariantViolation,
             AdmissionRefusalDetails::Invariant {
                 message: error.to_string(),
@@ -13252,6 +13488,58 @@ sys.stdout.write("\n")
         );
         validate_diagnostic_artifact_history(&engine.store)
             .expect("partial-byte refusal preserves exact semantic history");
+    }
+
+    #[test]
+    fn continuity_diagnostic_commits_prerequisite_before_real_provider_and_replays() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let Some((mut engine, watcher, _mode)) = admitted_host_diagnostic_fixture(
+            directory.path(),
+            "continuity-diagnostic-genesis",
+            b"continuity-diagnostic-evaluator",
+        ) else {
+            return;
+        };
+        let carrier =
+            crate::continuity::verified_fixture_carrier(&watcher, "continuity-provider-intake-a");
+        let artifact = engine
+            .diagnostic_execute_with_continuity(&watcher, &carrier)
+            .expect("continuity-bound real provider emits exact diagnostic");
+        let artifact_id = artifact.artifact_id().0.clone();
+        let proof = qualify_diagnostic_admission_supported(&engine.store, &artifact_id)
+            .expect("continuity admission proof reopens");
+        let SupportedDiagnosticAdmissionProvenance::V2(proof) = proof else {
+            panic!("continuity acquisition must emit the v2 proof carrier");
+        };
+        assert_eq!(
+            proof.continuity.intent.basis.authority_occurrence_ref,
+            uuid::Uuid::from_u128(1).to_string()
+        );
+        assert_eq!(
+            proof.continuity.phases,
+            ["provider_invocation_started", "provider_intake_completed"]
+        );
+        assert_eq!(
+            proof.continuity.intent.intake_id,
+            proof.provider.provider_intake_id
+        );
+        proof.validate().expect("v2 proof remains exact");
+
+        let replay = engine
+            .diagnostic_execute_with_continuity(&watcher, &carrier)
+            .expect("exact completed replay converges without a second provider intake");
+        assert_eq!(
+            replay.canonical_bytes().expect("replay bytes"),
+            artifact.canonical_bytes().expect("original bytes")
+        );
+        assert_eq!(
+            engine
+                .store
+                .provider_intakes_bounded(10, None)
+                .expect("intakes")
+                .len(),
+            1
+        );
     }
 
     #[test]

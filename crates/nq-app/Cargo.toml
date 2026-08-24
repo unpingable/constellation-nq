@@ -11,6 +11,7 @@ default-run = "nq"
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
+ed25519-dalek.workspace = true
 hex.workspace = true
 nix.workspace = true
 nq-build-info = { path = "../nq-build-info" }
