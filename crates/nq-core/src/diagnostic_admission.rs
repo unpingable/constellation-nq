@@ -10,11 +10,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::continuity::ProviderAcquisitionIntentV1;
 use crate::diagnostic_execution_v2::DIAGNOSTIC_EXECUTION_V2_SCHEMA;
+use crate::substrate_origin::SubstrateOriginAcquisitionIntentV1;
 
 /// Exact admission-provenance schema emitted by NQ-NG.
 pub const DIAGNOSTIC_ADMISSION_PROVENANCE_SCHEMA: &str = "nq.diagnostic_admission_provenance.v1";
 /// Admission provenance carrying an exact pre-invocation continuity chain.
 pub const DIAGNOSTIC_ADMISSION_PROVENANCE_SCHEMA_V2: &str = "nq.diagnostic_admission_provenance.v2";
+/// Admission provenance carrying a pre-invocation substrate-origin proof and,
+/// for a transition, its exact continuity-authority carrier.
+pub const DIAGNOSTIC_ADMISSION_PROVENANCE_SCHEMA_V3: &str = "nq.diagnostic_admission_provenance.v3";
 
 const NONCLAIMS: [&str; 3] = [
     "admission establishes evidence eligibility only",
@@ -360,6 +364,131 @@ impl DiagnosticAdmissionProvenanceV2 {
     }
 }
 
+/// Exact origin-attested prerequisite and lifecycle projection for one intake.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[allow(missing_docs)]
+pub struct DiagnosticAdmissionSubstrateOriginV3 {
+    pub intent: SubstrateOriginAcquisitionIntentV1,
+    pub intent_digest: Sha256Digest,
+    pub phases: Vec<String>,
+}
+
+/// Content-identified NQ admission carrier with an origin proof acquired
+/// before the observed provider was dispatched.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[allow(missing_docs)]
+pub struct DiagnosticAdmissionProvenanceV3 {
+    pub schema: String,
+    pub provenance_id: Sha256Digest,
+    pub source: DiagnosticAdmissionSourceV1,
+    pub artifact: DiagnosticAdmissionArtifactV1,
+    pub origin: DiagnosticAdmissionOriginV1,
+    pub provider: DiagnosticAdmissionProviderV1,
+    pub substrate_origin: DiagnosticAdmissionSubstrateOriginV3,
+    pub disposition: DiagnosticSourceDispositionV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judgment: Option<DiagnosticAdmissionJudgmentV1>,
+    pub nonclaims: Vec<String>,
+}
+
+#[allow(missing_docs)]
+#[allow(clippy::missing_errors_doc)]
+impl DiagnosticAdmissionProvenanceV3 {
+    pub(crate) fn seal(mut self) -> Result<Self, String> {
+        self.schema = DIAGNOSTIC_ADMISSION_PROVENANCE_SCHEMA_V3.into();
+        self.provenance_id = nq_protocol::sha256_bytes(b"pending v3 provenance identity");
+        self.nonclaims = NONCLAIMS.into_iter().map(str::to_owned).collect();
+        self.provenance_id = self.computed_provenance_id()?;
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub fn computed_provenance_id(&self) -> Result<Sha256Digest, String> {
+        let mut value = serde_json::to_value(self).map_err(|error| error.to_string())?;
+        value
+            .as_object_mut()
+            .ok_or_else(|| "diagnostic admission provenance v3 is not an object".to_owned())?
+            .remove("provenance_id");
+        semantic_digest(&value).map_err(|error| error.to_string())
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema != DIAGNOSTIC_ADMISSION_PROVENANCE_SCHEMA_V3 {
+            return Err("unsupported diagnostic admission provenance v3 schema".into());
+        }
+        self.substrate_origin
+            .intent
+            .validate()
+            .map_err(|error| error.to_string())?;
+        if self.source.kind != "local_nq_store"
+            || self.source.source_id.trim().is_empty()
+            || self.source.source_id.chars().any(char::is_whitespace)
+        {
+            return Err("diagnostic admission source identity is invalid".into());
+        }
+        if self.artifact.contract_schema != DIAGNOSTIC_EXECUTION_V2_SCHEMA
+            || self.artifact.canonical_bytes_length == 0
+        {
+            return Err("diagnostic admission artifact binding is invalid".into());
+        }
+        if self.origin.run_id.is_empty()
+            || self
+                .origin
+                .evaluation_id
+                .as_ref()
+                .is_some_and(String::is_empty)
+            || DateTime::parse_from_rfc3339(&self.origin.completed_at).is_err()
+            || DateTime::parse_from_rfc3339(&self.origin.committed_at).is_err()
+        {
+            return Err("diagnostic admission local origin is invalid".into());
+        }
+        if self.provider.provider_intake_id.is_empty()
+            || self.provider.source_admission_id.is_empty()
+        {
+            return Err("diagnostic admission provider binding is invalid".into());
+        }
+        if self.substrate_origin.intent.intake_id != self.provider.provider_intake_id
+            || self.substrate_origin.intent.run_id != self.origin.run_id
+            || self
+                .substrate_origin
+                .intent
+                .canonical_digest()
+                .map_err(|error| error.to_string())?
+                != self.substrate_origin.intent_digest.as_str()
+            || self.substrate_origin.phases
+                != ["provider_invocation_started", "provider_intake_completed"]
+        {
+            return Err(
+                "diagnostic admission substrate origin does not bind exact intent/intake lifecycle"
+                    .into(),
+            );
+        }
+        if self.nonclaims != NONCLAIMS.into_iter().map(str::to_owned).collect::<Vec<_>>() {
+            return Err("diagnostic admission v3 nonclaims differ from the closed contract".into());
+        }
+        match (self.disposition, &self.judgment) {
+            (DiagnosticSourceDispositionV1::AdmittedReport, Some(judgment))
+                if !judgment.report_id.is_empty()
+                    && judgment.judgment_schema == nq_store::JUDGMENT_SCHEMA_VERSION => {}
+            (DiagnosticSourceDispositionV1::AdmittedReport, _) => {
+                return Err("admitted report provenance requires its exact judgment".into());
+            }
+            (_, None) => {}
+            (_, Some(_)) => {
+                return Err(
+                    "non-admitted source disposition cannot carry a report judgment".into(),
+                );
+            }
+        }
+        if self.provenance_id != self.computed_provenance_id()? {
+            return Err("diagnostic admission provenance v3 identity mismatch".into());
+        }
+        Ok(())
+    }
+}
+
 /// Closed production export family. V1 history is never upgraded into V2 proof.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(untagged)]
@@ -368,4 +497,7 @@ pub enum SupportedDiagnosticAdmissionProvenance {
     V1(Box<DiagnosticAdmissionProvenanceV1>),
     /// Admission whose acquisition durably committed Standing authority first.
     V2(Box<DiagnosticAdmissionProvenanceV2>),
+    /// Admission whose acquisition bound independently signed substrate-origin
+    /// evidence before provider invocation.
+    V3(Box<DiagnosticAdmissionProvenanceV3>),
 }

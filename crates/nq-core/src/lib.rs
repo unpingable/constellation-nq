@@ -19,6 +19,7 @@ pub mod provider_intake;
 pub mod public;
 pub mod runner;
 pub mod runtime;
+pub mod substrate_origin;
 pub mod unix_runner;
 
 pub use admission::{AdmissionLock, AdmissionManager, AdmissionVerification};
@@ -33,9 +34,11 @@ pub use continuity::{
 pub use coordination::{CoordinationError, InstanceGuard};
 pub use diagnostic_admission::{
     DIAGNOSTIC_ADMISSION_PROVENANCE_SCHEMA, DIAGNOSTIC_ADMISSION_PROVENANCE_SCHEMA_V2,
-    DiagnosticAdmissionArtifactV1, DiagnosticAdmissionContinuityV2, DiagnosticAdmissionJudgmentV1,
-    DiagnosticAdmissionOriginV1, DiagnosticAdmissionProvenanceV1, DiagnosticAdmissionProvenanceV2,
-    DiagnosticAdmissionProviderV1, DiagnosticAdmissionSourceV1, DiagnosticSourceDispositionV1,
+    DIAGNOSTIC_ADMISSION_PROVENANCE_SCHEMA_V3, DiagnosticAdmissionArtifactV1,
+    DiagnosticAdmissionContinuityV2, DiagnosticAdmissionJudgmentV1, DiagnosticAdmissionOriginV1,
+    DiagnosticAdmissionProvenanceV1, DiagnosticAdmissionProvenanceV2,
+    DiagnosticAdmissionProvenanceV3, DiagnosticAdmissionProviderV1, DiagnosticAdmissionSourceV1,
+    DiagnosticAdmissionSubstrateOriginV3, DiagnosticSourceDispositionV1,
     SupportedDiagnosticAdmissionProvenance,
 };
 pub use diagnostic_execution::{
@@ -108,5 +111,11 @@ pub use runtime::{
     NativeRuntimeIdentity, RuntimeArtifactIdentity, RuntimeArtifactKind, RuntimeDirectoryIdentity,
     RuntimeLinkage, RuntimeMachine, RuntimeObjectBinding, RuntimeObjectRole,
     StartupRuntimeIdentity,
+};
+pub use substrate_origin::{
+    SignedSubstrateOriginAttestationV1, SubstrateCoordinateKindV1, SubstrateCoordinateV1,
+    SubstrateOriginAcquisitionBasisV1, SubstrateOriginAcquisitionIntentV1,
+    SubstrateOriginAttestationSourceV1, SubstrateOriginAttestationV1, SubstrateOriginError,
+    SubstrateOriginEvidenceMethodV1, SubstrateOriginVerifierV1, VerifiedSubstrateOriginV1,
 };
 pub use unix_runner::{UnixAcquisitionOutcome, UnixRunner, UnixRunnerOptions};

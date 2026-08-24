@@ -1596,12 +1596,13 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                         }))?,
                     };
                     drop(Store::upgrade_v4_to_v5(&config.database_path, &v4_receipt)?);
-                    let (v5_backup, v5_backup_digest) = upgrade_v5_to_current(
-                        &config.database_path,
-                        &backup_directory,
-                        &binary_digest,
-                        &operator_identity,
-                    )?;
+                    let (v5_backup, v5_backup_digest, v6_backup, v6_backup_digest) =
+                        upgrade_v5_to_current(
+                            &config.database_path,
+                            &backup_directory,
+                            &binary_digest,
+                            &operator_identity,
+                        )?;
                     print_value(
                         &json!({
                             "result": "migrated",
@@ -1613,6 +1614,8 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                             "v4_backup_digest": v4_artifact.sha256,
                             "v5_backup": v5_backup,
                             "v5_backup_digest": v5_backup_digest,
+                            "v6_backup": v6_backup,
+                            "v6_backup_digest": v6_backup_digest,
                             "historical_provider_intake": "explicit_gap_only",
                             "historical_diagnostic_artifacts": "no_durable_commitments",
                         }),
@@ -1652,12 +1655,13 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                         }))?,
                     };
                     drop(Store::upgrade_v4_to_v5(&config.database_path, &receipt)?);
-                    let (v5_backup, v5_backup_digest) = upgrade_v5_to_current(
-                        &config.database_path,
-                        &backup_directory,
-                        &binary_digest,
-                        &operator_identity,
-                    )?;
+                    let (v5_backup, v5_backup_digest, v6_backup, v6_backup_digest) =
+                        upgrade_v5_to_current(
+                            &config.database_path,
+                            &backup_directory,
+                            &binary_digest,
+                            &operator_identity,
+                        )?;
                     print_value(
                         &json!({
                             "result": "migrated",
@@ -1667,13 +1671,37 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                             "backup_digest": artifact.sha256,
                             "v5_backup": v5_backup,
                             "v5_backup_digest": v5_backup_digest,
+                            "v6_backup": v6_backup,
+                            "v6_backup_digest": v6_backup_digest,
                             "historical_diagnostic_artifacts": "no_durable_commitments",
                         }),
                         json_output,
                     )
                 }
                 5 => {
-                    let (backup, backup_digest) = upgrade_v5_to_current(
+                    let (backup, backup_digest, v6_backup, v6_backup_digest) =
+                        upgrade_v5_to_current(
+                            &config.database_path,
+                            &backup_directory,
+                            &binary_digest,
+                            &operator_identity,
+                        )?;
+                    print_value(
+                        &json!({
+                            "result": "migrated",
+                            "from_schema_version": 5,
+                            "schema_version": nq_store::SCHEMA_VERSION,
+                            "backup": backup,
+                            "backup_digest": backup_digest,
+                            "v6_backup": v6_backup,
+                            "v6_backup_digest": v6_backup_digest,
+                            "historical_continuity_prerequisites": "absent_not_synthesized",
+                        }),
+                        json_output,
+                    )
+                }
+                6 => {
+                    let (backup, backup_digest) = upgrade_v6_to_current(
                         &config.database_path,
                         &backup_directory,
                         &binary_digest,
@@ -1682,11 +1710,11 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                     print_value(
                         &json!({
                             "result": "migrated",
-                            "from_schema_version": 5,
+                            "from_schema_version": 6,
                             "schema_version": nq_store::SCHEMA_VERSION,
                             "backup": backup,
                             "backup_digest": backup_digest,
-                            "historical_continuity_prerequisites": "absent_not_synthesized",
+                            "historical_substrate_origin_proofs": "absent_not_synthesized",
                         }),
                         json_output,
                     )
@@ -1707,7 +1735,7 @@ fn upgrade_v5_to_current(
     backup_directory: &Path,
     binary_digest: &str,
     operator_identity: &CanonicalDocument,
-) -> Result<(PathBuf, String)> {
+) -> Result<(PathBuf, String, PathBuf, String)> {
     let started_at = chrono::Utc::now();
     let temporary = backup_directory.join(format!(".nq-upgrade-{}.db", uuid::Uuid::new_v4()));
     let artifact = Store::backup_v5_verified(database_path, &temporary)?;
@@ -1735,7 +1763,48 @@ fn upgrade_v5_to_current(
             "continuity_intents_synthesized": false,
         }))?,
     };
-    let store = Store::upgrade_v5_to_v6(database_path, &receipt)?;
+    drop(Store::upgrade_v5_to_v6(database_path, &receipt)?);
+    let (v6_backup, v6_digest) = upgrade_v6_to_current(
+        database_path,
+        backup_directory,
+        binary_digest,
+        operator_identity,
+    )?;
+    Ok((backup, artifact.sha256, v6_backup, v6_digest))
+}
+
+fn upgrade_v6_to_current(
+    database_path: &Path,
+    backup_directory: &Path,
+    binary_digest: &str,
+    operator_identity: &CanonicalDocument,
+) -> Result<(PathBuf, String)> {
+    let started_at = chrono::Utc::now();
+    let temporary = backup_directory.join(format!(".nq-upgrade-{}.db", uuid::Uuid::new_v4()));
+    let artifact = Store::backup_v6_verified(database_path, &temporary)?;
+    let backup = finalize_upgrade_backup(&temporary, backup_directory, &artifact.sha256)?;
+    let receipt = UpgradeReceiptInput {
+        receipt_id: uuid::Uuid::new_v4().to_string(),
+        from_schema_version: 6,
+        to_schema_version: 7,
+        migrations: CanonicalDocument::from_serializable(&["schema_v6_to_v7_substrate_origin"])?,
+        binary_digest: binary_digest.to_owned(),
+        backup_digest: artifact.sha256.clone(),
+        backup_location: backup.display().to_string(),
+        started_at: started_at.to_rfc3339(),
+        finished_at: started_at.to_rfc3339(),
+        result: "migrated".into(),
+        operator_identity: operator_identity.clone(),
+        verification: CanonicalDocument::from_serializable(&json!({
+            "integrity": "ok",
+            "source_schema_version": 6,
+            "source_schema_artifact_digest": nq_store::SCHEMA_V6_ARTIFACT_DIGEST,
+            "backup_reopened": true,
+            "historical_substrate_origin_proofs": "absent_not_synthesized",
+            "substrate_origin_intents_synthesized": false,
+        }))?,
+    };
+    let store = Store::upgrade_v6_to_v7(database_path, &receipt)?;
     store.validate()?;
     Ok((backup, artifact.sha256))
 }

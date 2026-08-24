@@ -1573,6 +1573,31 @@ mod tests {
             })),
         };
         drop(Store::upgrade_v5_to_v6(&database, &v5_receipt).expect("upgrade schema-v5 store"));
+        let v6_backup = root.join("nq-v6.pre-upgrade.db");
+        let v6_backup =
+            Store::backup_v6_verified(&database, &v6_backup).expect("backup schema-v6 store");
+        let v6_receipt = nq_store::UpgradeReceiptInput {
+            receipt_id: "upgrade-archive-v6-v7".to_owned(),
+            from_schema_version: 6,
+            to_schema_version: 7,
+            migrations: canonical(&serde_json::json!(["schema_v6_to_v7_substrate_origin"])),
+            binary_digest: nq_protocol::sha256_bytes(b"archive-upgrade-binary").into_string(),
+            backup_digest: v6_backup.sha256,
+            backup_location: v6_backup.path.to_string_lossy().into_owned(),
+            started_at: "2026-07-20T12:00:08Z".to_owned(),
+            finished_at: "2026-07-20T12:00:09Z".to_owned(),
+            result: "migrated".to_owned(),
+            operator_identity: canonical(&serde_json::json!({"uid": 991})),
+            verification: canonical(&serde_json::json!({
+                "integrity": "ok",
+                "source_schema_version": 6,
+                "source_schema_artifact_digest": nq_store::SCHEMA_V6_ARTIFACT_DIGEST,
+                "backup_reopened": true,
+                "historical_substrate_origin_proofs": "absent_not_synthesized",
+                "substrate_origin_intents_synthesized": false,
+            })),
+        };
+        drop(Store::upgrade_v6_to_v7(&database, &v6_receipt).expect("upgrade schema-v6 store"));
         let config = write_config(root, &database);
         let archive = root.join("archive");
         create_archive(&config, &archive).expect("create migrated-v3 archive");

@@ -30,7 +30,7 @@ use nq_store::{
     GenesisInput, ObservationInput, ProfileDescriptorInput, ProviderIntakeCommit,
     ProviderIntakeInput, ProviderIntakePreflight, RefusalInput, ReportErrorInput, ReportInput,
     RunInput, RunResultStatusInput, StatusEventInput, Store, SubmissionDisposition,
-    SubmissionInput,
+    SubmissionInput, SubstrateOriginAcquisitionEventInput, SubstrateOriginAcquisitionIntentInput,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -50,7 +50,8 @@ use crate::coordination::{CoordinationError, InstanceGuard};
 use crate::diagnostic_admission::{
     DiagnosticAdmissionArtifactV1, DiagnosticAdmissionContinuityV2, DiagnosticAdmissionJudgmentV1,
     DiagnosticAdmissionOriginV1, DiagnosticAdmissionProvenanceV1, DiagnosticAdmissionProvenanceV2,
-    DiagnosticAdmissionProviderV1, DiagnosticAdmissionSourceV1, DiagnosticSourceDispositionV1,
+    DiagnosticAdmissionProvenanceV3, DiagnosticAdmissionProviderV1, DiagnosticAdmissionSourceV1,
+    DiagnosticAdmissionSubstrateOriginV3, DiagnosticSourceDispositionV1,
     SupportedDiagnosticAdmissionProvenance,
 };
 use crate::diagnostic_execution::{
@@ -87,6 +88,11 @@ use crate::public::{
     StatusSnapshotV1, StatusSnapshotV2, StatusSnapshotV3, VisibilityState, VisibilityView,
 };
 use crate::runner::{AcquisitionOutcome, ExchangeTimeoutPhase, RunCapture, StdioRunner};
+use crate::substrate_origin::{
+    ORIGIN_BASIS_SCHEMA_V1, SubstrateOriginAcquisitionBasisV1, SubstrateOriginAcquisitionIntentV1,
+    SubstrateOriginAttestationSourceV1, SubstrateOriginError, SubstrateOriginVerifierV1,
+    VerifiedSubstrateOriginV1,
+};
 use crate::unix_runner::{
     UnixAcquisitionOutcome, UnixExchangeCapture, UnixIoPhase, UnixRunner, UnixRunnerOptions,
 };
@@ -111,6 +117,9 @@ pub enum EngineError {
     /// Standing continuity prerequisite verification failed before invocation.
     #[error(transparent)]
     Continuity(#[from] ContinuityCarrierError),
+    /// Independently signed substrate-origin prerequisite failed.
+    #[error(transparent)]
+    SubstrateOrigin(#[from] SubstrateOriginError),
     /// Local filesystem failure.
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -1755,6 +1764,13 @@ struct CollectionExecution {
     diagnostic_artifact_id: Option<Sha256Digest>,
 }
 
+struct PendingSubstrateOrigin<'a> {
+    acquisition_id: String,
+    verifier: &'a SubstrateOriginVerifierV1,
+    source: &'a mut dyn SubstrateOriginAttestationSourceV1,
+    continuity: Option<&'a VerifiedContinuityCarrierV1>,
+}
+
 impl CollectionExecution {
     fn without_diagnostic(outcome: CollectionOutcome) -> Self {
         Self {
@@ -2567,7 +2583,7 @@ impl CollectionEngine {
     /// Returns only local engine/storage failures. Expected helper, protocol,
     /// and admission outcomes are retained and returned as `CollectionOutcome`.
     pub fn collect(&mut self, watcher: &WatcherConfig) -> Result<CollectionOutcome, EngineError> {
-        self.collect_internal(watcher, false, None)
+        self.collect_internal(watcher, false, None, None)
             .map(|execution| execution.outcome)
     }
 
@@ -2593,7 +2609,7 @@ impl CollectionEngine {
         &mut self,
         watcher: &WatcherConfig,
     ) -> Result<SupportedDiagnosticExecution, EngineError> {
-        let execution = self.collect_internal(watcher, true, None)?;
+        let execution = self.collect_internal(watcher, true, None, None)?;
         execution.diagnostic.ok_or_else(|| {
             EngineError::DiagnosticUnsupported(format!(
                 "collection for {} produced no admitted determinate diagnostic execution; inspect the retained collection outcome",
@@ -2657,7 +2673,7 @@ impl CollectionEngine {
                     .into(),
             ));
         }
-        let execution = self.collect_internal(watcher, true, Some(carrier))?;
+        let execution = self.collect_internal(watcher, true, Some(carrier), None)?;
         let diagnostic = execution.diagnostic.ok_or_else(|| {
             EngineError::DiagnosticUnsupported(format!(
                 "continuity collection for {} produced no diagnostic artifact",
@@ -2695,12 +2711,124 @@ impl CollectionEngine {
         Ok(diagnostic)
     }
 
+    /// Execute one diagnostic with an independently signed substrate-origin
+    /// prerequisite acquired after the exact acquisition identity is fixed and
+    /// before the observed provider is invoked. An optional continuity carrier
+    /// is required only when the expected origin is a successor transition.
+    #[allow(clippy::too_many_arguments)]
+    /// Executes one diagnostic after atomically fencing the exact verified
+    /// substrate-origin prerequisite before provider invocation.
+    ///
+    /// # Errors
+    ///
+    /// Refuses malformed or substituted origin/continuity bindings, replay
+    /// conflicts, provider failures, and any persistence failure.
+    pub fn diagnostic_execute_with_substrate_origin(
+        &mut self,
+        watcher: &WatcherConfig,
+        acquisition_id: &str,
+        verifier: &SubstrateOriginVerifierV1,
+        source: &mut dyn SubstrateOriginAttestationSourceV1,
+        continuity: Option<&VerifiedContinuityCarrierV1>,
+    ) -> Result<SupportedDiagnosticExecution, EngineError> {
+        if let Some(carrier) = continuity
+            && carrier.basis.acquisition_id != acquisition_id
+        {
+            return Err(EngineError::Invariant(
+                "origin acquisition id differs from continuity commitment".into(),
+            ));
+        }
+        if let Some(existing) = self
+            .store
+            .substrate_origin_acquisition_intent_for_intake(acquisition_id)?
+        {
+            let phases = self
+                .store
+                .substrate_origin_acquisition_event_phases(&existing.intent_id)?;
+            if phases
+                .last()
+                .is_some_and(|phase| phase == "provider_intake_completed")
+            {
+                let intent: SubstrateOriginAcquisitionIntentV1 =
+                    serde_json::from_slice(&existing.intent_json).map_err(|error| {
+                        EngineError::Invariant(format!(
+                            "stored substrate-origin intent cannot decode: {error}"
+                        ))
+                    })?;
+                intent.validate()?;
+                return self
+                    .store
+                    .diagnostic_artifact_id_for_run(&intent.run_id)?
+                    .ok_or_else(|| {
+                        EngineError::Invariant(
+                            "completed substrate-origin acquisition lacks diagnostic artifact"
+                                .into(),
+                        )
+                    })
+                    .and_then(|artifact_id| reopen_diagnostic_artifact(&self.store, &artifact_id));
+            }
+            if phases
+                .iter()
+                .any(|phase| phase == "provider_invocation_started")
+            {
+                return Err(EngineError::Invariant(
+                    "substrate-origin provider outcome is unknown; origin evidence cannot be reused for a new logical acquisition"
+                        .into(),
+                ));
+            }
+            return Err(EngineError::Invariant(
+                "substrate-origin intent lacks its invocation fence".into(),
+            ));
+        }
+        let mut origin = PendingSubstrateOrigin {
+            acquisition_id: acquisition_id.to_owned(),
+            verifier,
+            source,
+            continuity,
+        };
+        let execution = self.collect_internal(watcher, true, None, Some(&mut origin))?;
+        let diagnostic = execution.diagnostic.ok_or_else(|| {
+            EngineError::DiagnosticUnsupported(format!(
+                "substrate-origin collection for {} produced no diagnostic artifact",
+                watcher.instance_id
+            ))
+        })?;
+        let intake = self.store.provider_intake(acquisition_id)?.ok_or_else(|| {
+            EngineError::Invariant(
+                "substrate-origin collection returned without exact provider intake".into(),
+            )
+        })?;
+        let intent = self
+            .store
+            .substrate_origin_acquisition_intent_for_intake(acquisition_id)?
+            .ok_or_else(|| EngineError::Invariant("substrate-origin intent disappeared".into()))?;
+        let event = CanonicalDocument::from_serializable(&json!({
+            "schema": "nq.substrate_origin_acquisition_event.v1",
+            "intent_id": intent.intent_id,
+            "phase": "provider_intake_completed",
+            "intake_id": intake.intake_id,
+            "intake_digest": intake.intake_digest,
+            "acknowledgment_id": intake.acknowledgment.acknowledgment_id,
+        }))?;
+        self.store.commit_substrate_origin_acquisition_event(
+            &SubstrateOriginAcquisitionEventInput {
+                event_id: event.digest().to_owned(),
+                intent_id: intent.intent_id,
+                phase: "provider_intake_completed".into(),
+                event,
+                occurred_at: intake.acknowledgment.committed_at,
+            },
+        )?;
+        Ok(diagnostic)
+    }
+
     #[allow(clippy::too_many_lines)]
     fn collect_internal(
         &mut self,
         watcher: &WatcherConfig,
         emit_diagnostic: bool,
         continuity: Option<&VerifiedContinuityCarrierV1>,
+        mut substrate_origin: Option<&mut PendingSubstrateOrigin<'_>>,
     ) -> Result<CollectionExecution, EngineError> {
         let _guard =
             InstanceGuard::acquire(&self.config.database_path, &watcher.instance_id, "collect")?;
@@ -2805,12 +2933,46 @@ impl CollectionEngine {
         // These are three independent identities: the provider intake and
         // application-level attempt are fixed before dispatch, while the
         // watcher run remains the current local-origin subtype.
-        let intake_id = continuity.map_or_else(
-            || Uuid::new_v4().to_string(),
-            |value| value.basis.acquisition_id.clone(),
+        let intake_id = substrate_origin.as_ref().map_or_else(
+            || {
+                continuity.map_or_else(
+                    || Uuid::new_v4().to_string(),
+                    |value| value.basis.acquisition_id.clone(),
+                )
+            },
+            |value| value.acquisition_id.clone(),
         );
         let attempt_id = Uuid::new_v4().to_string();
         let run_id = Uuid::new_v4().to_string();
+        let verified_origin: Option<VerifiedSubstrateOriginV1> = substrate_origin
+            .as_deref_mut()
+            .map(|origin| {
+                let watcher_digest = canonical(watcher)?
+                    .digest()
+                    .strip_prefix("sha256:")
+                    .ok_or_else(|| {
+                        EngineError::Invariant("watcher digest lacks sha256 prefix".into())
+                    })?
+                    .to_owned();
+                let basis = SubstrateOriginAcquisitionBasisV1 {
+                    schema: ORIGIN_BASIS_SCHEMA_V1.into(),
+                    acquisition_id: intake_id.clone(),
+                    watcher_instance_id: watcher.instance_id.clone(),
+                    watcher_config_digest: watcher_digest,
+                    subject_ref: watcher.subject.clone(),
+                    expected_coordinate: origin.verifier.expected_coordinate()?,
+                    continuity: origin.continuity.map(|value| value.basis.clone()),
+                };
+                basis.validate()?;
+                let signed = origin.source.attest(&basis).map_err(|error| {
+                    EngineError::Invariant(format!("substrate origin attester refused: {error}"))
+                })?;
+                origin
+                    .verifier
+                    .verify(&basis, &signed)
+                    .map_err(EngineError::from)
+            })
+            .transpose()?;
         if let Some(continuity) = continuity {
             let intent = ProviderAcquisitionIntentV1::new(
                 continuity,
@@ -2867,6 +3029,65 @@ impl CollectionEngine {
             if committed == ExactContinuityCommit::Replayed {
                 return Err(EngineError::Invariant(
                     "continuity dispatch replay reached provider invocation without prior reconciliation"
+                        .into(),
+                ));
+            }
+        }
+        if let Some(origin) = &verified_origin {
+            let pending = substrate_origin.as_deref().ok_or_else(|| {
+                EngineError::Invariant(
+                    "verified substrate origin lost its invocation source".into(),
+                )
+            })?;
+            let intent = SubstrateOriginAcquisitionIntentV1::new(
+                origin,
+                pending.continuity.map(|value| value.carrier.clone()),
+                attempt_id.clone(),
+                run_id.clone(),
+                request.clone(),
+                provider_identity.clone(),
+                carrier_name(watcher.carrier).to_owned(),
+                checkpoint_contract_digest.clone(),
+            )?;
+            let intent_document = CanonicalDocument::from_serializable(&intent)?;
+            let intent_input = SubstrateOriginAcquisitionIntentInput {
+                intent_id: intent.intent_id.clone(),
+                acquisition_id: intent.basis.acquisition_id.clone(),
+                intake_id: intake_id.clone(),
+                expected_coordinate_ref: intent.basis.expected_coordinate.coordinate_ref.clone(),
+                attestation_occurrence_ref: intent
+                    .attestation
+                    .payload
+                    .attestation_occurrence_ref
+                    .clone(),
+                attestation_digest: format!("sha256:{}", intent.attestation.payload_digest),
+                continuity_authority_occurrence_ref: intent
+                    .continuity_carrier
+                    .as_ref()
+                    .map(|carrier| carrier.authority.payload.authority_occurrence_ref.clone()),
+                intent: intent_document,
+            };
+            let event = CanonicalDocument::from_serializable(&json!({
+                "schema": "nq.substrate_origin_acquisition_event.v1",
+                "intent_id": intent.intent_id,
+                "phase": "provider_invocation_started",
+                "intake_id": intake_id,
+                "expected_coordinate_ref": intent.basis.expected_coordinate.coordinate_ref,
+                "attestation_occurrence_ref": intent.attestation.payload.attestation_occurrence_ref,
+            }))?;
+            let event_input = SubstrateOriginAcquisitionEventInput {
+                event_id: event.digest().to_owned(),
+                intent_id: intent_input.intent_id.clone(),
+                phase: "provider_invocation_started".into(),
+                event,
+                occurred_at: timestamp(Utc::now()),
+            };
+            let committed = self
+                .store
+                .commit_substrate_origin_dispatch(&intent_input, &event_input)?;
+            if committed == ExactContinuityCommit::Replayed {
+                return Err(EngineError::Invariant(
+                    "substrate-origin dispatch replay reached provider invocation without reconciliation"
                         .into(),
                 ));
             }
@@ -4315,11 +4536,66 @@ pub fn qualify_diagnostic_admission(
 ///
 /// Returns when local custody does not reopen exactly, the continuity phase
 /// chain is incomplete, or any stored intent/provider relation is substituted.
+#[allow(clippy::too_many_lines)] // Keep the closed V1/V2/V3 export law together.
 pub fn qualify_diagnostic_admission_supported(
     store: &Store,
     artifact_id: &Sha256Digest,
 ) -> Result<SupportedDiagnosticAdmissionProvenance, EngineError> {
     let v1 = qualify_diagnostic_admission(store, artifact_id)?;
+    if let Some(row) =
+        store.substrate_origin_acquisition_intent_for_intake(&v1.provider.provider_intake_id)?
+    {
+        let phases = store.substrate_origin_acquisition_event_phases(&row.intent_id)?;
+        if phases != ["provider_invocation_started", "provider_intake_completed"] {
+            return Err(EngineError::Invariant(
+                "origin-bound diagnostic lacks complete append-only acquisition phases".into(),
+            ));
+        }
+        let intent: SubstrateOriginAcquisitionIntentV1 = serde_json::from_slice(&row.intent_json)
+            .map_err(|error| {
+            EngineError::Invariant(format!("substrate-origin intent cannot decode: {error}"))
+        })?;
+        intent.validate()?;
+        if intent.intent_id != row.intent_id
+            || intent.canonical_digest()? != row.intent_digest
+            || intent.intake_id != v1.provider.provider_intake_id
+            || intent.run_id != v1.origin.run_id
+            || intent.basis.expected_coordinate.coordinate_ref != row.expected_coordinate_ref
+            || intent.attestation.payload.attestation_occurrence_ref
+                != row.attestation_occurrence_ref
+            || format!("sha256:{}", intent.attestation.payload_digest) != row.attestation_digest
+            || intent
+                .continuity_carrier
+                .as_ref()
+                .map(|carrier| carrier.authority.payload.authority_occurrence_ref.clone())
+                != row.continuity_authority_occurrence_ref
+        {
+            return Err(EngineError::Invariant(
+                "substrate-origin intent/store/provider relation was substituted".into(),
+            ));
+        }
+        let intent_digest = parse_digest("substrate-origin intent_digest", &row.intent_digest)?;
+        return DiagnosticAdmissionProvenanceV3 {
+            schema: String::new(),
+            provenance_id: nq_protocol::sha256_bytes(b"pending v3 provenance identity"),
+            source: v1.source,
+            artifact: v1.artifact,
+            origin: v1.origin,
+            provider: v1.provider,
+            substrate_origin: DiagnosticAdmissionSubstrateOriginV3 {
+                intent,
+                intent_digest,
+                phases,
+            },
+            disposition: v1.disposition,
+            judgment: v1.judgment,
+            nonclaims: Vec::new(),
+        }
+        .seal()
+        .map(Box::new)
+        .map(SupportedDiagnosticAdmissionProvenance::V3)
+        .map_err(EngineError::Invariant);
+    }
     let Some(row) =
         store.continuity_acquisition_intent_for_intake(&v1.provider.provider_intake_id)?
     else {
@@ -7186,6 +7462,13 @@ fn admission_refusal_from_engine(
             },
         ),
         EngineError::Continuity(error) => (
+            AdmissionRefusalBoundary::ActiveBinding,
+            AdmissionRefusalCode::InvariantViolation,
+            AdmissionRefusalDetails::Invariant {
+                message: error.to_string(),
+            },
+        ),
+        EngineError::SubstrateOrigin(error) => (
             AdmissionRefusalBoundary::ActiveBinding,
             AdmissionRefusalCode::InvariantViolation,
             AdmissionRefusalDetails::Invariant {
@@ -13539,6 +13822,74 @@ sys.stdout.write("\n")
                 .expect("intakes")
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn substrate_origin_is_committed_before_real_provider_and_replay_does_not_reattest() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let Some((mut engine, watcher, _mode)) = admitted_host_diagnostic_fixture(
+            directory.path(),
+            "substrate-origin-diagnostic-genesis",
+            b"substrate-origin-diagnostic-evaluator",
+        ) else {
+            return;
+        };
+        let mut source =
+            crate::substrate_origin::test_support::SyntheticOriginSourceV1::new(11, "test.local");
+        let verifier = source.verifier();
+        let acquisition_id = "substrate-origin-provider-intake-a";
+        let artifact = engine
+            .diagnostic_execute_with_substrate_origin(
+                &watcher,
+                acquisition_id,
+                &verifier,
+                &mut source,
+                None,
+            )
+            .expect("origin-bound real provider emits exact diagnostic");
+        assert_eq!(source.calls(), 1);
+        let artifact_id = artifact.artifact_id().0.clone();
+        let proof = qualify_diagnostic_admission_supported(&engine.store, &artifact_id)
+            .expect("origin admission proof reopens");
+        let SupportedDiagnosticAdmissionProvenance::V3(proof) = proof else {
+            panic!("origin acquisition must emit the v3 proof carrier");
+        };
+        assert_eq!(
+            proof.substrate_origin.phases,
+            ["provider_invocation_started", "provider_intake_completed"]
+        );
+        assert_eq!(
+            proof.substrate_origin.intent.intake_id,
+            proof.provider.provider_intake_id
+        );
+        assert_eq!(
+            proof
+                .substrate_origin
+                .intent
+                .basis
+                .expected_coordinate
+                .coordinate_ref,
+            verifier
+                .expected_coordinate()
+                .expect("coordinate")
+                .coordinate_ref
+        );
+        proof.validate().expect("v3 proof remains exact");
+
+        let replay = engine
+            .diagnostic_execute_with_substrate_origin(
+                &watcher,
+                acquisition_id,
+                &verifier,
+                &mut source,
+                None,
+            )
+            .expect("completed replay converges");
+        assert_eq!(source.calls(), 1, "replay never refreshes origin evidence");
+        assert_eq!(
+            replay.canonical_bytes().expect("replay bytes"),
+            artifact.canonical_bytes().expect("original bytes")
         );
     }
 

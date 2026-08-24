@@ -68,16 +68,15 @@ about unrelated planning evidence.
 
 A valid carrier proves that the declared edge warrant was an authenticated
 precondition. It does not prove that provider bytes actually originated on the
-declared successor substrate. Production NQ v2 currently supplies no
-independently owned predecessor/successor substrate coordinate. Nightshift
-therefore reports that attribution as `unresolved`, and refuses routine
-reliance, rather than treating reused subject/producer/scope/vantage tokens as
-continuity.
+declared successor substrate. NQ V3 now binds a pinned attester-key coordinate
+and exact signed challenge before provider invocation, and Nightshift requires
+that V3 path when configured for a subject. See `SUBSTRATE_ORIGIN_V2.md`.
 
-Before rerunning full substrate attribution, a qualified producer or custody
-boundary must supply independently authenticated origin evidence for the
-observation. DNS, hostname, IP, matching configured identity, and authority
-itself are not that evidence.
+That portable contract still does not qualify physical origin by itself. A
+production deployment must qualify a non-spoofable origin issuer, verifier
+roots, key/host co-location, clone and reimage behavior, and rotation before its
+coordinate can stand for a real substrate. DNS, hostname, IP, matching
+configured identity, and continuity authority itself are not origin evidence.
 
 ## Operator sequence
 

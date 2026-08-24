@@ -21,7 +21,9 @@ The read-only operation reopens the exact local history and emits
 `nq.diagnostic_admission_provenance.v1` for historical ordinary acquisitions,
 or `nq.diagnostic_admission_provenance.v2` when the original acquisition
 committed a signed Standing continuity prerequisite before provider
-invocation. The common carrier binds:
+invocation. `nq.diagnostic_admission_provenance.v3` additionally carries an
+independently signed substrate-origin acquisition intent and its immutable
+pre-provider phase fence. The common carrier binds:
 
 - the NQ store-genesis source identity;
 - the exact v2 artifact identity, canonical-byte digest, and length;
@@ -43,9 +45,15 @@ The v2 form additionally embeds the exact signed Standing authority and
 acquisition commitment, NQ-owned acquisition basis and intent, and the closed
 invocation-start/intake-complete phase chain. See
 `CONTINUITY_AUTHORITY_CARRIER_V1.md`. It cannot be retrofitted to a historical
-v1 acquisition. In the absence of independently authenticated substrate-origin
-evidence, Nightshift retains the carrier but leaves physical attribution
-unresolved.
+v1 acquisition. V3 embeds that same carrier when a transition is required,
+plus the exact expected coordinate and signed origin challenge committed before
+provider invocation. See `SUBSTRATE_ORIGIN_V2.md`. Historical V1/V2 evidence is
+never upgraded synthetically.
+
+The V3 contract is locally qualified, but no production origin attester is.
+The current attester-key coordinate proves possession of a pinned key, not
+physical key/host co-location or clone resistance. Until a deployment qualifies
+that custody boundary, production physical attribution remains unqualified.
 
 ## Relation to Classic NQ
 
