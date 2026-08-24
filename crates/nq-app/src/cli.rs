@@ -205,6 +205,14 @@ pub enum DiagnosticsCommand {
         /// Exact contract-owned artifact identity.
         artifact_id: String,
     },
+    /// Qualify one local artifact's retained NQ admission provenance.
+    ///
+    /// This establishes evidence eligibility only. It does not grant
+    /// freshness, reliance, authorization, or permission to act.
+    Qualify {
+        /// Exact contract-owned artifact identity.
+        artifact_id: String,
+    },
     /// Export the exact verified canonical bytes with no framing or newline.
     Export {
         /// Exact contract-owned artifact identity.
@@ -596,12 +604,23 @@ async fn diagnostics_command(
         DiagnosticsCommand::Inspect { artifact_id } => {
             diagnostic_inspect(config_path, &artifact_id, json_output)
         }
+        DiagnosticsCommand::Qualify { artifact_id } => {
+            diagnostic_qualify(config_path, &artifact_id, json_output)
+        }
         DiagnosticsCommand::Export { artifact_id } => diagnostic_export(config_path, &artifact_id),
         DiagnosticsCommand::Import {
             artifact,
             import_id,
         } => diagnostic_import(config_path, &artifact, import_id.as_deref(), json_output),
     }
+}
+
+fn diagnostic_qualify(config_path: &Path, artifact_id: &str, json_output: bool) -> Result<()> {
+    let config = NqConfig::load(config_path)?;
+    let artifact_id = nq_protocol::Sha256Digest::parse(artifact_id.to_owned())?;
+    let store = Store::open_read_only(&config.database_path)?;
+    let provenance = nq_core::qualify_diagnostic_admission(&store, &artifact_id)?;
+    print_value(&provenance, json_output)
 }
 
 async fn diagnostic_execute(config_path: &Path, instance_id: &str) -> Result<()> {
@@ -1917,6 +1936,22 @@ helper_runtime_dir = "/run/nq/helpers"
             inspect.command,
             Command::Diagnostics {
                 command: DiagnosticsCommand::Inspect { .. }
+            }
+        ));
+
+        let qualify = Nq::try_parse_from([
+            "nq",
+            "--json",
+            "diagnostics",
+            "qualify",
+            artifact_id.as_str(),
+        ])
+        .expect("artifact admission qualification parses");
+        assert!(qualify.json);
+        assert!(matches!(
+            qualify.command,
+            Command::Diagnostics {
+                command: DiagnosticsCommand::Qualify { .. }
             }
         ));
 

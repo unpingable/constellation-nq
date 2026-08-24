@@ -7,6 +7,7 @@
 pub mod admission;
 pub mod config;
 pub mod coordination;
+pub mod diagnostic_admission;
 pub mod diagnostic_execution;
 pub mod diagnostic_execution_supported;
 pub mod diagnostic_execution_v2;
@@ -22,6 +23,11 @@ pub mod unix_runner;
 pub use admission::{AdmissionLock, AdmissionManager, AdmissionVerification};
 pub use config::{MAX_WATCHERS, NqConfig, WatcherConfig};
 pub use coordination::{CoordinationError, InstanceGuard};
+pub use diagnostic_admission::{
+    DIAGNOSTIC_ADMISSION_PROVENANCE_SCHEMA, DiagnosticAdmissionArtifactV1,
+    DiagnosticAdmissionJudgmentV1, DiagnosticAdmissionOriginV1, DiagnosticAdmissionProvenanceV1,
+    DiagnosticAdmissionProviderV1, DiagnosticAdmissionSourceV1, DiagnosticSourceDispositionV1,
+};
 pub use diagnostic_execution::{
     AcquisitionIntervalV1, AdmittedInputV1, DIAGNOSTIC_CANONICALIZATION_ID,
     DIAGNOSTIC_EXECUTION_SCHEMA, DiagnosticArtifactId, DiagnosticClaimStatusV1, DiagnosticClaimV1,
@@ -61,9 +67,9 @@ pub use engine::{
     ProviderIntakeHistoryVerification, RUN_RESOURCE_OUTCOME_SCHEMA, RetryDisposition,
     RunHardLimits, RunResourceOutcomeSchema, RunResourceOutcomeV1, StructuredJsonError,
     VerificationRefusal, decode_collection_outcome, decode_collection_outcome_ndjson,
-    evaluation_history_bounded, rejected_custody_snapshot, rejected_custody_snapshot_bounded,
-    reopen_diagnostic_artifact, status_snapshot_v2, status_snapshot_v3,
-    validate_diagnostic_artifact_history, validate_evaluation_refusal_history,
+    evaluation_history_bounded, qualify_diagnostic_admission, rejected_custody_snapshot,
+    rejected_custody_snapshot_bounded, reopen_diagnostic_artifact, status_snapshot_v2,
+    status_snapshot_v3, validate_diagnostic_artifact_history, validate_evaluation_refusal_history,
     validate_provider_intake_history, validate_rejected_custody_history,
     validate_status_history_v2, validate_watcher_run_history,
 };

@@ -427,7 +427,7 @@ immutable record in `nq.evaluation_history.v1`. A later refused evaluation for
 an existing condition may retain that finding with refused visibility, but the
 finding is not the source from which the evaluation is reconstructed.
 
-## Execute, inspect, export, and import a diagnostic artifact
+## Execute, qualify, inspect, export, and import a diagnostic artifact
 
 The bounded diagnostic command runs the configured instance, commits its
 ordinary run/evaluation history and `nq.diagnostic_execution.v2` artifact in
@@ -451,10 +451,27 @@ After process restart, use the contract-owned artifact ID from the document:
 
 ```sh
 sudo -u nq nq --config /etc/nq/nq.toml --json \
+  diagnostics qualify sha256:LOWERCASE_64_HEX_DIGEST
+sudo -u nq nq --config /etc/nq/nq.toml --json \
   diagnostics inspect sha256:LOWERCASE_64_HEX_DIGEST
 sudo -u nq nq --config /etc/nq/nq.toml \
   diagnostics export sha256:LOWERCASE_64_HEX_DIGEST > exported.json
 ```
+
+`qualify` is the narrow NQ-NG → Nightshift admission-provenance boundary. It
+exhaustively reopens the store's semantic history and emits one
+`nq.diagnostic_admission_provenance.v1` only for a locally produced v2
+artifact. The carrier binds exact canonical bytes, the store-genesis source,
+run/evaluation origin, provider intake, raw-byte and admission-context
+identities, profile semantic identity, and the admitted judgment when one
+exists. Governed refusal and acquisition-failure artifacts remain eligible
+evidence with their distinct dispositions. Imported custody, v1 compatibility
+artifacts, unavailable/corrupt bytes, and inconsistent history refuse.
+
+Qualification is historical evidence admission only. It does not establish
+freshness, present reliance, authorization, or action. Its content hash is not
+a source signature; consumers must acquire it from their configured NQ-NG
+source and bind the separately configured store-genesis identity.
 
 `inspect` reports commitment, origin, schema support, exact byte state, and
 the decoded diagnostic when supported. `export` returns only verified
@@ -474,7 +491,8 @@ reliance, make the artifact current, or grant authorization. Supported v1 and
 v2 documents receive strict semantic and self-identity validation. Canonical
 unknown schemas may be retained only as explicitly unsupported custody and
 cannot enter diagnostic evaluation. Locally emitted artifacts are additionally
-checked against their retained semantic history before inspection or export;
+checked against their retained semantic history before qualification,
+inspection, or export;
 that local correspondence is not inferred for imported bytes.
 
 ## Apply configuration safely

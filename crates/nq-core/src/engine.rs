@@ -42,6 +42,11 @@ use crate::config::{
     Carrier, CheckpointPolicy, NqConfig, ScopeConfig, VantageConfig, WatcherConfig,
 };
 use crate::coordination::{CoordinationError, InstanceGuard};
+use crate::diagnostic_admission::{
+    DiagnosticAdmissionArtifactV1, DiagnosticAdmissionJudgmentV1, DiagnosticAdmissionOriginV1,
+    DiagnosticAdmissionProvenanceV1, DiagnosticAdmissionProviderV1, DiagnosticAdmissionSourceV1,
+    DiagnosticSourceDispositionV1,
+};
 use crate::diagnostic_execution::{
     AdmittedInputV1, DiagnosticArtifactId, DiagnosticClaimStatusV1, DiagnosticCoherenceV1,
     DiagnosticConditionV1, DiagnosticCoverageV1, DiagnosticDerivationV1,
@@ -3936,6 +3941,208 @@ pub fn reopen_diagnostic_artifact(
         )));
     }
     Ok(artifact)
+}
+
+/// Produce one immutable provenance carrier for a locally emitted v2
+/// diagnostic after exhaustively reopening its complete source history.
+///
+/// Imported custody is deliberately ineligible. The result records historical
+/// NQ admission only; it grants no freshness, reliance, authorization, or
+/// action.
+///
+/// # Errors
+///
+/// Returns when the artifact is missing, imported, unavailable, not v2, or any
+/// retained admission/intake/judgment/history binding fails to reopen exactly.
+#[allow(clippy::too_many_lines)]
+pub fn qualify_diagnostic_admission(
+    store: &Store,
+    artifact_id: &Sha256Digest,
+) -> Result<DiagnosticAdmissionProvenanceV1, EngineError> {
+    validate_semantic_history(store)?;
+    let DiagnosticArtifactLookup::Found(access) =
+        store.diagnostic_artifact(artifact_id, SUPPORTED_DIAGNOSTIC_EXECUTION_SCHEMAS)?
+    else {
+        return Err(EngineError::DiagnosticUnsupported(format!(
+            "diagnostic artifact {artifact_id} is not committed"
+        )));
+    };
+    if !matches!(
+        access.schema_support,
+        DiagnosticArtifactSchemaSupport::Supported
+    ) {
+        return Err(EngineError::DiagnosticUnsupported(format!(
+            "diagnostic artifact {artifact_id} uses an unsupported contract"
+        )));
+    }
+    let document = match access.byte_state {
+        DiagnosticArtifactByteState::VerifiedAvailable { canonical_bytes } => canonical_bytes,
+        DiagnosticArtifactByteState::CommittedUnavailable => {
+            return Err(EngineError::DiagnosticUnsupported(format!(
+                "diagnostic artifact {artifact_id} is committed but unavailable"
+            )));
+        }
+        DiagnosticArtifactByteState::Corrupt { reason } => {
+            return Err(EngineError::Invariant(format!(
+                "diagnostic artifact {artifact_id} failed byte verification: {reason}"
+            )));
+        }
+    };
+    let (run_id, evaluation_id, completed_at) = match access.commitment.origin {
+        DiagnosticArtifactOrigin::Local {
+            run_id,
+            evaluation_id,
+            completed_at,
+        } => (run_id, evaluation_id, completed_at),
+        DiagnosticArtifactOrigin::Imported { .. } => {
+            return Err(EngineError::DiagnosticUnsupported(format!(
+                "diagnostic artifact {artifact_id} has imported custody, not local admission"
+            )));
+        }
+    };
+    let artifact = SupportedDiagnosticExecution::decode_canonical(document.as_bytes())
+        .map_err(|error| EngineError::Invariant(error.to_string()))?;
+    let SupportedDiagnosticExecution::V2(artifact) = artifact else {
+        return Err(EngineError::DiagnosticUnsupported(
+            "only locally emitted nq.diagnostic_execution.v2 has retained admission correspondence"
+                .into(),
+        ));
+    };
+    if artifact.artifact_id.as_digest() != artifact_id || artifact.run_id.as_str() != run_id {
+        return Err(EngineError::Invariant(format!(
+            "diagnostic artifact {artifact_id} substitutes its local run identity"
+        )));
+    }
+
+    let mut provider_intake_ids = BTreeSet::new();
+    for received in &artifact.inputs.received {
+        provider_intake_ids.insert(received.provider_intake_id.as_str());
+    }
+    for failed in &artifact.inputs.failed {
+        match &failed.cause {
+            FailedInputCauseV2::ProviderNoResponse {
+                provider_intake_id, ..
+            }
+            | FailedInputCauseV2::AcquisitionFailed {
+                provider_intake_id, ..
+            } => {
+                provider_intake_ids.insert(provider_intake_id);
+            }
+            FailedInputCauseV2::Missing { .. } | FailedInputCauseV2::Unsupported { .. } => {}
+        }
+    }
+    let [provider_intake_id] = provider_intake_ids.into_iter().collect::<Vec<_>>()[..] else {
+        return Err(EngineError::Invariant(format!(
+            "diagnostic artifact {artifact_id} does not bind exactly one provider intake"
+        )));
+    };
+    let intake = store.provider_intake(provider_intake_id)?.ok_or_else(|| {
+        EngineError::Invariant(format!(
+            "diagnostic artifact {artifact_id} provider intake {provider_intake_id} is missing"
+        ))
+    })?;
+    if intake.run_id != run_id
+        || intake.profile_semantic_id != artifact.profile_semantic_id.as_str()
+    {
+        return Err(EngineError::Invariant(format!(
+            "diagnostic artifact {artifact_id} substitutes provider admission provenance"
+        )));
+    }
+
+    let disposition = if !artifact.inputs.admitted.is_empty() {
+        DiagnosticSourceDispositionV1::AdmittedReport
+    } else if !artifact.inputs.refused.is_empty() {
+        DiagnosticSourceDispositionV1::GovernedRefusal
+    } else {
+        DiagnosticSourceDispositionV1::AcquisitionFailure
+    };
+    let admitted = store.admitted_collection_for_run(&run_id)?;
+    let judgment = match (disposition, admitted) {
+        (DiagnosticSourceDispositionV1::AdmittedReport, Some(admitted)) => {
+            let snapshot = store
+                .verify_admitted_snapshot(&admitted.report_id)
+                .map_err(|error| {
+                    EngineError::Invariant(format!(
+                        "diagnostic artifact {artifact_id} admission snapshot failed authentication: {error}"
+                    ))
+                })?;
+            if evaluation_id.is_none()
+                || snapshot.admission_id != intake.source_admission_id
+                || snapshot.admission_context_digest != intake.admission_context_digest
+            {
+                return Err(EngineError::Invariant(format!(
+                    "diagnostic artifact {artifact_id} substitutes its admitted report judgment"
+                )));
+            }
+            Some(DiagnosticAdmissionJudgmentV1 {
+                report_id: snapshot.report_id,
+                judgment_schema: snapshot.judgment_schema_version,
+                judgment_digest: parse_digest("judgment_digest", &snapshot.judgment_digest)?,
+            })
+        }
+        (DiagnosticSourceDispositionV1::AdmittedReport, None) => {
+            return Err(EngineError::Invariant(format!(
+                "diagnostic artifact {artifact_id} claims admission without an admitted report"
+            )));
+        }
+        (_, None) if evaluation_id.is_none() => None,
+        (_, _) => {
+            return Err(EngineError::Invariant(format!(
+                "diagnostic artifact {artifact_id} mixes non-admitted custody with a report judgment"
+            )));
+        }
+    };
+    let source_id = format!("nq-store-genesis:{}", store.sole_genesis_id()?);
+    if artifact.producer.node_id != source_id {
+        return Err(EngineError::Invariant(format!(
+            "diagnostic artifact {artifact_id} substitutes its source store identity"
+        )));
+    }
+    DiagnosticAdmissionProvenanceV1 {
+        schema: String::new(),
+        provenance_id: nq_protocol::sha256_bytes(b"pending provenance identity"),
+        source: DiagnosticAdmissionSourceV1 {
+            kind: "local_nq_store".into(),
+            source_id,
+        },
+        artifact: DiagnosticAdmissionArtifactV1 {
+            artifact_id: artifact.artifact_id.0,
+            contract_schema: DIAGNOSTIC_EXECUTION_V2_SCHEMA.into(),
+            canonical_bytes_sha256: access.commitment.canonical_bytes_sha256,
+            canonical_bytes_length: access.commitment.canonical_bytes_length,
+        },
+        origin: DiagnosticAdmissionOriginV1 {
+            run_id,
+            evaluation_id,
+            completed_at,
+            committed_at: access.commitment.committed_at,
+        },
+        provider: DiagnosticAdmissionProviderV1 {
+            provider_intake_id: intake.intake_id,
+            raw_sha256: parse_digest("raw_sha256", &intake.raw_sha256)?,
+            provider_admission_id: parse_digest(
+                "provider_admission_id",
+                &intake.provider_admission_id,
+            )?,
+            source_admission_id: intake.source_admission_id,
+            admission_context_digest: parse_digest(
+                "admission_context_digest",
+                &intake.admission_context_digest,
+            )?,
+            profile_semantic_id: parse_digest("profile_semantic_id", &intake.profile_semantic_id)?,
+        },
+        disposition,
+        judgment,
+        nonclaims: Vec::new(),
+    }
+    .seal()
+    .map_err(EngineError::Invariant)
+}
+
+fn parse_digest(field: &str, value: &str) -> Result<Sha256Digest, EngineError> {
+    Sha256Digest::parse(value.to_owned()).map_err(|error| {
+        EngineError::Invariant(format!("diagnostic admission {field} is invalid: {error}"))
+    })
 }
 
 /// Exact historical diagnostic-artifact reopening counts.
@@ -12660,6 +12867,43 @@ sys.stdout.write("\n")
         validate_diagnostic_artifact_history(&engine.store)
             .expect("evaluated diagnostic history preserves exact semantics");
 
+        let admission = qualify_diagnostic_admission(&engine.store, &stored_artifact_id)
+            .expect("local artifact carries exact NQ admission provenance");
+        admission.validate().expect("closed provenance validates");
+        assert_eq!(
+            admission.source.source_id,
+            "nq-store-genesis:diagnostic-test-genesis"
+        );
+        assert_eq!(admission.artifact.artifact_id, stored_artifact_id);
+        assert_eq!(
+            admission.artifact.canonical_bytes_sha256,
+            nq_protocol::sha256_bytes(&original)
+        );
+        assert_eq!(
+            admission.artifact.canonical_bytes_length,
+            u64::try_from(original.len()).expect("fixture length")
+        );
+        assert_eq!(
+            admission.disposition,
+            DiagnosticSourceDispositionV1::AdmittedReport
+        );
+        assert!(admission.judgment.is_some());
+
+        let mut imported_store = Store::initialize_in_memory().expect("import-only store");
+        imported_store
+            .import_diagnostic_artifact(&nq_store::DiagnosticArtifactImportInput {
+                import_id: "import:test-only-custody".into(),
+                artifact_id: stored_artifact_id.clone(),
+                contract_schema: DIAGNOSTIC_EXECUTION_V2_SCHEMA.into(),
+                canonical_bytes: CanonicalDocument::from_canonical_bytes(original.clone())
+                    .expect("canonical artifact bytes"),
+                imported_at: "2026-07-28T12:01:00.000Z".into(),
+            })
+            .expect("imported custody");
+        let imported_error = qualify_diagnostic_admission(&imported_store, &stored_artifact_id)
+            .expect_err("imported custody cannot claim local NQ admission");
+        assert!(imported_error.to_string().contains("imported custody"));
+
         let intakes = engine
             .store
             .provider_intakes_bounded(10, None)
@@ -12850,6 +13094,13 @@ sys.stdout.write("\n")
         let artifact_id = artifact.artifact_id.0.clone();
         validate_diagnostic_artifact_history(&engine.store)
             .expect("run-only refusal history verifies semantically");
+        let admission = qualify_diagnostic_admission(&engine.store, &artifact_id)
+            .expect("governed refusal remains eligible NQ evidence");
+        assert_eq!(
+            admission.disposition,
+            DiagnosticSourceDispositionV1::GovernedRefusal
+        );
+        assert!(admission.judgment.is_none());
 
         drop(engine);
         let reopened = Store::open_read_only(directory.path().join("nq.db")).expect("reopen store");
@@ -12932,6 +13183,13 @@ sys.stdout.write("\n")
         let artifact_id = artifact.artifact_id.0.clone();
         validate_diagnostic_artifact_history(&engine.store)
             .expect("run-only failure history verifies semantically");
+        let admission = qualify_diagnostic_admission(&engine.store, &artifact_id)
+            .expect("acquisition failure remains eligible NQ evidence");
+        assert_eq!(
+            admission.disposition,
+            DiagnosticSourceDispositionV1::AcquisitionFailure
+        );
+        assert!(admission.judgment.is_none());
 
         drop(engine);
         let reopened = Store::open_read_only(directory.path().join("nq.db")).expect("reopen store");
