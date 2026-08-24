@@ -1199,6 +1199,7 @@ fn diagnostic_import_operation_identity_refuses_different_evidence() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn diagnostic_export_import_restart_and_same_operation_replay_preserve_exact_receipt() {
     let nq = env!("CARGO_BIN_EXE_nq");
     let directory = tempfile::tempdir().expect("temporary test directory");
@@ -1290,6 +1291,15 @@ fn diagnostic_export_import_restart_and_same_operation_replay_preserve_exact_rec
         first_receipt["imported_at"]
     );
     assert_eq!(inspected["byte_state"]["state"], "verified_available");
+    let qualification_error = failure(run(
+        nq,
+        &target_config,
+        &["diagnostics", "qualify", id.as_str()],
+    ));
+    assert!(
+        qualification_error.contains("imported custody"),
+        "imported bytes must not acquire local admission provenance: {qualification_error}"
+    );
     let doctor = success(run(nq, &target_config, &["doctor"]));
     assert_eq!(
         doctor["diagnostic_artifacts"]["state"],
@@ -1347,6 +1357,52 @@ fn doctor_and_restore_refuse_resealed_local_artifact_semantic_substitution() {
             .canonical_bytes()
             .expect("live artifact canonical bytes"),
         execution.stdout
+    );
+    let qualification = success(run(
+        nq,
+        &live_config,
+        &[
+            "diagnostics",
+            "qualify",
+            original.artifact_id.as_digest().as_str(),
+        ],
+    ));
+    let typed_qualification: nq_core::DiagnosticAdmissionProvenanceV1 =
+        serde_json::from_value(qualification.clone())
+            .expect("actual nq output uses the closed admission-provenance schema");
+    typed_qualification
+        .validate()
+        .expect("actual nq output validates as exact admission provenance");
+    assert_eq!(
+        qualification["schema"],
+        "nq.diagnostic_admission_provenance.v1"
+    );
+    assert_eq!(
+        qualification["artifact"]["artifact_id"],
+        original.artifact_id.as_digest().as_str()
+    );
+    assert_eq!(
+        qualification["source"]["source_id"],
+        original.producer.node_id
+    );
+    assert_eq!(qualification["disposition"], "admitted_report");
+    assert_eq!(
+        qualification["provider"]["profile_semantic_id"],
+        original.profile_semantic_id.as_str()
+    );
+    assert!(qualification["judgment"].is_object());
+    let qualification_replay = success(run(
+        nq,
+        &live_config,
+        &[
+            "diagnostics",
+            "qualify",
+            original.artifact_id.as_digest().as_str(),
+        ],
+    ));
+    assert_eq!(
+        qualification_replay, qualification,
+        "reopening the same local artifact must return the same exact admission provenance"
     );
 
     let pristine = root.join("pristine.db");

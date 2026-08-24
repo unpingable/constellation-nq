@@ -98,11 +98,14 @@ The repository implements the stage-one operational spine:
   typed no-byte provider no-response/acquisition failures without converting
   admission refusal into an execution. The artifact commits with its exact
   source history, reopens before return, and is available through
-  `diagnostics inspect`, exact-byte `diagnostics export`, and custody-only
-  `diagnostics import`. Local inspection and export reverify the retained
-  semantic history; imported custody remains explicitly unauthenticated.
-  Import and access grant no reliance or authority and do not create a general
-  historical emitter;
+  read-only `diagnostics qualify`, `diagnostics inspect`, exact-byte
+  `diagnostics export`, and custody-only `diagnostics import`. Qualification
+  emits `nq.diagnostic_admission_provenance.v1` only after exact local v2
+  history reopens, binding source genesis, artifact bytes, run/evaluation,
+  provider intake, admission context, profile semantics, and judgment when
+  present. Imported custody remains explicitly unauthenticated and cannot be
+  qualified. Qualification, import, and access grant no freshness, reliance,
+  authorization, or action and do not create a general historical emitter;
 - a native host profile/helper plus the conformance fixture profile;
 - strict, bounded `SystemSpecV1` validation and deterministic compilation into
   schema-domain-separated `ScopeCut` proposals, ratification-bound cuts,
