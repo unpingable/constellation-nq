@@ -1,0 +1,24 @@
+[package]
+name = "nq-linode-origin-helper"
+description = "Closed Linode instance-metadata origin helper for NQ V3 acquisitions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+chrono.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
+libc.workspace = true
+nix = { workspace = true, features = ["user"] }
+nq-build-info = { path = "../nq-build-info" }
+nq-core = { path = "../nq-core" }
+nq-protocol = { path = "../nq-protocol" }
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

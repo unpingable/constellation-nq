@@ -34,6 +34,22 @@ ensure_account_fallback() {
             --shell "$shell" \
             nq-helper
     fi
+    if ! getent group nq-origin-helper >/dev/null 2>&1; then
+        addgroup --system nq-origin-helper
+    fi
+    if ! getent passwd nq-origin-helper >/dev/null 2>&1; then
+        shell=/usr/sbin/nologin
+        if [ ! -x "$shell" ]; then
+            shell=/bin/false
+        fi
+        adduser \
+            --system \
+            --ingroup nq-origin-helper \
+            --home /var/lib/nq-origin-helper \
+            --no-create-home \
+            --shell "$shell" \
+            nq-origin-helper
+    fi
 }
 
 create_layout_fallback() {
@@ -42,6 +58,8 @@ create_layout_fallback() {
         /var/lib/nq \
         /var/lib/nq/admissions \
         /var/lib/nq/backups
+    install -d -o nq-origin-helper -g nq-origin-helper -m 0700 \
+        /var/lib/nq-origin-helper
     install -d -o nq -g nq -m 0751 /run/nq
     install -d -o nq -g nq -m 0711 /run/nq/helpers
 }

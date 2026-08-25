@@ -4,12 +4,16 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::process::{Command as ProcessCommand, Stdio};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use nix::libc;
 use nq_core::config::{LoadedConfig, NqConfig};
-use nq_helper_sandbox::{open_runtime_root, require_no_posix_acl};
+use nq_helper_sandbox::{
+    IsolationLimits, isolate_command_with_limits, open_runtime_root, require_no_posix_acl,
+    resolve_account,
+};
 use nq_profiles::all_profiles;
 use nq_protocol::semantic_digest;
 use nq_store::{
@@ -242,6 +246,29 @@ pub enum DiagnosticsCommand {
         /// File containing the pinned 32-byte Ed25519 public key in hex.
         #[arg(long)]
         standing_public_key: PathBuf,
+    },
+    /// Execute one genesis diagnostic under the closed Linode V3 origin profile.
+    ExecuteLinodeOrigin {
+        /// Configured watcher instance.
+        instance_id: String,
+        /// Caller-preallocated provider-intake/acquisition identity.
+        #[arg(long)]
+        acquisition_id: String,
+        /// Independently pinned `sha256:` digest of the decimal Linode instance ID.
+        #[arg(long)]
+        expected_instance_id_sha256: String,
+        /// Exact absolute installed Linode origin-helper executable.
+        #[arg(long)]
+        origin_helper: PathBuf,
+        /// Exact `sha256:` digest of the installed origin-helper executable.
+        #[arg(long)]
+        origin_helper_sha256: String,
+        /// Dedicated local execution account for the origin helper.
+        #[arg(long)]
+        origin_helper_account: String,
+        /// File containing the pinned 32-byte helper Ed25519 public key in hex.
+        #[arg(long)]
+        origin_helper_public_key: PathBuf,
     },
     /// Inspect one immutable artifact commitment without changing it.
     Inspect {
@@ -682,6 +709,27 @@ async fn diagnostics_command(
             )
             .await
         }
+        DiagnosticsCommand::ExecuteLinodeOrigin {
+            instance_id,
+            acquisition_id,
+            expected_instance_id_sha256,
+            origin_helper,
+            origin_helper_sha256,
+            origin_helper_account,
+            origin_helper_public_key,
+        } => {
+            diagnostic_execute_linode_origin(
+                config_path,
+                &instance_id,
+                &acquisition_id,
+                &expected_instance_id_sha256,
+                &origin_helper,
+                &origin_helper_sha256,
+                &origin_helper_account,
+                &origin_helper_public_key,
+            )
+            .await
+        }
         DiagnosticsCommand::Inspect { artifact_id } => {
             diagnostic_inspect(config_path, &artifact_id, json_output)
         }
@@ -803,6 +851,139 @@ async fn diagnostic_execute_continuity(
     std::io::stdout()
         .lock()
         .write_all(&artifact.canonical_bytes()?)?;
+    Ok(())
+}
+
+struct IsolatedLinodeOriginSource {
+    executable: PathBuf,
+    account: nq_helper_sandbox::ExecutionAccount,
+}
+
+impl nq_core::SubstrateOriginAttestationSourceV1 for IsolatedLinodeOriginSource {
+    fn attest(
+        &mut self,
+        basis: &nq_core::SubstrateOriginAcquisitionBasisV1,
+    ) -> Result<nq_core::SignedSubstrateOriginAttestationV1, String> {
+        let mut command = ProcessCommand::new(&self.executable);
+        command
+            .env_clear()
+            .current_dir("/")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        isolate_command_with_limits(
+            &mut command,
+            &self.account,
+            IsolationLimits {
+                address_space_bytes: 256 * 1024 * 1024,
+                cpu_seconds: 10,
+                processes: 4,
+                open_files: 16,
+                file_bytes: 0,
+            },
+        );
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("cannot launch isolated Linode origin helper: {error}"))?;
+        let basis_bytes = nq_protocol::canonical_json_bytes(basis)
+            .map_err(|error| format!("cannot encode Linode origin basis: {error}"))?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| "Linode origin helper stdin is unavailable".to_owned())?
+            .write_all(&basis_bytes)
+            .map_err(|error| format!("cannot write Linode origin basis: {error}"))?;
+        let output = child
+            .wait_with_output()
+            .map_err(|error| format!("cannot wait for Linode origin helper: {error}"))?;
+        if !output.status.success() {
+            let diagnostic = String::from_utf8_lossy(&output.stderr);
+            return Err(format!(
+                "Linode origin helper exited {}: {}",
+                output.status,
+                diagnostic.chars().take(1024).collect::<String>()
+            ));
+        }
+        if !output.stderr.is_empty() || output.stdout.is_empty() || output.stdout.len() > 64 * 1024
+        {
+            return Err("Linode origin helper emitted an invalid bounded response".into());
+        }
+        serde_json::from_slice(&output.stdout)
+            .map_err(|error| format!("Linode origin helper response is malformed: {error}"))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn diagnostic_execute_linode_origin(
+    config_path: &Path,
+    instance_id: &str,
+    acquisition_id: &str,
+    expected_instance_id_sha256: &str,
+    helper_executable: &Path,
+    helper_sha256: &str,
+    helper_account: &str,
+    helper_public_key: &Path,
+) -> Result<()> {
+    validate_sha256(expected_instance_id_sha256)?;
+    validate_sha256(helper_sha256)?;
+    validate_origin_helper_executable(helper_executable, helper_sha256)?;
+    let public_key = continuity_verifier(helper_public_key)?;
+    let key_id = nq_core::linode_origin_helper_key_id(&public_key);
+    let verifier = nq_core::SubstrateOriginVerifierV1::for_linode_instance_metadata(
+        nq_core::LINODE_ORIGIN_HELPER_ISSUER_V1.into(),
+        key_id,
+        nq_protocol::Sha256Digest::parse(expected_instance_id_sha256.to_owned())?,
+        public_key,
+    )?;
+    let account = resolve_account(helper_account, false)?;
+    let config = NqConfig::load(config_path)?;
+    let watcher = config
+        .watcher(instance_id)
+        .with_context(|| format!("unknown instance {instance_id}"))?
+        .clone();
+    let acquisition_id = acquisition_id.to_owned();
+    let mut source = IsolatedLinodeOriginSource {
+        executable: helper_executable.to_path_buf(),
+        account,
+    };
+    let artifact = tokio::task::spawn_blocking(move || {
+        let mut engine = nq_core::CollectionEngine::open(&config)?;
+        engine.diagnostic_execute_with_substrate_origin(
+            &watcher,
+            &acquisition_id,
+            &verifier,
+            &mut source,
+            None,
+        )
+    })
+    .await??;
+    std::io::stdout()
+        .lock()
+        .write_all(&artifact.canonical_bytes()?)?;
+    Ok(())
+}
+
+fn validate_origin_helper_executable(path: &Path, expected_sha256: &str) -> Result<()> {
+    if !path.is_absolute() || fs::canonicalize(path)? != path {
+        bail!("Linode origin helper must be an absolute canonical path without symlinks");
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.uid() != 0
+        || metadata.mode() & 0o022 != 0
+        || metadata.mode() & 0o111 == 0
+    {
+        bail!(
+            "Linode origin helper must be a root-owned executable regular file with no group/world write bits"
+        );
+    }
+    if digest_file(path)? != expected_sha256 {
+        bail!("Linode origin helper digest differs from the independently pinned executable");
+    }
     Ok(())
 }
 
@@ -2223,6 +2404,47 @@ helper_runtime_dir = "/run/nq/helpers"
         assert!(
             Nq::try_parse_from(["nq", "diagnostics", "execute", "host-a", "host-b"]).is_err(),
             "one invocation cannot silently broaden to multiple subjects"
+        );
+    }
+
+    #[test]
+    fn linode_origin_execution_requires_exact_closed_inputs() {
+        let options = Nq::try_parse_from([
+            "nq",
+            "diagnostics",
+            "execute-linode-origin",
+            "labelwatch-host-local",
+            "--acquisition-id",
+            "acquisition:fixture",
+            "--expected-instance-id-sha256",
+            &format!("sha256:{}", "a".repeat(64)),
+            "--origin-helper",
+            "/opt/nq-ng/bin/nq-linode-origin-helper",
+            "--origin-helper-sha256",
+            &format!("sha256:{}", "b".repeat(64)),
+            "--origin-helper-account",
+            "nq-origin-helper",
+            "--origin-helper-public-key",
+            "/etc/nq/origin-helper-public-key.hex",
+        ])
+        .expect("closed Linode origin execution parses");
+        assert!(matches!(
+            options.command,
+            Command::Diagnostics {
+                command: DiagnosticsCommand::ExecuteLinodeOrigin { .. }
+            }
+        ));
+        assert!(
+            Nq::try_parse_from([
+                "nq",
+                "diagnostics",
+                "execute-linode-origin",
+                "labelwatch-host-local",
+                "--url",
+                "http://example.invalid",
+            ])
+            .is_err(),
+            "the closed origin path has no caller-selected URL"
         );
     }
 

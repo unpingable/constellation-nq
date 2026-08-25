@@ -1,3 +1,4 @@
 # Type Name ID GECOS                    Home        Shell
 u nq     -  "NQ-ng service account"   /var/lib/nq /usr/sbin/nologin
 u nq-helper - "NQ-ng watcher account" /nonexistent /usr/sbin/nologin
+u nq-origin-helper - "NQ-ng Linode origin helper" /var/lib/nq-origin-helper /usr/sbin/nologin

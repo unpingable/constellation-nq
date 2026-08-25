@@ -38,8 +38,9 @@ pub const LINODE_INSTANCE_METADATA_PROFILE_V1: &str = "linode_instance_metadata_
 pub const LINODE_METADATA_NAMESPACE_V1: &str = "akamai_linode";
 pub const LINODE_METADATA_INSTANCE_ENDPOINT_V1: &str = "http://169.254.169.254/v1/instance";
 pub const LINODE_METADATA_EVIDENCE_SCHEMA_V1: &str = "nq.linode_instance_metadata_evidence.v1";
+pub const LINODE_ORIGIN_HELPER_ISSUER_V1: &str = "origin-helper:linode-instance-metadata:v1";
 const MAX_LINODE_METADATA_BYTES: usize = 16 * 1024;
-const LINODE_METADATA_NONCLAIMS: [&str; 6] = [
+pub const LINODE_METADATA_NONCLAIMS_V1: [&str; 6] = [
     "origin attestation proves the pinned helper reported an exact response under the closed Linode metadata profile for this acquisition basis",
     "Linode metadata is instance-local but is not a provider-signed portable identity document",
     "the qualified coordinate identifies one logical Linode instance, not physical host placement",
@@ -474,9 +475,17 @@ fn expected_nonclaims(coordinate: &SubstrateCoordinateV1) -> Vec<String> {
     match coordinate.kind {
         SubstrateCoordinateKindV1::AttesterKey => ATTESTATION_NONCLAIMS.map(str::to_owned).to_vec(),
         SubstrateCoordinateKindV1::LinodeInstance => {
-            LINODE_METADATA_NONCLAIMS.map(str::to_owned).to_vec()
+            LINODE_METADATA_NONCLAIMS_V1.map(str::to_owned).to_vec()
         }
     }
+}
+
+#[must_use]
+pub fn linode_origin_helper_key_id(verifying_key: &VerifyingKey) -> String {
+    format!(
+        "origin-helper-key:{}",
+        nq_protocol::sha256_bytes(verifying_key.as_bytes())
+    )
 }
 
 fn profile_evidence_matches(

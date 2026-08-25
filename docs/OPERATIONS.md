@@ -337,6 +337,52 @@ into the active configuration (or use it as the initial alternative), then run
 the same test/admit workflow. Its capability ceiling is explicit; the helper
 cannot expand it at runtime.
 
+### Linode V3 genesis acquisition
+
+The package includes the closed `nq-linode-origin-helper`. It is not a watcher,
+scheduler, monitor, or generic HTTP client. Normal execution accepts one exact
+`nq.substrate_origin_acquisition_basis.v1` on stdin, contacts only the fixed
+Linode metadata token and instance endpoints, refuses redirects and non-JSON
+instance responses, compares the logical-instance coordinate with the basis,
+and emits one signed bounded report. Its only alternate command is
+`--public-key`; the signing seed is read only from the fixed path
+`/var/lib/nq-origin-helper/signing-key.hex`.
+
+Provision that 32-byte hex seed as an explicit deployment operation owned by
+the separate `nq-origin-helper` account with mode `0600`. Store the resulting
+public key under root-owned `/etc/nq`; never copy the private seed into the NQ
+configuration or NQ state. The origin helper must not share the `nq-helper`
+watcher account, because the observed provider must not possess the key that
+authenticates origin reports.
+
+After independently pinning the SHA-256 digest of the decimal Linode instance
+ID, run one exact genesis acquisition through a maintenance process that has
+the same four child-isolation capabilities as `nqd.service`:
+
+```sh
+/opt/nq-ng/bin/nq --config /etc/nq/nq.toml diagnostics \
+  execute-linode-origin host-local \
+  --acquisition-id ACQUISITION_ID \
+  --expected-instance-id-sha256 sha256:PINNED_INSTANCE_ID_DIGEST \
+  --origin-helper /opt/nq-ng/lib/nq/helpers/nq-linode-origin-helper \
+  --origin-helper-sha256 sha256:PINNED_HELPER_EXECUTABLE_DIGEST \
+  --origin-helper-account nq-origin-helper \
+  --origin-helper-public-key /etc/nq/origin-helper-public-key.hex
+```
+
+The helper executable path must be absolute, canonical, root-owned,
+non-writable by group/other, executable, and equal to the supplied exact
+digest. NQ resolves and isolates the dedicated account before exec. It verifies
+the signed response and persists the existing V3 origin intent before invoking
+the diagnostic provider. Exact replay of a completed acquisition returns the
+stored diagnostic without invoking the metadata helper or provider again.
+
+This command supplies no continuity authority and is therefore the genesis
+case only. A successor coordinate requires the existing exact Standing
+continuity carrier; do not fabricate a predecessor. The helper signature
+authenticates the helper report, not Akamai, physical hardware, installation,
+boot, subject identity, evidence truth, currentness, standing, or authority.
+
 Rollback requires an exact retained lock path and re-verifies it against the
 current bytes, configuration, protocol, and compiled profile:
 
@@ -658,7 +704,8 @@ the off-host backup and release checksums if later custody or audit is needed.
 
 ## Build offline release artifacts
 
-Build or obtain `nq`, `nqd`, and `nq-host-helper` for each target without
+Build or obtain `nq`, `nqd`, `nq-host-helper`, and
+`nq-linode-origin-helper` for each target without
 allowing network access. They must be `--release` builds from one reviewed
 source cohort. Verify the checked-in descriptor catalog against that exact
 `nq` binary, then pass those inputs to the assembler:

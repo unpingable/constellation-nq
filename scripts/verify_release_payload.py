@@ -77,6 +77,7 @@ def expected_files(descriptors: list[str]) -> dict[str, int]:
         "bin/nq": 0o755,
         "bin/nqd": 0o755,
         "lib/nq/helpers/nq-host-helper": 0o755,
+        "lib/nq/helpers/nq-linode-origin-helper": 0o755,
         "lib/nq/helpers/nq_conformance_helper.py": 0o755,
         "lib/systemd/system/nqd.service": 0o644,
         "lib/sysusers.d/nq.conf": 0o644,

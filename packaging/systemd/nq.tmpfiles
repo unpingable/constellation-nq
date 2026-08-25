@@ -5,3 +5,4 @@ d /var/lib/nq/admissions      0700 nq   nq    -   -
 d /var/lib/nq/backups         0700 nq   nq    -   -
 d /run/nq                     0751 nq   nq    -   -
 d /run/nq/helpers             0711 nq   nq    -   -
+d /var/lib/nq-origin-helper   0700 nq-origin-helper nq-origin-helper - -

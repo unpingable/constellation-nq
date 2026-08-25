@@ -11,6 +11,16 @@ watchers. Every helper using `nq-helper` occupies the same Unix-identity
 failure and denial-of-service domain. Deploy separate admitted helper accounts
 where watchers do not share trust and availability requirements.
 
+The closed Linode origin helper uses the separate `nq-origin-helper` account.
+Its fixed signing-key path is outside `/var/lib/nq`, so the `nq` supervisor and
+the ordinary `nq-helper` watcher account have no DAC read grant. The package
+creates only the empty `0700` state directory; it never creates a signing key,
+chooses a bootstrap coordinate, or performs a V3 acquisition. A Linode
+deployment should additionally apply a service-local network policy that
+allows the NQ child cgroup to reach only `169.254.169.254/32` when no admitted
+watcher requires another network destination. That is deployment policy, not
+metadata proof and not a reason to change the host-wide firewall.
+
 The daemon receives only `CAP_SETUID`, `CAP_SETGID`, `CAP_CHOWN`, and
 `CAP_KILL`. They are respectively needed to enter the admitted account, clear
 and set the primary group, take exact-inode custody of a helper-created Unix

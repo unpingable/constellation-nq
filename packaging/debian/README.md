@@ -6,8 +6,9 @@ claim that the repository is a conventional Debian source package.
 The generated binary package has deliberately conservative maintainer-script
 semantics:
 
-- `postinst` creates the locked `nq` daemon and separate `nq-helper` helper
-  accounts plus standard directories. It
+- `postinst` creates the locked `nq` daemon, separate `nq-helper` watcher, and
+  separate `nq-origin-helper` origin-attester accounts plus standard
+  directories. It
   never creates or replaces `/etc/nq/nq.toml`, initializes a database, admits a
   helper, runs a migration, enables a unit, or starts the daemon.
 - `prerm` stops `nqd` before a binary upgrade and leaves it stopped. After the
@@ -15,8 +16,8 @@ semantics:
   start the service. Removal disables and stops the unit. On a systemd host,
   either lifecycle path fails closed if the systemctl operation fails or the
   unit's resulting active state is anything other than exactly `inactive`.
-- `postrm purge` retains `/etc/nq`, `/var/lib/nq`, backups, admissions, and the
-  `nq` and `nq-helper` accounts. This is intentional: Debian's `purge` flag is
+- `postrm purge` retains `/etc/nq`, `/var/lib/nq`, origin-helper state, backups,
+  admissions, and all three service accounts. This is intentional: Debian's `purge` flag is
   not sufficient evidence that durable operational records should be
   destroyed.
 

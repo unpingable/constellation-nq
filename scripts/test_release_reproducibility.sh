@@ -212,11 +212,11 @@ copy_profiles() {
 copy_binaries() {
     local destination=$1
     local order=$2
-    local names=(nq nqd nq-host-helper)
+    local names=(nq nqd nq-host-helper nq-linode-origin-helper)
     local name
     mkdir -p -- "$destination"
     if [[ "$order" == reverse ]]; then
-        names=(nq-host-helper nqd nq)
+        names=(nq-linode-origin-helper nq-host-helper nqd nq)
     fi
     for name in "${names[@]}"; do
         [[ -f "$bin_dir/$name" && -x "$bin_dir/$name" ]] || {

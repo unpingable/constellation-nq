@@ -10,6 +10,7 @@ members = [
     "crates/nq-core",
     "crates/nq-app",
     "crates/nq-host-helper",
+    "crates/nq-linode-origin-helper",
 ]
 
 [workspace.package]
