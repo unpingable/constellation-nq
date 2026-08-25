@@ -435,6 +435,7 @@ and acquisition authority:
 /opt/nq-ng/bin/nq --config /etc/nq/nq.toml recurring tick ENROLLMENT_ID
 /opt/nq-ng/bin/nq --config /etc/nq/nq.toml recurring status ENROLLMENT_ID
 /opt/nq-ng/bin/nq --config /etc/nq/nq.toml recurring reconcile ACQUISITION_ID
+/opt/nq-ng/bin/nq --config /etc/nq/nq.toml recurring inspect-fence ACQUISITION_ID
 ```
 
 Every enrollment is immutable and finite. Cadence changes require a new
@@ -447,6 +448,15 @@ for policy-envelope, missed-slot, fencing, storage, and failure law.
 outcome-unknown occurrence. It has no provider/origin-helper inputs, cannot
 reinvoke the provider, and does not resume recurrence. An explicit operator
 `recurring resume` may follow only after the matching domain fence is released.
+
+`recurring inspect-fence` projects diagnostic-outcome certainty separately
+from provider-activity certainty. `recurring reconcile-provider` accepts only
+an exact provider-activity evidence identity already in local custody plus the
+exact enrollment, domain, and fencing epoch. It performs no query, accepts no
+free-form assertion, cannot create a diagnostic artifact, and leaves the
+diagnostic outcome permanently unknown unless stronger exact result custody is
+later recovered. The full disposition law is in
+[`PROVIDER_FENCE_DISPOSITION_V1.md`](PROVIDER_FENCE_DISPOSITION_V1.md).
 
 Rollback requires an exact retained lock path and re-verifies it against the
 current bytes, configuration, protocol, and compiled profile:

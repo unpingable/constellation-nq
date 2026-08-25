@@ -110,11 +110,14 @@ After `provider_invocation_started`, the same occurrence cannot invoke again.
 Explicit completion terminates the occurrence. Ambiguity becomes
 `outcome_unknown`, pauses the enrollment, and fences the entire coordination
 domain in conservative V1. Lease or process expiry alone cannot clear that
-fence. An explicit `recurring reconcile ACQUISITION_ID` may release it only
-when read-only replay reopens exact local artifact custody for that same
-acquisition, attempt, and fencing epoch. Reconciliation has no provider or
-origin-helper source. It leaves the enrollment paused until a separate
-operator resume.
+fence. Exact result custody and provider-activity certainty are separate.
+`recurring reconcile ACQUISITION_ID` may recover an exact result only when
+read-only replay reopens local artifact custody for that same acquisition,
+attempt, and fencing epoch. `recurring reconcile-provider` may release only the
+coordination fence, and only from preexisting exact
+`nq.provider_activity_evidence.v1`. It leaves the diagnostic outcome unknown
+and the enrollment paused. Neither command has a provider or origin-helper
+source. See [`PROVIDER_FENCE_DISPOSITION_V1.md`](PROVIDER_FENCE_DISPOSITION_V1.md).
 
 Terminal failure increments the derived consecutive-failure projection;
 success resets that projection. Reaching the selected threshold appends a

@@ -373,6 +373,29 @@ pub enum RecurringCommand {
         /// Exact acquisition occurrence whose fenced result is reopened.
         acquisition_id: String,
     },
+    /// Inspect diagnostic and provider-activity uncertainty independently.
+    InspectFence {
+        /// Exact recurrence acquisition occurrence.
+        acquisition_id: String,
+    },
+    /// Release only an exact provider-activity fence using preexisting local
+    /// evidence. This command performs no provider query or diagnostic work.
+    ReconcileProvider {
+        /// Exact outcome-unknown acquisition occurrence.
+        acquisition_id: String,
+        /// Exact immutable recurrence enrollment.
+        #[arg(long)]
+        enrollment_id: String,
+        /// Exact deployment-owned coordination domain.
+        #[arg(long)]
+        coordination_domain: String,
+        /// Exact stale-proof fencing epoch held by the occurrence.
+        #[arg(long)]
+        fencing_epoch: u64,
+        /// Exact preexisting provider-activity evidence identity.
+        #[arg(long)]
+        evidence_id: String,
+    },
     /// Pause one enrollment without changing its anchor or history.
     Pause {
         /// Exact enrollment to pause.
@@ -976,6 +999,29 @@ fn recurring_command(
         RecurringCommand::Reconcile { acquisition_id } => {
             reconcile_outcome_unknown(&config, &acquisition_id, json_output)
         }
+        RecurringCommand::InspectFence { acquisition_id } => {
+            let store = Store::open_read_only(&config.database_path)?;
+            print_value(
+                &serde_json::to_value(store.provider_fence_status(&acquisition_id)?)?,
+                true,
+            )
+        }
+        RecurringCommand::ReconcileProvider {
+            acquisition_id,
+            enrollment_id,
+            coordination_domain,
+            fencing_epoch,
+            evidence_id,
+        } => reconcile_provider_activity_command(
+            &config,
+            &acquisition_id,
+            &enrollment_id,
+            &coordination_domain,
+            fencing_epoch,
+            &evidence_id,
+            now,
+            json_output,
+        ),
         RecurringCommand::Pause {
             enrollment_id,
             operation_id,
@@ -1019,6 +1065,48 @@ fn recurring_command(
             json_output,
         ),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconcile_provider_activity_command(
+    config: &NqConfig,
+    acquisition_id: &str,
+    enrollment_id: &str,
+    coordination_domain: &str,
+    fencing_epoch: u64,
+    evidence_id: &str,
+    now: i64,
+    json_output: bool,
+) -> Result<()> {
+    let _domain_guard = nq_core::CoordinationDomainGuard::acquire(
+        &config.database_path,
+        coordination_domain,
+        "recurring-reconcile-provider",
+    )?;
+    let event_id = Store::open(&config.database_path)?.reconcile_provider_activity(
+        acquisition_id,
+        enrollment_id,
+        coordination_domain,
+        fencing_epoch,
+        evidence_id,
+        now,
+    )?;
+    print_value(
+        &json!({
+            "outcome": "provider_activity_reconciled",
+            "acquisition_id": acquisition_id,
+            "enrollment_id": enrollment_id,
+            "coordination_domain_id": coordination_domain,
+            "fencing_epoch": fencing_epoch,
+            "evidence_id": evidence_id,
+            "reconciliation_event_id": event_id,
+            "diagnostic_outcome": "outcome_unknown",
+            "provider_invoked": false,
+            "new_acquisition_created": false,
+            "operator_resume_required": true
+        }),
+        json_output,
+    )
 }
 
 fn reconcile_outcome_unknown(
@@ -2655,6 +2743,27 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                         json_output,
                     )
                 }
+                8 => {
+                    let (backup, backup_digest) = upgrade_v8_to_current(
+                        &config.database_path,
+                        &backup_directory,
+                        &binary_digest,
+                        &operator_identity,
+                    )?;
+                    print_value(
+                        &json!({
+                            "result": "migrated",
+                            "from_schema_version": 8,
+                            "schema_version": nq_store::SCHEMA_VERSION,
+                            "backup": backup,
+                            "backup_digest": backup_digest,
+                            "historical_provider_activity_evidence": "absent_not_synthesized",
+                            "historical_provider_quiescence_synthesized": false,
+                            "historical_outcome_unknown_fences_released": false,
+                        }),
+                        json_output,
+                    )
+                }
                 _ => {
                     // Reuse the store's exact fail-closed diagnostic. `open`
                     // checks version and identity before any persistent PRAGMA.
@@ -2781,7 +2890,51 @@ fn upgrade_v7_to_current(
             "recurrence_authority_synthesized": false,
         }))?,
     };
-    let store = Store::upgrade_v7_to_v8(database_path, &receipt)?;
+    drop(Store::upgrade_v7_to_v8(database_path, &receipt)?);
+    let _ = upgrade_v8_to_current(
+        database_path,
+        backup_directory,
+        binary_digest,
+        operator_identity,
+    )?;
+    Ok((backup, artifact.sha256))
+}
+
+fn upgrade_v8_to_current(
+    database_path: &Path,
+    backup_directory: &Path,
+    binary_digest: &str,
+    operator_identity: &CanonicalDocument,
+) -> Result<(PathBuf, String)> {
+    let started_at = chrono::Utc::now();
+    let temporary = backup_directory.join(format!(".nq-upgrade-{}.db", uuid::Uuid::new_v4()));
+    let artifact = Store::backup_incompatible(database_path, &temporary)?;
+    let backup = finalize_upgrade_backup(&temporary, backup_directory, &artifact.sha256)?;
+    let receipt = UpgradeReceiptInput {
+        receipt_id: uuid::Uuid::new_v4().to_string(),
+        from_schema_version: 8,
+        to_schema_version: 9,
+        migrations: CanonicalDocument::from_serializable(&[
+            "schema_v8_to_v9_provider_activity_reconciliation",
+        ])?,
+        binary_digest: binary_digest.to_owned(),
+        backup_digest: artifact.sha256.clone(),
+        backup_location: backup.display().to_string(),
+        started_at: started_at.to_rfc3339(),
+        finished_at: started_at.to_rfc3339(),
+        result: "migrated".into(),
+        operator_identity: operator_identity.clone(),
+        verification: CanonicalDocument::from_serializable(&json!({
+            "integrity": "ok",
+            "source_schema_version": 8,
+            "source_schema_artifact_digest": nq_store::SCHEMA_V8_ARTIFACT_DIGEST,
+            "backup_reopened": true,
+            "historical_provider_activity_evidence": "absent_not_synthesized",
+            "historical_provider_quiescence_synthesized": false,
+            "historical_outcome_unknown_fences_released": false,
+        }))?,
+    };
+    let store = Store::upgrade_v8_to_v9(database_path, &receipt)?;
     store.validate()?;
     Ok((backup, artifact.sha256))
 }
@@ -3232,6 +3385,47 @@ helper_runtime_dir = "/run/nq/helpers"
             ])
             .is_err(),
             "reconciliation exposes no origin or provider acquisition surface"
+        );
+    }
+
+    #[test]
+    fn provider_reconciliation_requires_exact_preexisting_evidence_target() {
+        let options = Nq::try_parse_from([
+            "nq",
+            "--json",
+            "recurring",
+            "reconcile-provider",
+            "recurrence:unknown",
+            "--enrollment-id",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--coordination-domain",
+            "domain:fixture",
+            "--fencing-epoch",
+            "7",
+            "--evidence-id",
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ])
+        .expect("exact provider reconciliation parses");
+        assert!(matches!(
+            options.command,
+            Command::Recurring {
+                command: RecurringCommand::ReconcileProvider {
+                    acquisition_id,
+                    fencing_epoch: 7,
+                    ..
+                }
+            } if acquisition_id == "recurrence:unknown"
+        ));
+        assert!(
+            Nq::try_parse_from([
+                "nq",
+                "recurring",
+                "reconcile-provider",
+                "recurrence:unknown",
+                "--force",
+            ])
+            .is_err(),
+            "provider reconciliation exposes no operator override flag"
         );
     }
 

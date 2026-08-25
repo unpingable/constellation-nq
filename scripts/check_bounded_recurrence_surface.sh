@@ -26,6 +26,10 @@ rg -q 'admission renewal is required before provider invocation' "$engine" \
 rg -q 'RecurringCommand::Tick' "$cli" || fail "one-shot tick command missing"
 rg -q 'RecurringCommand::Reconcile' "$cli" || fail "exact outcome-unknown reconciliation missing"
 rg -q 'reconcile_recurrence_from_exact_custody' "$store" || fail "custody-only fence release missing"
+rg -q 'ProviderActivityEvidenceV1' "$store" || fail "typed provider-activity evidence missing"
+rg -q 'reconcile_provider_activity' "$store" || fail "provider-activity fence release missing"
+rg -q 'RecurringCommand::InspectFence' "$cli" || fail "split fence inspection missing"
+rg -q 'RecurringCommand::ReconcileProvider' "$cli" || fail "exact provider reconciliation command missing"
 
 if rg -q 'CronExpression|parse_cron|RRule|PriorityClass|PagerDuty|AlertManager' "$store" "$cli"; then
   fail "generic scheduling or alert surface introduced"
@@ -42,6 +46,18 @@ if grep -Eq 'diagnostic_acquire|prepare_recurring_origin|SubstrateOriginAttestat
 fi
 grep -q 'diagnostic_replay_substrate_origin' <<<"$reconcile" \
   || fail "outcome-unknown reconciliation does not reopen exact retained custody"
+provider_reconcile=$(sed -n '/^fn reconcile_provider_activity_command(/,/^}/p' "$cli")
+[ -n "$provider_reconcile" ] || fail "cannot inspect provider-activity reconciliation"
+if grep -Eq 'diagnostic_(acquire|execute|replay)|prepare_recurring_origin|SubstrateOriginAttestationSource' <<<"$provider_reconcile"; then
+  fail "provider-activity reconciliation can reach diagnostic acquisition/result custody"
+fi
+evidence_type=$(sed -n '/pub struct ProviderActivityEvidenceV1 {/,/^}/p' "$store")
+if grep -Eq 'diagnostic_(result|artifact|report|conclusion)|condition_state' <<<"$evidence_type"; then
+  fail "provider-activity evidence carries a diagnostic conclusion"
+fi
+if rg -qi 'force[_-]?(clear|unlock)|assume[_-]?provider[_-]?finished|accept[_-]?risk' "$store" "$cli"; then
+  fail "generic operator fence escape hatch introduced"
+fi
 if rg -q 'NightshiftClient|nightshift::|create_nightshift|run_nightshift' "$store"; then
   fail "NQ recurrence store names Nightshift reasoning mechanics"
 fi

@@ -57,7 +57,7 @@ The repository implements the stage-one operational spine:
   and compiled detector evaluation;
 - explicit helper test/admission/rotation/rollback/revocation with immutable
   admission history and drift refusal;
-- a schema-v8 append-only SQLite evidence substrate. It retains schema v3's
+- a schema-v9 append-only SQLite evidence substrate. It retains schema v3's
   exact raw/report/refusal/evaluation/finding/status custody, schema v4's
   versioned provider-intake parent, a distinct NQ-derived local-provider
   admission, an exact local-watcher-run subtype, and a durable acknowledgment
@@ -122,7 +122,10 @@ The repository implements the stage-one operational spine:
   epochs, provider-start fencing, V3 origin custody, provider-safe spacing,
   store guards, and append-only status prevent replay, restart, clock movement,
   or service-manager overlap from becoming provider authority. The packaged
-  timer is disabled and NQ recurrence never creates a Nightshift cycle;
+  timer is disabled and NQ recurrence never creates a Nightshift cycle.
+  Schema v9 adds exact local-stdio provider-activity evidence and a separate
+  reconciliation event that may release coordination while leaving the
+  diagnostic outcome permanently unknown; it adds no force-clear path;
 - a native host profile/helper plus the conformance fixture profile;
 - strict, bounded `SystemSpecV1` validation and deterministic compilation into
   schema-domain-separated `ScopeCut` proposals, ratification-bound cuts,
@@ -177,16 +180,19 @@ interpretation. Provider success or refusal is therefore still candidate input
 to NQ normalization and policy, not an NQ judgment. See
 [`PROVIDER_INTAKE_FOUNDATION.md`](PROVIDER_INTAKE_FOUNDATION.md).
 
-Schema v8 accepts only exact schema v7 directly, or older exact supported
+Schema v9 accepts only exact schema v8 directly, or older exact supported
 stores through the explicit version-by-version chain. Every source stage
 receives its own verified backup and migration receipt. The v3 step
 preserves each old watcher run with an explicit
 `provider_intake_not_recorded` gap; the v5 step records that historical
 diagnostic-artifact commitments were absent and synthesizes none. Migration
-through v6 continuity, v7 substrate origin, and v8 bounded recurrence likewise
+through v6 continuity, v7 substrate origin, v8 bounded recurrence, and v9
+provider-activity reconciliation likewise
 synthesizes no historical authority, origin proof, recurrence enrollment, slot,
-or diagnostic occurrence. Migration therefore invents neither historical
-intake bytes nor diagnostic executions.
+or diagnostic occurrence. The v9 migration also synthesizes no provider
+activity/quiescence evidence and releases no historical outcome-unknown fence.
+Migration therefore invents neither historical intake bytes nor diagnostic
+executions.
 
 ## Selected successor, deliberately not replacement-ready
 

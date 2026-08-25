@@ -13,21 +13,14 @@ fn command(nq: &str, config: &Path, arguments: &[&str]) -> Command {
     command
 }
 
-fn daemon_command(nqd: &str, config: &Path) -> Command {
-    let mut command = Command::new(nqd);
-    command.arg("--config").arg(config).arg("--once");
-    command
-}
-
 fn success(output: &Output) -> bool {
     output.status.success()
 }
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn daemon_collection_and_cli_revocation_are_serialized_across_processes() {
+fn cli_collection_and_revocation_are_serialized_across_processes() {
     let nq = env!("CARGO_BIN_EXE_nq");
-    let nqd = env!("CARGO_BIN_EXE_nqd");
     let directory = tempfile::tempdir().expect("temporary test directory");
     let root = directory.path();
     let config_path = root.join("nq.toml");
@@ -132,7 +125,10 @@ max_file_bytes = 67108864
     );
     fs::remove_file(&marker).expect("remove admission marker");
 
-    let collection = daemon_command(nqd, &config_path)
+    // Admission and acquisition intentionally use the same exact evaluator
+    // executable. The concurrency target is independent process ownership,
+    // not an evaluator-identity substitution between `nq` and `nqd`.
+    let collection = command(nq, &config_path, &["collect", "concurrent.primary"])
         .spawn()
         .expect("collection process");
     let wait_started = Instant::now();

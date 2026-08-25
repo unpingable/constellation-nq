@@ -1060,7 +1060,7 @@ fn exact_v3_upgrade_accepts_typed_empty_history_and_refuses_semantic_or_schema_d
     drop(store);
 
     let receipts = read_only_upgrade_receipts(&database);
-    assert_eq!(receipts.len(), 5, "v3 to v8 requires five exact receipts");
+    assert_eq!(receipts.len(), 6, "v3 to v9 requires six exact receipts");
     let receipt = &receipts[0];
     assert_eq!(receipt.from_version, 3);
     assert_eq!(receipt.to_version, 4);
@@ -1112,7 +1112,7 @@ fn exact_v3_upgrade_accepts_typed_empty_history_and_refuses_semantic_or_schema_d
     assert_eq!(verification["substrate_origin_intents_synthesized"], false);
     let receipt = &receipts[4];
     assert_eq!(receipt.from_version, 7);
-    assert_eq!(receipt.to_version, nq_store::SCHEMA_VERSION);
+    assert_eq!(receipt.to_version, 8);
     assert_eq!(receipt.result, "migrated");
     let v7_backup = PathBuf::from(&receipt.backup_location);
     assert_eq!(sha256_file(&v7_backup), receipt.backup_digest);
@@ -1126,6 +1126,29 @@ fn exact_v3_upgrade_accepts_typed_empty_history_and_refuses_semantic_or_schema_d
     );
     let verification: Value = serde_json::from_str(&receipt.verification_json).unwrap();
     assert_eq!(verification["recurrence_authority_synthesized"], false);
+    let receipt = &receipts[5];
+    assert_eq!(receipt.from_version, 8);
+    assert_eq!(receipt.to_version, nq_store::SCHEMA_VERSION);
+    assert_eq!(receipt.result, "migrated");
+    let v8_backup = PathBuf::from(&receipt.backup_location);
+    assert_eq!(sha256_file(&v8_backup), receipt.backup_digest);
+    assert_eq!(
+        nq_store::Store::database_schema_version(&v8_backup).expect("inspect v8 backup"),
+        8
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&receipt.migrations_json).unwrap(),
+        serde_json::json!(["schema_v8_to_v9_provider_activity_reconciliation"])
+    );
+    let verification: Value = serde_json::from_str(&receipt.verification_json).unwrap();
+    assert_eq!(
+        verification["historical_provider_quiescence_synthesized"],
+        false
+    );
+    assert_eq!(
+        verification["historical_outcome_unknown_fences_released"],
+        false
+    );
 
     let semantic_invalid = root.join("semantic-invalid-v3.db");
     write_exact_v3_database(&semantic_invalid, true);

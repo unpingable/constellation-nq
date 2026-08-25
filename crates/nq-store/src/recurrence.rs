@@ -27,6 +27,15 @@ pub const RECURRENCE_SLOT_SCHEMA_V1: &str = "nq.recurrence_slot.v1";
 pub const RECURRENCE_ACQUISITION_BINDING_SCHEMA_V1: &str = "nq.recurrence_acquisition_binding.v1";
 /// Canonical envelope for every append-only recurrence state-machine event.
 pub const RECURRENCE_EVENT_SCHEMA_V1: &str = "nq.recurrence_event.v1";
+/// Exact provider-activity evidence schema. It deliberately has no diagnostic
+/// result field.
+pub const PROVIDER_ACTIVITY_EVIDENCE_SCHEMA_V1: &str = "nq.provider_activity_evidence.v1";
+/// Closed producer that supervises one local stdio helper process group.
+pub const LOCAL_STDIO_PROCESS_GROUP_SUPERVISION_V1: &str =
+    "nq.local_stdio_process_group_supervision.v1";
+/// Append-only acceptance/release event schema.
+pub const PROVIDER_ACTIVITY_RECONCILIATION_SCHEMA_V1: &str =
+    "nq.provider_activity_reconciliation.v1";
 /// Only acquisition reason supported by the bounded V1 office.
 pub const RECURRENCE_REASON_V1: &str = "diagnostic_recurrence";
 /// Only origin profile supported by the deployed V1 office.
@@ -198,6 +207,193 @@ pub struct RecurrenceProviderFenceV1 {
     pub expected_instance_id_sha256: String,
     pub origin_helper_issuer: String,
     pub origin_helper_key_id: String,
+}
+
+/// Closed provider-activity claim. Neither variant says what the diagnostic
+/// concluded.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderActivityClaimV1 {
+    ProviderNotInvoked,
+    ProviderQuiescent,
+}
+
+impl ProviderActivityClaimV1 {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ProviderNotInvoked => "provider_not_invoked",
+            Self::ProviderQuiescent => "provider_quiescent",
+        }
+    }
+
+    const fn disposition(self) -> &'static str {
+        match self {
+            Self::ProviderNotInvoked => "provider_not_invoked",
+            Self::ProviderQuiescent => "outcome_unknown_provider_quiescent",
+        }
+    }
+}
+
+/// Exact NQ-produced provider-activity evidence for one fenced attempt.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderActivityEvidenceV1 {
+    pub schema: String,
+    pub evidence_id: String,
+    pub acquisition_id: String,
+    pub enrollment_id: String,
+    pub slot_id: String,
+    pub coordination_domain_id: String,
+    pub fencing_epoch: u64,
+    pub attempt_number: u16,
+    pub claim: ProviderActivityClaimV1,
+    pub producer_schema: String,
+    pub provider_attempt_id: String,
+    pub provider_run_id: String,
+    pub provider_request_id: String,
+    pub provider_semantic_id: String,
+    pub provider_artifact_digest: String,
+    pub provider_execution_identity_digest: String,
+    pub runner_outcome: String,
+    pub observed_at_unix_ms: i64,
+}
+
+/// Read-only split projection for one provider-fenced acquisition.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ProviderFenceStatusV1 {
+    pub schema: String,
+    pub acquisition_id: String,
+    pub enrollment_id: String,
+    pub slot_id: String,
+    pub coordination_domain_id: String,
+    pub fencing_epoch: u64,
+    pub diagnostic_outcome: String,
+    pub provider_activity: String,
+    pub coordination: String,
+    pub evidence_id: Option<String>,
+    pub reconciliation_event_id: Option<String>,
+    pub reason: String,
+}
+
+impl ProviderActivityEvidenceV1 {
+    /// Construct content-addressed evidence from facts already owned by the
+    /// closed local stdio runner. This constructor creates no provider fact.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        acquisition: &RecurrenceAcquisitionBindingV1,
+        fencing_epoch: u64,
+        attempt_number: u16,
+        claim: ProviderActivityClaimV1,
+        provider_attempt_id: String,
+        provider_run_id: String,
+        provider_request_id: String,
+        provider_semantic_id: String,
+        provider_artifact_digest: String,
+        provider_execution_identity_digest: String,
+        runner_outcome: String,
+        observed_at_unix_ms: i64,
+    ) -> Result<Self, StoreError> {
+        let basis = serde_json::json!({
+            "schema": PROVIDER_ACTIVITY_EVIDENCE_SCHEMA_V1,
+            "acquisition_id": acquisition.acquisition_id,
+            "enrollment_id": acquisition.enrollment_id,
+            "slot_id": acquisition.slot.slot_id,
+            "coordination_domain_id": acquisition.coordination_domain_id,
+            "fencing_epoch": fencing_epoch,
+            "attempt_number": attempt_number,
+            "claim": claim,
+            "producer_schema": LOCAL_STDIO_PROCESS_GROUP_SUPERVISION_V1,
+            "provider_attempt_id": provider_attempt_id,
+            "provider_run_id": provider_run_id,
+            "provider_request_id": provider_request_id,
+            "provider_semantic_id": provider_semantic_id,
+            "provider_artifact_digest": provider_artifact_digest,
+            "provider_execution_identity_digest": provider_execution_identity_digest,
+            "runner_outcome": runner_outcome,
+            "observed_at_unix_ms": observed_at_unix_ms,
+        });
+        let evidence_id = CanonicalDocument::from_serializable(&basis)?
+            .digest()
+            .to_owned();
+        let evidence = Self {
+            schema: PROVIDER_ACTIVITY_EVIDENCE_SCHEMA_V1.into(),
+            evidence_id,
+            acquisition_id: acquisition.acquisition_id.clone(),
+            enrollment_id: acquisition.enrollment_id.clone(),
+            slot_id: acquisition.slot.slot_id.clone(),
+            coordination_domain_id: acquisition.coordination_domain_id.clone(),
+            fencing_epoch,
+            attempt_number,
+            claim,
+            producer_schema: LOCAL_STDIO_PROCESS_GROUP_SUPERVISION_V1.into(),
+            provider_attempt_id,
+            provider_run_id,
+            provider_request_id,
+            provider_semantic_id,
+            provider_artifact_digest,
+            provider_execution_identity_digest,
+            runner_outcome,
+            observed_at_unix_ms,
+        };
+        evidence.validate_identity()?;
+        Ok(evidence)
+    }
+
+    fn validate_identity(&self) -> Result<(), StoreError> {
+        for (name, value) in [
+            ("provider semantic identity", &self.provider_semantic_id),
+            ("provider artifact digest", &self.provider_artifact_digest),
+            (
+                "provider execution identity digest",
+                &self.provider_execution_identity_digest,
+            ),
+        ] {
+            Sha256Digest::parse(value.clone())
+                .map_err(|error| StoreError::Invariant(format!("{name} is invalid: {error}")))?;
+        }
+        if self.schema != PROVIDER_ACTIVITY_EVIDENCE_SCHEMA_V1
+            || self.producer_schema != LOCAL_STDIO_PROCESS_GROUP_SUPERVISION_V1
+            || self.fencing_epoch == 0
+            || self.attempt_number == 0
+            || self.observed_at_unix_ms < 0
+            || self.provider_attempt_id.is_empty()
+            || self.provider_run_id.is_empty()
+            || self.provider_request_id.is_empty()
+            || self.runner_outcome.is_empty()
+        {
+            return Err(StoreError::Invariant(
+                "provider-activity evidence has invalid bounded fields".into(),
+            ));
+        }
+        let basis = serde_json::json!({
+            "schema": self.schema,
+            "acquisition_id": self.acquisition_id,
+            "enrollment_id": self.enrollment_id,
+            "slot_id": self.slot_id,
+            "coordination_domain_id": self.coordination_domain_id,
+            "fencing_epoch": self.fencing_epoch,
+            "attempt_number": self.attempt_number,
+            "claim": self.claim,
+            "producer_schema": self.producer_schema,
+            "provider_attempt_id": self.provider_attempt_id,
+            "provider_run_id": self.provider_run_id,
+            "provider_request_id": self.provider_request_id,
+            "provider_semantic_id": self.provider_semantic_id,
+            "provider_artifact_digest": self.provider_artifact_digest,
+            "provider_execution_identity_digest": self.provider_execution_identity_digest,
+            "runner_outcome": self.runner_outcome,
+            "observed_at_unix_ms": self.observed_at_unix_ms,
+        });
+        let expected = CanonicalDocument::from_serializable(&basis)?
+            .digest()
+            .to_owned();
+        if self.evidence_id != expected {
+            return Err(StoreError::ReplayConflict(
+                "provider-activity evidence content identity mismatch".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// One exact policy/enrollment refusal.
@@ -1960,7 +2156,10 @@ impl Store {
                     SELECT MAX(e2.event_sequence)
                     FROM recurrence_acquisition_events AS e2
                     WHERE e2.acquisition_id = a.acquisition_id)
-                  AND e.event_kind = 'outcome_unknown')",
+                  AND e.event_kind = 'outcome_unknown'
+                  AND NOT EXISTS(
+                    SELECT 1 FROM provider_activity_reconciliation_events AS r
+                    WHERE r.acquisition_id = a.acquisition_id))",
                 [enrollment_id],
                 |row| row.get(0),
             )
@@ -2099,6 +2298,9 @@ impl Store {
              WHERE a.watcher_instance_id = ?1
                AND e.event_sequence = (SELECT MAX(e2.event_sequence) FROM recurrence_acquisition_events AS e2 WHERE e2.acquisition_id = a.acquisition_id)
                AND e.event_kind IN ('created', 'pre_provider_failed', 'provider_invocation_started', 'outcome_unknown')
+               AND NOT (e.event_kind = 'outcome_unknown' AND EXISTS(
+                   SELECT 1 FROM provider_activity_reconciliation_events AS r
+                   WHERE r.acquisition_id = a.acquisition_id))
              ORDER BY a.created_at_unix_ms, a.acquisition_id LIMIT 1",
             [watcher_instance_id], |row| row.get(0),
         ).optional()?;
@@ -2138,6 +2340,7 @@ impl Store {
     /// custody for this same acquisition has been reopened by the caller. This
     /// transition never invokes a provider and leaves the enrollment paused
     /// until a separate explicit operator resume.
+    #[allow(clippy::too_many_lines)] // Keep the exact result/release transaction auditable.
     pub fn reconcile_recurrence_from_exact_custody(
         &mut self,
         acquisition_id: &str,
@@ -2152,9 +2355,16 @@ impl Store {
         let transaction = self.immediate_transaction()?;
         let domain = recurrence_binding_domain_on(&transaction, acquisition_id)?;
         let projection = domain_projection_on(&transaction, &domain)?;
+        let activity_released: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM provider_activity_reconciliation_events
+             WHERE acquisition_id = ?1 AND fencing_epoch = ?2)",
+            params![acquisition_id, fencing_epoch],
+            |row| row.get(0),
+        )?;
         if projection.epoch != Some(fencing_epoch)
-            || projection.holder_acquisition_id.as_deref() != Some(acquisition_id)
-            || !projection.fenced_unknown
+            || (!activity_released
+                && (projection.holder_acquisition_id.as_deref() != Some(acquisition_id)
+                    || !projection.fenced_unknown))
         {
             return Err(StoreError::Invariant(
                 "recurrence reconciliation lacks the exact outcome-unknown domain fence".into(),
@@ -2216,14 +2426,309 @@ impl Store {
             [acquisition_id],
             |row| row.get(0),
         )?;
-        let coordination = event_document(
+        if !activity_released {
+            let coordination = event_document(
+                "released",
+                occurred_at_unix_ms,
+                serde_json::json!({
+                    "coordination_domain_id": domain,
+                    "fencing_epoch": fencing_epoch,
+                    "holder_acquisition_id": acquisition_id,
+                    "reconciled_from_exact_custody": true
+                }),
+            )?;
+            transaction.execute(
+                "INSERT INTO recurrence_coordination_events (
+                    event_id, coordination_domain_id, fencing_epoch, event_kind,
+                    holder_acquisition_id, holder_watcher_instance_id, event_json,
+                    event_digest, occurred_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, 'released', ?4, ?5, ?6, ?1, ?7)",
+                params![
+                    coordination.digest(),
+                    domain,
+                    fencing_epoch,
+                    acquisition_id,
+                    watcher,
+                    coordination.as_bytes(),
+                    occurred_at_unix_ms
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Persist exact prospective evidence produced by the closed local stdio
+    /// supervisor. This does not release a fence or classify a diagnostic.
+    #[allow(clippy::too_many_lines)] // Keep identity, fence, and provider-basis checks atomic.
+    pub fn append_provider_activity_evidence(
+        &mut self,
+        evidence: &ProviderActivityEvidenceV1,
+    ) -> Result<String, StoreError> {
+        evidence.validate_identity()?;
+        let document = CanonicalDocument::from_serializable(evidence)?;
+        let transaction = self.immediate_transaction()?;
+        let binding: RecurrenceAcquisitionBindingV1 = transaction
+            .query_row(
+                "SELECT binding_json FROM recurrence_acquisitions WHERE acquisition_id = ?1",
+                [&evidence.acquisition_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?
+            .map(|bytes| decode(&bytes, "provider-activity recurrence binding"))
+            .transpose()?
+            .ok_or_else(|| {
+                StoreError::Invariant("provider-activity evidence names unknown acquisition".into())
+            })?;
+        if evidence.enrollment_id != binding.enrollment_id
+            || evidence.slot_id != binding.slot.slot_id
+            || evidence.coordination_domain_id != binding.coordination_domain_id
+        {
+            return Err(StoreError::ReplayConflict(
+                "provider-activity evidence substituted enrollment, slot, or domain".into(),
+            ));
+        }
+        let fenced: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM recurrence_acquisition_events
+             WHERE acquisition_id = ?1 AND event_kind = 'provider_invocation_started'
+               AND attempt_number = ?2 AND fencing_epoch = ?3)",
+            params![
+                evidence.acquisition_id,
+                evidence.attempt_number,
+                evidence.fencing_epoch
+            ],
+            |row| row.get(0),
+        )?;
+        if !fenced {
+            return Err(StoreError::Invariant(
+                "provider-activity evidence lacks its exact provider invocation fence".into(),
+            ));
+        }
+        let claim_matches_runner = match evidence.claim {
+            ProviderActivityClaimV1::ProviderNotInvoked => {
+                evidence.runner_outcome == "spawn_failed"
+            }
+            ProviderActivityClaimV1::ProviderQuiescent => matches!(
+                evidence.runner_outcome.as_str(),
+                "response"
+                    | "request_write_failed"
+                    | "timeout"
+                    | "output_too_large"
+                    | "stderr_too_large"
+                    | "eof"
+                    | "malformed_framing"
+                    | "malformed_json"
+                    | "exit_nonzero"
+            ),
+        };
+        if !claim_matches_runner {
+            return Err(StoreError::Invariant(
+                "runner outcome cannot establish the claimed provider activity".into(),
+            ));
+        }
+        let intent_bytes: Vec<u8> = transaction.query_row(
+            "SELECT intent_json FROM substrate_origin_acquisition_intents WHERE acquisition_id = ?1",
+            [&evidence.acquisition_id],
+            |row| row.get(0),
+        )?;
+        let intent: Value = serde_json::from_slice(&intent_bytes).map_err(|error| {
+            StoreError::Integrity(format!(
+                "provider-activity substrate intent cannot decode: {error}"
+            ))
+        })?;
+        let text = |path: &str| intent.pointer(path).and_then(Value::as_str);
+        if text("/attempt_id") != Some(&evidence.provider_attempt_id)
+            || text("/run_id") != Some(&evidence.provider_run_id)
+            || text("/request/request_id") != Some(&evidence.provider_request_id)
+            || text("/provider/provider_semantic_id") != Some(&evidence.provider_semantic_id)
+            || text("/provider/artifact_digest") != Some(&evidence.provider_artifact_digest)
+            || text("/provider/execution_identity_digest")
+                != Some(&evidence.provider_execution_identity_digest)
+            || text("/origin_carrier") != Some("stdio")
+        {
+            return Err(StoreError::ReplayConflict(
+                "provider-activity evidence substituted exact provider request, run, attempt, identity, or carrier"
+                    .into(),
+            ));
+        }
+        let existing: Option<Vec<u8>> = transaction
+            .query_row(
+                "SELECT evidence_json FROM provider_activity_evidence WHERE evidence_id = ?1
+             OR (acquisition_id = ?2 AND fencing_epoch = ?3 AND attempt_number = ?4
+                 AND claim = ?5 AND producer_schema = ?6)",
+                params![
+                    evidence.evidence_id,
+                    evidence.acquisition_id,
+                    evidence.fencing_epoch,
+                    evidence.attempt_number,
+                    evidence.claim.as_str(),
+                    evidence.producer_schema
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            if existing == document.as_bytes() {
+                transaction.commit()?;
+                return Ok(evidence.evidence_id.clone());
+            }
+            return Err(StoreError::ReplayConflict(
+                "provider-activity evidence replay changed exact bytes".into(),
+            ));
+        }
+        transaction.execute(
+            "INSERT INTO provider_activity_evidence (
+                evidence_id, schema_id, acquisition_id, enrollment_id, slot_id,
+                coordination_domain_id, fencing_epoch, attempt_number, claim,
+                producer_schema, evidence_json, evidence_digest, observed_at_unix_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?1, ?12)",
+            params![
+                evidence.evidence_id,
+                evidence.schema,
+                evidence.acquisition_id,
+                evidence.enrollment_id,
+                evidence.slot_id,
+                evidence.coordination_domain_id,
+                evidence.fencing_epoch,
+                evidence.attempt_number,
+                evidence.claim.as_str(),
+                evidence.producer_schema,
+                document.as_bytes(),
+                evidence.observed_at_unix_ms
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(evidence.evidence_id.clone())
+    }
+
+    /// Accept one exact stored provider-activity evidence object and release
+    /// only its matching outcome-unknown coordination fence. Diagnostic state
+    /// remains outcome_unknown.
+    #[allow(clippy::too_many_lines)] // Keep evidence acceptance and fence release atomic.
+    pub fn reconcile_provider_activity(
+        &mut self,
+        acquisition_id: &str,
+        enrollment_id: &str,
+        coordination_domain_id: &str,
+        fencing_epoch: u64,
+        evidence_id: &str,
+        occurred_at_unix_ms: i64,
+    ) -> Result<String, StoreError> {
+        let transaction = self.immediate_transaction()?;
+        let existing_event: Option<(String, String)> = transaction
+            .query_row(
+                "SELECT event_id, evidence_id FROM provider_activity_reconciliation_events
+             WHERE acquisition_id = ?1 AND fencing_epoch = ?2",
+                params![acquisition_id, fencing_epoch],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((event_id, existing_evidence)) = existing_event {
+            if existing_evidence == evidence_id {
+                transaction.commit()?;
+                return Ok(event_id);
+            }
+            return Err(StoreError::ReplayConflict(
+                "provider-activity reconciliation substituted evidence".into(),
+            ));
+        }
+        let evidence_bytes: Vec<u8> = transaction
+            .query_row(
+                "SELECT evidence_json FROM provider_activity_evidence WHERE evidence_id = ?1",
+                [evidence_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                StoreError::Invariant(
+                    "provider-activity reconciliation evidence is unknown to local custody".into(),
+                )
+            })?;
+        let evidence: ProviderActivityEvidenceV1 =
+            decode(&evidence_bytes, "provider-activity reconciliation evidence")?;
+        evidence.validate_identity()?;
+        if evidence.acquisition_id != acquisition_id
+            || evidence.enrollment_id != enrollment_id
+            || evidence.coordination_domain_id != coordination_domain_id
+            || evidence.fencing_epoch != fencing_epoch
+            || evidence.evidence_id != evidence_id
+        {
+            return Err(StoreError::ReplayConflict(
+                "provider-activity reconciliation substituted target identity".into(),
+            ));
+        }
+        let state: (String, u64, Option<u64>) = transaction.query_row(
+            "SELECT event_kind, attempt_number, fencing_epoch FROM recurrence_acquisition_events
+             WHERE acquisition_id = ?1 ORDER BY event_sequence DESC LIMIT 1",
+            [acquisition_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if state
+            != (
+                "outcome_unknown".into(),
+                u64::from(evidence.attempt_number),
+                Some(fencing_epoch),
+            )
+        {
+            return Err(StoreError::Invariant(
+                "provider-activity reconciliation requires the exact terminal outcome-unknown attempt"
+                    .into(),
+            ));
+        }
+        let projection = domain_projection_on(&transaction, coordination_domain_id)?;
+        if projection.epoch != Some(fencing_epoch)
+            || projection.holder_acquisition_id.as_deref() != Some(acquisition_id)
+            || !projection.fenced_unknown
+        {
+            return Err(StoreError::Invariant(
+                "provider-activity reconciliation lacks exact fenced domain ownership".into(),
+            ));
+        }
+        let event = canonical(&serde_json::json!({
+            "schema": PROVIDER_ACTIVITY_RECONCILIATION_SCHEMA_V1,
+            "occurred_at_unix_ms": occurred_at_unix_ms,
+            "fields": {
+                "acquisition_id": acquisition_id,
+                "enrollment_id": enrollment_id,
+                "coordination_domain_id": coordination_domain_id,
+                "fencing_epoch": fencing_epoch,
+                "evidence_id": evidence_id,
+                "disposition": evidence.claim.disposition(),
+                "diagnostic_outcome": "outcome_unknown"
+            }
+        }))?;
+        transaction.execute(
+            "INSERT INTO provider_activity_reconciliation_events (
+                event_id, acquisition_id, evidence_id, enrollment_id,
+                coordination_domain_id, fencing_epoch, disposition, event_json,
+                event_digest, occurred_at_unix_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?1, ?9)",
+            params![
+                event.digest(),
+                acquisition_id,
+                evidence_id,
+                enrollment_id,
+                coordination_domain_id,
+                fencing_epoch,
+                evidence.claim.disposition(),
+                event.as_bytes(),
+                occurred_at_unix_ms
+            ],
+        )?;
+        let watcher: String = transaction.query_row(
+            "SELECT watcher_instance_id FROM recurrence_acquisitions WHERE acquisition_id = ?1",
+            [acquisition_id],
+            |row| row.get(0),
+        )?;
+        let release = event_document(
             "released",
             occurred_at_unix_ms,
             serde_json::json!({
-                "coordination_domain_id": domain,
+                "coordination_domain_id": coordination_domain_id,
                 "fencing_epoch": fencing_epoch,
                 "holder_acquisition_id": acquisition_id,
-                "reconciled_from_exact_custody": true
+                "provider_activity_reconciliation_event_id": event.digest(),
+                "diagnostic_outcome": "outcome_unknown"
             }),
         )?;
         transaction.execute(
@@ -2233,17 +2738,104 @@ impl Store {
                 event_digest, occurred_at_unix_ms
              ) VALUES (?1, ?2, ?3, 'released', ?4, ?5, ?6, ?1, ?7)",
             params![
-                coordination.digest(),
-                domain,
+                release.digest(),
+                coordination_domain_id,
                 fencing_epoch,
                 acquisition_id,
                 watcher,
-                coordination.as_bytes(),
+                release.as_bytes(),
                 occurred_at_unix_ms
             ],
         )?;
         transaction.commit()?;
-        Ok(())
+        Ok(event.digest().to_owned())
+    }
+
+    /// Project diagnostic uncertainty and provider-activity certainty
+    /// independently without changing either.
+    pub fn provider_fence_status(
+        &self,
+        acquisition_id: &str,
+    ) -> Result<ProviderFenceStatusV1, StoreError> {
+        let binding = self
+            .recurrence_acquisition(acquisition_id)?
+            .ok_or_else(|| {
+                StoreError::Invariant("provider-fence status names unknown acquisition".into())
+            })?;
+        let state = self
+            .recurrence_acquisition_state(acquisition_id)?
+            .ok_or_else(|| {
+                StoreError::Integrity("provider-fence acquisition lacks state".into())
+            })?;
+        let epoch = state.fencing_epoch.ok_or_else(|| {
+            StoreError::Invariant("provider-fence acquisition lacks fencing epoch".into())
+        })?;
+        let evidence: Option<(String, String)> = self
+            .connection
+            .query_row(
+                "SELECT evidence_id, claim FROM provider_activity_evidence
+             WHERE acquisition_id = ?1 AND fencing_epoch = ?2
+             ORDER BY observed_at_unix_ms, evidence_id LIMIT 1",
+                params![acquisition_id, epoch],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let reconciliation: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT event_id FROM provider_activity_reconciliation_events
+             WHERE acquisition_id = ?1 AND fencing_epoch = ?2",
+                params![acquisition_id, epoch],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let domain = domain_projection_on(&self.connection, &binding.coordination_domain_id)?;
+        let diagnostic_outcome = match state.event_kind.as_str() {
+            "provider_succeeded" => "exact_result_known",
+            "provider_terminal_failed" => "exact_provider_failure_known",
+            "outcome_unknown" => "unknown",
+            _ => "not_terminal",
+        };
+        let provider_activity = if reconciliation.is_some() {
+            evidence
+                .as_ref()
+                .map_or("unknown", |(_, claim)| claim.as_str())
+        } else if evidence.is_some() {
+            "exact_evidence_available_not_applied"
+        } else {
+            "unknown"
+        };
+        let coordination = if domain.fenced_unknown {
+            "fenced"
+        } else {
+            "released"
+        };
+        let reason = match (diagnostic_outcome, provider_activity, coordination) {
+            ("unknown", "unknown", "fenced") => {
+                "provider invocation crossed; no exact result custody or accepted provider-activity evidence"
+            }
+            ("unknown", "provider_not_invoked" | "provider_quiescent", "released") => {
+                "overlap risk is proven absent; diagnostic result remains unknown"
+            }
+            ("exact_result_known", _, "released") => {
+                "exact result custody recovered; coordination released"
+            }
+            _ => "see exact acquisition, evidence, and coordination histories",
+        };
+        Ok(ProviderFenceStatusV1 {
+            schema: "nq.provider_fence_status.v1".into(),
+            acquisition_id: acquisition_id.into(),
+            enrollment_id: binding.enrollment_id,
+            slot_id: binding.slot.slot_id,
+            coordination_domain_id: binding.coordination_domain_id,
+            fencing_epoch: epoch,
+            diagnostic_outcome: diagnostic_outcome.into(),
+            provider_activity: provider_activity.into(),
+            coordination: coordination.into(),
+            evidence_id: evidence.map(|value| value.0),
+            reconciliation_event_id: reconciliation,
+            reason: reason.into(),
+        })
     }
 
     fn domain_projection(&self, domain_id: &str) -> Result<DomainProjection, StoreError> {
@@ -3110,6 +3702,283 @@ fn validate_recurrence_coordination_events(
     Ok(())
 }
 
+/// Recompute every provider-activity evidence and reconciliation binding.
+/// Historical schema-v8 stores contain no rows; migration never synthesizes
+/// quiescence for an already-fenced occurrence.
+#[allow(clippy::too_many_lines)]
+pub(super) fn validate_provider_activity_invariants(
+    connection: &rusqlite::Connection,
+) -> Result<(), StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT evidence_id, acquisition_id, enrollment_id, slot_id,
+                coordination_domain_id, fencing_epoch, attempt_number, claim,
+                producer_schema, evidence_json, observed_at_unix_ms
+         FROM provider_activity_evidence ORDER BY evidence_id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, u64>(5)?,
+            row.get::<_, u16>(6)?,
+            row.get::<_, String>(7)?,
+            row.get::<_, String>(8)?,
+            row.get::<_, Vec<u8>>(9)?,
+            row.get::<_, i64>(10)?,
+        ))
+    })?;
+    for row in rows {
+        let (
+            id,
+            acquisition_id,
+            enrollment_id,
+            slot_id,
+            domain,
+            epoch,
+            attempt,
+            claim,
+            producer,
+            bytes,
+            observed_at,
+        ) = row?;
+        let document = row_document(bytes, "provider-activity evidence")?;
+        let evidence: ProviderActivityEvidenceV1 =
+            decode(document.as_bytes(), "provider-activity evidence")?;
+        evidence.validate_identity().map_err(|error| {
+            StoreError::Integrity(format!("provider-activity evidence {id}: {error}"))
+        })?;
+        if document.digest() == id {
+            return Err(StoreError::Integrity(format!(
+                "provider-activity evidence {id} incorrectly hashes its outer self identity"
+            )));
+        }
+        if evidence.evidence_id != id
+            || evidence.acquisition_id != acquisition_id
+            || evidence.enrollment_id != enrollment_id
+            || evidence.slot_id != slot_id
+            || evidence.coordination_domain_id != domain
+            || evidence.fencing_epoch != epoch
+            || evidence.attempt_number != attempt
+            || evidence.claim.as_str() != claim
+            || evidence.producer_schema != producer
+            || evidence.observed_at_unix_ms != observed_at
+        {
+            return Err(StoreError::Integrity(format!(
+                "provider-activity evidence {id} differs from indexed custody"
+            )));
+        }
+        let binding: (String, String, String) = connection.query_row(
+            "SELECT enrollment_id, slot_id, coordination_domain_id
+             FROM recurrence_acquisitions WHERE acquisition_id = ?1",
+            [&acquisition_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if binding != (enrollment_id, slot_id, domain) {
+            return Err(StoreError::Integrity(format!(
+                "provider-activity evidence {id} substituted recurrence binding"
+            )));
+        }
+        let fence_exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM recurrence_acquisition_events
+             WHERE acquisition_id = ?1 AND event_kind = 'provider_invocation_started'
+               AND attempt_number = ?2 AND fencing_epoch = ?3)",
+            params![acquisition_id, attempt, epoch],
+            |row| row.get(0),
+        )?;
+        if !fence_exists {
+            return Err(StoreError::Integrity(format!(
+                "provider-activity evidence {id} lacks exact provider fence"
+            )));
+        }
+        let claim_matches_runner = match evidence.claim {
+            ProviderActivityClaimV1::ProviderNotInvoked => {
+                evidence.runner_outcome == "spawn_failed"
+            }
+            ProviderActivityClaimV1::ProviderQuiescent => matches!(
+                evidence.runner_outcome.as_str(),
+                "response"
+                    | "request_write_failed"
+                    | "timeout"
+                    | "output_too_large"
+                    | "stderr_too_large"
+                    | "eof"
+                    | "malformed_framing"
+                    | "malformed_json"
+                    | "exit_nonzero"
+            ),
+        };
+        if !claim_matches_runner {
+            return Err(StoreError::Integrity(format!(
+                "provider-activity evidence {id} runner outcome cannot prove its claim"
+            )));
+        }
+        let intent_bytes: Vec<u8> = connection.query_row(
+            "SELECT intent_json FROM substrate_origin_acquisition_intents
+             WHERE acquisition_id = ?1",
+            [&acquisition_id],
+            |row| row.get(0),
+        )?;
+        let intent: Value = serde_json::from_slice(&intent_bytes).map_err(|error| {
+            StoreError::Integrity(format!(
+                "provider-activity evidence {id} substrate intent cannot decode: {error}"
+            ))
+        })?;
+        let text = |path: &str| intent.pointer(path).and_then(Value::as_str);
+        if text("/attempt_id") != Some(&evidence.provider_attempt_id)
+            || text("/run_id") != Some(&evidence.provider_run_id)
+            || text("/request/request_id") != Some(&evidence.provider_request_id)
+            || text("/provider/provider_semantic_id") != Some(&evidence.provider_semantic_id)
+            || text("/provider/artifact_digest") != Some(&evidence.provider_artifact_digest)
+            || text("/provider/execution_identity_digest")
+                != Some(&evidence.provider_execution_identity_digest)
+            || text("/origin_carrier") != Some("stdio")
+        {
+            return Err(StoreError::Integrity(format!(
+                "provider-activity evidence {id} differs from exact substrate/provider intent"
+            )));
+        }
+    }
+    drop(statement);
+
+    let mut reconciliations = connection.prepare(
+        "SELECT event_id, acquisition_id, evidence_id, enrollment_id,
+                coordination_domain_id, fencing_epoch, disposition, event_json,
+                occurred_at_unix_ms
+         FROM provider_activity_reconciliation_events ORDER BY event_sequence",
+    )?;
+    let rows = reconciliations.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, u64>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, Vec<u8>>(7)?,
+            row.get::<_, i64>(8)?,
+        ))
+    })?;
+    for row in rows {
+        let (
+            id,
+            acquisition_id,
+            evidence_id,
+            enrollment_id,
+            domain,
+            epoch,
+            disposition,
+            bytes,
+            occurred_at,
+        ) = row?;
+        let document = row_document(bytes, "provider-activity reconciliation")?;
+        if document.digest() != id {
+            return Err(StoreError::Integrity(format!(
+                "provider-activity reconciliation {id} digest mismatch"
+            )));
+        }
+        let value: Value = decode(document.as_bytes(), "provider-activity reconciliation")?;
+        let fields = value.get("fields").ok_or_else(|| {
+            StoreError::Integrity(format!(
+                "provider-activity reconciliation {id} lacks fields"
+            ))
+        })?;
+        if value.get("schema").and_then(Value::as_str)
+            != Some(PROVIDER_ACTIVITY_RECONCILIATION_SCHEMA_V1)
+            || value.get("occurred_at_unix_ms").and_then(Value::as_i64) != Some(occurred_at)
+            || fields.get("acquisition_id").and_then(Value::as_str) != Some(&acquisition_id)
+            || fields.get("evidence_id").and_then(Value::as_str) != Some(&evidence_id)
+            || fields.get("enrollment_id").and_then(Value::as_str) != Some(&enrollment_id)
+            || fields.get("coordination_domain_id").and_then(Value::as_str) != Some(&domain)
+            || fields.get("fencing_epoch").and_then(Value::as_u64) != Some(epoch)
+            || fields.get("disposition").and_then(Value::as_str) != Some(&disposition)
+            || fields.get("diagnostic_outcome").and_then(Value::as_str) != Some("outcome_unknown")
+        {
+            return Err(StoreError::Integrity(format!(
+                "provider-activity reconciliation {id} differs from indexed custody"
+            )));
+        }
+        let evidence: (String, String, String, u64, String) = connection.query_row(
+            "SELECT acquisition_id, enrollment_id, coordination_domain_id,
+                    fencing_epoch, claim FROM provider_activity_evidence WHERE evidence_id = ?1",
+            [&evidence_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )?;
+        let expected_disposition = if evidence.4 == "provider_not_invoked" {
+            "provider_not_invoked"
+        } else {
+            "outcome_unknown_provider_quiescent"
+        };
+        if evidence.0 != acquisition_id
+            || evidence.1 != enrollment_id
+            || evidence.2 != domain
+            || evidence.3 != epoch
+            || disposition != expected_disposition
+        {
+            return Err(StoreError::Integrity(format!(
+                "provider-activity reconciliation {id} substituted evidence target"
+            )));
+        }
+        let release_json: Option<Vec<u8>> = connection
+            .query_row(
+                "SELECT event_json FROM recurrence_coordination_events
+             WHERE coordination_domain_id = ?1 AND fencing_epoch = ?2
+               AND event_kind = 'released' AND holder_acquisition_id = ?3",
+                params![domain, epoch, acquisition_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(release_json) = release_json else {
+            return Err(StoreError::Integrity(format!(
+                "provider-activity reconciliation {id} lacks exact coordination release"
+            )));
+        };
+        let release: Value = serde_json::from_slice(&release_json).map_err(|error| {
+            StoreError::Integrity(format!(
+                "provider-activity reconciliation {id} release cannot decode: {error}"
+            ))
+        })?;
+        if release
+            .pointer("/fields/provider_activity_reconciliation_event_id")
+            .and_then(Value::as_str)
+            != Some(&id)
+            || release
+                .pointer("/fields/diagnostic_outcome")
+                .and_then(Value::as_str)
+                != Some("outcome_unknown")
+        {
+            return Err(StoreError::Integrity(format!(
+                "provider-activity reconciliation {id} release loses uncertainty binding"
+            )));
+        }
+        let unknown_exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM recurrence_acquisition_events
+             WHERE acquisition_id = ?1 AND event_kind = 'outcome_unknown'
+               AND attempt_number = (SELECT attempt_number FROM provider_activity_evidence WHERE evidence_id = ?2)
+               AND fencing_epoch = ?3)",
+            params![acquisition_id, evidence_id, epoch],
+            |row| row.get(0),
+        )?;
+        if !unknown_exists {
+            return Err(StoreError::Integrity(format!(
+                "provider-activity reconciliation {id} lacks exact outcome-unknown history"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3681,6 +4550,24 @@ mod tests {
             .expect("status");
         assert!(status.outcome_unknown_fences_domain);
         assert_eq!(status.enrollment_state, "paused_outcome_unknown");
+        store
+            .append_recurrence_enrollment_operator_event(
+                &enrollment.enrollment_id,
+                "revoked_operator",
+                "retire:unknown-provider",
+                1_300,
+                "retire future enrollment authority without clearing provider uncertainty",
+                &operator(),
+            )
+            .expect("enrollment may be retired append-only");
+        let retired = store
+            .recurrence_status(&enrollment.enrollment_id)
+            .expect("retired status");
+        assert_eq!(retired.enrollment_state, "revoked");
+        assert!(
+            retired.outcome_unknown_fences_domain,
+            "enrollment retirement cannot release the coordination domain"
+        );
     }
 
     #[test]

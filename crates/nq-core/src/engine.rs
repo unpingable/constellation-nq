@@ -96,7 +96,9 @@ use crate::substrate_origin::{
 use crate::unix_runner::{
     UnixAcquisitionOutcome, UnixExchangeCapture, UnixIoPhase, UnixRunner, UnixRunnerOptions,
 };
-use nq_store::recurrence::RecurrenceProviderFenceV1;
+use nq_store::recurrence::{
+    ProviderActivityClaimV1, ProviderActivityEvidenceV1, RecurrenceProviderFenceV1,
+};
 
 /// Engine-level failures. Expected watcher outcomes are returned as
 /// [`CollectionOutcome`] and still committed when applicable.
@@ -3327,7 +3329,7 @@ impl CollectionEngine {
         }
         let attempt = ProviderAttempt::new(
             intake_id,
-            attempt_id,
+            attempt_id.clone(),
             run_id.clone(),
             request.clone(),
             provider,
@@ -3341,6 +3343,38 @@ impl CollectionEngine {
             Some(&verification.binding_digest),
             launch,
         );
+        if let Some(fence) = recurrence_fence
+            && watcher.carrier == Carrier::Stdio
+            && let Some(claim) = local_stdio_provider_activity_claim(&capture.outcome)
+        {
+            let acquisition = self
+                .store
+                .recurrence_acquisition(&fence.acquisition_id)?
+                .ok_or_else(|| {
+                    EngineError::Invariant(
+                        "recurrence acquisition disappeared before provider-activity custody"
+                            .into(),
+                    )
+                })?;
+            let evidence = ProviderActivityEvidenceV1::new(
+                &acquisition,
+                fence.fencing_epoch,
+                fence.attempt_number,
+                claim,
+                attempt_id.clone(),
+                run_id.clone(),
+                request.request_id.to_string(),
+                provider_identity.provider_semantic_id.as_str().to_owned(),
+                provider_identity.artifact_digest.as_str().to_owned(),
+                provider_identity
+                    .execution_identity_digest
+                    .as_str()
+                    .to_owned(),
+                acquisition_code(&capture.outcome).to_owned(),
+                capture.finished_at.timestamp_millis(),
+            )?;
+            self.store.append_provider_activity_evidence(&evidence)?;
+        }
         let intake = ProviderIntakeV1::from_capture(attempt, capture.clone(), &watcher.resources)?;
         let run = RunInput {
             run_id: run_id.clone(),
@@ -8514,6 +8548,34 @@ pub(crate) fn acquisition_code(outcome: &AcquisitionOutcome) -> &'static str {
     }
 }
 
+/// Translate only closed local-stdio supervision outcomes into provider
+/// activity evidence. Persistent-carrier and ambiguous I/O outcomes are
+/// deliberately absent: the caller must retain its outcome-unknown fence.
+fn local_stdio_provider_activity_claim(
+    outcome: &AcquisitionOutcome,
+) -> Option<ProviderActivityClaimV1> {
+    match outcome {
+        AcquisitionOutcome::SpawnFailed { .. } => Some(ProviderActivityClaimV1::ProviderNotInvoked),
+        AcquisitionOutcome::Response
+        | AcquisitionOutcome::RequestWriteFailed { .. }
+        | AcquisitionOutcome::Timeout
+        | AcquisitionOutcome::OutputTooLarge
+        | AcquisitionOutcome::StderrTooLarge
+        | AcquisitionOutcome::Eof
+        | AcquisitionOutcome::MalformedFraming { .. }
+        | AcquisitionOutcome::MalformedJson { .. }
+        | AcquisitionOutcome::ExitNonzero { .. } => {
+            Some(ProviderActivityClaimV1::ProviderQuiescent)
+        }
+        AcquisitionOutcome::ExchangeTimeout { .. }
+        | AcquisitionOutcome::HelperExited { .. }
+        | AcquisitionOutcome::Disconnect { .. }
+        | AcquisitionOutcome::CarrierStartupFailed { .. }
+        | AcquisitionOutcome::NotRunning
+        | AcquisitionOutcome::IoFailed { .. } => None,
+    }
+}
+
 fn timestamp(value: DateTime<Utc>) -> String {
     value.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
@@ -11186,6 +11248,53 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn local_stdio_quiescence_claims_are_closed_and_ambiguous_outcomes_fail_closed() {
+        assert_eq!(
+            local_stdio_provider_activity_claim(&AcquisitionOutcome::SpawnFailed {
+                message: "absent".into(),
+            }),
+            Some(ProviderActivityClaimV1::ProviderNotInvoked)
+        );
+        for outcome in [
+            AcquisitionOutcome::Response,
+            AcquisitionOutcome::Timeout,
+            AcquisitionOutcome::OutputTooLarge,
+            AcquisitionOutcome::StderrTooLarge,
+            AcquisitionOutcome::Eof,
+            AcquisitionOutcome::MalformedFraming {
+                message: "bad frame".into(),
+            },
+            AcquisitionOutcome::MalformedJson {
+                message: "bad json".into(),
+            },
+            AcquisitionOutcome::ExitNonzero { code: Some(1) },
+        ] {
+            assert_eq!(
+                local_stdio_provider_activity_claim(&outcome),
+                Some(ProviderActivityClaimV1::ProviderQuiescent)
+            );
+        }
+        for ambiguous in [
+            AcquisitionOutcome::ExchangeTimeout {
+                phase: ExchangeTimeoutPhase::ReadResponse,
+            },
+            AcquisitionOutcome::HelperExited { code: None },
+            AcquisitionOutcome::Disconnect {
+                message: "disconnected".into(),
+            },
+            AcquisitionOutcome::CarrierStartupFailed {
+                message: "startup".into(),
+            },
+            AcquisitionOutcome::NotRunning,
+            AcquisitionOutcome::IoFailed {
+                message: "ambiguous wait".into(),
+            },
+        ] {
+            assert_eq!(local_stdio_provider_activity_claim(&ambiguous), None);
+        }
+    }
 
     const SEMANTIC_TRANSPORT_HELPER: &str = r#"import datetime
 import json
@@ -14609,6 +14718,107 @@ sys.stdout.write("\n")
                 .is_err(),
             "operator intent alone cannot release uncertain provider custody"
         );
+        let fenced = engine
+            .store
+            .provider_fence_status(&acquisition.acquisition_id)
+            .expect("split fence status");
+        assert_eq!(fenced.diagnostic_outcome, "unknown");
+        assert_eq!(
+            fenced.provider_activity,
+            "exact_evidence_available_not_applied"
+        );
+        assert_eq!(fenced.coordination, "fenced");
+        let evidence_id = fenced
+            .evidence_id
+            .expect("closed stdio runner retained exact provider quiescence");
+        assert!(
+            engine
+                .store
+                .reconcile_provider_activity(
+                    &acquisition.acquisition_id,
+                    &format!("sha256:{}", "e".repeat(64)),
+                    &acquisition.coordination_domain_id,
+                    fencing_epoch,
+                    &evidence_id,
+                    1_175,
+                )
+                .is_err(),
+            "neighboring enrollment cannot release the domain"
+        );
+        assert!(
+            engine
+                .store
+                .reconcile_provider_activity(
+                    &acquisition.acquisition_id,
+                    &enrollment.enrollment_id,
+                    "domain:neighbor",
+                    fencing_epoch,
+                    &evidence_id,
+                    1_175,
+                )
+                .is_err(),
+            "neighboring coordination domain cannot release the domain"
+        );
+        assert!(
+            engine
+                .store
+                .reconcile_provider_activity(
+                    &acquisition.acquisition_id,
+                    &enrollment.enrollment_id,
+                    &acquisition.coordination_domain_id,
+                    fencing_epoch,
+                    &format!("sha256:{}", "d".repeat(64)),
+                    1_175,
+                )
+                .is_err(),
+            "unknown evidence identity cannot release the domain"
+        );
+        assert!(
+            engine
+                .store
+                .reconcile_provider_activity(
+                    &acquisition.acquisition_id,
+                    &enrollment.enrollment_id,
+                    &acquisition.coordination_domain_id,
+                    fencing_epoch + 1,
+                    &evidence_id,
+                    1_175,
+                )
+                .is_err(),
+            "neighboring fencing epoch cannot release the domain"
+        );
+        let activity_event = engine
+            .store
+            .reconcile_provider_activity(
+                &acquisition.acquisition_id,
+                &enrollment.enrollment_id,
+                &acquisition.coordination_domain_id,
+                fencing_epoch,
+                &evidence_id,
+                1_175,
+            )
+            .expect("exact quiescence evidence releases coordination only");
+        assert_eq!(
+            engine
+                .store
+                .reconcile_provider_activity(
+                    &acquisition.acquisition_id,
+                    &enrollment.enrollment_id,
+                    &acquisition.coordination_domain_id,
+                    fencing_epoch,
+                    &evidence_id,
+                    1_176,
+                )
+                .expect("exact duplicate reconciliation converges"),
+            activity_event
+        );
+        let released_unknown = engine
+            .store
+            .provider_fence_status(&acquisition.acquisition_id)
+            .expect("released split fence status");
+        assert_eq!(released_unknown.diagnostic_outcome, "unknown");
+        assert_eq!(released_unknown.provider_activity, "provider_quiescent");
+        assert_eq!(released_unknown.coordination, "released");
         let replay = engine
             .diagnostic_replay_substrate_origin(&watcher, &acquisition.acquisition_id)
             .expect("replay");
@@ -14625,7 +14835,7 @@ sys.stdout.write("\n")
                     1,
                     fencing_epoch,
                     &format!("sha256:{}", "f".repeat(64)),
-                    1_175,
+                    1_180,
                 )
                 .is_err(),
             "a neighboring artifact identity cannot release the fence"
@@ -14657,6 +14867,13 @@ sys.stdout.write("\n")
             .store
             .validate()
             .expect("reconciled append-only history validates");
+        let exact_result = engine
+            .store
+            .provider_fence_status(&acquisition.acquisition_id)
+            .expect("stronger exact-result status");
+        assert_eq!(exact_result.diagnostic_outcome, "exact_result_known");
+        assert_eq!(exact_result.provider_activity, "provider_quiescent");
+        assert_eq!(exact_result.coordination, "released");
         assert_eq!(
             calls.get(),
             2,
