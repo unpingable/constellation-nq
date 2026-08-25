@@ -113,9 +113,12 @@ pub use runtime::{
     StartupRuntimeIdentity,
 };
 pub use substrate_origin::{
-    SignedSubstrateOriginAttestationV1, SubstrateCoordinateKindV1, SubstrateCoordinateV1,
-    SubstrateOriginAcquisitionBasisV1, SubstrateOriginAcquisitionIntentV1,
-    SubstrateOriginAttestationSourceV1, SubstrateOriginAttestationV1, SubstrateOriginError,
-    SubstrateOriginEvidenceMethodV1, SubstrateOriginVerifierV1, VerifiedSubstrateOriginV1,
+    LINODE_INSTANCE_METADATA_PROFILE_V1, LINODE_METADATA_EVIDENCE_SCHEMA_V1,
+    LINODE_METADATA_INSTANCE_ENDPOINT_V1, LINODE_METADATA_NAMESPACE_V1,
+    LinodeInstanceMetadataEvidenceV1, SignedSubstrateOriginAttestationV1,
+    SubstrateCoordinateKindV1, SubstrateCoordinateV1, SubstrateOriginAcquisitionBasisV1,
+    SubstrateOriginAcquisitionIntentV1, SubstrateOriginAttestationSourceV1,
+    SubstrateOriginAttestationV1, SubstrateOriginError, SubstrateOriginEvidenceMethodV1,
+    SubstrateOriginVerifierV1, VerifiedSubstrateOriginV1,
 };
 pub use unix_runner::{UnixAcquisitionOutcome, UnixRunner, UnixRunnerOptions};

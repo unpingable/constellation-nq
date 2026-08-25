@@ -13894,6 +13894,87 @@ sys.stdout.write("\n")
     }
 
     #[test]
+    fn linode_metadata_profile_uses_the_same_pre_provider_fence_and_replay_law() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        use ed25519_dalek::SigningKey;
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let Some((mut engine, watcher, _mode)) = admitted_host_diagnostic_fixture(
+            directory.path(),
+            "linode-origin-diagnostic-genesis",
+            b"linode-origin-diagnostic-evaluator",
+        ) else {
+            return;
+        };
+        let response = br#"{"id":42,"host_uuid":"supplemental-host","label":"mutable","region":"ca-central","type":"g6-dedicated-4","tags":[],"specs":{},"backups":{},"account_euuid":"supplemental","image":{"id":"linode/ubuntu22.04","label":"Ubuntu"}}"#.to_vec();
+        let evidence =
+            crate::substrate_origin::LinodeInstanceMetadataEvidenceV1::from_response(&response)
+                .expect("Linode metadata fixture");
+        let key = SigningKey::from_bytes(&[9; 32]);
+        let verifier =
+            crate::substrate_origin::SubstrateOriginVerifierV1::for_linode_instance_metadata(
+                "origin-helper:test".into(),
+                "origin-helper-key:test".into(),
+                evidence.instance_id_sha256.clone(),
+                key.verifying_key(),
+            )
+            .expect("Linode verifier");
+        let calls = Rc::new(Cell::new(0));
+        let mut source =
+            crate::substrate_origin::test_support::SyntheticLinodeMetadataSourceV1::new(key, {
+                let calls = Rc::clone(&calls);
+                move || {
+                    calls.set(calls.get() + 1);
+                    Ok(response.clone())
+                }
+            });
+        let acquisition_id = "linode-origin-provider-intake-a";
+        let artifact = engine
+            .diagnostic_execute_with_substrate_origin(
+                &watcher,
+                acquisition_id,
+                &verifier,
+                &mut source,
+                None,
+            )
+            .expect("Linode-origin-bound real provider emits exact diagnostic");
+        assert_eq!(calls.get(), 1);
+        let proof =
+            qualify_diagnostic_admission_supported(&engine.store, &artifact.artifact_id().0)
+                .expect("Linode profile proof reopens");
+        let SupportedDiagnosticAdmissionProvenance::V3(proof) = proof else {
+            panic!("Linode profile must use the V3 proof carrier");
+        };
+        assert_eq!(
+            proof.substrate_origin.intent.basis.expected_coordinate.kind,
+            crate::substrate_origin::SubstrateCoordinateKindV1::LinodeInstance
+        );
+        assert!(
+            proof
+                .substrate_origin
+                .intent
+                .attestation
+                .payload
+                .linode_metadata
+                .is_some()
+        );
+        proof.validate().expect("Linode V3 proof remains exact");
+
+        engine
+            .diagnostic_execute_with_substrate_origin(
+                &watcher,
+                acquisition_id,
+                &verifier,
+                &mut source,
+                None,
+            )
+            .expect("completed Linode replay converges");
+        assert_eq!(calls.get(), 1, "replay never re-fetches metadata");
+    }
+
+    #[test]
     fn diagnostic_execute_keeps_pre_run_admission_refusal_outside_artifact_history() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let (config, watcher, _mode) = host_diagnostic_fixture(directory.path());

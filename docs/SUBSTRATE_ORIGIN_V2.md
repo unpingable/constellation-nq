@@ -13,11 +13,15 @@ expected coordinate + exact acquisition basis
 → diagnostic admission provenance v3
 ```
 
-The coordinate is an `attester_key` coordinate: canonical JCS bytes bind a
-namespace, key ID, public-key digest, and the closed
-`ed25519_acquisition_challenge` verification method. DNS, IP, hostname,
-machine-id, boot ID, subject, producer, scope, and vantage are not coordinate
-inputs.
+The original coordinate is an `attester_key` coordinate: canonical JCS bytes
+bind a namespace, key ID, public-key digest, and the closed
+`ed25519_acquisition_challenge` verification method. That profile proves
+software-key possession only. The separately qualified
+`linode_instance_metadata_v1` contract adds a closed `linode_instance`
+coordinate for one logical provider instance; see
+`LINODE_INSTANCE_METADATA_ORIGIN_PROFILE_V1.md`. Profile proof strengths do not
+substitute. DNS, IP, hostname, machine-id, boot ID, subject, producer, scope,
+and vantage are not coordinate inputs.
 
 This contract proves possession of the pinned attester key for the exact
 acquisition basis before provider execution. It does **not** by itself prove
@@ -25,9 +29,11 @@ bare-metal identity, VM identity, installation identity, key/host co-location,
 clone resistance, evidence truth, continuity, currentness, standing, or
 authority. Those are explicit nonclaims in the signed object.
 
-No production attester is qualified in this repository. Tests use an
-in-process deterministic signer to qualify schema, signature, dispatch-order,
-persistence, replay, and substitution behavior only.
+No production attester deployment is qualified in this repository. Tests use
+an in-process deterministic signer to qualify schema, signature,
+dispatch-order, persistence, replay, and substitution behavior only. The
+Linode metadata parser/profile is qualified as a contract, while helper
+isolation and real-host deployment remain explicitly unqualified.
 
 ## Candidate origin sources
 
@@ -50,14 +56,18 @@ to physical truth.
 | Kernel namespace/container ID | Kernel/runtime | Restart/recreate-sensitive | Runtime-specific | Process/container incarnation | Too narrow and often controller-visible/spoofable |
 
 Most identifiers are non-confidential, but raw machine identifiers can be
-sensitive. The V3 carrier exposes only a public-key digest and content-derived
-coordinate; private key material never enters evidence.
+sensitive. The V3 carrier exposes content-derived coordinates (including a
+public-key digest for the software profile or a provider instance-ID digest
+for the Linode profile); private key material never enters evidence.
 
 ## Coordinate semantics
 
-`substrate_incarnation` V3 currently means one **attester-key custody
-incarnation** under a pinned namespace and verification profile. That is a
-portable protocol coordinate, not a claim of universal physical identity.
+`substrate_incarnation` V3 is parameterized by a closed origin profile. It is
+not a claim of universal physical identity. Under the software profile it means
+one attester-key custody incarnation. Under
+`linode_instance_metadata_v1` it means one logical Linode provider-object
+coordinate, with physical placement and installation explicitly outside the
+claim.
 
 * Reboot: remains the same coordinate when the attester key remains the same;
   boot identity is separate evidence.
@@ -68,6 +78,10 @@ portable protocol coordinate, not a claim of universal physical identity.
   attestation profile could instead choose provider-instance semantics.
 * Clone: copying the key creates a collision. Preventing that requires a
   production attester whose key cannot be cloned or whose issuer detects it.
+
+The Linode profile has its own lifecycle table and trust boundary in
+`LINODE_INSTANCE_METADATA_ORIGIN_PROFILE_V1.md`; its semantics must not be
+inferred from these software-key examples.
 
 ## Ordering, replay, and migration
 
