@@ -29,6 +29,8 @@ The implementation permanently enforces these non-configurable laws:
 * slot times derive from the immutable anchor and interval, never completion;
 * durable history is append-only and restart creates no authority;
 * watcher semantics and the complete V3 origin binding remain exact;
+* the current evaluator artifact/method must match the active watcher
+  admission before fresh origin evidence or the provider fence is consumed;
 * stale domain epochs refuse and lease expiry is not evidence that work stopped;
 * support evidence and Nightshift cannot construct recurrence triggers;
 * every enrollment is finite.

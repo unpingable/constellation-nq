@@ -21,6 +21,8 @@ rg -q 'outcome_unknown' "$store" || fail "outcome-unknown domain fence missing"
 rg -q 'deployment_policy_superseded' "$store" || fail "policy tightening does not fail closed"
 rg -q 'commit_recurrence_provider_fence' "$engine" || fail "provider boundary lacks recurrence fence"
 rg -q 'diagnostic_acquire_recurring_with_substrate_origin' "$engine" || fail "bounded recurrence engine path missing"
+rg -q 'admission renewal is required before provider invocation' "$engine" \
+  || fail "evaluator drift is not refused before the recurrence provider boundary"
 rg -q 'RecurringCommand::Tick' "$cli" || fail "one-shot tick command missing"
 rg -q 'RecurringCommand::Reconcile' "$cli" || fail "exact outcome-unknown reconciliation missing"
 rg -q 'reconcile_recurrence_from_exact_custody' "$store" || fail "custody-only fence release missing"

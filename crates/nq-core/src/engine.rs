@@ -2371,6 +2371,7 @@ impl CollectionEngine {
             })?;
         let semantic = profile_semantic_id(profile.descriptor())
             .map_err(|error| EngineError::Canonical(error.to_string()))?;
+        let current_evaluator = self.require_evaluator_identity()?;
         if durable.instance_id != lock.instance_id
             || durable.config_digest != lock.config_digest
             || durable.helper_artifact_digest != execution.sha256
@@ -2384,6 +2385,18 @@ impl CollectionEngine {
             return Err(EngineError::Invariant(format!(
                 "active provider admission {} differs from its durable identity or semantics",
                 lock.admission_id
+            )));
+        }
+        if durable.artifact_identity_method != current_evaluator.artifact_identity_method()
+            || durable.evaluator_artifact_digest != current_evaluator.artifact_digest().as_str()
+        {
+            return Err(EngineError::Invariant(format!(
+                "active provider admission {} binds evaluator artifact {} under method {}, but the current evaluator is {} under method {}; admission renewal is required before provider invocation",
+                lock.admission_id,
+                durable.evaluator_artifact_digest,
+                durable.artifact_identity_method,
+                current_evaluator.artifact_digest(),
+                current_evaluator.artifact_identity_method(),
             )));
         }
         VerifiedProvider::local_helper(
@@ -14676,6 +14689,85 @@ sys.stdout.write("\n")
                 .expect("resumed status")
                 .enrollment_state,
             "active"
+        );
+
+        let watcher_digest = canonical(&watcher)
+            .expect("watcher canonical")
+            .digest()
+            .to_owned();
+        let RecurrenceTickPlanV1::Ready {
+            acquisition: drift_acquisition,
+            fencing_epoch: drift_epoch,
+            attempt_number: drift_attempt,
+            watcher_binding: drift_binding,
+        } = engine
+            .store
+            .plan_recurrence_tick(&enrollment.enrollment_id, &watcher_digest, 2_000)
+            .expect("second slot")
+        else {
+            panic!("second slot is ready");
+        };
+        let drift_fence = RecurrenceProviderFenceV1 {
+            acquisition_id: drift_acquisition.acquisition_id.clone(),
+            enrollment_id: drift_acquisition.enrollment_id.clone(),
+            policy_id: drift_acquisition.policy_id.clone(),
+            coordination_domain_id: drift_acquisition.coordination_domain_id.clone(),
+            fencing_epoch: drift_epoch,
+            attempt_number: drift_attempt,
+            occurred_at_unix_ms: 2_000,
+            watcher_instance_id: watcher.instance_id.clone(),
+            watcher_semantic_digest: watcher_digest,
+            origin_profile: drift_binding.origin_profile,
+            expected_instance_id_sha256: drift_binding.expected_instance_id_sha256,
+            origin_helper_issuer: drift_binding.origin_helper_issuer,
+            origin_helper_key_id: drift_binding.origin_helper_key_id,
+        };
+        let calls_before_drift = calls.get();
+        let config = engine.config.clone();
+        drop(engine);
+        let drifted_evaluator = EvaluatorRuntimeIdentity::for_test(nq_protocol::sha256_bytes(
+            b"recurrence-v3-drifted-evaluator",
+        ));
+        let mut drifted =
+            CollectionEngine::open_with_evaluator_identity(&config, Ok(drifted_evaluator))
+                .expect("open with drifted evaluator identity");
+        let drift_error = drifted
+            .diagnostic_acquire_recurring_with_substrate_origin(
+                &watcher,
+                &drift_acquisition.acquisition_id,
+                &verifier,
+                &mut source,
+                None,
+                &drift_fence,
+            )
+            .expect_err("evaluator drift refuses before origin or provider invocation");
+        assert!(
+            drift_error
+                .to_string()
+                .contains("admission renewal is required")
+        );
+        assert_eq!(
+            calls.get(),
+            calls_before_drift,
+            "evaluator drift cannot consume fresh origin evidence"
+        );
+        assert_eq!(
+            drifted
+                .store
+                .recurrence_acquisition_state(&drift_acquisition.acquisition_id)
+                .expect("drift occurrence state")
+                .expect("drift occurrence exists")
+                .event_kind,
+            "created",
+            "the provider invocation fence remains uncrossed"
+        );
+        assert!(
+            drifted
+                .store
+                .substrate_origin_acquisition_intent_for_intake(&drift_acquisition.acquisition_id)
+                .expect("drift intent lookup")
+                .is_none(),
+            "drift refusal creates no origin/provider intent"
         );
     }
 
