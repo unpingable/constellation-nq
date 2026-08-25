@@ -434,6 +434,7 @@ and acquisition authority:
   enroll /etc/nq/recurrence-enrollment.json
 /opt/nq-ng/bin/nq --config /etc/nq/nq.toml recurring tick ENROLLMENT_ID
 /opt/nq-ng/bin/nq --config /etc/nq/nq.toml recurring status ENROLLMENT_ID
+/opt/nq-ng/bin/nq --config /etc/nq/nq.toml recurring reconcile ACQUISITION_ID
 ```
 
 Every enrollment is immutable and finite. Cadence changes require a new
@@ -441,6 +442,11 @@ enrollment. The optional packaged timer remains disabled by default and its
 wakeup frequency is not the semantic diagnostic interval. See
 [`BOUNDED_RECURRING_DIAGNOSTIC_OFFICE_V1.md`](BOUNDED_RECURRING_DIAGNOSTIC_OFFICE_V1.md)
 for policy-envelope, missed-slot, fencing, storage, and failure law.
+
+`recurring reconcile` is a read-only-custody recovery operation for an exact
+outcome-unknown occurrence. It has no provider/origin-helper inputs, cannot
+reinvoke the provider, and does not resume recurrence. An explicit operator
+`recurring resume` may follow only after the matching domain fence is released.
 
 Rollback requires an exact retained lock path and re-verifies it against the
 current bytes, configuration, protocol, and compiled profile:

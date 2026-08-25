@@ -22,6 +22,8 @@ rg -q 'deployment_policy_superseded' "$store" || fail "policy tightening does no
 rg -q 'commit_recurrence_provider_fence' "$engine" || fail "provider boundary lacks recurrence fence"
 rg -q 'diagnostic_acquire_recurring_with_substrate_origin' "$engine" || fail "bounded recurrence engine path missing"
 rg -q 'RecurringCommand::Tick' "$cli" || fail "one-shot tick command missing"
+rg -q 'RecurringCommand::Reconcile' "$cli" || fail "exact outcome-unknown reconciliation missing"
+rg -q 'reconcile_recurrence_from_exact_custody' "$store" || fail "custody-only fence release missing"
 
 if rg -q 'CronExpression|parse_cron|RRule|PriorityClass|PagerDuty|AlertManager' "$store" "$cli"; then
   fail "generic scheduling or alert surface introduced"
@@ -31,6 +33,13 @@ tick=$(sed -n '/^fn recurring_tick(/,/^}/p' "$cli")
 if grep -Eq 'loop[[:space:]]*\{' <<<"$tick"; then
   fail "recurrence surface contains an internal forever loop"
 fi
+reconcile=$(sed -n '/^fn reconcile_outcome_unknown(/,/^}/p' "$cli")
+[ -n "$reconcile" ] || fail "cannot inspect outcome-unknown reconciliation"
+if grep -Eq 'diagnostic_acquire|prepare_recurring_origin|SubstrateOriginAttestationSource' <<<"$reconcile"; then
+  fail "outcome-unknown reconciliation can reach an origin/provider acquisition path"
+fi
+grep -q 'diagnostic_replay_substrate_origin' <<<"$reconcile" \
+  || fail "outcome-unknown reconciliation does not reopen exact retained custody"
 if rg -q 'NightshiftClient|nightshift::|create_nightshift|run_nightshift' "$store"; then
   fail "NQ recurrence store names Nightshift reasoning mechanics"
 fi

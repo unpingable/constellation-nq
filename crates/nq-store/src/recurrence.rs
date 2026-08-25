@@ -1076,7 +1076,7 @@ impl Store {
             "resumed_operator"
                 if !matches!(
                     state.as_str(),
-                    "paused_operator" | "paused_failure_threshold"
+                    "paused_operator" | "paused_failure_threshold" | "paused_outcome_unknown"
                 ) =>
             {
                 return Err(StoreError::Invariant(format!(
@@ -1955,7 +1955,12 @@ impl Store {
                 "SELECT EXISTS(
                 SELECT 1 FROM recurrence_acquisitions AS a
                 JOIN recurrence_acquisition_events AS e ON e.acquisition_id = a.acquisition_id
-                WHERE a.enrollment_id = ?1 AND e.event_kind = 'outcome_unknown')",
+                WHERE a.enrollment_id = ?1
+                  AND e.event_sequence = (
+                    SELECT MAX(e2.event_sequence)
+                    FROM recurrence_acquisition_events AS e2
+                    WHERE e2.acquisition_id = a.acquisition_id)
+                  AND e.event_kind = 'outcome_unknown')",
                 [enrollment_id],
                 |row| row.get(0),
             )
@@ -2112,6 +2117,135 @@ impl Store {
         ).optional().map_err(StoreError::from)
     }
 
+    /// Reopen one exact immutable recurrence acquisition binding by identity.
+    /// This read-only lookup creates no trigger or provider work.
+    pub fn recurrence_acquisition(
+        &self,
+        acquisition_id: &str,
+    ) -> Result<Option<RecurrenceAcquisitionBindingV1>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT binding_json FROM recurrence_acquisitions WHERE acquisition_id = ?1",
+                [acquisition_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?
+            .map(|bytes| decode(&bytes, "recurrence acquisition binding"))
+            .transpose()
+    }
+
+    /// Release an outcome-unknown domain fence only after exact local artifact
+    /// custody for this same acquisition has been reopened by the caller. This
+    /// transition never invokes a provider and leaves the enrollment paused
+    /// until a separate explicit operator resume.
+    pub fn reconcile_recurrence_from_exact_custody(
+        &mut self,
+        acquisition_id: &str,
+        attempt_number: u64,
+        fencing_epoch: u64,
+        artifact_id: &str,
+        occurred_at_unix_ms: i64,
+    ) -> Result<(), StoreError> {
+        Sha256Digest::parse(artifact_id.to_owned()).map_err(|error| {
+            StoreError::Invariant(format!("reconciled artifact identity is invalid: {error}"))
+        })?;
+        let transaction = self.immediate_transaction()?;
+        let domain = recurrence_binding_domain_on(&transaction, acquisition_id)?;
+        let projection = domain_projection_on(&transaction, &domain)?;
+        if projection.epoch != Some(fencing_epoch)
+            || projection.holder_acquisition_id.as_deref() != Some(acquisition_id)
+            || !projection.fenced_unknown
+        {
+            return Err(StoreError::Invariant(
+                "recurrence reconciliation lacks the exact outcome-unknown domain fence".into(),
+            ));
+        }
+        let prior: (String, u64, Option<u64>) = transaction.query_row(
+            "SELECT event_kind, attempt_number, fencing_epoch
+             FROM recurrence_acquisition_events
+             WHERE acquisition_id = ?1 ORDER BY event_sequence DESC LIMIT 1",
+            [acquisition_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if prior
+            != (
+                "outcome_unknown".to_owned(),
+                attempt_number,
+                Some(fencing_epoch),
+            )
+        {
+            return Err(StoreError::Invariant(
+                "recurrence reconciliation differs from the exact terminal attempt/fence".into(),
+            ));
+        }
+        if !exact_local_diagnostic_artifact_on(&transaction, acquisition_id, artifact_id)? {
+            return Err(StoreError::Invariant(
+                "recurrence reconciliation artifact is not exact local custody for this acquisition"
+                    .into(),
+            ));
+        }
+        let event = event_document(
+            "provider_succeeded",
+            occurred_at_unix_ms,
+            serde_json::json!({
+                "acquisition_id": acquisition_id,
+                "attempt_number": attempt_number,
+                "fencing_epoch": fencing_epoch,
+                "detail": {
+                    "artifact_id": artifact_id,
+                    "reconciled_from_exact_custody": true
+                }
+            }),
+        )?;
+        transaction.execute(
+            "INSERT INTO recurrence_acquisition_events (
+                event_id, acquisition_id, event_kind, attempt_number,
+                fencing_epoch, event_json, event_digest, occurred_at_unix_ms
+             ) VALUES (?1, ?2, 'provider_succeeded', ?3, ?4, ?5, ?1, ?6)",
+            params![
+                event.digest(),
+                acquisition_id,
+                attempt_number,
+                fencing_epoch,
+                event.as_bytes(),
+                occurred_at_unix_ms
+            ],
+        )?;
+        let watcher: String = transaction.query_row(
+            "SELECT watcher_instance_id FROM recurrence_acquisitions WHERE acquisition_id = ?1",
+            [acquisition_id],
+            |row| row.get(0),
+        )?;
+        let coordination = event_document(
+            "released",
+            occurred_at_unix_ms,
+            serde_json::json!({
+                "coordination_domain_id": domain,
+                "fencing_epoch": fencing_epoch,
+                "holder_acquisition_id": acquisition_id,
+                "reconciled_from_exact_custody": true
+            }),
+        )?;
+        transaction.execute(
+            "INSERT INTO recurrence_coordination_events (
+                event_id, coordination_domain_id, fencing_epoch, event_kind,
+                holder_acquisition_id, holder_watcher_instance_id, event_json,
+                event_digest, occurred_at_unix_ms
+             ) VALUES (?1, ?2, ?3, 'released', ?4, ?5, ?6, ?1, ?7)",
+            params![
+                coordination.digest(),
+                domain,
+                fencing_epoch,
+                acquisition_id,
+                watcher,
+                coordination.as_bytes(),
+                occurred_at_unix_ms
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     fn domain_projection(&self, domain_id: &str) -> Result<DomainProjection, StoreError> {
         domain_projection_on(&self.connection, domain_id)
     }
@@ -2153,6 +2287,27 @@ fn recurrence_binding_domain_on(
         .query_row(
             "SELECT coordination_domain_id FROM recurrence_acquisitions WHERE acquisition_id = ?1",
             [acquisition_id],
+            |row| row.get(0),
+        )
+        .map_err(StoreError::from)
+}
+
+fn exact_local_diagnostic_artifact_on(
+    connection: &rusqlite::Connection,
+    acquisition_id: &str,
+    artifact_id: &str,
+) -> Result<bool, StoreError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM local_diagnostic_artifact_origins AS origin
+                JOIN local_watcher_provider_intakes AS intake
+                  ON intake.run_id = origin.run_id
+                JOIN diagnostic_artifact_payloads AS payload
+                  ON payload.artifact_id = origin.artifact_id
+                WHERE intake.intake_id = ?1 AND origin.artifact_id = ?2)",
+            params![acquisition_id, artifact_id],
             |row| row.get(0),
         )
         .map_err(StoreError::from)
@@ -2692,10 +2847,22 @@ fn validate_recurrence_acquisition_events(
             {
                 state = "terminal";
             }
-            "provider_succeeded" | "provider_terminal_failed" | "outcome_unknown"
+            "provider_succeeded" | "provider_terminal_failed"
                 if state == "provider_invocation_started"
                     && epoch == held_epoch
                     && attempt == last_attempt =>
+            {
+                state = "terminal";
+            }
+            "outcome_unknown"
+                if state == "provider_invocation_started"
+                    && epoch == held_epoch
+                    && attempt == last_attempt =>
+            {
+                state = "outcome_unknown";
+            }
+            "provider_succeeded"
+                if state == "outcome_unknown" && epoch == held_epoch && attempt == last_attempt =>
             {
                 state = "terminal";
             }
@@ -2912,7 +3079,9 @@ fn validate_recurrence_coordination_events(
                 let prior = states.get(&domain).ok_or_else(|| {
                     StoreError::Integrity(format!("coordination terminal event {id} lacks claim"))
                 })?;
-                if prior.kind != "claimed"
+                let valid_prior = prior.kind == "claimed"
+                    || (kind == "released" && prior.kind == "fenced_outcome_unknown");
+                if !valid_prior
                     || prior.epoch != epoch
                     || prior.acquisition != acquisition
                     || prior.watcher != watcher

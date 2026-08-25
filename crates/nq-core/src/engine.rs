@@ -14575,13 +14575,27 @@ sys.stdout.write("\n")
             .store
             .finish_recurrence_acquisition(
                 &acquisition.acquisition_id,
-                "provider_succeeded",
+                "outcome_unknown",
                 1,
                 Some(fencing_epoch),
                 1_100,
                 json!({"artifact_id": recurring.artifact_id().as_digest().as_str()}),
             )
-            .expect("finish");
+            .expect("fence unknown provider outcome");
+        assert!(
+            engine
+                .store
+                .append_recurrence_enrollment_operator_event(
+                    &enrollment.enrollment_id,
+                    "resumed_operator",
+                    "resume:before-exact-reconciliation",
+                    1_150,
+                    "must remain fenced",
+                    &operator,
+                )
+                .is_err(),
+            "operator intent alone cannot release uncertain provider custody"
+        );
         let replay = engine
             .diagnostic_replay_substrate_origin(&watcher, &acquisition.acquisition_id)
             .expect("replay");
@@ -14589,6 +14603,79 @@ sys.stdout.write("\n")
         assert_eq!(
             replay.canonical_bytes().expect("replay bytes"),
             recurring.canonical_bytes().expect("original bytes")
+        );
+        assert!(
+            engine
+                .store
+                .reconcile_recurrence_from_exact_custody(
+                    &acquisition.acquisition_id,
+                    1,
+                    fencing_epoch,
+                    &format!("sha256:{}", "f".repeat(64)),
+                    1_175,
+                )
+                .is_err(),
+            "a neighboring artifact identity cannot release the fence"
+        );
+        engine
+            .store
+            .reconcile_recurrence_from_exact_custody(
+                &acquisition.acquisition_id,
+                1,
+                fencing_epoch,
+                replay.artifact_id().as_digest().as_str(),
+                1_200,
+            )
+            .expect("exact retained artifact custody releases only the matching fence");
+        assert!(
+            engine
+                .store
+                .reconcile_recurrence_from_exact_custody(
+                    &acquisition.acquisition_id,
+                    1,
+                    fencing_epoch,
+                    replay.artifact_id().as_digest().as_str(),
+                    1_201,
+                )
+                .is_err(),
+            "repeated reconciliation cannot append another terminal or release event"
+        );
+        engine
+            .store
+            .validate()
+            .expect("reconciled append-only history validates");
+        assert_eq!(
+            calls.get(),
+            2,
+            "reconciliation has no origin or provider source"
+        );
+        let reconciled = engine
+            .store
+            .recurrence_status(&enrollment.enrollment_id)
+            .expect("reconciled status");
+        assert!(!reconciled.outcome_unknown_fences_domain);
+        assert_eq!(
+            reconciled.enrollment_state, "paused_outcome_unknown",
+            "custody reconciliation does not manufacture operator resume"
+        );
+        engine
+            .store
+            .append_recurrence_enrollment_operator_event(
+                &enrollment.enrollment_id,
+                "resumed_operator",
+                "resume:after-exact-reconciliation",
+                1_250,
+                "explicit bounded continuation",
+                &operator,
+            )
+            .expect("operator may resume only after the exact fence is reconciled");
+        assert_eq!(
+            engine
+                .store
+                .recurrence_status(&enrollment.enrollment_id)
+                .expect("resumed status")
+                .enrollment_state,
+            "active"
         );
     }
 

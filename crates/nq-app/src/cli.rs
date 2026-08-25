@@ -367,6 +367,12 @@ pub enum RecurringCommand {
         /// Exact enrollment whose immutable history is projected.
         enrollment_id: String,
     },
+    /// Reconcile one outcome-unknown occurrence from exact retained custody.
+    /// This command has no provider or origin-helper source.
+    Reconcile {
+        /// Exact acquisition occurrence whose fenced result is reopened.
+        acquisition_id: String,
+    },
     /// Pause one enrollment without changing its anchor or history.
     Pause {
         /// Exact enrollment to pause.
@@ -967,6 +973,9 @@ fn recurring_command(
                 true,
             )
         }
+        RecurringCommand::Reconcile { acquisition_id } => {
+            reconcile_outcome_unknown(&config, &acquisition_id, json_output)
+        }
         RecurringCommand::Pause {
             enrollment_id,
             operation_id,
@@ -1010,6 +1019,62 @@ fn recurring_command(
             json_output,
         ),
     }
+}
+
+fn reconcile_outcome_unknown(
+    config: &NqConfig,
+    acquisition_id: &str,
+    json_output: bool,
+) -> Result<()> {
+    let store = Store::open_read_only(&config.database_path)?;
+    let acquisition = store
+        .recurrence_acquisition(acquisition_id)?
+        .context("unknown recurrence acquisition")?;
+    let state = store
+        .recurrence_acquisition_state(acquisition_id)?
+        .context("recurrence acquisition has no state")?;
+    if state.event_kind != "outcome_unknown" {
+        bail!("only an exact outcome-unknown recurrence acquisition may be reconciled");
+    }
+    let fencing_epoch = state
+        .fencing_epoch
+        .context("outcome-unknown recurrence acquisition lacks fencing epoch")?;
+    let watcher = config
+        .watcher(&acquisition.watcher_instance_id)
+        .with_context(|| format!("unknown instance {}", acquisition.watcher_instance_id))?
+        .clone();
+    let watcher_digest = semantic_digest(&watcher)?.to_string();
+    if watcher_digest != acquisition.watcher_semantic_digest {
+        bail!("current watcher semantics differ from the fenced acquisition");
+    }
+    drop(store);
+    let _domain_guard = nq_core::CoordinationDomainGuard::acquire(
+        &config.database_path,
+        &acquisition.coordination_domain_id,
+        "recurring-reconcile",
+    )?;
+    let engine = nq_core::CollectionEngine::open(config)?;
+    let artifact = engine.diagnostic_replay_substrate_origin(&watcher, acquisition_id)?;
+    drop(engine);
+    let reconciled_at = chrono::Utc::now().timestamp_millis();
+    Store::open(&config.database_path)?.reconcile_recurrence_from_exact_custody(
+        acquisition_id,
+        state.attempt_number,
+        fencing_epoch,
+        artifact.artifact_id().as_digest().as_str(),
+        reconciled_at,
+    )?;
+    print_value(
+        &json!({
+            "outcome": "reconciled_succeeded",
+            "acquisition_id": acquisition_id,
+            "artifact_id": artifact.artifact_id().as_digest().as_str(),
+            "fencing_epoch": fencing_epoch,
+            "provider_invoked": false,
+            "operator_resume_required": true
+        }),
+        json_output,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3138,6 +3203,36 @@ helper_runtime_dir = "/run/nq/helpers"
             panic!("recurring tick command expected");
         };
         assert!(enrollment_id.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn recurring_reconciliation_is_exact_custody_only() {
+        let options = Nq::try_parse_from([
+            "nq",
+            "--json",
+            "recurring",
+            "reconcile",
+            "acquisition:outcome-unknown",
+        ])
+        .expect("exact recurrence reconciliation parses");
+        assert!(matches!(
+            options.command,
+            Command::Recurring {
+                command: RecurringCommand::Reconcile { acquisition_id }
+            } if acquisition_id == "acquisition:outcome-unknown"
+        ));
+        assert!(
+            Nq::try_parse_from([
+                "nq",
+                "recurring",
+                "reconcile",
+                "acquisition:outcome-unknown",
+                "--origin-helper",
+                "/tmp/not-allowed",
+            ])
+            .is_err(),
+            "reconciliation exposes no origin or provider acquisition surface"
+        );
     }
 
     #[test]

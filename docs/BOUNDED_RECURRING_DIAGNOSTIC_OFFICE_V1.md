@@ -24,7 +24,8 @@ The implementation permanently enforces these non-configurable laws:
 * one deterministic enrollment slot creates at most one acquisition identity;
 * one acquisition may cross its provider invocation fence once;
 * pre-provider retry retains enrollment, slot, acquisition, and domain epoch;
-* completed and outcome-unknown occurrences never reopen;
+* completed occurrences never reopen and outcome-unknown occurrences never
+  reinvoke their provider;
 * slot times derive from the immutable anchor and interval, never completion;
 * durable history is append-only and restart creates no authority;
 * watcher semantics and the complete V3 origin binding remain exact;
@@ -107,7 +108,11 @@ After `provider_invocation_started`, the same occurrence cannot invoke again.
 Explicit completion terminates the occurrence. Ambiguity becomes
 `outcome_unknown`, pauses the enrollment, and fences the entire coordination
 domain in conservative V1. Lease or process expiry alone cannot clear that
-fence; exact reconciliation is external/manual work.
+fence. An explicit `recurring reconcile ACQUISITION_ID` may release it only
+when read-only replay reopens exact local artifact custody for that same
+acquisition, attempt, and fencing epoch. Reconciliation has no provider or
+origin-helper source. It leaves the enrollment paused until a separate
+operator resume.
 
 Terminal failure increments the derived consecutive-failure projection;
 success resets that projection. Reaching the selected threshold appends a
@@ -176,9 +181,9 @@ retention/archive operations, failure escalation, and host principal custody.
 V1 never enables a timer during package installation.
 
 What remains external/manual: policy registration/activation, finite
-enrollment, admission renewal, pause/resume/revoke, outcome-unknown
-reconciliation, archive/store-generation rotation, Nightshift cadence, and any
-decision to enable a real-host timer.
+enrollment, admission renewal, invoking exact outcome-unknown reconciliation,
+pause/resume/revoke, archive/store-generation rotation, Nightshift cadence, and
+any decision to enable a real-host timer.
 
 The production operator surface keeps each authority transition explicit:
 
@@ -189,6 +194,7 @@ nq --config /etc/nq/nq.toml recurring policy-activate POLICY_ID \
 nq --config /etc/nq/nq.toml recurring enroll /path/enrollment.json
 nq --config /etc/nq/nq.toml recurring tick ENROLLMENT_ID
 nq --config /etc/nq/nq.toml recurring status ENROLLMENT_ID
+nq --config /etc/nq/nq.toml recurring reconcile ACQUISITION_ID
 ```
 
 `policy-register`, `policy-activate`, and `enroll` are operator actions.
@@ -204,6 +210,11 @@ nq --config /etc/nq/nq.toml recurring resume ENROLLMENT_ID \
 nq --config /etc/nq/nq.toml recurring revoke ENROLLMENT_ID \
   --operation-id OPERATION_ID --reason REASON
 ```
+
+`reconcile` is not resume and is not retry. It consumes only retained exact
+custody, performs no provider invocation, and releases only the matching
+outcome-unknown domain fence. The separate `resume` operation records the
+operator decision to allow later finite slots after reconciliation.
 
 Production policy/specification files are deployment- and operator-owned exact
 inputs. Passing a different pathname with similar prose does not establish an
