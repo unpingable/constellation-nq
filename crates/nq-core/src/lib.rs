@@ -31,7 +31,7 @@ pub use continuity::{
     SignedContinuityAcquisitionCommitmentV1, SignedContinuityAuthorityV1,
     VerifiedContinuityCarrierV1, parse_verifying_key,
 };
-pub use coordination::{CoordinationError, InstanceGuard};
+pub use coordination::{CoordinationDomainGuard, CoordinationError, InstanceGuard};
 pub use diagnostic_admission::{
     DIAGNOSTIC_ADMISSION_PROVENANCE_SCHEMA, DIAGNOSTIC_ADMISSION_PROVENANCE_SCHEMA_V2,
     DIAGNOSTIC_ADMISSION_PROVENANCE_SCHEMA_V3, DiagnosticAdmissionArtifactV1,

@@ -408,6 +408,18 @@ impl SubstrateOriginVerifierV1 {
         Ok(self.expected_coordinate.clone())
     }
 
+    /// Exact issuer identity pinned by this verifier.
+    #[must_use]
+    pub fn expected_issuer_id(&self) -> &str {
+        &self.expected_issuer_id
+    }
+
+    /// Exact helper signing-key identity pinned by this verifier.
+    #[must_use]
+    pub fn expected_key_id(&self) -> &str {
+        &self.expected_key_id
+    }
+
     pub fn verify(
         &self,
         basis: &SubstrateOriginAcquisitionBasisV1,
@@ -672,6 +684,8 @@ pub(crate) mod test_support {
         F: FnMut() -> Result<Vec<u8>, String>,
     {
         signing_key: SigningKey,
+        issuer_id: String,
+        key_id: String,
         fetch: F,
     }
 
@@ -680,7 +694,26 @@ pub(crate) mod test_support {
         F: FnMut() -> Result<Vec<u8>, String>,
     {
         pub(crate) fn new(signing_key: SigningKey, fetch: F) -> Self {
-            Self { signing_key, fetch }
+            Self::new_with_identity(
+                signing_key,
+                "origin-helper:test".into(),
+                "origin-helper-key:test".into(),
+                fetch,
+            )
+        }
+
+        pub(crate) fn new_with_identity(
+            signing_key: SigningKey,
+            issuer_id: String,
+            key_id: String,
+            fetch: F,
+        ) -> Self {
+            Self {
+                signing_key,
+                issuer_id,
+                key_id,
+                fetch,
+            }
         }
     }
 
@@ -704,8 +737,8 @@ pub(crate) mod test_support {
             let payload = SubstrateOriginAttestationV1 {
                 schema: ATTESTATION_SCHEMA_V1.into(),
                 attestation_occurrence_ref: format!("attestation:{}", basis.acquisition_id),
-                issuer_id: "origin-helper:test".into(),
-                key_id: "origin-helper-key:test".into(),
+                issuer_id: self.issuer_id.clone(),
+                key_id: self.key_id.clone(),
                 acquisition_id: basis.acquisition_id.clone(),
                 acquisition_basis_digest: basis.digest().map_err(|error| error.to_string())?,
                 nonclaims: expected_nonclaims(&coordinate),

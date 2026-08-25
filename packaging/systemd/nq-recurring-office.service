@@ -1,0 +1,52 @@
+[Unit]
+Description=NQ-ng bounded recurring diagnostic office wakeup
+Documentation=file:///usr/share/doc/nq-ng/docs/BOUNDED_RECURRING_DIAGNOSTIC_OFFICE_V1.md
+After=local-fs.target
+RequiresMountsFor=/var/lib/nq
+
+[Service]
+Type=oneshot
+User=nq
+Group=nq
+UMask=0077
+WorkingDirectory=/usr
+EnvironmentFile=/etc/nq/recurring-office.env
+ExecStart=/usr/bin/nq --config=/etc/nq/nq.toml --json recurring tick ${NQ_RECURRENCE_ENROLLMENT_ID}
+
+# The CLI must enter the separately admitted watcher and origin-helper
+# principals. It receives the same narrow parent capability set as nqd and no
+# diagnostic authority from systemd; the durable finite enrollment decides.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+KeyringMode=private
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_KILL
+AmbientCapabilities=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_KILL
+ReadOnlyPaths=/etc/nq
+ReadWritePaths=/var/lib/nq /run/nq
+LimitNOFILE=4096
+LimitFSIZE=1G
+LimitCORE=0
+TasksMax=64
+MemoryMax=1G
+MemorySwapMax=0
+TimeoutStartSec=90s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nq-recurring-office
+
+# Deliberately no [Install] section: the paired timer is the optional wakeup.

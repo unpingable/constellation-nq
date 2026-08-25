@@ -262,6 +262,10 @@ install -Dm0755 \
     "$stage/lib/nq/helpers/nq_conformance_helper.py"
 install -Dm0644 "$root/packaging/systemd/nqd.service" \
     "$stage/lib/systemd/system/nqd.service"
+install -Dm0644 "$root/packaging/systemd/nq-recurring-office.service" \
+    "$stage/lib/systemd/system/nq-recurring-office.service"
+install -Dm0644 "$root/packaging/systemd/nq-recurring-office.timer" \
+    "$stage/lib/systemd/system/nq-recurring-office.timer"
 install -Dm0644 "$root/packaging/systemd/nq.sysusers" \
     "$stage/lib/sysusers.d/nq.conf"
 install -Dm0644 "$root/packaging/systemd/nq.tmpfiles" \
@@ -276,6 +280,8 @@ install -Dm0644 "$root/docs/DEVELOPMENT.md" \
     "$stage/share/doc/nq-ng/docs/DEVELOPMENT.md"
 install -Dm0644 "$root/docs/IMPLEMENTATION_STATUS.md" \
     "$stage/share/doc/nq-ng/docs/IMPLEMENTATION_STATUS.md"
+install -Dm0644 "$root/docs/BOUNDED_RECURRING_DIAGNOSTIC_OFFICE_V1.md" \
+    "$stage/share/doc/nq-ng/docs/BOUNDED_RECURRING_DIAGNOSTIC_OFFICE_V1.md"
 install -Dm0644 "$root/docs/PORTER_NETBOX_ADDENDUM.md" \
     "$stage/share/doc/nq-ng/docs/PORTER_NETBOX_ADDENDUM.md"
 install -Dm0644 "$root/packaging/debian/copyright" \

@@ -1,5 +1,12 @@
 # systemd integration
 
+`nq-recurring-office.service` and `.timer` are optional disabled artifacts for
+the finite recurring office documented in
+`docs/BOUNDED_RECURRING_DIAGNOSTIC_OFFICE_V1.md`. The timer is only a wakeup;
+the content-addressed deployment policy and immutable finite enrollment own
+cadence and trigger authority. Package installation never creates an
+enrollment, writes `/etc/nq/recurring-office.env`, or enables the timer.
+
 `nqd.service` runs the daemon as the unprivileged `nq` account and the packaged
 helpers as the separate `nq-helper` account. A configured name or numeric UID
 is resolved during admission, and its exact UID/primary GID is bound into the

@@ -1,0 +1,15 @@
+[Unit]
+Description=Wake the NQ-ng bounded recurring office
+Documentation=file:///usr/share/doc/nq-ng/docs/BOUNDED_RECURRING_DIAGNOSTIC_OFFICE_V1.md
+
+[Timer]
+# These values are wakeup granularity, not diagnostic cadence or authority.
+# NQ derives due slots only from the immutable enrollment anchor and interval.
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=1s
+Persistent=false
+Unit=nq-recurring-office.service
+
+[Install]
+WantedBy=timers.target

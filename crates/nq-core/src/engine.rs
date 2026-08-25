@@ -96,6 +96,7 @@ use crate::substrate_origin::{
 use crate::unix_runner::{
     UnixAcquisitionOutcome, UnixExchangeCapture, UnixIoPhase, UnixRunner, UnixRunnerOptions,
 };
+use nq_store::recurrence::RecurrenceProviderFenceV1;
 
 /// Engine-level failures. Expected watcher outcomes are returned as
 /// [`CollectionOutcome`] and still committed when applicable.
@@ -2750,6 +2751,7 @@ impl CollectionEngine {
             source,
             continuity,
             DiagnosticSelectionLaw::Initial,
+            None,
         )
     }
 
@@ -2778,10 +2780,63 @@ impl CollectionEngine {
             source,
             continuity,
             DiagnosticSelectionLaw::DeliberateSuccessor,
+            None,
         )
     }
 
-    #[allow(clippy::too_many_lines)]
+    /// Execute one recurrence-authorized successor occurrence. The durable
+    /// recurrence/domain fence is committed after origin attestation and
+    /// immediately before the existing provider dispatch fence. A timer or
+    /// caller cannot reach this path without the exact store-issued token.
+    ///
+    /// # Errors
+    ///
+    /// Refuses any recurrence, watcher, origin, continuity, admission, or
+    /// provider-boundary substitution and preserves the underlying bounded V3
+    /// acquisition failures without retrying the provider.
+    #[allow(clippy::too_many_arguments)]
+    pub fn diagnostic_acquire_recurring_with_substrate_origin(
+        &mut self,
+        watcher: &WatcherConfig,
+        acquisition_id: &str,
+        verifier: &SubstrateOriginVerifierV1,
+        source: &mut dyn SubstrateOriginAttestationSourceV1,
+        continuity: Option<&VerifiedContinuityCarrierV1>,
+        recurrence_fence: &RecurrenceProviderFenceV1,
+    ) -> Result<SupportedDiagnosticExecution, EngineError> {
+        if recurrence_fence.acquisition_id != acquisition_id {
+            return Err(EngineError::Invariant(
+                "recurrence fence acquisition identity was substituted".into(),
+            ));
+        }
+        let coordinate = verifier.expected_coordinate()?;
+        if recurrence_fence.watcher_instance_id != watcher.instance_id
+            || recurrence_fence.watcher_semantic_digest != canonical(watcher)?.digest()
+            || recurrence_fence.origin_profile != "linode_instance_metadata_v1"
+            || coordinate
+                .linode_instance_id_sha256
+                .as_ref()
+                .map(ToString::to_string)
+                != Some(recurrence_fence.expected_instance_id_sha256.clone())
+            || verifier.expected_issuer_id() != recurrence_fence.origin_helper_issuer
+            || verifier.expected_key_id() != recurrence_fence.origin_helper_key_id
+        {
+            return Err(EngineError::Invariant(
+                "recurrence fence differs from watcher or exact V3 origin verifier".into(),
+            ));
+        }
+        self.diagnostic_execute_with_substrate_origin_selection(
+            watcher,
+            acquisition_id,
+            verifier,
+            source,
+            continuity,
+            DiagnosticSelectionLaw::DeliberateSuccessor,
+            Some(recurrence_fence),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn diagnostic_execute_with_substrate_origin_selection(
         &mut self,
         watcher: &WatcherConfig,
@@ -2790,6 +2845,7 @@ impl CollectionEngine {
         source: &mut dyn SubstrateOriginAttestationSourceV1,
         continuity: Option<&VerifiedContinuityCarrierV1>,
         selection: DiagnosticSelectionLaw,
+        recurrence_fence: Option<&RecurrenceProviderFenceV1>,
     ) -> Result<SupportedDiagnosticExecution, EngineError> {
         if let Some(carrier) = continuity
             && carrier.basis.acquisition_id != acquisition_id
@@ -2857,8 +2913,13 @@ impl CollectionEngine {
             source,
             continuity,
         };
-        let execution =
-            self.collect_internal_guarded(watcher, Some(selection), None, Some(&mut origin))?;
+        let execution = self.collect_internal_guarded(
+            watcher,
+            Some(selection),
+            None,
+            Some(&mut origin),
+            recurrence_fence,
+        )?;
         let diagnostic = execution.diagnostic.ok_or_else(|| {
             EngineError::DiagnosticUnsupported(format!(
                 "substrate-origin collection for {} produced no diagnostic artifact",
@@ -2964,7 +3025,13 @@ impl CollectionEngine {
     ) -> Result<CollectionExecution, EngineError> {
         let _guard =
             InstanceGuard::acquire(&self.config.database_path, &watcher.instance_id, "collect")?;
-        self.collect_internal_guarded(watcher, diagnostic_selection, continuity, substrate_origin)
+        self.collect_internal_guarded(
+            watcher,
+            diagnostic_selection,
+            continuity,
+            substrate_origin,
+            None,
+        )
     }
 
     #[allow(clippy::too_many_lines)]
@@ -2974,6 +3041,7 @@ impl CollectionEngine {
         diagnostic_selection: Option<DiagnosticSelectionLaw>,
         continuity: Option<&VerifiedContinuityCarrierV1>,
         mut substrate_origin: Option<&mut PendingSubstrateOrigin<'_>>,
+        recurrence_fence: Option<&RecurrenceProviderFenceV1>,
     ) -> Result<CollectionExecution, EngineError> {
         // Fail closed before any persistence: a collection stamps evaluator
         // identity onto its finding events, so refuse up front when it is
@@ -3176,6 +3244,14 @@ impl CollectionEngine {
                         .into(),
                 ));
             }
+        }
+        if let Some(fence) = recurrence_fence {
+            if fence.acquisition_id != intake_id {
+                return Err(EngineError::Invariant(
+                    "recurrence fence differs from provider intake identity".into(),
+                ));
+            }
+            self.store.commit_recurrence_provider_fence(fence)?;
         }
         if let Some(origin) = &verified_origin {
             let pending = substrate_origin.as_deref().ok_or_else(|| {
@@ -14313,6 +14389,207 @@ sys.stdout.write("\n")
         );
         validate_diagnostic_artifact_history(&reopened.store)
             .expect("A1/A2/A3 exact history validates after restart");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn recurrence_fence_is_exact_v3_prerequisite_and_replay_remains_read_only() {
+        use ed25519_dalek::SigningKey;
+        use nq_store::recurrence::{
+            CoordinationDomainPolicyV1, MissedSlotPolicyV1, RECURRENCE_ENROLLMENT_SPEC_SCHEMA_V1,
+            RECURRENCE_REASON_V1, RECURRING_OFFICE_POLICY_SCHEMA_V1, RecurrenceEnrollmentSpecV1,
+            RecurrenceEnrollmentV1, RecurrenceProviderFenceV1, RecurrenceTickPlanV1,
+            RecurringOfficePolicyV1, StartupPolicyV1, WatcherCoordinationBindingV1,
+        };
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let Some((mut engine, watcher, _mode)) = admitted_host_diagnostic_fixture(
+            directory.path(),
+            "recurrence-v3-diagnostic-genesis",
+            b"recurrence-v3-diagnostic-evaluator",
+        ) else {
+            return;
+        };
+        let key = SigningKey::from_bytes(&[42; 32]);
+        let instance_digest = nq_protocol::sha256_bytes(b"11");
+        let verifier = SubstrateOriginVerifierV1::for_linode_instance_metadata(
+            crate::LINODE_ORIGIN_HELPER_ISSUER_V1.into(),
+            "origin-helper-key:test".into(),
+            instance_digest.clone(),
+            key.verifying_key(),
+        )
+        .expect("verifier");
+        let response = br#"{"id":11,"host_uuid":"fixture","label":"mutable","region":"test","type":"test","tags":[],"specs":{"vcpus":1,"memory":1,"disk":1,"transfer":1,"gpus":0},"backups":{"enabled":false,"status":null},"account_euuid":"fixture","image":{"id":"fixture","label":"fixture"}}"#.to_vec();
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0_u32));
+        let source_calls = std::rc::Rc::clone(&calls);
+        let mut source = crate::substrate_origin::test_support::SyntheticLinodeMetadataSourceV1::new_with_identity(
+                key,
+                crate::LINODE_ORIGIN_HELPER_ISSUER_V1.into(),
+                "origin-helper-key:test".into(),
+                move || {
+                    source_calls.set(source_calls.get() + 1);
+                    Ok(response.clone())
+                },
+            );
+        engine
+            .diagnostic_execute_with_substrate_origin(
+                &watcher,
+                "recurrence-v3-a1",
+                &verifier,
+                &mut source,
+                None,
+            )
+            .expect("A1");
+
+        let watcher_digest = canonical(&watcher)
+            .expect("watcher canonical")
+            .digest()
+            .to_owned();
+        let policy = RecurringOfficePolicyV1 {
+            schema: RECURRING_OFFICE_POLICY_SCHEMA_V1.into(),
+            deployment_profile_ref: "deployment:recurrence-engine-test/v1".into(),
+            min_interval_ms: 1_000,
+            max_interval_ms: 60_000,
+            min_timer_granularity_ms: 100,
+            max_enrollment_lifetime_ms: 60_000,
+            max_acquisition_occurrences: 2,
+            allowed_missed_slot_policies: BTreeSet::from([MissedSlotPolicyV1::LatestOnly]),
+            allowed_startup_policies: BTreeSet::from([StartupPolicyV1::EvaluateCurrentSlot]),
+            max_pre_provider_attempts: 2,
+            min_pre_provider_backoff_ms: 10,
+            max_pre_provider_backoff_ms: 100,
+            max_consecutive_failure_threshold: 2,
+            max_in_flight_per_watcher: 1,
+            provider_timeout_ceiling_ms: watcher.schedule.deadline_ms,
+            max_store_bytes: 100_000_000,
+            min_free_bytes: 1,
+            allowed_acquisition_reasons: BTreeSet::from([RECURRENCE_REASON_V1.into()]),
+            coordination_domains: vec![CoordinationDomainPolicyV1 {
+                domain_id: "domain:recurrence-engine-test".into(),
+                max_in_flight: 1,
+                min_provider_start_spacing_ms: 10,
+            }],
+            watcher_bindings: vec![WatcherCoordinationBindingV1 {
+                watcher_instance_id: watcher.instance_id.clone(),
+                watcher_semantic_digest: watcher_digest.clone(),
+                coordination_domain_id: "domain:recurrence-engine-test".into(),
+                origin_profile: "linode_instance_metadata_v1".into(),
+                expected_instance_id_sha256: instance_digest.to_string(),
+                origin_helper_path: "/opt/nq/bin/origin-helper".into(),
+                origin_helper_sha256: format!("sha256:{}", "3".repeat(64)),
+                origin_helper_account: "nq-origin".into(),
+                origin_helper_public_key_path: "/etc/nq/origin.pub".into(),
+                origin_helper_issuer: crate::LINODE_ORIGIN_HELPER_ISSUER_V1.into(),
+                origin_helper_key_id: "origin-helper-key:test".into(),
+            }],
+        };
+        let operator = canonical(&json!({"uid": 991})).expect("operator");
+        let policy_id = engine
+            .store
+            .register_recurring_office_policy(&policy, 1_000, &operator)
+            .expect("register");
+        engine
+            .store
+            .activate_recurring_office_policy(&policy_id, "activate:engine-test", 1_000, &operator)
+            .expect("activate");
+        let enrollment = RecurrenceEnrollmentV1::new(
+            RecurrenceEnrollmentSpecV1 {
+                schema: RECURRENCE_ENROLLMENT_SPEC_SCHEMA_V1.into(),
+                operator_occurrence_id: "operator:engine-enrollment".into(),
+                policy_id,
+                watcher_instance_id: watcher.instance_id.clone(),
+                anchor_unix_ms: 1_000,
+                interval_ms: 1_000,
+                max_acquisition_occurrences: 2,
+                expires_at_unix_ms: 10_000,
+                missed_slot_policy: MissedSlotPolicyV1::LatestOnly,
+                startup_policy: StartupPolicyV1::EvaluateCurrentSlot,
+                max_pre_provider_attempts: 2,
+                pre_provider_backoff_ms: 10,
+                failure_pause_threshold: 2,
+                requested_domain_concurrency: 1,
+                acquisition_reason: RECURRENCE_REASON_V1.into(),
+            },
+            &policy,
+            &watcher_digest,
+            watcher.schedule.deadline_ms,
+            1_000,
+        )
+        .expect("enrollment");
+        engine
+            .store
+            .create_recurrence_enrollment(&enrollment, &operator)
+            .expect("persist enrollment");
+        let RecurrenceTickPlanV1::Ready {
+            acquisition,
+            fencing_epoch,
+            attempt_number,
+            watcher_binding,
+        } = engine
+            .store
+            .plan_recurrence_tick(&enrollment.enrollment_id, &watcher_digest, 1_000)
+            .expect("plan")
+        else {
+            panic!("ready");
+        };
+        let fence = RecurrenceProviderFenceV1 {
+            acquisition_id: acquisition.acquisition_id.clone(),
+            enrollment_id: acquisition.enrollment_id.clone(),
+            policy_id: acquisition.policy_id.clone(),
+            coordination_domain_id: acquisition.coordination_domain_id.clone(),
+            fencing_epoch,
+            attempt_number,
+            occurred_at_unix_ms: 1_000,
+            watcher_instance_id: watcher.instance_id.clone(),
+            watcher_semantic_digest: watcher_digest,
+            origin_profile: watcher_binding.origin_profile,
+            expected_instance_id_sha256: watcher_binding.expected_instance_id_sha256,
+            origin_helper_issuer: watcher_binding.origin_helper_issuer,
+            origin_helper_key_id: watcher_binding.origin_helper_key_id,
+        };
+        let recurring = engine
+            .diagnostic_acquire_recurring_with_substrate_origin(
+                &watcher,
+                &acquisition.acquisition_id,
+                &verifier,
+                &mut source,
+                None,
+                &fence,
+            )
+            .expect("recurring acquisition");
+        assert_eq!(
+            calls.get(),
+            2,
+            "A1 and recurring occurrence each attest once"
+        );
+        assert_eq!(
+            engine
+                .store
+                .recurrence_acquisition_state(&acquisition.acquisition_id)
+                .expect("state")
+                .expect("present")
+                .event_kind,
+            "provider_invocation_started"
+        );
+        engine
+            .store
+            .finish_recurrence_acquisition(
+                &acquisition.acquisition_id,
+                "provider_succeeded",
+                1,
+                Some(fencing_epoch),
+                1_100,
+                json!({"artifact_id": recurring.artifact_id().as_digest().as_str()}),
+            )
+            .expect("finish");
+        let replay = engine
+            .diagnostic_replay_substrate_origin(&watcher, &acquisition.acquisition_id)
+            .expect("replay");
+        assert_eq!(calls.get(), 2, "replay has no origin or provider source");
+        assert_eq!(
+            replay.canonical_bytes().expect("replay bytes"),
+            recurring.canonical_bytes().expect("original bytes")
+        );
     }
 
     #[test]

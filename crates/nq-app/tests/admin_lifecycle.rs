@@ -1044,7 +1044,6 @@ fn exact_v3_upgrade_accepts_typed_empty_history_and_refuses_semantic_or_schema_d
         nq_store::Store::database_schema_version(&v6_backup).expect("inspect v6 backup"),
         6
     );
-
     let store = nq_store::Store::open(&database).expect("open migrated v4 store");
     store.validate().expect("validate migrated v4 store");
     assert!(
@@ -1061,7 +1060,7 @@ fn exact_v3_upgrade_accepts_typed_empty_history_and_refuses_semantic_or_schema_d
     drop(store);
 
     let receipts = read_only_upgrade_receipts(&database);
-    assert_eq!(receipts.len(), 4, "v3 to v7 requires four exact receipts");
+    assert_eq!(receipts.len(), 5, "v3 to v8 requires five exact receipts");
     let receipt = &receipts[0];
     assert_eq!(receipt.from_version, 3);
     assert_eq!(receipt.to_version, 4);
@@ -1101,7 +1100,7 @@ fn exact_v3_upgrade_accepts_typed_empty_history_and_refuses_semantic_or_schema_d
     assert_eq!(verification["continuity_intents_synthesized"], false);
     let receipt = &receipts[3];
     assert_eq!(receipt.from_version, 6);
-    assert_eq!(receipt.to_version, nq_store::SCHEMA_VERSION);
+    assert_eq!(receipt.to_version, 7);
     assert_eq!(receipt.result, "migrated");
     assert_eq!(receipt.backup_digest, v6_backup_digest);
     assert_eq!(receipt.backup_location, v6_backup.display().to_string());
@@ -1111,6 +1110,22 @@ fn exact_v3_upgrade_accepts_typed_empty_history_and_refuses_semantic_or_schema_d
     );
     let verification: Value = serde_json::from_str(&receipt.verification_json).unwrap();
     assert_eq!(verification["substrate_origin_intents_synthesized"], false);
+    let receipt = &receipts[4];
+    assert_eq!(receipt.from_version, 7);
+    assert_eq!(receipt.to_version, nq_store::SCHEMA_VERSION);
+    assert_eq!(receipt.result, "migrated");
+    let v7_backup = PathBuf::from(&receipt.backup_location);
+    assert_eq!(sha256_file(&v7_backup), receipt.backup_digest);
+    assert_eq!(
+        nq_store::Store::database_schema_version(&v7_backup).expect("inspect v7 backup"),
+        7
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&receipt.migrations_json).unwrap(),
+        serde_json::json!(["schema_v7_to_v8_bounded_recurrence"])
+    );
+    let verification: Value = serde_json::from_str(&receipt.verification_json).unwrap();
+    assert_eq!(verification["recurrence_authority_synthesized"], false);
 
     let semantic_invalid = root.join("semantic-invalid-v3.db");
     write_exact_v3_database(&semantic_invalid, true);

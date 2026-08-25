@@ -7,6 +7,8 @@ lib/nq/helpers/nq-host-helper                              0755
 lib/nq/helpers/nq-linode-origin-helper                     0755
 lib/nq/helpers/nq_conformance_helper.py                    0755
 lib/systemd/system/nqd.service                             0644
+lib/systemd/system/nq-recurring-office.service             0644
+lib/systemd/system/nq-recurring-office.timer               0644
 lib/sysusers.d/nq.conf                                     0644
 lib/tmpfiles.d/nq.conf                                     0644
 share/doc/nq-ng/OPERATIONS.md                              0644
@@ -16,6 +18,7 @@ share/doc/nq-ng/copyright                                  0644
 share/doc/nq-ng/docs/PLAN.md                               0644
 share/doc/nq-ng/docs/DEVELOPMENT.md                        0644
 share/doc/nq-ng/docs/IMPLEMENTATION_STATUS.md              0644
+share/doc/nq-ng/docs/BOUNDED_RECURRING_DIAGNOSTIC_OFFICE_V1.md 0644
 share/doc/nq-ng/docs/PORTER_NETBOX_ADDENDUM.md             0644
 share/doc/nq-ng/examples/nq.toml                           0644
 share/doc/nq-ng/examples/nq-host.toml                      0644

@@ -12,12 +12,21 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use nix::fcntl::{Flock, FlockArg};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 /// Process-scoped exclusive ownership of one instance's collection/binding
 /// lifecycle. The lock is released when this value is dropped.
 #[derive(Debug)]
 pub struct InstanceGuard {
+    _lock: Flock<File>,
+    path: PathBuf,
+}
+
+/// Process-scoped serialization for one deployment-declared recurrence
+/// coordination domain. The clear-text domain is never used as a path.
+#[derive(Debug)]
+pub struct CoordinationDomainGuard {
     _lock: Flock<File>,
     path: PathBuf,
 }
@@ -119,6 +128,83 @@ impl InstanceGuard {
     }
 }
 
+impl CoordinationDomainGuard {
+    /// Block until this process owns the local worker boundary for the exact
+    /// deployment-declared coordination domain. Durable fencing in `nq-store`
+    /// remains authoritative across crashes; this guard only closes the race
+    /// between concurrent local tick evaluators.
+    ///
+    /// # Errors
+    ///
+    /// Refuses an invalid domain identity, an unsafe coordination directory or
+    /// lock file, or any failure to acquire and persist the local kernel lock.
+    pub fn acquire(
+        database_path: &Path,
+        domain_id: &str,
+        operation: &str,
+    ) -> Result<Self, CoordinationError> {
+        if domain_id.is_empty() || domain_id.len() > 1024 || domain_id.chars().any(char::is_control)
+        {
+            return Err(CoordinationError::InvalidInstance(domain_id.to_owned()));
+        }
+        let key = format!(
+            "domain-{}",
+            hex::encode(Sha256::digest(domain_id.as_bytes()))
+        );
+        let directory = lock_directory(database_path)?;
+        let directory_file = ensure_private_directory(&directory)?;
+        let path = directory.join(format!("{key}.lock"));
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(&path)
+            .map_err(|source| io_error(&path, source))?;
+        drop(directory_file);
+        if !file
+            .metadata()
+            .map_err(|source| io_error(&path, source))?
+            .is_file()
+        {
+            return Err(CoordinationError::Io {
+                path,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "coordination artifact is not a regular file",
+                ),
+            });
+        }
+        let mut lock = Flock::lock(file, FlockArg::LockExclusive).map_err(|(_, error)| {
+            CoordinationError::Lock {
+                path: path.clone(),
+                message: error.to_string(),
+            }
+        })?;
+        lock.set_len(0).map_err(|source| io_error(&path, source))?;
+        lock.seek(SeekFrom::Start(0))
+            .map_err(|source| io_error(&path, source))?;
+        writeln!(
+            lock,
+            "pid={} domain_digest={} operation={}",
+            std::process::id(),
+            key,
+            sanitize_operation(operation)
+        )
+        .and_then(|()| lock.sync_data())
+        .map_err(|source| io_error(&path, source))?;
+        Ok(Self { _lock: lock, path })
+    }
+
+    /// Filesystem path carrying this process's kernel lock.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 fn valid_instance_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -202,6 +288,7 @@ mod tests {
 
     const CHILD_ENV: &str = "NQ_COORDINATION_LOCK_CHILD";
     const CHILD_DATABASE_ENV: &str = "NQ_COORDINATION_LOCK_DATABASE";
+    const CHILD_DOMAIN_ENV: &str = "NQ_COORDINATION_LOCK_DOMAIN";
 
     // This is a deliberately ordinary test (rather than ignored) so a parent
     // test can re-exec the test binary and select it by exact name. In the
@@ -216,6 +303,20 @@ mod tests {
             std::env::var(CHILD_DATABASE_ENV).map_or_else(|_| root.join("nq.db"), PathBuf::from);
         let _guard = InstanceGuard::acquire(&database, "shared", "child").expect("child lock");
         std::fs::write(root.join("child-ready"), b"ready").expect("ready marker");
+        thread::sleep(Duration::from_millis(500));
+    }
+
+    #[test]
+    fn cross_process_domain_lock_holder() {
+        let Ok(root) = std::env::var(CHILD_DOMAIN_ENV) else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let database = root.join("nq.db");
+        let _guard =
+            CoordinationDomainGuard::acquire(&database, "shared:provider/domain", "child-domain")
+                .expect("child domain lock");
+        std::fs::write(root.join("domain-child-ready"), b"ready").expect("ready marker");
         thread::sleep(Duration::from_millis(500));
     }
 
@@ -260,6 +361,49 @@ mod tests {
         let started = Instant::now();
         let _second = InstanceGuard::acquire(&database, "second", "test").expect("second");
         assert!(started.elapsed() < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn coordination_domains_are_explicit_and_path_safe() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database = directory.path().join("nq.db");
+        std::fs::write(&database, b"database identity").expect("database fixture");
+        let first =
+            CoordinationDomainGuard::acquire(&database, "linode:labelwatch-host/provider", "tick")
+                .expect("domain guard");
+        assert!(first.path().file_name().is_some_and(|name| {
+            name.to_string_lossy().starts_with("domain-")
+                && !name.to_string_lossy().contains("labelwatch")
+        }));
+        let _independent =
+            CoordinationDomainGuard::acquire(&database, "linode:another-host/provider", "tick")
+                .expect("independent domain");
+    }
+
+    #[test]
+    fn serializes_two_processes_for_the_same_coordination_domain() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database = directory.path().join("nq.db");
+        std::fs::write(&database, b"database identity").expect("database fixture");
+        let mut child = Command::new(std::env::current_exe().expect("test executable"))
+            .arg("--exact")
+            .arg("coordination::tests::cross_process_domain_lock_holder")
+            .arg("--nocapture")
+            .env(CHILD_DOMAIN_ENV, directory.path())
+            .spawn()
+            .expect("spawn child test process");
+        let ready = directory.path().join("domain-child-ready");
+        let wait_started = Instant::now();
+        while !ready.exists() && wait_started.elapsed() < Duration::from_secs(5) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready.exists(), "child never acquired domain lock");
+        let started = Instant::now();
+        let _guard =
+            CoordinationDomainGuard::acquire(&database, "shared:provider/domain", "parent-domain")
+                .expect("parent domain lock");
+        assert!(started.elapsed() >= Duration::from_millis(350));
+        assert!(child.wait().expect("child status").success());
     }
 
     #[test]

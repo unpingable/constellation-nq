@@ -23,6 +23,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+pub mod recurrence;
+
 const SCHEMA: &str = include_str!("schema.sql");
 const SCHEMA_V3: &str = include_str!("schema_v3.sql");
 const SCHEMA_V4: &str = include_str!("schema_v4.sql");
@@ -33,6 +35,7 @@ const SCHEMA_V4_TO_V5_DIAGNOSTIC_ARTIFACTS: &str =
     include_str!("schema_v4_to_v5_diagnostic_artifacts.sql");
 const SCHEMA_V5_TO_V6_CONTINUITY: &str = include_str!("schema_v5_to_v6_continuity.sql");
 const SCHEMA_V6_TO_V7_SUBSTRATE_ORIGIN: &str = include_str!("schema_v6_to_v7_substrate_origin.sql");
+const SCHEMA_V7_TO_V8_RECURRENCE: &str = include_str!("schema_v7_to_v8_recurrence.sql");
 const APPLICATION_ID: i64 = 1_313_951_303;
 
 const SCHEMA_METADATA_V4: &str = r"CREATE TABLE schema_metadata (
@@ -95,6 +98,21 @@ const SCHEMA_METADATA_V7: &str = r"CREATE TABLE schema_metadata (
 const SCHEMA_METADATA_V7_TRIGGERS: &str = "CREATE TRIGGER immutable_schema_metadata_update BEFORE UPDATE ON schema_metadata BEGIN SELECT RAISE(ABORT, 'append-only table'); END;\n\
      CREATE TRIGGER immutable_schema_metadata_delete BEFORE DELETE ON schema_metadata BEGIN SELECT RAISE(ABORT, 'append-only table'); END;";
 
+const SCHEMA_METADATA_V8: &str = r"CREATE TABLE schema_metadata (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    product TEXT NOT NULL CHECK (product = 'nq-ng'),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 8),
+    -- Digest of the exact schema.sql artifact compiled into the writing binary.
+    -- Rejects stale provisional-candidate databases at startup; it is NOT a
+    -- tamper attestation of the live SQLite schema (which the structural
+    -- fingerprint checks separately).
+    schema_artifact_digest TEXT NOT NULL CHECK (length(schema_artifact_digest) = 71 AND substr(schema_artifact_digest, 1, 7) = 'sha256:'),
+    initialized_at TEXT NOT NULL
+) STRICT;";
+
+const SCHEMA_METADATA_V8_TRIGGERS: &str = "CREATE TRIGGER immutable_schema_metadata_update BEFORE UPDATE ON schema_metadata BEGIN SELECT RAISE(ABORT, 'append-only table'); END;\n\
+     CREATE TRIGGER immutable_schema_metadata_delete BEFORE DELETE ON schema_metadata BEGIN SELECT RAISE(ABORT, 'append-only table'); END;";
+
 /// Exact schema-artifact digest of the qualified v0.1.0 store. It is retained
 /// only to validate an explicit v3-to-v4 upgrade source; normal opening never
 /// interprets v3 bytes as current storage.
@@ -113,6 +131,16 @@ pub const SCHEMA_V5_ARTIFACT_DIGEST: &str =
 /// Exact schema-artifact digest of the qualified schema-v6 store.
 pub const SCHEMA_V6_ARTIFACT_DIGEST: &str =
     "sha256:f20697b11ec1b343c8ee3b58a371378a57bcc6b50afd3179baf2234859e7a66e";
+
+/// Exact schema-artifact digest of the qualified schema-v7 substrate-origin store.
+pub const SCHEMA_V7_ARTIFACT_DIGEST: &str =
+    "sha256:08270d6b60d836f7d8a60cc468e61427bded485bc9af2fb5ecdb3666db7e313f";
+
+/// Structural fingerprint of the qualified schema-v7 store. Kept as an
+/// explicit migration-source fact so the v8 binary need not embed a second
+/// complete copy of the historical schema.
+const SCHEMA_V7_FINGERPRINT: &str =
+    "sha256:b4ac2ccbf40e924c1dee8ba2cccf70e3036aa173a556a6590f4c99e1232ad117";
 
 /// Schema tag bound into every admission-context digest preimage. Bump only when
 /// the constituent set or its canonicalization changes.
@@ -171,7 +199,7 @@ static EXPECTED_SCHEMA_V6_FINGERPRINT: LazyLock<Result<String, String>> = LazyLo
 });
 
 /// The only schema version understood by this crate.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// Hard ceiling for one page returned through the public read model helpers.
 pub const MAX_PUBLIC_QUERY_ROWS: u32 = 1_000;
@@ -2052,6 +2080,27 @@ impl Store {
         Ok(store)
     }
 
+    /// Open the exact qualified schema-v7 store read-only for the separately
+    /// authorized v7-to-v8 recurring-office custody migration.
+    pub fn open_v7_upgrade_source_read_only(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        if !path.is_file() || std::fs::metadata(path)?.len() == 0 {
+            return Err(StoreError::NotInitialized(path.to_path_buf()));
+        }
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        connection.pragma_update(None, "query_only", "ON")?;
+        let store = Self {
+            connection,
+            path: Some(path.to_path_buf()),
+        };
+        validate_v7_upgrade_source_connection(&store.connection)?;
+        Ok(store)
+    }
+
     /// Checkpoint a writable backup copy and leave it in rollback-journal mode
     /// before archive inventory and sealing.
     pub fn prepare_archive_copy(&self) -> Result<(), StoreError> {
@@ -2182,6 +2231,7 @@ impl Store {
         validate_local_provider_admissions(&self.connection)?;
         validate_provider_intake_invariants(&self.connection)?;
         validate_continuity_acquisition_invariants(&self.connection)?;
+        recurrence::validate_recurrence_invariants(&self.connection)?;
         validate_refusal_invariants(&self.connection)?;
         validate_run_results(&self.connection)?;
         validate_evaluation_refusal_invariants(&self.connection)?;
@@ -5625,21 +5675,16 @@ impl Store {
                 "INSERT INTO schema_metadata (
                     singleton, product, schema_version, schema_artifact_digest, initialized_at
                  ) SELECT singleton, product, 7, ?1, initialized_at FROM schema_metadata_v6",
-                [schema_artifact_digest()],
+                [SCHEMA_V7_ARTIFACT_DIGEST],
             )?;
             transaction.execute("DROP TABLE schema_metadata_v6", [])?;
             transaction.execute_batch(SCHEMA_METADATA_V7_TRIGGERS)?;
             transaction.execute_batch(SCHEMA_V6_TO_V7_SUBSTRATE_ORIGIN)?;
             transaction.pragma_update(None, "user_version", 7)?;
-            let expected = EXPECTED_SCHEMA_FINGERPRINT.as_ref().map_err(|error| {
-                StoreError::Integrity(format!(
-                    "compiled v7 schema cannot be fingerprinted after migration: {error}"
-                ))
-            })?;
             let actual = schema_fingerprint(&transaction)?;
-            if &actual != expected {
+            if actual != SCHEMA_V7_FINGERPRINT {
                 return Err(StoreError::Integrity(format!(
-                    "migrated v7 schema fingerprint {actual} differs from fresh v7 {expected}"
+                    "migrated v7 schema fingerprint {actual} differs from exact v7 {SCHEMA_V7_FINGERPRINT}"
                 )));
             }
             validate_stored_digests(&transaction)?;
@@ -5647,6 +5692,120 @@ impl Store {
             validate_all_admission_context_digests(&transaction)?;
             validate_local_provider_admissions(&transaction)?;
             validate_provider_intake_invariants(&transaction)?;
+            validate_refusal_invariants(&transaction)?;
+            validate_run_results(&transaction)?;
+            validate_evaluation_refusal_invariants(&transaction)?;
+            validate_diagnostic_artifact_invariants(&transaction)?;
+            validate_status_sequence_lower_bound(&transaction)?;
+            validate_projection_invariants(&transaction)?;
+            let mut committed_receipt = receipt.clone();
+            committed_receipt.finished_at = now_utc();
+            insert_upgrade_receipt(&transaction, &committed_receipt)?;
+            validate_upgrade_receipts(&transaction)?;
+            transaction.commit()?;
+        }
+        validate_v7_upgrade_source_connection(&store.connection)?;
+        Ok(store)
+    }
+
+    /// Explicitly migrate schema-v7 custody to schema v8. Historical manual
+    /// acquisitions receive no synthetic recurrence enrollment or slot
+    /// authority.
+    #[allow(clippy::too_many_lines)]
+    pub fn upgrade_v7_to_v8(
+        path: impl AsRef<Path>,
+        receipt: &UpgradeReceiptInput,
+    ) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        validate_v7_to_v8_receipt(receipt)?;
+        let backup_path = Path::new(&receipt.backup_location);
+        if !backup_path.is_file() || sha256_file(backup_path)? != receipt.backup_digest {
+            return Err(StoreError::Invariant(
+                "v7-to-v8 migration requires exact verified backup named by receipt".into(),
+            ));
+        }
+        let source_metadata = std::fs::metadata(path)?;
+        let backup_metadata = std::fs::metadata(backup_path)?;
+        if std::fs::canonicalize(path)? == std::fs::canonicalize(backup_path)?
+            || (source_metadata.dev(), source_metadata.ino())
+                == (backup_metadata.dev(), backup_metadata.ino())
+        {
+            return Err(StoreError::Invariant(
+                "v7-to-v8 migration backup must be distinct from source database".into(),
+            ));
+        }
+        let backup_store = Self::open_v7_upgrade_source_read_only(backup_path)?;
+        let backup_digest = v7_logical_state_digest(&backup_store.connection)?;
+        let source_store = Self::open_v7_upgrade_source_read_only(path)?;
+        let source_digest = v7_logical_state_digest(&source_store.connection)?;
+        if source_digest != backup_digest {
+            return Err(StoreError::Invariant(
+                "v7-to-v8 migration backup logical state differs from source".into(),
+            ));
+        }
+        drop(source_store);
+        drop(backup_store);
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        configure_connection(&connection, false)?;
+        let mut store = Self {
+            connection,
+            path: Some(path.to_path_buf()),
+        };
+        validate_v7_upgrade_source_connection(&store.connection)?;
+        {
+            let transaction = store.immediate_transaction()?;
+            validate_v7_upgrade_source_connection(&transaction)?;
+            if sha256_file(backup_path)? != receipt.backup_digest {
+                return Err(StoreError::Invariant(
+                    "v7-to-v8 migration backup changed after preflight".into(),
+                ));
+            }
+            let locked_backup = Self::open_v7_upgrade_source_read_only(backup_path)?;
+            if v7_logical_state_digest(&locked_backup.connection)?
+                != v7_logical_state_digest(&transaction)?
+            {
+                return Err(StoreError::Invariant(
+                    "locked v7 source differs from verified backup".into(),
+                ));
+            }
+            drop(locked_backup);
+            transaction.execute_batch(
+                "DROP TRIGGER immutable_schema_metadata_update;
+                 DROP TRIGGER immutable_schema_metadata_delete;
+                 ALTER TABLE schema_metadata RENAME TO schema_metadata_v7;",
+            )?;
+            transaction.execute_batch(SCHEMA_METADATA_V8)?;
+            transaction.execute(
+                "INSERT INTO schema_metadata (
+                    singleton, product, schema_version, schema_artifact_digest, initialized_at
+                 ) SELECT singleton, product, 8, ?1, initialized_at FROM schema_metadata_v7",
+                [schema_artifact_digest()],
+            )?;
+            transaction.execute("DROP TABLE schema_metadata_v7", [])?;
+            transaction.execute_batch(SCHEMA_METADATA_V8_TRIGGERS)?;
+            transaction.execute_batch(SCHEMA_V7_TO_V8_RECURRENCE)?;
+            transaction.pragma_update(None, "user_version", 8)?;
+            let expected = EXPECTED_SCHEMA_FINGERPRINT.as_ref().map_err(|error| {
+                StoreError::Integrity(format!(
+                    "compiled v8 schema cannot be fingerprinted after migration: {error}"
+                ))
+            })?;
+            let actual = schema_fingerprint(&transaction)?;
+            if &actual != expected {
+                return Err(StoreError::Integrity(format!(
+                    "migrated v8 schema fingerprint {actual} differs from fresh v8 {expected}"
+                )));
+            }
+            validate_stored_digests(&transaction)?;
+            validate_upgrade_receipts(&transaction)?;
+            validate_all_admission_context_digests(&transaction)?;
+            validate_local_provider_admissions(&transaction)?;
+            validate_provider_intake_invariants(&transaction)?;
+            validate_continuity_acquisition_invariants(&transaction)?;
+            recurrence::validate_recurrence_invariants(&transaction)?;
             validate_refusal_invariants(&transaction)?;
             validate_run_results(&transaction)?;
             validate_evaluation_refusal_invariants(&transaction)?;
@@ -6463,6 +6622,7 @@ fn insert_upgrade_receipt(
         (4, 5) => validate_v4_to_v5_receipt(receipt)?,
         (5, 6) => validate_v5_to_v6_receipt(receipt)?,
         (6, 7) => validate_v6_to_v7_receipt(receipt)?,
+        (7, 8) => validate_v7_to_v8_receipt(receipt)?,
         _ => {}
     }
     transaction.execute(
@@ -6649,6 +6809,39 @@ fn validate_v6_to_v7_receipt(receipt: &UpgradeReceiptInput) -> Result<(), StoreE
     Ok(())
 }
 
+fn validate_v7_to_v8_receipt(receipt: &UpgradeReceiptInput) -> Result<(), StoreError> {
+    if receipt.from_schema_version != 7 || receipt.to_schema_version != 8 {
+        return Err(StoreError::Invariant(
+            "v7-to-v8 migration receipt names the wrong version transition".into(),
+        ));
+    }
+    validate_digest("binary_digest", &receipt.binary_digest)?;
+    validate_digest("backup_digest", &receipt.backup_digest)?;
+    validate_upgrade_receipt_times(receipt)?;
+    let expected_migrations =
+        CanonicalDocument::from_serializable(&["schema_v7_to_v8_bounded_recurrence"])?;
+    if receipt.migrations != expected_migrations || receipt.result != "migrated" {
+        return Err(StoreError::Invariant(
+            "v7-to-v8 migration receipt differs from closed recurrence contract".into(),
+        ));
+    }
+    let expected_verification = CanonicalDocument::from_serializable(&serde_json::json!({
+        "integrity": "ok",
+        "source_schema_version": 7,
+        "source_schema_artifact_digest": SCHEMA_V7_ARTIFACT_DIGEST,
+        "backup_reopened": true,
+        "historical_recurrence_enrollments": "absent_not_synthesized",
+        "recurrence_authority_synthesized": false,
+    }))?;
+    if receipt.verification != expected_verification {
+        return Err(StoreError::Invariant(
+            "v7-to-v8 migration receipt verification differs from closed recurrence contract"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_upgrade_receipts(connection: &Connection) -> Result<(), StoreError> {
     let mut statement = connection.prepare(
         "SELECT receipt_id, from_schema_version, to_schema_version,
@@ -6706,6 +6899,8 @@ fn validate_upgrade_receipts(connection: &Connection) -> Result<(), StoreError> 
             (5, 6) => validate_v5_to_v6_receipt(&receipt)
                 .map_err(|error| StoreError::Integrity(format!("{receipt_id}: {error}")))?,
             (6, 7) => validate_v6_to_v7_receipt(&receipt)
+                .map_err(|error| StoreError::Integrity(format!("{receipt_id}: {error}")))?,
+            (7, 8) => validate_v7_to_v8_receipt(&receipt)
                 .map_err(|error| StoreError::Integrity(format!("{receipt_id}: {error}")))?,
             _ => {}
         }
@@ -7967,6 +8162,67 @@ fn validate_v6_upgrade_source_connection(connection: &Connection) -> Result<(), 
     validate_projection_invariants(connection)
 }
 
+fn validate_v7_upgrade_source_connection(connection: &Connection) -> Result<(), StoreError> {
+    let version = pragma_i64(connection, "user_version")?;
+    if version != 7 {
+        return Err(StoreError::SchemaVersionMismatch {
+            found: version,
+            supported: 7,
+        });
+    }
+    let application_id = pragma_i64(connection, "application_id")?;
+    if application_id != APPLICATION_ID {
+        return Err(StoreError::ApplicationIdMismatch {
+            found: application_id,
+            expected: APPLICATION_ID,
+        });
+    }
+    let metadata: (i64, String) = connection.query_row(
+        "SELECT schema_version, schema_artifact_digest
+         FROM schema_metadata WHERE singleton = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if metadata.0 != 7 || metadata.1 != SCHEMA_V7_ARTIFACT_DIGEST {
+        return Err(StoreError::Integrity(
+            "schema-v7 metadata does not identify exact qualified artifact".into(),
+        ));
+    }
+    let quick_check: String =
+        connection.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+    if quick_check != "ok" {
+        return Err(StoreError::Integrity(quick_check));
+    }
+    let foreign_key_failures: i64 =
+        connection.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })?;
+    if foreign_key_failures != 0 {
+        return Err(StoreError::Integrity(format!(
+            "{foreign_key_failures} schema-v7 foreign-key violations"
+        )));
+    }
+    let actual = schema_fingerprint(connection)?;
+    if actual != SCHEMA_V7_FINGERPRINT {
+        return Err(StoreError::Integrity(format!(
+            "schema-v7 definition fingerprint {actual} differs from exact v7 {SCHEMA_V7_FINGERPRINT}"
+        )));
+    }
+    validate_stored_digests(connection)?;
+    validate_upgrade_receipts(connection)?;
+    validate_all_admission_context_digests(connection)?;
+    validate_local_provider_admissions(connection)?;
+    validate_provider_intake_invariants(connection)?;
+    validate_continuity_acquisition_invariants(connection)?;
+    validate_refusal_invariants(connection)?;
+    validate_run_results(connection)?;
+    validate_evaluation_refusal_invariants(connection)?;
+    validate_diagnostic_artifact_invariants(connection)?;
+    validate_admitted_report_associations_connection(connection)?;
+    validate_status_sequence_lower_bound(connection)?;
+    validate_projection_invariants(connection)
+}
+
 fn validate_admitted_report_associations_connection(
     connection: &Connection,
 ) -> Result<(), StoreError> {
@@ -8063,6 +8319,10 @@ fn v6_logical_state_digest(connection: &Connection) -> Result<String, StoreError
     logical_state_digest(connection, b"nq.schema_v6.logical_state.v1\0")
 }
 
+fn v7_logical_state_digest(connection: &Connection) -> Result<String, StoreError> {
+    logical_state_digest(connection, b"nq.schema_v7.logical_state.v1\0")
+}
+
 fn logical_state_digest(connection: &Connection, domain: &[u8]) -> Result<String, StoreError> {
     let mut names =
         connection.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name")?;
@@ -8153,6 +8413,16 @@ fn validate_required_objects(connection: &Connection) -> Result<(), StoreError> 
         "watcher_runs",
         "continuity_acquisition_intents",
         "continuity_acquisition_events",
+        "substrate_origin_acquisition_intents",
+        "substrate_origin_acquisition_events",
+        "recurring_office_policies",
+        "recurring_office_policy_events",
+        "recurrence_enrollments",
+        "recurrence_enrollment_events",
+        "recurrence_slot_events",
+        "recurrence_acquisitions",
+        "recurrence_acquisition_events",
+        "recurrence_coordination_events",
         "provider_intake_attempts",
         "local_watcher_provider_intakes",
         "legacy_v3_watcher_run_intake_gaps",
@@ -11948,6 +12218,30 @@ mod tests {
                 "backup_reopened": true,
                 "historical_substrate_origin_proofs": "absent_not_synthesized",
                 "substrate_origin_intents_synthesized": false,
+            })),
+        }
+    }
+
+    fn exact_v7_to_v8_receipt(backup: &BackupArtifact) -> UpgradeReceiptInput {
+        UpgradeReceiptInput {
+            receipt_id: "upgrade-v7-v8-bounded-recurrence".to_owned(),
+            from_schema_version: 7,
+            to_schema_version: 8,
+            migrations: document(json!(["schema_v7_to_v8_bounded_recurrence"])),
+            binary_digest: digest("migration-binary-v8"),
+            backup_digest: backup.sha256.clone(),
+            backup_location: backup.path.to_string_lossy().into_owned(),
+            started_at: "2026-08-25T12:00:00Z".to_owned(),
+            finished_at: "2026-08-25T12:00:01Z".to_owned(),
+            result: "migrated".to_owned(),
+            operator_identity: document(json!({"uid": 991})),
+            verification: document(json!({
+                "integrity": "ok",
+                "source_schema_version": 7,
+                "source_schema_artifact_digest": SCHEMA_V7_ARTIFACT_DIGEST,
+                "backup_reopened": true,
+                "historical_recurrence_enrollments": "absent_not_synthesized",
+                "recurrence_authority_synthesized": false,
             })),
         }
     }
@@ -17037,6 +17331,7 @@ mod tests {
         let backup_path = directory.path().join("backup-v4.db");
         let backup_v5_path = directory.path().join("backup-v5.db");
         let backup_v6_path = directory.path().join("backup-v6.db");
+        let backup_v7_path = directory.path().join("backup-v7.db");
         write_empty_exact_v4(&source);
         let backup = Store::backup_v4_verified(&source, &backup_path).expect("verified v4 backup");
         let receipt = exact_v4_to_v5_receipt(&backup);
@@ -17087,10 +17382,9 @@ mod tests {
         let backup_v6 =
             Store::backup_v6_verified(&source, &backup_v6_path).expect("verified v6 backup");
         let receipt_v7 = exact_v6_to_v7_receipt(&backup_v6);
-        let current =
-            Store::upgrade_v6_to_v7(&source, &receipt_v7).expect("exact v6 upgrades to v7");
-        current.validate().expect("migrated v7 validates");
-        let origin_count: i64 = current
+        let v7 = Store::upgrade_v6_to_v7(&source, &receipt_v7).expect("exact v6 upgrades to v7");
+        validate_v7_upgrade_source_connection(&v7.connection).expect("migrated v7 validates");
+        let origin_count: i64 = v7
             .connection
             .query_row(
                 "SELECT COUNT(*) FROM substrate_origin_acquisition_intents",
@@ -17101,6 +17395,24 @@ mod tests {
         assert_eq!(
             origin_count, 0,
             "migration synthesized origin proofs for historical acquisitions"
+        );
+        drop(v7);
+
+        let backup_v7 =
+            Store::backup_incompatible(&source, &backup_v7_path).expect("verified v7 backup");
+        let receipt_v8 = exact_v7_to_v8_receipt(&backup_v7);
+        let current =
+            Store::upgrade_v7_to_v8(&source, &receipt_v8).expect("exact v7 upgrades to current v8");
+        current.validate().expect("migrated v8 validates");
+        let recurrence_count: i64 = current
+            .connection
+            .query_row("SELECT COUNT(*) FROM recurrence_enrollments", [], |row| {
+                row.get(0)
+            })
+            .expect("recurrence enrollment count");
+        assert_eq!(
+            recurrence_count, 0,
+            "migration synthesized recurrence authority"
         );
     }
 

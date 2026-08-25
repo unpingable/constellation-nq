@@ -22,7 +22,7 @@ use nq_store::{
     DiagnosticArtifactSchemaSupport, MAX_PUBLIC_QUERY_ROWS, MAX_STORED_JSON_BYTES, Store,
     UpgradeReceiptInput,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tempfile::NamedTempFile;
 
@@ -82,6 +82,12 @@ pub enum Command {
         /// Diagnostic-execution workflow.
         #[command(subcommand)]
         command: DiagnosticsCommand,
+    },
+    /// Manage one finite, policy-bounded recurring diagnostic office.
+    Recurring {
+        /// Recurring-office workflow.
+        #[command(subcommand)]
+        command: RecurringCommand,
     },
     /// Diagnose configuration, storage, profiles, and admission drift.
     Doctor,
@@ -329,6 +335,73 @@ pub enum DiagnosticsCommand {
     },
 }
 
+/// Finite recurring-office operations. `Tick` is a one-shot schedule
+/// evaluation, never an internal loop.
+#[derive(Debug, Subcommand)]
+pub enum RecurringCommand {
+    /// Register exact deployment-owned safety-envelope bytes.
+    PolicyRegister {
+        /// Exact closed deployment safety-envelope JSON.
+        policy: PathBuf,
+    },
+    /// Activate a registered deployment policy for future enrollments/slots.
+    PolicyActivate {
+        /// Content-derived registered policy identity.
+        policy_id: String,
+        /// Caller-owned idempotency identity for this activation.
+        #[arg(long)]
+        operation_id: String,
+    },
+    /// Materialize one immutable finite operator enrollment.
+    Enroll {
+        /// Exact immutable enrollment-spec JSON.
+        spec: PathBuf,
+    },
+    /// Evaluate the current deterministic slot exactly once.
+    Tick {
+        /// Exact finite enrollment to evaluate.
+        enrollment_id: String,
+    },
+    /// Project current state from immutable recurrence records.
+    Status {
+        /// Exact enrollment whose immutable history is projected.
+        enrollment_id: String,
+    },
+    /// Pause one enrollment without changing its anchor or history.
+    Pause {
+        /// Exact enrollment to pause.
+        enrollment_id: String,
+        /// Caller-owned idempotency identity.
+        #[arg(long)]
+        operation_id: String,
+        /// Bounded operator reason retained in custody.
+        #[arg(long)]
+        reason: String,
+    },
+    /// Resume one non-fenced enrollment without changing cadence.
+    Resume {
+        /// Exact enrollment to resume.
+        enrollment_id: String,
+        /// Caller-owned idempotency identity.
+        #[arg(long)]
+        operation_id: String,
+        /// Bounded operator reason retained in custody.
+        #[arg(long)]
+        reason: String,
+    },
+    /// Revoke future finite slot authority append-only.
+    Revoke {
+        /// Exact enrollment whose future slot authority is revoked.
+        enrollment_id: String,
+        /// Caller-owned idempotency identity.
+        #[arg(long)]
+        operation_id: String,
+        /// Bounded operator reason retained in custody.
+        #[arg(long)]
+        reason: String,
+    },
+}
+
 /// Backup workflow.
 #[derive(Debug, Args)]
 pub struct BackupArgs {
@@ -481,6 +554,7 @@ pub async fn run(options: Nq) -> Result<()> {
         Command::Diagnostics { command } => {
             diagnostics_command(&options.config, command, options.json).await
         }
+        Command::Recurring { command } => recurring_command(&options.config, command, options.json),
         Command::Doctor => doctor(&options.config, options.json),
         Command::Backup(arguments) => backup(&options.config, &arguments.destination, options.json),
         Command::Restore(arguments) => {
@@ -799,6 +873,466 @@ async fn diagnostics_command(
             import_id,
         } => diagnostic_import(config_path, &artifact, import_id.as_deref(), json_output),
     }
+}
+
+fn recurrence_operator_identity() -> Result<CanonicalDocument> {
+    CanonicalDocument::from_serializable(&json!({
+        "kind": "local_nq_operator_boundary",
+        "uid": nix::unistd::Uid::effective().as_raw(),
+        "gid": nix::unistd::Gid::effective().as_raw(),
+    }))
+    .map_err(Into::into)
+}
+
+fn read_exact_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
+    let bytes = fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+    if bytes.len() > MAX_STORED_JSON_BYTES {
+        bail!("{} exceeds the bounded JSON limit", path.display());
+    }
+    serde_json::from_slice(&bytes).with_context(|| format!("cannot decode {}", path.display()))
+}
+
+#[allow(clippy::too_many_lines)]
+fn recurring_command(
+    config_path: &Path,
+    command: RecurringCommand,
+    json_output: bool,
+) -> Result<()> {
+    let config = NqConfig::load(config_path)?;
+    let now = chrono::Utc::now().timestamp_millis();
+    let operator = recurrence_operator_identity()?;
+    match command {
+        RecurringCommand::PolicyRegister { policy } => {
+            let policy: nq_store::recurrence::RecurringOfficePolicyV1 = read_exact_json(&policy)?;
+            let mut store = Store::open(&config.database_path)?;
+            let policy_id = store.register_recurring_office_policy(&policy, now, &operator)?;
+            print_value(
+                &json!({"policy_id": policy_id, "registered": true}),
+                json_output,
+            )
+        }
+        RecurringCommand::PolicyActivate {
+            policy_id,
+            operation_id,
+        } => {
+            let mut store = Store::open(&config.database_path)?;
+            let event_id = store.activate_recurring_office_policy(
+                &policy_id,
+                &operation_id,
+                now,
+                &operator,
+            )?;
+            print_value(
+                &json!({"policy_id": policy_id, "activation_event_id": event_id}),
+                json_output,
+            )
+        }
+        RecurringCommand::Enroll { spec } => {
+            let spec: nq_store::recurrence::RecurrenceEnrollmentSpecV1 = read_exact_json(&spec)?;
+            let watcher = config
+                .watcher(&spec.watcher_instance_id)
+                .with_context(|| format!("unknown instance {}", spec.watcher_instance_id))?;
+            let watcher_digest = semantic_digest(watcher)?.to_string();
+            let mut store = Store::open(&config.database_path)?;
+            let policy = store
+                .recurring_office_policy(&spec.policy_id)?
+                .context("enrollment names an unknown deployment policy")?;
+            let enrollment = nq_store::recurrence::RecurrenceEnrollmentV1::new(
+                spec,
+                &policy,
+                &watcher_digest,
+                watcher.schedule.deadline_ms,
+                now,
+            )
+            .map_err(|refusal| {
+                anyhow::anyhow!(
+                    "recurrence enrollment refused [{}]: {}",
+                    refusal.code,
+                    refusal.detail
+                )
+            })?;
+            let enrollment_id = store.create_recurrence_enrollment(&enrollment, &operator)?;
+            print_value(
+                &json!({"enrollment": enrollment, "enrollment_id": enrollment_id}),
+                true,
+            )
+        }
+        RecurringCommand::Tick { enrollment_id } => {
+            recurring_tick(&config, &enrollment_id, now, json_output)
+        }
+        RecurringCommand::Status { enrollment_id } => {
+            let store = Store::open_read_only(&config.database_path)?;
+            print_value(
+                &serde_json::to_value(store.recurrence_status(&enrollment_id)?)?,
+                true,
+            )
+        }
+        RecurringCommand::Pause {
+            enrollment_id,
+            operation_id,
+            reason,
+        } => recurrence_operator_event(
+            &config,
+            &enrollment_id,
+            "paused_operator",
+            &operation_id,
+            &reason,
+            now,
+            &operator,
+            json_output,
+        ),
+        RecurringCommand::Resume {
+            enrollment_id,
+            operation_id,
+            reason,
+        } => recurrence_operator_event(
+            &config,
+            &enrollment_id,
+            "resumed_operator",
+            &operation_id,
+            &reason,
+            now,
+            &operator,
+            json_output,
+        ),
+        RecurringCommand::Revoke {
+            enrollment_id,
+            operation_id,
+            reason,
+        } => recurrence_operator_event(
+            &config,
+            &enrollment_id,
+            "revoked_operator",
+            &operation_id,
+            &reason,
+            now,
+            &operator,
+            json_output,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recurrence_operator_event(
+    config: &NqConfig,
+    enrollment_id: &str,
+    kind: &str,
+    operation_id: &str,
+    reason: &str,
+    now: i64,
+    operator: &CanonicalDocument,
+    json_output: bool,
+) -> Result<()> {
+    let mut store = Store::open(&config.database_path)?;
+    let event_id = store.append_recurrence_enrollment_operator_event(
+        enrollment_id,
+        kind,
+        operation_id,
+        now,
+        reason,
+        operator,
+    )?;
+    print_value(
+        &json!({"enrollment_id": enrollment_id, "event_kind": kind, "event_id": event_id}),
+        json_output,
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn recurring_tick(
+    config: &NqConfig,
+    enrollment_id: &str,
+    now: i64,
+    json_output: bool,
+) -> Result<()> {
+    let enrollment = Store::open_read_only(&config.database_path)?
+        .recurrence_enrollment(enrollment_id)?
+        .context("unknown recurrence enrollment")?;
+    let watcher = config
+        .watcher(&enrollment.spec.watcher_instance_id)
+        .with_context(|| format!("unknown instance {}", enrollment.spec.watcher_instance_id))?
+        .clone();
+    let watcher_digest = semantic_digest(&watcher)?.to_string();
+    let _domain_guard = nq_core::CoordinationDomainGuard::acquire(
+        &config.database_path,
+        &enrollment.coordination_domain_id,
+        "recurring-tick",
+    )?;
+    let plan = Store::open(&config.database_path)?.plan_recurrence_tick(
+        enrollment_id,
+        &watcher_digest,
+        now,
+    )?;
+    let (acquisition, fencing_epoch, attempt_number, watcher_binding) = match plan {
+        nq_store::recurrence::RecurrenceTickPlanV1::Ready {
+            acquisition,
+            fencing_epoch,
+            attempt_number,
+            watcher_binding,
+        } => (acquisition, fencing_epoch, attempt_number, watcher_binding),
+        nq_store::recurrence::RecurrenceTickPlanV1::ReconcileRequired { acquisition_id } => {
+            return reconcile_recurring_occurrence(
+                config,
+                &watcher,
+                &acquisition_id,
+                now,
+                json_output,
+            );
+        }
+        other => return print_value(&serde_json::to_value(other)?, true),
+    };
+
+    if let Err(error) = enforce_recurrence_storage_guard(&config.database_path, &acquisition) {
+        let mut store = Store::open(&config.database_path)?;
+        store.record_recurrence_pre_provider_failure(
+            &acquisition.acquisition_id,
+            attempt_number,
+            fencing_epoch,
+            now,
+            json!({"reason": "storage_guard_refused", "detail": error.to_string()}),
+        )?;
+        return print_value(
+            &json!({"outcome": "pre_provider_refused", "acquisition_id": acquisition.acquisition_id, "reason": "storage_guard_refused"}),
+            true,
+        );
+    }
+
+    let (verifier, mut source) = match prepare_recurring_origin(&watcher_binding) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            record_recurring_pre_provider_refusal(
+                config,
+                &acquisition.acquisition_id,
+                attempt_number,
+                fencing_epoch,
+                now,
+                &error.to_string(),
+            )?;
+            return Err(error);
+        }
+    };
+    let fence = nq_store::recurrence::RecurrenceProviderFenceV1 {
+        acquisition_id: acquisition.acquisition_id.clone(),
+        enrollment_id: acquisition.enrollment_id.clone(),
+        policy_id: acquisition.policy_id.clone(),
+        coordination_domain_id: acquisition.coordination_domain_id.clone(),
+        fencing_epoch,
+        attempt_number,
+        occurred_at_unix_ms: chrono::Utc::now().timestamp_millis(),
+        watcher_instance_id: acquisition.watcher_instance_id.clone(),
+        watcher_semantic_digest: acquisition.watcher_semantic_digest.clone(),
+        origin_profile: watcher_binding.origin_profile.clone(),
+        expected_instance_id_sha256: watcher_binding.expected_instance_id_sha256.clone(),
+        origin_helper_issuer: watcher_binding.origin_helper_issuer.clone(),
+        origin_helper_key_id: watcher_binding.origin_helper_key_id.clone(),
+    };
+    let mut engine = nq_core::CollectionEngine::open(config)?;
+    let result = engine.diagnostic_acquire_recurring_with_substrate_origin(
+        &watcher,
+        &acquisition.acquisition_id,
+        &verifier,
+        &mut source,
+        None,
+        &fence,
+    );
+    drop(engine);
+    let terminal_at = chrono::Utc::now().timestamp_millis();
+    match result {
+        Ok(artifact) => {
+            Store::open(&config.database_path)?.finish_recurrence_acquisition(
+                &acquisition.acquisition_id,
+                "provider_succeeded",
+                u64::from(attempt_number),
+                Some(fencing_epoch),
+                terminal_at,
+                json!({"artifact_id": artifact.artifact_id().as_digest().as_str()}),
+            )?;
+            print_value(
+                &json!({
+                    "outcome": "acquired",
+                    "enrollment_id": enrollment_id,
+                    "slot": acquisition.slot,
+                    "acquisition_id": acquisition.acquisition_id,
+                    "artifact_id": artifact.artifact_id().as_digest().as_str(),
+                    "fencing_epoch": fencing_epoch,
+                    "attempt_number": attempt_number,
+                }),
+                json_output,
+            )
+        }
+        Err(error) => {
+            let mut store = Store::open(&config.database_path)?;
+            let state = store
+                .recurrence_acquisition_state(&acquisition.acquisition_id)?
+                .context("recurrence acquisition state disappeared")?;
+            if state.event_kind == "provider_invocation_started" {
+                store.finish_recurrence_acquisition(
+                    &acquisition.acquisition_id,
+                    "outcome_unknown",
+                    u64::from(attempt_number),
+                    Some(fencing_epoch),
+                    terminal_at,
+                    json!({"reason": "provider_path_returned_after_fence", "diagnostic": error.to_string()}),
+                )?;
+            } else {
+                store.record_recurrence_pre_provider_failure(
+                    &acquisition.acquisition_id,
+                    attempt_number,
+                    fencing_epoch,
+                    terminal_at,
+                    json!({"reason": "pre_provider_failure", "diagnostic": error.to_string()}),
+                )?;
+            }
+            Err(error.into())
+        }
+    }
+}
+
+fn prepare_recurring_origin(
+    binding: &nq_store::recurrence::WatcherCoordinationBindingV1,
+) -> Result<(
+    nq_core::SubstrateOriginVerifierV1,
+    IsolatedLinodeOriginSource,
+)> {
+    if binding.origin_profile != nq_store::recurrence::LINODE_ORIGIN_PROFILE_V1 {
+        bail!("recurrence deployment binding names unsupported origin profile");
+    }
+    if binding.origin_helper_issuer != nq_core::LINODE_ORIGIN_HELPER_ISSUER_V1 {
+        bail!("recurrence deployment binding substituted the closed origin-helper issuer");
+    }
+    let helper_path = PathBuf::from(&binding.origin_helper_path);
+    validate_origin_helper_executable(&helper_path, &binding.origin_helper_sha256)?;
+    let public_key = continuity_verifier(Path::new(&binding.origin_helper_public_key_path))?;
+    let key_id = nq_core::linode_origin_helper_key_id(&public_key);
+    if key_id != binding.origin_helper_key_id {
+        bail!("origin helper key identity differs from deployment policy");
+    }
+    let verifier = nq_core::SubstrateOriginVerifierV1::for_linode_instance_metadata(
+        binding.origin_helper_issuer.clone(),
+        key_id,
+        nq_protocol::Sha256Digest::parse(binding.expected_instance_id_sha256.clone())?,
+        public_key,
+    )?;
+    let account = resolve_account(&binding.origin_helper_account, false)?;
+    Ok((
+        verifier,
+        IsolatedLinodeOriginSource {
+            executable: helper_path,
+            account,
+        },
+    ))
+}
+
+fn reconcile_recurring_occurrence(
+    config: &NqConfig,
+    watcher: &nq_core::WatcherConfig,
+    acquisition_id: &str,
+    now: i64,
+    json_output: bool,
+) -> Result<()> {
+    let state = Store::open_read_only(&config.database_path)?
+        .recurrence_acquisition_state(acquisition_id)?
+        .context("recurrence acquisition state disappeared during reconciliation")?;
+    if state.event_kind == "outcome_unknown" {
+        return print_value(
+            &json!({"outcome": "reconcile_required", "acquisition_id": acquisition_id, "reason": "provider_outcome_unknown"}),
+            true,
+        );
+    }
+    if state.event_kind != "provider_invocation_started" {
+        bail!(
+            "recurrence reconciliation reached unexpected state {}",
+            state.event_kind
+        );
+    }
+    let epoch = state
+        .fencing_epoch
+        .context("provider-started occurrence lacks fencing epoch")?;
+    let attempt = state.attempt_number;
+    let engine = nq_core::CollectionEngine::open(config)?;
+    match engine.diagnostic_replay_substrate_origin(watcher, acquisition_id) {
+        Ok(artifact) => {
+            Store::open(&config.database_path)?.finish_recurrence_acquisition(
+                acquisition_id,
+                "provider_succeeded",
+                attempt,
+                Some(epoch),
+                now,
+                json!({"artifact_id": artifact.artifact_id().as_digest().as_str(), "reconciled_from_exact_custody": true}),
+            )?;
+            print_value(
+                &json!({"outcome": "reconciled_succeeded", "acquisition_id": acquisition_id, "artifact_id": artifact.artifact_id().as_digest().as_str()}),
+                json_output,
+            )
+        }
+        Err(error) => {
+            Store::open(&config.database_path)?.finish_recurrence_acquisition(
+                acquisition_id,
+                "outcome_unknown",
+                attempt,
+                Some(epoch),
+                now,
+                json!({"reason": "provider_started_without_replayable_exact_result", "diagnostic": error.to_string()}),
+            )?;
+            print_value(
+                &json!({"outcome": "reconcile_required", "acquisition_id": acquisition_id, "reason": "provider_outcome_unknown"}),
+                true,
+            )
+        }
+    }
+}
+
+fn record_recurring_pre_provider_refusal(
+    config: &NqConfig,
+    acquisition_id: &str,
+    attempt_number: u16,
+    fencing_epoch: u64,
+    now: i64,
+    detail: &str,
+) -> Result<()> {
+    Store::open(&config.database_path)?.record_recurrence_pre_provider_failure(
+        acquisition_id,
+        attempt_number,
+        fencing_epoch,
+        now,
+        json!({"reason": "deployment_binding_refused", "detail": detail}),
+    )?;
+    Ok(())
+}
+
+fn enforce_recurrence_storage_guard(
+    database_path: &Path,
+    acquisition: &nq_store::recurrence::RecurrenceAcquisitionBindingV1,
+) -> Result<()> {
+    enforce_recurrence_storage_guard_limits(
+        database_path,
+        acquisition.max_store_bytes,
+        acquisition.min_free_bytes,
+    )
+}
+
+fn enforce_recurrence_storage_guard_limits(
+    database_path: &Path,
+    max_store_bytes: u64,
+    min_free_bytes: u64,
+) -> Result<()> {
+    let store_bytes = fs::metadata(database_path)?.len();
+    if store_bytes > max_store_bytes {
+        bail!("durable store is {store_bytes} bytes, above configured maximum {max_store_bytes}");
+    }
+    let parent = database_path
+        .parent()
+        .context("recurrence database path has no parent")?;
+    let stats = nix::sys::statvfs::statvfs(parent)?;
+    let free_bytes = stats
+        .blocks_available()
+        .saturating_mul(stats.fragment_size());
+    if free_bytes < min_free_bytes {
+        bail!(
+            "durable store filesystem has {free_bytes} free bytes, below configured minimum {min_free_bytes}"
+        );
+    }
+    Ok(())
 }
 
 fn diagnostic_qualify(config_path: &Path, artifact_id: &str, json_output: bool) -> Result<()> {
@@ -2036,6 +2570,26 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                         json_output,
                     )
                 }
+                7 => {
+                    let (backup, backup_digest) = upgrade_v7_to_current(
+                        &config.database_path,
+                        &backup_directory,
+                        &binary_digest,
+                        &operator_identity,
+                    )?;
+                    print_value(
+                        &json!({
+                            "result": "migrated",
+                            "from_schema_version": 7,
+                            "schema_version": nq_store::SCHEMA_VERSION,
+                            "backup": backup,
+                            "backup_digest": backup_digest,
+                            "historical_recurrence_enrollments": "absent_not_synthesized",
+                            "recurrence_authority_synthesized": false,
+                        }),
+                        json_output,
+                    )
+                }
                 _ => {
                     // Reuse the store's exact fail-closed diagnostic. `open`
                     // checks version and identity before any persistent PRAGMA.
@@ -2121,7 +2675,48 @@ fn upgrade_v6_to_current(
             "substrate_origin_intents_synthesized": false,
         }))?,
     };
-    let store = Store::upgrade_v6_to_v7(database_path, &receipt)?;
+    drop(Store::upgrade_v6_to_v7(database_path, &receipt)?);
+    let _ = upgrade_v7_to_current(
+        database_path,
+        backup_directory,
+        binary_digest,
+        operator_identity,
+    )?;
+    Ok((backup, artifact.sha256))
+}
+
+fn upgrade_v7_to_current(
+    database_path: &Path,
+    backup_directory: &Path,
+    binary_digest: &str,
+    operator_identity: &CanonicalDocument,
+) -> Result<(PathBuf, String)> {
+    let started_at = chrono::Utc::now();
+    let temporary = backup_directory.join(format!(".nq-upgrade-{}.db", uuid::Uuid::new_v4()));
+    let artifact = Store::backup_incompatible(database_path, &temporary)?;
+    let backup = finalize_upgrade_backup(&temporary, backup_directory, &artifact.sha256)?;
+    let receipt = UpgradeReceiptInput {
+        receipt_id: uuid::Uuid::new_v4().to_string(),
+        from_schema_version: 7,
+        to_schema_version: 8,
+        migrations: CanonicalDocument::from_serializable(&["schema_v7_to_v8_bounded_recurrence"])?,
+        binary_digest: binary_digest.to_owned(),
+        backup_digest: artifact.sha256.clone(),
+        backup_location: backup.display().to_string(),
+        started_at: started_at.to_rfc3339(),
+        finished_at: started_at.to_rfc3339(),
+        result: "migrated".into(),
+        operator_identity: operator_identity.clone(),
+        verification: CanonicalDocument::from_serializable(&json!({
+            "integrity": "ok",
+            "source_schema_version": 7,
+            "source_schema_artifact_digest": nq_store::SCHEMA_V7_ARTIFACT_DIGEST,
+            "backup_reopened": true,
+            "historical_recurrence_enrollments": "absent_not_synthesized",
+            "recurrence_authority_synthesized": false,
+        }))?,
+    };
+    let store = Store::upgrade_v7_to_v8(database_path, &receipt)?;
     store.validate()?;
     Ok((backup, artifact.sha256))
 }
@@ -2524,6 +3119,40 @@ helper_runtime_dir = "/run/nq/helpers"
     fn command_tree_exposes_required_operator_workflows() {
         use clap::CommandFactory;
         Nq::command().debug_assert();
+    }
+
+    #[test]
+    fn recurring_tick_is_explicit_one_shot_enrollment_evaluation() {
+        let options = Nq::try_parse_from([
+            "nq",
+            "--json",
+            "recurring",
+            "tick",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ])
+        .expect("recurring tick parses");
+        let Command::Recurring {
+            command: RecurringCommand::Tick { enrollment_id },
+        } = options.command
+        else {
+            panic!("recurring tick command expected");
+        };
+        assert!(enrollment_id.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn recurrence_storage_guard_refuses_both_store_growth_and_free_space_pressure() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database = directory.path().join("nq.db");
+        fs::write(&database, [0_u8; 32]).expect("write bounded fixture");
+
+        let size_error = enforce_recurrence_storage_guard_limits(&database, 31, 1)
+            .expect_err("oversized store must refuse before provider");
+        assert!(size_error.to_string().contains("above configured maximum"));
+
+        let free_error = enforce_recurrence_storage_guard_limits(&database, u64::MAX, u64::MAX)
+            .expect_err("free-space floor must refuse before provider");
+        assert!(free_error.to_string().contains("below configured minimum"));
     }
 
     #[test]

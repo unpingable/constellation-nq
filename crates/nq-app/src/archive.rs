@@ -1598,6 +1598,31 @@ mod tests {
             })),
         };
         drop(Store::upgrade_v6_to_v7(&database, &v6_receipt).expect("upgrade schema-v6 store"));
+        let v7_backup = root.join("nq-v7.pre-upgrade.db");
+        let v7_backup =
+            Store::backup_incompatible(&database, &v7_backup).expect("backup schema-v7 store");
+        let v7_receipt = nq_store::UpgradeReceiptInput {
+            receipt_id: "upgrade-archive-v7-v8".to_owned(),
+            from_schema_version: 7,
+            to_schema_version: 8,
+            migrations: canonical(&serde_json::json!(["schema_v7_to_v8_bounded_recurrence"])),
+            binary_digest: nq_protocol::sha256_bytes(b"archive-upgrade-binary").into_string(),
+            backup_digest: v7_backup.sha256,
+            backup_location: v7_backup.path.to_string_lossy().into_owned(),
+            started_at: "2026-07-20T12:00:10Z".to_owned(),
+            finished_at: "2026-07-20T12:00:11Z".to_owned(),
+            result: "migrated".to_owned(),
+            operator_identity: canonical(&serde_json::json!({"uid": 991})),
+            verification: canonical(&serde_json::json!({
+                "integrity": "ok",
+                "source_schema_version": 7,
+                "source_schema_artifact_digest": nq_store::SCHEMA_V7_ARTIFACT_DIGEST,
+                "backup_reopened": true,
+                "historical_recurrence_enrollments": "absent_not_synthesized",
+                "recurrence_authority_synthesized": false,
+            })),
+        };
+        drop(Store::upgrade_v7_to_v8(&database, &v7_receipt).expect("upgrade schema-v7 store"));
         let config = write_config(root, &database);
         let archive = root.join("archive");
         create_archive(&config, &archive).expect("create migrated-v3 archive");

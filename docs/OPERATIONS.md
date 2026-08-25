@@ -416,6 +416,32 @@ Replay is a separate read-only command with no helper/provider surface:
 See [`REPEAT_DIAGNOSTIC_ACQUISITION_V1.md`](REPEAT_DIAGNOSTIC_ACQUISITION_V1.md)
 for occurrence selection, failure, concurrency, and restart law.
 
+### Finite recurring diagnostic acquisition
+
+The optional bounded recurring office is enrolled separately from deliberate
+single successors. A deployment owner first registers and activates exact
+`nq.recurring_office_policy.v1` bytes; an operator then supplies one finite
+`nq.recurrence_enrollment_spec.v1`. The one-shot `recurring tick` command is
+safe for duplicate wakeups because the NQ store, not systemd, owns exact slot
+and acquisition authority:
+
+```sh
+/opt/nq-ng/bin/nq --config /etc/nq/nq.toml recurring \
+  policy-register /etc/nq/recurring-office-policy.json
+/opt/nq-ng/bin/nq --config /etc/nq/nq.toml recurring \
+  policy-activate POLICY_ID --operation-id OPERATION_ID
+/opt/nq-ng/bin/nq --config /etc/nq/nq.toml recurring \
+  enroll /etc/nq/recurrence-enrollment.json
+/opt/nq-ng/bin/nq --config /etc/nq/nq.toml recurring tick ENROLLMENT_ID
+/opt/nq-ng/bin/nq --config /etc/nq/nq.toml recurring status ENROLLMENT_ID
+```
+
+Every enrollment is immutable and finite. Cadence changes require a new
+enrollment. The optional packaged timer remains disabled by default and its
+wakeup frequency is not the semantic diagnostic interval. See
+[`BOUNDED_RECURRING_DIAGNOSTIC_OFFICE_V1.md`](BOUNDED_RECURRING_DIAGNOSTIC_OFFICE_V1.md)
+for policy-envelope, missed-slot, fencing, storage, and failure law.
+
 Rollback requires an exact retained lock path and re-verifies it against the
 current bytes, configuration, protocol, and compiled profile:
 

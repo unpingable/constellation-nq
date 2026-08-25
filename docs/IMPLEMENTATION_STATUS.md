@@ -57,7 +57,7 @@ The repository implements the stage-one operational spine:
   and compiled detector evaluation;
 - explicit helper test/admission/rotation/rollback/revocation with immutable
   admission history and drift refusal;
-- a schema-v5 append-only SQLite evidence substrate. It retains schema v3's
+- a schema-v8 append-only SQLite evidence substrate. It retains schema v3's
   exact raw/report/refusal/evaluation/finding/status custody, schema v4's
   versioned provider-intake parent, a distinct NQ-derived local-provider
   admission, an exact local-watcher-run subtype, and a durable acknowledgment
@@ -112,6 +112,17 @@ The repository implements the stage-one operational spine:
   occurrence-scoped diagnostic artifact. `diagnostics replay-substrate-origin`
   has no helper/provider surface and returns only completed historical bytes.
   Neither command defines cadence or automatic retry;
+- an optional bounded recurring diagnostic office, separate from `nqd` and
+  Nightshift cadence. A content-addressed deployment safety envelope maps exact
+  watcher semantics to explicit coordination domains; one finite immutable
+  operator enrollment selects an anchored fixed interval, closed startup and
+  missed-slot behavior, bounded retries/failure pause, occurrence limit, and
+  exclusive expiry within that envelope. Repeated one-shot `recurring tick`
+  wakeups converge on deterministic slot/acquisition identities. Durable domain
+  epochs, provider-start fencing, V3 origin custody, provider-safe spacing,
+  store guards, and append-only status prevent replay, restart, clock movement,
+  or service-manager overlap from becoming provider authority. The packaged
+  timer is disabled and NQ recurrence never creates a Nightshift cycle;
 - a native host profile/helper plus the conformance fixture profile;
 - strict, bounded `SystemSpecV1` validation and deterministic compilation into
   schema-domain-separated `ScopeCut` proposals, ratification-bound cuts,
@@ -133,13 +144,12 @@ The repository implements the stage-one operational spine:
   schema-v3/v4 migration, live-WAL backup/restore, diagnostic-artifact
   corruption and missing-byte states, and cold-archive reopening.
 
-The resident `nqd` scheduler is an implemented preview mechanism, not a claim
-that NQ owns the target product's recurrent monitoring posture. Under the
-current north star, NQ runs bounded diagnostics while Nightshift owns
-recurrence, expiry, campaigns, transition detection, and the estate-level
-operational view. Any migration or narrowing of the existing scheduler
-requires its own implementation campaign; this status record does not pretend
-that work has already occurred.
+The resident `nqd` scheduler remains an implemented preview mechanism, not a
+claim that NQ owns the target product's recurrent reasoning posture. The
+separate bounded recurring office owns only finite operator-enrolled provider
+acquisition slots. Nightshift still owns its reasoning/currentness cadence,
+campaigns, transition detection, and the estate-level operational view. NQ
+acquisition never fabricates a Nightshift cycle.
 
 The preview treats the SQLite binding history as authoritative. Active
 admission files are crash-recoverable materializations, and every collection
@@ -167,13 +177,16 @@ interpretation. Provider success or refusal is therefore still candidate input
 to NQ normalization and policy, not an NQ judgment. See
 [`PROVIDER_INTAKE_FOUNDATION.md`](PROVIDER_INTAKE_FOUNDATION.md).
 
-Schema v5 accepts only exact schema v4 directly, or exact schema v3 through the
-existing v3-to-v4 transition followed by the v4-to-v5 transition. Every source
-stage receives its own verified backup and migration receipt. The v3 step
+Schema v8 accepts only exact schema v7 directly, or older exact supported
+stores through the explicit version-by-version chain. Every source stage
+receives its own verified backup and migration receipt. The v3 step
 preserves each old watcher run with an explicit
 `provider_intake_not_recorded` gap; the v5 step records that historical
 diagnostic-artifact commitments were absent and synthesizes none. Migration
-therefore invents neither historical intake bytes nor diagnostic executions.
+through v6 continuity, v7 substrate origin, and v8 bounded recurrence likewise
+synthesizes no historical authority, origin proof, recurrence enrollment, slot,
+or diagnostic occurrence. Migration therefore invents neither historical
+intake bytes nor diagnostic executions.
 
 ## Selected successor, deliberately not replacement-ready
 
