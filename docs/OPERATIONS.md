@@ -377,11 +377,44 @@ the signed response and persists the existing V3 origin intent before invoking
 the diagnostic provider. Exact replay of a completed acquisition returns the
 stored diagnostic without invoking the metadata helper or provider again.
 
-This command supplies no continuity authority and is therefore the genesis
-case only. A successor coordinate requires the existing exact Standing
-continuity carrier; do not fabricate a predecessor. The helper signature
+`execute-linode-origin` retains the genesis selection law and therefore
+refuses new IDs after matching diagnostic history exists. A changed successor
+coordinate requires the existing exact Standing continuity carrier; do not
+fabricate a predecessor. The helper signature
 authenticates the helper report, not Akamai, physical hardware, installation,
 boot, subject identity, evidence truth, currentness, standing, or authority.
+
+### Deliberate successor diagnostic acquisition
+
+For an already admitted watcher at the same expected V3 coordinate, request
+one bounded successor with an explicit caller-owned trigger identity:
+
+```sh
+/opt/nq-ng/bin/nq --config /etc/nq/nq.toml diagnostics \
+  acquire-next-linode-origin host-local \
+  --acquisition-id NEW_ACQUISITION_ID \
+  --expected-instance-id-sha256 sha256:PINNED_INSTANCE_ID_DIGEST \
+  --origin-helper /opt/nq-ng/lib/nq/helpers/nq-linode-origin-helper \
+  --origin-helper-sha256 sha256:PINNED_HELPER_EXECUTABLE_DIGEST \
+  --origin-helper-account nq-origin-helper \
+  --origin-helper-public-key /etc/nq/origin-helper-public-key.hex
+```
+
+This obtains a fresh occurrence-specific V3 origin report and invokes the
+diagnostic provider once. It does not establish a timer or automatic retry.
+Exact duplicate delivery converges on the completed occurrence; two deliberate
+requests must carry different acquisition IDs.
+
+Replay is a separate read-only command with no helper/provider surface:
+
+```sh
+/opt/nq-ng/bin/nq --config /etc/nq/nq.toml diagnostics \
+  replay-substrate-origin host-local \
+  --acquisition-id EXACT_COMPLETED_ACQUISITION_ID
+```
+
+See [`REPEAT_DIAGNOSTIC_ACQUISITION_V1.md`](REPEAT_DIAGNOSTIC_ACQUISITION_V1.md)
+for occurrence selection, failure, concurrency, and restart law.
 
 Rollback requires an exact retained lock path and re-verifies it against the
 current bytes, configuration, protocol, and compiled profile:

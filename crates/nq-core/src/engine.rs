@@ -1771,6 +1771,12 @@ struct PendingSubstrateOrigin<'a> {
     continuity: Option<&'a VerifiedContinuityCarrierV1>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DiagnosticSelectionLaw {
+    Initial,
+    DeliberateSuccessor,
+}
+
 impl CollectionExecution {
     fn without_diagnostic(outcome: CollectionOutcome) -> Self {
         Self {
@@ -2583,7 +2589,7 @@ impl CollectionEngine {
     /// Returns only local engine/storage failures. Expected helper, protocol,
     /// and admission outcomes are retained and returned as `CollectionOutcome`.
     pub fn collect(&mut self, watcher: &WatcherConfig) -> Result<CollectionOutcome, EngineError> {
-        self.collect_internal(watcher, false, None, None)
+        self.collect_internal(watcher, None, None, None)
             .map(|execution| execution.outcome)
     }
 
@@ -2609,7 +2615,8 @@ impl CollectionEngine {
         &mut self,
         watcher: &WatcherConfig,
     ) -> Result<SupportedDiagnosticExecution, EngineError> {
-        let execution = self.collect_internal(watcher, true, None, None)?;
+        let execution =
+            self.collect_internal(watcher, Some(DiagnosticSelectionLaw::Initial), None, None)?;
         execution.diagnostic.ok_or_else(|| {
             EngineError::DiagnosticUnsupported(format!(
                 "collection for {} produced no admitted determinate diagnostic execution; inspect the retained collection outcome",
@@ -2673,7 +2680,12 @@ impl CollectionEngine {
                     .into(),
             ));
         }
-        let execution = self.collect_internal(watcher, true, Some(carrier), None)?;
+        let execution = self.collect_internal(
+            watcher,
+            Some(DiagnosticSelectionLaw::Initial),
+            Some(carrier),
+            None,
+        )?;
         let diagnostic = execution.diagnostic.ok_or_else(|| {
             EngineError::DiagnosticUnsupported(format!(
                 "continuity collection for {} produced no diagnostic artifact",
@@ -2731,6 +2743,54 @@ impl CollectionEngine {
         source: &mut dyn SubstrateOriginAttestationSourceV1,
         continuity: Option<&VerifiedContinuityCarrierV1>,
     ) -> Result<SupportedDiagnosticExecution, EngineError> {
+        self.diagnostic_execute_with_substrate_origin_selection(
+            watcher,
+            acquisition_id,
+            verifier,
+            source,
+            continuity,
+            DiagnosticSelectionLaw::Initial,
+        )
+    }
+
+    /// Deliberately acquire one successor diagnostic occurrence for an already
+    /// admitted watcher. The caller-owned acquisition identity is the trigger
+    /// identity: exact redelivery replays, while a different identity performs
+    /// one new origin-attested provider invocation. No cadence follows.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a watcher without prior matching diagnostic history, semantic
+    /// substitutions, incomplete/unknown earlier delivery of the same trigger,
+    /// and every ordinary V3 origin/intake failure.
+    pub fn diagnostic_acquire_successor_with_substrate_origin(
+        &mut self,
+        watcher: &WatcherConfig,
+        acquisition_id: &str,
+        verifier: &SubstrateOriginVerifierV1,
+        source: &mut dyn SubstrateOriginAttestationSourceV1,
+        continuity: Option<&VerifiedContinuityCarrierV1>,
+    ) -> Result<SupportedDiagnosticExecution, EngineError> {
+        self.diagnostic_execute_with_substrate_origin_selection(
+            watcher,
+            acquisition_id,
+            verifier,
+            source,
+            continuity,
+            DiagnosticSelectionLaw::DeliberateSuccessor,
+        )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn diagnostic_execute_with_substrate_origin_selection(
+        &mut self,
+        watcher: &WatcherConfig,
+        acquisition_id: &str,
+        verifier: &SubstrateOriginVerifierV1,
+        source: &mut dyn SubstrateOriginAttestationSourceV1,
+        continuity: Option<&VerifiedContinuityCarrierV1>,
+        selection: DiagnosticSelectionLaw,
+    ) -> Result<SupportedDiagnosticExecution, EngineError> {
         if let Some(carrier) = continuity
             && carrier.basis.acquisition_id != acquisition_id
         {
@@ -2738,6 +2798,11 @@ impl CollectionEngine {
                 "origin acquisition id differs from continuity commitment".into(),
             ));
         }
+        let _guard = InstanceGuard::acquire(
+            &self.config.database_path,
+            &watcher.instance_id,
+            "diagnostic-substrate-origin",
+        )?;
         if let Some(existing) = self
             .store
             .substrate_origin_acquisition_intent_for_intake(acquisition_id)?
@@ -2756,6 +2821,12 @@ impl CollectionEngine {
                         ))
                     })?;
                 intent.validate()?;
+                validate_substrate_origin_replay_binding(
+                    watcher,
+                    acquisition_id,
+                    verifier,
+                    &intent,
+                )?;
                 return self
                     .store
                     .diagnostic_artifact_id_for_run(&intent.run_id)?
@@ -2786,7 +2857,8 @@ impl CollectionEngine {
             source,
             continuity,
         };
-        let execution = self.collect_internal(watcher, true, None, Some(&mut origin))?;
+        let execution =
+            self.collect_internal_guarded(watcher, Some(selection), None, Some(&mut origin))?;
         let diagnostic = execution.diagnostic.ok_or_else(|| {
             EngineError::DiagnosticUnsupported(format!(
                 "substrate-origin collection for {} produced no diagnostic artifact",
@@ -2822,16 +2894,87 @@ impl CollectionEngine {
         Ok(diagnostic)
     }
 
+    /// Reopen one completed substrate-origin diagnostic acquisition exactly.
+    /// This read-only operation has no origin source or provider executable and
+    /// therefore cannot acquire, attest, or refresh anything.
+    ///
+    /// # Errors
+    ///
+    /// Refuses missing/incomplete acquisition history, watcher substitution,
+    /// and any artifact/provenance corruption.
+    pub fn diagnostic_replay_substrate_origin(
+        &self,
+        watcher: &WatcherConfig,
+        acquisition_id: &str,
+    ) -> Result<SupportedDiagnosticExecution, EngineError> {
+        let existing = self
+            .store
+            .substrate_origin_acquisition_intent_for_intake(acquisition_id)?
+            .ok_or_else(|| {
+                EngineError::DiagnosticUnsupported(format!(
+                    "no substrate-origin diagnostic acquisition {acquisition_id}"
+                ))
+            })?;
+        let phases = self
+            .store
+            .substrate_origin_acquisition_event_phases(&existing.intent_id)?;
+        if phases != ["provider_invocation_started", "provider_intake_completed"] {
+            return Err(EngineError::Invariant(
+                "substrate-origin diagnostic acquisition is incomplete or outcome-unknown".into(),
+            ));
+        }
+        let intent: SubstrateOriginAcquisitionIntentV1 =
+            serde_json::from_slice(&existing.intent_json).map_err(|error| {
+                EngineError::Invariant(format!(
+                    "stored substrate-origin intent cannot decode: {error}"
+                ))
+            })?;
+        intent.validate()?;
+        validate_stored_watcher_binding(watcher, acquisition_id, &intent)?;
+        let artifact_id = self
+            .store
+            .diagnostic_artifact_id_for_run(&intent.run_id)?
+            .ok_or_else(|| {
+                EngineError::Invariant(
+                    "completed substrate-origin acquisition lacks diagnostic artifact".into(),
+                )
+            })?;
+        let artifact = reopen_diagnostic_artifact(&self.store, &artifact_id)?;
+        let provenance = qualify_diagnostic_admission_supported(&self.store, &artifact_id)?;
+        let SupportedDiagnosticAdmissionProvenance::V3(provenance) = provenance else {
+            return Err(EngineError::Invariant(
+                "substrate-origin replay did not reopen V3 admission provenance".into(),
+            ));
+        };
+        if provenance.provider.provider_intake_id != acquisition_id {
+            return Err(EngineError::Invariant(
+                "substrate-origin replay substituted its acquisition identity".into(),
+            ));
+        }
+        Ok(artifact)
+    }
+
     #[allow(clippy::too_many_lines)]
     fn collect_internal(
         &mut self,
         watcher: &WatcherConfig,
-        emit_diagnostic: bool,
+        diagnostic_selection: Option<DiagnosticSelectionLaw>,
         continuity: Option<&VerifiedContinuityCarrierV1>,
-        mut substrate_origin: Option<&mut PendingSubstrateOrigin<'_>>,
+        substrate_origin: Option<&mut PendingSubstrateOrigin<'_>>,
     ) -> Result<CollectionExecution, EngineError> {
         let _guard =
             InstanceGuard::acquire(&self.config.database_path, &watcher.instance_id, "collect")?;
+        self.collect_internal_guarded(watcher, diagnostic_selection, continuity, substrate_origin)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn collect_internal_guarded(
+        &mut self,
+        watcher: &WatcherConfig,
+        diagnostic_selection: Option<DiagnosticSelectionLaw>,
+        continuity: Option<&VerifiedContinuityCarrierV1>,
+        mut substrate_origin: Option<&mut PendingSubstrateOrigin<'_>>,
+    ) -> Result<CollectionExecution, EngineError> {
         // Fail closed before any persistence: a collection stamps evaluator
         // identity onto its finding events, so refuse up front when it is
         // unavailable rather than commit an admitted report and only then refuse
@@ -2839,6 +2982,7 @@ impl CollectionEngine {
         self.require_evaluator_identity()?;
         self.reconcile_pending_binding(watcher)?;
         let profile = resolve(watcher)?;
+        let emit_diagnostic = diagnostic_selection.is_some();
         let diagnostic_node_id = emit_diagnostic
             .then(|| self.store.sole_genesis_id())
             .transpose()?
@@ -2847,12 +2991,12 @@ impl CollectionEngine {
             .descriptor()
             .digest()
             .map_err(|error| EngineError::Canonical(error.to_string()))?;
-        if emit_diagnostic {
+        if let Some(selection) = diagnostic_selection {
             require_initial_diagnostic_profile(profile, descriptor_digest.as_str())?;
             let snapshot = self
                 .store
                 .evidence_snapshot(std::slice::from_ref(&watcher.instance_id))?;
-            require_empty_diagnostic_history(&snapshot, watcher, descriptor_digest.as_str())?;
+            require_diagnostic_history(&snapshot, watcher, descriptor_digest.as_str(), selection)?;
         }
         let authoritative = match self.authoritative_active_lock(watcher) {
             Ok(Some(lock)) => lock,
@@ -3183,6 +3327,11 @@ impl CollectionEngine {
                         &capture,
                         self.require_evaluator_identity()?,
                         &outcome,
+                        diagnostic_selection.ok_or_else(|| {
+                            EngineError::Invariant(
+                                "diagnostic artifact lost its selection law".into(),
+                            )
+                        })?,
                     )
                 })
                 .transpose()?;
@@ -3235,6 +3384,11 @@ impl CollectionEngine {
                             &capture,
                             self.require_evaluator_identity()?,
                             &outcome,
+                            diagnostic_selection.ok_or_else(|| {
+                                EngineError::Invariant(
+                                    "diagnostic artifact lost its selection law".into(),
+                                )
+                            })?,
                         )
                     })
                     .transpose()?;
@@ -3283,6 +3437,11 @@ impl CollectionEngine {
                             &capture,
                             self.require_evaluator_identity()?,
                             &outcome,
+                            diagnostic_selection.ok_or_else(|| {
+                                EngineError::Invariant(
+                                    "diagnostic artifact lost its selection law".into(),
+                                )
+                            })?,
                         )
                     })
                     .transpose()?;
@@ -3337,6 +3496,11 @@ impl CollectionEngine {
                                     &capture,
                                     self.require_evaluator_identity()?,
                                     &outcome,
+                                    diagnostic_selection.ok_or_else(|| {
+                                        EngineError::Invariant(
+                                            "diagnostic artifact lost its selection law".into(),
+                                        )
+                                    })?,
                                 )
                             })
                             .transpose()?;
@@ -3395,6 +3559,11 @@ impl CollectionEngine {
                                     &capture,
                                     self.require_evaluator_identity()?,
                                     &outcome,
+                                    diagnostic_selection.ok_or_else(|| {
+                                        EngineError::Invariant(
+                                            "diagnostic artifact lost its selection law".into(),
+                                        )
+                                    })?,
                                 )
                             })
                             .transpose()?;
@@ -3436,6 +3605,11 @@ impl CollectionEngine {
                                     &validated,
                                     &capture,
                                     self.require_evaluator_identity()?,
+                                    diagnostic_selection.ok_or_else(|| {
+                                        EngineError::Invariant(
+                                            "diagnostic context lost its selection law".into(),
+                                        )
+                                    })?,
                                 )
                             })
                             .transpose()?;
@@ -3463,20 +3637,23 @@ impl CollectionEngine {
                                 let snapshot = view.evidence_snapshot(std::slice::from_ref(
                                     &watcher.instance_id,
                                 ))?;
-                                if emit_diagnostic {
-                                    require_fresh_diagnostic_snapshot(
+                                let evaluation_snapshot = if let Some(selection) = diagnostic_selection {
+                                    diagnostic_occurrence_snapshot(
                                         &snapshot,
                                         watcher,
                                         descriptor_digest.as_str(),
                                         &report_id,
-                                    )?;
-                                }
+                                        selection,
+                                    )?
+                                } else {
+                                    snapshot
+                                };
                                 let current_findings = view.finding_snapshots()?;
                                 let prepared = prepare_instance_evaluations(
                                     watcher,
                                     profile,
                                     Some(&run_id),
-                                    &snapshot,
+                                    &evaluation_snapshot,
                                     &current_findings,
                                     &evaluator_artifact_digest,
                                 )?;
@@ -5103,14 +5280,11 @@ fn validate_local_v2_provider_correspondence(
             "profile_semantic_id": provider_intake.provider.profile_semantic_id,
         }),
     )?;
-    let expected_selection_rule = semantic_identity(
-        "nq.fresh_single_admitted_report",
-        "1",
-        &json!({
-            "schema": "nq.diagnostic_selection_rule.v1",
-            "question": expected_question,
-            "cardinality": "exactly_one_newly_admitted_report_with_no_prior_matching_history",
-        }),
+    let expected_initial_selection =
+        diagnostic_selection_rule(&expected_question, DiagnosticSelectionLaw::Initial)?;
+    let expected_successor_selection = diagnostic_selection_rule(
+        &expected_question,
+        DiagnosticSelectionLaw::DeliberateSuccessor,
     )?;
     let mut substitutions = Vec::new();
     if artifact.producer.node_id != node_id {
@@ -5155,7 +5329,9 @@ fn validate_local_v2_provider_correspondence(
     if artifact.nonclaims != historical_surface.nonclaims {
         substitutions.push("nonclaims");
     }
-    if artifact.inputs.selection_rule != expected_selection_rule {
+    if artifact.inputs.selection_rule != expected_initial_selection
+        && artifact.inputs.selection_rule != expected_successor_selection
+    {
         substitutions.push("selection_rule");
     }
     if artifact
@@ -5351,6 +5527,40 @@ fn validate_evaluated_diagnostic_correspondence(
                 artifact.artifact_id.0
             ))
         })?;
+    let history = store.evidence_snapshot_read_only(std::slice::from_ref(&run.instance_id))?;
+    let mut prior_matching = false;
+    for row in history
+        .reports
+        .iter()
+        .filter(|row| row.report_sequence < admitted.report_sequence)
+    {
+        if report_matches_diagnostic_binding(
+            row,
+            &artifact.profile.id,
+            &artifact.profile.version,
+            artifact.profile.digest.as_str(),
+            request.binding.subject.as_str(),
+            &expected_scope,
+            &expected_vantage,
+        )? {
+            prior_matching = true;
+            break;
+        }
+    }
+    let expected_selection = diagnostic_selection_rule(
+        &artifact.question,
+        if prior_matching {
+            DiagnosticSelectionLaw::DeliberateSuccessor
+        } else {
+            DiagnosticSelectionLaw::Initial
+        },
+    )?;
+    if artifact.inputs.selection_rule != expected_selection {
+        return Err(EngineError::Invariant(format!(
+            "local v2 diagnostic artifact {} selection law differs from its prior exact watcher history",
+            artifact.artifact_id.0
+        )));
+    }
     if admitted.evaluations != 1
         || evaluation.watermark.instance_id != run.instance_id
         || evaluation.watermark.max_report_sequence
@@ -6039,12 +6249,28 @@ fn report_matches_evaluation_context(
     watcher: &WatcherConfig,
     profile_digest: &str,
 ) -> Result<bool, EngineError> {
-    if !report_matches_profile_contract(
+    report_matches_diagnostic_binding(
         row,
         &watcher.profile.id,
         &watcher.profile.version.to_string(),
         profile_digest,
-    ) {
+        &watcher.subject,
+        &watcher.scope,
+        &watcher.vantage,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn report_matches_diagnostic_binding(
+    row: &nq_store::AdmittedReportRow,
+    profile_id: &str,
+    profile_version: &str,
+    profile_digest: &str,
+    subject: &str,
+    scope: &ScopeConfig,
+    vantage: &VantageConfig,
+) -> Result<bool, EngineError> {
+    if !report_matches_profile_contract(row, profile_id, profile_version, profile_digest) {
         return Ok(false);
     }
     let document = CanonicalDocument::from_canonical_bytes(row.canonical_json.clone())?;
@@ -6058,14 +6284,14 @@ fn report_matches_evaluation_context(
         .map_err(|error| EngineError::Invariant(format!("stored report cannot decode: {error}")))?;
     nq_protocol::validate_report(&report)
         .map_err(|error| EngineError::Invariant(format!("stored report is invalid: {error}")))?;
-    Ok(report.profile.id.as_str() == watcher.profile.id
-        && report.profile.version.to_string() == watcher.profile.version.to_string()
+    Ok(report.profile.id.as_str() == profile_id
+        && report.profile.version.to_string() == profile_version
         && report.profile.digest.as_str() == profile_digest
-        && report.binding.subject.as_str() == watcher.subject
-        && report.binding.scope.kind.as_str() == watcher.scope.kind
-        && report.binding.scope.value == watcher.scope.value
-        && report.binding.vantage.kind.as_str() == watcher.vantage.kind
-        && report.binding.vantage.value == watcher.vantage.value)
+        && report.binding.subject.as_str() == subject
+        && report.binding.scope.kind.as_str() == scope.kind
+        && report.binding.scope.value == scope.value
+        && report.binding.vantage.kind.as_str() == vantage.kind
+        && report.binding.vantage.value == vantage.value)
 }
 
 fn evaluation_context_rows(
@@ -6119,43 +6345,116 @@ fn require_initial_diagnostic_profile(
     Ok(())
 }
 
-fn require_empty_diagnostic_history(
+fn stored_watcher_config_digest(watcher: &WatcherConfig) -> Result<String, EngineError> {
+    canonical(watcher)?
+        .digest()
+        .strip_prefix("sha256:")
+        .map(str::to_owned)
+        .ok_or_else(|| EngineError::Invariant("watcher digest lacks sha256 prefix".into()))
+}
+
+fn validate_stored_watcher_binding(
+    watcher: &WatcherConfig,
+    acquisition_id: &str,
+    intent: &SubstrateOriginAcquisitionIntentV1,
+) -> Result<(), EngineError> {
+    if intent.basis.acquisition_id != acquisition_id
+        || intent.intake_id != acquisition_id
+        || intent.basis.watcher_instance_id != watcher.instance_id
+        || intent.basis.subject_ref != watcher.subject
+        || intent.basis.watcher_config_digest != stored_watcher_config_digest(watcher)?
+    {
+        return Err(EngineError::Invariant(
+            "substrate-origin replay differs from the exact watcher/acquisition binding".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_substrate_origin_replay_binding(
+    watcher: &WatcherConfig,
+    acquisition_id: &str,
+    verifier: &SubstrateOriginVerifierV1,
+    intent: &SubstrateOriginAcquisitionIntentV1,
+) -> Result<(), EngineError> {
+    validate_stored_watcher_binding(watcher, acquisition_id, intent)?;
+    verifier.verify(&intent.basis, &intent.attestation)?;
+    Ok(())
+}
+
+fn require_diagnostic_history(
     snapshot: &EvidenceSnapshot,
     watcher: &WatcherConfig,
     profile_digest: &str,
+    selection: DiagnosticSelectionLaw,
 ) -> Result<(), EngineError> {
     let matching = evaluation_context_rows(&snapshot.reports, watcher, profile_digest)?;
-    if matching.is_empty() {
-        return Ok(());
+    match selection {
+        DiagnosticSelectionLaw::Initial if matching.is_empty() => Ok(()),
+        DiagnosticSelectionLaw::Initial => Err(EngineError::DiagnosticUnsupported(format!(
+            "initial diagnostic execution requires no prior matching history; found {} reports for {}",
+            matching.len(),
+            watcher.instance_id
+        ))),
+        DiagnosticSelectionLaw::DeliberateSuccessor if matching.is_empty() => {
+            Err(EngineError::DiagnosticUnsupported(format!(
+                "deliberate successor diagnostic requires prior matching history for {}",
+                watcher.instance_id
+            )))
+        }
+        DiagnosticSelectionLaw::DeliberateSuccessor => Ok(()),
     }
-    Err(EngineError::DiagnosticUnsupported(format!(
-        "diagnostic execution requires a fresh instance with no prior matching history; found {} reports for {}",
-        matching.len(),
-        watcher.instance_id
-    )))
 }
 
-fn require_fresh_diagnostic_snapshot(
+fn diagnostic_occurrence_snapshot(
     snapshot: &EvidenceSnapshot,
     watcher: &WatcherConfig,
     profile_digest: &str,
     current_report_id: &str,
-) -> Result<(), EngineError> {
+    selection: DiagnosticSelectionLaw,
+) -> Result<EvidenceSnapshot, EngineError> {
     let matching = evaluation_context_rows(&snapshot.reports, watcher, profile_digest)?;
-    let [report] = matching.as_slice() else {
-        return Err(EngineError::Invariant(format!(
-            "diagnostic execution requires one fresh admitted report and no prior matching history; found {} reports for {}",
-            matching.len(),
-            watcher.instance_id
-        )));
-    };
-    if report.report_id != current_report_id || report.instance_id != watcher.instance_id {
-        return Err(EngineError::Invariant(
-            "diagnostic execution fresh-history snapshot does not identify the current admitted report"
-                .into(),
-        ));
+    let current = matching
+        .iter()
+        .find(|report| report.report_id == current_report_id)
+        .ok_or_else(|| {
+            EngineError::Invariant(
+                "diagnostic occurrence snapshot does not identify the current admitted report"
+                    .into(),
+            )
+        })?;
+    let prior = matching
+        .iter()
+        .filter(|report| report.report_sequence < current.report_sequence)
+        .count();
+    match selection {
+        DiagnosticSelectionLaw::Initial if prior != 0 => {
+            return Err(EngineError::Invariant(format!(
+                "initial diagnostic occurrence acquired {prior} prior matching reports"
+            )));
+        }
+        DiagnosticSelectionLaw::DeliberateSuccessor if prior == 0 => {
+            return Err(EngineError::Invariant(
+                "successor diagnostic occurrence lost its prior matching history".into(),
+            ));
+        }
+        _ => {}
     }
-    Ok(())
+    if current.instance_id != watcher.instance_id {
+        return Err(EngineError::Invariant(format!(
+            "diagnostic occurrence report belongs to {} rather than {}",
+            current.instance_id, watcher.instance_id
+        )));
+    }
+    Ok(EvidenceSnapshot {
+        watermarks: snapshot
+            .watermarks
+            .iter()
+            .filter(|watermark| watermark.instance_id == watcher.instance_id)
+            .cloned()
+            .collect(),
+        reports: vec![(*current).clone()],
+    })
 }
 
 struct DryExchange {
@@ -6611,6 +6910,33 @@ fn initial_local_v2_question(
     })
 }
 
+fn diagnostic_selection_rule(
+    question: &SemanticIdentityV1,
+    selection: DiagnosticSelectionLaw,
+) -> Result<SemanticIdentityV1, EngineError> {
+    match selection {
+        DiagnosticSelectionLaw::Initial => semantic_identity(
+            "nq.fresh_single_admitted_report",
+            "1",
+            &json!({
+                "schema": "nq.diagnostic_selection_rule.v1",
+                "question": question,
+                "cardinality": "exactly_one_newly_admitted_report_with_no_prior_matching_history",
+            }),
+        ),
+        DiagnosticSelectionLaw::DeliberateSuccessor => semantic_identity(
+            "nq.deliberate_successor_single_admitted_report",
+            "1",
+            &json!({
+                "schema": "nq.diagnostic_selection_rule.v1",
+                "question": question,
+                "cardinality": "exactly_one_newly_admitted_report_for_exact_successor_acquisition",
+                "prior_matching_history": "required_present_retained_excluded",
+            }),
+        ),
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn prepare_diagnostic_emission_base(
     node_id: &str,
@@ -6621,6 +6947,7 @@ fn prepare_diagnostic_emission_base(
     run_id: &str,
     capture: &RunCapture,
     evaluator: &EvaluatorRuntimeIdentity,
+    selection: DiagnosticSelectionLaw,
 ) -> Result<DiagnosticEmissionBase, EngineError> {
     let detector = profile.detectors().first().ok_or_else(|| {
         EngineError::Invariant("diagnostic execution profile has no detector".into())
@@ -6766,15 +7093,7 @@ fn prepare_diagnostic_emission_base(
             "profile_semantic_id": provider.profile_semantic_id,
         }),
     )?;
-    let selection_rule = semantic_identity(
-        "nq.fresh_single_admitted_report",
-        "1",
-        &json!({
-            "schema": "nq.diagnostic_selection_rule.v1",
-            "question": question,
-            "cardinality": "exactly_one_newly_admitted_report_with_no_prior_matching_history",
-        }),
-    )?;
+    let selection_rule = diagnostic_selection_rule(&question, selection)?;
     Ok(DiagnosticEmissionBase {
         producer: DiagnosticProducerV1 {
             node_id: node_id.to_owned(),
@@ -6834,6 +7153,7 @@ fn prepare_non_success_diagnostic(
     capture: &RunCapture,
     evaluator: &EvaluatorRuntimeIdentity,
     outcome: &CollectionOutcome,
+    selection: DiagnosticSelectionLaw,
 ) -> Result<DiagnosticExecutionV2, EngineError> {
     if outcome.run_id.as_deref() != Some(run_id) || outcome.instance_id != watcher.instance_id {
         return Err(EngineError::Invariant(
@@ -6841,7 +7161,7 @@ fn prepare_non_success_diagnostic(
         ));
     }
     let base = prepare_diagnostic_emission_base(
-        node_id, watcher, profile, provider, request, run_id, capture, evaluator,
+        node_id, watcher, profile, provider, request, run_id, capture, evaluator, selection,
     )?;
     let expected = vec![ExpectedInputV1 {
         expectation_id: "expected:current_provider_report".to_owned(),
@@ -7009,9 +7329,10 @@ fn prepare_diagnostic_emission(
     validated: &ValidatedReport,
     capture: &RunCapture,
     evaluator: &EvaluatorRuntimeIdentity,
+    selection: DiagnosticSelectionLaw,
 ) -> Result<DiagnosticEmissionContext, EngineError> {
     let base = prepare_diagnostic_emission_base(
-        node_id, watcher, profile, provider, request, run_id, capture, evaluator,
+        node_id, watcher, profile, provider, request, run_id, capture, evaluator, selection,
     )?;
     let normalized_document = canonical(normalized)?;
     let projected_artifact_placeholder = ProjectedArtifactId(nq_protocol::sha256_bytes(
@@ -10910,6 +11231,8 @@ if mode_path:
         mode = source.read().strip()
 if mode == "no_response":
     sys.exit(0)
+if mode == "pressure":
+    report["observations"][0]["payload"]["load_1m"] = 9.0
 if mode == "partial_bytes_failure":
     sys.stdout.write('{"schema":"nq.helper.response.v1","partial":')
     sys.stdout.flush()
@@ -13444,7 +13767,7 @@ sys.stdout.write("\n")
         assert!(
             error
                 .to_string()
-                .contains("requires a fresh instance with no prior matching history")
+                .contains("initial diagnostic execution requires no prior matching history")
         );
         assert_eq!(
             engine
@@ -13826,6 +14149,7 @@ sys.stdout.write("\n")
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn substrate_origin_is_committed_before_real_provider_and_replay_does_not_reattest() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let Some((mut engine, watcher, _mode)) = admitted_host_diagnostic_fixture(
@@ -13891,6 +14215,347 @@ sys.stdout.write("\n")
             replay.canonical_bytes().expect("replay bytes"),
             artifact.canonical_bytes().expect("original bytes")
         );
+        let SupportedDiagnosticExecution::V2(initial_v2) = &artifact else {
+            panic!("initial origin diagnostic uses v2");
+        };
+        let mut substituted_watcher = watcher.clone();
+        substituted_watcher.subject = "host:substituted".into();
+        let replay_error = engine
+            .diagnostic_replay_substrate_origin(&substituted_watcher, acquisition_id)
+            .expect_err("historical replay refuses watcher substitution");
+        assert!(
+            replay_error
+                .to_string()
+                .contains("watcher/acquisition binding")
+        );
+        let calls_before_substitution = source.calls();
+        engine
+            .diagnostic_acquire_successor_with_substrate_origin(
+                &substituted_watcher,
+                "substrate-origin-substituted-watcher",
+                &verifier,
+                &mut source,
+                None,
+            )
+            .expect_err("successor cannot mutate the admitted watcher semantics");
+        assert_eq!(
+            source.calls(),
+            calls_before_substitution,
+            "semantic substitution refuses before fresh origin acquisition"
+        );
+
+        let successor_id = "substrate-origin-provider-intake-b";
+        let successor = engine
+            .diagnostic_acquire_successor_with_substrate_origin(
+                &watcher,
+                successor_id,
+                &verifier,
+                &mut source,
+                None,
+            )
+            .expect("deliberate successor performs one new origin-attested acquisition");
+        assert_eq!(source.calls(), 2, "successor obtains fresh origin evidence");
+        assert_ne!(successor.artifact_id(), artifact.artifact_id());
+        let SupportedDiagnosticExecution::V2(successor_v2) = &successor else {
+            panic!("successor remains an exact v2 diagnostic artifact");
+        };
+        assert_eq!(
+            successor_v2.inputs.selection_rule.id,
+            "nq.deliberate_successor_single_admitted_report"
+        );
+        assert_eq!(
+            successor_v2.outcome.condition, initial_v2.outcome.condition,
+            "equal measured proposition state does not collapse occurrence identity"
+        );
+        let explicit_replay = engine
+            .diagnostic_replay_substrate_origin(&watcher, successor_id)
+            .expect("read-only exact replay reopens A2");
+        assert_eq!(
+            explicit_replay.canonical_bytes().expect("A2 replay bytes"),
+            successor.canonical_bytes().expect("A2 original bytes")
+        );
+        assert_eq!(source.calls(), 2, "explicit replay has no origin source");
+
+        let config = engine.config.clone();
+        drop(engine);
+        let evaluator = EvaluatorRuntimeIdentity::for_test(nq_protocol::sha256_bytes(
+            b"substrate-origin-diagnostic-evaluator",
+        ));
+        let mut reopened = CollectionEngine::open_with_evaluator_identity(&config, Ok(evaluator))
+            .expect("restart reopens exact watcher history");
+        let restarted_replay = reopened
+            .diagnostic_replay_substrate_origin(&watcher, successor_id)
+            .expect("restart replay remains read-only");
+        assert_eq!(
+            restarted_replay
+                .canonical_bytes()
+                .expect("restart replay bytes"),
+            successor.canonical_bytes().expect("A2 bytes")
+        );
+        let third = reopened
+            .diagnostic_acquire_successor_with_substrate_origin(
+                &watcher,
+                "substrate-origin-provider-intake-c",
+                &verifier,
+                &mut source,
+                None,
+            )
+            .expect("restart does not prevent a deliberate A3");
+        assert_eq!(source.calls(), 3);
+        assert_ne!(third.artifact_id(), successor.artifact_id());
+        assert_eq!(
+            reopened
+                .store
+                .provider_intakes_bounded(10, None)
+                .expect("append-only intake history")
+                .len(),
+            3
+        );
+        validate_diagnostic_artifact_history(&reopened.store)
+            .expect("A1/A2/A3 exact history validates after restart");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn successor_failures_preserve_the_provider_boundary_without_automatic_retry() {
+        struct RefusingOriginSource;
+
+        impl SubstrateOriginAttestationSourceV1 for RefusingOriginSource {
+            fn attest(
+                &mut self,
+                _basis: &SubstrateOriginAcquisitionBasisV1,
+            ) -> Result<crate::substrate_origin::SignedSubstrateOriginAttestationV1, String>
+            {
+                Err("synthetic pre-provider origin refusal".into())
+            }
+        }
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let Some((mut engine, watcher, mode)) = admitted_host_diagnostic_fixture(
+            directory.path(),
+            "successor-failure-diagnostic-genesis",
+            b"successor-failure-diagnostic-evaluator",
+        ) else {
+            return;
+        };
+        let mut source =
+            crate::substrate_origin::test_support::SyntheticOriginSourceV1::new(12, "test.local");
+        let verifier = source.verifier();
+        engine
+            .diagnostic_execute_with_substrate_origin(
+                &watcher,
+                "successor-failure-a1",
+                &verifier,
+                &mut source,
+                None,
+            )
+            .expect("A1 establishes matching history");
+
+        let pre_provider_id = "successor-failure-pre-provider";
+        let error = engine
+            .diagnostic_acquire_successor_with_substrate_origin(
+                &watcher,
+                pre_provider_id,
+                &verifier,
+                &mut RefusingOriginSource,
+                None,
+            )
+            .expect_err("origin refusal occurs before diagnostic provider invocation");
+        assert!(error.to_string().contains("origin attester refused"));
+        assert!(
+            engine
+                .store
+                .substrate_origin_acquisition_intent_for_intake(pre_provider_id)
+                .expect("intent lookup")
+                .is_none(),
+            "pre-provider failure creates no ambiguous acquisition occurrence"
+        );
+        assert!(
+            engine
+                .store
+                .provider_intake(pre_provider_id)
+                .expect("intake lookup")
+                .is_none()
+        );
+
+        engine
+            .diagnostic_acquire_successor_with_substrate_origin(
+                &watcher,
+                pre_provider_id,
+                &verifier,
+                &mut source,
+                None,
+            )
+            .expect("same deliberate trigger may proceed when no occurrence reached invocation");
+
+        fs::write(&mode, "no_response\n").expect("select bounded provider failure");
+        let failed_id = "successor-failure-completed-a2";
+        let failed = engine
+            .diagnostic_acquire_successor_with_substrate_origin(
+                &watcher,
+                failed_id,
+                &verifier,
+                &mut source,
+                None,
+            )
+            .expect("run-bearing provider failure is a completed historical diagnostic");
+        let SupportedDiagnosticExecution::V2(failed_v2) = &failed else {
+            panic!("failed successor remains exact v2 evidence");
+        };
+        assert_eq!(
+            failed_v2.outcome.condition,
+            DiagnosticConditionV1::Unresolved
+        );
+        assert_eq!(
+            engine
+                .store
+                .substrate_origin_acquisition_event_phases(
+                    &engine
+                        .store
+                        .substrate_origin_acquisition_intent_for_intake(failed_id)
+                        .expect("failed intent lookup")
+                        .expect("failed occurrence intent")
+                        .intent_id
+                )
+                .expect("failed occurrence phases"),
+            ["provider_invocation_started", "provider_intake_completed"]
+        );
+        let calls_after_failure = source.calls();
+        let replay = engine
+            .diagnostic_replay_substrate_origin(&watcher, failed_id)
+            .expect("failed occurrence replays as the same evidence");
+        assert_eq!(
+            replay.canonical_bytes().expect("failed replay bytes"),
+            failed.canonical_bytes().expect("failed original bytes")
+        );
+        assert_eq!(source.calls(), calls_after_failure);
+
+        fs::write(&mode, "pressure\n").expect("select changed-world provider fixture");
+        let changed = engine
+            .diagnostic_acquire_successor_with_substrate_origin(
+                &watcher,
+                "successor-after-failed-occurrence-a3",
+                &verifier,
+                &mut source,
+                None,
+            )
+            .expect("a later deliberate ID, not retry, observes changed world evidence");
+        let SupportedDiagnosticExecution::V2(changed_v2) = changed else {
+            panic!("changed-world successor remains exact v2 evidence");
+        };
+        assert_eq!(changed_v2.outcome.condition, DiagnosticConditionV1::Present);
+        assert_eq!(
+            engine
+                .store
+                .provider_intakes_bounded(10, None)
+                .expect("append-only intakes")
+                .len(),
+            4,
+            "A1, recovered pre-provider trigger, failed A2, and deliberate A3 coexist"
+        );
+    }
+
+    #[test]
+    fn concurrent_successor_triggers_converge_or_remain_distinct_by_trigger_identity() {
+        use std::sync::{Arc, Barrier};
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let Some((mut initial, watcher, _mode)) = admitted_host_diagnostic_fixture(
+            directory.path(),
+            "successor-concurrency-diagnostic-genesis",
+            b"successor-concurrency-diagnostic-evaluator",
+        ) else {
+            return;
+        };
+        let mut origin =
+            crate::substrate_origin::test_support::SyntheticOriginSourceV1::new(13, "test.local");
+        let verifier = origin.verifier();
+        initial
+            .diagnostic_execute_with_substrate_origin(
+                &watcher,
+                "successor-concurrency-a1",
+                &verifier,
+                &mut origin,
+                None,
+            )
+            .expect("A1 establishes successor basis");
+        let config = initial.config.clone();
+        drop(initial);
+
+        let run_pair = |ids: [&str; 2]| {
+            let barrier = Arc::new(Barrier::new(2));
+            ids.into_iter()
+                .map(|id| {
+                    let barrier = Arc::clone(&barrier);
+                    let config = config.clone();
+                    let watcher = watcher.clone();
+                    let id = id.to_owned();
+                    std::thread::spawn(move || {
+                        let evaluator =
+                            EvaluatorRuntimeIdentity::for_test(nq_protocol::sha256_bytes(
+                                b"successor-concurrency-diagnostic-evaluator",
+                            ));
+                        let mut engine =
+                            CollectionEngine::open_with_evaluator_identity(&config, Ok(evaluator))
+                                .expect("concurrent engine opens");
+                        let mut source =
+                            crate::substrate_origin::test_support::SyntheticOriginSourceV1::new(
+                                13,
+                                "test.local",
+                            );
+                        let verifier = source.verifier();
+                        barrier.wait();
+                        let artifact = engine
+                            .diagnostic_acquire_successor_with_substrate_origin(
+                                &watcher,
+                                &id,
+                                &verifier,
+                                &mut source,
+                                None,
+                            )
+                            .expect("serialized successor acquisition");
+                        (
+                            artifact.canonical_bytes().expect("artifact bytes"),
+                            source.calls(),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|thread| thread.join().expect("concurrent worker"))
+                .collect::<Vec<_>>()
+        };
+
+        let duplicate = run_pair([
+            "successor-concurrency-duplicate",
+            "successor-concurrency-duplicate",
+        ]);
+        assert_eq!(duplicate[0].0, duplicate[1].0);
+        assert_eq!(
+            duplicate.iter().map(|(_, calls)| calls).sum::<usize>(),
+            1,
+            "duplicate trigger performs one origin and provider acquisition"
+        );
+
+        let distinct = run_pair([
+            "successor-concurrency-distinct-a",
+            "successor-concurrency-distinct-b",
+        ]);
+        assert_ne!(distinct[0].0, distinct[1].0);
+        assert_eq!(distinct[0].1, 1);
+        assert_eq!(distinct[1].1, 1);
+
+        let reopened = Store::open_read_only(&config.database_path).expect("reopen exact history");
+        assert_eq!(
+            reopened
+                .provider_intakes_bounded(10, None)
+                .expect("intake history")
+                .len(),
+            4,
+            "A1, one converged duplicate, and two deliberate distinct triggers coexist"
+        );
+        validate_diagnostic_artifact_history(&reopened)
+            .expect("concurrent history retains exact artifacts");
     }
 
     #[test]

@@ -5744,6 +5744,16 @@ impl Store {
         Ok(snapshot)
     }
 
+    /// Read an evidence snapshot from an already stable/read-only connection.
+    /// Callers performing live multi-statement work should use
+    /// [`Store::evidence_snapshot`] so SQLite pins an explicit transaction.
+    pub fn evidence_snapshot_read_only(
+        &self,
+        instance_ids: &[String],
+    ) -> Result<EvidenceSnapshot, StoreError> {
+        evidence_snapshot_from_connection(&self.connection, instance_ids)
+    }
+
     /// Return the newest durably acknowledged non-null checkpoint for one
     /// instance. Rejected submissions, uncommitted reports, and migrated v3
     /// reports lacking a real provider-intake acknowledgment can never advance

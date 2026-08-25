@@ -270,6 +270,37 @@ pub enum DiagnosticsCommand {
         #[arg(long)]
         origin_helper_public_key: PathBuf,
     },
+    /// Deliberately acquire one successor diagnostic under the closed Linode V3 profile.
+    AcquireNextLinodeOrigin {
+        /// Configured watcher instance with prior exact diagnostic history.
+        instance_id: String,
+        /// Caller-owned deliberate trigger and acquisition occurrence identity.
+        #[arg(long)]
+        acquisition_id: String,
+        /// Independently pinned `sha256:` digest of the decimal Linode instance ID.
+        #[arg(long)]
+        expected_instance_id_sha256: String,
+        /// Exact absolute installed Linode origin-helper executable.
+        #[arg(long)]
+        origin_helper: PathBuf,
+        /// Exact `sha256:` digest of the installed origin-helper executable.
+        #[arg(long)]
+        origin_helper_sha256: String,
+        /// Dedicated local execution account for the origin helper.
+        #[arg(long)]
+        origin_helper_account: String,
+        /// File containing the pinned 32-byte helper Ed25519 public key in hex.
+        #[arg(long)]
+        origin_helper_public_key: PathBuf,
+    },
+    /// Replay one completed substrate-origin acquisition without invoking any provider.
+    ReplaySubstrateOrigin {
+        /// Exact configured watcher instance.
+        instance_id: String,
+        /// Exact completed acquisition occurrence identity.
+        #[arg(long)]
+        acquisition_id: String,
+    },
     /// Inspect one immutable artifact commitment without changing it.
     Inspect {
         /// Exact contract-owned artifact identity.
@@ -662,6 +693,7 @@ async fn collect_command(config_path: &Path, instance_id: &str, json_output: boo
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn diagnostics_command(
     config_path: &Path,
     command: DiagnosticsCommand,
@@ -730,6 +762,31 @@ async fn diagnostics_command(
             )
             .await
         }
+        DiagnosticsCommand::AcquireNextLinodeOrigin {
+            instance_id,
+            acquisition_id,
+            expected_instance_id_sha256,
+            origin_helper,
+            origin_helper_sha256,
+            origin_helper_account,
+            origin_helper_public_key,
+        } => {
+            diagnostic_acquire_next_linode_origin(
+                config_path,
+                &instance_id,
+                &acquisition_id,
+                &expected_instance_id_sha256,
+                &origin_helper,
+                &origin_helper_sha256,
+                &origin_helper_account,
+                &origin_helper_public_key,
+            )
+            .await
+        }
+        DiagnosticsCommand::ReplaySubstrateOrigin {
+            instance_id,
+            acquisition_id,
+        } => diagnostic_replay_substrate_origin(config_path, &instance_id, &acquisition_id),
         DiagnosticsCommand::Inspect { artifact_id } => {
             diagnostic_inspect(config_path, &artifact_id, json_output)
         }
@@ -924,6 +981,57 @@ async fn diagnostic_execute_linode_origin(
     helper_account: &str,
     helper_public_key: &Path,
 ) -> Result<()> {
+    diagnostic_run_linode_origin(
+        config_path,
+        instance_id,
+        acquisition_id,
+        expected_instance_id_sha256,
+        helper_executable,
+        helper_sha256,
+        helper_account,
+        helper_public_key,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn diagnostic_acquire_next_linode_origin(
+    config_path: &Path,
+    instance_id: &str,
+    acquisition_id: &str,
+    expected_instance_id_sha256: &str,
+    helper_executable: &Path,
+    helper_sha256: &str,
+    helper_account: &str,
+    helper_public_key: &Path,
+) -> Result<()> {
+    diagnostic_run_linode_origin(
+        config_path,
+        instance_id,
+        acquisition_id,
+        expected_instance_id_sha256,
+        helper_executable,
+        helper_sha256,
+        helper_account,
+        helper_public_key,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn diagnostic_run_linode_origin(
+    config_path: &Path,
+    instance_id: &str,
+    acquisition_id: &str,
+    expected_instance_id_sha256: &str,
+    helper_executable: &Path,
+    helper_sha256: &str,
+    helper_account: &str,
+    helper_public_key: &Path,
+    successor: bool,
+) -> Result<()> {
     validate_sha256(expected_instance_id_sha256)?;
     validate_sha256(helper_sha256)?;
     validate_origin_helper_executable(helper_executable, helper_sha256)?;
@@ -948,15 +1056,43 @@ async fn diagnostic_execute_linode_origin(
     };
     let artifact = tokio::task::spawn_blocking(move || {
         let mut engine = nq_core::CollectionEngine::open(&config)?;
-        engine.diagnostic_execute_with_substrate_origin(
-            &watcher,
-            &acquisition_id,
-            &verifier,
-            &mut source,
-            None,
-        )
+        if successor {
+            engine.diagnostic_acquire_successor_with_substrate_origin(
+                &watcher,
+                &acquisition_id,
+                &verifier,
+                &mut source,
+                None,
+            )
+        } else {
+            engine.diagnostic_execute_with_substrate_origin(
+                &watcher,
+                &acquisition_id,
+                &verifier,
+                &mut source,
+                None,
+            )
+        }
     })
     .await??;
+    std::io::stdout()
+        .lock()
+        .write_all(&artifact.canonical_bytes()?)?;
+    Ok(())
+}
+
+fn diagnostic_replay_substrate_origin(
+    config_path: &Path,
+    instance_id: &str,
+    acquisition_id: &str,
+) -> Result<()> {
+    let config = NqConfig::load(config_path)?;
+    let watcher = config
+        .watcher(instance_id)
+        .with_context(|| format!("unknown instance {instance_id}"))?
+        .clone();
+    let engine = nq_core::CollectionEngine::open(&config)?;
+    let artifact = engine.diagnostic_replay_substrate_origin(&watcher, acquisition_id)?;
     std::io::stdout()
         .lock()
         .write_all(&artifact.canonical_bytes()?)?;
@@ -2445,6 +2581,67 @@ helper_runtime_dir = "/run/nq/helpers"
             ])
             .is_err(),
             "the closed origin path has no caller-selected URL"
+        );
+    }
+
+    #[test]
+    fn successor_acquisition_and_replay_are_distinct_closed_commands() {
+        let coordinate = format!("sha256:{}", "a".repeat(64));
+        let helper = format!("sha256:{}", "b".repeat(64));
+        let successor = Nq::try_parse_from([
+            "nq",
+            "diagnostics",
+            "acquire-next-linode-origin",
+            "labelwatch-host-local",
+            "--acquisition-id",
+            "acquisition:successor-2",
+            "--expected-instance-id-sha256",
+            coordinate.as_str(),
+            "--origin-helper",
+            "/opt/nq-ng/bin/nq-linode-origin-helper",
+            "--origin-helper-sha256",
+            helper.as_str(),
+            "--origin-helper-account",
+            "nq-origin-helper",
+            "--origin-helper-public-key",
+            "/etc/nq/origin-helper-public-key.hex",
+        ])
+        .expect("explicit successor acquisition parses");
+        assert!(matches!(
+            successor.command,
+            Command::Diagnostics {
+                command: DiagnosticsCommand::AcquireNextLinodeOrigin { .. }
+            }
+        ));
+
+        let replay = Nq::try_parse_from([
+            "nq",
+            "diagnostics",
+            "replay-substrate-origin",
+            "labelwatch-host-local",
+            "--acquisition-id",
+            "acquisition:successor-2",
+        ])
+        .expect("explicit read-only replay parses");
+        assert!(matches!(
+            replay.command,
+            Command::Diagnostics {
+                command: DiagnosticsCommand::ReplaySubstrateOrigin { .. }
+            }
+        ));
+        assert!(
+            Nq::try_parse_from([
+                "nq",
+                "diagnostics",
+                "replay-substrate-origin",
+                "labelwatch-host-local",
+                "--acquisition-id",
+                "acquisition:successor-2",
+                "--origin-helper",
+                "/tmp/not-allowed",
+            ])
+            .is_err(),
+            "replay has no producer or origin-helper surface"
         );
     }
 

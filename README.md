@@ -61,7 +61,9 @@ verdicts,
 [docs/PORTER_NETBOX_ADDENDUM.md](docs/PORTER_NETBOX_ADDENDUM.md) for the
 Porter/QEMU/NetBox system-cut contract and later integration specimens,
 [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) for the exact
-developer-preview boundary, and
+developer-preview boundary,
+[docs/REPEAT_DIAGNOSTIC_ACQUISITION_V1.md](docs/REPEAT_DIAGNOSTIC_ACQUISITION_V1.md)
+for the closed deliberate-successor versus replay contract, and
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for verification commands. The
 older [docs/PLAN.md](docs/PLAN.md) is preserved as historical design material;
 where it conflicts with the north-star or sequencing record, those current

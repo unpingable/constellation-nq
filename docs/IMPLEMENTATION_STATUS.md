@@ -105,7 +105,13 @@ The repository implements the stage-one operational spine:
   provider intake, admission context, profile semantics, and judgment when
   present. Imported custody remains explicitly unauthenticated and cannot be
   qualified. Qualification, import, and access grant no freshness, reliance,
-  authorization, or action and do not create a general historical emitter;
+  authorization, or action and do not create a general historical emitter.
+  The same exact watcher may now perform one explicit V3-bound successor via
+  `diagnostics acquire-next-linode-origin`: a new caller-owned acquisition ID
+  obtains fresh origin evidence, one provider invocation, and one
+  occurrence-scoped diagnostic artifact. `diagnostics replay-substrate-origin`
+  has no helper/provider surface and returns only completed historical bytes.
+  Neither command defines cadence or automatic retry;
 - a native host profile/helper plus the conformance fixture profile;
 - strict, bounded `SystemSpecV1` validation and deterministic compilation into
   schema-domain-separated `ScopeCut` proposals, ratification-bound cuts,
