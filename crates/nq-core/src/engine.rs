@@ -421,7 +421,12 @@ impl EvaluationEnvelopeV2 {
             ));
         }
         if let Some(refusal) = &self.result.refusal {
-            refusal.validate()?;
+            // An evaluation is a historical carrier. Its refusal must retain
+            // exact transport/origin invariants, but its profile semantic ID
+            // is checked against the trigger run's admission-time evaluator
+            // source by validate_evaluation_refusal_row, not against whatever
+            // evaluator happens to be compiled while reopening history.
+            refusal.validate_transport()?;
             let GovernedRefusalOrigin::Profile(profile) = &refusal.origin else {
                 return Err(EngineError::Invariant(
                     "detector evaluation refusal must be profile-origin".into(),
@@ -955,7 +960,11 @@ impl AdmissionRefusal {
                 AdmissionRefusalCode::UpstreamRefusal,
                 AdmissionRefusalDetails::Governed { refusal },
             ) => {
-                refusal.validate()?;
+                // Admission refusals are durable history. The enclosing
+                // admission evidence supplies the semantic context; reopening
+                // must not reinterpret a nested profile refusal under a later
+                // evaluator source closure.
+                refusal.validate_transport()?;
                 if refusal.responsible_instance_id() != self.responsible_instance_id {
                     return Err(EngineError::Invariant(
                         "nested governed refusal lost its admission instance association".into(),
@@ -1628,7 +1637,10 @@ impl CollectionOutcome {
                         "governed refusal lost its responsible instance".into(),
                     ));
                 }
-                refusal.validate()?;
+                // Collection outcomes are durable carriers. Context-specific
+                // historical validation against the exact persisted admission
+                // happens in validate_collection_run.
+                refusal.validate_transport()?;
                 Ok(())
             }
             CollectionResult::AcquisitionFailed { failure } => {
@@ -1739,7 +1751,7 @@ fn decode_governed_refusal(bytes: &[u8], context: &str) -> Result<GovernedRefusa
                 "{context} cannot decode as governed refusal: {error}"
             ))
         })?;
-    refusal.validate()?;
+    refusal.validate_transport()?;
     if canonical(&refusal)?.as_bytes() != document.as_bytes() {
         return Err(EngineError::Invariant(format!(
             "{context} does not round-trip to exact canonical bytes"
@@ -8012,6 +8024,8 @@ fn stored_governed_refusal(
     refusal: &GovernedRefusal,
     created_at: DateTime<Utc>,
 ) -> Result<RefusalInput, EngineError> {
+    // This is the live persistence boundary: a newly stored profile refusal
+    // must still match the evaluator source that is currently executing.
     refusal.validate()?;
     let (source_kind, boundary, code) = governed_refusal_projections(refusal)?;
     Ok(RefusalInput {
@@ -11319,7 +11333,7 @@ fn rejected_custody_from_row(
                 row.refusal_id
             ))
         })?;
-    refusal.validate()?;
+    refusal.validate_transport()?;
     let profile_semantic_id = row.profile_semantic_id.clone().ok_or_else(|| {
         EngineError::Invariant(format!(
             "rejected custody {} has no admission proving its profile semantics",
@@ -13262,6 +13276,47 @@ sys.stdout.write("\n")
             },
             result,
         }
+    }
+
+    #[test]
+    fn historical_profile_refusal_reopens_under_its_admission_time_source() {
+        let mut envelope = host_cannot_evaluate_envelope();
+        let historical = profile_semantic_id_for_source(
+            nq_profiles::host::MODULE.descriptor(),
+            nq_protocol::HELPER_PROTOCOL_VERSION,
+            nq_protocol::sha256_bytes(b"historical evaluator source").as_str(),
+        )
+        .expect("historical profile semantic identity");
+        envelope.profile.profile_semantic_id = historical.clone();
+        envelope.result.profile.profile_semantic_id = historical.clone();
+        let historical_refusal = {
+            let refusal = envelope
+                .result
+                .refusal
+                .as_mut()
+                .expect("cannot-evaluate result retains refusal");
+            let GovernedRefusalOrigin::Profile(profile) = &mut refusal.origin else {
+                panic!("host detector refusal remains profile-origin")
+            };
+            profile.profile_semantic_id = historical;
+            assert!(
+                refusal.validate().is_err(),
+                "live validation must still refuse a non-current evaluator source"
+            );
+            refusal.clone()
+        };
+        envelope
+            .validate()
+            .expect("historical envelope validates its exact internal source binding");
+
+        let rejected = CollectionOutcome::rejected(
+            envelope.context.instance_id.clone(),
+            "historical-refusal-run".to_owned(),
+            historical_refusal,
+        );
+        rejected
+            .validate()
+            .expect("historical collection carrier does not reinterpret profile meaning");
     }
 
     fn evaluation_profile_refusal_mut(
