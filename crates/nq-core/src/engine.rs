@@ -5388,15 +5388,10 @@ fn validate_local_v2_provider_correspondence(
         )?,
         omitted_distinctions: Vec::new(),
     };
-    let expected_clock = semantic_identity(
-        "nq.local_linux_realtime",
-        "1",
-        &json!({
-            "schema": "nq.local_linux_realtime.v1",
-            "source": "CLOCK_REALTIME through chrono::Utc",
-            "relationship": "NQ bounds the local helper invocation; admitted source times must fall inside that interval",
-        }),
-    )?;
+    let passive_source = request.passive_host_load_sample.is_some();
+    let expected_clock = diagnostic_execution_clock(passive_source)?;
+    let expected_limitations =
+        diagnostic_limitations(historical_surface.limitations.clone(), passive_source);
     let capture_policy = semantic_identity(
         "nq.capture.exact_provider_response",
         "1",
@@ -5458,7 +5453,7 @@ fn validate_local_v2_provider_correspondence(
     if artifact.attempt_interval.qualification != historical_surface.clock_qualification {
         substitutions.push("attempt_interval.qualification");
     }
-    if artifact.limitations != historical_surface.limitations {
+    if artifact.limitations != expected_limitations {
         substitutions.push("limitations");
     }
     if artifact.nonclaims != historical_surface.nonclaims {
@@ -7242,27 +7237,7 @@ fn prepare_diagnostic_emission_base(
             ));
         }
     };
-    let execution_clock = if passive_source_timing.is_some() {
-        semantic_identity(
-            "nq.local_linux_realtime_preexisting_passive_sample",
-            "1",
-            &json!({
-                "schema": "nq.local_linux_realtime_preexisting_passive_sample.v1",
-                "source": "CLOCK_REALTIME through chrono::Utc",
-                "relationship": "the exact source sample must predate the NQ-owned request cutoff and remain within its closed age bound",
-            }),
-        )?
-    } else {
-        semantic_identity(
-            "nq.local_linux_realtime",
-            "1",
-            &json!({
-                "schema": "nq.local_linux_realtime.v1",
-                "source": "CLOCK_REALTIME through chrono::Utc",
-                "relationship": "NQ bounds the local helper invocation; admitted source times must fall inside that interval",
-            }),
-        )?
-    };
+    let execution_clock = diagnostic_execution_clock(passive_source_timing.is_some())?;
     let capture_policy = semantic_identity(
         "nq.capture.exact_provider_response",
         "1",
@@ -7331,6 +7306,30 @@ fn prepare_diagnostic_emission_base(
         expected_vantage: watcher.vantage.clone(),
         passive_source_timing,
     })
+}
+
+fn diagnostic_execution_clock(passive_source: bool) -> Result<SemanticIdentityV1, EngineError> {
+    if passive_source {
+        semantic_identity(
+            "nq.local_linux_realtime_preexisting_passive_sample",
+            "1",
+            &json!({
+                "schema": "nq.local_linux_realtime_preexisting_passive_sample.v1",
+                "source": "CLOCK_REALTIME through chrono::Utc",
+                "relationship": "the exact source sample must predate the NQ-owned request cutoff and remain within its closed age bound",
+            }),
+        )
+    } else {
+        semantic_identity(
+            "nq.local_linux_realtime",
+            "1",
+            &json!({
+                "schema": "nq.local_linux_realtime.v1",
+                "source": "CLOCK_REALTIME through chrono::Utc",
+                "relationship": "NQ bounds the local helper invocation; admitted source times must fall inside that interval",
+            }),
+        )
+    }
 }
 
 fn diagnostic_limitations(
@@ -11712,6 +11711,22 @@ mod tests {
                 "passive_observer_effect_bounded_not_zero",
                 "raw_evidence_not_publicly_retrievable",
             ]
+        );
+    }
+
+    #[test]
+    fn passive_execution_clock_is_distinct_and_reconstructible() {
+        let ordinary = diagnostic_execution_clock(false).expect("ordinary execution clock");
+        let passive = diagnostic_execution_clock(true).expect("passive execution clock");
+        assert_eq!(ordinary.id, "nq.local_linux_realtime");
+        assert_eq!(
+            passive.id,
+            "nq.local_linux_realtime_preexisting_passive_sample"
+        );
+        assert_ne!(ordinary, passive);
+        assert_eq!(
+            passive,
+            diagnostic_execution_clock(true).expect("reconstructed passive execution clock")
         );
     }
 
