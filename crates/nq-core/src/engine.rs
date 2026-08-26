@@ -5740,6 +5740,8 @@ fn validate_evaluated_diagnostic_correspondence(
             admitted.report_id
         )));
     }
+    let detector_input_complete =
+        diagnostic_required_coverage_complete(&context.question, &validated)?;
     let projection_document = canonical(&json!({
         "schema": "nq.detector_input_projection.v1",
         "instance_id": evaluation.context.instance_id,
@@ -5802,7 +5804,7 @@ fn validate_evaluated_diagnostic_correspondence(
             evaluation,
             &expected_inputs,
             &expected_state_bindings,
-            admitted.report_status == "complete",
+            detector_input_complete,
         )?;
     if let (Some(actual), Some(expected)) = (
         artifact.inputs.admitted.first(),
