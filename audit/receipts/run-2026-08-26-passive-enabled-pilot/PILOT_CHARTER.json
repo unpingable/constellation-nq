@@ -1,0 +1,70 @@
+{
+  "schema": "nq.passive_enabled_operational_pilot_charter.v1",
+  "pilot_id": "pilot:105d3b28-5181-4883-8d2f-a0804c327a7c",
+  "reviewed_at": "2026-08-26T21:37:10Z",
+  "subject": "host:labelwatch-host",
+  "watcher": "labelwatch-host-passive-enabled-pilot-g5",
+  "passive_provider_boundary": {
+    "observer_profile": "nq.host_load_passive_sampler.v1",
+    "observer_artifact_digest": "sha256:77e2085acdb3e39f42fe53e8288c0fc3c390b736fe97db6aa3a529ffdbb740a0",
+    "initial_observer_config_digest": "sha256:d3e8aa2c540cc8e503a6010686e3ab98ea3591b4738ecd69faf01722f77df034",
+    "capacity_context_id": "sha256:6c6e34b0e088655fce62d4dd15ea355e6d79015736c6e0fb5b8219feac492c7d",
+    "max_sample_age_ms": 30000
+  },
+  "deployment_policy_id": "sha256:7b676712e141b4aacfb276af7227f80e892eb902e191aedee384dee7f652bf34",
+  "initial_observer_generation_id": "sha256:d3e8aa2c540cc8e503a6010686e3ab98ea3591b4738ecd69faf01722f77df034",
+  "planned_successor_generation_id": "sha256:b6e813e4751604f015780d5f653596eccb2aaa636d8ac59e8550f3088582123a",
+  "initial_recurrence_enrollment_id": "sha256:41cf66b67a24a03c7e21849d727a231d3272e209eafe0c584b34929617657667",
+  "initial_recurrence_policy_id": "sha256:7d08ed93041e9cffdbaa8e9324ff1a96ee81040d13f238517ca928b886cf7c12",
+  "sampling_interval_ms": 15000,
+  "diagnostic_acquisition_interval_ms": 300000,
+  "pilot_start": "2026-08-26T21:35:00Z",
+  "planned_pilot_end_exclusive": "2026-08-26T22:03:00Z",
+  "expected_renewal_points": {
+    "observer_generation": "2026-08-26T21:49:00Z",
+    "recurrence_enrollment": "after E1 exhaustion and after explicit G6 admission"
+  },
+  "maximum_observer_generations": 2,
+  "maximum_recurrence_enrollments": 2,
+  "maximum_diagnostic_acquisitions": 4,
+  "storage_stop_conditions": {
+    "maximum_bytes_per_generation": 4194304,
+    "required_free_bytes": 10737418240,
+    "retention_mode": "retain_all"
+  },
+  "failure_stop_conditions": {
+    "observer_consecutive_failures": 2,
+    "recurrence_consecutive_failures": 2,
+    "capacity_or_vantage_drift": "stop",
+    "outcome_unknown": "stop_and_preserve_fence",
+    "unexpected_identity_or_policy_drift": "stop"
+  },
+  "service_identities": {
+    "observer": "nq-passive-load-observer.service",
+    "recurrence_evaluator": "nq-recurring-office.service",
+    "recurrence_wakeup": "nq-recurring-office.timer",
+    "nightshift_cycles_authorized": false
+  },
+  "signing_key": {
+    "key_id": "passive-load-operational-20260826-g2",
+    "public_key_digest": "sha256:6193222f1949cd2d55eb30410623f6bf7dbe325aa561e3eb50e76026daadd86d",
+    "hardware_bound": false
+  },
+  "planned_restart_drill": {
+    "window": "around the second E1 acquisition slot",
+    "minimum_observer_gap_ms": 45000,
+    "physical_reboot": false
+  },
+  "closeout_requirements": [
+    "retire or exhaust the active observer generation",
+    "exhaust or revoke the active recurrence enrollment",
+    "disable and stop the recurrence timer",
+    "stop observer and one-shot services",
+    "prove exhausted grants create no new work",
+    "verify sample and NQ custody",
+    "verify signing-key custody",
+    "record final free space",
+    "verify A4 unchanged"
+  ],
+  "authority_statement": "This charter is descriptive and audit-bearing. Only the exact finite observer generations and recurrence enrollments create sampling or diagnostic authority."
+}
