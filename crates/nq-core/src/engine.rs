@@ -7270,14 +7270,10 @@ fn prepare_diagnostic_emission_base(
         }),
     )?;
     let selection_rule = diagnostic_selection_rule(&question, selection)?;
-    let mut limitations = historical_surface.limitations;
-    if passive_source_timing.is_some() {
-        limitations.push(DiagnosticLimitationV1 {
-            kind: DiagnosticLimitationKindV1::Other,
-            code: "passive_observer_effect_bounded_not_zero".to_owned(),
-            detail: "the independently scheduled sampler has qualified bounded overhead; it is part of the observed deployment and is not physically free".to_owned(),
-        });
-    }
+    let limitations = diagnostic_limitations(
+        historical_surface.limitations,
+        passive_source_timing.is_some(),
+    );
     Ok(DiagnosticEmissionBase {
         producer: DiagnosticProducerV1 {
             node_id: node_id.to_owned(),
@@ -7323,6 +7319,21 @@ fn prepare_diagnostic_emission_base(
         expected_vantage: watcher.vantage.clone(),
         passive_source_timing,
     })
+}
+
+fn diagnostic_limitations(
+    mut limitations: Vec<DiagnosticLimitationV1>,
+    passive_source: bool,
+) -> Vec<DiagnosticLimitationV1> {
+    if passive_source {
+        limitations.push(DiagnosticLimitationV1 {
+            kind: DiagnosticLimitationKindV1::Other,
+            code: "passive_observer_effect_bounded_not_zero".to_owned(),
+            detail: "the independently scheduled sampler has qualified bounded overhead; it is part of the observed deployment and is not physically free".to_owned(),
+        });
+    }
+    limitations.sort_by(|left, right| left.code.as_bytes().cmp(right.code.as_bytes()));
+    limitations
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // One closed mapping from collection failure to diagnostic artifact.
@@ -11666,6 +11677,28 @@ mod tests {
             passive_timing_fixture(cutoff - Duration::seconds(1), cutoff);
         timing.selection.producer_key_id = "wrong-key".into();
         assert!(validate_diagnostic_source_timing(Some(&timing), &valid, &attempt).is_err());
+    }
+
+    #[test]
+    fn passive_observer_limitation_is_inserted_in_canonical_code_order() {
+        let limitations = diagnostic_limitations(
+            vec![DiagnosticLimitationV1 {
+                kind: DiagnosticLimitationKindV1::UnavailableEvidence,
+                code: "raw_evidence_not_publicly_retrievable".into(),
+                detail: "fixture".into(),
+            }],
+            true,
+        );
+        assert_eq!(
+            limitations
+                .iter()
+                .map(|limitation| limitation.code.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "passive_observer_effect_bounded_not_zero",
+                "raw_evidence_not_publicly_retrievable",
+            ]
+        );
     }
 
     #[test]
