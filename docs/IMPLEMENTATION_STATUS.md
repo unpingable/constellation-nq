@@ -145,6 +145,17 @@ The repository implements the stage-one operational spine:
   inclusive `2.000` evaluator. Ordinary helpers retain the execution-interval
   timing law, replay never resamples, and no missing-sample fallback exists.
   Historical A4 remains unresolved under the old provider boundary;
+- a finite operational-continuity lifecycle for that passive boundary. An
+  immutable observer generation content-binds the exact deployment policy,
+  executable, subject/vantage/capacity context, fixed sampling slots, exclusive
+  time/count/store bounds, failure pause, retention mode, and software signing
+  key window. Duplicate starts and restart converge on one durable writer;
+  missed slots remain gaps; policy tightening may stop future sampling but
+  broadening cannot enlarge the grant. Explicit successor generations and
+  independent finite NQ recurrence enrollments provide renewable bounded
+  continuity without creating one another or any Nightshift cycle. V1 retains
+  all samples in each finite store and deliberately adds no deletion, archive,
+  automatic key roll, or recursive renewal surface;
 - a native host profile/helper plus the conformance fixture profile;
 - strict, bounded `SystemSpecV1` validation and deterministic compilation into
   schema-domain-separated `ScopeCut` proposals, ratification-bound cuts,

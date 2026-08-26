@@ -1,6 +1,6 @@
 [Unit]
-Description=NQ-ng bounded passive host-load sampler
-Documentation=file:///usr/share/doc/nq-ng/docs/PASSIVE_LOAD_SAMPLING_V1.md
+Description=NQ-ng finite passive host-load observer generation
+Documentation=file:///usr/share/doc/nq-ng/docs/PASSIVE_LOAD_OPERATIONAL_CONTINUITY_V1.md
 After=local-fs.target
 RequiresMountsFor=/var/lib/nq-passive-load
 
@@ -10,8 +10,12 @@ User=nq-passive-load-observer
 Group=nq-passive-load-reader
 UMask=0027
 WorkingDirectory=/usr
-ExecStart=/usr/lib/nq/helpers/nq-passive-load-helper observe /etc/nq/passive-load-observer.toml
-Restart=no
+ExecStart=/usr/lib/nq/helpers/nq-passive-load-helper observe-generation /etc/nq/passive-load-operational-policy.json /etc/nq/passive-load-observer-generation.json
+# Restart recovers only the exact still-active immutable generation. The helper
+# exits successfully for exhaustion, pause, retirement, or key revocation, so
+# restart cannot mint or extend sampling authority.
+Restart=on-failure
+RestartSec=10s
 
 # The sampler needs no network, shell, device, privilege, or arbitrary command
 # surface. Deliberately do not set CPUQuota, CPUAffinity, or AllowedCPUs: those
@@ -38,7 +42,7 @@ SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX
 CapabilityBoundingSet=
 AmbientCapabilities=
-ReadOnlyPaths=/etc/nq/passive-load-observer.toml /var/lib/nq-passive-load/sample.key
+ReadOnlyPaths=/etc/nq/passive-load-operational-policy.json /etc/nq/passive-load-observer-generation.json /var/lib/nq-passive-load/keys
 ReadWritePaths=/var/lib/nq-passive-load/samples
 LimitNOFILE=64
 LimitFSIZE=64K
@@ -51,5 +55,5 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=nq-passive-load-observer
 
-# Deliberately no [Install] section. Deployment-owned sampling authority and
-# finite configuration must be qualified before any explicit start.
+# Deliberately no [Install] section. Package installation and service-manager
+# state create no generation, signing key, sample, or diagnostic authority.

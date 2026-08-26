@@ -95,6 +95,7 @@ def expected_files(descriptors: list[str]) -> dict[str, int]:
         "share/doc/nq-ng/docs/IMPLEMENTATION_STATUS.md": 0o644,
         "share/doc/nq-ng/docs/BOUNDED_RECURRING_DIAGNOSTIC_OFFICE_V1.md": 0o644,
         "share/doc/nq-ng/docs/PASSIVE_LOAD_SAMPLING_V1.md": 0o644,
+        "share/doc/nq-ng/docs/PASSIVE_LOAD_OPERATIONAL_CONTINUITY_V1.md": 0o644,
         "share/doc/nq-ng/docs/PORTER_NETBOX_ADDENDUM.md": 0o644,
         "share/doc/nq-ng/examples/nq.toml": 0o644,
         "share/doc/nq-ng/examples/nq-host.toml": 0o644,

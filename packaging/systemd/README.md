@@ -1,14 +1,25 @@
 # systemd integration
 
 `nq-passive-load-observer.service` is a static, disabled artifact for the one
-closed boundary in `docs/PASSIVE_LOAD_SAMPLING_V1.md`. It has no `[Install]`
-section and package installation creates neither configuration nor signing
-key. The unit runs one long-lived finite sampler as
+closed boundary in `docs/PASSIVE_LOAD_SAMPLING_V1.md` and its finite lifecycle
+in `docs/PASSIVE_LOAD_OPERATIONAL_CONTINUITY_V1.md`. It has no `[Install]`
+section and package installation creates neither policy, generation, nor
+signing key. The unit runs one long-lived finite sampler as
 `nq-passive-load-observer`, writes group-readable immutable samples for the
 separate admitted `nq-passive-load-reader` helper principal, and has no network
 or shell surface. It deliberately applies no CPU quota or affinity constraint:
 those properties participate in `available_parallelism()` semantics and must
 instead be pinned by deployment qualification.
+
+`Restart=on-failure` is process recovery, not sampling authority. Every start
+reopens the exact canonical generation, its original policy snapshot, samples,
+events, signing-key window, count, and exclusive expiry. A clean exit follows
+exhaustion, pause, retirement, or revocation, so systemd cannot roll the
+generation, reset a failure streak, backfill a missed slot, or create a new
+sample beyond its immutable grant. The unit's two fixed `/etc/nq` paths are
+deployment locators, not mutable latest-evidence pointers; changing either
+requires stopping the unit and installing an independently materialized exact
+policy or generation.
 
 `nq-recurring-office.service` and `.timer` are optional disabled artifacts for
 the finite recurring office documented in

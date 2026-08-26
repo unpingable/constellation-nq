@@ -95,7 +95,10 @@ create_layout_fallback() {
     install -d -o nq-passive-load-observer -g nq-passive-load-reader -m 0750 \
         /var/lib/nq-passive-load
     install -d -o nq-passive-load-observer -g nq-passive-load-reader -m 2750 \
-        /var/lib/nq-passive-load/samples
+        /var/lib/nq-passive-load/samples \
+        /var/lib/nq-passive-load/generations
+    install -d -o nq-passive-load-observer -g nq-passive-load-observer -m 0700 \
+        /var/lib/nq-passive-load/keys
     install -d -o nq -g nq -m 0751 /run/nq
     install -d -o nq -g nq -m 0711 /run/nq/helpers
 }

@@ -47,8 +47,10 @@ for forbidden in ("CPUQuota=", "CPUAffinity=", "AllowedCPUs=", "Restart=always")
         failures.append(f"observer unit changes capacity/restart semantics through {forbidden}")
 if any(line.strip() == "[Install]" for line in unit.splitlines()):
     failures.append("observer unit must remain static and explicitly started")
-if "PrivateNetwork=yes" not in unit or "Restart=no" not in unit:
+if "PrivateNetwork=yes" not in unit or "Restart=on-failure" not in unit:
     failures.append("observer unit lacks closed network/restart behavior")
+if "observe-generation" not in unit or "passive-load-observer.toml" in unit:
+    failures.append("observer unit does not require an exact finite generation")
 
 required_doctrine = (
     "Diagnostic acquisition may consume an observation. It need not cause the observation to occur.",

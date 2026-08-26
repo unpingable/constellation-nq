@@ -192,6 +192,8 @@ python3 -B "$root/system-contract/verify_assets.py" \
 python3 -B "$root/diagnostic-contract/verify_assets.py" \
     --source-vectors "$root/audit/nq-nightshift-stage6-foundation/vectors"
 python3 -B "$root/diagnostic-contract-v2/verify_assets.py"
+python3 -B "$root/scripts/verify_passive_load_boundary.py"
+python3 -B "$root/scripts/verify_passive_operational_continuity.py"
 python3 - "${descriptors[@]}" <<'PY'
 import json
 import pathlib
@@ -288,6 +290,8 @@ install -Dm0644 "$root/docs/BOUNDED_RECURRING_DIAGNOSTIC_OFFICE_V1.md" \
     "$stage/share/doc/nq-ng/docs/BOUNDED_RECURRING_DIAGNOSTIC_OFFICE_V1.md"
 install -Dm0644 "$root/docs/PASSIVE_LOAD_SAMPLING_V1.md" \
     "$stage/share/doc/nq-ng/docs/PASSIVE_LOAD_SAMPLING_V1.md"
+install -Dm0644 "$root/docs/PASSIVE_LOAD_OPERATIONAL_CONTINUITY_V1.md" \
+    "$stage/share/doc/nq-ng/docs/PASSIVE_LOAD_OPERATIONAL_CONTINUITY_V1.md"
 install -Dm0644 "$root/docs/PORTER_NETBOX_ADDENDUM.md" \
     "$stage/share/doc/nq-ng/docs/PORTER_NETBOX_ADDENDUM.md"
 install -Dm0644 "$root/packaging/debian/copyright" \

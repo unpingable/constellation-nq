@@ -255,5 +255,9 @@ identity, workload cause, whole-host health, or Nightshift reliance. It creates
 no generic sensor registry, metrics platform, time-series database, alerting,
 dashboard, scheduler, mutable latest pointer, or arbitrary telemetry source.
 
+Finite-generation lifecycle, storage, restart, signing-key rotation, and
+independent recurrence-renewal doctrine are specified separately in
+[`PASSIVE_LOAD_OPERATIONAL_CONTINUITY_V1.md`](PASSIVE_LOAD_OPERATIONAL_CONTINUITY_V1.md).
+
 > If the exact proposition cannot survive the new boundary unchanged,
 > recurring acquisition remains unsupported.
