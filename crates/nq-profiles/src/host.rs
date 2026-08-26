@@ -538,9 +538,12 @@ fn newest_current_report<'a>(
             profile_contract_mismatch_details(admitted, descriptor),
         )));
     }
-    if admitted.status != SemanticReportStatus::Complete
-        || admitted.coverage.get("load") != Some(&SemanticCoverageState::Complete)
-    {
+    // Detector sufficiency follows the exact claim dependency frontier.  A
+    // host report may be partial because unrelated host_identity or uptime
+    // coverage is unavailable while its load coverage and raw load inputs are
+    // complete.  Requiring whole-report completeness here would incorrectly
+    // make those unrelated fields prerequisites of nq.host.load_pressure/v1.
+    if admitted.coverage.get("load") != Some(&SemanticCoverageState::Complete) {
         return Err(Box::new(DetectorResult::cannot_evaluate_with_details(
             input,
             descriptor,

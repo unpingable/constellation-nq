@@ -239,6 +239,18 @@ fn failed_host_report(at: chrono::DateTime<Utc>) -> ReportInput {
     report
 }
 
+fn load_complete_partial_host_report(at: chrono::DateTime<Utc>, load_1m: f64) -> ReportInput {
+    let mut report = host_report(at, load_1m);
+    report.report_digest = format!("sha256:{}", "4".repeat(64));
+    report.status = SemanticReportStatus::Partial;
+    report.error_count = 1;
+    report.coverage[0].state = SemanticCoverageState::Unavailable;
+    report.coverage[1].state = SemanticCoverageState::Unavailable;
+    report.observations[0].payload["hostname"] = Value::Null;
+    report.observations[0].payload["uptime_seconds"] = Value::Null;
+    report
+}
+
 fn detector_report(
     report_id: &str,
     report_sequence: u64,
@@ -529,6 +541,58 @@ fn detector_requires_newest_current_complete_coverage_to_resolve() {
     let result = detector.evaluate(&newer_failure_input);
     assert_eq!(result.state, DetectorState::CannotEvaluate);
     assert!(result.refusal.is_some());
+}
+
+#[test]
+fn load_detector_depends_on_complete_load_coverage_not_unrelated_report_coverage() {
+    let context = host_context(now());
+    let detector = host::MODULE.detectors()[0];
+
+    for (load_1m, expected) in [
+        (3.999, DetectorState::ExplicitlyAbsent),
+        (4.0, DetectorState::Present),
+        (4.001, DetectorState::Present),
+    ] {
+        let report = load_complete_partial_host_report(now(), load_1m);
+        let admitted = host::MODULE
+            .validate(&context, &report)
+            .expect("unrelated missing fields leave exact load testimony admissible");
+        assert_eq!(admitted.status, SemanticReportStatus::Partial);
+        assert_eq!(
+            admitted.coverage.get("load"),
+            Some(&SemanticCoverageState::Complete),
+        );
+        let result = detector.evaluate(&DetectorInput {
+            instance_id: "instance:host",
+            evaluated_at: now() + Duration::seconds(1),
+            watermark: EvidenceWatermark(10),
+            reports: &[detector_report("report:passive-load", 10, admitted)],
+        });
+        assert_eq!(result.state, expected);
+        assert!(result.refusal.is_none());
+    }
+
+    let mut incomplete = load_complete_partial_host_report(now(), 4.0);
+    incomplete.coverage[2].state = SemanticCoverageState::Partial;
+    incomplete.observations[0].payload["load_1m"] = Value::Null;
+    let admitted = host::MODULE
+        .validate(&context, &incomplete)
+        .expect("bounded incomplete load testimony remains admitted custody");
+    let result = detector.evaluate(&DetectorInput {
+        instance_id: "instance:host",
+        evaluated_at: now() + Duration::seconds(1),
+        watermark: EvidenceWatermark(11),
+        reports: &[detector_report("report:partial-load", 11, admitted)],
+    });
+    assert_eq!(result.state, DetectorState::CannotEvaluate);
+    assert_eq!(
+        result
+            .refusal
+            .as_ref()
+            .and_then(|refusal| refusal.details.get("load_coverage_state"))
+            .map(String::as_str),
+        Some("partial"),
+    );
 }
 
 #[test]

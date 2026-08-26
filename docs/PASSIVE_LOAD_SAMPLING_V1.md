@@ -119,7 +119,11 @@ An NQ recurrence tick does not cause a kernel read.
 
 The sample stores raw facts, not `pressure_present`. NQ's existing evaluator
 parses the admitted values, divides by capacity, and applies the unchanged
-inclusive threshold.
+inclusive threshold. Detector sufficiency follows that exact dependency
+frontier: a report may remain `partial` because hostname and uptime are
+intentionally unavailable while complete `load` coverage is sufficient for
+`nq.host.load_pressure/v1`. Partial or unavailable `load` coverage still
+refuses; unrelated missing fields do not silently become load-pressure inputs.
 
 The file name contains the immutable sequence and payload digest. Creation uses
 `O_EXCL`, exact canonical bytes, file synchronization, and directory
