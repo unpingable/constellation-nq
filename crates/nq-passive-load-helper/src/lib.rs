@@ -867,16 +867,40 @@ fn decode_public_key(value: &str) -> Result<[u8; 32], Error> {
 
 fn load_toml<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<(T, Vec<u8>), Error> {
     require_absolute("config", path)?;
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.file_type().is_file() || metadata.len() > MAX_CONFIG_BYTES as u64 {
+    let mut options = OpenOptions::new();
+    options.read(true).custom_flags(libc::O_CLOEXEC);
+    if !is_inherited_descriptor_path(path) {
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > MAX_CONFIG_BYTES as u64 {
         return Err(Error::Invalid(
             "config is not a bounded regular file".into(),
         ));
     }
-    let bytes = fs::read(path)?;
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(metadata.len())
+            .unwrap_or(MAX_CONFIG_BYTES)
+            .min(MAX_CONFIG_BYTES),
+    );
+    Read::by_ref(&mut file)
+        .take(u64::try_from(MAX_CONFIG_BYTES + 1).unwrap_or(u64::MAX))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_CONFIG_BYTES {
+        return Err(Error::Invalid("config exceeds bounded size".into()));
+    }
     let text =
         std::str::from_utf8(&bytes).map_err(|_| Error::Invalid("config is not UTF-8".into()))?;
     Ok((toml::from_str(text)?, bytes))
+}
+
+fn is_inherited_descriptor_path(path: &Path) -> bool {
+    path.to_str()
+        .and_then(|value| value.strip_prefix("/proc/self/fd/"))
+        .is_some_and(|descriptor| {
+            !descriptor.is_empty() && descriptor.bytes().all(|byte| byte.is_ascii_digit())
+        })
 }
 
 fn require_absolute(field: &str, path: &Path) -> Result<(), Error> {
@@ -924,8 +948,9 @@ fn read_bounded(path: &Path, max: usize) -> Result<String, Error> {
 #[cfg(test)]
 mod tests {
     use std::fs::{self, OpenOptions};
-    use std::io::Write as _;
-    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    use std::io::{Seek as _, Write as _};
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _, symlink};
 
     use chrono::Utc;
     use ed25519_dalek::SigningKey;
@@ -941,8 +966,32 @@ mod tests {
 
     use super::{
         CapacityContextV1, OBSERVER_PROFILE, ObserverConfigV1, ObserverSession, ProviderConfigV1,
-        SOURCE_BASIS, capacity_context, executable_digest, sample_once, serve,
+        SOURCE_BASIS, capacity_context, executable_digest, load_toml, sample_once, serve,
     };
+
+    #[test]
+    fn config_loader_accepts_only_regular_paths_or_exact_inherited_descriptors() {
+        let root = tempfile::tempdir().expect("config root");
+        let config = root.path().join("config.toml");
+        fs::write(&config, b"value = 7\n").expect("write config");
+        let (_, regular_bytes) = load_toml::<toml::Value>(&config).expect("regular config");
+        assert_eq!(regular_bytes, b"value = 7\n");
+
+        let alias = root.path().join("config-link.toml");
+        symlink(&config, &alias).expect("config symlink");
+        assert!(load_toml::<toml::Value>(&alias).is_err());
+
+        let mut inherited = tempfile::tempfile().expect("inherited config");
+        inherited
+            .write_all(b"value = 9\n")
+            .expect("inherited config bytes");
+        inherited.rewind().expect("rewind inherited config");
+        let inherited_path =
+            std::path::PathBuf::from(format!("/proc/self/fd/{}", inherited.as_raw_fd()));
+        let (_, inherited_bytes) =
+            load_toml::<toml::Value>(&inherited_path).expect("sealed inherited config");
+        assert_eq!(inherited_bytes, b"value = 9\n");
+    }
 
     #[test]
     fn exact_threshold_vectors_remain_inclusive() {

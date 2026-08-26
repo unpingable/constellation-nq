@@ -80,6 +80,13 @@ watcher whose evaluator artifact and current source closure match exactly.
 This keeps old custody readable without allowing semantic drift to authorize
 new work.
 
+NQ's verified launcher passes fixed argument files to the child as sealed
+numeric `/proc/self/fd/N` snapshots. The passive helper accepts that exact
+inherited-descriptor spelling after opening and `fstat`-checking a bounded
+regular file. Ordinary symlink configuration paths remain refused. This keeps
+the retrieval process compatible with sealed launch without falling back to a
+mutable deployment path after verification.
+
 ## Sampling cadence and acquisition cadence
 
 Sampling cadence belongs to deployment-owned observer configuration. V1 is a
