@@ -28,6 +28,41 @@ enum Command {
         issuer: String,
         key_id: String,
     },
+    /// Materialize one immutable finite observer generation.
+    PrepareGeneration {
+        policy: PathBuf,
+        spec: PathBuf,
+        output: PathBuf,
+        #[arg(long)]
+        previous_generation: Option<PathBuf>,
+    },
+    /// Run one bounded long-lived observer generation.
+    ObserveGeneration {
+        policy: PathBuf,
+        generation: PathBuf,
+    },
+    /// Evaluate one sampling slot without starting a loop.
+    SampleOnceGeneration {
+        policy: PathBuf,
+        generation: PathBuf,
+    },
+    /// Project immutable observer-generation state without sampling.
+    GenerationStatus {
+        policy: PathBuf,
+        generation: PathBuf,
+    },
+    /// Retire one generation without deleting its samples.
+    RetireGeneration {
+        generation: PathBuf,
+        operation_id: String,
+        reason: String,
+    },
+    /// Revoke one generation's signing key for future sampling only.
+    RevokeGenerationKey {
+        generation: PathBuf,
+        operation_id: String,
+        reason: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -49,6 +84,61 @@ fn main() -> ExitCode {
             issuer,
             key_id,
         } => nq_passive_load_helper::keygen(&private_key, &issuer, &key_id),
+        Command::PrepareGeneration {
+            policy,
+            spec,
+            output,
+            previous_generation,
+        } => nq_passive_load_helper::materialize_generation(
+            &policy,
+            &spec,
+            previous_generation.as_deref(),
+            &output,
+        )
+        .map(|generation| {
+            let bytes = std::fs::read(&output).expect("materialized generation must reopen");
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema": "nq.passive_load_observer_generation_materialization.v1",
+                    "generation_id": nq_protocol::sha256_bytes(&bytes),
+                    "generation": generation,
+                })
+            );
+        }),
+        Command::ObserveGeneration { policy, generation } => {
+            nq_passive_load_helper::observe_generation(&policy, &generation)
+        }
+        Command::SampleOnceGeneration { policy, generation } => {
+            nq_passive_load_helper::sample_once_generation(&policy, &generation).map(|action| {
+                println!(
+                    "{}",
+                    serde_json::to_string(&action).expect("sampling action must serialize")
+                );
+            })
+        }
+        Command::GenerationStatus { policy, generation } => {
+            nq_passive_load_helper::generation_status(&policy, &generation).map(|status| {
+                println!(
+                    "{}",
+                    serde_json::to_string(&status).expect("generation status must serialize")
+                );
+            })
+        }
+        Command::RetireGeneration {
+            generation,
+            operation_id,
+            reason,
+        } => nq_passive_load_helper::retire_generation(&generation, &operation_id, &reason)
+            .map(|event_id| println!("{{\"event_id\":\"{event_id}\",\"state\":\"retired\"}}")),
+        Command::RevokeGenerationKey {
+            generation,
+            operation_id,
+            reason,
+        } => nq_passive_load_helper::revoke_generation_key(&generation, &operation_id, &reason)
+            .map(|event_id| {
+                println!("{{\"event_id\":\"{event_id}\",\"state\":\"key_revoked\"}}");
+            }),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

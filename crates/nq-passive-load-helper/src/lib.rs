@@ -33,6 +33,14 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
 
+mod operational;
+
+pub use operational::{
+    ObserverGenerationSpecV1, ObserverGenerationV1, OperationalPolicyV1, RetentionModeV1,
+    SamplingStartupPolicyV1, generation_status, materialize_generation, observe_generation,
+    retire_generation, revoke_generation_key, sample_once_generation,
+};
+
 const OBSERVER_CONFIG_SCHEMA: &str = "nq.passive_load_observer_config.v1";
 const PROVIDER_CONFIG_SCHEMA: &str = "nq.passive_load_provider_config.v1";
 const OBSERVER_PROFILE: &str = "nq.host_load_passive_sampler.v1";
@@ -563,6 +571,28 @@ fn load_samples(
             if !metadata.file_type().is_file() || metadata.mode() & 0o002 != 0 {
                 return Err(Error::Invalid(
                     "observer lock is not a non-world-writable regular file".into(),
+                ));
+            }
+            continue;
+        }
+        if name == ".observer-generation.json" {
+            let metadata = fs::symlink_metadata(entry.path())?;
+            if !metadata.file_type().is_file()
+                || metadata.len() > 262_144
+                || metadata.mode() & 0o002 != 0
+            {
+                return Err(Error::Invalid(
+                    "observer generation manifest is not a bounded non-world-writable regular file"
+                        .into(),
+                ));
+            }
+            continue;
+        }
+        if name == ".observer-events" {
+            let metadata = fs::symlink_metadata(entry.path())?;
+            if !metadata.file_type().is_dir() || metadata.mode() & 0o002 != 0 {
+                return Err(Error::Invalid(
+                    "observer event custody is not a non-world-writable real directory".into(),
                 ));
             }
             continue;
