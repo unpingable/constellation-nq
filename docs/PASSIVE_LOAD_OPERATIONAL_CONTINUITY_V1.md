@@ -243,3 +243,35 @@ runner, archive/backup system, generic PKI, or Nightshift scheduler. It does
 not prove zero observer effect, hardware key custody, indefinite disk safety,
 physical-host identity, or long-running production cadence. Those claims need
 their own evidence and authority.
+
+## Enabled operational pilot standing
+
+The bounded live pilot in
+[`PASSIVE_LOAD_ENABLED_PILOT_2026-08-26.md`](PASSIVE_LOAD_ENABLED_PILOT_2026-08-26.md)
+qualified real service-manager operation through one G renewal and one
+independent E renewal. It also established the operational ordering law:
+
+```text
+new provider-bound watcher configuration
+→ first independently produced sample
+→ watcher admission
+→ exact genesis
+→ finite recurrence enrollment
+→ timer activation
+```
+
+The recurrence timer must remain paused until admission and genesis are
+complete. Duplicate timer delivery correctly consumes only the bounded
+pre-provider attempt budget, but consuming that budget during deployment is an
+operational defect rather than useful observation.
+
+The pilot used 15-second sampling and five-minute diagnostics. A planned
+observer restart left an exact gap; recurrence during the gap persisted a
+governed missing-sample refusal and did not fall back. Expired G and E grants
+refused service-manager restart/wakeup without producing new work. Closeout
+left all services inactive and the timer disabled.
+
+The current 15-minute G and 10-minute E deployment limits remain qualified but
+are intentionally too short for unattended production. Longer finite grants
+or a finite higher-level renewal grant require a separate policy campaign; the
+enabled pilot does not imply them.
