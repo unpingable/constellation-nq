@@ -1,0 +1,52 @@
+[Unit]
+Description=NQ-ng bounded passive-load recurring office wakeup (labelwatch-host qualification)
+Documentation=file:///opt/nq-ng/passive-load-69584e3/share/doc/nq-ng/docs/BOUNDED_RECURRING_DIAGNOSTIC_OFFICE_V1.md
+After=local-fs.target
+RequiresMountsFor=/var/lib/nq-ng-observation-office /var/lib/nq-passive-load
+
+[Service]
+Type=oneshot
+User=nq
+Group=nq
+SupplementaryGroups=nq-passive-load-reader
+UMask=0077
+WorkingDirectory=/opt/nq-ng/passive-load-69584e3
+EnvironmentFile=/etc/nq-ng-observation-office/recurring-office-passive.env
+ExecStart=/opt/nq-ng/passive-load-69584e3/bin/nq --config=/etc/nq-ng-observation-office/nq.toml --json recurring tick ${NQ_RECURRENCE_ENROLLMENT_ID}
+
+# systemd supplies wakeups and bounded local custody only. The immutable
+# deployment policy and finite enrollment remain the acquisition authority.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+KeyringMode=private
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_KILL
+AmbientCapabilities=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_KILL
+ReadOnlyPaths=/etc/nq-ng-observation-office /etc/nq-passive-load /opt/nq-ng/passive-load-69584e3 /var/lib/nq-passive-load
+ReadWritePaths=/var/lib/nq-ng-observation-office /run/nq-ng-observation-office
+LimitNOFILE=4096
+LimitFSIZE=1G
+LimitCORE=0
+TasksMax=64
+MemoryMax=1G
+MemorySwapMax=0
+TimeoutStartSec=90s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nq-passive-recurring-office
+
+# Intentionally static. No [Install] section and no timer enablement.

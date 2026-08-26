@@ -1,0 +1,98 @@
+{
+  "schema": "nq.passive_load_deployment_receipt.v1",
+  "recorded_at": "2026-08-26T13:53:59-04:00",
+  "classification": "exact_load_pressure_passive_recurring_acquisition_qualified_live_office_dormant",
+  "repository": {
+    "branch": "campaign/passive-load-sampling",
+    "start_commit": "f970ddc74fc8d7b63aafcdc5613f39df03edd1e2",
+    "qualified_source_commit": "1bc26596d5562090246e3e70d857ebbffe6c3504"
+  },
+  "release": {
+    "archive_sha256": "72eb1fa561a6ee38d2718a2f9b2cd485f3c96421f2cfed9cac539ff9875970d6",
+    "nq_path": "/opt/nq-ng/passive-load-1bc2659/bin/nq",
+    "nq_sha256": "bb30ce631f5b1fd50b35ef23c8bfbbe5faf1dfdf54b8c3a8ef0fd7d619d05a46",
+    "passive_helper_path": "/opt/nq-ng/passive-load-69584e3/lib/nq/helpers/nq-passive-load-helper",
+    "passive_helper_sha256": "7dceb31830ed6b4930e3089367a59ac80c97f35fd7d2a396c7a08186fe2c38b6"
+  },
+  "subject": "host:labelwatch-host",
+  "watcher": "labelwatch-host-passive",
+  "sample_boundary": {
+    "sample_schema": "nq.signed_passive_host_load_sample.v1",
+    "observer_profile": "nq.host_load_passive_sampler.v1",
+    "source_basis": "linux_proc_loadavg_plus_rust_available_parallelism_v1",
+    "provider_config_sha256": "9c7d3a7717ebfb6ea374cf879618b8b7a743b2ba46326e9830d6cc66791fec94",
+    "observer_config_sha256": "783e3a66683b35939f80759eae604e3f9cd2723836c3fd3b7059df2bace63507",
+    "producer_public_key_digest": "sha256:57459d9c6bd8aaf10e0c60a36f3f48bb861956e5234cf03a8372878698ef81a3",
+    "capacity_context_id": "sha256:6c6e34b0e088655fce62d4dd15ea355e6d79015736c6e0fb5b8219feac492c7d",
+    "max_sample_age_ms": 30000,
+    "final_sample_count": 22
+  },
+  "admission": {
+    "occurrence_id": "27c4a406-0293-4259-8b4d-551f0ff2d85d",
+    "binding_digest": "sha256:1e84cba180ddb2038e57566902255bdc746ddd4496e45dc514c5c3cdec37de07",
+    "watcher_semantic_digest": "sha256:eca928e1aa6293711b0ad7a4c62acef258aedf183864b0df7d48b2580d29ef8d"
+  },
+  "manual_acquisitions": [
+    {
+      "acquisition_id": "passive-load-labelwatch-host-20260826-4",
+      "run_id": "c1ffa45d-5ef3-4f5d-bf44-2ab9af5df6ca",
+      "artifact_id": "sha256:349c545c7456162e298e75f7d5a70e7d70d544e717b6ecbba56a88e34c354514",
+      "condition": "explicitly_absent",
+      "replay_resampled": false
+    },
+    {
+      "acquisition_id": "passive-load-labelwatch-host-20260826-5",
+      "run_id": "7a2640ce-bd73-4406-86cd-c070695f415d",
+      "artifact_id": "sha256:41b8e79582c34db75e5ac8c48491bc205d8f7038386d30663c1594407dad02f3",
+      "condition": "explicitly_absent"
+    }
+  ],
+  "recurrence": {
+    "policy_id": "sha256:e08af78ecd343759420fc6f4043bb326c8b2f7d272b627f3989cfbb50068ade7",
+    "policy_activation_event_id": "sha256:a9006321e2b1adb349a7a5eab313368a1567604c7559bc1929c7a7c5db59842c",
+    "enrollment_id": "sha256:e5a299aa3c6c5a5077dc3be951031f2aec5039aef48abe84d56b1fa3b259e122",
+    "coordination_domain_id": "passive-load-samples:sha256:9c7d3a7717ebfb6ea374cf879618b8b7a743b2ba46326e9830d6cc66791fec94",
+    "state": "exhausted",
+    "occurrences": [
+      {
+        "slot_index": 2,
+        "slot_id": "sha256:21a11b4b43a90accee4cc70cb8d4b06c3c02004bcc7dc45f360c3fa953ba0747",
+        "acquisition_id": "recurrence:21a11b4b43a90accee4cc70cb8d4b06c3c02004bcc7dc45f360c3fa953ba0747",
+        "fencing_epoch": 1,
+        "run_id": "e54c5101-bc03-4157-b156-6a415546f50b",
+        "artifact_id": "sha256:b2ad01fd679cceac65dc68c3b96595fcb089466f85f1a6104cec56f9bd522c25",
+        "condition": "explicitly_absent"
+      },
+      {
+        "slot_index": 3,
+        "slot_id": "sha256:4312a44435a58a8e0f3b38b4553110233cc9eb7a03634e35111c46459c314094",
+        "acquisition_id": "recurrence:4312a44435a58a8e0f3b38b4553110233cc9eb7a03634e35111c46459c314094",
+        "fencing_epoch": 2,
+        "run_id": "805d49d5-f1f3-4340-ad74-d78843001530",
+        "artifact_id": "sha256:5864098009de762dcc0e9be1f9aeb2e664ffcf0211350c5a655ecc7fd273880f",
+        "condition": "explicitly_absent"
+      }
+    ]
+  },
+  "historical_a4": {
+    "acquisition_id": "recurrence:d555a10d2b4f11e7c6d550f43a6fd6d07631573bec5c14b54d09ca6b8e04beea",
+    "coordination_domain_id": "linode:labelwatch-host",
+    "fencing_epoch": 1,
+    "diagnostic_outcome": "unknown",
+    "provider_activity": "unknown",
+    "coordination": "fenced",
+    "enrollment_state": "revoked",
+    "next_acquisition_created": false
+  },
+  "installed_state": {
+    "recurrence_unit_sha256": "0f129e754208e02e5641f760d87534484390ec316899610587dbaa1e35f8f39b",
+    "policy_file_sha256": "8f09f62fe07aebea33bcb94650515d6158dbe86cf97f836ceba46ddbbab8232e",
+    "enrollment_file_sha256": "ca2555332eb692863d13dddd487a3a17fb10a4d174eab007e62ef2e19cb0bb1d",
+    "environment_file_sha256": "99baebc801e20c984c89b26b09754230daa7e1aef5e1efd98296c435e74619f9",
+    "database_sha256": "02c66db96f9a278a1b9479b7e83169f89b4f2442cd91f58a94f2f62eee7399e2",
+    "observer_service": "inactive",
+    "recurring_service": "inactive",
+    "recurring_timer_enabled": false,
+    "recurring_timer_active": false
+  }
+}

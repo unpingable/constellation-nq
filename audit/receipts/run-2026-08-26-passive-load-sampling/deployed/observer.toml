@@ -1,0 +1,23 @@
+schema = "nq.passive_load_observer_config.v1"
+sample_store = "/var/lib/nq-passive-load/samples-passive-cac11df"
+sample_interval_ms = 5000
+max_samples = 360
+max_store_bytes = 2097152
+private_key_path = "/var/lib/nq-passive-load/sample.key"
+producer_issuer = "nq-passive-load-observer:labelwatch-host"
+producer_key_id = "passive-load-20260826-v1"
+capacity_context_id = "sha256:6c6e34b0e088655fce62d4dd15ea355e6d79015736c6e0fb5b8219feac492c7d"
+
+[binding]
+subject = "host:labelwatch-host"
+
+[binding.scope]
+kind = "host"
+
+[binding.scope.value]
+id = "labelwatch-host"
+
+[binding.vantage]
+kind = "local"
+
+[binding.vantage.value]

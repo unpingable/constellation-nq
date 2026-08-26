@@ -1,0 +1,14 @@
+[Unit]
+Description=Wake the bounded NQ-ng passive-load recurring office
+Documentation=file:///opt/nq-ng/passive-load-cac11df/share/doc/nq-ng/docs/BOUNDED_RECURRING_DIAGNOSTIC_OFFICE_V1.md
+
+[Timer]
+# Wakeup granularity is not diagnostic cadence or acquisition authority.
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=1s
+Persistent=false
+Unit=nq-passive-recurring-office.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,42 @@
+{
+  "schema": "nq.recurring_office_policy.v1",
+  "deployment_profile_ref": "linode-labelwatch-passive-bounded-recurrence:1bc2659",
+  "min_interval_ms": 60000,
+  "max_interval_ms": 86400000,
+  "min_timer_granularity_ms": 1000,
+  "max_enrollment_lifetime_ms": 3600000,
+  "max_acquisition_occurrences": 4,
+  "allowed_missed_slot_policies": ["skip", "latest_only"],
+  "allowed_startup_policies": ["wait_for_next_slot", "evaluate_current_slot"],
+  "max_pre_provider_attempts": 2,
+  "min_pre_provider_backoff_ms": 1000,
+  "max_pre_provider_backoff_ms": 30000,
+  "max_consecutive_failure_threshold": 2,
+  "max_in_flight_per_watcher": 1,
+  "provider_timeout_ceiling_ms": 30000,
+  "max_store_bytes": 1073741824,
+  "min_free_bytes": 10737418240,
+  "allowed_acquisition_reasons": ["diagnostic_recurrence"],
+  "coordination_domains": [
+    {
+      "domain_id": "passive-load-samples:sha256:9c7d3a7717ebfb6ea374cf879618b8b7a743b2ba46326e9830d6cc66791fec94",
+      "max_in_flight": 1,
+      "min_provider_start_spacing_ms": 60000
+    }
+  ],
+  "watcher_bindings": [
+    {
+      "watcher_instance_id": "labelwatch-host-passive",
+      "watcher_semantic_digest": "sha256:eca928e1aa6293711b0ad7a4c62acef258aedf183864b0df7d48b2580d29ef8d",
+      "coordination_domain_id": "passive-load-samples:sha256:9c7d3a7717ebfb6ea374cf879618b8b7a743b2ba46326e9830d6cc66791fec94",
+      "origin_profile": "linode_instance_metadata_v1",
+      "expected_instance_id_sha256": "sha256:4c4a4b31edb61934a7d81cfd736af7d6c8a588d866e6116d88049d2a910c695c",
+      "origin_helper_path": "/opt/nq-ng/linode-v3-20260824/bin/nq-linode-origin-helper",
+      "origin_helper_sha256": "sha256:058c9220ea0a2c58a4c9f6c9def3307444a9087a2ec2717577446b2ec9d20279",
+      "origin_helper_account": "nq-origin-helper",
+      "origin_helper_public_key_path": "/etc/nq-ng-observation-office/origin-helper-public-key.hex",
+      "origin_helper_issuer": "origin-helper:linode-instance-metadata:v1",
+      "origin_helper_key_id": "origin-helper-key:sha256:866e1635603e99a22e9120d589686fd1771f10973bf037b49cfc3d970e8ef94d"
+    }
+  ]
+}

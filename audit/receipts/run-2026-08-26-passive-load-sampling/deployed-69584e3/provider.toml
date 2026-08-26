@@ -1,0 +1,10 @@
+schema = "nq.passive_load_provider_config.v1"
+sample_store = "/var/lib/nq-passive-load/samples-passive-69584e3"
+max_sample_age_ms = 30000
+observer_profile = "nq.host_load_passive_sampler.v1"
+observer_artifact_digest = "sha256:7dceb31830ed6b4930e3089367a59ac80c97f35fd7d2a396c7a08186fe2c38b6"
+observer_config_digest = "sha256:783e3a66683b35939f80759eae604e3f9cd2723836c3fd3b7059df2bace63507"
+producer_issuer = "nq-passive-load-observer:labelwatch-host"
+producer_key_id = "passive-load-20260826-v1"
+producer_public_key_hex = "62ef27020ae8af7b7c2f923a00d475e7c4c2ed6743e951736e0af593a956ee27"
+capacity_context_id = "sha256:6c6e34b0e088655fce62d4dd15ea355e6d79015736c6e0fb5b8219feac492c7d"
