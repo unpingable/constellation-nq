@@ -14,6 +14,7 @@ use nq_profiles::{
     DetectorInput, DetectorReport, DetectorState, EVALUATOR_SOURCE_DIGEST, EvidenceWatermark,
     ProfileModule, ProfileSemanticId, ReportInput as ProfileReportInput, ScopeGrant,
     SemanticReportStatus, ValidatedReport, ValidationContext, VantageGrant, profile_semantic_id,
+    profile_semantic_id_for_source,
 };
 use nq_protocol::{
     Capability, Checkpoint, CollectionBounds, HelperRequest, InstanceId, MonotonicClock,
@@ -9894,8 +9895,18 @@ fn validate_evaluation_refusal_row(
             .descriptor()
             .digest()
             .map_err(|error| EngineError::Canonical(error.to_string()))?;
-        let compiled_semantic_id = profile_semantic_id(compiled.descriptor())
-            .map_err(|error| EngineError::Canonical(error.to_string()))?;
+        let compiled_semantic_id = if let Some(run_id) = row.trigger_run_id.as_deref() {
+            let run = store.watcher_run_outcome(run_id)?.ok_or_else(|| {
+                EngineError::Invariant(format!(
+                    "evaluation {} trigger run {run_id} is missing",
+                    row.evaluation_id
+                ))
+            })?;
+            admission_time_profile_semantic_id(&run, compiled)?
+        } else {
+            profile_semantic_id(compiled.descriptor())
+                .map_err(|error| EngineError::Canonical(error.to_string()))?
+        };
         let detector = compiled
             .detectors()
             .iter()
@@ -11202,8 +11213,7 @@ fn validate_run_profile_identity(
         .descriptor()
         .digest()
         .map_err(|error| EngineError::Canonical(error.to_string()))?;
-    let semantic_id = profile_semantic_id(compiled.descriptor())
-        .map_err(|error| EngineError::Canonical(error.to_string()))?;
+    let semantic_id = admission_time_profile_semantic_id(run, compiled)?;
     let detector_identity = detector_identity_digest(compiled)?;
     if run.profile_digest != digest.as_str()
         || run.profile_semantic_id.as_deref() != Some(semantic_id.as_str())
@@ -11215,6 +11225,36 @@ fn validate_run_profile_identity(
         )));
     }
     Ok(semantic_id)
+}
+
+/// Recompute one historical run's profile meaning from its immutable
+/// admission-time source and protocol constituents. A separate live-provider
+/// gate still requires the currently executing evaluator to match admission.
+fn admission_time_profile_semantic_id(
+    run: &nq_store::WatcherRunOutcomeRow,
+    compiled: &'static dyn ProfileModule,
+) -> Result<ProfileSemanticId, EngineError> {
+    let historical_source = run
+        .admission_evaluator_source_digest
+        .as_deref()
+        .ok_or_else(|| {
+            EngineError::Invariant(format!(
+                "watcher run {} admission lacks its evaluator source identity",
+                run.run_id
+            ))
+        })?;
+    let historical_protocol = run.admission_protocol_version.as_deref().ok_or_else(|| {
+        EngineError::Invariant(format!(
+            "watcher run {} admission lacks its protocol identity",
+            run.run_id
+        ))
+    })?;
+    profile_semantic_id_for_source(
+        compiled.descriptor(),
+        historical_protocol,
+        historical_source,
+    )
+    .map_err(|error| EngineError::Canonical(error.to_string()))
 }
 
 fn reopen_run_resource_outcome(
@@ -11985,7 +12025,10 @@ sys.stdout.write("\n")
                     .expect("typed semantic identity"),
                     detector_identity_digest: detector_identity_digest(profile)
                         .expect("compiled detector suite identity"),
-                    evaluator_source_digest: typed("source"),
+                    evaluator_source_digest: Sha256Digest::parse(
+                        EVALUATOR_SOURCE_DIGEST.to_owned(),
+                    )
+                    .expect("compiled evaluator source identity"),
                     evaluator_artifact_digest: typed("evaluator"),
                     helper_artifact_digest: Sha256Digest::parse(lock.execution.sha256.clone())
                         .expect("helper artifact digest"),
@@ -17488,11 +17531,9 @@ sys.stdout.write("\n")
         );
     }
 
-    #[test]
-    fn run_profile_digest_and_semantic_substitution_fail_closed() {
-        let profile: &'static dyn ProfileModule = &nq_profiles::conformance::MODULE;
+    fn profile_binding_run(profile: &'static dyn ProfileModule) -> nq_store::WatcherRunOutcomeRow {
         let descriptor = profile.descriptor();
-        let mut run = nq_store::WatcherRunOutcomeRow {
+        nq_store::WatcherRunOutcomeRow {
             run_id: "run-profile-binding".to_owned(),
             request_id: "request-profile-binding".to_owned(),
             instance_id: "profile.binding".to_owned(),
@@ -17528,11 +17569,20 @@ sys.stdout.write("\n")
             admission_evaluator_artifact_digest: Some(
                 nq_protocol::sha256_bytes(b"profile-binding-evaluator").into_string(),
             ),
+            admission_evaluator_source_digest: Some(EVALUATOR_SOURCE_DIGEST.to_owned()),
+            admission_protocol_version: Some(nq_protocol::HELPER_PROTOCOL_VERSION.to_owned()),
             acquisition_outcome: "response".to_owned(),
             resource_outcome_json: test_run_resource(AcquisitionOutcome::Response)
                 .as_bytes()
                 .to_vec(),
-        };
+        }
+    }
+
+    #[test]
+    fn run_profile_digest_and_semantic_substitution_fail_closed() {
+        let profile: &'static dyn ProfileModule = &nq_profiles::conformance::MODULE;
+        let descriptor = profile.descriptor();
+        let mut run = profile_binding_run(profile);
         validate_run_profile_identity(&run).expect("exact compiled profile binding");
         let mut wrong_admission_instance = run.clone();
         wrong_admission_instance.admission_instance_id = Some("profile.other".to_owned());
@@ -17588,6 +17638,54 @@ sys.stdout.write("\n")
             validate_run_profile_identity(&run),
             Err(EngineError::Invariant(message))
                 if message.contains("profile digest, semantic identity, or detector suite was substituted")
+        ));
+    }
+
+    #[test]
+    fn historical_run_profile_identity_uses_exact_admission_time_source_and_protocol() {
+        let profile: &'static dyn ProfileModule = &nq_profiles::conformance::MODULE;
+        let descriptor = profile.descriptor();
+        let mut run = profile_binding_run(profile);
+        run.admission_detector_identity_digest = Some(
+            detector_identity_digest(profile)
+                .expect("detector suite identity")
+                .into_string(),
+        );
+        let historical_source = nq_protocol::sha256_bytes(b"historical evaluator source");
+        run.admission_evaluator_source_digest = Some(historical_source.as_str().to_owned());
+        run.profile_semantic_id = Some(
+            profile_semantic_id_for_source(
+                descriptor,
+                nq_protocol::HELPER_PROTOCOL_VERSION,
+                historical_source.as_str(),
+            )
+            .expect("historical profile semantic identity")
+            .as_str()
+            .to_owned(),
+        );
+        validate_run_profile_identity(&run)
+            .expect("historical admission reopens under its own source identity");
+        run.admission_evaluator_source_digest =
+            Some(nq_protocol::sha256_bytes(b"substituted historical source").into_string());
+        assert!(matches!(
+            validate_run_profile_identity(&run),
+            Err(EngineError::Invariant(message))
+                if message.contains("profile digest, semantic identity, or detector suite was substituted")
+        ));
+
+        let mut missing_source = run.clone();
+        missing_source.admission_evaluator_source_digest = None;
+        assert!(matches!(
+            validate_run_profile_identity(&missing_source),
+            Err(EngineError::Invariant(message))
+                if message.contains("lacks its evaluator source identity")
+        ));
+        let mut missing_protocol = run;
+        missing_protocol.admission_protocol_version = None;
+        assert!(matches!(
+            validate_run_profile_identity(&missing_protocol),
+            Err(EngineError::Invariant(message))
+                if message.contains("lacks its protocol identity")
         ));
     }
 

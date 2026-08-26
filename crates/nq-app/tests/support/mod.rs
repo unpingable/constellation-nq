@@ -141,7 +141,10 @@ pub fn append_typed_admission(
                     }),
                 )
                 .expect("compiled detector suite identity"),
-                evaluator_source_digest: digest("source"),
+                evaluator_source_digest: Sha256Digest::parse(
+                    nq_profiles::EVALUATOR_SOURCE_DIGEST.to_owned(),
+                )
+                .expect("compiled evaluator source identity"),
                 evaluator_artifact_digest: digest("evaluator"),
                 helper_artifact_digest: Sha256Digest::parse(lock.execution.sha256.clone())
                     .expect("helper artifact identity"),

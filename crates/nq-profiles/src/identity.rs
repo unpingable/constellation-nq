@@ -86,12 +86,34 @@ struct SemanticIdPreimage<'a> {
 pub fn profile_semantic_id(
     descriptor: &ProfileDescriptor,
 ) -> Result<ProfileSemanticId, DescriptorError> {
+    profile_semantic_id_for_source(
+        descriptor,
+        nq_protocol::HELPER_PROTOCOL_VERSION,
+        EVALUATOR_SOURCE_DIGEST,
+    )
+}
+
+/// Recompute the semantic identity carried by one historical admission.
+///
+/// The admission-time protocol and evaluator-source digests are immutable
+/// constituents of the admission context. Reopening history must use those
+/// exact constituents rather than silently reinterpret the old occurrence
+/// under the currently compiled source closure.
+///
+/// # Errors
+///
+/// Returns [`DescriptorError`] if the descriptor cannot be canonicalized.
+pub fn profile_semantic_id_for_source(
+    descriptor: &ProfileDescriptor,
+    protocol_semantics_version: &str,
+    evaluator_source_digest: &str,
+) -> Result<ProfileSemanticId, DescriptorError> {
     let descriptor_digest = descriptor.digest()?;
     compose_semantic_id(
         PROFILE_SEMANTIC_ID_SCHEMA,
-        nq_protocol::HELPER_PROTOCOL_VERSION,
+        protocol_semantics_version,
         descriptor_digest.as_str(),
-        EVALUATOR_SOURCE_DIGEST,
+        evaluator_source_digest,
     )
 }
 
@@ -117,7 +139,8 @@ fn compose_semantic_id(
 
 #[cfg(test)]
 mod tests {
-    use super::compose_semantic_id;
+    use super::{compose_semantic_id, profile_semantic_id_for_source};
+    use crate::{ProfileModule as _, conformance};
 
     #[test]
     fn every_preimage_field_contributes_to_the_identity() {
@@ -140,6 +163,28 @@ mod tests {
         assert_ne!(
             base,
             compose_semantic_id("s", "p", "d", "src2").expect("id")
+        );
+    }
+
+    #[test]
+    fn historical_identity_uses_the_admission_time_source_and_protocol() {
+        let descriptor = conformance::MODULE.descriptor();
+        let historical = profile_semantic_id_for_source(
+            descriptor,
+            "nq.helper.historical",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .expect("historical semantic id");
+        let current = super::profile_semantic_id(descriptor).expect("current semantic id");
+        assert_ne!(historical, current);
+        assert_eq!(
+            historical,
+            profile_semantic_id_for_source(
+                descriptor,
+                "nq.helper.historical",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .expect("same historical semantic id")
         );
     }
 }

@@ -691,7 +691,10 @@ mod tests {
                 }),
             )
             .expect("compiled detector suite identity"),
-            evaluator_source_digest: digest("source"),
+            evaluator_source_digest: nq_protocol::Sha256Digest::parse(
+                nq_profiles::EVALUATOR_SOURCE_DIGEST.to_owned(),
+            )
+            .expect("compiled evaluator source identity"),
             evaluator_artifact_digest: digest("evaluator"),
             helper_artifact_digest: digest("helper"),
             config_digest: digest("config"),
@@ -1343,8 +1346,6 @@ mod tests {
             .expect("compiled legacy archive fixture profile");
         let descriptor = canonical(profile.descriptor());
         let profile_digest = descriptor.digest().to_owned();
-        let profile_semantic_id = nq_profiles::profile_semantic_id(profile.descriptor())
-            .expect("compiled legacy profile semantics");
         let detector_identity =
             nq_store::detector_suite_identity_digest(profile.detectors().iter().map(|detector| {
                 detector
@@ -1368,6 +1369,12 @@ mod tests {
         let config_digest = nq_protocol::sha256_bytes(b"legacy-config");
         let helper_artifact_digest = nq_protocol::sha256_bytes(b"legacy-helper");
         let evaluator_source_digest = nq_protocol::sha256_bytes(b"legacy-evaluator-source");
+        let profile_semantic_id = nq_profiles::profile_semantic_id_for_source(
+            profile.descriptor(),
+            nq_protocol::HELPER_PROTOCOL_VERSION,
+            evaluator_source_digest.as_str(),
+        )
+        .expect("exact legacy profile semantics");
         let evaluator_artifact_digest = nq_protocol::sha256_bytes(b"legacy-evaluator");
         let protocol_version = nq_protocol::HELPER_PROTOCOL_VERSION;
         let admission_context_digest = nq_protocol::semantic_digest(&serde_json::json!({

@@ -948,7 +948,10 @@ mod tests {
                         }),
                     )
                     .expect("compiled detector suite identity"),
-                    evaluator_source_digest: digest("source"),
+                    evaluator_source_digest: Sha256Digest::parse(
+                        nq_profiles::EVALUATOR_SOURCE_DIGEST.to_owned(),
+                    )
+                    .expect("compiled evaluator source identity"),
                     evaluator_artifact_digest: digest("evaluator"),
                     helper_artifact_digest: digest("helper"),
                     config_digest: digest("config"),

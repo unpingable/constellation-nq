@@ -1459,6 +1459,10 @@ pub struct WatcherRunOutcomeRow {
     pub admission_detector_identity_digest: Option<String>,
     /// Exact evaluator artifact identity recorded by the joined admission.
     pub admission_evaluator_artifact_digest: Option<String>,
+    /// Exact evaluator source closure recorded by the joined admission.
+    pub admission_evaluator_source_digest: Option<String>,
+    /// Exact helper protocol semantics recorded by the joined admission.
+    pub admission_protocol_version: Option<String>,
     pub acquisition_outcome: String,
     pub resource_outcome_json: Vec<u8>,
 }
@@ -4309,6 +4313,8 @@ impl Store {
                         admission.profile_semantic_id,
                         admission.detector_identity_digest,
                         admission.evaluator_artifact_digest,
+                        admission.evaluator_source_digest,
+                        admission.protocol_version,
                         run.acquisition_outcome, run.resource_outcome_json
                  FROM watcher_runs AS run
                  LEFT JOIN admission_records AS admission
@@ -4331,8 +4337,10 @@ impl Store {
                         profile_semantic_id: row.get(11)?,
                         admission_detector_identity_digest: row.get(12)?,
                         admission_evaluator_artifact_digest: row.get(13)?,
-                        acquisition_outcome: row.get(14)?,
-                        resource_outcome_json: row.get(15)?,
+                        admission_evaluator_source_digest: row.get(14)?,
+                        admission_protocol_version: row.get(15)?,
+                        acquisition_outcome: row.get(16)?,
+                        resource_outcome_json: row.get(17)?,
                     })
                 },
             )
@@ -4366,6 +4374,8 @@ impl Store {
                     admission.profile_semantic_id,
                     admission.detector_identity_digest,
                     admission.evaluator_artifact_digest,
+                    admission.evaluator_source_digest,
+                    admission.protocol_version,
                     run.acquisition_outcome, run.resource_outcome_json
              FROM watcher_runs AS run
              LEFT JOIN admission_records AS admission
@@ -4390,8 +4400,10 @@ impl Store {
                 profile_semantic_id: row.get(11)?,
                 admission_detector_identity_digest: row.get(12)?,
                 admission_evaluator_artifact_digest: row.get(13)?,
-                acquisition_outcome: row.get(14)?,
-                resource_outcome_json: row.get(15)?,
+                admission_evaluator_source_digest: row.get(14)?,
+                admission_protocol_version: row.get(15)?,
+                acquisition_outcome: row.get(16)?,
+                resource_outcome_json: row.get(17)?,
             })
         })?;
         let rows = rows.collect::<Result<Vec<_>, _>>()?;

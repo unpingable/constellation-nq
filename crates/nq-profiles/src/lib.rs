@@ -28,6 +28,7 @@ pub use detector::{
 };
 pub use identity::{
     EVALUATOR_SOURCE_DIGEST, PROFILE_SEMANTIC_ID_SCHEMA, ProfileSemanticId, profile_semantic_id,
+    profile_semantic_id_for_source,
 };
 pub use projection::{ProfileProjection, ProjectionResult};
 pub use registry::{all_profiles, resolve_profile, resolve_profile_key};

@@ -70,6 +70,16 @@ software-held producer key and immutable payload; it does not prove physical
 hardware identity. Linode V3 remains the separate logical-instance origin
 proof.
 
+Adding this carrier rotates NQ's conservative evaluator source-closure digest
+even though the frozen `nq.host` descriptor and load-pressure detector
+descriptor remain unchanged. Historical runs are reopened against the exact
+source digest and helper-protocol version retained in their own authenticated
+admission context. They are not reinterpreted under the newly compiled source
+closure. Conversely, a new provider invocation still requires a newly admitted
+watcher whose evaluator artifact and current source closure match exactly.
+This keeps old custody readable without allowing semantic drift to authorize
+new work.
+
 ## Sampling cadence and acquisition cadence
 
 Sampling cadence belongs to deployment-owned observer configuration. V1 is a
