@@ -13,8 +13,8 @@ use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 use nq_profiles::{
     DetectorInput, DetectorReport, DetectorState, EVALUATOR_SOURCE_DIGEST, EvidenceWatermark,
     ProfileModule, ProfileSemanticId, ReportInput as ProfileReportInput, ScopeGrant,
-    SemanticReportStatus, ValidatedReport, ValidationContext, VantageGrant, profile_semantic_id,
-    profile_semantic_id_for_source,
+    SemanticCoverageState, SemanticReportStatus, ValidatedReport, ValidationContext, VantageGrant,
+    profile_semantic_id, profile_semantic_id_for_source,
 };
 use nq_protocol::{
     Capability, Checkpoint, CollectionBounds, HelperRequest, InstanceId, MonotonicClock,
@@ -1930,7 +1930,7 @@ struct DiagnosticEmissionContext {
     expected_scope: ScopeConfig,
     expected_vantage: VantageConfig,
     report_id: String,
-    report_complete: bool,
+    detector_input_complete: bool,
     passive_source_timing: Option<PassiveSourceTimingV1>,
 }
 
@@ -2045,7 +2045,7 @@ impl DiagnosticEmissionContext {
             evaluation,
             &inputs,
             &self.state_bindings,
-            self.report_complete,
+            self.detector_input_complete,
         )?;
 
         // The detector evaluation is the bounded semantic completion event.
@@ -2098,13 +2098,14 @@ fn diagnostic_result_from_evaluation(
     evaluation: &EvaluationEnvelopeV2,
     inputs: &DiagnosticInputAccountingV2,
     state_bindings: &[DiagnosticStateBindingV1],
-    report_complete: bool,
+    detector_input_complete: bool,
 ) -> Result<(Vec<DiagnosticClaimV2>, Option<String>, DiagnosticOutcomeV2), EngineError> {
     match evaluation.result.state {
         DetectorState::Present | DetectorState::ExplicitlyAbsent => {
-            if !report_complete {
+            if !detector_input_complete {
                 return Err(EngineError::Invariant(
-                    "determinate diagnostic result came from incomplete report coverage".into(),
+                    "determinate diagnostic result came from incomplete required detector coverage"
+                        .into(),
                 ));
             }
             let condition = match evaluation.result.state {
@@ -7541,6 +7542,7 @@ fn prepare_diagnostic_emission(
     let base = prepare_diagnostic_emission_base(
         node_id, watcher, profile, provider, request, run_id, capture, evaluator, selection,
     )?;
+    let detector_input_complete = diagnostic_required_coverage_complete(&base.question, validated)?;
     let normalized_document = canonical(normalized)?;
     let projected_artifact_placeholder = ProjectedArtifactId(nq_protocol::sha256_bytes(
         b"pending exact detector input projection",
@@ -7617,9 +7619,24 @@ fn prepare_diagnostic_emission(
         expected_scope: base.expected_scope,
         expected_vantage: base.expected_vantage,
         report_id: report_id.to_owned(),
-        report_complete: validated.status == SemanticReportStatus::Complete,
+        detector_input_complete,
         passive_source_timing: base.passive_source_timing,
     })
+}
+
+fn diagnostic_required_coverage_complete(
+    question: &SemanticIdentityV1,
+    report: &ValidatedReport,
+) -> Result<bool, EngineError> {
+    if question.id == INITIAL_DIAGNOSTIC_DETECTOR_ID
+        && question.version == INITIAL_DIAGNOSTIC_DETECTOR_VERSION.to_string()
+    {
+        return Ok(report.coverage.get("load") == Some(&SemanticCoverageState::Complete));
+    }
+    Err(EngineError::DiagnosticUnsupported(format!(
+        "diagnostic question {}/{} has no frozen required-coverage mapping",
+        question.id, question.version
+    )))
 }
 
 fn validate_diagnostic_source_timing(
@@ -11727,6 +11744,31 @@ mod tests {
         assert_eq!(
             passive,
             diagnostic_execution_clock(true).expect("reconstructed passive execution clock")
+        );
+    }
+
+    #[test]
+    fn passive_partial_report_has_complete_load_detector_coverage() {
+        let cutoff = Utc::now();
+        let (mut report, _, _) = passive_timing_fixture(cutoff - Duration::seconds(1), cutoff);
+        assert_eq!(report.status, SemanticReportStatus::Partial);
+        let detector = nq_profiles::host::MODULE.detectors()[0].descriptor();
+        let question = SemanticIdentityV1 {
+            id: detector.id.clone(),
+            version: detector.version.to_string(),
+            digest: Sha256Digest::parse(detector.digest().expect("detector digest"))
+                .expect("parsed detector digest"),
+        };
+        assert!(
+            diagnostic_required_coverage_complete(&question, &report)
+                .expect("frozen host load coverage mapping")
+        );
+        report
+            .coverage
+            .insert("load".into(), SemanticCoverageState::Partial);
+        assert!(
+            !diagnostic_required_coverage_complete(&question, &report)
+                .expect("frozen host load coverage mapping")
         );
     }
 
