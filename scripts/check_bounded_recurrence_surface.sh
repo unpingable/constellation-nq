@@ -71,4 +71,6 @@ if grep -Eqi 'cron|OnCalendar' "$timer"; then
   fail "calendar/cron cadence escaped into service-manager artifact"
 fi
 
+"$root/scripts/check_provider_operation_noninterference_surface.sh"
+
 echo "bounded-recurrence-surface: finite enrollment, exact slots, durable fencing, and wakeup/authority separation present"

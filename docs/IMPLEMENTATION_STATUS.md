@@ -126,6 +126,15 @@ The repository implements the stage-one operational spine:
   Schema v9 adds exact local-stdio provider-activity evidence and a separate
   reconciliation event that may release coordination while leaving the
   diagnostic outcome permanently unknown; it adds no force-clear path;
+- an exact provider-operation noninterference assessment for the deployed
+  `labelwatch-host-local` helper. The content-derived class binds the admitted
+  helper/profile/subject/vantage/coordinate and bounded kernel sources. Its
+  independent one-shot process and pipe custody qualifies local attribution,
+  but full overlap is not qualified: helper execution participates in the
+  scheduler state measured by `nq.host.load_pressure/v1`, and no provider
+  contract proves resource-safety with an indefinitely active prior helper.
+  This assessment adds no overlap flag or fence-narrowing runtime path, so live
+  A4 and its coordination domain remain fenced;
 - a native host profile/helper plus the conformance fixture profile;
 - strict, bounded `SystemSpecV1` validation and deterministic compilation into
   schema-domain-separated `ScopeCut` proposals, ratification-bound cuts,

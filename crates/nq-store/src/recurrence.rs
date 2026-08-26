@@ -4571,6 +4571,81 @@ mod tests {
     }
 
     #[test]
+    fn unqualified_provider_overlap_cannot_bypass_an_outcome_unknown_domain_fence() {
+        let policy = policy_with_second_watcher(true);
+        let mut store = activated_store(&policy);
+        let first = enrollment(&policy, 1_000);
+        let second = second_enrollment(&policy, 1_000);
+        store
+            .create_recurrence_enrollment(&first, &operator())
+            .expect("first enroll");
+        store
+            .create_recurrence_enrollment(&second, &operator())
+            .expect("second enroll");
+        let RecurrenceTickPlanV1::Ready {
+            acquisition,
+            fencing_epoch,
+            ..
+        } = store
+            .plan_recurrence_tick(&first.enrollment_id, &first.watcher_semantic_digest, 1_000)
+            .expect("first tick")
+        else {
+            panic!("first ready");
+        };
+        store
+            .commit_recurrence_provider_fence(&provider_fence(
+                &acquisition,
+                fencing_epoch,
+                1,
+                1_000,
+            ))
+            .expect("provider fence");
+        store
+            .finish_recurrence_acquisition(
+                &acquisition.acquisition_id,
+                "outcome_unknown",
+                1,
+                Some(fencing_epoch),
+                1_100,
+                serde_json::json!({"reason":"provider_activity_unknown"}),
+            )
+            .expect("unknown");
+
+        let blocked = store
+            .plan_recurrence_tick(
+                &second.enrollment_id,
+                &second.watcher_semantic_digest,
+                1_100,
+            )
+            .expect("coordination projection");
+        assert!(
+            matches!(
+                blocked,
+                RecurrenceTickPlanV1::CoordinationBlocked {
+                    ref holder_acquisition_id,
+                    ..
+                } if holder_acquisition_id == &acquisition.acquisition_id
+            ),
+            "a same-domain operation cannot turn an unqualified overlap claim into authority: {blocked:?}"
+        );
+        let second_status = store
+            .recurrence_status(&second.enrollment_id)
+            .expect("second status");
+        assert_eq!(
+            second_status.coordination_blocked_reason.as_deref(),
+            Some("outcome_unknown_domain_fence")
+        );
+        assert_eq!(
+            store
+                .recurrence_acquisition_state(&acquisition.acquisition_id)
+                .expect("state")
+                .expect("acquisition")
+                .event_kind,
+            "outcome_unknown"
+        );
+    }
+
+    #[test]
     fn policy_tightening_does_not_reinterpret_inflight_but_blocks_future_slots() {
         let first = policy();
         let mut store = activated_store(&first);

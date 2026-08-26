@@ -1,0 +1,140 @@
+{
+  "schema": "nq.provider_operation_noninterference_assessment.v1",
+  "operation_class_id": "sha256:e46d9c18ca22579a4e00ccfc92ad923b50a345016b7e0944c2818ddfd65d1fda",
+  "operation_class_basis": {
+    "schema": "nq.provider_operation_class_basis.v1",
+    "carrier": "stdio",
+    "provider_kind": "local_helper",
+    "provider_protocol_identity": "nq.helper.v1",
+    "provider_semantic_id": "sha256:a10a8e3da6234910ffe1c2f0a396b8481b7cc5340b78408ac5f0b9f0d7be0075",
+    "provider_artifact_digest": "sha256:a0665c7ec0d21dc321f4f7e9a08183787bce55c38e92603a1160f047bef993de",
+    "provider_execution_identity_digest": "sha256:24bcd1db4824f9aef3366982ad32755c078efe2294f8c1152c62208f039e1a23",
+    "provider_admission_id": "sha256:6ce60ff2e61247dae6ebdd0a16afdcf5f3b59e7aee5b45f4936b596b807e7b05",
+    "helper": {
+      "absolute_path": "/opt/nq-ng/linode-v3-20260824/bin/nq-host-helper",
+      "execution_principal": "nq-helper",
+      "fixed_argv": [],
+      "working_directory": "/opt/nq-ng/linode-v3-20260824/bin",
+      "process_model": "one_shot_process_group",
+      "stdout_model": "one_bounded_lf_terminated_json_frame",
+      "stderr_model": "bounded_diagnostic_only",
+      "network_endpoints": []
+    },
+    "profile": {
+      "id": "nq.host",
+      "version": "1",
+      "digest": "sha256:c8c10fed1cc5598d953b4defbc98e8c106fc59e035c249d43681698a5c7b4ff9",
+      "semantic_id": "sha256:382b8dac14ef9353a3603757d60fc8fbc727e1bcaf088c9aab4bdf895d3f6ab1",
+      "diagnostic_question": "nq.host.load_pressure/v1",
+      "normalized_load_threshold_millis": 2000
+    },
+    "binding": {
+      "watcher_instance_id": "labelwatch-host-local",
+      "watcher_semantic_digest": "sha256:ad9864e2e03f85a909f4f1078db2204fd53bc8d6516d29e1e5ece6f8e6bcb141",
+      "subject_ref": "host:labelwatch-host",
+      "scope": {
+        "kind": "host",
+        "value": {
+          "id": "labelwatch-host"
+        }
+      },
+      "vantage": {
+        "kind": "local",
+        "value": {}
+      },
+      "substrate_coordinate_ref": "substrate:linode-instance:v1:a09bf794e58b16779d67c84dc1e68d2dfb4bd6b0f3de7940df05a2dda9802e94"
+    },
+    "request": {
+      "granted_capabilities": [
+        "read_procfs",
+        "read_system_info"
+      ],
+      "deadline_ms": 30000,
+      "max_observations": 1,
+      "max_response_bytes": 1048576
+    },
+    "bounded_observation_methods": [
+      {
+        "method": "read_utf8",
+        "source": "/proc/uptime",
+        "maximum_bytes": 4096
+      },
+      {
+        "method": "read_utf8",
+        "source": "/proc/loadavg",
+        "maximum_bytes": 4096
+      },
+      {
+        "method": "gethostname",
+        "source": "linux_kernel_hostname"
+      },
+      {
+        "method": "std_thread_available_parallelism",
+        "source": "execution_environment_parallelism_estimate"
+      }
+    ],
+    "derived_proposition": "load_1m / cpu_count >= 2.000",
+    "acquisition_prerequisite": {
+      "origin_profile": "linode_instance_metadata_v1",
+      "note": "origin proof runs before this provider operation and is not provider-result custody"
+    }
+  },
+  "pair": {
+    "active_operation_class_id": "sha256:e46d9c18ca22579a4e00ccfc92ad923b50a345016b7e0944c2818ddfd65d1fda",
+    "candidate_operation_class_id": "sha256:e46d9c18ca22579a4e00ccfc92ad923b50a345016b7e0944c2818ddfd65d1fda",
+    "directionality": "not_qualified"
+  },
+  "dimensions": {
+    "world_state": {
+      "standing": "refuted",
+      "reason": "launching the helper creates scheduled work on the same host whose runnable and uninterruptible work contributes to the observed load average"
+    },
+    "evidence_attribution": {
+      "standing": "qualified_locally",
+      "reason": "each descriptor-bound one-shot launch has separate request identity, process group, stdout and stderr pipes, bounded capture, intake, and occurrence custody"
+    },
+    "semantics": {
+      "standing": "refuted",
+      "reason": "the inclusive load-pressure threshold can change when overlapping acquisition work perturbs load_1m"
+    },
+    "provider_safety": {
+      "standing": "unqualified",
+      "reason": "no contract proves that an indefinitely active prior helper plus another origin/helper acquisition cannot contend for scheduler, process, memory, or cgroup resources"
+    },
+    "local_runtime": {
+      "standing": "qualified_locally",
+      "reason": "the helper has no mutable files, shell, network endpoint, persistent process, shared session, or process-global cross-run state"
+    }
+  },
+  "overall_standing": "noninterference_not_qualified",
+  "blocking_dimensions": [
+    "world_state",
+    "semantics",
+    "provider_safety"
+  ],
+  "protocol_consequence": {
+    "a4_remains_outcome_unknown": true,
+    "a4_provider_activity_remains_unknown": true,
+    "coordination_domain_remains_fenced": true,
+    "future_same_class_overlap_permitted": false,
+    "deployment_may_override": false,
+    "new_acquisition_permitted": false
+  },
+  "authoritative_sources": [
+    {
+      "title": "Linux proc_loadavg(5)",
+      "url": "https://man7.org/linux/man-pages/man5/proc_loadavg.5.html",
+      "relied_upon_for": "load average includes runnable and uninterruptible jobs"
+    },
+    {
+      "title": "Linux kernel /proc filesystem documentation",
+      "url": "https://www.kernel.org/doc/html/latest/filesystems/proc.html",
+      "relied_upon_for": "loadavg and runnable-task semantics"
+    },
+    {
+      "title": "Rust std::thread::available_parallelism",
+      "url": "https://doc.rust-lang.org/stable/std/thread/fn.available_parallelism.html",
+      "relied_upon_for": "parallelism is an estimate and can reflect runtime resource constraints"
+    }
+  ]
+}

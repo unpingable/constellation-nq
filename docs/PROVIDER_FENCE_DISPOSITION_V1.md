@@ -119,6 +119,14 @@ If exact result custody and admissible provider-activity evidence are both
 unavailable, the only sound state is a dormant office with the domain still
 fenced.
 
+The exact `labelwatch-host-local` provider-boundary campaign subsequently
+tested whether qualified operation-class noninterference could narrow this
+fence without proving quiescence. It could not: the local helper process and
+its acquisition prelude participate in scheduler/resource state used by
+`nq.host.load_pressure/v1`. See
+`PROVIDER_OPERATION_NONINTERFERENCE_V1.md`. Partial stdout/process isolation is
+not sufficient to release or narrow the domain fence.
+
 > Coordination may resume when overlap risk is proven gone. That does not
 > rewrite epistemic history.
 

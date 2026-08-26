@@ -2,7 +2,9 @@
 
 use std::{
     io::Write,
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
+    sync::{Arc, Barrier},
+    thread,
 };
 
 use nq_profiles::{ProfileModule, ReportInput, ValidationContext, host};
@@ -13,10 +15,10 @@ use nq_protocol::{
 };
 use serde_json::json;
 
-fn request() -> HelperRequest {
+fn request(request_id: &str) -> HelperRequest {
     let descriptor = host::MODULE.descriptor();
     HelperRequest::builder(
-        RequestId::new("request:blackbox").unwrap(),
+        RequestId::new(request_id).unwrap(),
         InstanceId::new("instance:blackbox").unwrap(),
         ProfileBinding {
             id: ProfileId::new(host::PROFILE_ID).unwrap(),
@@ -47,20 +49,24 @@ fn request() -> HelperRequest {
     .unwrap()
 }
 
-fn invoke(frame: &[u8]) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_nq-host-helper"))
+fn spawn_helper() -> Child {
+    Command::new(env!("CARGO_BIN_EXE_nq-host-helper"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .unwrap();
+        .unwrap()
+}
+
+fn invoke(frame: &[u8]) -> std::process::Output {
+    let mut child = spawn_helper();
     child.stdin.take().unwrap().write_all(frame).unwrap();
     child.wait_with_output().unwrap()
 }
 
 #[test]
 fn shipped_binary_emits_one_admissible_local_host_report() {
-    let request = request();
+    let request = request("request:blackbox");
     let output = invoke(&encode_ndjson(&request).unwrap());
     assert!(
         output.status.success(),
@@ -84,6 +90,49 @@ fn shipped_binary_emits_one_admissible_local_host_report() {
     host::MODULE
         .validate(&context, &input)
         .expect("the compiled profile must admit first-party testimony");
+}
+
+#[test]
+fn concurrent_one_shot_helpers_keep_request_and_stdio_custody_separate() {
+    let barrier = Arc::new(Barrier::new(3));
+    let children = [spawn_helper(), spawn_helper()];
+    let handles = ["request:concurrent-one", "request:concurrent-two"]
+        .into_iter()
+        .zip(children)
+        .map(|(request_id, mut child)| {
+            let request = request(request_id);
+            let frame = encode_ndjson(&request).unwrap();
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                child.stdin.take().unwrap().write_all(&frame).unwrap();
+                (request, child.wait_with_output().unwrap())
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+
+    let mut outputs = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("helper worker must join"));
+    let (first_request, first) = outputs.next().unwrap();
+    let (second_request, second) = outputs.next().unwrap();
+    for (request, output) in [(&first_request, &first), (&second_request, &second)] {
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stderr.is_empty());
+        parse_response(request, &output.stdout)
+            .expect("each response must echo and validate against only its own request");
+    }
+    assert_ne!(
+        first.stdout, second.stdout,
+        "distinct request identities must remain visible in separately captured frames"
+    );
+    assert!(parse_response(&first_request, &second.stdout).is_err());
+    assert!(parse_response(&second_request, &first.stdout).is_err());
 }
 
 #[test]
