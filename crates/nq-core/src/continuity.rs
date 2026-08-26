@@ -770,6 +770,7 @@ mod tests {
             schedule: ScheduleConfig::default(),
             resources: ResourceLimits::default(),
             checkpoint_policy: CheckpointPolicy::Disabled,
+            passive_host_load_sample: None,
         }
     }
 

@@ -1,0 +1,30 @@
+[package]
+name = "nq-passive-load-helper"
+description = "Bounded passive load sampler and immutable-sample provider for NQ-ng"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+clap.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
+nix.workspace = true
+nq-build-info = { path = "../nq-build-info" }
+nq-profiles = { path = "../nq-profiles" }
+nq-protocol = { path = "../nq-protocol" }
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

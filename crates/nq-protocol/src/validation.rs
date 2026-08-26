@@ -122,6 +122,38 @@ pub fn validate_request(request: &HelperRequest) -> Result<(), ValidationError> 
             request.bounds.max_checkpoint_bytes as usize,
         )?;
     }
+    if let Some(selection) = &request.passive_host_load_sample {
+        if selection.schema != crate::PASSIVE_HOST_LOAD_SELECTION_SCHEMA_V1 {
+            return Err(invalid(
+                "passive_host_load_sample.schema",
+                "unsupported passive host-load selection schema",
+            ));
+        }
+        if selection.max_age_ms == 0 || selection.max_age_ms > 300_000 {
+            return Err(invalid(
+                "passive_host_load_sample.max_age_ms",
+                "must be between 1 and the nq.host/v1 300000ms reliance horizon",
+            ));
+        }
+        for (field, value) in [
+            (
+                "passive_host_load_sample.observer_profile",
+                selection.observer_profile.as_str(),
+            ),
+            (
+                "passive_host_load_sample.producer_issuer",
+                selection.producer_issuer.as_str(),
+            ),
+            (
+                "passive_host_load_sample.producer_key_id",
+                selection.producer_key_id.as_str(),
+            ),
+        ] {
+            if value.is_empty() || value.len() > 256 {
+                return Err(invalid(field, "must contain 1 through 256 UTF-8 bytes"));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -435,6 +467,9 @@ pub fn validate_exchange(
     }
     if response.echo.checkpoint != expected.checkpoint {
         return Err(echo("echo.checkpoint"));
+    }
+    if response.echo.passive_host_load_sample != expected.passive_host_load_sample {
+        return Err(echo("echo.passive_host_load_sample"));
     }
     if response.echo.deadline != expected.deadline {
         return Err(echo("echo.deadline"));

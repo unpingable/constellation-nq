@@ -2,12 +2,13 @@
 set -eu
 
 require_inactive() {
-    state=$(systemctl show --property=ActiveState --value nqd.service) || {
-        echo "nq-ng: cannot verify that nqd.service is inactive" >&2
+    unit=$1
+    state=$(systemctl show --property=ActiveState --value "$unit") || {
+        echo "nq-ng: cannot verify that $unit is inactive" >&2
         exit 1
     }
     if [ "$state" != "inactive" ]; then
-        echo "nq-ng: refusing package lifecycle operation: nqd.service is $state, not inactive" >&2
+        echo "nq-ng: refusing package lifecycle operation: $unit is $state, not inactive" >&2
         exit 1
     fi
 }
@@ -23,11 +24,15 @@ if [ -d /run/systemd/system ]; then
             # Replacing a running evidence engine is unsafe. Keep enablement,
             # but require explicit schema verification and restart afterward.
             systemctl stop nqd.service
-            require_inactive
+            systemctl stop nq-passive-load-observer.service
+            require_inactive nqd.service
+            require_inactive nq-passive-load-observer.service
             ;;
         remove|deconfigure)
             systemctl disable --now nqd.service
-            require_inactive
+            systemctl stop nq-passive-load-observer.service
+            require_inactive nqd.service
+            require_inactive nq-passive-load-observer.service
             ;;
     esac
 fi

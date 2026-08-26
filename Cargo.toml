@@ -11,6 +11,7 @@ members = [
     "crates/nq-app",
     "crates/nq-host-helper",
     "crates/nq-linode-origin-helper",
+    "crates/nq-passive-load-helper",
 ]
 
 [workspace.package]

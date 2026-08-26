@@ -135,6 +135,16 @@ The repository implements the stage-one operational spine:
   contract proves resource-safety with an indefinitely active prior helper.
   This assessment adds no overlap flag or fence-narrowing runtime path, so live
   A4 and its coordination domain remain fenced;
+- a closed passive load-sample boundary for the unchanged
+  `nq.host.load_pressure/v1` formula. A finite independently scheduled
+  long-lived sampler records signed immutable raw `/proc/loadavg` and Rust
+  `available_parallelism()` facts. A separately admitted retrieval helper may
+  consume only an exact sample predating an NQ-owned pre-launch cutoff; NQ
+  independently verifies sample signature, subject/vantage/capacity context,
+  implementation/config identity, and age before applying the existing
+  inclusive `2.000` evaluator. Ordinary helpers retain the execution-interval
+  timing law, replay never resamples, and no missing-sample fallback exists.
+  Historical A4 remains unresolved under the old provider boundary;
 - a native host profile/helper plus the conformance fixture profile;
 - strict, bounded `SystemSpecV1` validation and deterministic compilation into
   schema-domain-separated `ScopeCut` proposals, ratification-bound cuts,

@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
+use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 use nq_profiles::{
     DetectorInput, DetectorReport, DetectorState, EVALUATOR_SOURCE_DIGEST, EvidenceWatermark,
     ProfileModule, ProfileSemanticId, ReportInput as ProfileReportInput, ScopeGrant,
@@ -1825,6 +1826,14 @@ struct DiagnosticEmissionBase {
     expected_instance_id: String,
     expected_scope: ScopeConfig,
     expected_vantage: VantageConfig,
+    passive_source_timing: Option<PassiveSourceTimingV1>,
+}
+
+#[derive(Clone)]
+struct PassiveSourceTimingV1 {
+    selection: nq_protocol::PassiveHostLoadSampleSelectionV1,
+    producer_public_key_hex: String,
+    expected_binding: SubjectBinding,
 }
 
 impl DiagnosticEmissionBase {
@@ -1909,6 +1918,7 @@ struct DiagnosticEmissionContext {
     expected_vantage: VantageConfig,
     report_id: String,
     report_complete: bool,
+    passive_source_timing: Option<PassiveSourceTimingV1>,
 }
 
 impl DiagnosticEmissionContext {
@@ -1953,22 +1963,11 @@ impl DiagnosticEmissionContext {
                 "detector input occurrence differs from the diagnostic emission context".into(),
             ));
         }
-        if detector_report.report.observed_at < self.attempt_interval.started_at
-            || detector_report.report.observed_at > self.attempt_interval.ended_at
-            || detector_report
-                .report
-                .observations
-                .iter()
-                .any(|observation| {
-                    observation.observed_at < self.attempt_interval.started_at
-                        || observation.observed_at > self.attempt_interval.ended_at
-                })
-        {
-            return Err(EngineError::DiagnosticUnsupported(
-                "source observation time is not bounded by the NQ-owned helper execution interval"
-                    .into(),
-            ));
-        }
+        validate_diagnostic_source_timing(
+            self.passive_source_timing.as_ref(),
+            &detector_report.report,
+            &self.attempt_interval,
+        )?;
 
         let report_sequence = evaluation.watermark.max_report_sequence;
         let projection_document = canonical(&json!({
@@ -6853,6 +6852,30 @@ fn build_request(
     let digest = descriptor
         .digest()
         .map_err(|error| EngineError::Canonical(error.to_string()))?;
+    let passive_host_load_sample = if let Some(passive) = &watcher.passive_host_load_sample {
+        let public_key = hex::decode(&passive.producer_public_key_hex).map_err(|error| {
+            EngineError::Invariant(format!(
+                "passive producer public key cannot decode: {error}"
+            ))
+        })?;
+        Some(nq_protocol::PassiveHostLoadSampleSelectionV1 {
+            schema: nq_protocol::PASSIVE_HOST_LOAD_SELECTION_SCHEMA_V1.into(),
+            cutoff_at: Utc::now(),
+            max_age_ms: passive.max_sample_age_ms,
+            observer_profile: passive.observer_profile.clone(),
+            observer_artifact_digest: Sha256Digest::parse(passive.observer_artifact_digest.clone())
+                .map_err(|error| EngineError::Invariant(error.to_string()))?,
+            observer_config_digest: Sha256Digest::parse(passive.observer_config_digest.clone())
+                .map_err(|error| EngineError::Invariant(error.to_string()))?,
+            producer_issuer: passive.producer_issuer.clone(),
+            producer_key_id: passive.producer_key_id.clone(),
+            producer_public_key_digest: nq_protocol::sha256_bytes(&public_key),
+            capacity_context_id: Sha256Digest::parse(passive.capacity_context_id.clone())
+                .map_err(|error| EngineError::Invariant(error.to_string()))?,
+        })
+    } else {
+        None
+    };
     let request = HelperRequest {
         schema: nq_protocol::HELPER_REQUEST_SCHEMA.into(),
         protocol_version: nq_protocol::HELPER_PROTOCOL_VERSION.into(),
@@ -6880,6 +6903,7 @@ fn build_request(
             .map(|capability| token(Capability::new(capability.clone())))
             .collect::<Result<_, _>>()?,
         checkpoint,
+        passive_host_load_sample,
         deadline: MonotonicDeadline {
             clock: MonotonicClock::LinuxBoottime,
             expires_at_ns: boottime_ns()?
@@ -7189,15 +7213,43 @@ fn prepare_diagnostic_emission_base(
             ],
         }),
     )?;
-    let execution_clock = semantic_identity(
-        "nq.local_linux_realtime",
-        "1",
-        &json!({
-            "schema": "nq.local_linux_realtime.v1",
-            "source": "CLOCK_REALTIME through chrono::Utc",
-            "relationship": "NQ bounds the local helper invocation; admitted source times must fall inside that interval",
+    let passive_source_timing = match (
+        &watcher.passive_host_load_sample,
+        &request.passive_host_load_sample,
+    ) {
+        (None, None) => None,
+        (Some(config), Some(selection)) => Some(PassiveSourceTimingV1 {
+            selection: selection.clone(),
+            producer_public_key_hex: config.producer_public_key_hex.clone(),
+            expected_binding: request.binding.clone(),
         }),
-    )?;
+        _ => {
+            return Err(EngineError::Invariant(
+                "passive source timing differs between watcher and exact helper request".into(),
+            ));
+        }
+    };
+    let execution_clock = if passive_source_timing.is_some() {
+        semantic_identity(
+            "nq.local_linux_realtime_preexisting_passive_sample",
+            "1",
+            &json!({
+                "schema": "nq.local_linux_realtime_preexisting_passive_sample.v1",
+                "source": "CLOCK_REALTIME through chrono::Utc",
+                "relationship": "the exact source sample must predate the NQ-owned request cutoff and remain within its closed age bound",
+            }),
+        )?
+    } else {
+        semantic_identity(
+            "nq.local_linux_realtime",
+            "1",
+            &json!({
+                "schema": "nq.local_linux_realtime.v1",
+                "source": "CLOCK_REALTIME through chrono::Utc",
+                "relationship": "NQ bounds the local helper invocation; admitted source times must fall inside that interval",
+            }),
+        )?
+    };
     let capture_policy = semantic_identity(
         "nq.capture.exact_provider_response",
         "1",
@@ -7217,6 +7269,14 @@ fn prepare_diagnostic_emission_base(
         }),
     )?;
     let selection_rule = diagnostic_selection_rule(&question, selection)?;
+    let mut limitations = historical_surface.limitations;
+    if passive_source_timing.is_some() {
+        limitations.push(DiagnosticLimitationV1 {
+            kind: DiagnosticLimitationKindV1::Other,
+            code: "passive_observer_effect_bounded_not_zero".to_owned(),
+            detail: "the independently scheduled sampler has qualified bounded overhead; it is part of the observed deployment and is not physically free".to_owned(),
+        });
+    }
     Ok(DiagnosticEmissionBase {
         producer: DiagnosticProducerV1 {
             node_id: node_id.to_owned(),
@@ -7253,13 +7313,14 @@ fn prepare_diagnostic_emission_base(
         admission_rule,
         normalization_rule: historical_surface.normalization_rule,
         selection_rule,
-        limitations: historical_surface.limitations,
+        limitations,
         nonclaims: historical_surface.nonclaims,
         expected_evaluator_artifact_digest: evaluator.artifact_digest().clone(),
         expected_profile_semantic_id: profile_semantic,
         expected_instance_id: watcher.instance_id.clone(),
         expected_scope: watcher.scope.clone(),
         expected_vantage: watcher.vantage.clone(),
+        passive_source_timing,
     })
 }
 
@@ -7534,7 +7595,119 @@ fn prepare_diagnostic_emission(
         expected_vantage: base.expected_vantage,
         report_id: report_id.to_owned(),
         report_complete: validated.status == SemanticReportStatus::Complete,
+        passive_source_timing: base.passive_source_timing,
     })
+}
+
+fn validate_diagnostic_source_timing(
+    passive: Option<&PassiveSourceTimingV1>,
+    report: &ValidatedReport,
+    attempt: &AcquisitionIntervalV2,
+) -> Result<(), EngineError> {
+    let embedded = report
+        .observations
+        .first()
+        .and_then(|observation| observation.payload.get("passive_sample"))
+        .cloned();
+    match (passive, embedded) {
+        (None, None) => {
+            if report.observed_at < attempt.started_at
+                || report.observed_at > attempt.ended_at
+                || report.observations.iter().any(|observation| {
+                    observation.observed_at < attempt.started_at
+                        || observation.observed_at > attempt.ended_at
+                })
+            {
+                return Err(EngineError::DiagnosticUnsupported(
+                    "source observation time is not bounded by the NQ-owned helper execution interval"
+                        .into(),
+                ));
+            }
+            Ok(())
+        }
+        (None, Some(_)) => Err(EngineError::DiagnosticUnsupported(
+            "ordinary diagnostic acquisition cannot consume passive sample custody".into(),
+        )),
+        (Some(_), None) => Err(EngineError::DiagnosticUnsupported(
+            "passive diagnostic acquisition requires exact signed sample custody".into(),
+        )),
+        (Some(passive), Some(value)) => {
+            validate_passive_diagnostic_source_timing(passive, report, attempt, value)
+        }
+    }
+}
+
+fn validate_passive_diagnostic_source_timing(
+    passive: &PassiveSourceTimingV1,
+    report: &ValidatedReport,
+    attempt: &AcquisitionIntervalV2,
+    value: Value,
+) -> Result<(), EngineError> {
+    let sample: nq_protocol::SignedPassiveHostLoadSampleV1 = serde_json::from_value(value)
+        .map_err(|error| {
+            EngineError::DiagnosticUnsupported(format!(
+                "passive sample custody cannot decode: {error}"
+            ))
+        })?;
+    sample.validate_structure().map_err(|error| {
+        EngineError::DiagnosticUnsupported(format!("passive sample custody is invalid: {error}"))
+    })?;
+    let selection = &passive.selection;
+    let public_key = hex::decode(&passive.producer_public_key_hex).map_err(|error| {
+        EngineError::Invariant(format!(
+            "passive producer public key cannot decode: {error}"
+        ))
+    })?;
+    let public_key: [u8; 32] = public_key.try_into().map_err(|_| {
+        EngineError::Invariant("passive producer public key is not 32 bytes".into())
+    })?;
+    if nq_protocol::sha256_bytes(&public_key) != selection.producer_public_key_digest
+        || sample.producer_issuer != selection.producer_issuer
+        || sample.producer_key_id != selection.producer_key_id
+        || sample.payload.observer_profile != selection.observer_profile
+        || sample.payload.observer_artifact_digest != selection.observer_artifact_digest
+        || sample.payload.observer_config_digest != selection.observer_config_digest
+        || sample.payload.capacity_context_id != selection.capacity_context_id
+        || sample.payload.binding != passive.expected_binding
+        || sample.payload.observed_at != report.observed_at
+        || report
+            .observations
+            .iter()
+            .any(|observation| observation.observed_at != report.observed_at)
+    {
+        return Err(EngineError::DiagnosticUnsupported(
+            "passive sample differs from its exact request, report, or deployment binding".into(),
+        ));
+    }
+    let signature = hex::decode(&sample.signature).map_err(|error| {
+        EngineError::DiagnosticUnsupported(format!(
+            "passive sample signature cannot decode: {error}"
+        ))
+    })?;
+    let signature: [u8; 64] = signature.try_into().map_err(|_| {
+        EngineError::DiagnosticUnsupported("passive sample signature is not 64 bytes".into())
+    })?;
+    VerifyingKey::from_bytes(&public_key)
+        .map_err(|_| EngineError::Invariant("passive producer public key is invalid".into()))?
+        .verify(
+            sample.payload_digest.as_str().as_bytes(),
+            &Signature::from_bytes(&signature),
+        )
+        .map_err(|_| {
+            EngineError::DiagnosticUnsupported("passive sample signature is not authentic".into())
+        })?;
+    let age = selection
+        .cutoff_at
+        .signed_duration_since(sample.payload.observed_at);
+    if age < Duration::zero()
+        || u64::try_from(age.num_milliseconds()).unwrap_or(u64::MAX) > selection.max_age_ms
+        || selection.cutoff_at > attempt.started_at
+    {
+        return Err(EngineError::DiagnosticUnsupported(
+            "passive sample is future, stale, or was not fixed before provider launch".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn store_report(
@@ -11236,6 +11409,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::os::unix::fs::PermissionsExt;
 
+    use ed25519_dalek::{Signer as _, SigningKey};
     use nq_helper_sandbox::ExecutionAccount;
 
     use crate::admission::{ADMISSION_SCHEMA, AdmittedProfile, OperatorIdentity};
@@ -11248,6 +11422,211 @@ mod tests {
     };
 
     use super::*;
+
+    #[allow(clippy::too_many_lines)]
+    fn passive_timing_fixture(
+        sample_time: DateTime<Utc>,
+        cutoff: DateTime<Utc>,
+    ) -> (
+        ValidatedReport,
+        PassiveSourceTimingV1,
+        AcquisitionIntervalV2,
+    ) {
+        let key = SigningKey::from_bytes(&[31_u8; 32]);
+        let binding = SubjectBinding {
+            subject: SubjectId::new("host:passive-timing").unwrap(),
+            scope: ScopeBinding {
+                kind: ScopeKind::new("host").unwrap(),
+                value: json!({"id": "passive-timing"}),
+            },
+            vantage: VantageBinding {
+                kind: VantageKind::new("local").unwrap(),
+                value: json!({}),
+            },
+        };
+        let capacity_context_id = nq_protocol::sha256_bytes(b"capacity-context");
+        let observer_artifact_digest = nq_protocol::sha256_bytes(b"observer-artifact");
+        let observer_config_digest = nq_protocol::sha256_bytes(b"observer-config");
+        let payload = nq_protocol::PassiveHostLoadSamplePayloadV1 {
+            schema: nq_protocol::PASSIVE_HOST_LOAD_SAMPLE_PAYLOAD_SCHEMA_V1.into(),
+            sample_occurrence_id: "sample:timing-fixture".into(),
+            binding: binding.clone(),
+            observed_at: sample_time,
+            sequence: 1,
+            observer_run_id: "observer-run:timing-fixture".into(),
+            observer_profile: "nq.host_load_passive_sampler.v1".into(),
+            observer_artifact_digest: observer_artifact_digest.clone(),
+            observer_config_digest: observer_config_digest.clone(),
+            load_1m_token: "8.000".into(),
+            logical_cpu_count: 4,
+            source_basis: "linux_proc_loadavg_plus_rust_available_parallelism_v1".into(),
+            capacity_context_id: capacity_context_id.clone(),
+        };
+        let payload_digest = nq_protocol::semantic_digest(&payload).unwrap();
+        let sample = nq_protocol::SignedPassiveHostLoadSampleV1 {
+            schema: nq_protocol::SIGNED_PASSIVE_HOST_LOAD_SAMPLE_SCHEMA_V1.into(),
+            payload,
+            payload_digest: payload_digest.clone(),
+            producer_issuer: "fixture.passive-observer".into(),
+            producer_key_id: "fixture-key-1".into(),
+            signature: hex::encode(key.sign(payload_digest.as_str().as_bytes()).to_bytes()),
+        };
+        let descriptor = nq_profiles::host::MODULE.descriptor();
+        let request = HelperRequest::builder(
+            RequestId::new("request-passive-timing").unwrap(),
+            InstanceId::new("passive-timing").unwrap(),
+            ProfileBinding {
+                id: ProfileId::new(nq_profiles::host::PROFILE_ID).unwrap(),
+                version: ProfileVersion::new(nq_profiles::host::PROFILE_VERSION.to_string())
+                    .unwrap(),
+                digest: Sha256Digest::parse(descriptor.digest().unwrap().as_str().to_owned())
+                    .unwrap(),
+            },
+            binding.clone(),
+            MonotonicDeadline {
+                clock: MonotonicClock::LinuxBoottime,
+                expires_at_ns: 1,
+            },
+        )
+        .capabilities(vec![
+            Capability::new("read_procfs").unwrap(),
+            Capability::new("read_system_info").unwrap(),
+        ])
+        .build()
+        .unwrap();
+        let report = nq_protocol::EvidenceReport::builder(
+            request.profile.clone(),
+            binding.clone(),
+            sample_time,
+            nq_protocol::ReportStatus::Partial,
+            nq_protocol::BackendProvenance {
+                implementation: nq_protocol::BackendIdentity {
+                    name: nq_protocol::ImplementationName::new("passive-timing-fixture").unwrap(),
+                    version: Some("1".into()),
+                    digest: None,
+                },
+                tools: Vec::new(),
+            },
+        )
+        .coverage(nq_protocol::CoverageDeclaration {
+            kind: nq_protocol::CoverageKind::new("host_identity").unwrap(),
+            subject: None,
+            state: nq_protocol::CoverageState::Unavailable,
+            detail: None,
+        })
+        .coverage(nq_protocol::CoverageDeclaration {
+            kind: nq_protocol::CoverageKind::new("uptime").unwrap(),
+            subject: None,
+            state: nq_protocol::CoverageState::Unavailable,
+            detail: None,
+        })
+        .coverage(nq_protocol::CoverageDeclaration {
+            kind: nq_protocol::CoverageKind::new("load").unwrap(),
+            subject: None,
+            state: nq_protocol::CoverageState::Complete,
+            detail: None,
+        })
+        .observed_payload(
+            nq_protocol::ObservationKind::new("host_snapshot").unwrap(),
+            binding.subject.clone(),
+            sample_time,
+            json!({
+                "evidence_basis": {
+                    "scope": binding.scope,
+                    "vantage": binding.vantage,
+                    "access_path": "procfs_sysinfo",
+                    "basis": "kernel_snapshot",
+                    "regime": "normal",
+                    "capabilities_used": ["read_procfs", "read_system_info"],
+                },
+                "hostname": null,
+                "uptime_seconds": null,
+                "cpu_count": 4,
+                "load_1m": 8.0,
+                "passive_sample": sample,
+            }),
+        )
+        .used_capability(Capability::new("read_procfs").unwrap())
+        .used_capability(Capability::new("read_system_info").unwrap())
+        .error(nq_protocol::ReportError {
+            code: nq_protocol::ErrorCode::new("passive_load_only_scope").unwrap(),
+            severity: nq_protocol::ErrorSeverity::Warning,
+            message: "passive fixture intentionally omits hostname and uptime".into(),
+            subject: None,
+            observation_ordinal: Some(0),
+            retriable: false,
+        })
+        .build()
+        .unwrap();
+        let normalized = ProfileReportInput::from_protocol_with_digest(&report).unwrap();
+        let validated = nq_profiles::host::MODULE
+            .validate(
+                &ValidationContext::from_request(&request, cutoff, Duration::seconds(60)),
+                &normalized,
+            )
+            .unwrap();
+        let public = key.verifying_key().to_bytes();
+        let timing = PassiveSourceTimingV1 {
+            selection: nq_protocol::PassiveHostLoadSampleSelectionV1 {
+                schema: nq_protocol::PASSIVE_HOST_LOAD_SELECTION_SCHEMA_V1.into(),
+                cutoff_at: cutoff,
+                max_age_ms: 60_000,
+                observer_profile: "nq.host_load_passive_sampler.v1".into(),
+                observer_artifact_digest,
+                observer_config_digest,
+                producer_issuer: "fixture.passive-observer".into(),
+                producer_key_id: "fixture-key-1".into(),
+                producer_public_key_digest: nq_protocol::sha256_bytes(&public),
+                capacity_context_id,
+            },
+            producer_public_key_hex: hex::encode(public),
+            expected_binding: binding,
+        };
+        let clock = SemanticIdentityV1 {
+            id: "clock.fixture".into(),
+            version: "1".into(),
+            digest: nq_protocol::sha256_bytes(b"clock.fixture"),
+        };
+        let attempt = AcquisitionIntervalV2 {
+            started_at: cutoff + Duration::milliseconds(1),
+            ended_at: cutoff + Duration::milliseconds(2),
+            clock,
+            qualification: ClockQualificationV2::Unqualified {
+                code: "fixture".into(),
+                detail: "fixture".into(),
+            },
+        };
+        (validated, timing, attempt)
+    }
+
+    #[test]
+    fn passive_timing_accepts_only_exact_authenticated_preexisting_sample() {
+        let cutoff = Utc::now();
+        let sample_time = cutoff - Duration::seconds(1);
+        let (report, timing, attempt) = passive_timing_fixture(sample_time, cutoff);
+        validate_diagnostic_source_timing(Some(&timing), &report, &attempt).unwrap();
+        let ordinary = validate_diagnostic_source_timing(None, &report, &attempt).unwrap_err();
+        assert!(
+            ordinary
+                .to_string()
+                .contains("ordinary diagnostic acquisition")
+        );
+    }
+
+    #[test]
+    fn passive_timing_refuses_stale_future_and_substituted_bindings() {
+        let cutoff = Utc::now();
+        let (stale, timing, attempt) =
+            passive_timing_fixture(cutoff - Duration::seconds(61), cutoff);
+        assert!(validate_diagnostic_source_timing(Some(&timing), &stale, &attempt).is_err());
+        let (future, timing, attempt) =
+            passive_timing_fixture(cutoff + Duration::milliseconds(1), cutoff);
+        assert!(validate_diagnostic_source_timing(Some(&timing), &future, &attempt).is_err());
+        let (valid, mut timing, attempt) =
+            passive_timing_fixture(cutoff - Duration::seconds(1), cutoff);
+        timing.selection.producer_key_id = "wrong-key".into();
+        assert!(validate_diagnostic_source_timing(Some(&timing), &valid, &attempt).is_err());
+    }
 
     #[test]
     fn local_stdio_quiescence_claims_are_closed_and_ambiguous_outcomes_fail_closed() {
@@ -12864,6 +13243,7 @@ sys.stdout.write("\n")
             schedule: ScheduleConfig::default(),
             resources: ResourceLimits::default(),
             checkpoint_policy: CheckpointPolicy::Disabled,
+            passive_host_load_sample: None,
         };
         let config = NqConfig {
             schema: crate::config::CONFIG_SCHEMA.to_owned(),
@@ -12941,6 +13321,7 @@ sys.stdout.write("\n")
             schedule: ScheduleConfig::default(),
             resources: ResourceLimits::default(),
             checkpoint_policy: CheckpointPolicy::Disabled,
+            passive_host_load_sample: None,
         };
         let config = NqConfig {
             schema: crate::config::CONFIG_SCHEMA.to_owned(),

@@ -6,3 +6,5 @@ d /var/lib/nq/backups         0700 nq   nq    -   -
 d /run/nq                     0751 nq   nq    -   -
 d /run/nq/helpers             0711 nq   nq    -   -
 d /var/lib/nq-origin-helper   0700 nq-origin-helper nq-origin-helper - -
+d /var/lib/nq-passive-load   0750 nq-passive-load-observer nq-passive-load-reader - -
+d /var/lib/nq-passive-load/samples 2750 nq-passive-load-observer nq-passive-load-reader - -

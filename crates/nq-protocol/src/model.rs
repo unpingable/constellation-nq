@@ -163,6 +163,13 @@ pub struct HelperRequest {
     /// Existing committed cursor, if this profile supports polling.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<Checkpoint>,
+    /// Closed selection law for the one qualified passive host-load source.
+    ///
+    /// Ordinary helpers never receive this field. Its cutoff is fixed by NQ
+    /// before provider launch, so a helper cannot turn an acquisition-triggered
+    /// measurement into a nominally pre-existing sample.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub passive_host_load_sample: Option<PassiveHostLoadSampleSelectionV1>,
     /// Deadline that the helper must not extend.
     pub deadline: MonotonicDeadline,
     /// Cardinality and response bounds.
@@ -202,6 +209,9 @@ pub struct RequestEcho {
     /// Original checkpoint, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<Checkpoint>,
+    /// Exact passive host-load selection law from the request, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub passive_host_load_sample: Option<PassiveHostLoadSampleSelectionV1>,
     /// Original absolute deadline.
     pub deadline: MonotonicDeadline,
     /// Original negotiated bounds.
@@ -218,9 +228,168 @@ impl From<&HelperRequest> for RequestEcho {
             binding: request.binding.clone(),
             granted_capabilities: request.granted_capabilities.clone(),
             checkpoint: request.checkpoint.clone(),
+            passive_host_load_sample: request.passive_host_load_sample.clone(),
             deadline: request.deadline.clone(),
             bounds: request.bounds.clone(),
         }
+    }
+}
+
+/// Request-controlled selector for the closed passive host-load sample family.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PassiveHostLoadSampleSelectionV1 {
+    /// Must be [`crate::PASSIVE_HOST_LOAD_SELECTION_SCHEMA_V1`].
+    pub schema: String,
+    /// Latest permissible source-observation time, fixed before provider launch.
+    pub cutoff_at: DateTime<Utc>,
+    /// Maximum permitted age at `cutoff_at`.
+    pub max_age_ms: u64,
+    /// Exact admitted passive-observer profile.
+    pub observer_profile: String,
+    /// Exact deployed sampler executable bytes.
+    pub observer_artifact_digest: Sha256Digest,
+    /// Exact deployed sampler configuration bytes.
+    pub observer_config_digest: Sha256Digest,
+    /// Exact expected sample producer issuer.
+    pub producer_issuer: String,
+    /// Exact expected sample producer key identity.
+    pub producer_key_id: String,
+    /// SHA-256 digest of the expected Ed25519 public key bytes.
+    pub producer_public_key_digest: Sha256Digest,
+    /// Qualified execution-context identity for `available_parallelism()`.
+    pub capacity_context_id: Sha256Digest,
+}
+
+/// Unsigned, immutable raw facts produced by the bounded passive sampler.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PassiveHostLoadSamplePayloadV1 {
+    /// Must be [`crate::PASSIVE_HOST_LOAD_SAMPLE_PAYLOAD_SCHEMA_V1`].
+    pub schema: String,
+    /// Unique occurrence identity assigned by the observer.
+    pub sample_occurrence_id: String,
+    /// Exact independently configured subject, scope, and vantage.
+    pub binding: SubjectBinding,
+    /// Actual wall-clock sampling time, never retrieval or acquisition time.
+    pub observed_at: DateTime<Utc>,
+    /// Monotonic sequence within the finite append-only sample store.
+    pub sequence: u64,
+    /// Observer-process occurrence; restart creates a new value, not missed samples.
+    pub observer_run_id: String,
+    /// Exact closed observer profile.
+    pub observer_profile: String,
+    /// Exact deployed observer executable digest.
+    pub observer_artifact_digest: Sha256Digest,
+    /// Exact deployed observer configuration digest.
+    pub observer_config_digest: Sha256Digest,
+    /// Raw first token read from `/proc/loadavg`.
+    pub load_1m_token: String,
+    /// Exact value returned by Rust `available_parallelism()`.
+    pub logical_cpu_count: u32,
+    /// Fixed semantic source identifier for the two raw quantities.
+    pub source_basis: String,
+    /// Qualified execution context for `available_parallelism()` and local vantage.
+    pub capacity_context_id: Sha256Digest,
+}
+
+/// Ed25519-authenticated passive host-load sample occurrence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignedPassiveHostLoadSampleV1 {
+    /// Must be [`crate::SIGNED_PASSIVE_HOST_LOAD_SAMPLE_SCHEMA_V1`].
+    pub schema: String,
+    /// Exact raw facts and occurrence binding.
+    pub payload: PassiveHostLoadSamplePayloadV1,
+    /// Canonical SHA-256 digest of `payload`; this is the sample replay identity.
+    pub payload_digest: Sha256Digest,
+    /// Authenticated deployment-owned sample producer identity.
+    pub producer_issuer: String,
+    /// Exact producer key identity.
+    pub producer_key_id: String,
+    /// Lowercase hexadecimal Ed25519 signature over the payload digest bytes.
+    pub signature: String,
+}
+
+impl PassiveHostLoadSamplePayloadV1 {
+    /// Validate the closed raw-fact shape without assigning trust to it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable explanatory string for malformed or semantically
+    /// impossible sample fields.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema != crate::PASSIVE_HOST_LOAD_SAMPLE_PAYLOAD_SCHEMA_V1 {
+            return Err("unsupported passive host-load payload schema".into());
+        }
+        for (field, value) in [
+            ("sample_occurrence_id", self.sample_occurrence_id.as_str()),
+            ("observer_run_id", self.observer_run_id.as_str()),
+            ("observer_profile", self.observer_profile.as_str()),
+        ] {
+            if value.is_empty() || value.len() > 256 {
+                return Err(format!("{field} must contain 1 through 256 UTF-8 bytes"));
+            }
+        }
+        if self.sequence == 0 {
+            return Err("passive host-load sample sequence must be non-zero".into());
+        }
+        if self.observer_profile != "nq.host_load_passive_sampler.v1" {
+            return Err("unsupported passive host-load observer profile".into());
+        }
+        if self.source_basis != "linux_proc_loadavg_plus_rust_available_parallelism_v1" {
+            return Err("unsupported passive host-load source basis".into());
+        }
+        if self.load_1m_token.is_empty() || self.load_1m_token.len() > 64 {
+            return Err("load_1m_token must contain 1 through 64 bytes".into());
+        }
+        let load = self
+            .load_1m_token
+            .parse::<f64>()
+            .map_err(|error| format!("load_1m_token is not a decimal float: {error}"))?;
+        if !load.is_finite() || load.is_sign_negative() {
+            return Err("load_1m_token must be finite and non-negative".into());
+        }
+        if self.logical_cpu_count == 0 {
+            return Err("logical_cpu_count must be non-zero".into());
+        }
+        Ok(())
+    }
+}
+
+impl SignedPassiveHostLoadSampleV1 {
+    /// Validate the content-derived occurrence identity and signed-envelope
+    /// shape. Signature authenticity is verified by the admitted provider and
+    /// independently by NQ against deployment-pinned key material.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable explanatory string on malformed or substituted input.
+    pub fn validate_structure(&self) -> Result<(), String> {
+        if self.schema != crate::SIGNED_PASSIVE_HOST_LOAD_SAMPLE_SCHEMA_V1 {
+            return Err("unsupported signed passive host-load sample schema".into());
+        }
+        self.payload.validate()?;
+        for (field, value) in [
+            ("producer_issuer", self.producer_issuer.as_str()),
+            ("producer_key_id", self.producer_key_id.as_str()),
+        ] {
+            if value.is_empty() || value.len() > 256 {
+                return Err(format!("{field} must contain 1 through 256 UTF-8 bytes"));
+            }
+        }
+        let expected = crate::semantic_digest(&self.payload)
+            .map_err(|error| format!("passive sample payload cannot canonicalize: {error}"))?;
+        if expected != self.payload_digest {
+            return Err("passive sample payload digest was substituted".into());
+        }
+        if self.signature.len() != 128
+            || self.signature != self.signature.to_ascii_lowercase()
+            || !self.signature.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("passive sample signature must be 64 lowercase hexadecimal bytes".into());
+        }
+        Ok(())
     }
 }
 

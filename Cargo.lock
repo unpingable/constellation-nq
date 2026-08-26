@@ -703,6 +703,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "nq-passive-load-helper"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "ed25519-dalek",
+ "hex",
+ "nix",
+ "nq-build-info",
+ "nq-profiles",
+ "nq-protocol",
+ "rand",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "toml 0.8.23",
+ "uuid",
+]
+
+[[package]]
 name = "nq-profiles"
 version = "0.1.0"
 dependencies = [

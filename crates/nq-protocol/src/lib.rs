@@ -32,9 +32,10 @@ pub use ids::{
 pub use model::{
     BackendIdentity, BackendProvenance, Checkpoint, CollectionBounds, CoverageDeclaration,
     CoverageState, ErrorSeverity, EvidenceReport, HelperRequest, HelperResponse, MonotonicClock,
-    MonotonicDeadline, Observation, ProfileBinding, Refusal, RefusalBoundary, RefusalCode,
-    ReportError, ReportStatus, RequestEcho, ResponseOutcome, ScopeBinding, SubjectBinding,
-    VantageBinding,
+    MonotonicDeadline, Observation, PassiveHostLoadSamplePayloadV1,
+    PassiveHostLoadSampleSelectionV1, ProfileBinding, Refusal, RefusalBoundary, RefusalCode,
+    ReportError, ReportStatus, RequestEcho, ResponseOutcome, ScopeBinding,
+    SignedPassiveHostLoadSampleV1, SubjectBinding, VantageBinding,
 };
 pub use validation::{
     ValidationError, validate_exchange, validate_report, validate_request, validate_response,
@@ -51,6 +52,16 @@ pub const HELPER_RESPONSE_SCHEMA: &str = "nq.helper.response.v1";
 
 /// The evidence report document schema identifier.
 pub const EVIDENCE_REPORT_SCHEMA: &str = "nq.evidence_report.v1";
+
+/// Closed request selector for the passive host-load provider boundary.
+pub const PASSIVE_HOST_LOAD_SELECTION_SCHEMA_V1: &str = "nq.passive_host_load_sample_selection.v1";
+
+/// Unsigned raw-fact payload produced by the passive host-load sampler.
+pub const PASSIVE_HOST_LOAD_SAMPLE_PAYLOAD_SCHEMA_V1: &str =
+    "nq.passive_host_load_sample_payload.v1";
+
+/// Signed passive host-load sample envelope.
+pub const SIGNED_PASSIVE_HOST_LOAD_SAMPLE_SCHEMA_V1: &str = "nq.signed_passive_host_load_sample.v1";
 
 /// Maximum request frame accepted by the SDK, including the final newline.
 pub const MAX_REQUEST_FRAME_BYTES: usize = 1_048_576;

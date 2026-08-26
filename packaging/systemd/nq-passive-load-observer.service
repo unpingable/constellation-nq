@@ -1,0 +1,55 @@
+[Unit]
+Description=NQ-ng bounded passive host-load sampler
+Documentation=file:///usr/share/doc/nq-ng/docs/PASSIVE_LOAD_SAMPLING_V1.md
+After=local-fs.target
+RequiresMountsFor=/var/lib/nq-passive-load
+
+[Service]
+Type=simple
+User=nq-passive-load-observer
+Group=nq-passive-load-reader
+UMask=0027
+WorkingDirectory=/usr
+ExecStart=/usr/lib/nq/helpers/nq-passive-load-helper observe /etc/nq/passive-load-observer.toml
+Restart=no
+
+# The sampler needs no network, shell, device, privilege, or arbitrary command
+# surface. Deliberately do not set CPUQuota, CPUAffinity, or AllowedCPUs: those
+# would change the exact available_parallelism() capacity context.
+NoNewPrivileges=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+KeyringMode=private
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadOnlyPaths=/etc/nq/passive-load-observer.toml /var/lib/nq-passive-load/sample.key
+ReadWritePaths=/var/lib/nq-passive-load/samples
+LimitNOFILE=64
+LimitFSIZE=64K
+LimitCORE=0
+TasksMax=4
+MemoryMax=64M
+MemorySwapMax=0
+TimeoutStopSec=15s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nq-passive-load-observer
+
+# Deliberately no [Install] section. Deployment-owned sampling authority and
+# finite configuration must be qualified before any explicit start.

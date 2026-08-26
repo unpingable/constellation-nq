@@ -103,6 +103,8 @@ struct HostSnapshotPayload {
     cpu_count: Option<u32>,
     #[serde(default)]
     load_1m: Option<f64>,
+    #[serde(default)]
+    passive_sample: Option<nq_protocol::SignedPassiveHostLoadSampleV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -190,6 +192,12 @@ impl ProfileModule for HostProfile {
             ));
         }
         validate_access_capability(context, self.descriptor(), &payload.evidence_basis)?;
+        validate_passive_sample(
+            context,
+            self.descriptor(),
+            observation.observed_at,
+            &payload,
+        )?;
 
         if observation.observed_at != admitted.observed_at {
             return Err(inconsistent(
@@ -280,6 +288,51 @@ impl ProfileModule for HostProfile {
     fn detectors(&self) -> &'static [&'static dyn Detector] {
         &DETECTORS
     }
+}
+
+fn validate_passive_sample(
+    context: &ValidationContext,
+    descriptor: &ProfileDescriptor,
+    observed_at: chrono::DateTime<chrono::Utc>,
+    payload: &HostSnapshotPayload,
+) -> Result<(), ProfileRefusal> {
+    let Some(sample) = &payload.passive_sample else {
+        return Ok(());
+    };
+    if payload.evidence_basis.access_path != "procfs_sysinfo"
+        || payload.evidence_basis.basis != "kernel_snapshot"
+        || payload.evidence_basis.regime != "normal"
+    {
+        return Err(inconsistent(
+            context,
+            "passive sample must retain the exact underlying procfs/sysinfo kernel basis",
+        ));
+    }
+    sample.validate_structure().map_err(|error| {
+        invalid_payload(context, descriptor, "invalid passive sample custody")
+            .with_detail("error", error)
+    })?;
+    let parsed_load = sample
+        .payload
+        .load_1m_token
+        .parse::<f64>()
+        .map_err(|error| {
+            invalid_payload(context, descriptor, "invalid passive load token")
+                .with_detail("error", error.to_string())
+        })?;
+    if sample.payload.binding != *context_request_binding(context)?
+        || sample.payload.observed_at != observed_at
+        || payload.load_1m != Some(parsed_load)
+        || payload.cpu_count != Some(sample.payload.logical_cpu_count)
+        || payload.hostname.is_some()
+        || payload.uptime_seconds.is_some()
+    {
+        return Err(inconsistent(
+            context,
+            "passive sample raw facts or binding differ from the host snapshot projection",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_binding(
@@ -636,6 +689,31 @@ fn validate_access_capability(
         .with_detail("required", required.join(",")));
     }
     Ok(())
+}
+
+fn context_request_binding(
+    context: &ValidationContext,
+) -> Result<Box<nq_protocol::SubjectBinding>, ProfileRefusal> {
+    Ok(Box::new(nq_protocol::SubjectBinding {
+        subject: nq_protocol::SubjectId::new(context.request_subject.clone()).map_err(|error| {
+            invalid_payload(context, &DESCRIPTOR, "invalid passive request subject")
+                .with_detail("error", error.to_string())
+        })?,
+        scope: nq_protocol::ScopeBinding {
+            kind: nq_protocol::ScopeKind::new(context.scope.kind.clone()).map_err(|error| {
+                invalid_payload(context, &DESCRIPTOR, "invalid passive request scope")
+                    .with_detail("error", error.to_string())
+            })?,
+            value: context.scope.value.clone(),
+        },
+        vantage: nq_protocol::VantageBinding {
+            kind: nq_protocol::VantageKind::new(context.vantage.kind.clone()).map_err(|error| {
+                invalid_payload(context, &DESCRIPTOR, "invalid passive request vantage")
+                    .with_detail("error", error.to_string())
+            })?,
+            value: context.vantage.value.clone(),
+        },
+    }))
 }
 
 fn require_coverage_consistency(

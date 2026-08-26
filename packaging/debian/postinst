@@ -50,6 +50,38 @@ ensure_account_fallback() {
             --shell "$shell" \
             nq-origin-helper
     fi
+    if ! getent group nq-passive-load-observer >/dev/null 2>&1; then
+        addgroup --system nq-passive-load-observer
+    fi
+    if ! getent passwd nq-passive-load-observer >/dev/null 2>&1; then
+        shell=/usr/sbin/nologin
+        if [ ! -x "$shell" ]; then
+            shell=/bin/false
+        fi
+        adduser \
+            --system \
+            --ingroup nq-passive-load-observer \
+            --home /var/lib/nq-passive-load \
+            --no-create-home \
+            --shell "$shell" \
+            nq-passive-load-observer
+    fi
+    if ! getent group nq-passive-load-reader >/dev/null 2>&1; then
+        addgroup --system nq-passive-load-reader
+    fi
+    if ! getent passwd nq-passive-load-reader >/dev/null 2>&1; then
+        shell=/usr/sbin/nologin
+        if [ ! -x "$shell" ]; then
+            shell=/bin/false
+        fi
+        adduser \
+            --system \
+            --ingroup nq-passive-load-reader \
+            --home /nonexistent \
+            --no-create-home \
+            --shell "$shell" \
+            nq-passive-load-reader
+    fi
 }
 
 create_layout_fallback() {
@@ -60,6 +92,10 @@ create_layout_fallback() {
         /var/lib/nq/backups
     install -d -o nq-origin-helper -g nq-origin-helper -m 0700 \
         /var/lib/nq-origin-helper
+    install -d -o nq-passive-load-observer -g nq-passive-load-reader -m 0750 \
+        /var/lib/nq-passive-load
+    install -d -o nq-passive-load-observer -g nq-passive-load-reader -m 2750 \
+        /var/lib/nq-passive-load/samples
     install -d -o nq -g nq -m 0751 /run/nq
     install -d -o nq -g nq -m 0711 /run/nq/helpers
 }

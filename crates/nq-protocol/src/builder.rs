@@ -32,6 +32,7 @@ impl HelperRequestBuilder {
                 binding,
                 granted_capabilities: Vec::new(),
                 checkpoint: None,
+                passive_host_load_sample: None,
                 deadline,
                 bounds: CollectionBounds::default(),
             },
@@ -63,6 +64,16 @@ impl HelperRequestBuilder {
     #[must_use]
     pub fn checkpoint(mut self, checkpoint: Checkpoint) -> Self {
         self.request.checkpoint = Some(checkpoint);
+        self
+    }
+
+    /// Selects one exact pre-existing passive host-load sample family.
+    #[must_use]
+    pub fn passive_host_load_sample(
+        mut self,
+        selection: crate::PassiveHostLoadSampleSelectionV1,
+    ) -> Self {
+        self.request.passive_host_load_sample = Some(selection);
         self
     }
 

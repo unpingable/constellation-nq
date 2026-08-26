@@ -102,6 +102,34 @@ pub struct WatcherConfig {
     /// Optional checkpoint handling.
     #[serde(default)]
     pub checkpoint_policy: CheckpointPolicy,
+    /// Closed passive host-load sample provider policy. Absence preserves the
+    /// ordinary occurrence-bounded helper law byte-for-byte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passive_host_load_sample: Option<PassiveHostLoadProviderConfigV1>,
+}
+
+/// Immutable deployment selection for the one qualified passive load source.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PassiveHostLoadProviderConfigV1 {
+    /// Must be `nq.passive_host_load_provider_config.v1`.
+    pub schema: String,
+    /// Maximum age of a sample at the NQ-owned pre-launch cutoff.
+    pub max_sample_age_ms: u64,
+    /// Exact closed sampler profile.
+    pub observer_profile: String,
+    /// Exact deployed observer executable digest.
+    pub observer_artifact_digest: String,
+    /// Exact deployed observer configuration digest.
+    pub observer_config_digest: String,
+    /// Authenticated sample-producer issuer.
+    pub producer_issuer: String,
+    /// Exact Ed25519 sample-producer key identity.
+    pub producer_key_id: String,
+    /// Lowercase hexadecimal Ed25519 public key bytes.
+    pub producer_public_key_hex: String,
+    /// Qualified `available_parallelism()` execution/vantage context digest.
+    pub capacity_context_id: String,
 }
 
 /// Fixed helper command. No shell interpolation is performed.
@@ -584,6 +612,95 @@ impl NqConfig {
             for capability in &watcher.capability_ceiling {
                 validate_binding_token(&format!("{base}.capability_ceiling"), capability)?;
             }
+            if let Some(passive) = &watcher.passive_host_load_sample {
+                if passive.schema != "nq.passive_host_load_provider_config.v1" {
+                    return Err(invalid(
+                        format!("{base}.passive_host_load_sample.schema"),
+                        "expected nq.passive_host_load_provider_config.v1",
+                    ));
+                }
+                if watcher.profile.id != "nq.host" || watcher.profile.version != 1 {
+                    return Err(invalid(
+                        format!("{base}.passive_host_load_sample"),
+                        "the closed passive source supports only nq.host/v1",
+                    ));
+                }
+                if watcher.carrier != Carrier::Stdio {
+                    return Err(invalid(
+                        format!("{base}.carrier"),
+                        "passive sample retrieval uses one bounded stdio custody exchange",
+                    ));
+                }
+                if watcher.checkpoint_policy != CheckpointPolicy::Disabled {
+                    return Err(invalid(
+                        format!("{base}.checkpoint_policy"),
+                        "passive samples have exact occurrence identity and do not use polling checkpoints",
+                    ));
+                }
+                if watcher.capability_ceiling
+                    != BTreeSet::from(["read_procfs".to_owned(), "read_system_info".to_owned()])
+                {
+                    return Err(invalid(
+                        format!("{base}.capability_ceiling"),
+                        "passive custody must retain the exact underlying procfs plus Rust system-info capability basis",
+                    ));
+                }
+                if !(1..=300_000).contains(&passive.max_sample_age_ms) {
+                    return Err(invalid(
+                        format!("{base}.passive_host_load_sample.max_sample_age_ms"),
+                        "must be between 1 and the nq.host/v1 300000ms reliance horizon",
+                    ));
+                }
+                for (field, value) in [
+                    ("observer_profile", passive.observer_profile.as_str()),
+                    ("producer_issuer", passive.producer_issuer.as_str()),
+                    ("producer_key_id", passive.producer_key_id.as_str()),
+                ] {
+                    if value.is_empty() || value.len() > 256 {
+                        return Err(invalid(
+                            format!("{base}.passive_host_load_sample.{field}"),
+                            "must contain 1 through 256 UTF-8 bytes",
+                        ));
+                    }
+                }
+                let public_key = hex::decode(&passive.producer_public_key_hex).map_err(|_| {
+                    invalid(
+                        format!("{base}.passive_host_load_sample.producer_public_key_hex"),
+                        "must be lowercase hexadecimal Ed25519 public-key bytes",
+                    )
+                })?;
+                if public_key.len() != 32
+                    || passive.producer_public_key_hex
+                        != passive.producer_public_key_hex.to_ascii_lowercase()
+                {
+                    return Err(invalid(
+                        format!("{base}.passive_host_load_sample.producer_public_key_hex"),
+                        "must encode exactly 32 bytes in lowercase hexadecimal",
+                    ));
+                }
+                nq_protocol::Sha256Digest::parse(passive.capacity_context_id.clone()).map_err(
+                    |error| {
+                        invalid(
+                            format!("{base}.passive_host_load_sample.capacity_context_id"),
+                            error.to_string(),
+                        )
+                    },
+                )?;
+                for (field, value) in [
+                    (
+                        "observer_artifact_digest",
+                        &passive.observer_artifact_digest,
+                    ),
+                    ("observer_config_digest", &passive.observer_config_digest),
+                ] {
+                    nq_protocol::Sha256Digest::parse(value.clone()).map_err(|error| {
+                        invalid(
+                            format!("{base}.passive_host_load_sample.{field}"),
+                            error.to_string(),
+                        )
+                    })?;
+                }
+            }
         }
         Ok(())
     }
@@ -736,6 +853,46 @@ version = 1
         let config = NqConfig::from_toml(&minimal()).expect("valid config");
         assert_eq!(config.watchers[0].schedule.deadline_ms, 30_000);
         assert_eq!(config.watchers[0].carrier, Carrier::Stdio);
+    }
+
+    #[test]
+    fn passive_load_policy_is_closed_and_cannot_enable_measurement_fallback() {
+        let mut config = NqConfig::from_toml(&minimal()).expect("valid config");
+        let watcher = &mut config.watchers[0];
+        watcher.capability_ceiling =
+            BTreeSet::from(["read_procfs".to_owned(), "read_system_info".to_owned()]);
+        watcher.passive_host_load_sample = Some(PassiveHostLoadProviderConfigV1 {
+            schema: "nq.passive_host_load_provider_config.v1".into(),
+            max_sample_age_ms: 60_000,
+            observer_profile: "nq.host_load_passive_sampler.v1".into(),
+            observer_artifact_digest: format!("sha256:{}", "a".repeat(64)),
+            observer_config_digest: format!("sha256:{}", "b".repeat(64)),
+            producer_issuer: "fixture.passive-observer".into(),
+            producer_key_id: "fixture-key-1".into(),
+            producer_public_key_hex: "11".repeat(32),
+            capacity_context_id: format!("sha256:{}", "c".repeat(64)),
+        });
+        config.validate().expect("closed passive policy");
+
+        let mut fallback = config.clone();
+        fallback.watchers[0]
+            .capability_ceiling
+            .insert("arbitrary.read".into());
+        assert!(matches!(
+            fallback.validate(),
+            Err(ConfigError::Invalid { path, .. }) if path.ends_with("capability_ceiling")
+        ));
+
+        let mut stale = config;
+        stale.watchers[0]
+            .passive_host_load_sample
+            .as_mut()
+            .unwrap()
+            .max_sample_age_ms = 300_001;
+        assert!(matches!(
+            stale.validate(),
+            Err(ConfigError::Invalid { path, .. }) if path.ends_with("max_sample_age_ms")
+        ));
     }
 
     #[test]
