@@ -329,6 +329,11 @@ pub fn materialize_generation(
         .map(load_generation)
         .transpose()?
         .map(|(generation, id, _)| (generation, id));
+    if spec.previous_generation_id.is_some() != previous.is_some() {
+        return Err(Error::Invalid(
+            "renewal requires both the exact predecessor identity and predecessor generation custody".into(),
+        ));
+    }
     validate_generation_spec(&spec, &policy, previous.as_ref())?;
 
     let key = load_signing_key(&spec.private_key_path)?;
@@ -1886,6 +1891,18 @@ mod tests {
         let spec2_path = fixture.root.path().join("spec-g2.json");
         let generation2_path = fixture.root.path().join("generation-g2.json");
         write_json(&spec2_path, &spec2);
+        let omitted_predecessor_path = fixture.root.path().join("generation-g2-omitted.json");
+        assert!(
+            materialize_generation(
+                &fixture.policy_path,
+                &spec2_path,
+                None,
+                &omitted_predecessor_path,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("exact predecessor identity")
+        );
         materialize_generation(
             &fixture.policy_path,
             &spec2_path,
