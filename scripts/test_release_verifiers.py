@@ -555,7 +555,9 @@ if arguments[:1] == ["show"]:
                 (directory / "calls").read_text(encoding="utf-8").splitlines(),
                 [
                     "stop nqd.service",
+                    "stop nq-passive-load-observer.service",
                     "show --property=ActiveState --value nqd.service",
+                    "show --property=ActiveState --value nq-passive-load-observer.service",
                 ],
             )
 
@@ -567,7 +569,9 @@ if arguments[:1] == ["show"]:
                 (directory / "calls").read_text(encoding="utf-8").splitlines(),
                 [
                     "disable --now nqd.service",
+                    "stop nq-passive-load-observer.service",
                     "show --property=ActiveState --value nqd.service",
+                    "show --property=ActiveState --value nq-passive-load-observer.service",
                 ],
             )
 
