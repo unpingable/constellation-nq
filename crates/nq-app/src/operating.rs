@@ -608,7 +608,9 @@ impl OperatingLedger {
         if self.activation_status(activation_id)?.state != ActivationStateV1::Validated {
             bail!("only an exactly validated activation may become armed");
         }
-        self.require_active_grant(&activation.spec.grant_id, now)?;
+        if !self.grant_permits_issued_child_runtime(&activation.spec.grant_id, now)? {
+            bail!("operating grant is not active for issued child runtime");
+        }
         self.append_event("activation-events", activation_id, "armed", operation_id, now,
             json!({"enrollment_id": activation.spec.enrollment_id, "timer_exposure": "finite_recurrence"}))
     }
@@ -656,7 +658,7 @@ impl OperatingLedger {
             });
         }
         let grant_status = self.grant_status(&activation.spec.grant_id, now)?;
-        if !grant_status.active {
+        if !Self::status_permits_issued_child_runtime(&grant_status) {
             return Ok(TickGateV1::Inert {
                 activation_id: activation_id.into(),
                 state: status.state,
@@ -670,6 +672,18 @@ impl OperatingLedger {
             activation_id: activation_id.into(),
             enrollment_id: activation.spec.enrollment_id,
         })
+    }
+
+    /// H exhaustion ends further child issuance; it does not revoke an exact
+    /// already-issued child. Retirement, expiry, and absence of activation do.
+    pub fn grant_permits_issued_child_runtime(&self, grant_id: &str, now: i64) -> Result<bool> {
+        Ok(Self::status_permits_issued_child_runtime(
+            &self.grant_status(grant_id, now)?,
+        ))
+    }
+
+    fn status_permits_issued_child_runtime(status: &OperatingGrantStatusV1) -> bool {
+        status.active || status.terminal_reason.as_deref() == Some("child_budgets_exhausted")
     }
 
     pub fn grant_status(&self, grant_id: &str, now: i64) -> Result<OperatingGrantStatusV1> {
@@ -1712,6 +1726,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn ordinary_g_and_e_children_consume_finite_h_budgets_append_only() {
         let root = tempfile::tempdir().unwrap();
         let ledger = OperatingLedger::open(root.path()).unwrap();
@@ -1757,6 +1772,21 @@ mod tests {
         ledger
             .issue_generation(&grant.grant_id, &g2, &g2_id, "issue:g2", 2_002)
             .unwrap();
+        let g3 = generation(
+            &grant,
+            g2.spec.expires_at_unix_ms,
+            Some(g2_id.clone()),
+            "g3",
+        );
+        let g3_id = semantic_digest(&g3).unwrap().to_string();
+        ledger
+            .issue_generation(&grant.grant_id, &g3, &g3_id, "issue:g3", 2_002)
+            .unwrap();
+        let g4 = generation(&grant, g3.spec.expires_at_unix_ms, Some(g3_id), "g4");
+        let g4_id = semantic_digest(&g4).unwrap().to_string();
+        ledger
+            .issue_generation(&grant.grant_id, &g4, &g4_id, "issue:g4", 2_002)
+            .unwrap();
 
         let e1 = enrollment(&grant, 2_000, 'a');
         ledger
@@ -1766,11 +1796,47 @@ mod tests {
         ledger
             .issue_enrollment(&grant.grant_id, &e2, "issue:e2", 2_004)
             .unwrap();
+        let e3 = enrollment(&grant, e2.spec.expires_at_unix_ms, 'c');
+        ledger
+            .issue_enrollment(&grant.grant_id, &e3, "issue:e3", 2_004)
+            .unwrap();
+        let e4 = enrollment(&grant, e3.spec.expires_at_unix_ms, 'd');
+        ledger
+            .issue_enrollment(&grant.grant_id, &e4, "issue:e4", 2_004)
+            .unwrap();
         let status = ledger.grant_status(&grant.grant_id, 2_005).unwrap();
-        assert_eq!(status.observer_generations_issued, 2);
-        assert_eq!(status.recurrence_enrollments_issued, 2);
-        assert_eq!(status.aggregate_samples_issued, 2_880);
-        assert_eq!(status.aggregate_acquisitions_issued, 144);
+        assert!(!status.active);
+        assert_eq!(
+            status.terminal_reason.as_deref(),
+            Some("child_budgets_exhausted")
+        );
+        assert!(
+            ledger
+                .grant_permits_issued_child_runtime(&grant.grant_id, 2_005)
+                .unwrap()
+        );
+        let activation = ledger
+            .stage_activation(activation_spec(&grant.grant_id), 2_005)
+            .unwrap();
+        ledger
+            .mark_validated(
+                &activation.activation_id,
+                "validate:exhausted",
+                2_005,
+                json!({}),
+            )
+            .unwrap();
+        ledger
+            .arm(&activation.activation_id, "arm:exhausted", 2_005)
+            .unwrap();
+        assert!(matches!(
+            ledger.tick_gate(&activation.activation_id, 2_005).unwrap(),
+            TickGateV1::Exposed { .. }
+        ));
+        assert_eq!(status.observer_generations_issued, 4);
+        assert_eq!(status.recurrence_enrollments_issued, 4);
+        assert_eq!(status.aggregate_samples_issued, 5_760);
+        assert_eq!(status.aggregate_acquisitions_issued, 288);
 
         let mut drift = g2.clone();
         drift.spec.sample_interval_ms = 10_000;

@@ -1528,7 +1528,7 @@ fn validate_activation_prerequisites(
     use crate::operating::ChildGrantKindV1;
     let activation = ledger.activation(activation_id)?;
     let grant = ledger.grant(&activation.spec.grant_id)?;
-    if !ledger.grant_status(&grant.grant_id, now)?.active {
+    if !ledger.grant_permits_issued_child_runtime(&grant.grant_id, now)? {
         bail!("activation operating grant is not active");
     }
     if !ledger.watcher_digest_is_authorized(
