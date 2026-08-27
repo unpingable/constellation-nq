@@ -1,0 +1,81 @@
+{
+  "schema": "nq.recurring_office_policy.v1",
+  "deployment_profile_ref": "linode-labelwatch-passive-load:20260827-reviewed-24h-v1",
+  "min_interval_ms": 300000,
+  "max_interval_ms": 300000,
+  "max_enrollment_lifetime_ms": 86400000,
+  "max_acquisition_occurrences": 72,
+  "max_pre_provider_attempts": 2,
+  "min_pre_provider_backoff_ms": 1000,
+  "max_pre_provider_backoff_ms": 30000,
+  "max_consecutive_failure_threshold": 2,
+  "max_in_flight_per_watcher": 1,
+  "provider_timeout_ceiling_ms": 30000,
+  "min_timer_granularity_ms": 1000,
+  "max_store_bytes": 1073741824,
+  "min_free_bytes": 10737418240,
+  "allowed_missed_slot_policies": ["latest_only", "skip"],
+  "allowed_startup_policies": ["evaluate_current_slot", "wait_for_next_slot"],
+  "allowed_acquisition_reasons": ["diagnostic_recurrence"],
+  "coordination_domains": [
+    {
+      "domain_id": "passive-load-24h:labelwatch-host:v1",
+      "max_in_flight": 1,
+      "min_provider_start_spacing_ms": 300000
+    }
+  ],
+  "watcher_bindings": [
+    {
+      "watcher_instance_id": "labelwatch-host-passive-24h-g1",
+      "watcher_semantic_digest": "sha256:f5fd0d9643da2bf559f128a728d707710a89c1b44970e88fe6fa87c37ccea9d7",
+      "coordination_domain_id": "passive-load-24h:labelwatch-host:v1",
+      "origin_profile": "linode_instance_metadata_v1",
+      "expected_instance_id_sha256": "sha256:4c4a4b31edb61934a7d81cfd736af7d6c8a588d866e6116d88049d2a910c695c",
+      "origin_helper_path": "/opt/nq-ng/linode-v3-20260824/bin/nq-linode-origin-helper",
+      "origin_helper_sha256": "sha256:058c9220ea0a2c58a4c9f6c9def3307444a9087a2ec2717577446b2ec9d20279",
+      "origin_helper_account": "nq-origin-helper",
+      "origin_helper_issuer": "origin-helper:linode-instance-metadata:v1",
+      "origin_helper_key_id": "origin-helper-key:sha256:866e1635603e99a22e9120d589686fd1771f10973bf037b49cfc3d970e8ef94d",
+      "origin_helper_public_key_path": "/etc/nq-ng-observation-office/origin-helper-public-key.hex"
+    },
+    {
+      "watcher_instance_id": "labelwatch-host-passive-24h-g2",
+      "watcher_semantic_digest": "sha256:3d0fb453457df37e60d363c58a1117cea3e655db6db0b9dfbe96049c2b828694",
+      "coordination_domain_id": "passive-load-24h:labelwatch-host:v1",
+      "origin_profile": "linode_instance_metadata_v1",
+      "expected_instance_id_sha256": "sha256:4c4a4b31edb61934a7d81cfd736af7d6c8a588d866e6116d88049d2a910c695c",
+      "origin_helper_path": "/opt/nq-ng/linode-v3-20260824/bin/nq-linode-origin-helper",
+      "origin_helper_sha256": "sha256:058c9220ea0a2c58a4c9f6c9def3307444a9087a2ec2717577446b2ec9d20279",
+      "origin_helper_account": "nq-origin-helper",
+      "origin_helper_issuer": "origin-helper:linode-instance-metadata:v1",
+      "origin_helper_key_id": "origin-helper-key:sha256:866e1635603e99a22e9120d589686fd1771f10973bf037b49cfc3d970e8ef94d",
+      "origin_helper_public_key_path": "/etc/nq-ng-observation-office/origin-helper-public-key.hex"
+    },
+    {
+      "watcher_instance_id": "labelwatch-host-passive-24h-g3",
+      "watcher_semantic_digest": "sha256:f49a309367e2829bdb86f0ea660769c6596db94622e10b84709d6655b4ff863e",
+      "coordination_domain_id": "passive-load-24h:labelwatch-host:v1",
+      "origin_profile": "linode_instance_metadata_v1",
+      "expected_instance_id_sha256": "sha256:4c4a4b31edb61934a7d81cfd736af7d6c8a588d866e6116d88049d2a910c695c",
+      "origin_helper_path": "/opt/nq-ng/linode-v3-20260824/bin/nq-linode-origin-helper",
+      "origin_helper_sha256": "sha256:058c9220ea0a2c58a4c9f6c9def3307444a9087a2ec2717577446b2ec9d20279",
+      "origin_helper_account": "nq-origin-helper",
+      "origin_helper_issuer": "origin-helper:linode-instance-metadata:v1",
+      "origin_helper_key_id": "origin-helper-key:sha256:866e1635603e99a22e9120d589686fd1771f10973bf037b49cfc3d970e8ef94d",
+      "origin_helper_public_key_path": "/etc/nq-ng-observation-office/origin-helper-public-key.hex"
+    },
+    {
+      "watcher_instance_id": "labelwatch-host-passive-24h-g4",
+      "watcher_semantic_digest": "sha256:28af540d2920b08fd93a558163a7535c437bf6e4cab8dfb3aba7d622dcbf9786",
+      "coordination_domain_id": "passive-load-24h:labelwatch-host:v1",
+      "origin_profile": "linode_instance_metadata_v1",
+      "expected_instance_id_sha256": "sha256:4c4a4b31edb61934a7d81cfd736af7d6c8a588d866e6116d88049d2a910c695c",
+      "origin_helper_path": "/opt/nq-ng/linode-v3-20260824/bin/nq-linode-origin-helper",
+      "origin_helper_sha256": "sha256:058c9220ea0a2c58a4c9f6c9def3307444a9087a2ec2717577446b2ec9d20279",
+      "origin_helper_account": "nq-origin-helper",
+      "origin_helper_issuer": "origin-helper:linode-instance-metadata:v1",
+      "origin_helper_key_id": "origin-helper-key:sha256:866e1635603e99a22e9120d589686fd1771f10973bf037b49cfc3d970e8ef94d",
+      "origin_helper_public_key_path": "/etc/nq-ng-observation-office/origin-helper-public-key.hex"
+    }
+  ]
+}

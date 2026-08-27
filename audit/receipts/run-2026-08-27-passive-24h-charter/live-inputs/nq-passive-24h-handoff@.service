@@ -1,0 +1,38 @@
+[Unit]
+Description=NQ exact finite successor-handoff evaluator %i
+After=local-fs.target
+RequiresMountsFor=/var/lib/nq-passive-load
+
+[Service]
+Type=oneshot
+User=nq
+Group=nq
+SupplementaryGroups=nq-evidence nq-passive-load-reader
+UMask=0027
+WorkingDirectory=/
+ExecStart=/opt/nq-ng/passive-handoff-87a6ca3-musl/bin/nq --config /etc/nq/passive-load-24h/nq-charter.toml --json operating handoff-tick %i --state-dir /var/lib/nq-passive-load/charter-24h-authorized/operating
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_KILL
+AmbientCapabilities=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_KILL
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadOnlyPaths=/etc/nq/passive-load-24h /etc/nq-ng-observation-office/origin-helper-public-key.hex /opt/nq-ng/passive-handoff-87a6ca3-musl /opt/nq-ng/linode-v3-20260824
+ReadWritePaths=/var/lib/nq-passive-load/charter-24h-authorized /var/lib/nq-passive-load/samples /run/nq-passive-load-24h
+RestrictAddressFamilies=AF_INET AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=169.254.169.254/32
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LimitNOFILE=4096
+LimitFSIZE=1G
+LimitCORE=0
+TasksMax=64
+MemoryMax=1G
+MemorySwapMax=0
+TimeoutStartSec=90s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nq-passive-24h-handoff-%i

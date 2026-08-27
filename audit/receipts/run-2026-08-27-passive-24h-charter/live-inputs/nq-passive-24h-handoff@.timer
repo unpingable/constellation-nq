@@ -1,0 +1,10 @@
+[Unit]
+Description=Mechanical wake for exact finite successor handoff %i
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=15s
+AccuracySec=1s
+Persistent=false
+Unit=nq-passive-24h-handoff@%i.service
+[Install]
+WantedBy=timers.target
