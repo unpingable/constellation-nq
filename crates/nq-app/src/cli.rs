@@ -1338,9 +1338,11 @@ async fn operating_command(
                 now,
                 operating_operator_identity(),
             )?;
-            let id = OperatingLedger::open(&state_dir)?.create_grant(&grant)?;
+            let ledger = OperatingLedger::open(&state_dir)?;
+            let id = ledger.create_grant(&grant)?;
+            let persisted = ledger.grant(&id)?;
             print_value(
-                &json!({"grant_id": id, "grant": grant, "authority_created": false}),
+                &json!({"grant_id": id, "grant": persisted, "authority_created": false}),
                 true,
             )
         }

@@ -420,6 +420,15 @@ impl OperatingLedger {
 
     pub fn create_grant(&self, grant: &OperatingGrantV1) -> Result<String> {
         validate_materialized_grant(grant)?;
+        for existing in read_dir_json::<OperatingGrantV1>(&self.root.join("grants"))? {
+            validate_materialized_grant(&existing)?;
+            if existing.spec.operator_occurrence_id == grant.spec.operator_occurrence_id {
+                if same_grant_intent(&existing, grant) {
+                    return Ok(existing.grant_id);
+                }
+                bail!("operating-grant operator occurrence was reused for different authority");
+            }
+        }
         write_canonical_idempotent(&self.grant_path(&grant.grant_id), grant)?;
         Ok(grant.grant_id.clone())
     }
@@ -1489,6 +1498,16 @@ impl OperatingLedger {
     }
 }
 
+fn same_grant_intent(left: &OperatingGrantV1, right: &OperatingGrantV1) -> bool {
+    left.schema == right.schema
+        && left.spec == right.spec
+        && left.observer_deployment_policy_id == right.observer_deployment_policy_id
+        && left.observer_deployment_policy == right.observer_deployment_policy
+        && left.recurrence_deployment_policy_id == right.recurrence_deployment_policy_id
+        && left.recurrence_deployment_policy == right.recurrence_deployment_policy
+        && left.issuer == right.issuer
+}
+
 const fn handoff_event_kind(state: SuccessorHandoffStateV1) -> &'static str {
     match state {
         SuccessorHandoffStateV1::Staged => "staged",
@@ -2206,6 +2225,49 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn duplicate_grant_creation_converges_on_first_exact_operator_occurrence() {
+        let root = tempfile::tempdir().unwrap();
+        let ledger = OperatingLedger::open(root.path()).unwrap();
+        let first = OperatingGrantV1::new(
+            grant_spec(2_000),
+            observer_policy(),
+            recurrence_policy(),
+            1_000,
+            json!({"operator": "test"}),
+        )
+        .unwrap();
+        let duplicate = OperatingGrantV1::new(
+            grant_spec(2_000),
+            observer_policy(),
+            recurrence_policy(),
+            1_001,
+            json!({"operator": "test"}),
+        )
+        .unwrap();
+        assert_ne!(first.grant_id, duplicate.grant_id);
+        assert_eq!(ledger.create_grant(&first).unwrap(), first.grant_id);
+        assert_eq!(ledger.create_grant(&duplicate).unwrap(), first.grant_id);
+        assert_eq!(
+            read_dir_json::<OperatingGrantV1>(&root.path().join("grants"))
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let mut drifted_spec = grant_spec(2_000);
+        drifted_spec.observer_renewal_lead_ms += 1;
+        let drifted = OperatingGrantV1::new(
+            drifted_spec,
+            observer_policy(),
+            recurrence_policy(),
+            1_002,
+            json!({"operator": "test"}),
+        )
+        .unwrap();
+        assert!(ledger.create_grant(&drifted).is_err());
     }
 
     #[test]
