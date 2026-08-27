@@ -69,6 +69,18 @@ configuration, service, timer, sample, acquisition, Nightshift cycle, or A4
 record was changed. The inherited live office remains dormant and A4 remains
 historically fenced.
 
+Final read-only verification at `2026-08-27T00:48:31Z` established:
+
+- observer, recurring service, recurring timer, and `nqd`: inactive;
+- observer and recurring service: static;
+- recurring timer: disabled;
+- office database SHA-256:
+  `c4a4c9864ff74c456798cf6f6339841919601c5319c96e9e1e1359275b7b08f3`;
+- A4 diagnostic outcome: unknown;
+- A4 provider activity: unknown;
+- A4 coordination: fenced at epoch 1;
+- A4 reconciliation/provider-activity evidence: absent.
+
 ## Required next decision
 
 Govern the exact relationship among generation-bound passive watcher

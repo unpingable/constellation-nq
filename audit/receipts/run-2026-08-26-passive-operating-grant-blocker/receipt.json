@@ -45,6 +45,21 @@
     "host_mutated": false,
     "services_enabled": false,
     "a4_touched": false,
-    "nightshift_touched": false
+    "nightshift_touched": false,
+    "read_only_closeout_at": "2026-08-27T00:48:31Z",
+    "observer_service": "inactive_static",
+    "recurrence_service": "inactive_static",
+    "recurrence_timer": "inactive_disabled",
+    "nqd_service": "inactive",
+    "office_database_sha256": "c4a4c9864ff74c456798cf6f6339841919601c5319c96e9e1e1359275b7b08f3",
+    "a4": {
+      "acquisition_id": "recurrence:d555a10d2b4f11e7c6d550f43a6fd6d07631573bec5c14b54d09ca6b8e04beea",
+      "diagnostic_outcome": "unknown",
+      "provider_activity": "unknown",
+      "coordination": "fenced",
+      "fencing_epoch": 1,
+      "evidence_id": null,
+      "reconciliation_event_id": null
+    }
   }
 }
