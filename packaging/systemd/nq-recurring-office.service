@@ -11,12 +11,13 @@ Group=nq
 UMask=0077
 WorkingDirectory=/usr
 EnvironmentFile=/etc/nq/recurring-office.env
-ExecStart=/usr/bin/nq --config=/etc/nq/nq.toml --json operating tick ${NQ_OFFICE_ACTIVATION_ID} --state-dir=/var/lib/nq-operating-office
+ExecStart=/usr/bin/nq --config=/etc/nq/nq.toml --json operating tick-grant ${NQ_OPERATING_GRANT_ID} --state-dir=/var/lib/nq-operating-office
 
 # The CLI must enter the separately admitted watcher and origin-helper
 # principals. It receives the same narrow parent capability set as nqd and no
-# diagnostic authority from systemd; the durable Armed activation and its
-# exact finite enrollment decide. Wakeups before Armed are canonical no-ops.
+# diagnostic authority from systemd; H projects its sole durable Armed
+# activation and exact finite enrollment. Wakeups with no Armed activation
+# are canonical no-ops; multiple Armed activations fail closed.
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict

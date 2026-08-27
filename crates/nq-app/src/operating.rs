@@ -315,6 +315,21 @@ pub enum TickGateV1 {
     },
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum GrantTickGateV1 {
+    Inert {
+        grant_id: String,
+        attempts_consumed: u8,
+        reason: String,
+    },
+    Exposed {
+        grant_id: String,
+        activation_id: String,
+        enrollment_id: String,
+    },
+}
+
 pub struct OperatingLedger {
     root: PathBuf,
     _lock: Flock<File>,
@@ -1066,6 +1081,48 @@ impl OperatingLedger {
             activation_id: activation_id.into(),
             enrollment_id: activation.spec.enrollment_id,
         })
+    }
+
+    /// Project the sole Armed activation under one exact finite H. The
+    /// service-manager can wake this gate without knowing child activation
+    /// identities; it still creates no authority and multiple Armed children
+    /// fail closed.
+    pub fn grant_tick_gate(&self, grant_id: &str, now: i64) -> Result<GrantTickGateV1> {
+        self.grant(grant_id)?;
+        let mut armed = Vec::new();
+        for activation in read_dir_json::<OfficeActivationV1>(&self.root.join("activations"))?
+            .into_iter()
+            .filter(|activation| activation.spec.grant_id == grant_id)
+        {
+            let status = self.activation_status(&activation.activation_id)?;
+            if status.state == ActivationStateV1::Armed {
+                armed.push(status);
+            }
+        }
+        armed.sort_by(|left, right| left.activation_id.cmp(&right.activation_id));
+        match armed.as_slice() {
+            [] => Ok(GrantTickGateV1::Inert {
+                grant_id: grant_id.into(),
+                attempts_consumed: 0,
+                reason: "no_canonically_armed_activation".into(),
+            }),
+            [status] => match self.tick_gate(&status.activation_id, now)? {
+                TickGateV1::Inert { reason, .. } => Ok(GrantTickGateV1::Inert {
+                    grant_id: grant_id.into(),
+                    attempts_consumed: 0,
+                    reason,
+                }),
+                TickGateV1::Exposed {
+                    activation_id,
+                    enrollment_id,
+                } => Ok(GrantTickGateV1::Exposed {
+                    grant_id: grant_id.into(),
+                    activation_id,
+                    enrollment_id,
+                }),
+            },
+            _ => bail!("operating grant has multiple canonically Armed activations"),
+        }
     }
 
     /// H exhaustion ends further child issuance; it does not revoke an exact
@@ -2689,7 +2746,7 @@ mod tests {
     fn exact_handoff_is_restart_safe_inert_until_arm_and_closes_predecessor_first() {
         let root = tempfile::tempdir().unwrap();
         let ledger = OperatingLedger::open(root.path()).unwrap();
-        let (_grant, predecessor, successor, spec) = handoff_fixture(&ledger, 2_000);
+        let (grant, predecessor, successor, spec) = handoff_fixture(&ledger, 2_000);
         let handoff = ledger.stage_successor_handoff(spec.clone(), 2_001).unwrap();
         assert_eq!(
             ledger
@@ -2704,6 +2761,11 @@ mod tests {
                 attempts_consumed: 0,
                 ..
             }
+        ));
+        assert!(matches!(
+            ledger.grant_tick_gate(&grant.grant_id, 2_002).unwrap(),
+            GrantTickGateV1::Exposed { activation_id, .. }
+                if activation_id == predecessor.activation_id
         ));
         assert!(
             ledger
@@ -2761,6 +2823,11 @@ mod tests {
             ledger.handoff_status(&handoff.handoff_id).unwrap().state,
             SuccessorHandoffStateV1::Armed
         );
+        assert!(matches!(
+            ledger.grant_tick_gate(&grant.grant_id, 2_006).unwrap(),
+            GrantTickGateV1::Exposed { activation_id, .. }
+                if activation_id == successor.activation_id
+        ));
     }
 
     #[test]

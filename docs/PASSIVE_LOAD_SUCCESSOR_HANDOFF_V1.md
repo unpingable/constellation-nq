@@ -84,6 +84,13 @@ no child, admission, sample, acquisition, or recurrence authority. The service
 manager may wake every staged handoff; before its exact boundary and before
 Armed, those wakeups are semantically inert.
 
+The recurrence one-shot uses `operating tick-grant H`. H projects exactly one
+Armed child activation and then applies its ordinary tick gate. Zero Armed
+children is inert; more than one is a protocol contradiction and refuses.
+This keeps one static service valid across successor activations without a
+mutable authoritative “current activation” pointer. Selecting H in a wakeup
+still grants nothing: only an already-Armed activation can expose its finite E.
+
 > H may delegate execution of an exact finite validation sequence. It may not
 > delegate the outcomes of those validations.
 

@@ -592,6 +592,12 @@ pub enum OperatingCommand {
         #[arg(long, default_value = "/var/lib/nq-operating-office")]
         state_dir: PathBuf,
     },
+    /// One-shot H gate: project and tick its sole canonically Armed activation.
+    TickGrant {
+        grant_id: String,
+        #[arg(long, default_value = "/var/lib/nq-operating-office")]
+        state_dir: PathBuf,
+    },
 }
 
 /// Backup workflow.
@@ -1551,6 +1557,29 @@ async fn operating_command(
                     validate_activation_prerequisites(&config, &ledger, &activation_id, now)
                         .context(
                             "armed activation prerequisites drifted; recurrence remains unspent",
+                        )?;
+                    recurring_tick(&config, &enrollment_id, now, json_output)
+                }
+            }
+        }
+        OperatingCommand::TickGrant {
+            grant_id,
+            state_dir,
+        } => {
+            let config = NqConfig::load(config_path)?;
+            let ledger = OperatingLedger::open(&state_dir)?;
+            match ledger.grant_tick_gate(&grant_id, now)? {
+                inert @ crate::operating::GrantTickGateV1::Inert { .. } => {
+                    print_value(&inert, true)
+                }
+                crate::operating::GrantTickGateV1::Exposed {
+                    activation_id,
+                    enrollment_id,
+                    ..
+                } => {
+                    validate_activation_prerequisites(&config, &ledger, &activation_id, now)
+                        .context(
+                            "H-selected Armed activation prerequisites drifted; recurrence remains unspent",
                         )?;
                     recurring_tick(&config, &enrollment_id, now, json_output)
                 }
