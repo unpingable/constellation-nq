@@ -1629,8 +1629,25 @@ async fn successor_handoff_tick(
                 let predecessor_state = crate::operating::OperatingLedger::open(state_dir)?
                     .activation_status(&handoff.spec.predecessor_activation_id)?
                     .state;
+                if matches!(
+                    predecessor_state,
+                    ActivationStateV1::Staging | ActivationStateV1::Validated
+                ) {
+                    return print_value(
+                        &json!({
+                            "handoff_id": handoff_id,
+                            "state": "staged",
+                            "timer_exposure": "inert",
+                            "attempts_consumed": 0,
+                            "reason": "predecessor_activation_not_armed"
+                        }),
+                        true,
+                    );
+                }
                 if predecessor_state != ActivationStateV1::Armed {
-                    bail!("successor handoff predecessor activation is not exactly armed");
+                    bail!(
+                        "successor handoff predecessor activation is terminal before this exact handoff"
+                    );
                 }
                 let config = NqConfig::load(config_path)?;
                 let watcher = config
