@@ -5,14 +5,17 @@ Classification: **FINITE DELEGATED PASSIVE RENEWAL AND TRANSACTIONAL ACTIVATION 
 Date: 2026-08-27 UTC  
 Host: `sp00ky.net`  
 Branch: `campaign/passive-watcher-succession-v1`  
-Qualified code HEAD: `63078116295f966820a3c60a7198f2ae612ab406`
+Qualified code HEAD: `eb189d850f47434889f7523a8ba68627a9e3b907`
 
 ## Installed custody
 
-* release: `/opt/nq-ng/passive-succession-6307811-musl`
-* `nq` SHA-256: `2917ade7eead35d9c2f42fc0abc85bda42083788d428273278aaa279ae319534`
+* release: `/opt/nq-ng/passive-succession-eb189d8-musl`
+* predecessor qualification release (retained): `/opt/nq-ng/passive-succession-6307811-musl`
+* `nq` SHA-256: `17acade22606caa6ca587bd595dc32591875042268e362e8f98b5bbf8142faaf`
+* private release tar SHA-256: `6f88b9957a55f8b62e1b273bad476bb5396611bfb7d68a34fd5bcf26f5bba0d7`
+* private Debian artifact SHA-256: `009732419e3aaef14e469bb80f511016ae5c1ecb692b6ef2afcd9734656ca968`
 * recurrence unit: `/etc/systemd/system/nq-recurring-office.service`
-* recurrence unit SHA-256: `5a8a9681b2240d43ed5c257dc6dbfc22187115b3e7712770999d2db7699c85a4`
+* recurrence unit SHA-256: `63dc7e87b44a8f8f8253e48a3a1c642ebd5ed9e681c4e3d00108a49b5a3b5b07`
 * active NQ configuration SHA-256: `130a9264b2b0003c39c18cbd7e990f76375a4466b19c30c5a35a14e2c016737f`
 
 The checked-in `live-inputs/` are non-secret specifications and static service
@@ -106,6 +109,15 @@ existing regular file's owner, group, and mode while still installing only the
 validated byte snapshot. The live file was restored to `root:nq` mode `0640`
 without changing its bytes. An exact service-principal doctor over the narrowed
 configuration reports every configured watcher, including G14, healthy.
+
+Release `eb189d8` packages that repair. The checksummed private release was
+installed at its immutable path, and the dormant recurrence unit was updated to
+that exact `nq` binary. A post-deployment doctor executed as the unit's `nq:nq`
+principal, supplementary groups, and capability ceiling reported
+`healthy: true`, 20 supported available diagnostic-artifact commitments, and
+all nine configured watcher instances healthy. Final available space at the
+store filesystem was 26,896,269,312 bytes. No service or timer was started by
+the deployment.
 
 The observer produced 39 G13 samples (97,124 bytes) and 14 G14 samples (38,604
 bytes). Retain-all remains comfortably inside the reviewed 24-hour horizon;
