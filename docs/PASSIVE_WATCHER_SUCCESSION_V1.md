@@ -55,6 +55,11 @@ It then performs an ordinary fresh admission for the distinct successor. Every
 successor G, watcher, admission, and E retains its own identity and custody.
 Semantic drift refuses succession and returns to human review.
 
+When an H begins after an already retained observer history, it may bind the
+exact immediately preceding G identity. That identity is historical continuity
+input only: it is not counted as an H child and imports no sampling authority.
+The first issued G must name it exactly; omission or substitution refuses.
+
 The recurrence deployment policy predeclares each exact watcher binding to the
 same qualified passive coordination domain. H-authorized succession does not
 change coordination meaning. A successor E is accepted only after its watcher
@@ -71,4 +76,3 @@ gate before service shutdown.
 Succession never touches the retired one-shot provider boundary or A4. It never
 creates a sample, diagnostic acquisition, artifact, support occurrence, or
 Nightshift cycle.
-

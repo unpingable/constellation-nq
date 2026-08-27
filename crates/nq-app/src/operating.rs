@@ -55,6 +55,9 @@ pub struct OperatingGrantSpecV1 {
     pub recurrence_missed_slot_policy: String,
     pub recurrence_startup_policy: String,
     pub allowed_signing_key_ids: BTreeSet<String>,
+    /// Exact historical G immediately preceding this H, if continuity already exists.
+    /// It contributes no child or sampling authority inside H.
+    pub observer_predecessor_generation_id: Option<String>,
     pub not_before_unix_ms: i64,
     pub expires_at_unix_ms: i64,
     pub max_observer_generations: u16,
@@ -374,6 +377,7 @@ impl OperatingLedger {
             generation.spec.not_before_unix_ms,
             generation.spec.expires_at_unix_ms,
             generation.spec.previous_generation_id.as_deref(),
+            grant.spec.observer_predecessor_generation_id.as_deref(),
         )?;
         let semantic_snapshot_digest = generation_semantic_digest(generation)?;
         self.persist_issuance(ChildIssuanceInput {
@@ -433,6 +437,7 @@ impl OperatingLedger {
             enrollment.spec.anchor_unix_ms,
             enrollment.spec.expires_at_unix_ms,
             predecessor,
+            None,
         )?;
         let semantic_snapshot_digest = enrollment_semantic_digest(enrollment)?;
         self.persist_issuance(ChildIssuanceInput {
@@ -1041,6 +1046,10 @@ fn validate_grant_spec(
     for relation_id in &spec.allowed_watcher_succession_relation_ids {
         Sha256Digest::parse(relation_id.clone()).context("invalid succession relation identity")?;
     }
+    if let Some(predecessor) = &spec.observer_predecessor_generation_id {
+        Sha256Digest::parse(predecessor.clone())
+            .context("invalid historical observer predecessor identity")?;
+    }
     for value in [
         &spec.operator_occurrence_id,
         &spec.watcher_instance_id,
@@ -1196,6 +1205,7 @@ fn validate_child_budget(
     starts: i64,
     expires: i64,
     predecessor: Option<&str>,
+    initial_predecessor: Option<&str>,
 ) -> Result<()> {
     let (max_children, max_aggregate) = match kind {
         ChildGrantKindV1::ObserverGeneration => (
@@ -1224,8 +1234,8 @@ fn validate_child_budget(
         if starts != last.expires_at_unix_ms || predecessor != Some(last.child_id.as_str()) {
             bail!("successor child must use the exact exclusive predecessor boundary and identity");
         }
-    } else if predecessor.is_some() {
-        bail!("first H child cannot name a predecessor outside H");
+    } else if predecessor != initial_predecessor {
+        bail!("first H child must name H's exact historical predecessor, if any");
     }
     Ok(())
 }
@@ -1390,6 +1400,7 @@ mod tests {
             recurrence_missed_slot_policy: "latest_only".into(),
             recurrence_startup_policy: "evaluate_current_slot".into(),
             allowed_signing_key_ids: BTreeSet::from(["key:1".into()]),
+            observer_predecessor_generation_id: None,
             not_before_unix_ms: start,
             expires_at_unix_ms: start + i64::try_from(24 * HOUR).unwrap(),
             max_observer_generations: 4,
@@ -1792,6 +1803,45 @@ mod tests {
     }
 
     #[test]
+    fn first_h_generation_may_bind_exact_history_without_importing_child_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let ledger = OperatingLedger::open(root.path()).unwrap();
+        let mut spec = grant_spec(2_000);
+        let binding: nq_protocol::SubjectBinding = serde_json::from_value(json!({
+            "subject": "host:test", "scope": {"kind": "host", "value": {"id": "test"}},
+            "vantage": {"kind": "local", "value": {}}
+        }))
+        .unwrap();
+        spec.subject_binding_digest = semantic_digest(&binding).unwrap().to_string();
+        spec.observer_predecessor_generation_id = Some(format!("sha256:{}", "9".repeat(64)));
+        let grant = OperatingGrantV1::new(
+            spec,
+            observer_policy(),
+            recurrence_policy(),
+            1_000,
+            json!({"operator": "test"}),
+        )
+        .unwrap();
+        ledger.create_grant(&grant).unwrap();
+        ledger
+            .activate_grant(&grant.grant_id, "activate", 2_000)
+            .unwrap();
+        let first = generation(
+            &grant,
+            2_000,
+            grant.spec.observer_predecessor_generation_id.clone(),
+            "g1",
+        );
+        let first_id = semantic_digest(&first).unwrap().to_string();
+        ledger
+            .issue_generation(&grant.grant_id, &first, &first_id, "issue:first", 2_001)
+            .unwrap();
+        let status = ledger.grant_status(&grant.grant_id, 2_002).unwrap();
+        assert_eq!(status.observer_generations_issued, 1);
+        assert_eq!(status.aggregate_samples_issued, 1_440);
+    }
+
+    #[test]
     fn finite_h_edge_authorizes_distinct_successor_enrollment_without_identity_equivalence() {
         use nq_store::recurrence::WatcherCoordinationBindingV1;
         let root = tempfile::tempdir().unwrap();
@@ -1903,6 +1953,7 @@ mod tests {
             recurrence_missed_slot_policy: "latestonly".into(),
             recurrence_startup_policy: "evaluatecurrentslot".into(),
             allowed_signing_key_ids: BTreeSet::from(["k".into()]),
+            observer_predecessor_generation_id: None,
             not_before_unix_ms: 1,
             expires_at_unix_ms: 2,
             max_observer_generations: 1,
