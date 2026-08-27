@@ -5,6 +5,11 @@ RequiresMountsFor=/var/lib/nq-passive-load
 
 [Service]
 Type=simple
+# Template instances otherwise enter an automatic per-template slice. That
+# nested cgroup omits the exact cpu.max/cpuset files bound by this deployment's
+# qualified available_parallelism() context. Keep every finite instance in the
+# already-qualified direct system slice; this selects no CPU quota or affinity.
+Slice=system.slice
 User=nq-passive-load-observer
 Group=nq-passive-load-reader
 UMask=0027

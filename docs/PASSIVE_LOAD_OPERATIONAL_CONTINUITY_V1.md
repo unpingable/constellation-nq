@@ -117,6 +117,13 @@ scope, vantage, executable, or key drift cannot be normalized away. The pinned
 capacity-context digest is re-derived before each sample. A changed runtime
 context produces no sample under the old identity.
 
+Service template placement is therefore deployment custody, not a mechanical
+detail outside the generation. Template instances must run in the exact
+qualified cgroup slice. An implicit per-template slice may omit or alter the
+pinned cgroup inputs even when systemd specifies no quota or affinity; that is
+capacity-context drift and is terminal for the generation. Correcting the unit
+does not reopen the refused generation or replenish a finite operating grant.
+
 ## Signing-key generations
 
 Each sample identifies one issuer and key ID and carries an Ed25519 signature.

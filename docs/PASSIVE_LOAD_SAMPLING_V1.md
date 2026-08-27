@@ -183,6 +183,16 @@ namespace and systemd CPU-affinity/quota properties. The observer unit does not
 set `CPUQuota`, `CPUAffinity`, or `AllowedCPUs`; adding one would change the
 capacity context and requires requalification.
 
+The service's cgroup placement is part of that exact runtime context even when
+no explicit CPU control is requested. In particular, a systemd template
+instance normally enters an implicit per-template slice whose inherited
+`cpu.max` or cpuset files may differ from a directly qualified service. A
+deployment using template instances must pin the already-qualified slice (for
+the Linode office, `Slice=system.slice`) or qualify the template slice as a new
+capacity context. Process presence, the absence of an explicit quota, and an
+equal `available_parallelism()` integer are not substitutes for the exact
+content-bound context proof.
+
 ## Observer effect and footprint
 
 The long-lived observer performs one bounded file read, one

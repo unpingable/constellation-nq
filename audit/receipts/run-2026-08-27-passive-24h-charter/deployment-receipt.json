@@ -1,0 +1,107 @@
+{
+  "schema": "nq.passive_load_reviewed_24h_charter_receipt.v1",
+  "recorded_at": "2026-08-27T17:05:00Z",
+  "classification": "reviewed_24h_charter_failed_closed_at_first_sample_capacity_context_service_slice_drift_office_dormant",
+  "repository": {
+    "branch": "campaign/passive-watcher-succession-v1",
+    "charter_source_commit": "4294773535119070c7e4156fc8a9c016bf30dee8"
+  },
+  "host": "sp00ky.net",
+  "charter": {
+    "grant_id": "sha256:deb832fdc11d3b32a56643aa3831570154bfd430c1b8328518f26917824c881f",
+    "start": "2026-08-27T17:00:00Z",
+    "end_exclusive": "2026-08-28T17:00:00Z",
+    "sample_interval_ms": 15000,
+    "acquisition_interval_ms": 300000,
+    "max_observer_generations": 4,
+    "max_recurrence_enrollments": 4,
+    "max_watcher_succession_edges": 3,
+    "max_aggregate_samples": 5760,
+    "max_aggregate_acquisitions": 288,
+    "required_free_bytes": 10737418240,
+    "retention_mode": "retain_all",
+    "terminal_state": "retired",
+    "retirement_event_id": "sha256:665fbfb6a1f0d3bf18048bc93a8c72eea2887847e0ae088a0682b0eec715fbe4"
+  },
+  "observer_generations": [
+    {
+      "label": "G1",
+      "generation_id": "sha256:fc013ff578b97c28648886cdd0c4b10c5ea428178458834822a7df78d8f73ef1",
+      "terminal_state": "retired",
+      "samples": 0,
+      "failure_event_id": "sha256:272a6deead6605bb02db70deff9e78a614e1b28c9498ddd998430c64384ff45a",
+      "failure": "capacity_context_drift",
+      "retirement_event_id": "sha256:61f36f91a0c4e897fd78612645169924703adf28334c18ffbc072e4d7562ff94"
+    },
+    {
+      "label": "G2",
+      "generation_id": "sha256:896177eee499eb3dbfa72b8cb242c2f4bdb74fa8654d1758b69d7b6df962314e",
+      "terminal_state": "retired",
+      "samples": 0,
+      "retirement_event_id": "sha256:2859535f8d9c97dec95ff4aa8a481493601b1dcc067aac81191aa3c13c95c863"
+    },
+    {
+      "label": "G3",
+      "generation_id": "sha256:f3f71712a5b13cdcfba25aead4ad4fcc9a7ed237b05c87f35b172e5081cdd1d4",
+      "terminal_state": "retired",
+      "samples": 0,
+      "retirement_event_id": "sha256:8879d46c9d02d0974d4b1cbb583f75dc81b2f37555f12af8bf28b3d96b6e6f04"
+    },
+    {
+      "label": "G4",
+      "generation_id": "sha256:a9cded26c61b3d731b29dada65b4687e32a3cc1e54badce8efe935d9cfccfd92",
+      "terminal_state": "retired",
+      "samples": 0,
+      "retirement_event_id": "sha256:ebd6e4f572065658d886faa3733e33f963e364a89a5a3cb9a83e31f5de52fa6f"
+    }
+  ],
+  "recurrence_enrollments": [
+    "sha256:045f20cfbe836461b8251085a731774d91ae951c2e2e2f3588e0265da41d75c2",
+    "sha256:16912c0bc77a5b174e2386c3b1e4bd9719b6e9579c1e4577f79d498d238f2d80",
+    "sha256:32c058d53234818aed63fc1a53f2834b1ecb127c592c7a056c950e53938e1e92",
+    "sha256:ef28624e31c9d6d33ddf8245fb7f0d57388da04e08497906832d8ea354622438"
+  ],
+  "recurrence_result": {
+    "timer_wakeups_explicitly_observed_inert": 18,
+    "acquisition_occurrences": 0,
+    "provider_intakes": 0,
+    "evaluation_runs": 0,
+    "diagnostic_artifacts": 0,
+    "admissions": 0,
+    "handoffs": 0,
+    "activations": 0
+  },
+  "capacity_context": {
+    "expected_id": "sha256:6c6e34b0e088655fce62d4dd15ea355e6d79015736c6e0fb5b8219feac492c7d",
+    "failure_source": "implicit_per_template_systemd_slice",
+    "repair": "Slice=system.slice",
+    "repaired_unit_sha256": "b2910ba65771c43d5294c03a332320c067a9391d147197642dac097684105ec7",
+    "repaired_unit_probe_matches_expected_context": true
+  },
+  "installed": {
+    "release": "/opt/nq-ng/passive-handoff-87a6ca3-musl",
+    "nq_sha256": "d43f928af34ef7873ae52499c4118ebf660702e8bce40f337788d1cd6e0081ad",
+    "observer_sha256": "bc8e36f7a3569a8b430da44040acdd7d3a368e595385db03571a332ce30ec9a1",
+    "release_manifest_sha256": "b2770c1e8159cf5de669618003466cbd557659a65740ac76208048967a058399",
+    "observer_service": "inactive_static",
+    "observer_timers": "inactive_disabled",
+    "recurrence_service": "inactive_static",
+    "recurrence_timer": "inactive_disabled"
+  },
+  "storage": {
+    "charter_generation_store_bytes": 44256,
+    "samples": 0,
+    "final_free_bytes": 26692595712,
+    "archive_required": false
+  },
+  "historical_a4": {
+    "acquisition_id": "recurrence:d555a10d2b4f11e7c6d550f43a6fd6d07631573bec5c14b54d09ca6b8e04beea",
+    "coordination_domain_id": "linode:labelwatch-host",
+    "fencing_epoch": 1,
+    "diagnostic_outcome": "unknown",
+    "provider_activity": "unknown",
+    "coordination": "fenced",
+    "unchanged": true
+  },
+  "next_human_decision": "authorize_or_decline_one_like_for_like_replacement_24h_charter_with_system_slice_pinned"
+}
