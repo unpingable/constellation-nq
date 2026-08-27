@@ -191,6 +191,22 @@ pub enum WatcherCommand {
     Test(InstanceArg),
     /// Conformance-test, dry-collect, and atomically activate a new lock.
     Admit(InstanceArg),
+    /// Admit a distinct passive watcher only after consuming an exact H-bound succession edge.
+    AdmitSuccessor {
+        /// Exact predecessor watcher identity.
+        predecessor_instance_id: String,
+        /// Exact successor watcher identity.
+        successor_instance_id: String,
+        /// Finite operating grant containing the closed relation.
+        #[arg(long)]
+        grant_id: String,
+        /// Exact succession relation identity.
+        #[arg(long)]
+        relation_id: String,
+        /// Operating-office append-only ledger.
+        #[arg(long, default_value = "/var/lib/nq-operating-office")]
+        operating_state_dir: PathBuf,
+    },
     /// Re-admit changed bytes/config/profile and retain admission history.
     Rotate(InstanceArg),
     /// Activate a previously retained and currently verifiable lock.
@@ -490,6 +506,24 @@ pub enum OperatingCommand {
         enrollment_id: String,
         #[arg(long)]
         operation_id: String,
+        #[arg(long, default_value = "/var/lib/nq-operating-office")]
+        state_dir: PathBuf,
+    },
+    /// Construct one exact relation candidate; creates no admission or grant authority.
+    BuildWatcherSuccession {
+        predecessor_instance_id: String,
+        successor_instance_id: String,
+        #[arg(long)]
+        predecessor_provider_config: PathBuf,
+        #[arg(long)]
+        successor_provider_config: PathBuf,
+        #[arg(long)]
+        operator_occurrence_id: String,
+    },
+    /// Consume one predeclared exact watcher succession edge under finite H.
+    IssueWatcherSuccession {
+        grant_id: String,
+        relation: PathBuf,
         #[arg(long, default_value = "/var/lib/nq-operating-office")]
         state_dir: PathBuf,
     },
@@ -872,6 +906,55 @@ async fn watcher_command(
         }
         WatcherCommand::Admit(instance) => {
             run_watcher_action(config_path, &instance.instance_id, "admit", json_output).await
+        }
+        WatcherCommand::AdmitSuccessor {
+            predecessor_instance_id,
+            successor_instance_id,
+            grant_id,
+            relation_id,
+            operating_state_dir,
+        } => {
+            let config = NqConfig::load(config_path)?;
+            let predecessor = config
+                .watcher(&predecessor_instance_id)
+                .context("predecessor watcher is absent from current configuration")?;
+            let successor = config
+                .watcher(&successor_instance_id)
+                .context("successor watcher is absent from current configuration")?;
+            let ledger = crate::operating::OperatingLedger::open(&operating_state_dir)?;
+            let relation = ledger.watcher_succession(&grant_id, &relation_id)?;
+            if &relation.predecessor != predecessor || &relation.successor != successor {
+                bail!("current watcher configurations differ from the exact succession relation");
+            }
+            if passive_provider_custody(&relation.predecessor_custody.provider_config_path)?
+                != relation.predecessor_custody
+                || passive_provider_custody(&relation.successor_custody.provider_config_path)?
+                    != relation.successor_custody
+            {
+                bail!("passive provider custody changed after succession relation qualification");
+            }
+            let predecessor_digest = semantic_digest(predecessor)?.to_string();
+            let store = Store::open_read_only(&config.database_path)?;
+            let binding = store
+                .latest_binding(&predecessor_instance_id)?
+                .context("predecessor watcher has no admission binding")?;
+            let admission_id = binding
+                .admission_id
+                .as_deref()
+                .context("predecessor watcher binding is not active")?;
+            let admission = store
+                .admission(admission_id)?
+                .context("predecessor admission is absent")?;
+            if !matches!(binding.event_kind.as_str(), "activate" | "rollback")
+                || admission.instance_id != predecessor_instance_id
+                || admission.config_digest != predecessor_digest
+            {
+                bail!(
+                    "predecessor watcher does not hold the exact active admission required by succession"
+                );
+            }
+            drop(ledger);
+            run_watcher_action(config_path, &successor_instance_id, "admit", json_output).await
         }
         WatcherCommand::Rotate(instance) => {
             run_watcher_action(config_path, &instance.instance_id, "rotate", json_output).await
@@ -1290,6 +1373,49 @@ fn operating_command(
             )?;
             print_value(&issuance, true)
         }
+        OperatingCommand::BuildWatcherSuccession {
+            predecessor_instance_id,
+            successor_instance_id,
+            predecessor_provider_config,
+            successor_provider_config,
+            operator_occurrence_id,
+        } => {
+            let config = NqConfig::load(config_path)?;
+            let predecessor = config
+                .watcher(&predecessor_instance_id)
+                .context("unknown predecessor watcher")?
+                .clone();
+            let successor = config
+                .watcher(&successor_instance_id)
+                .context("unknown successor watcher")?
+                .clone();
+            let predecessor_custody = passive_provider_custody(&predecessor_provider_config)?;
+            let successor_custody = passive_provider_custody(&successor_provider_config)?;
+            let relation = nq_core::PassiveWatcherSuccessionV1::new(
+                predecessor,
+                successor,
+                predecessor_custody,
+                successor_custody,
+                operator_occurrence_id,
+                now,
+            )?;
+            print_canonical_value(&relation)
+        }
+        OperatingCommand::IssueWatcherSuccession {
+            grant_id,
+            relation,
+            state_dir,
+        } => {
+            let relation: nq_core::PassiveWatcherSuccessionV1 =
+                read_exact_canonical_json(&relation)?;
+            let relation_id = OperatingLedger::open(&state_dir)?
+                .issue_watcher_succession(&grant_id, &relation, now)?;
+            print_value(
+                &json!({"grant_id": grant_id, "relation_id": relation_id,
+                    "admission_created": false, "acquisition_authority_created": false}),
+                true,
+            )
+        }
         OperatingCommand::ActivationStage { spec, state_dir } => {
             let spec: crate::operating::OfficeActivationSpecV1 = read_exact_json(&spec)?;
             let activation = OperatingLedger::open(&state_dir)?.stage_activation(spec, now)?;
@@ -1389,9 +1515,11 @@ fn validate_activation_prerequisites(
     if !ledger.grant_status(&grant.grant_id, now)?.active {
         bail!("activation operating grant is not active");
     }
-    if activation.spec.watcher_instance_id != grant.spec.watcher_instance_id
-        || activation.spec.watcher_semantic_digest != grant.spec.watcher_semantic_digest
-        || activation.spec.passive_provider_boundary_id != grant.spec.passive_provider_boundary_id
+    if !ledger.watcher_digest_is_authorized(
+        &grant.grant_id,
+        &activation.spec.watcher_instance_id,
+        &activation.spec.watcher_semantic_digest,
+    )? || activation.spec.passive_provider_boundary_id != grant.spec.passive_provider_boundary_id
         || activation.spec.capacity_context_id != grant.spec.capacity_context_id
     {
         bail!("activation manifest changed H-bound semantics");
@@ -1464,8 +1592,7 @@ fn validate_activation_prerequisites(
         bail!("activation genesis lacks exact completed provider intake");
     }
 
-    let provider: nq_passive_load_helper::ProviderConfigV1 =
-        read_exact_canonical_json(&activation.spec.provider_config_path)?;
+    let provider = load_passive_provider_config(&activation.spec.provider_config_path)?;
     if digest_file(&activation.spec.provider_config_path)? != activation.spec.provider_config_digest
         || provider.sample_store != activation.spec.sample_store
         || provider.observer_config_digest.as_str() != activation.spec.generation_id
@@ -1487,6 +1614,43 @@ fn validate_activation_prerequisites(
         "sample_store": "ready",
         "service_manager_deployment": "ready"
     }))
+}
+
+fn passive_provider_custody(path: &Path) -> Result<nq_core::PassiveProviderCustodyV1> {
+    if !path.is_absolute() {
+        bail!("passive provider configuration path must be absolute");
+    }
+    let provider = load_passive_provider_config(path)?;
+    Ok(nq_core::PassiveProviderCustodyV1 {
+        provider_config_path: path.to_owned(),
+        provider_config_digest: digest_file(path)?,
+        sample_store: provider.sample_store,
+        max_sample_age_ms: provider.max_sample_age_ms,
+        observer_profile: provider.observer_profile,
+        observer_artifact_digest: provider.observer_artifact_digest.to_string(),
+        observer_config_digest: provider.observer_config_digest.to_string(),
+        producer_issuer: provider.producer_issuer,
+        producer_key_id: provider.producer_key_id,
+        producer_public_key_hex: provider.producer_public_key_hex,
+        capacity_context_id: provider.capacity_context_id.to_string(),
+    })
+}
+
+fn load_passive_provider_config(path: &Path) -> Result<nq_passive_load_helper::ProviderConfigV1> {
+    let bytes = fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+    if bytes.len() > MAX_STORED_JSON_BYTES {
+        bail!("passive provider configuration exceeds bounded size");
+    }
+    if path
+        .extension()
+        .is_some_and(|extension| extension == "toml")
+    {
+        Ok(toml::from_str(
+            std::str::from_utf8(&bytes).context("provider config is not UTF-8")?,
+        )?)
+    } else {
+        Ok(serde_json::from_slice(&bytes)?)
+    }
 }
 
 fn read_exact_canonical_json<T>(path: &Path) -> Result<T>
@@ -3775,6 +3939,63 @@ helper_runtime_dir = "/run/nq/helpers"
     fn command_tree_exposes_required_operator_workflows() {
         use clap::CommandFactory;
         Nq::command().debug_assert();
+    }
+
+    #[test]
+    fn passive_succession_surface_is_exact_and_has_no_equivalence_override() {
+        let relation = Nq::try_parse_from([
+            "nq",
+            "operating",
+            "build-watcher-succession",
+            "watcher-g1",
+            "watcher-g2",
+            "--predecessor-provider-config",
+            "/etc/nq/provider-g1.toml",
+            "--successor-provider-config",
+            "/etc/nq/provider-g2.toml",
+            "--operator-occurrence-id",
+            "operator:edge-1",
+        ])
+        .expect("typed succession builder parses");
+        assert!(matches!(
+            relation.command,
+            Command::Operating {
+                command: OperatingCommand::BuildWatcherSuccession { .. }
+            }
+        ));
+        let admission = Nq::try_parse_from([
+            "nq",
+            "watcher",
+            "admit-successor",
+            "watcher-g1",
+            "watcher-g2",
+            "--grant-id",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--relation-id",
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ])
+        .expect("successor admission parses");
+        assert!(matches!(
+            admission.command,
+            Command::Watcher {
+                command: WatcherCommand::AdmitSuccessor { .. }
+            }
+        ));
+        assert!(
+            Nq::try_parse_from([
+                "nq",
+                "watcher",
+                "admit-successor",
+                "watcher-g1",
+                "watcher-g2",
+                "--grant-id",
+                "g",
+                "--relation-id",
+                "r",
+                "--same-enough",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use nix::fcntl::{Flock, FlockArg};
+use nq_core::PassiveWatcherSuccessionV1;
 use nq_passive_load_helper::{ObserverGenerationV1, OperationalPolicyV1};
 use nq_protocol::{Sha256Digest, canonical_json_bytes, semantic_digest};
 use nq_store::recurrence::{RecurrenceEnrollmentV1, RecurringOfficePolicyV1};
@@ -58,6 +59,8 @@ pub struct OperatingGrantSpecV1 {
     pub expires_at_unix_ms: i64,
     pub max_observer_generations: u16,
     pub max_recurrence_enrollments: u16,
+    pub max_watcher_succession_edges: u16,
+    pub allowed_watcher_succession_relation_ids: BTreeSet<String>,
     pub observer_generation_duration_ms: u64,
     pub observer_generation_max_samples: u64,
     pub recurrence_enrollment_duration_ms: u64,
@@ -181,6 +184,8 @@ pub struct OperatingGrantStatusV1 {
     pub observer_generations_remaining: u16,
     pub recurrence_enrollments_issued: u16,
     pub recurrence_enrollments_remaining: u16,
+    pub watcher_succession_edges_issued: u16,
+    pub watcher_succession_edges_remaining: u16,
     pub aggregate_samples_issued: u64,
     pub aggregate_samples_remaining: u64,
     pub aggregate_acquisitions_issued: u64,
@@ -282,6 +287,7 @@ impl OperatingLedger {
             "children",
             "activations",
             "activation-events",
+            "successions",
         ] {
             fs::create_dir_all(root.join(child))?;
         }
@@ -393,6 +399,15 @@ impl OperatingLedger {
         now: i64,
     ) -> Result<ChildGrantIssuanceV1> {
         let grant = self.require_active_grant(grant_id, now)?;
+        if !self.watcher_digest_is_authorized(
+            grant_id,
+            &enrollment.spec.watcher_instance_id,
+            &enrollment.watcher_semantic_digest,
+        )? {
+            bail!(
+                "recurrence enrollment watcher is not reachable through H's issued succession chain"
+            );
+        }
         let expected_id = semantic_digest(enrollment)?.to_string();
         Sha256Digest::parse(enrollment.enrollment_id.clone())
             .context("recurrence enrollment has invalid content-derived identity")?;
@@ -433,6 +448,79 @@ impl OperatingLedger {
             operation_id,
             now,
         })
+    }
+
+    /// Consume one finite H succession-edge allowance. The relation remains
+    /// continuity evidence only; this operation creates no admission.
+    pub fn issue_watcher_succession(
+        &self,
+        grant_id: &str,
+        relation: &PassiveWatcherSuccessionV1,
+        now: i64,
+    ) -> Result<String> {
+        let grant = self.require_active_grant(grant_id, now)?;
+        relation.validate()?;
+        if !grant
+            .spec
+            .allowed_watcher_succession_relation_ids
+            .contains(&relation.relation_id)
+        {
+            bail!("watcher succession relation is not in H's exact closed set");
+        }
+        let prior = self.watcher_successions(grant_id)?;
+        if let Some(existing) = prior
+            .iter()
+            .find(|existing| existing.relation_id == relation.relation_id)
+        {
+            if existing == relation {
+                return Ok(relation.relation_id.clone());
+            }
+            bail!("watcher succession relation identity was substituted");
+        }
+        if prior.len() >= usize::from(grant.spec.max_watcher_succession_edges) {
+            bail!("operating grant watcher succession budget is exhausted");
+        }
+        let predecessor_digest = relation.predecessor_digest()?;
+        let expected_predecessor = prior
+            .last()
+            .map(PassiveWatcherSuccessionV1::successor_digest)
+            .transpose()?
+            .unwrap_or_else(|| grant.spec.watcher_semantic_digest.clone());
+        let expected_instance = prior
+            .last()
+            .map(|edge| edge.successor.instance_id.as_str())
+            .unwrap_or(grant.spec.watcher_instance_id.as_str());
+        if predecessor_digest != expected_predecessor
+            || relation.predecessor.instance_id != expected_instance
+        {
+            bail!("watcher succession does not extend H's exact directed chain");
+        }
+        let successor_passive = relation
+            .successor
+            .passive_host_load_sample
+            .as_ref()
+            .context("successor is not passive load")?;
+        if successor_passive.observer_profile != grant.spec.observer_profile
+            || successor_passive.observer_artifact_digest != grant.spec.observer_artifact_digest
+            || successor_passive.capacity_context_id != grant.spec.capacity_context_id
+            || successor_passive.max_sample_age_ms
+                != grant
+                    .observer_deployment_policy
+                    .max_sample_eligibility_age_ms
+            || !grant
+                .spec
+                .allowed_signing_key_ids
+                .contains(&successor_passive.producer_key_id)
+        {
+            bail!("watcher succession escapes H's exact semantic/key envelope");
+        }
+        let path = self
+            .root
+            .join("successions")
+            .join(id_component(grant_id))
+            .join(format!("{}.json", id_component(&relation.relation_id)));
+        write_canonical_new(&path, relation)?;
+        Ok(relation.relation_id.clone())
     }
 
     pub fn stage_activation(
@@ -582,6 +670,7 @@ impl OperatingLedger {
         let retired = events.iter().any(|event| event.event_kind == "retired");
         let generations = self.child_issuances(grant_id, ChildGrantKindV1::ObserverGeneration)?;
         let enrollments = self.child_issuances(grant_id, ChildGrantKindV1::RecurrenceEnrollment)?;
+        let successions = self.watcher_successions(grant_id)?;
         let samples = generations
             .iter()
             .map(|item| item.finite_authority_count)
@@ -621,6 +710,11 @@ impl OperatingLedger {
                 .spec
                 .max_recurrence_enrollments
                 .saturating_sub(enrollments.len().try_into().unwrap_or(u16::MAX)),
+            watcher_succession_edges_issued: successions.len().try_into().unwrap_or(u16::MAX),
+            watcher_succession_edges_remaining: grant
+                .spec
+                .max_watcher_succession_edges
+                .saturating_sub(successions.len().try_into().unwrap_or(u16::MAX)),
             aggregate_samples_issued: samples,
             aggregate_samples_remaining: grant.spec.max_aggregate_samples.saturating_sub(samples),
             aggregate_acquisitions_issued: acquisitions,
@@ -691,6 +785,51 @@ impl OperatingLedger {
             .child_issuances(grant_id, kind)?
             .iter()
             .any(|item| item.child_id == child_id))
+    }
+
+    pub fn watcher_succession(
+        &self,
+        grant_id: &str,
+        relation_id: &str,
+    ) -> Result<PassiveWatcherSuccessionV1> {
+        let relation: PassiveWatcherSuccessionV1 = read_json(
+            &self
+                .root
+                .join("successions")
+                .join(id_component(grant_id))
+                .join(format!("{}.json", id_component(relation_id))),
+        )?;
+        relation.validate()?;
+        Ok(relation)
+    }
+
+    pub fn watcher_digest_is_authorized(
+        &self,
+        grant_id: &str,
+        instance_id: &str,
+        watcher_digest: &str,
+    ) -> Result<bool> {
+        let grant = self.grant(grant_id)?;
+        if grant.spec.watcher_instance_id == instance_id
+            && grant.spec.watcher_semantic_digest == watcher_digest
+        {
+            return Ok(true);
+        }
+        let mut expected_instance = grant.spec.watcher_instance_id.clone();
+        let mut expected_digest = grant.spec.watcher_semantic_digest.clone();
+        for edge in self.watcher_successions(grant_id)? {
+            if edge.predecessor.instance_id != expected_instance
+                || edge.predecessor_digest()? != expected_digest
+            {
+                bail!("operating grant watcher succession ledger is not one exact directed chain");
+            }
+            expected_instance = edge.successor.instance_id.clone();
+            expected_digest = edge.successor_digest()?;
+            if expected_instance == instance_id && expected_digest == watcher_digest {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn require_active_grant(&self, grant_id: &str, now: i64) -> Result<OperatingGrantV1> {
@@ -765,6 +904,24 @@ impl OperatingLedger {
         .filter(|item| item.kind == kind)
         .collect::<Vec<_>>();
         items.sort_by_key(|item| (item.starts_at_unix_ms, item.issuance_id.clone()));
+        Ok(items)
+    }
+
+    fn watcher_successions(&self, grant_id: &str) -> Result<Vec<PassiveWatcherSuccessionV1>> {
+        let mut items = read_dir_json::<PassiveWatcherSuccessionV1>(
+            &self.root.join("successions").join(id_component(grant_id)),
+        )?;
+        for item in &items {
+            item.validate()?;
+        }
+        items.sort_by_key(|item| (item.created_at_unix_ms, item.relation_id.clone()));
+        for pair in items.windows(2) {
+            if pair[0].created_at_unix_ms >= pair[1].created_at_unix_ms
+                || pair[0].successor != pair[1].predecessor
+            {
+                bail!("watcher succession records are not one strictly ordered directed chain");
+            }
+        }
         Ok(items)
     }
 
@@ -870,6 +1027,19 @@ fn validate_grant_spec(
         || spec.allowed_signing_key_ids.is_empty()
     {
         bail!("operating grant must contain exact positive finite bounds");
+    }
+    if usize::from(spec.max_watcher_succession_edges)
+        != spec.allowed_watcher_succession_relation_ids.len()
+        || spec.max_watcher_succession_edges
+            > spec
+                .max_observer_generations
+                .min(spec.max_recurrence_enrollments)
+                .saturating_sub(1)
+    {
+        bail!("operating grant succession authority must be an exact finite closed set");
+    }
+    for relation_id in &spec.allowed_watcher_succession_relation_ids {
+        Sha256Digest::parse(relation_id.clone()).context("invalid succession relation identity")?;
     }
     for value in [
         &spec.operator_occurrence_id,
@@ -988,9 +1158,19 @@ fn validate_enrollment_child(
     grant: &OperatingGrantV1,
     enrollment: &RecurrenceEnrollmentV1,
 ) -> Result<()> {
+    let watcher_declared = grant
+        .recurrence_deployment_policy
+        .watcher_bindings
+        .iter()
+        .any(|binding| {
+            binding.watcher_instance_id == enrollment.spec.watcher_instance_id
+                && binding.watcher_semantic_digest == enrollment.watcher_semantic_digest
+                && binding.coordination_domain_id == grant.spec.coordination_domain_id
+        });
+    let initial_watcher = enrollment.spec.watcher_instance_id == grant.spec.watcher_instance_id
+        && enrollment.watcher_semantic_digest == grant.spec.watcher_semantic_digest;
     if enrollment.spec.policy_id != grant.recurrence_deployment_policy_id
-        || enrollment.spec.watcher_instance_id != grant.spec.watcher_instance_id
-        || enrollment.watcher_semantic_digest != grant.spec.watcher_semantic_digest
+        || (!initial_watcher && !watcher_declared)
         || enrollment.coordination_domain_id != grant.spec.coordination_domain_id
         || enrollment.spec.interval_ms != grant.spec.acquisition_interval_ms
         || enrollment.spec.max_acquisition_occurrences
@@ -1137,6 +1317,7 @@ fn read_dir_json<T: for<'de> Deserialize<'de> + Serialize>(dir: &Path) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nq_core::{PassiveProviderCustodyV1, PassiveWatcherSuccessionV1, WatcherConfig};
     use nq_passive_load_helper::{RetentionModeV1, SamplingStartupPolicyV1};
     use nq_store::recurrence::{MissedSlotPolicyV1, StartupPolicyV1};
 
@@ -1213,6 +1394,8 @@ mod tests {
             expires_at_unix_ms: start + i64::try_from(24 * HOUR).unwrap(),
             max_observer_generations: 4,
             max_recurrence_enrollments: 4,
+            max_watcher_succession_edges: 0,
+            allowed_watcher_succession_relation_ids: BTreeSet::new(),
             observer_generation_duration_ms: 6 * HOUR,
             observer_generation_max_samples: 1_440,
             recurrence_enrollment_duration_ms: 6 * HOUR,
@@ -1323,6 +1506,60 @@ mod tests {
             first_eligible_slot: 0,
             created_at_unix_ms: start,
         }
+    }
+
+    fn succession_watchers() -> (WatcherConfig, WatcherConfig, PassiveWatcherSuccessionV1) {
+        fn watcher(instance: &str, generation: char) -> WatcherConfig {
+            serde_json::from_value(json!({
+                "instance_id": instance,
+                "command": {"executable": "/opt/nq/passive", "args": ["serve-stdio",
+                    format!("/etc/nq/provider-{generation}.toml")], "env": {},
+                    "execution_account": "nq", "working_directory": "/var/empty"},
+                "profile": {"id": "nq.host", "version": 1},
+                "subject": "host:test",
+                "scope": {"kind": "host", "value": {"id": "test"}},
+                "vantage": {"kind": "local", "value": {}},
+                "capability_ceiling": ["read_procfs", "read_system_info"],
+                "passive_host_load_sample": {
+                    "schema": "nq.passive_host_load_provider_config.v1",
+                    "max_sample_age_ms": 30000,
+                    "observer_profile": "nq.host_load_passive_sampler.v1",
+                    "observer_artifact_digest": format!("sha256:{}", "2".repeat(64)),
+                    "observer_config_digest": format!("sha256:{}", generation.to_string().repeat(64)),
+                    "producer_issuer": "observer:test", "producer_key_id": "key:1",
+                    "producer_public_key_hex": "00".repeat(32),
+                    "capacity_context_id": format!("sha256:{}", "4".repeat(64))
+                }
+            })).unwrap()
+        }
+        fn custody(watcher: &WatcherConfig, generation: char) -> PassiveProviderCustodyV1 {
+            let passive = watcher.passive_host_load_sample.as_ref().unwrap();
+            PassiveProviderCustodyV1 {
+                provider_config_path: PathBuf::from(format!("/etc/nq/provider-{generation}.toml")),
+                provider_config_digest: format!("sha256:{}", generation.to_string().repeat(64)),
+                sample_store: PathBuf::from(format!("/tmp/samples-{generation}")),
+                max_sample_age_ms: passive.max_sample_age_ms,
+                observer_profile: passive.observer_profile.clone(),
+                observer_artifact_digest: passive.observer_artifact_digest.clone(),
+                observer_config_digest: passive.observer_config_digest.clone(),
+                producer_issuer: passive.producer_issuer.clone(),
+                producer_key_id: passive.producer_key_id.clone(),
+                producer_public_key_hex: passive.producer_public_key_hex.clone(),
+                capacity_context_id: passive.capacity_context_id.clone(),
+            }
+        }
+        let predecessor = watcher("passive-watcher-g1", '1');
+        let successor = watcher("passive-watcher-g2", '2');
+        let relation = PassiveWatcherSuccessionV1::new(
+            predecessor.clone(),
+            successor.clone(),
+            custody(&predecessor, '1'),
+            custody(&successor, '2'),
+            "operator:succession".into(),
+            1_000,
+        )
+        .unwrap();
+        (predecessor, successor, relation)
     }
 
     #[test]
@@ -1555,6 +1792,98 @@ mod tests {
     }
 
     #[test]
+    fn finite_h_edge_authorizes_distinct_successor_enrollment_without_identity_equivalence() {
+        use nq_store::recurrence::WatcherCoordinationBindingV1;
+        let root = tempfile::tempdir().unwrap();
+        let ledger = OperatingLedger::open(root.path()).unwrap();
+        let (predecessor, successor, relation) = succession_watchers();
+        let predecessor_digest = semantic_digest(&predecessor).unwrap().to_string();
+        let successor_digest = semantic_digest(&successor).unwrap().to_string();
+        assert_ne!(predecessor_digest, successor_digest);
+
+        let mut spec = grant_spec(2_000);
+        spec.watcher_instance_id = predecessor.instance_id.clone();
+        spec.watcher_semantic_digest = predecessor_digest;
+        spec.max_watcher_succession_edges = 1;
+        spec.allowed_watcher_succession_relation_ids =
+            BTreeSet::from([relation.relation_id.clone()]);
+        let mut recurrence = recurrence_policy();
+        recurrence
+            .watcher_bindings
+            .push(WatcherCoordinationBindingV1 {
+                watcher_instance_id: successor.instance_id.clone(),
+                watcher_semantic_digest: successor_digest.clone(),
+                coordination_domain_id: spec.coordination_domain_id.clone(),
+                origin_profile: "nq.substrate_origin.linode_instance_metadata.v1".into(),
+                expected_instance_id_sha256: "1".repeat(64),
+                origin_helper_path: "/opt/nq/origin".into(),
+                origin_helper_sha256: "2".repeat(64),
+                origin_helper_account: "nq-origin".into(),
+                origin_helper_public_key_path: "/etc/nq/origin.pub".into(),
+                origin_helper_issuer: "origin:test".into(),
+                origin_helper_key_id: "origin-key:test".into(),
+            });
+        let grant = OperatingGrantV1::new(
+            spec,
+            observer_policy(),
+            recurrence,
+            1_000,
+            json!({"operator": "test"}),
+        )
+        .unwrap();
+        ledger.create_grant(&grant).unwrap();
+        ledger
+            .activate_grant(&grant.grant_id, "activate", 2_000)
+            .unwrap();
+        ledger
+            .issue_watcher_succession(&grant.grant_id, &relation, 2_001)
+            .unwrap();
+        assert!(
+            ledger
+                .watcher_digest_is_authorized(
+                    &grant.grant_id,
+                    &successor.instance_id,
+                    &successor_digest
+                )
+                .unwrap()
+        );
+        let status = ledger.grant_status(&grant.grant_id, 2_002).unwrap();
+        assert_eq!(status.watcher_succession_edges_issued, 1);
+        assert_eq!(status.watcher_succession_edges_remaining, 0);
+
+        let mut successor_enrollment = enrollment(&grant, 2_000, 'b');
+        successor_enrollment.spec.watcher_instance_id = successor.instance_id;
+        successor_enrollment.watcher_semantic_digest = successor_digest;
+        ledger
+            .issue_enrollment(
+                &grant.grant_id,
+                &successor_enrollment,
+                "issue:successor-e",
+                2_003,
+            )
+            .unwrap();
+        let mut drift = relation.clone();
+        drift.successor.subject = "host:other".into();
+        drift.relation_id = semantic_digest(&(
+            drift.schema.as_str(),
+            &drift.predecessor,
+            &drift.successor,
+            &drift.predecessor_custody,
+            &drift.successor_custody,
+            &drift.deltas,
+            &drift.operator_occurrence_id,
+            drift.created_at_unix_ms,
+        ))
+        .unwrap()
+        .to_string();
+        assert!(
+            ledger
+                .issue_watcher_succession(&grant.grant_id, &drift, 2_004)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn schema_has_no_infinite_or_recursive_authority_field() {
         let fields = serde_json::to_value(OperatingGrantSpecV1 {
             schema: OPERATING_GRANT_SPEC_SCHEMA_V1.into(),
@@ -1578,6 +1907,8 @@ mod tests {
             expires_at_unix_ms: 2,
             max_observer_generations: 1,
             max_recurrence_enrollments: 1,
+            max_watcher_succession_edges: 0,
+            allowed_watcher_succession_relation_ids: BTreeSet::new(),
             observer_generation_duration_ms: 1,
             observer_generation_max_samples: 1,
             recurrence_enrollment_duration_ms: 1,
