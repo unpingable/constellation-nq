@@ -73,6 +73,10 @@ they create no occurrence and consume no recurrence attempt. Only the durable
 `armed` transition exposes the exact finite E. Closeout disarms the semantic
 gate before service shutdown.
 
+The manifest binds both the absolute service-unit path and the digest of its
+exact installed bytes. Readiness recomputes that digest; a syntactically valid
+digest without matching installed custody cannot arm the office.
+
 Succession never touches the retired one-shot provider boundary or A4. It never
 creates a sample, diagnostic acquisition, artifact, support occurrence, or
 Nightshift cycle.

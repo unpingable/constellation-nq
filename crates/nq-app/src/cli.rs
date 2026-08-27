@@ -1603,6 +1603,11 @@ fn validate_activation_prerequisites(
         bail!("activation passive selector/provider configuration is substituted");
     }
     validate_sha256(&activation.spec.service_manager_deployment_digest)?;
+    if digest_file(&activation.spec.service_manager_deployment_path)?
+        != activation.spec.service_manager_deployment_digest
+    {
+        bail!("activation service-manager deployment bytes are substituted");
+    }
     Ok(json!({
         "operating_grant": "ready",
         "observer_generation": "ready",

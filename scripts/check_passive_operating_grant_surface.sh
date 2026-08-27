@@ -29,6 +29,7 @@ rg -q 'office_not_canonically_armed' "$model" || fail "pre-Armed inert gate abse
 rg -q 'ActivationStateV1::Closed' "$model" || fail "terminal closeout state absent"
 rg -q 'has_child_issuance' "$cli" || fail "activation does not bind ordinary issued G/E"
 rg -q 'validate_activation_prerequisites' "$cli" || fail "transactional readiness validation absent"
+rg -q 'service_manager_deployment_path' "$cli" || fail "installed service path is not revalidated"
 grep -q 'operating tick' "$service" || fail "service bypasses transactional gate"
 rg -q 'nq.passive_watcher_succession.v1' "$succession" || fail "typed passive watcher succession absent"
 rg -q 'watcher_digest_is_authorized' "$cli" || fail "activation does not consume H succession reachability"

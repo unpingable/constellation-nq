@@ -140,6 +140,8 @@ pub struct OfficeActivationSpecV1 {
     pub passive_provider_boundary_id: String,
     pub sample_store: PathBuf,
     pub capacity_context_id: String,
+    /// Exact installed service-manager unit whose bytes invoke the gated tick.
+    pub service_manager_deployment_path: PathBuf,
     pub service_manager_deployment_digest: String,
 }
 
@@ -493,8 +495,9 @@ impl OperatingLedger {
             .unwrap_or_else(|| grant.spec.watcher_semantic_digest.clone());
         let expected_instance = prior
             .last()
-            .map(|edge| edge.successor.instance_id.as_str())
-            .unwrap_or(grant.spec.watcher_instance_id.as_str());
+            .map_or(grant.spec.watcher_instance_id.as_str(), |edge| {
+                edge.successor.instance_id.as_str()
+            });
         if predecessor_digest != expected_predecessor
             || relation.predecessor.instance_id != expected_instance
         {
@@ -555,6 +558,7 @@ impl OperatingLedger {
         if !spec.generation_path.is_absolute()
             || !spec.provider_config_path.is_absolute()
             || !spec.sample_store.is_absolute()
+            || !spec.service_manager_deployment_path.is_absolute()
         {
             bail!("activation paths must be absolute");
         }
@@ -828,7 +832,7 @@ impl OperatingLedger {
             {
                 bail!("operating grant watcher succession ledger is not one exact directed chain");
             }
-            expected_instance = edge.successor.instance_id.clone();
+            expected_instance.clone_from(&edge.successor.instance_id);
             expected_digest = edge.successor_digest()?;
             if expected_instance == instance_id && expected_digest == watcher_digest {
                 return Ok(true);
@@ -1197,6 +1201,7 @@ fn validate_enrollment_child(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_child_budget(
     grant: &OperatingGrantV1,
     prior: &[ChildGrantIssuanceV1],
@@ -1435,6 +1440,9 @@ mod tests {
             passive_provider_boundary_id: "nq.passive.load-pressure:v1".into(),
             sample_store: PathBuf::from("/tmp/samples"),
             capacity_context_id: format!("sha256:{}", "4".repeat(64)),
+            service_manager_deployment_path: PathBuf::from(
+                "/etc/systemd/system/nq-recurring-office.service",
+            ),
             service_manager_deployment_digest: format!("sha256:{}", "8".repeat(64)),
         }
     }
