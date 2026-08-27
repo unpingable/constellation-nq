@@ -1,0 +1,50 @@
+{
+  "schema": "nq.passive_load_operating_grant_campaign_receipt.v1",
+  "recorded_at": "2026-08-26T23:17:02Z",
+  "classification": "live_renewal_blocked_generation_bound_watcher_semantics_require_new_succession_rule",
+  "repository": {
+    "branch": "campaign/finite-operating-grant",
+    "start_sha": "965f782cbd94f0281ff9035e8b1359575172d17f",
+    "candidate_commit": "3f38bd7e56850a48756a7c8017021600075d149f"
+  },
+  "candidate": {
+    "operating_grant_schema": "nq.passive_load_operating_grant.v1",
+    "activation_schema": "nq.passive_load_office_activation.v1",
+    "finite": true,
+    "recursive_h_issuance": false,
+    "pre_armed_tick_attempts_consumed": 0,
+    "production_qualified": false,
+    "live_qualified": false
+  },
+  "candidate_profile": {
+    "sample_interval_ms": 15000,
+    "acquisition_interval_ms": 300000,
+    "generation_duration_ms": 21600000,
+    "generation_max_samples": 1440,
+    "enrollment_duration_ms": 21600000,
+    "enrollment_max_acquisitions": 72,
+    "operating_grant_duration_ms": 86400000,
+    "max_generations": 4,
+    "max_enrollments": 4,
+    "ratified": false
+  },
+  "blocker": {
+    "kind": "watcher_semantic_succession_undefined",
+    "cause": "passive WatcherConfig binds the exact observer_config_digest while every successor generation has a new digest and dedicated sample store",
+    "g5_watcher_semantic_digest": "sha256:71f90576660b8f8866eb464fbca6da71d9bbcde114b34099be63288c55b36931",
+    "g6_watcher_semantic_digest": "sha256:d6875944c36d428d6af998415443db3aead74608a947964fc11693053abb2512"
+  },
+  "validation": {
+    "locked_workspace_all_targets_serial": "passed",
+    "clippy_app_core_warnings_denied": "passed",
+    "structural_checks": "passed",
+    "format_and_diff_check": "passed"
+  },
+  "live": {
+    "bundle_built": false,
+    "host_mutated": false,
+    "services_enabled": false,
+    "a4_touched": false,
+    "nightshift_touched": false
+  }
+}
