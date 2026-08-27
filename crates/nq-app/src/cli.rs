@@ -187,6 +187,8 @@ pub enum ProtocolCommand {
 /// Watcher admission operations.
 #[derive(Debug, Subcommand)]
 pub enum WatcherCommand {
+    /// Print the exact content-derived watcher semantic identity without admission or collection.
+    Digest(InstanceArg),
     /// Execute a bounded dry request without creating admission state.
     Test(InstanceArg),
     /// Conformance-test, dry-collect, and atomically activate a new lock.
@@ -901,6 +903,20 @@ async fn watcher_command(
     json_output: bool,
 ) -> Result<()> {
     match command {
+        WatcherCommand::Digest(instance) => {
+            let config = NqConfig::load(config_path)?;
+            let watcher = config
+                .watcher(&instance.instance_id)
+                .context("watcher is absent from current configuration")?;
+            print_value(
+                &serde_json::json!({
+                    "schema": "nq.watcher_semantic_identity.v1",
+                    "instance_id": watcher.instance_id,
+                    "watcher_semantic_digest": semantic_digest(watcher)?.to_string(),
+                }),
+                json_output,
+            )
+        }
         WatcherCommand::Test(instance) => {
             run_watcher_action(config_path, &instance.instance_id, "test", json_output).await
         }
