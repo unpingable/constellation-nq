@@ -1,0 +1,858 @@
+schema = "nq.config.v1"
+database_path = "/var/lib/nq-ng-observation-office/nq.db"
+socket_path = "/run/nq-ng-observation-office/nqd.sock"
+admissions_dir = "/var/lib/nq-ng-observation-office/admissions"
+helper_runtime_dir = "/run/nq-ng-observation-office/helpers"
+
+[[watchers]]
+instance_id = "labelwatch-host-local"
+carrier = "stdio"
+subject = "host:labelwatch-host"
+capability_ceiling = ["read_procfs", "read_system_info"]
+checkpoint_policy = "disabled"
+
+[watchers.command]
+executable = "/opt/nq-ng/linode-v3-20260824/bin/nq-host-helper"
+args = []
+env = {}
+execution_account = "nq-helper"
+working_directory = "/opt/nq-ng/linode-v3-20260824/bin"
+
+[watchers.profile]
+id = "nq.host"
+version = 1
+
+[watchers.scope]
+kind = "host"
+value = { id = "labelwatch-host" }
+
+[watchers.vantage]
+kind = "local"
+value = {}
+
+[watchers.schedule]
+interval_seconds = 86400
+jitter_seconds = 0
+deadline_ms = 30000
+retry_backoff_seconds = 10
+max_retry_backoff_seconds = 300
+
+[watchers.resources]
+max_response_bytes = 1048576
+max_stderr_bytes = 65536
+max_observations = 1
+max_address_space_bytes = 536870912
+max_cpu_seconds = 60
+max_processes = 32
+max_open_files = 128
+max_file_bytes = 67108864
+
+[[watchers]]
+instance_id = "labelwatch-host-passive"
+carrier = "stdio"
+subject = "host:labelwatch-host"
+capability_ceiling = ["read_procfs", "read_system_info"]
+checkpoint_policy = "disabled"
+
+[watchers.command]
+executable = "/opt/nq-ng/passive-load-69584e3/lib/nq/helpers/nq-passive-load-helper"
+args = ["serve-stdio", "/etc/nq-passive-load/provider.toml"]
+env = {}
+execution_account = "nq-passive-load-reader"
+working_directory = "/opt/nq-ng/passive-load-69584e3"
+
+[watchers.profile]
+id = "nq.host"
+version = 1
+
+[watchers.scope]
+kind = "host"
+value = { id = "labelwatch-host" }
+
+[watchers.vantage]
+kind = "local"
+value = {}
+
+[watchers.schedule]
+interval_seconds = 86400
+jitter_seconds = 0
+deadline_ms = 30000
+retry_backoff_seconds = 10
+max_retry_backoff_seconds = 300
+
+[watchers.resources]
+max_response_bytes = 1048576
+max_stderr_bytes = 65536
+max_observations = 1
+max_address_space_bytes = 536870912
+max_cpu_seconds = 60
+max_processes = 4
+max_open_files = 64
+max_file_bytes = 67108864
+
+[watchers.passive_host_load_sample]
+schema = "nq.passive_host_load_provider_config.v1"
+max_sample_age_ms = 30000
+observer_profile = "nq.host_load_passive_sampler.v1"
+observer_artifact_digest = "sha256:7dceb31830ed6b4930e3089367a59ac80c97f35fd7d2a396c7a08186fe2c38b6"
+observer_config_digest = "sha256:783e3a66683b35939f80759eae604e3f9cd2723836c3fd3b7059df2bace63507"
+producer_issuer = "nq-passive-load-observer:labelwatch-host"
+producer_key_id = "passive-load-20260826-v1"
+producer_public_key_hex = "62ef27020ae8af7b7c2f923a00d475e7c4c2ed6743e951736e0af593a956ee27"
+capacity_context_id = "sha256:6c6e34b0e088655fce62d4dd15ea355e6d79015736c6e0fb5b8219feac492c7d"
+
+[[watchers]]
+instance_id = "labelwatch-host-passive-succession-g7"
+carrier = "stdio"
+subject = "host:labelwatch-host"
+capability_ceiling = ["read_procfs", "read_system_info"]
+checkpoint_policy = "disabled"
+
+[watchers.command]
+executable = "/opt/nq-ng/passive-succession-75809e8-musl/lib/nq/helpers/nq-passive-load-helper"
+args = ["serve-stdio", "/etc/nq/passive-load-succession/provider-g7.toml"]
+env = {}
+execution_account = "nq-passive-load-reader"
+working_directory = "/opt/nq-ng/passive-succession-75809e8-musl"
+
+[watchers.profile]
+id = "nq.host"
+version = 1
+
+[watchers.scope]
+kind = "host"
+value = { id = "labelwatch-host" }
+
+[watchers.vantage]
+kind = "local"
+value = {}
+
+[watchers.schedule]
+interval_seconds = 86400
+jitter_seconds = 0
+deadline_ms = 30000
+retry_backoff_seconds = 10
+max_retry_backoff_seconds = 300
+
+[watchers.resources]
+max_response_bytes = 1048576
+max_stderr_bytes = 65536
+max_observations = 1
+max_address_space_bytes = 536870912
+max_cpu_seconds = 60
+max_processes = 4
+max_open_files = 64
+max_file_bytes = 67108864
+
+[watchers.passive_host_load_sample]
+schema = "nq.passive_host_load_provider_config.v1"
+max_sample_age_ms = 30000
+observer_profile = "nq.host_load_passive_sampler.v1"
+observer_artifact_digest = "sha256:629c092a1596e7afd875f733ba6e5ad3d1ca77a1ba23d30eea4d1fe1d415403d"
+observer_config_digest = "sha256:05939c8e32120a5bdb35f4e9558fa844c8d5e64c631be56d1f7903f1fd6d689a"
+producer_issuer = "nq-passive-load-observer:labelwatch-host-operational-continuity"
+producer_key_id = "passive-load-operational-20260826-g2"
+producer_public_key_hex = "9b0bad3636b34a87f3e428de16de2eadc6376675b8f133c871e4434195730419"
+capacity_context_id = "sha256:6c6e34b0e088655fce62d4dd15ea355e6d79015736c6e0fb5b8219feac492c7d"
+
+[[watchers]]
+instance_id = "labelwatch-host-passive-succession-g8"
+carrier = "stdio"
+subject = "host:labelwatch-host"
+capability_ceiling = ["read_procfs", "read_system_info"]
+checkpoint_policy = "disabled"
+
+[watchers.command]
+executable = "/opt/nq-ng/passive-succession-75809e8-musl/lib/nq/helpers/nq-passive-load-helper"
+args = ["serve-stdio", "/etc/nq/passive-load-succession/provider-g8.toml"]
+env = {}
+execution_account = "nq-passive-load-reader"
+working_directory = "/opt/nq-ng/passive-succession-75809e8-musl"
+
+[watchers.profile]
+id = "nq.host"
+version = 1
+
+[watchers.scope]
+kind = "host"
+value = { id = "labelwatch-host" }
+
+[watchers.vantage]
+kind = "local"
+value = {}
+
+[watchers.schedule]
+interval_seconds = 86400
+jitter_seconds = 0
+deadline_ms = 30000
+retry_backoff_seconds = 10
+max_retry_backoff_seconds = 300
+
+[watchers.resources]
+max_response_bytes = 1048576
+max_stderr_bytes = 65536
+max_observations = 1
+max_address_space_bytes = 536870912
+max_cpu_seconds = 60
+max_processes = 4
+max_open_files = 64
+max_file_bytes = 67108864
+
+[watchers.passive_host_load_sample]
+schema = "nq.passive_host_load_provider_config.v1"
+max_sample_age_ms = 30000
+observer_profile = "nq.host_load_passive_sampler.v1"
+observer_artifact_digest = "sha256:629c092a1596e7afd875f733ba6e5ad3d1ca77a1ba23d30eea4d1fe1d415403d"
+observer_config_digest = "sha256:0ec2a00161ad6406cd7524dd4fe77ff630f6aff4351d0a891087b1f5e662fc29"
+producer_issuer = "nq-passive-load-observer:labelwatch-host-operational-continuity"
+producer_key_id = "passive-load-operational-20260826-g2"
+producer_public_key_hex = "9b0bad3636b34a87f3e428de16de2eadc6376675b8f133c871e4434195730419"
+capacity_context_id = "sha256:6c6e34b0e088655fce62d4dd15ea355e6d79015736c6e0fb5b8219feac492c7d"
+
+[[watchers]]
+instance_id = "labelwatch-host-passive-continuity-g1"
+carrier = "stdio"
+subject = "host:labelwatch-host"
+capability_ceiling = ["read_procfs", "read_system_info"]
+checkpoint_policy = "disabled"
+
+[watchers.command]
+executable = "/opt/nq-ng/passive-operational-continuity-b697df7-musl/lib/nq/helpers/nq-passive-load-helper"
+args = ["serve-stdio", "/etc/nq/passive-load-operational-continuity/provider-g1.toml"]
+env = {}
+execution_account = "nq-passive-load-reader"
+working_directory = "/opt/nq-ng/passive-operational-continuity-b697df7-musl"
+
+[watchers.profile]
+id = "nq.host"
+version = 1
+
+[watchers.scope]
+kind = "host"
+value = { id = "labelwatch-host" }
+
+[watchers.vantage]
+kind = "local"
+value = {}
+
+[watchers.schedule]
+interval_seconds = 86400
+jitter_seconds = 0
+deadline_ms = 30000
+retry_backoff_seconds = 10
+max_retry_backoff_seconds = 300
+
+[watchers.resources]
+max_response_bytes = 1048576
+max_stderr_bytes = 65536
+max_observations = 1
+max_address_space_bytes = 536870912
+max_cpu_seconds = 60
+max_processes = 4
+max_open_files = 64
+max_file_bytes = 67108864
+
+[watchers.passive_host_load_sample]
+schema = "nq.passive_host_load_provider_config.v1"
+max_sample_age_ms = 30000
+observer_profile = "nq.host_load_passive_sampler.v1"
+observer_artifact_digest = "sha256:77e2085acdb3e39f42fe53e8288c0fc3c390b736fe97db6aa3a529ffdbb740a0"
+observer_config_digest = "sha256:4c377d933800c089419a0ded9843165eba2f54ff505726b9482418d3c0f6afe1"
+producer_issuer = "nq-passive-load-observer:labelwatch-host-operational-continuity"
+producer_key_id = "passive-load-operational-20260826-g1"
+producer_public_key_hex = "98c9cceca4fecabbe0efb896596a7fcc19f7b59ebcf5a748f8848d79782532b3"
+capacity_context_id = "sha256:6c6e34b0e088655fce62d4dd15ea355e6d79015736c6e0fb5b8219feac492c7d"
+
+[[watchers]]
+instance_id = "labelwatch-host-passive-continuity-g2"
+carrier = "stdio"
+subject = "host:labelwatch-host"
+capability_ceiling = ["read_procfs", "read_system_info"]
+checkpoint_policy = "disabled"
+
+[watchers.command]
+executable = "/opt/nq-ng/passive-operational-continuity-b697df7-musl/lib/nq/helpers/nq-passive-load-helper"
+args = ["serve-stdio", "/etc/nq/passive-load-operational-continuity/provider-g2.toml"]
+env = {}
+execution_account = "nq-passive-load-reader"
+working_directory = "/opt/nq-ng/passive-operational-continuity-b697df7-musl"
+
+[watchers.profile]
+id = "nq.host"
+version = 1
+
+[watchers.scope]
+kind = "host"
+value = { id = "labelwatch-host" }
+
+[watchers.vantage]
+kind = "local"
+value = {}
+
+[watchers.schedule]
+interval_seconds = 86400
+jitter_seconds = 0
+deadline_ms = 30000
+retry_backoff_seconds = 10
+max_retry_backoff_seconds = 300
+
+[watchers.resources]
+max_response_bytes = 1048576
+max_stderr_bytes = 65536
+max_observations = 1
+max_address_space_bytes = 536870912
+max_cpu_seconds = 60
+max_processes = 4
+max_open_files = 64
+max_file_bytes = 67108864
+
+[watchers.passive_host_load_sample]
+schema = "nq.passive_host_load_provider_config.v1"
+max_sample_age_ms = 30000
+observer_profile = "nq.host_load_passive_sampler.v1"
+observer_artifact_digest = "sha256:77e2085acdb3e39f42fe53e8288c0fc3c390b736fe97db6aa3a529ffdbb740a0"
+observer_config_digest = "sha256:aaf390773cd0ddef83603e80191ba1c1d64eae2d4b78a3152e215650f0b2ba8d"
+producer_issuer = "nq-passive-load-observer:labelwatch-host-operational-continuity"
+producer_key_id = "passive-load-operational-20260826-g2"
+producer_public_key_hex = "9b0bad3636b34a87f3e428de16de2eadc6376675b8f133c871e4434195730419"
+capacity_context_id = "sha256:6c6e34b0e088655fce62d4dd15ea355e6d79015736c6e0fb5b8219feac492c7d"
+
+[[watchers]]
+instance_id = "labelwatch-host-passive-continuity-g3"
+carrier = "stdio"
+subject = "host:labelwatch-host"
+capability_ceiling = ["read_procfs", "read_system_info"]
+checkpoint_policy = "disabled"
+
+[watchers.command]
+executable = "/opt/nq-ng/passive-operational-continuity-b697df7-musl/lib/nq/helpers/nq-passive-load-helper"
+args = ["serve-stdio", "/etc/nq/passive-load-operational-continuity/provider-g3.toml"]
+env = {}
+execution_account = "nq-passive-load-reader"
+working_directory = "/opt/nq-ng/passive-operational-continuity-b697df7-musl"
+
+[watchers.profile]
+id = "nq.host"
+version = 1
+
+[watchers.scope]
+kind = "host"
+value = { id = "labelwatch-host" }
+
+[watchers.vantage]
+kind = "local"
+value = {}
+
+[watchers.schedule]
+interval_seconds = 86400
+jitter_seconds = 0
+deadline_ms = 30000
+retry_backoff_seconds = 10
+max_retry_backoff_seconds = 300
+
+[watchers.resources]
+max_response_bytes = 1048576
+max_stderr_bytes = 65536
+max_observations = 1
+max_address_space_bytes = 536870912
+max_cpu_seconds = 60
+max_processes = 4
+max_open_files = 64
+max_file_bytes = 67108864
+
+[watchers.passive_host_load_sample]
+schema = "nq.passive_host_load_provider_config.v1"
+max_sample_age_ms = 30000
+observer_profile = "nq.host_load_passive_sampler.v1"
+observer_artifact_digest = "sha256:77e2085acdb3e39f42fe53e8288c0fc3c390b736fe97db6aa3a529ffdbb740a0"
+observer_config_digest = "sha256:4c7c3bbcecfd94380e9dedfd24446741ae7ed2cb1e651971681430efe07d75b5"
+producer_issuer = "nq-passive-load-observer:labelwatch-host-operational-continuity"
+producer_key_id = "passive-load-operational-20260826-g2"
+producer_public_key_hex = "9b0bad3636b34a87f3e428de16de2eadc6376675b8f133c871e4434195730419"
+capacity_context_id = "sha256:6c6e34b0e088655fce62d4dd15ea355e6d79015736c6e0fb5b8219feac492c7d"
+
+[[watchers]]
+instance_id = "labelwatch-host-passive-continuity-g4"
+carrier = "stdio"
+subject = "host:labelwatch-host"
+capability_ceiling = ["read_procfs", "read_system_info"]
+checkpoint_policy = "disabled"
+
+[watchers.command]
+executable = "/opt/nq-ng/passive-operational-continuity-b697df7-musl/lib/nq/helpers/nq-passive-load-helper"
+args = ["serve-stdio", "/etc/nq/passive-load-operational-continuity/provider-g4.toml"]
+env = {}
+execution_account = "nq-passive-load-reader"
+working_directory = "/opt/nq-ng/passive-operational-continuity-b697df7-musl"
+
+[watchers.profile]
+id = "nq.host"
+version = 1
+
+[watchers.scope]
+kind = "host"
+value = { id = "labelwatch-host" }
+
+[watchers.vantage]
+kind = "local"
+value = {}
+
+[watchers.schedule]
+interval_seconds = 86400
+jitter_seconds = 0
+deadline_ms = 30000
+retry_backoff_seconds = 10
+max_retry_backoff_seconds = 300
+
+[watchers.resources]
+max_response_bytes = 1048576
+max_stderr_bytes = 65536
+max_observations = 1
+max_address_space_bytes = 536870912
+max_cpu_seconds = 60
+max_processes = 4
+max_open_files = 64
+max_file_bytes = 67108864
+
+[watchers.passive_host_load_sample]
+schema = "nq.passive_host_load_provider_config.v1"
+max_sample_age_ms = 30000
+observer_profile = "nq.host_load_passive_sampler.v1"
+observer_artifact_digest = "sha256:77e2085acdb3e39f42fe53e8288c0fc3c390b736fe97db6aa3a529ffdbb740a0"
+observer_config_digest = "sha256:e3dfe6acf98cc844dccbec2da31ff2def875b4756490968d262b1fbda8f4ac10"
+producer_issuer = "nq-passive-load-observer:labelwatch-host-operational-continuity"
+producer_key_id = "passive-load-operational-20260826-g2"
+producer_public_key_hex = "9b0bad3636b34a87f3e428de16de2eadc6376675b8f133c871e4434195730419"
+capacity_context_id = "sha256:6c6e34b0e088655fce62d4dd15ea355e6d79015736c6e0fb5b8219feac492c7d"
+
+[[watchers]]
+instance_id = "labelwatch-host-passive-enabled-pilot-g5"
+carrier = "stdio"
+subject = "host:labelwatch-host"
+capability_ceiling = ["read_procfs", "read_system_info"]
+checkpoint_policy = "disabled"
+
+[watchers.command]
+executable = "/opt/nq-ng/passive-operational-continuity-b697df7-musl/lib/nq/helpers/nq-passive-load-helper"
+args = ["serve-stdio", "/etc/nq/passive-load-operational-continuity/provider-g5.toml"]
+env = {}
+execution_account = "nq-passive-load-reader"
+working_directory = "/opt/nq-ng/passive-operational-continuity-b697df7-musl"
+
+[watchers.profile]
+id = "nq.host"
+version = 1
+
+[watchers.scope]
+kind = "host"
+value = { id = "labelwatch-host" }
+
+[watchers.vantage]
+kind = "local"
+value = {}
+
+[watchers.schedule]
+interval_seconds = 86400
+jitter_seconds = 0
+deadline_ms = 30000
+retry_backoff_seconds = 10
+max_retry_backoff_seconds = 300
+
+[watchers.resources]
+max_response_bytes = 1048576
+max_stderr_bytes = 65536
+max_observations = 1
+max_address_space_bytes = 536870912
+max_cpu_seconds = 60
+max_processes = 4
+max_open_files = 64
+max_file_bytes = 67108864
+
+[watchers.passive_host_load_sample]
+schema = "nq.passive_host_load_provider_config.v1"
+max_sample_age_ms = 30000
+observer_profile = "nq.host_load_passive_sampler.v1"
+observer_artifact_digest = "sha256:77e2085acdb3e39f42fe53e8288c0fc3c390b736fe97db6aa3a529ffdbb740a0"
+observer_config_digest = "sha256:d3e8aa2c540cc8e503a6010686e3ab98ea3591b4738ecd69faf01722f77df034"
+producer_issuer = "nq-passive-load-observer:labelwatch-host-operational-continuity"
+producer_key_id = "passive-load-operational-20260826-g2"
+producer_public_key_hex = "9b0bad3636b34a87f3e428de16de2eadc6376675b8f133c871e4434195730419"
+capacity_context_id = "sha256:6c6e34b0e088655fce62d4dd15ea355e6d79015736c6e0fb5b8219feac492c7d"
+
+[[watchers]]
+instance_id = "labelwatch-host-passive-enabled-pilot-g6"
+carrier = "stdio"
+subject = "host:labelwatch-host"
+capability_ceiling = ["read_procfs", "read_system_info"]
+checkpoint_policy = "disabled"
+
+[watchers.command]
+executable = "/opt/nq-ng/passive-operational-continuity-b697df7-musl/lib/nq/helpers/nq-passive-load-helper"
+args = ["serve-stdio", "/etc/nq/passive-load-operational-continuity/provider-g6.toml"]
+env = {}
+execution_account = "nq-passive-load-reader"
+working_directory = "/opt/nq-ng/passive-operational-continuity-b697df7-musl"
+
+[watchers.profile]
+id = "nq.host"
+version = 1
+
+[watchers.scope]
+kind = "host"
+value = { id = "labelwatch-host" }
+
+[watchers.vantage]
+kind = "local"
+value = {}
+
+[watchers.schedule]
+interval_seconds = 86400
+jitter_seconds = 0
+deadline_ms = 30000
+retry_backoff_seconds = 10
+max_retry_backoff_seconds = 300
+
+[watchers.resources]
+max_response_bytes = 1048576
+max_stderr_bytes = 65536
+max_observations = 1
+max_address_space_bytes = 536870912
+max_cpu_seconds = 60
+max_processes = 4
+max_open_files = 64
+max_file_bytes = 67108864
+
+[watchers.passive_host_load_sample]
+schema = "nq.passive_host_load_provider_config.v1"
+max_sample_age_ms = 30000
+observer_profile = "nq.host_load_passive_sampler.v1"
+observer_artifact_digest = "sha256:77e2085acdb3e39f42fe53e8288c0fc3c390b736fe97db6aa3a529ffdbb740a0"
+observer_config_digest = "sha256:b6e813e4751604f015780d5f653596eccb2aaa636d8ac59e8550f3088582123a"
+producer_issuer = "nq-passive-load-observer:labelwatch-host-operational-continuity"
+producer_key_id = "passive-load-operational-20260826-g2"
+producer_public_key_hex = "9b0bad3636b34a87f3e428de16de2eadc6376675b8f133c871e4434195730419"
+capacity_context_id = "sha256:6c6e34b0e088655fce62d4dd15ea355e6d79015736c6e0fb5b8219feac492c7d"
+
+[[watchers]]
+instance_id = "labelwatch-host-passive-succession-g9"
+carrier = "stdio"
+subject = "host:labelwatch-host"
+capability_ceiling = ["read_procfs", "read_system_info"]
+checkpoint_policy = "disabled"
+
+[watchers.command]
+executable = "/opt/nq-ng/passive-succession-75809e8-musl/lib/nq/helpers/nq-passive-load-helper"
+args = ["serve-stdio", "/etc/nq/passive-load-succession/provider-g9.toml"]
+env = {}
+execution_account = "nq-passive-load-reader"
+working_directory = "/opt/nq-ng/passive-succession-75809e8-musl"
+
+[watchers.profile]
+id = "nq.host"
+version = 1
+
+[watchers.scope]
+kind = "host"
+value = { id = "labelwatch-host" }
+
+[watchers.vantage]
+kind = "local"
+value = {}
+
+[watchers.schedule]
+interval_seconds = 86400
+jitter_seconds = 0
+deadline_ms = 30000
+retry_backoff_seconds = 10
+max_retry_backoff_seconds = 300
+
+[watchers.resources]
+max_response_bytes = 1048576
+max_stderr_bytes = 65536
+max_observations = 1
+max_address_space_bytes = 536870912
+max_cpu_seconds = 60
+max_processes = 4
+max_open_files = 64
+max_file_bytes = 67108864
+
+[watchers.passive_host_load_sample]
+schema = "nq.passive_host_load_provider_config.v1"
+max_sample_age_ms = 30000
+observer_profile = "nq.host_load_passive_sampler.v1"
+observer_artifact_digest = "sha256:629c092a1596e7afd875f733ba6e5ad3d1ca77a1ba23d30eea4d1fe1d415403d"
+observer_config_digest = "sha256:fbc32eff140ed627930e7dbfafb1c2f4fb51b9ccb28bbde8d81b44cc31294f5b"
+producer_issuer = "nq-passive-load-observer:labelwatch-host-operational-continuity"
+producer_key_id = "passive-load-operational-20260826-g2"
+producer_public_key_hex = "9b0bad3636b34a87f3e428de16de2eadc6376675b8f133c871e4434195730419"
+capacity_context_id = "sha256:6c6e34b0e088655fce62d4dd15ea355e6d79015736c6e0fb5b8219feac492c7d"
+
+[[watchers]]
+instance_id = "labelwatch-host-passive-succession-g10"
+carrier = "stdio"
+subject = "host:labelwatch-host"
+capability_ceiling = ["read_procfs", "read_system_info"]
+checkpoint_policy = "disabled"
+
+[watchers.command]
+executable = "/opt/nq-ng/passive-succession-75809e8-musl/lib/nq/helpers/nq-passive-load-helper"
+args = ["serve-stdio", "/etc/nq/passive-load-succession/provider-g10.toml"]
+env = {}
+execution_account = "nq-passive-load-reader"
+working_directory = "/opt/nq-ng/passive-succession-75809e8-musl"
+
+[watchers.profile]
+id = "nq.host"
+version = 1
+
+[watchers.scope]
+kind = "host"
+value = { id = "labelwatch-host" }
+
+[watchers.vantage]
+kind = "local"
+value = {}
+
+[watchers.schedule]
+interval_seconds = 86400
+jitter_seconds = 0
+deadline_ms = 30000
+retry_backoff_seconds = 10
+max_retry_backoff_seconds = 300
+
+[watchers.resources]
+max_response_bytes = 1048576
+max_stderr_bytes = 65536
+max_observations = 1
+max_address_space_bytes = 536870912
+max_cpu_seconds = 60
+max_processes = 4
+max_open_files = 64
+max_file_bytes = 67108864
+
+[watchers.passive_host_load_sample]
+schema = "nq.passive_host_load_provider_config.v1"
+max_sample_age_ms = 30000
+observer_profile = "nq.host_load_passive_sampler.v1"
+observer_artifact_digest = "sha256:629c092a1596e7afd875f733ba6e5ad3d1ca77a1ba23d30eea4d1fe1d415403d"
+observer_config_digest = "sha256:620ad0c9fd427e2f68aa046d258d58561be56a0120ee421657de30550d7c5815"
+producer_issuer = "nq-passive-load-observer:labelwatch-host-operational-continuity"
+producer_key_id = "passive-load-operational-20260826-g2"
+producer_public_key_hex = "9b0bad3636b34a87f3e428de16de2eadc6376675b8f133c871e4434195730419"
+capacity_context_id = "sha256:6c6e34b0e088655fce62d4dd15ea355e6d79015736c6e0fb5b8219feac492c7d"
+
+[[watchers]]
+instance_id = "labelwatch-host-passive-succession-g11"
+carrier = "stdio"
+subject = "host:labelwatch-host"
+capability_ceiling = ["read_procfs", "read_system_info"]
+checkpoint_policy = "disabled"
+
+[watchers.command]
+executable = "/opt/nq-ng/passive-succession-75809e8-musl/lib/nq/helpers/nq-passive-load-helper"
+args = ["serve-stdio", "/etc/nq/passive-load-succession/provider-g11.toml"]
+env = {}
+execution_account = "nq-passive-load-reader"
+working_directory = "/opt/nq-ng/passive-succession-75809e8-musl"
+
+[watchers.profile]
+id = "nq.host"
+version = 1
+
+[watchers.scope]
+kind = "host"
+value = { id = "labelwatch-host" }
+
+[watchers.vantage]
+kind = "local"
+value = {}
+
+[watchers.schedule]
+interval_seconds = 86400
+jitter_seconds = 0
+deadline_ms = 30000
+retry_backoff_seconds = 10
+max_retry_backoff_seconds = 300
+
+[watchers.resources]
+max_response_bytes = 1048576
+max_stderr_bytes = 65536
+max_observations = 1
+max_address_space_bytes = 536870912
+max_cpu_seconds = 60
+max_processes = 4
+max_open_files = 64
+max_file_bytes = 67108864
+
+[watchers.passive_host_load_sample]
+schema = "nq.passive_host_load_provider_config.v1"
+max_sample_age_ms = 30000
+observer_profile = "nq.host_load_passive_sampler.v1"
+observer_artifact_digest = "sha256:629c092a1596e7afd875f733ba6e5ad3d1ca77a1ba23d30eea4d1fe1d415403d"
+observer_config_digest = "sha256:e769465e0016e6706b56dadd558b6d3f489a26d3439f4b0fb889bd853ea9578f"
+producer_issuer = "nq-passive-load-observer:labelwatch-host-operational-continuity"
+producer_key_id = "passive-load-operational-20260826-g2"
+producer_public_key_hex = "9b0bad3636b34a87f3e428de16de2eadc6376675b8f133c871e4434195730419"
+capacity_context_id = "sha256:6c6e34b0e088655fce62d4dd15ea355e6d79015736c6e0fb5b8219feac492c7d"
+
+[[watchers]]
+instance_id = "labelwatch-host-passive-succession-g12"
+carrier = "stdio"
+subject = "host:labelwatch-host"
+capability_ceiling = ["read_procfs", "read_system_info"]
+checkpoint_policy = "disabled"
+
+[watchers.command]
+executable = "/opt/nq-ng/passive-succession-75809e8-musl/lib/nq/helpers/nq-passive-load-helper"
+args = ["serve-stdio", "/etc/nq/passive-load-succession/provider-g12.toml"]
+env = {}
+execution_account = "nq-passive-load-reader"
+working_directory = "/opt/nq-ng/passive-succession-75809e8-musl"
+
+[watchers.profile]
+id = "nq.host"
+version = 1
+
+[watchers.scope]
+kind = "host"
+value = { id = "labelwatch-host" }
+
+[watchers.vantage]
+kind = "local"
+value = {}
+
+[watchers.schedule]
+interval_seconds = 86400
+jitter_seconds = 0
+deadline_ms = 30000
+retry_backoff_seconds = 10
+max_retry_backoff_seconds = 300
+
+[watchers.resources]
+max_response_bytes = 1048576
+max_stderr_bytes = 65536
+max_observations = 1
+max_address_space_bytes = 536870912
+max_cpu_seconds = 60
+max_processes = 4
+max_open_files = 64
+max_file_bytes = 67108864
+
+[watchers.passive_host_load_sample]
+schema = "nq.passive_host_load_provider_config.v1"
+max_sample_age_ms = 30000
+observer_profile = "nq.host_load_passive_sampler.v1"
+observer_artifact_digest = "sha256:629c092a1596e7afd875f733ba6e5ad3d1ca77a1ba23d30eea4d1fe1d415403d"
+observer_config_digest = "sha256:2df357ecfbd0ee1f52b74716e7f1847df6c08d1b0917f8461242a7d15b237e48"
+producer_issuer = "nq-passive-load-observer:labelwatch-host-operational-continuity"
+producer_key_id = "passive-load-operational-20260826-g2"
+producer_public_key_hex = "9b0bad3636b34a87f3e428de16de2eadc6376675b8f133c871e4434195730419"
+capacity_context_id = "sha256:6c6e34b0e088655fce62d4dd15ea355e6d79015736c6e0fb5b8219feac492c7d"
+
+[[watchers]]
+instance_id = "labelwatch-host-passive-succession-g13"
+carrier = "stdio"
+subject = "host:labelwatch-host"
+capability_ceiling = ["read_procfs", "read_system_info"]
+checkpoint_policy = "disabled"
+
+[watchers.command]
+executable = "/opt/nq-ng/passive-succession-75809e8-musl/lib/nq/helpers/nq-passive-load-helper"
+args = ["serve-stdio", "/etc/nq/passive-load-succession/provider-g13.toml"]
+env = {}
+execution_account = "nq-passive-load-reader"
+working_directory = "/opt/nq-ng/passive-succession-75809e8-musl"
+
+[watchers.profile]
+id = "nq.host"
+version = 1
+
+[watchers.scope]
+kind = "host"
+value = { id = "labelwatch-host" }
+
+[watchers.vantage]
+kind = "local"
+value = {}
+
+[watchers.schedule]
+interval_seconds = 86400
+jitter_seconds = 0
+deadline_ms = 30000
+retry_backoff_seconds = 10
+max_retry_backoff_seconds = 300
+
+[watchers.resources]
+max_response_bytes = 1048576
+max_stderr_bytes = 65536
+max_observations = 1
+max_address_space_bytes = 536870912
+max_cpu_seconds = 60
+max_processes = 4
+max_open_files = 64
+max_file_bytes = 67108864
+
+[watchers.passive_host_load_sample]
+schema = "nq.passive_host_load_provider_config.v1"
+max_sample_age_ms = 30000
+observer_profile = "nq.host_load_passive_sampler.v1"
+observer_artifact_digest = "sha256:629c092a1596e7afd875f733ba6e5ad3d1ca77a1ba23d30eea4d1fe1d415403d"
+observer_config_digest = "sha256:e9cffc808aebf4348c04d6d5c6e4cecbe9d5ccac9cf246dd2e0bd42fabfa8761"
+producer_issuer = "nq-passive-load-observer:labelwatch-host-operational-continuity"
+producer_key_id = "passive-load-operational-20260826-g2"
+producer_public_key_hex = "9b0bad3636b34a87f3e428de16de2eadc6376675b8f133c871e4434195730419"
+capacity_context_id = "sha256:6c6e34b0e088655fce62d4dd15ea355e6d79015736c6e0fb5b8219feac492c7d"
+
+[[watchers]]
+instance_id = "labelwatch-host-passive-succession-g14"
+carrier = "stdio"
+subject = "host:labelwatch-host"
+capability_ceiling = ["read_procfs", "read_system_info"]
+checkpoint_policy = "disabled"
+
+[watchers.command]
+executable = "/opt/nq-ng/passive-succession-75809e8-musl/lib/nq/helpers/nq-passive-load-helper"
+args = ["serve-stdio", "/etc/nq/passive-load-succession/provider-g14.toml"]
+env = {}
+execution_account = "nq-passive-load-reader"
+working_directory = "/opt/nq-ng/passive-succession-75809e8-musl"
+
+[watchers.profile]
+id = "nq.host"
+version = 1
+
+[watchers.scope]
+kind = "host"
+value = { id = "labelwatch-host" }
+
+[watchers.vantage]
+kind = "local"
+value = {}
+
+[watchers.schedule]
+interval_seconds = 86400
+jitter_seconds = 0
+deadline_ms = 30000
+retry_backoff_seconds = 10
+max_retry_backoff_seconds = 300
+
+[watchers.resources]
+max_response_bytes = 1048576
+max_stderr_bytes = 65536
+max_observations = 1
+max_address_space_bytes = 536870912
+max_cpu_seconds = 60
+max_processes = 4
+max_open_files = 64
+max_file_bytes = 67108864
+
+[watchers.passive_host_load_sample]
+schema = "nq.passive_host_load_provider_config.v1"
+max_sample_age_ms = 30000
+observer_profile = "nq.host_load_passive_sampler.v1"
+observer_artifact_digest = "sha256:629c092a1596e7afd875f733ba6e5ad3d1ca77a1ba23d30eea4d1fe1d415403d"
+observer_config_digest = "sha256:7ff8bbf0983599832ca106bd8f781c698f66ed3b78875ccd63d16f137007206c"
+producer_issuer = "nq-passive-load-observer:labelwatch-host-operational-continuity"
+producer_key_id = "passive-load-operational-20260826-g2"
+producer_public_key_hex = "9b0bad3636b34a87f3e428de16de2eadc6376675b8f133c871e4434195730419"
+capacity_context_id = "sha256:6c6e34b0e088655fce62d4dd15ea355e6d79015736c6e0fb5b8219feac492c7d"

@@ -1,0 +1,12 @@
+[Unit]
+Description=Wake the transactionally gated finite NQ recurrence evaluator
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15s
+AccuracySec=1s
+Persistent=false
+Unit=nq-recurring-office.service
+
+[Install]
+WantedBy=timers.target

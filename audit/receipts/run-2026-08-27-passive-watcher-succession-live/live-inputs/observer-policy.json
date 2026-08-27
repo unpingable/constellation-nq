@@ -1,0 +1,22 @@
+{
+  "schema": "nq.passive_load_operational_policy.v1",
+  "deployment_profile_ref": "linode-labelwatch-passive-operational-continuity:20260826-b697df7-window-v2",
+  "min_sampling_interval_ms": 1000,
+  "max_sampling_interval_ms": 20000,
+  "min_timer_granularity_ms": 1000,
+  "max_scheduling_jitter_ms": 1000,
+  "max_generation_duration_ms": 900000,
+  "max_generation_samples": 180,
+  "max_active_store_bytes": 8388608,
+  "min_required_free_bytes": 10737418240,
+  "max_consecutive_sample_failures": 3,
+  "max_sample_eligibility_age_ms": 30000,
+  "max_key_overlap_ms": 0,
+  "allowed_startup_policies": [
+    "sample_current_slot",
+    "wait_for_next_sample_slot"
+  ],
+  "allowed_retention_modes": [
+    "retain_all"
+  ]
+}

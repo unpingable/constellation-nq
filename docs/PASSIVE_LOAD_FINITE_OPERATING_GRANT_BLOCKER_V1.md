@@ -1,6 +1,12 @@
 # Finite operating-grant campaign — exact watcher succession blocker
 
-Standing: **LIVE RENEWAL BLOCKED — GENERATION-BOUND WATCHER SEMANTICS REQUIRE A NEW SUCCESSION RULE**
+Standing: **SUPERSEDED — THE TYPED, DIRECTED SUCCESSION RULE IS NOW QUALIFIED**
+
+This document preserves the decision surface that stopped the earlier tranche.
+The approved resolution is `nq.passive_watcher_succession.v1`, documented in
+`PASSIVE_WATCHER_SUCCESSION_V1.md`. Distinct watcher identities remain distinct;
+the relation proves only a closed generation/custody transition and creates no
+admission or operational authority.
 
 The enabled pilot justified two narrow mechanisms:
 

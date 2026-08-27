@@ -1,0 +1,28 @@
+[Unit]
+Description=NQ-ng transactionally gated finite recurring office (succession qualification)
+After=local-fs.target
+RequiresMountsFor=/var/lib/nq-ng-observation-office /var/lib/nq-operating-office-succession
+
+[Service]
+Type=oneshot
+User=nq
+Group=nq
+SupplementaryGroups=nq-evidence nq-passive-load-reader
+UMask=0027
+EnvironmentFile=/etc/nq-ng-observation-office/operating-office-succession.env
+WorkingDirectory=/
+ExecStart=/opt/nq-ng/passive-succession-6307811-musl/bin/nq --config /etc/nq-ng-observation-office/nq-operational-continuity.toml --json operating tick ${NQ_OFFICE_ACTIVATION_ID} --state-dir /var/lib/nq-operating-office-succession
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_KILL
+AmbientCapabilities=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_KILL
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/nq-ng-observation-office /var/lib/nq-operating-office-succession /run/nq-ng-observation-office
+RestrictAddressFamilies=AF_INET AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=169.254.169.254/32
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes

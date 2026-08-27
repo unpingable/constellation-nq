@@ -38,6 +38,10 @@ New `WatcherConfig` fields cause the exhaustive comparison code to require an
 explicit review. A digest-shaped field is never accepted merely because its
 name looks derived.
 
+`nq watcher digest WATCHER` is the canonical read-only way to obtain the exact
+semantic digest. Deployment scripts must not approximate canonical JSON or
+infer the digest from field names.
+
 ## Admission and finite H
 
 The finite operating grant H contains a closed set of exact relation IDs and an
