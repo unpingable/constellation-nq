@@ -2,6 +2,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
@@ -3682,8 +3683,35 @@ fn atomic_activate(validated_bytes: &[u8], destination: &Path) -> Result<()> {
         .parent()
         .context("destination must have a parent directory")?;
     fs::create_dir_all(parent)?;
+    let existing_custody = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(destination)
+    {
+        Ok(file) => {
+            let metadata = file.metadata()?;
+            if !metadata.is_file() {
+                bail!("active configuration must be one regular file");
+            }
+            Some((metadata.uid(), metadata.gid(), metadata.mode() & 0o7777))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
     let mut temporary = NamedTempFile::new_in(parent)?;
     temporary.write_all(validated_bytes)?;
+    if let Some((uid, gid, mode)) = existing_custody {
+        nix::unistd::fchown(
+            temporary.as_file().as_raw_fd(),
+            Some(nix::unistd::Uid::from_raw(uid)),
+            Some(nix::unistd::Gid::from_raw(gid)),
+        )
+        .context("cannot preserve active configuration owner and group")?;
+        temporary
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(mode))
+            .context("cannot preserve active configuration mode")?;
+    }
     temporary.as_file_mut().sync_all()?;
     temporary.persist(destination)?;
     File::open(parent)?.sync_all()?;
@@ -4617,5 +4645,29 @@ helper_runtime_dir = "{}"
             config_fixture().as_bytes()
         );
         NqConfig::load(&active).expect("active config remains the validated document");
+    }
+
+    #[test]
+    fn config_activation_preserves_existing_owner_group_and_mode() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let candidate = directory.path().join("candidate.toml");
+        let active = directory.path().join("active.toml");
+        fs::write(&candidate, config_fixture()).expect("write candidate");
+        fs::write(&active, b"previous active bytes\n").expect("write active sentinel");
+        fs::set_permissions(&active, fs::Permissions::from_mode(0o640))
+            .expect("set governed active mode");
+        let before = fs::metadata(&active).expect("active metadata before");
+        let loaded = LoadedConfig::load(&candidate).expect("validate candidate");
+
+        activate_loaded_config(&loaded, &active).expect("activate validated candidate");
+
+        let after = fs::metadata(&active).expect("active metadata after");
+        assert_eq!(after.uid(), before.uid());
+        assert_eq!(after.gid(), before.gid());
+        assert_eq!(after.mode() & 0o7777, 0o640);
+        assert_eq!(
+            fs::read(&active).expect("read active config"),
+            config_fixture().as_bytes()
+        );
     }
 }

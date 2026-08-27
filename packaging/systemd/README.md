@@ -96,7 +96,9 @@ operator must create `/etc/nq/nq.toml`, run `nq init`, admit each configured
 watcher, and run `nq doctor`. Admission and doctor must use the documented
 transient maintenance unit because both execute or runtime-verify under the
 separate watcher UID; a plain `sudo -u nq` process lacks the four narrowly
-bounded parent capabilities. See `docs/OPERATIONS.md`.
+bounded parent capabilities. This includes `watcher admit-successor`: running
+that operator command as root would publish a root-owned active admission that
+the unprivileged recurrence service must refuse. See `docs/OPERATIONS.md`.
 
 ## Why there is no `nqd.socket`
 

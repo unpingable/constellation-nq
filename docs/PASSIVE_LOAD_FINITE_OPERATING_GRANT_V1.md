@@ -66,6 +66,12 @@ Closeout appends `closing` and then `closed`, making wakeups inert before
 mechanical services are stopped. Restart reconstructs the durable state and
 cannot arm, renew, or extend anything.
 
+Admission publication is part of deployment custody. `watcher admit-successor`
+must run through the documented capability-bounded `nq:nq` maintenance unit.
+Running it from a root shell does not add authority; it instead leaves a
+mode-`0600` materialization that the unprivileged recurrence service cannot
+read, so the provider remains untouched and the occurrence fails pre-provider.
+
 > A higher-level operating grant reduces renewal toil by permitting a finite
 > number of exact successor grants. It does not remove the child grants or make
 > authority continuous by implication.

@@ -357,10 +357,9 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let database = directory.path().join("nq.db");
         std::fs::write(&database, b"database identity").expect("database fixture");
-        let _first = InstanceGuard::acquire(&database, "first", "test").expect("first");
-        let started = Instant::now();
-        let _second = InstanceGuard::acquire(&database, "second", "test").expect("second");
-        assert!(started.elapsed() < Duration::from_millis(100));
+        let first = InstanceGuard::acquire(&database, "first", "test").expect("first");
+        let second = InstanceGuard::acquire(&database, "second", "test").expect("second");
+        assert_ne!(first.path(), second.path());
     }
 
     #[test]

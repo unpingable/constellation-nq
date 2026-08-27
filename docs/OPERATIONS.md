@@ -237,8 +237,12 @@ reaps a distinct-UID helper. The child clears every capability and enables
 `no_new_privs` before helper exec. The transient unit also mirrors the daemon's
 filesystem, home, temporary-directory, namespace, kernel, and address-family
 restrictions; keep it synchronized with `nqd.service`. Use it for commands that
-execute or runtime-verify a watcher: `watcher test/admit/rotate/rollback`,
-`collect`, and `doctor`. In particular, `doctor` and rollback trace the current
+execute or runtime-verify a watcher: `watcher test/admit/admit-successor/rotate/rollback`,
+`collect`, and `doctor`. A passive successor admission must therefore be
+created by this `nq:nq` maintenance principal, not by a root shell: the
+recurrence service later reads the exact active admission materialization as
+`nq`, and root-owned mode-`0600` bytes correctly refuse. In particular,
+`doctor` and rollback trace the current
 runtime loader under the admitted watcher UID, so they are not capability-free
 inspection operations. Configuration, initialization, backup, restore,
 upgrade, query, status, findings, and other pure exports remain capability-free

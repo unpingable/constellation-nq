@@ -13,7 +13,7 @@ Qualified code HEAD: `63078116295f966820a3c60a7198f2ae612ab406`
 * `nq` SHA-256: `2917ade7eead35d9c2f42fc0abc85bda42083788d428273278aaa279ae319534`
 * recurrence unit: `/etc/systemd/system/nq-recurring-office.service`
 * recurrence unit SHA-256: `5a8a9681b2240d43ed5c257dc6dbfc22187115b3e7712770999d2db7699c85a4`
-* active NQ configuration SHA-256: `c94a459d83a2456c8844c3f9701ef36557c4e31c419b822203c5d0286098dc19`
+* active NQ configuration SHA-256: `130a9264b2b0003c39c18cbd7e990f76375a4466b19c30c5a35a14e2c016737f`
 
 The checked-in `live-inputs/` are non-secret specifications and static service
 artifacts used during the bounded tranches. Private signing material was not
@@ -68,11 +68,44 @@ already issued children. The repaired law distinguishes child issuance from
 issued-child runtime. Release `6307811` revalidated and armed G14/E14 under the
 exhausted-but-not-yet-retired H4 without permitting another child issuance.
 
-Real armed ticks reached the ordinary recurrence boundary. Their diagnostic
-subprocess returned the explicit fail-closed error that the selected substrate
-origin collection produced no diagnostic artifact. No occurrence became
-`outcome_unknown`, no old-helper fallback occurred, and this campaign did not
-weaken or repeatedly exercise that independent diagnostic boundary.
+Real armed ticks reached the ordinary recurrence boundary. They returned the
+outer fail-closed error that substrate-origin collection produced no diagnostic
+artifact. Subsequent exact status archaeology identified the inner cause:
+G13/G14 active admission materializations had been created by a root shell as
+mode-`0600` `root:root`, while the recurrence service correctly runs as `nq`.
+The engine recorded a pre-provider admission-materialization refusal; no
+provider invocation or `outcome_unknown` state occurred.
+
+The deployment repair changed only file custody to mode `0600` `nq:nq` for the
+four configured passive-succession admission files. SHA-256 before and after
+was identical:
+
+* G7: `64b9042e96548becace6b86fb040d600139ef67eed47d093e46a640fd219d847`
+* G11: `552eeb47fa4bc07fe12f3e858f2f4dc7e23f4960ab94857f4c5784dc9e93d73d`
+* G13: `0ddfa510ef6619b9d578820202f2127f1f1fc4c575f9022819874cdafab7dab8`
+* G14: `ca5597188ea8818923102604fc951875a0467253f4180b7b3c0f8c0bd4142340`
+
+A transient doctor run with the exact recurrence service principal,
+supplementary groups, and bounded capabilities then verified G7, G11, G13,
+and G14 admissions healthy. Missing admissions for discarded intermediate
+G8/G9/G10/G12 configurations remain explicit historical staging refusals;
+they confer no authority. Future successor admission must use the documented
+capability-bounded `nq:nq` maintenance unit rather than a root shell.
+
+The dormant configuration was then narrowed to the current G14 passive watcher
+plus the unrelated pre-existing watchers; discarded G8/G9/G10/G12 staging
+watchers are no longer active configuration entries. The canonical semantic
+configuration digest is
+`sha256:003bfeba665361f664abfccadfd6b6effdc84a4a33166f75123dcd4aa5f3f29f`;
+the exact installed TOML SHA-256 is
+`130a9264b2b0003c39c18cbd7e990f76375a4466b19c30c5a35a14e2c016737f`.
+A second custody defect was exposed by that operation: atomic config
+activation replaced an existing service-readable file with the temporary
+file's root-only ownership. The repaired activation path preserves the exact
+existing regular file's owner, group, and mode while still installing only the
+validated byte snapshot. The live file was restored to `root:nq` mode `0640`
+without changing its bytes. An exact service-principal doctor over the narrowed
+configuration reports every configured watcher, including G14, healthy.
 
 The observer produced 39 G13 samples (97,124 bytes) and 14 G14 samples (38,604
 bytes). Retain-all remains comfortably inside the reviewed 24-hour horizon;
