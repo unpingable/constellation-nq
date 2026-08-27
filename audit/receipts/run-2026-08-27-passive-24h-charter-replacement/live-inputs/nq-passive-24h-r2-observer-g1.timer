@@ -1,0 +1,9 @@
+[Unit]
+Description=Mechanical wake for exact finite passive G1
+[Timer]
+OnCalendar=2026-08-27 18:00:00 UTC
+AccuracySec=1s
+Persistent=true
+Unit=nq-passive-24h-r2-observer@g1.service
+[Install]
+WantedBy=timers.target

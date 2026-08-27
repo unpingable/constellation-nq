@@ -1,0 +1,12 @@
+[Unit]
+Description=Close exact reviewed passive-load r2 charter at exclusive expiry
+After=local-fs.target
+RequiresMountsFor=/var/lib/nq-passive-load
+
+[Service]
+Type=oneshot
+ExecStart=/etc/nq/passive-load-24h-r2/closeout-at-expiry.sh
+TimeoutStartSec=5min
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nq-passive-24h-r2-closeout

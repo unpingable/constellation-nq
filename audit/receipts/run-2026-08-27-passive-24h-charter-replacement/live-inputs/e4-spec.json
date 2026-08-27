@@ -1,0 +1,17 @@
+{
+  "schema": "nq.recurrence_enrollment_spec.v1",
+  "operator_occurrence_id": "linode-passive-24h-r2-e4-20260828",
+  "watcher_instance_id": "labelwatch-host-passive-24h-r2-g4",
+  "policy_id": "sha256:c76d2f0b5ea97ab64c5e08d01de50d36aa5c7bbb5f3126ddd022430effc878fa",
+  "anchor_unix_ms": 1787918400000,
+  "interval_ms": 300000,
+  "max_acquisition_occurrences": 72,
+  "expires_at_unix_ms": 1787940000000,
+  "missed_slot_policy": "latest_only",
+  "startup_policy": "evaluate_current_slot",
+  "max_pre_provider_attempts": 2,
+  "pre_provider_backoff_ms": 1000,
+  "failure_pause_threshold": 2,
+  "requested_domain_concurrency": 1,
+  "acquisition_reason": "diagnostic_recurrence"
+}

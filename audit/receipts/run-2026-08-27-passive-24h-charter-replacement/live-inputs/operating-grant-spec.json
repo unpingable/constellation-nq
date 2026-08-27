@@ -1,0 +1,40 @@
+{
+  "schema": "nq.passive_load_operating_grant_spec.v1",
+  "operator_occurrence_id": "linode-passive-24h-r2-h1-20260827",
+  "not_before_unix_ms": 1787853600000,
+  "expires_at_unix_ms": 1787940000000,
+  "watcher_instance_id": "labelwatch-host-passive-24h-r2-g1",
+  "watcher_semantic_digest": "sha256:3f79c2ff8be52abf25d99fddb1fe1687016189184268534cd73ff05a5f71c082",
+  "subject_binding_digest": "sha256:67ff63b65acc8ede10dcbcd17d212d2cc98aa40fece2a5adb3e4bb2295b9b00e",
+  "passive_provider_boundary_id": "nq.passive_host_load_preexisting_sample_provider.v1",
+  "observer_profile": "nq.host_load_passive_sampler.v1",
+  "observer_artifact_digest": "sha256:bc8e36f7a3569a8b430da44040acdd7d3a368e595385db03571a332ce30ec9a1",
+  "sample_schema": "nq.signed_passive_host_load_sample.v1",
+  "capacity_context_id": "sha256:6c6e34b0e088655fce62d4dd15ea355e6d79015736c6e0fb5b8219feac492c7d",
+  "sample_eligibility_profile_id": "preexisting_latest_before_cutoff:max_age_30000:v1",
+  "coordination_domain_id": "passive-load-24h-r2:labelwatch-host:v1",
+  "sample_interval_ms": 15000,
+  "acquisition_interval_ms": 300000,
+  "recurrence_startup_policy": "evaluate_current_slot",
+  "recurrence_missed_slot_policy": "latest_only",
+  "observer_generation_duration_ms": 21600000,
+  "observer_generation_max_samples": 1440,
+  "recurrence_enrollment_duration_ms": 21600000,
+  "recurrence_enrollment_max_occurrences": 72,
+  "max_observer_generations": 4,
+  "max_recurrence_enrollments": 4,
+  "max_watcher_succession_edges": 3,
+  "max_aggregate_samples": 5760,
+  "max_aggregate_acquisitions": 288,
+  "observer_renewal_lead_ms": 900000,
+  "recurrence_renewal_lead_slots": 2,
+  "allowed_signing_key_ids": [
+    "passive-load-operational-20260826-g2"
+  ],
+  "observer_predecessor_generation_id": "sha256:7ff8bbf0983599832ca106bd8f781c698f66ed3b78875ccd63d16f137007206c",
+  "allowed_watcher_succession_relation_ids": [
+    "sha256:ce385d1a8252cf6b5013db9bb5ff5294c9d8b58d0d8cbe68b3d7f8a80f84c183",
+    "sha256:b6b9e748bfd00749958ddb3fcf12f336dc80fe9f3c54c29fbe72a1ec14d7fdeb",
+    "sha256:22bf46899a5e9a2f5df4b37ff29d93b58d559a2b339dca2729b26122f0898fdf"
+  ]
+}

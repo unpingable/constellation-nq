@@ -1,0 +1,10 @@
+[Unit]
+Description=Mechanical wake for transactionally gated finite recurrence
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=1s
+Persistent=false
+Unit=nq-passive-24h-r2-recurrence.service
+[Install]
+WantedBy=timers.target
