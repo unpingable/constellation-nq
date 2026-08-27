@@ -4,5 +4,6 @@ pub mod api;
 pub mod archive;
 pub mod cli;
 pub mod daemon;
+pub mod operating;
 mod ownership;
 mod transport;

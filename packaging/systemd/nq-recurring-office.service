@@ -2,7 +2,7 @@
 Description=NQ-ng bounded recurring diagnostic office wakeup
 Documentation=file:///usr/share/doc/nq-ng/docs/BOUNDED_RECURRING_DIAGNOSTIC_OFFICE_V1.md
 After=local-fs.target
-RequiresMountsFor=/var/lib/nq
+RequiresMountsFor=/var/lib/nq /var/lib/nq-operating-office
 
 [Service]
 Type=oneshot
@@ -11,11 +11,12 @@ Group=nq
 UMask=0077
 WorkingDirectory=/usr
 EnvironmentFile=/etc/nq/recurring-office.env
-ExecStart=/usr/bin/nq --config=/etc/nq/nq.toml --json recurring tick ${NQ_RECURRENCE_ENROLLMENT_ID}
+ExecStart=/usr/bin/nq --config=/etc/nq/nq.toml --json operating tick ${NQ_OFFICE_ACTIVATION_ID} --state-dir=/var/lib/nq-operating-office
 
 # The CLI must enter the separately admitted watcher and origin-helper
 # principals. It receives the same narrow parent capability set as nqd and no
-# diagnostic authority from systemd; the durable finite enrollment decides.
+# diagnostic authority from systemd; the durable Armed activation and its
+# exact finite enrollment decide. Wakeups before Armed are canonical no-ops.
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
@@ -37,7 +38,7 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_KILL
 AmbientCapabilities=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_KILL
 ReadOnlyPaths=/etc/nq
-ReadWritePaths=/var/lib/nq /run/nq
+ReadWritePaths=/var/lib/nq /var/lib/nq-operating-office /run/nq
 LimitNOFILE=4096
 LimitFSIZE=1G
 LimitCORE=0

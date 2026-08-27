@@ -17,6 +17,7 @@ nix.workspace = true
 nq-build-info = { path = "../nq-build-info" }
 nq-core = { path = "../nq-core" }
 nq-helper-sandbox = { path = "../nq-helper-sandbox" }
+nq-passive-load-helper = { path = "../nq-passive-load-helper" }
 nq-profiles = { path = "../nq-profiles" }
 nq-protocol = { path = "../nq-protocol" }
 nq-store = { path = "../nq-store" }

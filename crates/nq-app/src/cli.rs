@@ -89,6 +89,12 @@ pub enum Command {
         #[command(subcommand)]
         command: RecurringCommand,
     },
+    /// Manage finite delegated passive-office authority and transactional activation.
+    Operating {
+        /// Operating-office workflow.
+        #[command(subcommand)]
+        command: OperatingCommand,
+    },
     /// Diagnose configuration, storage, profiles, and admission drift.
     Doctor,
     /// Create a verified backup while the daemon is stopped.
@@ -431,6 +437,108 @@ pub enum RecurringCommand {
     },
 }
 
+/// Finite higher-level operating-grant and activation operations.
+#[allow(missing_docs)]
+#[derive(Debug, Subcommand)]
+pub enum OperatingCommand {
+    /// Materialize one finite reviewed operating grant.
+    GrantCreate {
+        spec: PathBuf,
+        #[arg(long)]
+        observer_policy: PathBuf,
+        #[arg(long)]
+        recurrence_policy: PathBuf,
+        #[arg(long, default_value = "/var/lib/nq-operating-office")]
+        state_dir: PathBuf,
+    },
+    /// Activate a materialized operating grant; creates no child grant.
+    GrantActivate {
+        grant_id: String,
+        #[arg(long)]
+        operation_id: String,
+        #[arg(long, default_value = "/var/lib/nq-operating-office")]
+        state_dir: PathBuf,
+    },
+    /// Retire future child issuance without rewriting children.
+    GrantRetire {
+        grant_id: String,
+        #[arg(long)]
+        operation_id: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long, default_value = "/var/lib/nq-operating-office")]
+        state_dir: PathBuf,
+    },
+    /// Inspect append-only higher-level authority accounting.
+    GrantStatus {
+        grant_id: String,
+        #[arg(long, default_value = "/var/lib/nq-operating-office")]
+        state_dir: PathBuf,
+    },
+    /// Bind one ordinary observer generation as an H-authorized child.
+    IssueGeneration {
+        grant_id: String,
+        generation: PathBuf,
+        #[arg(long)]
+        operation_id: String,
+        #[arg(long, default_value = "/var/lib/nq-operating-office")]
+        state_dir: PathBuf,
+    },
+    /// Bind one ordinary recurrence enrollment as an H-authorized child.
+    IssueEnrollment {
+        grant_id: String,
+        enrollment_id: String,
+        #[arg(long)]
+        operation_id: String,
+        #[arg(long, default_value = "/var/lib/nq-operating-office")]
+        state_dir: PathBuf,
+    },
+    /// Persist an immutable, initially inert activation bundle.
+    ActivationStage {
+        spec: PathBuf,
+        #[arg(long, default_value = "/var/lib/nq-operating-office")]
+        state_dir: PathBuf,
+    },
+    /// Recheck every durable prerequisite without arming timer exposure.
+    ActivationValidate {
+        activation_id: String,
+        #[arg(long)]
+        operation_id: String,
+        #[arg(long, default_value = "/var/lib/nq-operating-office")]
+        state_dir: PathBuf,
+    },
+    /// Atomically expose the exact finite E only after validation.
+    ActivationArm {
+        activation_id: String,
+        #[arg(long)]
+        operation_id: String,
+        #[arg(long, default_value = "/var/lib/nq-operating-office")]
+        state_dir: PathBuf,
+    },
+    /// Project activation state and timer exposure.
+    ActivationStatus {
+        activation_id: String,
+        #[arg(long, default_value = "/var/lib/nq-operating-office")]
+        state_dir: PathBuf,
+    },
+    /// Disarm first, then append exact closeout facts.
+    ActivationClose {
+        activation_id: String,
+        #[arg(long)]
+        operation_id: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long, default_value = "/var/lib/nq-operating-office")]
+        state_dir: PathBuf,
+    },
+    /// Service-manager one-shot: inert before Armed, ordinary recurrence after.
+    Tick {
+        activation_id: String,
+        #[arg(long, default_value = "/var/lib/nq-operating-office")]
+        state_dir: PathBuf,
+    },
+}
+
 /// Backup workflow.
 #[derive(Debug, Args)]
 pub struct BackupArgs {
@@ -584,6 +692,7 @@ pub async fn run(options: Nq) -> Result<()> {
             diagnostics_command(&options.config, command, options.json).await
         }
         Command::Recurring { command } => recurring_command(&options.config, command, options.json),
+        Command::Operating { command } => operating_command(&options.config, command, options.json),
         Command::Doctor => doctor(&options.config, options.json),
         Command::Backup(arguments) => backup(&options.config, &arguments.destination, options.json),
         Command::Restore(arguments) => {
@@ -1065,6 +1174,335 @@ fn recurring_command(
             json_output,
         ),
     }
+}
+
+fn operating_operator_identity() -> serde_json::Value {
+    json!({
+        "kind": "local_nq_operator_boundary",
+        "uid": nix::unistd::Uid::effective().as_raw(),
+        "gid": nix::unistd::Gid::effective().as_raw(),
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn operating_command(
+    config_path: &Path,
+    command: OperatingCommand,
+    json_output: bool,
+) -> Result<()> {
+    use crate::operating::{OperatingGrantV1, OperatingLedger, TickGateV1};
+
+    let now = chrono::Utc::now().timestamp_millis();
+    match command {
+        OperatingCommand::GrantCreate {
+            spec,
+            observer_policy,
+            recurrence_policy,
+            state_dir,
+        } => {
+            let spec: crate::operating::OperatingGrantSpecV1 = read_exact_json(&spec)?;
+            let observer_policy: nq_passive_load_helper::OperationalPolicyV1 =
+                read_exact_json(&observer_policy)?;
+            let recurrence_policy: nq_store::recurrence::RecurringOfficePolicyV1 =
+                read_exact_json(&recurrence_policy)?;
+            let grant = OperatingGrantV1::new(
+                spec,
+                observer_policy,
+                recurrence_policy,
+                now,
+                operating_operator_identity(),
+            )?;
+            let id = OperatingLedger::open(&state_dir)?.create_grant(&grant)?;
+            print_value(
+                &json!({"grant_id": id, "grant": grant, "authority_created": false}),
+                true,
+            )
+        }
+        OperatingCommand::GrantActivate {
+            grant_id,
+            operation_id,
+            state_dir,
+        } => {
+            let event_id =
+                OperatingLedger::open(&state_dir)?.activate_grant(&grant_id, &operation_id, now)?;
+            print_value(
+                &json!({"grant_id": grant_id, "event_id": event_id, "child_grant_created": false}),
+                json_output,
+            )
+        }
+        OperatingCommand::GrantRetire {
+            grant_id,
+            operation_id,
+            reason,
+            state_dir,
+        } => {
+            let event_id = OperatingLedger::open(&state_dir)?.retire_grant(
+                &grant_id,
+                &operation_id,
+                now,
+                &reason,
+            )?;
+            print_value(
+                &json!({"grant_id": grant_id, "event_id": event_id, "future_child_issuance": "refused"}),
+                json_output,
+            )
+        }
+        OperatingCommand::GrantStatus {
+            grant_id,
+            state_dir,
+        } => print_value(
+            &OperatingLedger::open(&state_dir)?.grant_status(&grant_id, now)?,
+            true,
+        ),
+        OperatingCommand::IssueGeneration {
+            grant_id,
+            generation,
+            operation_id,
+            state_dir,
+        } => {
+            let child: nq_passive_load_helper::ObserverGenerationV1 =
+                read_exact_canonical_json(&generation)?;
+            let child_id = semantic_digest(&child)?.to_string();
+            let issuance = OperatingLedger::open(&state_dir)?.issue_generation(
+                &grant_id,
+                &child,
+                &child_id,
+                &operation_id,
+                now,
+            )?;
+            print_value(&issuance, true)
+        }
+        OperatingCommand::IssueEnrollment {
+            grant_id,
+            enrollment_id,
+            operation_id,
+            state_dir,
+        } => {
+            let config = NqConfig::load(config_path)?;
+            let enrollment = Store::open_read_only(&config.database_path)?
+                .recurrence_enrollment(&enrollment_id)?
+                .context("unknown recurrence enrollment")?;
+            let issuance = OperatingLedger::open(&state_dir)?.issue_enrollment(
+                &grant_id,
+                &enrollment,
+                &operation_id,
+                now,
+            )?;
+            print_value(&issuance, true)
+        }
+        OperatingCommand::ActivationStage { spec, state_dir } => {
+            let spec: crate::operating::OfficeActivationSpecV1 = read_exact_json(&spec)?;
+            let activation = OperatingLedger::open(&state_dir)?.stage_activation(spec, now)?;
+            print_value(
+                &json!({"activation": activation, "timer_exposure": "inert", "attempts_consumed": 0}),
+                true,
+            )
+        }
+        OperatingCommand::ActivationValidate {
+            activation_id,
+            operation_id,
+            state_dir,
+        } => {
+            let config = NqConfig::load(config_path)?;
+            let ledger = OperatingLedger::open(&state_dir)?;
+            let readiness =
+                validate_activation_prerequisites(&config, &ledger, &activation_id, now)?;
+            let event_id =
+                ledger.mark_validated(&activation_id, &operation_id, now, readiness.clone())?;
+            print_value(
+                &json!({"activation_id": activation_id, "event_id": event_id,
+                "state": "validated", "timer_exposure": "inert", "readiness": readiness}),
+                true,
+            )
+        }
+        OperatingCommand::ActivationArm {
+            activation_id,
+            operation_id,
+            state_dir,
+        } => {
+            let config = NqConfig::load(config_path)?;
+            let ledger = OperatingLedger::open(&state_dir)?;
+            let readiness =
+                validate_activation_prerequisites(&config, &ledger, &activation_id, now)?;
+            let event_id = ledger.arm(&activation_id, &operation_id, now)?;
+            print_value(
+                &json!({"activation_id": activation_id, "event_id": event_id,
+                "state": "armed", "timer_exposure": "finite_recurrence", "readiness": readiness}),
+                true,
+            )
+        }
+        OperatingCommand::ActivationStatus {
+            activation_id,
+            state_dir,
+        } => print_value(
+            &OperatingLedger::open(&state_dir)?.activation_status(&activation_id)?,
+            true,
+        ),
+        OperatingCommand::ActivationClose {
+            activation_id,
+            operation_id,
+            reason,
+            state_dir,
+        } => {
+            let event_ids = OperatingLedger::open(&state_dir)?.close_activation(
+                &activation_id,
+                &operation_id,
+                now,
+                &reason,
+            )?;
+            print_value(
+                &json!({"activation_id": activation_id, "event_ids": event_ids,
+                "state": "closed", "timer_exposure": "inert"}),
+                true,
+            )
+        }
+        OperatingCommand::Tick {
+            activation_id,
+            state_dir,
+        } => {
+            let config = NqConfig::load(config_path)?;
+            let ledger = OperatingLedger::open(&state_dir)?;
+            match ledger.tick_gate(&activation_id, now)? {
+                inert @ TickGateV1::Inert { .. } => print_value(&inert, true),
+                TickGateV1::Exposed { enrollment_id, .. } => {
+                    validate_activation_prerequisites(&config, &ledger, &activation_id, now)
+                        .context(
+                            "armed activation prerequisites drifted; recurrence remains unspent",
+                        )?;
+                    recurring_tick(&config, &enrollment_id, now, json_output)
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn validate_activation_prerequisites(
+    config: &NqConfig,
+    ledger: &crate::operating::OperatingLedger,
+    activation_id: &str,
+    now: i64,
+) -> Result<serde_json::Value> {
+    use crate::operating::ChildGrantKindV1;
+    let activation = ledger.activation(activation_id)?;
+    let grant = ledger.grant(&activation.spec.grant_id)?;
+    if !ledger.grant_status(&grant.grant_id, now)?.active {
+        bail!("activation operating grant is not active");
+    }
+    if activation.spec.watcher_instance_id != grant.spec.watcher_instance_id
+        || activation.spec.watcher_semantic_digest != grant.spec.watcher_semantic_digest
+        || activation.spec.passive_provider_boundary_id != grant.spec.passive_provider_boundary_id
+        || activation.spec.capacity_context_id != grant.spec.capacity_context_id
+    {
+        bail!("activation manifest changed H-bound semantics");
+    }
+    if !ledger.has_child_issuance(
+        &grant.grant_id,
+        ChildGrantKindV1::ObserverGeneration,
+        &activation.spec.generation_id,
+    )? || !ledger.has_child_issuance(
+        &grant.grant_id,
+        ChildGrantKindV1::RecurrenceEnrollment,
+        &activation.spec.enrollment_id,
+    )? {
+        bail!("activation names a G/E child not issued under its exact H");
+    }
+
+    let generation: nq_passive_load_helper::ObserverGenerationV1 =
+        read_exact_canonical_json(&activation.spec.generation_path)?;
+    if semantic_digest(&generation)?.as_str() != activation.spec.generation_id
+        || generation.spec.sample_store != activation.spec.sample_store
+        || generation.spec.capacity_context_id.as_str() != activation.spec.capacity_context_id
+        || now < generation.spec.not_before_unix_ms
+        || now >= generation.spec.expires_at_unix_ms
+    {
+        bail!("activation observer generation is substituted, inactive, or context-drifted");
+    }
+
+    let watcher = config
+        .watcher(&activation.spec.watcher_instance_id)
+        .context("activation watcher is absent from current configuration")?;
+    if semantic_digest(watcher)?.as_str() != activation.spec.watcher_semantic_digest {
+        bail!("activation watcher semantics drifted");
+    }
+    let store = Store::open_read_only(&config.database_path)?;
+    let enrollment = store
+        .recurrence_enrollment(&activation.spec.enrollment_id)?
+        .context("activation recurrence enrollment is absent")?;
+    if enrollment.spec.watcher_instance_id != activation.spec.watcher_instance_id
+        || enrollment.watcher_semantic_digest != activation.spec.watcher_semantic_digest
+        || now >= enrollment.spec.expires_at_unix_ms
+    {
+        bail!("activation recurrence enrollment is inactive or substituted");
+    }
+    let recurrence_status = store.recurrence_status(&activation.spec.enrollment_id)?;
+    if recurrence_status.enrollment_state != "active"
+        || !recurrence_status.enrollment_policy_current
+    {
+        bail!("activation recurrence enrollment is not active under current deployment policy");
+    }
+    let admission = store
+        .admission(&activation.spec.admission_id)?
+        .context("activation admission is absent")?;
+    let binding = store
+        .latest_binding(&activation.spec.watcher_instance_id)?
+        .context("activation watcher has no active binding")?;
+    if admission.instance_id != activation.spec.watcher_instance_id
+        || binding.admission_id.as_deref() != Some(activation.spec.admission_id.as_str())
+        || !matches!(binding.event_kind.as_str(), "activate" | "rollback")
+    {
+        bail!("activation admission is not the current exact watcher binding");
+    }
+    let genesis = store
+        .substrate_origin_acquisition_intent_for_intake(&activation.spec.genesis_acquisition_id)?
+        .context("activation genesis acquisition is absent")?;
+    let phases = store.substrate_origin_acquisition_event_phases(&genesis.intent_id)?;
+    if !phases
+        .iter()
+        .any(|phase| phase == "provider_intake_completed")
+    {
+        bail!("activation genesis lacks exact completed provider intake");
+    }
+
+    let provider: nq_passive_load_helper::ProviderConfigV1 =
+        read_exact_canonical_json(&activation.spec.provider_config_path)?;
+    if digest_file(&activation.spec.provider_config_path)? != activation.spec.provider_config_digest
+        || provider.sample_store != activation.spec.sample_store
+        || provider.observer_config_digest.as_str() != activation.spec.generation_id
+        || provider.observer_profile != grant.spec.observer_profile
+        || provider.observer_artifact_digest.as_str() != grant.spec.observer_artifact_digest
+        || provider.capacity_context_id.as_str() != grant.spec.capacity_context_id
+    {
+        bail!("activation passive selector/provider configuration is substituted");
+    }
+    validate_sha256(&activation.spec.service_manager_deployment_digest)?;
+    Ok(json!({
+        "operating_grant": "ready",
+        "observer_generation": "ready",
+        "watcher_admission": "ready",
+        "genesis": "ready",
+        "recurrence_enrollment": "ready",
+        "passive_selector": "ready",
+        "capacity_context": "ready",
+        "sample_store": "ready",
+        "service_manager_deployment": "ready"
+    }))
+}
+
+fn read_exact_canonical_json<T>(path: &Path) -> Result<T>
+where
+    T: for<'de> Deserialize<'de> + Serialize,
+{
+    let bytes = fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+    if bytes.len() > MAX_STORED_JSON_BYTES {
+        bail!("{} exceeds bounded JSON limit", path.display());
+    }
+    let value: T = serde_json::from_slice(&bytes)
+        .with_context(|| format!("cannot decode {}", path.display()))?;
+    if nq_protocol::canonical_json_bytes(&value)? != bytes {
+        bail!("{} is not exact canonical JSON", path.display());
+    }
+    Ok(value)
 }
 
 #[allow(clippy::too_many_arguments)]

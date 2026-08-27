@@ -896,6 +896,34 @@ version = 1
     }
 
     #[test]
+    fn passive_generation_rotation_changes_exact_watcher_semantics() {
+        let mut config = NqConfig::from_toml(&minimal()).expect("valid config");
+        let watcher = &mut config.watchers[0];
+        watcher.capability_ceiling =
+            BTreeSet::from(["read_procfs".to_owned(), "read_system_info".to_owned()]);
+        watcher.passive_host_load_sample = Some(PassiveHostLoadProviderConfigV1 {
+            schema: "nq.passive_host_load_provider_config.v1".into(),
+            max_sample_age_ms: 30_000,
+            observer_profile: "nq.host_load_passive_sampler.v1".into(),
+            observer_artifact_digest: format!("sha256:{}", "a".repeat(64)),
+            observer_config_digest: format!("sha256:{}", "b".repeat(64)),
+            producer_issuer: "fixture.passive-observer".into(),
+            producer_key_id: "fixture-key-1".into(),
+            producer_public_key_hex: "11".repeat(32),
+            capacity_context_id: format!("sha256:{}", "c".repeat(64)),
+        });
+        let first = nq_protocol::semantic_digest(watcher).expect("first exact watcher digest");
+        watcher
+            .passive_host_load_sample
+            .as_mut()
+            .unwrap()
+            .observer_config_digest = format!("sha256:{}", "d".repeat(64));
+        let successor =
+            nq_protocol::semantic_digest(watcher).expect("successor exact watcher digest");
+        assert_ne!(first, successor);
+    }
+
+    #[test]
     fn rejects_unknown_fields() {
         let text = format!("{}\nmagic = true", minimal());
         assert!(matches!(

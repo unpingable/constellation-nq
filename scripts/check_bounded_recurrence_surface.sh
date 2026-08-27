@@ -62,7 +62,11 @@ if rg -q 'NightshiftClient|nightshift::|create_nightshift|run_nightshift' "$stor
   fail "NQ recurrence store names Nightshift reasoning mechanics"
 fi
 
-grep -q 'recurring tick' "$service" || fail "one-shot service does not invoke tick"
+grep -q 'operating tick' "$service" || fail "one-shot service does not invoke transactional operating tick"
+grep -q 'NQ_OFFICE_ACTIVATION_ID' "$service" || fail "service manager bypasses exact activation identity"
+rg -q 'office_not_canonically_armed' "$root/crates/nq-app/src/operating.rs" || fail "pre-Armed timer gate is missing"
+rg -q 'attempts_consumed: 0' "$root/crates/nq-app/src/operating.rs" \
+  || fail "pre-Armed timer gate does not prove zero recurrence attempt consumption"
 if grep -Eq 'diagnostics (execute|acquire-next)|collect ' "$service"; then
   fail "service manager directly invokes diagnostic acquisition"
 fi

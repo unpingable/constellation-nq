@@ -612,6 +612,7 @@ dependencies = [
  "nq-build-info",
  "nq-core",
  "nq-helper-sandbox",
+ "nq-passive-load-helper",
  "nq-profiles",
  "nq-protocol",
  "nq-store",
