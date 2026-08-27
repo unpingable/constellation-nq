@@ -360,6 +360,75 @@ pub fn serve_stdio(config_path: &Path) -> Result<(), Error> {
     serve(config_path, io::stdin().lock(), io::stdout().lock())
 }
 
+/// Exact read-only readiness witness for a bounded successor handoff.
+///
+/// This performs the same signature, generation, binding, cutoff, and age
+/// checks as provider selection, but emits no helper report and creates no NQ
+/// admission or acquisition authority. A later admission still performs its
+/// own ordinary provider exchange and may refuse independently.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EligiblePassiveSampleV1 {
+    /// Observer-assigned immutable occurrence identity.
+    pub sample_occurrence_id: String,
+    /// Content digest of the exact signed raw-fact payload.
+    pub payload_digest: Sha256Digest,
+    /// Kernel-fact observation time, never retrieval time.
+    pub observed_at: DateTime<Utc>,
+    /// Monotonic sequence within the exact observer generation.
+    pub sequence: u64,
+}
+
+/// Find the newest exact passive sample eligible at `cutoff_at`.
+///
+/// # Errors
+///
+/// Refuses substituted provider configuration, corrupt custody, invalid
+/// signatures, or an invalid age request. Absence is returned as `None`.
+pub fn eligible_sample_at(
+    config_path: &Path,
+    binding: &SubjectBinding,
+    cutoff_at: DateTime<Utc>,
+    max_age_ms: u64,
+) -> Result<Option<EligiblePassiveSampleV1>, Error> {
+    let (config, _) = load_toml::<ProviderConfigV1>(config_path)?;
+    validate_provider_config(&config)?;
+    if max_age_ms == 0 || max_age_ms > config.max_sample_age_ms {
+        return Err(Error::Invalid(
+            "readiness age exceeds the exact passive provider deployment".into(),
+        ));
+    }
+    let public_bytes = decode_public_key(&config.producer_public_key_hex)?;
+    let public = VerifyingKey::from_bytes(&public_bytes)
+        .map_err(|_| Error::Invalid("invalid producer public key".into()))?;
+    let sample = load_samples(
+        &config.sample_store,
+        &public,
+        &ExpectedSampleIdentity {
+            observer_profile: &config.observer_profile,
+            observer_artifact_digest: Some(&config.observer_artifact_digest),
+            observer_config_digest: Some(&config.observer_config_digest),
+            producer_issuer: &config.producer_issuer,
+            producer_key_id: &config.producer_key_id,
+            capacity_context_id: &config.capacity_context_id,
+            binding: Some(binding),
+        },
+    )?
+    .into_iter()
+    .filter(|sample| {
+        let age = cutoff_at.signed_duration_since(sample.payload.observed_at);
+        age >= chrono::Duration::zero()
+            && u64::try_from(age.num_milliseconds()).unwrap_or(u64::MAX) <= max_age_ms
+    })
+    .max_by_key(|sample| (sample.payload.observed_at, sample.payload.sequence));
+    Ok(sample.map(|sample| EligiblePassiveSampleV1 {
+        sample_occurrence_id: sample.payload.sample_occurrence_id,
+        payload_digest: sample.payload_digest,
+        observed_at: sample.payload.observed_at,
+        sequence: sample.payload.sequence,
+    }))
+}
+
 /// Serve one exchange over supplied bounded streams.
 ///
 /// # Errors
@@ -996,7 +1065,8 @@ mod tests {
 
     use super::{
         CapacityContextV1, OBSERVER_PROFILE, ObserverConfigV1, ObserverSession, ProviderConfigV1,
-        SOURCE_BASIS, capacity_context, executable_digest, load_toml, sample_once, serve,
+        SOURCE_BASIS, capacity_context, eligible_sample_at, executable_digest, load_toml,
+        sample_once, serve,
     };
 
     #[test]
@@ -1225,6 +1295,54 @@ mod tests {
             serde_json::from_value(report.observations[0].payload["passive_sample"].clone())
                 .unwrap();
         assert_eq!(embedded.payload.sequence, 2);
+    }
+
+    #[test]
+    fn handoff_readiness_is_read_only_exact_and_age_bounded() {
+        let fixture = Fixture::new();
+        assert!(
+            eligible_sample_at(
+                &fixture.provider_config_path,
+                &fixture.binding,
+                Utc::now(),
+                60_000,
+            )
+            .unwrap()
+            .is_none()
+        );
+        let sample = sample_once(&fixture.observer_config_path).unwrap();
+        let ready = eligible_sample_at(
+            &fixture.provider_config_path,
+            &fixture.binding,
+            Utc::now(),
+            60_000,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(ready.payload_digest, sample.payload_digest);
+        assert_eq!(
+            ready.sample_occurrence_id,
+            sample.payload.sample_occurrence_id
+        );
+        let before = fs::read_dir(fixture.root.path().join("samples"))
+            .unwrap()
+            .count();
+        assert!(
+            eligible_sample_at(
+                &fixture.provider_config_path,
+                &fixture.binding,
+                sample.payload.observed_at - chrono::Duration::milliseconds(1),
+                60_000,
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(
+            fs::read_dir(fixture.root.path().join("samples"))
+                .unwrap()
+                .count(),
+            before
+        );
     }
 
     #[test]

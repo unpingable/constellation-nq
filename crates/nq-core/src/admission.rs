@@ -212,6 +212,31 @@ impl AdmissionManager {
         evidence: CandidateEvidence,
         execution: ExecutionIdentity,
     ) -> Result<AdmissionLock, AdmissionError> {
+        Self::candidate_with_execution_and_id(
+            watcher,
+            evidence,
+            execution,
+            uuid::Uuid::new_v4().to_string(),
+        )
+    }
+
+    /// Build the one exact admission candidate preallocated by a bounded
+    /// successor-handoff procedure. This does not confer admission: the
+    /// ordinary conformance, dry collection, execution, and binding checks
+    /// remain unchanged. Keeping identity allocation outside the provider
+    /// fence lets restart reconcile exact custody instead of minting a second
+    /// candidate.
+    pub(crate) fn candidate_with_execution_and_id(
+        watcher: &WatcherConfig,
+        evidence: CandidateEvidence,
+        execution: ExecutionIdentity,
+        admission_id: String,
+    ) -> Result<AdmissionLock, AdmissionError> {
+        uuid::Uuid::parse_str(&admission_id).map_err(|error| {
+            AdmissionError::ConformanceFailed(format!(
+                "preallocated admission identity is not a UUID: {error}"
+            ))
+        })?;
         if !evidence.conformance.protocol_passed {
             return Err(AdmissionError::ConformanceFailed(
                 "protocol corpus failed".into(),
@@ -229,7 +254,7 @@ impl AdmissionManager {
             .collect();
         Ok(AdmissionLock {
             schema: ADMISSION_SCHEMA.into(),
-            admission_id: uuid::Uuid::new_v4().to_string(),
+            admission_id,
             instance_id: watcher.instance_id.clone(),
             config_digest: config_digest(watcher)?,
             execution,
@@ -654,6 +679,48 @@ mod tests {
             .expect("admission records helper account");
         assert_eq!(account.uid, nix::unistd::geteuid().as_raw());
         assert_eq!(account.gid, nix::unistd::getegid().as_raw());
+    }
+
+    #[test]
+    fn bounded_handoff_preallocates_identity_without_bypassing_admission_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let helper = dir.path().join("helper");
+        fs::write(&helper, b"executable").unwrap();
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+        let watcher = watcher(helper, dir.path().to_path_buf());
+        let ordinary = candidate(AdmissionManager, &watcher);
+        let expected = "504deacc-09da-4ded-9f96-a77cbd6458c8";
+        let exact = AdmissionManager::candidate_with_execution_and_id(
+            &watcher,
+            CandidateEvidence {
+                profile_digest: ordinary.profile.digest.clone(),
+                protocol_version: ordinary.protocol_version.clone(),
+                declared_capabilities: BTreeSet::from(["fixture.read".into()]),
+                conformance: ordinary.conformance.clone(),
+            },
+            ordinary.execution.clone(),
+            expected.into(),
+        )
+        .unwrap();
+        assert_eq!(exact.admission_id, expected);
+        assert_eq!(exact.instance_id, watcher.instance_id);
+
+        let mut refused = ordinary.conformance;
+        refused.dry_collection_passed = false;
+        assert!(matches!(
+            AdmissionManager::candidate_with_execution_and_id(
+                &watcher,
+                CandidateEvidence {
+                    profile_digest: exact.profile.digest,
+                    protocol_version: exact.protocol_version,
+                    declared_capabilities: BTreeSet::new(),
+                    conformance: refused,
+                },
+                exact.execution,
+                "f65e5bd3-c460-4200-b5ba-3176898280f3".into(),
+            ),
+            Err(AdmissionError::ConformanceFailed(_))
+        ));
     }
 
     #[test]

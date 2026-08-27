@@ -59,6 +59,12 @@ It then performs an ordinary fresh admission for the distinct successor. Every
 successor G, watcher, admission, and E retains its own identity and custody.
 Semantic drift refuses succession and returns to human review.
 
+An H-authorized successor handoff may execute that ordinary admission step
+unattended only for one exact pre-issued tuple. The relation still confers no
+admission: a missing sample may wait under the same handoff, while an ordinary
+admission refusal is terminal and returns to human review. It cannot try later
+samples until one happens to admit.
+
 When an H begins after an already retained observer history, it may bind the
 exact immediately preceding G identity. That identity is historical continuity
 input only: it is not counted as an H child and imports no sampling authority.

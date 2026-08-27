@@ -33,6 +33,8 @@ pub const OPERATING_EVENT_SCHEMA_V1: &str = "nq.passive_load_operating_event.v1"
 pub const CHILD_ISSUANCE_SCHEMA_V1: &str = "nq.passive_load_child_grant_issuance.v1";
 pub const OFFICE_ACTIVATION_SPEC_SCHEMA_V1: &str = "nq.passive_load_office_activation_spec.v1";
 pub const OFFICE_ACTIVATION_SCHEMA_V1: &str = "nq.passive_load_office_activation.v1";
+pub const SUCCESSOR_HANDOFF_SPEC_SCHEMA_V1: &str = "nq.passive_load_successor_handoff_spec.v1";
+pub const SUCCESSOR_HANDOFF_SCHEMA_V1: &str = "nq.passive_load_successor_handoff.v1";
 const MAX_LEDGER_DOCUMENT_BYTES: usize = 1_048_576;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -154,6 +156,93 @@ pub struct OfficeActivationV1 {
     pub staged_at_unix_ms: i64,
 }
 
+/// One pre-reviewed, finite procedure delegation between exact H children.
+/// The object contains identities and validation inputs only. It is not an
+/// admission, sample, acquisition, recurrence, or diagnostic grant.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SuccessorHandoffSpecV1 {
+    pub schema: String,
+    pub operation_id: String,
+    pub grant_id: String,
+    pub succession_relation_id: String,
+    pub predecessor_activation_id: String,
+    pub next_generation_id: String,
+    pub next_generation_path: PathBuf,
+    pub successor_watcher_instance_id: String,
+    pub successor_watcher_semantic_digest: String,
+    pub expected_admission_id: String,
+    pub genesis_acquisition_id: String,
+    pub expected_instance_id_sha256: String,
+    pub origin_helper_path: PathBuf,
+    pub origin_helper_sha256: String,
+    pub origin_helper_account: String,
+    pub origin_helper_public_key_path: PathBuf,
+    pub next_enrollment_id: String,
+    pub next_activation_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SuccessorHandoffV1 {
+    pub schema: String,
+    pub handoff_id: String,
+    pub spec: SuccessorHandoffSpecV1,
+    pub staged_at_unix_ms: i64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuccessorHandoffStateV1 {
+    Staged,
+    WaitingForSample,
+    SampleReady,
+    AdmissionStarted,
+    AdmissionCompleted,
+    GenesisStarted,
+    GenesisCompleted,
+    Validated,
+    Armed,
+    AdmissionRefused,
+    GenesisRefused,
+    OutcomeUnknown,
+    Expired,
+}
+
+impl SuccessorHandoffStateV1 {
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Armed
+                | Self::AdmissionRefused
+                | Self::GenesisRefused
+                | Self::OutcomeUnknown
+                | Self::Expired
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SuccessorHandoffStatusV1 {
+    pub schema: String,
+    pub handoff_id: String,
+    pub grant_id: String,
+    pub relation_id: String,
+    pub next_generation_id: String,
+    pub successor_watcher_instance_id: String,
+    pub expected_admission_id: String,
+    pub genesis_acquisition_id: String,
+    pub next_enrollment_id: String,
+    pub next_activation_id: String,
+    pub state: SuccessorHandoffStateV1,
+    pub timer_exposure: String,
+    pub human_required: bool,
+    pub last_event_id: String,
+    pub last_event_detail: Value,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActivationStateV1 {
@@ -191,6 +280,8 @@ pub struct OperatingGrantStatusV1 {
     pub recurrence_enrollments_remaining: u16,
     pub watcher_succession_edges_issued: u16,
     pub watcher_succession_edges_remaining: u16,
+    pub successor_handoffs_staged: u16,
+    pub successor_handoffs_remaining: u16,
     pub aggregate_samples_issued: u64,
     pub aggregate_samples_remaining: u64,
     pub aggregate_acquisitions_issued: u64,
@@ -293,6 +384,8 @@ impl OperatingLedger {
             "activations",
             "activation-events",
             "successions",
+            "handoffs",
+            "handoff-events",
         ] {
             fs::create_dir_all(root.join(child))?;
         }
@@ -583,6 +676,307 @@ impl OperatingLedger {
         Ok(activation)
     }
 
+    #[allow(clippy::too_many_lines)]
+    pub fn stage_successor_handoff(
+        &self,
+        spec: SuccessorHandoffSpecV1,
+        now: i64,
+    ) -> Result<SuccessorHandoffV1> {
+        if spec.schema != SUCCESSOR_HANDOFF_SPEC_SCHEMA_V1 {
+            bail!("unsupported successor handoff spec");
+        }
+        let grant = self.grant(&spec.grant_id)?;
+        if !self.grant_permits_issued_child_runtime(&spec.grant_id, now)? {
+            bail!("operating grant is not active for an issued successor handoff");
+        }
+        for value in [
+            &spec.operation_id,
+            &spec.grant_id,
+            &spec.succession_relation_id,
+            &spec.predecessor_activation_id,
+            &spec.next_generation_id,
+            &spec.successor_watcher_instance_id,
+            &spec.successor_watcher_semantic_digest,
+            &spec.expected_admission_id,
+            &spec.genesis_acquisition_id,
+            &spec.expected_instance_id_sha256,
+            &spec.origin_helper_sha256,
+            &spec.origin_helper_account,
+            &spec.next_enrollment_id,
+            &spec.next_activation_id,
+        ] {
+            bounded(value, "successor handoff identity")?;
+        }
+        uuid::Uuid::parse_str(&spec.expected_admission_id)
+            .context("handoff expected admission identity must be a UUID")?;
+        for digest in [
+            &spec.successor_watcher_semantic_digest,
+            &spec.expected_instance_id_sha256,
+            &spec.origin_helper_sha256,
+        ] {
+            Sha256Digest::parse(digest.clone()).context("invalid handoff digest")?;
+        }
+        if !spec.next_generation_path.is_absolute()
+            || !spec.origin_helper_path.is_absolute()
+            || !spec.origin_helper_public_key_path.is_absolute()
+        {
+            bail!("successor handoff paths must be absolute");
+        }
+        let relation = self.watcher_succession(&spec.grant_id, &spec.succession_relation_id)?;
+        if relation.successor.instance_id != spec.successor_watcher_instance_id
+            || relation.successor_digest()? != spec.successor_watcher_semantic_digest
+        {
+            bail!("successor handoff substitutes the exact directed watcher relation");
+        }
+        let origin = grant
+            .recurrence_deployment_policy
+            .watcher_bindings
+            .iter()
+            .find(|binding| {
+                binding.watcher_instance_id == spec.successor_watcher_instance_id
+                    && binding.watcher_semantic_digest == spec.successor_watcher_semantic_digest
+            })
+            .context("successor handoff watcher lacks exact deployment origin policy")?;
+        if origin.expected_instance_id_sha256 != spec.expected_instance_id_sha256
+            || origin.origin_helper_path != spec.origin_helper_path
+            || origin.origin_helper_sha256 != spec.origin_helper_sha256
+            || origin.origin_helper_account != spec.origin_helper_account
+            || origin.origin_helper_public_key_path != spec.origin_helper_public_key_path
+            || origin.coordination_domain_id != grant.spec.coordination_domain_id
+        {
+            bail!("successor handoff origin or coordination policy is substituted");
+        }
+        let activation = self.activation(&spec.next_activation_id)?;
+        if activation.spec.grant_id != spec.grant_id
+            || activation.spec.generation_id != spec.next_generation_id
+            || activation.spec.generation_path != spec.next_generation_path
+            || activation.spec.enrollment_id != spec.next_enrollment_id
+            || activation.spec.watcher_instance_id != spec.successor_watcher_instance_id
+            || activation.spec.watcher_semantic_digest != spec.successor_watcher_semantic_digest
+            || activation.spec.admission_id != spec.expected_admission_id
+            || activation.spec.genesis_acquisition_id != spec.genesis_acquisition_id
+            || activation.spec.provider_config_path
+                != relation.successor_custody.provider_config_path
+            || activation.spec.provider_config_digest
+                != relation.successor_custody.provider_config_digest
+            || activation.spec.sample_store != relation.successor_custody.sample_store
+            || relation.successor_custody.observer_config_digest != spec.next_generation_id
+            || activation.spec.passive_provider_boundary_id
+                != grant.spec.passive_provider_boundary_id
+        {
+            bail!("successor handoff activation tuple is substituted");
+        }
+        let predecessor = self.activation(&spec.predecessor_activation_id)?;
+        if predecessor.spec.grant_id != spec.grant_id
+            || predecessor.spec.watcher_instance_id != relation.predecessor.instance_id
+            || predecessor.spec.watcher_semantic_digest != relation.predecessor_digest()?
+        {
+            bail!("successor handoff predecessor activation is substituted");
+        }
+        let generations =
+            self.child_issuances(&spec.grant_id, ChildGrantKindV1::ObserverGeneration)?;
+        let enrollments =
+            self.child_issuances(&spec.grant_id, ChildGrantKindV1::RecurrenceEnrollment)?;
+        let generation_index = generations
+            .iter()
+            .position(|item| item.child_id == spec.next_generation_id)
+            .context("handoff G child was not issued under H")?;
+        let enrollment_index = enrollments
+            .iter()
+            .position(|item| item.child_id == spec.next_enrollment_id)
+            .context("handoff E child was not issued under H")?;
+        if generation_index == 0
+            || generation_index != enrollment_index
+            || generations[generation_index - 1].child_id != predecessor.spec.generation_id
+            || enrollments[enrollment_index - 1].child_id != predecessor.spec.enrollment_id
+        {
+            bail!("handoff may only advance the next exact paired G/E child boundary");
+        }
+        let relations = self.watcher_successions(&spec.grant_id)?;
+        if relations
+            .get(generation_index - 1)
+            .map(|edge| edge.relation_id.as_str())
+            != Some(spec.succession_relation_id.as_str())
+        {
+            bail!("handoff may not skip or reorder H's closed succession chain");
+        }
+        let existing = self.handoffs(&spec.grant_id)?;
+        if let Some(prior) = existing.iter().find(|item| item.spec == spec) {
+            return Ok(prior.clone());
+        }
+        if existing.iter().any(|item| {
+            item.spec.succession_relation_id == spec.succession_relation_id
+                || item.spec.next_generation_id == spec.next_generation_id
+                || item.spec.next_enrollment_id == spec.next_enrollment_id
+                || item.spec.next_activation_id == spec.next_activation_id
+        }) {
+            bail!("an exact H successor boundary already has a handoff");
+        }
+        if existing.len() >= usize::from(grant.spec.max_watcher_succession_edges) {
+            bail!("operating grant successor-handoff budget is exhausted");
+        }
+        let preimage = json!({"schema": SUCCESSOR_HANDOFF_SCHEMA_V1, "spec": spec,
+            "staged_at_unix_ms": now});
+        let handoff_id = semantic_digest(&preimage)?.to_string();
+        let handoff = SuccessorHandoffV1 {
+            schema: SUCCESSOR_HANDOFF_SCHEMA_V1.into(),
+            handoff_id: handoff_id.clone(),
+            spec: serde_json::from_value(preimage["spec"].clone())?,
+            staged_at_unix_ms: now,
+        };
+        write_canonical_idempotent(&self.handoff_path(&handoff_id), &handoff)?;
+        self.append_event(
+            "handoff-events",
+            &handoff_id,
+            "staged",
+            &handoff.spec.operation_id,
+            now,
+            json!({"procedure_authority": "finite_exact_validation_sequence", "timer_exposure": "inert"}),
+        )?;
+        Ok(handoff)
+    }
+
+    pub(crate) fn advance_handoff(
+        &self,
+        handoff_id: &str,
+        next: SuccessorHandoffStateV1,
+        operation_id: &str,
+        now: i64,
+        detail: Value,
+    ) -> Result<String> {
+        let current = self.handoff_status(handoff_id)?.state;
+        if current == next {
+            return self.append_event(
+                "handoff-events",
+                handoff_id,
+                handoff_event_kind(next),
+                operation_id,
+                now,
+                detail,
+            );
+        }
+        if !valid_handoff_transition(current, next) {
+            bail!("forbidden successor-handoff state transition {current:?} -> {next:?}");
+        }
+        self.append_event(
+            "handoff-events",
+            handoff_id,
+            handoff_event_kind(next),
+            operation_id,
+            now,
+            detail,
+        )
+    }
+
+    /// Disarm the exact predecessor before exposing the successor activation.
+    /// A crash between the two append-only transitions yields a safe real gap;
+    /// restart can finish the same handoff and can never expose both E grants.
+    pub(crate) fn arm_successor_handoff(
+        &self,
+        handoff_id: &str,
+        operation_id: &str,
+        now: i64,
+    ) -> Result<Vec<String>> {
+        let handoff = self.handoff(handoff_id)?;
+        if self.handoff_status(handoff_id)?.state != SuccessorHandoffStateV1::Validated {
+            bail!("only an exactly validated handoff may arm its successor");
+        }
+        let mut events = Vec::new();
+        if self
+            .activation_status(&handoff.spec.predecessor_activation_id)?
+            .state
+            != ActivationStateV1::Closed
+        {
+            events.extend(self.close_activation(
+                &handoff.spec.predecessor_activation_id,
+                &format!("{operation_id}:predecessor"),
+                now,
+                "exact successor handoff",
+            )?);
+        }
+        let next_state = self
+            .activation_status(&handoff.spec.next_activation_id)?
+            .state;
+        if next_state == ActivationStateV1::Validated {
+            events.push(self.arm(
+                &handoff.spec.next_activation_id,
+                &format!("{operation_id}:activation"),
+                now,
+            )?);
+        } else if next_state != ActivationStateV1::Armed {
+            bail!("successor activation is not validated or already armed");
+        }
+        events.push(self.advance_handoff(
+            handoff_id,
+            SuccessorHandoffStateV1::Armed,
+            &format!("{operation_id}:handoff"),
+            now,
+            json!({"next_activation_id": handoff.spec.next_activation_id,
+                "timer_exposure": "finite_recurrence"}),
+        )?);
+        Ok(events)
+    }
+
+    pub fn handoff_status(&self, handoff_id: &str) -> Result<SuccessorHandoffStatusV1> {
+        let handoff = self.handoff(handoff_id)?;
+        let mut state = SuccessorHandoffStateV1::Staged;
+        let events = self.events("handoff-events", handoff_id)?;
+        for (index, event) in events.iter().enumerate() {
+            let next = parse_handoff_event(&event.event_kind)?;
+            if index == 0 {
+                if next != SuccessorHandoffStateV1::Staged {
+                    bail!("successor-handoff history does not begin staged");
+                }
+            } else if next != state && !valid_handoff_transition(state, next) {
+                bail!("successor-handoff history contains a forbidden transition");
+            }
+            state = next;
+        }
+        let last = events
+            .last()
+            .context("successor handoff has no staged event")?;
+        Ok(SuccessorHandoffStatusV1 {
+            schema: "nq.passive_load_successor_handoff_status.v1".into(),
+            handoff_id: handoff_id.into(),
+            grant_id: handoff.spec.grant_id,
+            relation_id: handoff.spec.succession_relation_id,
+            next_generation_id: handoff.spec.next_generation_id,
+            successor_watcher_instance_id: handoff.spec.successor_watcher_instance_id,
+            expected_admission_id: handoff.spec.expected_admission_id,
+            genesis_acquisition_id: handoff.spec.genesis_acquisition_id,
+            next_enrollment_id: handoff.spec.next_enrollment_id,
+            next_activation_id: handoff.spec.next_activation_id,
+            state,
+            timer_exposure: if state == SuccessorHandoffStateV1::Armed {
+                "finite_recurrence"
+            } else {
+                "inert"
+            }
+            .into(),
+            human_required: matches!(
+                state,
+                SuccessorHandoffStateV1::AdmissionRefused
+                    | SuccessorHandoffStateV1::GenesisRefused
+                    | SuccessorHandoffStateV1::OutcomeUnknown
+                    | SuccessorHandoffStateV1::Expired
+            ),
+            last_event_id: last.event_id.clone(),
+            last_event_detail: last.detail.clone(),
+        })
+    }
+
+    pub fn handoff(&self, handoff_id: &str) -> Result<SuccessorHandoffV1> {
+        let handoff: SuccessorHandoffV1 = read_json(&self.handoff_path(handoff_id))?;
+        if semantic_digest(&json!({"schema": handoff.schema, "spec": handoff.spec,
+            "staged_at_unix_ms": handoff.staged_at_unix_ms}))?
+        .as_str()
+            != handoff.handoff_id
+        {
+            bail!("successor handoff identity differs from exact canonical bytes");
+        }
+        Ok(handoff)
+    }
+
     pub fn mark_validated(
         &self,
         activation_id: &str,
@@ -694,6 +1088,7 @@ impl OperatingLedger {
         let generations = self.child_issuances(grant_id, ChildGrantKindV1::ObserverGeneration)?;
         let enrollments = self.child_issuances(grant_id, ChildGrantKindV1::RecurrenceEnrollment)?;
         let successions = self.watcher_successions(grant_id)?;
+        let handoffs = self.handoffs(grant_id)?;
         let samples = generations
             .iter()
             .map(|item| item.finite_authority_count)
@@ -738,6 +1133,11 @@ impl OperatingLedger {
                 .spec
                 .max_watcher_succession_edges
                 .saturating_sub(successions.len().try_into().unwrap_or(u16::MAX)),
+            successor_handoffs_staged: handoffs.len().try_into().unwrap_or(u16::MAX),
+            successor_handoffs_remaining: grant
+                .spec
+                .max_watcher_succession_edges
+                .saturating_sub(handoffs.len().try_into().unwrap_or(u16::MAX)),
             aggregate_samples_issued: samples,
             aggregate_samples_remaining: grant.spec.max_aggregate_samples.saturating_sub(samples),
             aggregate_acquisitions_issued: acquisitions,
@@ -1016,6 +1416,95 @@ impl OperatingLedger {
             .join("activations")
             .join(format!("{}.json", id_component(id)))
     }
+    fn handoff_path(&self, id: &str) -> PathBuf {
+        self.root
+            .join("handoffs")
+            .join(format!("{}.json", id_component(id)))
+    }
+
+    fn handoffs(&self, grant_id: &str) -> Result<Vec<SuccessorHandoffV1>> {
+        let mut items = read_dir_json::<SuccessorHandoffV1>(&self.root.join("handoffs"))?
+            .into_iter()
+            .filter(|item| item.spec.grant_id == grant_id)
+            .collect::<Vec<_>>();
+        items.sort_by_key(|item| (item.staged_at_unix_ms, item.handoff_id.clone()));
+        Ok(items)
+    }
+}
+
+const fn handoff_event_kind(state: SuccessorHandoffStateV1) -> &'static str {
+    match state {
+        SuccessorHandoffStateV1::Staged => "staged",
+        SuccessorHandoffStateV1::WaitingForSample => "waiting_for_sample",
+        SuccessorHandoffStateV1::SampleReady => "sample_ready",
+        SuccessorHandoffStateV1::AdmissionStarted => "admission_started",
+        SuccessorHandoffStateV1::AdmissionCompleted => "admission_completed",
+        SuccessorHandoffStateV1::GenesisStarted => "genesis_started",
+        SuccessorHandoffStateV1::GenesisCompleted => "genesis_completed",
+        SuccessorHandoffStateV1::Validated => "validated",
+        SuccessorHandoffStateV1::Armed => "armed",
+        SuccessorHandoffStateV1::AdmissionRefused => "admission_refused",
+        SuccessorHandoffStateV1::GenesisRefused => "genesis_refused",
+        SuccessorHandoffStateV1::OutcomeUnknown => "outcome_unknown",
+        SuccessorHandoffStateV1::Expired => "expired",
+    }
+}
+
+fn parse_handoff_event(kind: &str) -> Result<SuccessorHandoffStateV1> {
+    match kind {
+        "staged" => Ok(SuccessorHandoffStateV1::Staged),
+        "waiting_for_sample" => Ok(SuccessorHandoffStateV1::WaitingForSample),
+        "sample_ready" => Ok(SuccessorHandoffStateV1::SampleReady),
+        "admission_started" => Ok(SuccessorHandoffStateV1::AdmissionStarted),
+        "admission_completed" => Ok(SuccessorHandoffStateV1::AdmissionCompleted),
+        "genesis_started" => Ok(SuccessorHandoffStateV1::GenesisStarted),
+        "genesis_completed" => Ok(SuccessorHandoffStateV1::GenesisCompleted),
+        "validated" => Ok(SuccessorHandoffStateV1::Validated),
+        "armed" => Ok(SuccessorHandoffStateV1::Armed),
+        "admission_refused" => Ok(SuccessorHandoffStateV1::AdmissionRefused),
+        "genesis_refused" => Ok(SuccessorHandoffStateV1::GenesisRefused),
+        "outcome_unknown" => Ok(SuccessorHandoffStateV1::OutcomeUnknown),
+        "expired" => Ok(SuccessorHandoffStateV1::Expired),
+        other => bail!("unknown successor-handoff event {other}"),
+    }
+}
+
+fn valid_handoff_transition(
+    current: SuccessorHandoffStateV1,
+    next: SuccessorHandoffStateV1,
+) -> bool {
+    if next == SuccessorHandoffStateV1::Expired && !current.is_terminal() {
+        return true;
+    }
+    matches!(
+        (current, next),
+        (
+            SuccessorHandoffStateV1::Staged | SuccessorHandoffStateV1::WaitingForSample,
+            SuccessorHandoffStateV1::WaitingForSample | SuccessorHandoffStateV1::SampleReady
+        ) | (
+            SuccessorHandoffStateV1::SampleReady,
+            SuccessorHandoffStateV1::AdmissionStarted
+        ) | (
+            SuccessorHandoffStateV1::AdmissionStarted,
+            SuccessorHandoffStateV1::AdmissionCompleted
+                | SuccessorHandoffStateV1::AdmissionRefused
+                | SuccessorHandoffStateV1::OutcomeUnknown
+        ) | (
+            SuccessorHandoffStateV1::AdmissionCompleted,
+            SuccessorHandoffStateV1::GenesisStarted
+        ) | (
+            SuccessorHandoffStateV1::GenesisStarted,
+            SuccessorHandoffStateV1::GenesisCompleted
+                | SuccessorHandoffStateV1::GenesisRefused
+                | SuccessorHandoffStateV1::OutcomeUnknown
+        ) | (
+            SuccessorHandoffStateV1::GenesisCompleted,
+            SuccessorHandoffStateV1::Validated
+        ) | (
+            SuccessorHandoffStateV1::Validated,
+            SuccessorHandoffStateV1::Armed
+        )
+    )
 }
 
 struct ChildIssuanceInput<'a> {
@@ -2004,6 +2493,414 @@ mod tests {
             ledger
                 .issue_watcher_succession(&grant.grant_id, &drift, 2_004)
                 .is_err()
+        );
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn handoff_fixture(
+        ledger: &OperatingLedger,
+        start: i64,
+    ) -> (
+        OperatingGrantV1,
+        OfficeActivationV1,
+        OfficeActivationV1,
+        SuccessorHandoffSpecV1,
+    ) {
+        use nq_store::recurrence::WatcherCoordinationBindingV1;
+
+        let observer = observer_policy();
+        let recurrence_base = recurrence_policy();
+        let provisional = OperatingGrantV1::new(
+            grant_spec(start),
+            observer.clone(),
+            recurrence_base.clone(),
+            start - 1,
+            json!({"operator": "provisional"}),
+        )
+        .unwrap();
+        let g1 = generation(&provisional, start, None, "1");
+        let g1_id = semantic_digest(&g1).unwrap().to_string();
+        let g2 = generation(
+            &provisional,
+            start + i64::try_from(6 * HOUR).unwrap(),
+            Some(g1_id.clone()),
+            "2",
+        );
+        let g2_id = semantic_digest(&g2).unwrap().to_string();
+
+        let (mut predecessor, mut successor, _) = succession_watchers();
+        predecessor
+            .passive_host_load_sample
+            .as_mut()
+            .unwrap()
+            .observer_config_digest
+            .clone_from(&g1_id);
+        successor
+            .passive_host_load_sample
+            .as_mut()
+            .unwrap()
+            .observer_config_digest
+            .clone_from(&g2_id);
+        let predecessor_custody = PassiveProviderCustodyV1 {
+            provider_config_path: PathBuf::from("/etc/nq/provider-1.toml"),
+            provider_config_digest: format!("sha256:{}", "1".repeat(64)),
+            sample_store: PathBuf::from("/tmp/samples-1"),
+            max_sample_age_ms: 30_000,
+            observer_profile: "nq.host_load_passive_sampler.v1".into(),
+            observer_artifact_digest: format!("sha256:{}", "2".repeat(64)),
+            observer_config_digest: g1_id.clone(),
+            producer_issuer: "observer:test".into(),
+            producer_key_id: "key:1".into(),
+            producer_public_key_hex: "00".repeat(32),
+            capacity_context_id: format!("sha256:{}", "4".repeat(64)),
+        };
+        let mut successor_custody = predecessor_custody.clone();
+        successor_custody.provider_config_path = PathBuf::from("/etc/nq/provider-2.toml");
+        successor_custody.provider_config_digest = format!("sha256:{}", "2".repeat(64));
+        successor_custody.sample_store = PathBuf::from("/tmp/samples-2");
+        successor_custody.observer_config_digest = g2_id.clone();
+        let relation = PassiveWatcherSuccessionV1::new(
+            predecessor.clone(),
+            successor.clone(),
+            predecessor_custody,
+            successor_custody,
+            "operator:handoff-relation".into(),
+            start - 1,
+        )
+        .unwrap();
+
+        let predecessor_digest = semantic_digest(&predecessor).unwrap().to_string();
+        let successor_digest = semantic_digest(&successor).unwrap().to_string();
+        let mut spec = grant_spec(start);
+        spec.watcher_instance_id = predecessor.instance_id.clone();
+        spec.watcher_semantic_digest = predecessor_digest.clone();
+        spec.max_watcher_succession_edges = 1;
+        spec.allowed_watcher_succession_relation_ids =
+            BTreeSet::from([relation.relation_id.clone()]);
+        let binding = g1.spec.binding.clone();
+        spec.subject_binding_digest = semantic_digest(&binding).unwrap().to_string();
+        let mut recurrence = recurrence_base;
+        for (watcher, digest) in [
+            (&predecessor, predecessor_digest.clone()),
+            (&successor, successor_digest.clone()),
+        ] {
+            recurrence
+                .watcher_bindings
+                .push(WatcherCoordinationBindingV1 {
+                    watcher_instance_id: watcher.instance_id.clone(),
+                    watcher_semantic_digest: digest,
+                    coordination_domain_id: spec.coordination_domain_id.clone(),
+                    origin_profile: "linode_instance_metadata_v1".into(),
+                    expected_instance_id_sha256: format!("sha256:{}", "a".repeat(64)),
+                    origin_helper_path: "/opt/nq/origin".into(),
+                    origin_helper_sha256: format!("sha256:{}", "b".repeat(64)),
+                    origin_helper_account: "nq-origin".into(),
+                    origin_helper_public_key_path: "/etc/nq/origin.pub".into(),
+                    origin_helper_issuer: "origin:test".into(),
+                    origin_helper_key_id: "origin-key:test".into(),
+                });
+        }
+        let grant = OperatingGrantV1::new(
+            spec,
+            observer,
+            recurrence,
+            start - 1,
+            json!({"operator": "test"}),
+        )
+        .unwrap();
+        ledger.create_grant(&grant).unwrap();
+        ledger
+            .activate_grant(&grant.grant_id, "activate:handoff", start)
+            .unwrap();
+        ledger
+            .issue_watcher_succession(&grant.grant_id, &relation, start)
+            .unwrap();
+        ledger
+            .issue_generation(&grant.grant_id, &g1, &g1_id, "issue:g1", start)
+            .unwrap();
+        ledger
+            .issue_generation(&grant.grant_id, &g2, &g2_id, "issue:g2", start)
+            .unwrap();
+        let e1 = enrollment(&grant, start, 'a');
+        let mut e2 = enrollment(&grant, start + i64::try_from(6 * HOUR).unwrap(), 'b');
+        e2.spec.watcher_instance_id = successor.instance_id.clone();
+        e2.watcher_semantic_digest = successor_digest.clone();
+        ledger
+            .issue_enrollment(&grant.grant_id, &e1, "issue:e1", start)
+            .unwrap();
+        ledger
+            .issue_enrollment(&grant.grant_id, &e2, "issue:e2", start)
+            .unwrap();
+
+        let mut a1_spec = activation_spec(&grant.grant_id);
+        a1_spec.operation_id = "stage:a1".into();
+        a1_spec.generation_id = g1_id;
+        a1_spec.generation_path = PathBuf::from("/tmp/g1.json");
+        a1_spec.enrollment_id = e1.enrollment_id;
+        a1_spec.watcher_instance_id = predecessor.instance_id;
+        a1_spec.watcher_semantic_digest = predecessor_digest;
+        a1_spec.provider_config_path = PathBuf::from("/etc/nq/provider-1.toml");
+        a1_spec.provider_config_digest = format!("sha256:{}", "1".repeat(64));
+        a1_spec.sample_store = PathBuf::from("/tmp/samples-1");
+        let a1 = ledger.stage_activation(a1_spec, start).unwrap();
+        ledger
+            .mark_validated(&a1.activation_id, "validate:a1", start, json!({}))
+            .unwrap();
+        ledger.arm(&a1.activation_id, "arm:a1", start).unwrap();
+
+        let admission_id = "4dbead7e-b1a9-4d20-9890-cf16b6c7dfa1";
+        let mut a2_spec = activation_spec(&grant.grant_id);
+        a2_spec.operation_id = "stage:a2".into();
+        a2_spec.generation_id = g2_id.clone();
+        a2_spec.generation_path = PathBuf::from("/tmp/g2.json");
+        a2_spec.enrollment_id = e2.enrollment_id.clone();
+        a2_spec.watcher_instance_id = successor.instance_id.clone();
+        a2_spec.watcher_semantic_digest = successor_digest.clone();
+        a2_spec.admission_id = admission_id.into();
+        a2_spec.genesis_acquisition_id = "genesis:g2".into();
+        a2_spec.provider_config_path = PathBuf::from("/etc/nq/provider-2.toml");
+        a2_spec.provider_config_digest = format!("sha256:{}", "2".repeat(64));
+        a2_spec.sample_store = PathBuf::from("/tmp/samples-2");
+        let a2 = ledger.stage_activation(a2_spec, start).unwrap();
+        let handoff = SuccessorHandoffSpecV1 {
+            schema: SUCCESSOR_HANDOFF_SPEC_SCHEMA_V1.into(),
+            operation_id: "stage:handoff".into(),
+            grant_id: grant.grant_id.clone(),
+            succession_relation_id: relation.relation_id,
+            predecessor_activation_id: a1.activation_id.clone(),
+            next_generation_id: g2_id,
+            next_generation_path: PathBuf::from("/tmp/g2.json"),
+            successor_watcher_instance_id: successor.instance_id,
+            successor_watcher_semantic_digest: successor_digest,
+            expected_admission_id: admission_id.into(),
+            genesis_acquisition_id: "genesis:g2".into(),
+            expected_instance_id_sha256: format!("sha256:{}", "a".repeat(64)),
+            origin_helper_path: PathBuf::from("/opt/nq/origin"),
+            origin_helper_sha256: format!("sha256:{}", "b".repeat(64)),
+            origin_helper_account: "nq-origin".into(),
+            origin_helper_public_key_path: PathBuf::from("/etc/nq/origin.pub"),
+            next_enrollment_id: e2.enrollment_id,
+            next_activation_id: a2.activation_id.clone(),
+        };
+        (grant, a1, a2, handoff)
+    }
+
+    #[test]
+    fn exact_handoff_is_restart_safe_inert_until_arm_and_closes_predecessor_first() {
+        let root = tempfile::tempdir().unwrap();
+        let ledger = OperatingLedger::open(root.path()).unwrap();
+        let (_grant, predecessor, successor, spec) = handoff_fixture(&ledger, 2_000);
+        let handoff = ledger.stage_successor_handoff(spec.clone(), 2_001).unwrap();
+        assert_eq!(
+            ledger
+                .stage_successor_handoff(spec, 2_002)
+                .unwrap()
+                .handoff_id,
+            handoff.handoff_id
+        );
+        assert!(matches!(
+            ledger.tick_gate(&successor.activation_id, 2_002).unwrap(),
+            TickGateV1::Inert {
+                attempts_consumed: 0,
+                ..
+            }
+        ));
+        assert!(
+            ledger
+                .advance_handoff(
+                    &handoff.handoff_id,
+                    SuccessorHandoffStateV1::GenesisStarted,
+                    "skip",
+                    2_002,
+                    json!({})
+                )
+                .is_err()
+        );
+        for (state, operation) in [
+            (SuccessorHandoffStateV1::WaitingForSample, "wait:1"),
+            (SuccessorHandoffStateV1::SampleReady, "sample:1"),
+            (SuccessorHandoffStateV1::AdmissionStarted, "admit:start"),
+            (SuccessorHandoffStateV1::AdmissionCompleted, "admit:done"),
+            (SuccessorHandoffStateV1::GenesisStarted, "genesis:start"),
+            (SuccessorHandoffStateV1::GenesisCompleted, "genesis:done"),
+        ] {
+            ledger
+                .advance_handoff(&handoff.handoff_id, state, operation, 2_003, json!({}))
+                .unwrap();
+        }
+        ledger
+            .mark_validated(&successor.activation_id, "validate:a2", 2_004, json!({}))
+            .unwrap();
+        ledger
+            .advance_handoff(
+                &handoff.handoff_id,
+                SuccessorHandoffStateV1::Validated,
+                "handoff:validated",
+                2_004,
+                json!({}),
+            )
+            .unwrap();
+        ledger
+            .arm_successor_handoff(&handoff.handoff_id, "handoff:arm", 2_005)
+            .unwrap();
+        assert_eq!(
+            ledger
+                .activation_status(&predecessor.activation_id)
+                .unwrap()
+                .state,
+            ActivationStateV1::Closed
+        );
+        assert_eq!(
+            ledger
+                .activation_status(&successor.activation_id)
+                .unwrap()
+                .state,
+            ActivationStateV1::Armed
+        );
+        assert_eq!(
+            ledger.handoff_status(&handoff.handoff_id).unwrap().state,
+            SuccessorHandoffStateV1::Armed
+        );
+    }
+
+    #[test]
+    fn handoff_substitution_and_semantic_refusal_fail_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let ledger = OperatingLedger::open(root.path()).unwrap();
+        let (_grant, _predecessor, successor, mut spec) = handoff_fixture(&ledger, 2_000);
+        let exact = spec.clone();
+        spec.next_activation_id = successor.activation_id.clone();
+        spec.successor_watcher_instance_id = "substituted-watcher".into();
+        assert!(ledger.stage_successor_handoff(spec, 2_001).is_err());
+        let handoff = ledger.stage_successor_handoff(exact, 2_001).unwrap();
+        ledger
+            .advance_handoff(
+                &handoff.handoff_id,
+                SuccessorHandoffStateV1::SampleReady,
+                "sample",
+                2_002,
+                json!({}),
+            )
+            .unwrap();
+        ledger
+            .advance_handoff(
+                &handoff.handoff_id,
+                SuccessorHandoffStateV1::AdmissionStarted,
+                "admit:start",
+                2_002,
+                json!({}),
+            )
+            .unwrap();
+        ledger
+            .advance_handoff(
+                &handoff.handoff_id,
+                SuccessorHandoffStateV1::AdmissionRefused,
+                "admit:refused",
+                2_003,
+                json!({"human_required": true}),
+            )
+            .unwrap();
+        assert!(
+            ledger
+                .advance_handoff(
+                    &handoff.handoff_id,
+                    SuccessorHandoffStateV1::AdmissionCompleted,
+                    "admit:retry",
+                    2_004,
+                    json!({})
+                )
+                .is_err()
+        );
+        let status = ledger.handoff_status(&handoff.handoff_id).unwrap();
+        assert!(status.human_required);
+        assert_eq!(status.timer_exposure, "inert");
+    }
+
+    #[test]
+    fn handoff_duplicate_delivery_and_crash_terminal_cuts_converge() {
+        for terminal in [
+            SuccessorHandoffStateV1::OutcomeUnknown,
+            SuccessorHandoffStateV1::AdmissionRefused,
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let ledger = OperatingLedger::open(root.path()).unwrap();
+            let (_grant, _predecessor, _successor, spec) = handoff_fixture(&ledger, 2_000);
+            let handoff = ledger.stage_successor_handoff(spec, 2_001).unwrap();
+            let first = ledger
+                .advance_handoff(
+                    &handoff.handoff_id,
+                    SuccessorHandoffStateV1::SampleReady,
+                    "sample:duplicate",
+                    2_002,
+                    json!({"sample": "exact"}),
+                )
+                .unwrap();
+            let duplicate = ledger
+                .advance_handoff(
+                    &handoff.handoff_id,
+                    SuccessorHandoffStateV1::SampleReady,
+                    "sample:duplicate",
+                    2_002,
+                    json!({"sample": "exact"}),
+                )
+                .unwrap();
+            assert_eq!(first, duplicate);
+            ledger
+                .advance_handoff(
+                    &handoff.handoff_id,
+                    SuccessorHandoffStateV1::AdmissionStarted,
+                    "admission:start",
+                    2_003,
+                    json!({}),
+                )
+                .unwrap();
+            ledger
+                .advance_handoff(
+                    &handoff.handoff_id,
+                    terminal,
+                    "admission:terminal",
+                    2_004,
+                    json!({"human_required": true}),
+                )
+                .unwrap();
+            assert_eq!(
+                ledger.handoff_status(&handoff.handoff_id).unwrap().state,
+                terminal
+            );
+            assert!(
+                ledger
+                    .advance_handoff(
+                        &handoff.handoff_id,
+                        SuccessorHandoffStateV1::AdmissionCompleted,
+                        "admission:late",
+                        2_005,
+                        json!({})
+                    )
+                    .is_err()
+            );
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let ledger = OperatingLedger::open(root.path()).unwrap();
+        let (_grant, _predecessor, _successor, spec) = handoff_fixture(&ledger, 2_000);
+        let handoff = ledger.stage_successor_handoff(spec, 2_001).unwrap();
+        for (state, operation) in [
+            (SuccessorHandoffStateV1::SampleReady, "sample"),
+            (SuccessorHandoffStateV1::AdmissionStarted, "admission:start"),
+            (
+                SuccessorHandoffStateV1::AdmissionCompleted,
+                "admission:done",
+            ),
+            (SuccessorHandoffStateV1::GenesisStarted, "genesis:start"),
+            (SuccessorHandoffStateV1::OutcomeUnknown, "genesis:unknown"),
+        ] {
+            ledger
+                .advance_handoff(&handoff.handoff_id, state, operation, 2_003, json!({}))
+                .unwrap();
+        }
+        assert_eq!(
+            ledger.handoff_status(&handoff.handoff_id).unwrap().state,
+            SuccessorHandoffStateV1::OutcomeUnknown
         );
     }
 

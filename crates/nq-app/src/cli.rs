@@ -530,6 +530,24 @@ pub enum OperatingCommand {
         #[arg(long, default_value = "/var/lib/nq-operating-office")]
         state_dir: PathBuf,
     },
+    /// Persist one exact finite successor-handoff procedure; creates no admission.
+    HandoffStage {
+        spec: PathBuf,
+        #[arg(long, default_value = "/var/lib/nq-operating-office")]
+        state_dir: PathBuf,
+    },
+    /// Evaluate one exact handoff step; waits, refuses, or advances append-only.
+    HandoffTick {
+        handoff_id: String,
+        #[arg(long, default_value = "/var/lib/nq-operating-office")]
+        state_dir: PathBuf,
+    },
+    /// Inspect the exact successor-handoff projection.
+    HandoffStatus {
+        handoff_id: String,
+        #[arg(long, default_value = "/var/lib/nq-operating-office")]
+        state_dir: PathBuf,
+    },
     /// Persist an immutable, initially inert activation bundle.
     ActivationStage {
         spec: PathBuf,
@@ -729,7 +747,9 @@ pub async fn run(options: Nq) -> Result<()> {
             diagnostics_command(&options.config, command, options.json).await
         }
         Command::Recurring { command } => recurring_command(&options.config, command, options.json),
-        Command::Operating { command } => operating_command(&options.config, command, options.json),
+        Command::Operating { command } => {
+            operating_command(&options.config, command, options.json).await
+        }
         Command::Doctor => doctor(&options.config, options.json),
         Command::Backup(arguments) => backup(&options.config, &arguments.destination, options.json),
         Command::Restore(arguments) => {
@@ -1285,7 +1305,7 @@ fn operating_operator_identity() -> serde_json::Value {
 }
 
 #[allow(clippy::too_many_lines)]
-fn operating_command(
+async fn operating_command(
     config_path: &Path,
     command: OperatingCommand,
     json_output: bool,
@@ -1433,6 +1453,26 @@ fn operating_command(
                 true,
             )
         }
+        OperatingCommand::HandoffStage { spec, state_dir } => {
+            let spec: crate::operating::SuccessorHandoffSpecV1 = read_exact_json(&spec)?;
+            let handoff = OperatingLedger::open(&state_dir)?.stage_successor_handoff(spec, now)?;
+            print_value(
+                &json!({"handoff": handoff, "admission_created": false,
+                    "diagnostic_authority_created": false, "timer_exposure": "inert"}),
+                true,
+            )
+        }
+        OperatingCommand::HandoffTick {
+            handoff_id,
+            state_dir,
+        } => successor_handoff_tick(config_path, &state_dir, &handoff_id, now).await,
+        OperatingCommand::HandoffStatus {
+            handoff_id,
+            state_dir,
+        } => print_value(
+            &OperatingLedger::open(&state_dir)?.handoff_status(&handoff_id)?,
+            true,
+        ),
         OperatingCommand::ActivationStage { spec, state_dir } => {
             let spec: crate::operating::OfficeActivationSpecV1 = read_exact_json(&spec)?;
             let activation = OperatingLedger::open(&state_dir)?.stage_activation(spec, now)?;
@@ -1517,6 +1557,434 @@ fn operating_command(
             }
         }
     }
+}
+
+#[allow(clippy::too_many_lines)]
+async fn successor_handoff_tick(
+    config_path: &Path,
+    state_dir: &Path,
+    handoff_id: &str,
+    now: i64,
+) -> Result<()> {
+    use crate::operating::{ActivationStateV1, SuccessorHandoffStateV1 as State};
+
+    // One invocation may finish the exact ready sequence, but is bounded and
+    // can never walk into another handoff.
+    for _ in 0..12 {
+        let ledger = crate::operating::OperatingLedger::open(state_dir)?;
+        let handoff = ledger.handoff(handoff_id)?;
+        let status = ledger.handoff_status(handoff_id)?;
+        if status.state.is_terminal() {
+            return print_value(&status, true);
+        }
+        let grant = ledger.grant(&handoff.spec.grant_id)?;
+        if now >= grant.spec.expires_at_unix_ms
+            && !matches!(
+                status.state,
+                State::AdmissionStarted | State::GenesisStarted
+            )
+        {
+            ledger.advance_handoff(
+                handoff_id,
+                State::Expired,
+                &format!("handoff:{handoff_id}:h-expired"),
+                now,
+                json!({"reason": "operating_grant_expired", "timer_exposure": "inert"}),
+            )?;
+            continue;
+        }
+        drop(ledger);
+
+        match status.state {
+            State::Staged | State::WaitingForSample => {
+                let predecessor_state = crate::operating::OperatingLedger::open(state_dir)?
+                    .activation_status(&handoff.spec.predecessor_activation_id)?
+                    .state;
+                if predecessor_state != ActivationStateV1::Armed {
+                    bail!("successor handoff predecessor activation is not exactly armed");
+                }
+                let config = NqConfig::load(config_path)?;
+                let watcher = config
+                    .watcher(&handoff.spec.successor_watcher_instance_id)
+                    .context("successor handoff watcher is absent")?;
+                if semantic_digest(watcher)?.as_str()
+                    != handoff.spec.successor_watcher_semantic_digest
+                {
+                    bail!("successor handoff watcher semantics drifted");
+                }
+                let generation: nq_passive_load_helper::ObserverGenerationV1 =
+                    read_exact_canonical_json(&handoff.spec.next_generation_path)?;
+                if semantic_digest(&generation)?.as_str() != handoff.spec.next_generation_id {
+                    bail!("successor handoff generation bytes were substituted");
+                }
+                if now < generation.spec.not_before_unix_ms {
+                    return print_value(
+                        &json!({"handoff_id": handoff_id, "state": "staged",
+                            "timer_exposure": "inert", "reason": "next_generation_not_started"}),
+                        true,
+                    );
+                }
+                if now >= generation.spec.expires_at_unix_ms {
+                    crate::operating::OperatingLedger::open(state_dir)?.advance_handoff(
+                        handoff_id,
+                        State::Expired,
+                        &format!("handoff:{handoff_id}:g-expired"),
+                        now,
+                        json!({"reason": "next_generation_expired_without_admission",
+                            "timer_exposure": "inert"}),
+                    )?;
+                    continue;
+                }
+                let binding = watcher_subject_binding(watcher)?;
+                let cutoff = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(now)
+                    .context("handoff clock is outside chrono range")?;
+                let passive = watcher
+                    .passive_host_load_sample
+                    .as_ref()
+                    .context("successor handoff watcher is not passive load")?;
+                let activation = crate::operating::OperatingLedger::open(state_dir)?
+                    .activation(&handoff.spec.next_activation_id)?;
+                let sample = nq_passive_load_helper::eligible_sample_at(
+                    &activation.spec.provider_config_path,
+                    &binding,
+                    cutoff,
+                    passive.max_sample_age_ms,
+                )?;
+                let Some(sample) = sample else {
+                    let slot = u64::try_from(now - generation.spec.sampling_anchor_unix_ms)
+                        .unwrap_or(0)
+                        / generation.spec.sample_interval_ms;
+                    crate::operating::OperatingLedger::open(state_dir)?.advance_handoff(
+                        handoff_id,
+                        State::WaitingForSample,
+                        &format!("handoff:{handoff_id}:sample-slot:{slot}"),
+                        now,
+                        json!({"sampling_slot": slot, "reason": "no_eligible_successor_sample",
+                            "timer_exposure": "inert", "admission_attempted": false}),
+                    )?;
+                    return print_value(
+                        &crate::operating::OperatingLedger::open(state_dir)?
+                            .handoff_status(handoff_id)?,
+                        true,
+                    );
+                };
+                crate::operating::OperatingLedger::open(state_dir)?.advance_handoff(
+                    handoff_id,
+                    State::SampleReady,
+                    &format!("handoff:{handoff_id}:sample:{}", sample.payload_digest),
+                    now,
+                    json!({"sample": sample, "timer_exposure": "inert",
+                        "admission_attempted": false}),
+                )?;
+            }
+            State::SampleReady => {
+                crate::operating::OperatingLedger::open(state_dir)?.advance_handoff(
+                    handoff_id,
+                    State::AdmissionStarted,
+                    &format!("handoff:{handoff_id}:admission-started"),
+                    now,
+                    json!({"expected_admission_id": handoff.spec.expected_admission_id,
+                        "timer_exposure": "inert"}),
+                )?;
+                match execute_preallocated_successor_admission(
+                    config_path,
+                    &handoff.spec.successor_watcher_instance_id,
+                    &handoff.spec.expected_admission_id,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        crate::operating::OperatingLedger::open(state_dir)?.advance_handoff(
+                            handoff_id,
+                            State::AdmissionCompleted,
+                            &format!("handoff:{handoff_id}:admission-completed"),
+                            chrono::Utc::now().timestamp_millis(),
+                            json!({"admission_id": handoff.spec.expected_admission_id,
+                                "admission_owner": "ordinary_nq_admission", "timer_exposure": "inert"}),
+                        )?;
+                    }
+                    Err(error) => {
+                        let state = if matches!(
+                            error.downcast_ref::<nq_core::engine::EngineError>(),
+                            Some(
+                                nq_core::engine::EngineError::GovernedRefusal(_)
+                                    | nq_core::engine::EngineError::AcquisitionFailed(_)
+                            )
+                        ) {
+                            State::AdmissionRefused
+                        } else {
+                            State::OutcomeUnknown
+                        };
+                        crate::operating::OperatingLedger::open(state_dir)?.advance_handoff(
+                            handoff_id,
+                            state,
+                            &format!("handoff:{handoff_id}:admission-terminal"),
+                            chrono::Utc::now().timestamp_millis(),
+                            json!({"reason": error.to_string(), "human_required": true,
+                                "timer_exposure": "inert"}),
+                        )?;
+                    }
+                }
+            }
+            State::AdmissionStarted => {
+                let config = NqConfig::load(config_path)?;
+                let store = Store::open_read_only(&config.database_path)?;
+                let exact = store
+                    .admission(&handoff.spec.expected_admission_id)?
+                    .is_some()
+                    && store
+                        .latest_binding(&handoff.spec.successor_watcher_instance_id)?
+                        .and_then(|binding| binding.admission_id)
+                        .as_deref()
+                        == Some(handoff.spec.expected_admission_id.as_str());
+                let next = if exact {
+                    State::AdmissionCompleted
+                } else {
+                    State::OutcomeUnknown
+                };
+                crate::operating::OperatingLedger::open(state_dir)?.advance_handoff(
+                    handoff_id,
+                    next,
+                    &format!("handoff:{handoff_id}:admission-reconcile"),
+                    now,
+                    json!({"admission_id": handoff.spec.expected_admission_id,
+                        "exact_custody": exact, "human_required": !exact,
+                        "timer_exposure": "inert"}),
+                )?;
+            }
+            State::AdmissionCompleted => {
+                crate::operating::OperatingLedger::open(state_dir)?.advance_handoff(
+                    handoff_id,
+                    State::GenesisStarted,
+                    &format!("handoff:{handoff_id}:genesis-started"),
+                    now,
+                    json!({"acquisition_id": handoff.spec.genesis_acquisition_id,
+                        "timer_exposure": "inert"}),
+                )?;
+                match execute_handoff_genesis(config_path, &handoff).await {
+                    Ok(artifact_id) => {
+                        crate::operating::OperatingLedger::open(state_dir)?.advance_handoff(
+                            handoff_id,
+                            State::GenesisCompleted,
+                            &format!("handoff:{handoff_id}:genesis-completed"),
+                            chrono::Utc::now().timestamp_millis(),
+                            json!({"acquisition_id": handoff.spec.genesis_acquisition_id,
+                                "artifact_id": artifact_id, "timer_exposure": "inert"}),
+                        )?;
+                    }
+                    Err(error) => {
+                        let config = NqConfig::load(config_path)?;
+                        let store = Store::open_read_only(&config.database_path)?;
+                        let started = store
+                            .substrate_origin_acquisition_intent_for_intake(
+                                &handoff.spec.genesis_acquisition_id,
+                            )?
+                            .is_some();
+                        let next = if started {
+                            State::OutcomeUnknown
+                        } else {
+                            State::GenesisRefused
+                        };
+                        crate::operating::OperatingLedger::open(state_dir)?.advance_handoff(
+                            handoff_id,
+                            next,
+                            &format!("handoff:{handoff_id}:genesis-terminal"),
+                            chrono::Utc::now().timestamp_millis(),
+                            json!({"reason": error.to_string(), "provider_fence_exists": started,
+                                "human_required": true, "timer_exposure": "inert"}),
+                        )?;
+                    }
+                }
+            }
+            State::GenesisStarted => {
+                let config = NqConfig::load(config_path)?;
+                let store = Store::open_read_only(&config.database_path)?;
+                if let Some(intent) = store.substrate_origin_acquisition_intent_for_intake(
+                    &handoff.spec.genesis_acquisition_id,
+                )? {
+                    let phases =
+                        store.substrate_origin_acquisition_event_phases(&intent.intent_id)?;
+                    let completed = phases
+                        .last()
+                        .is_some_and(|phase| phase == "provider_intake_completed");
+                    crate::operating::OperatingLedger::open(state_dir)?.advance_handoff(
+                        handoff_id,
+                        if completed {
+                            State::GenesisCompleted
+                        } else {
+                            State::OutcomeUnknown
+                        },
+                        &format!("handoff:{handoff_id}:genesis-reconcile"),
+                        now,
+                        json!({"phases": phases, "exact_intake": completed,
+                            "human_required": !completed, "timer_exposure": "inert"}),
+                    )?;
+                } else if now >= grant.spec.expires_at_unix_ms {
+                    crate::operating::OperatingLedger::open(state_dir)?.advance_handoff(
+                        handoff_id,
+                        State::Expired,
+                        &format!("handoff:{handoff_id}:h-expired-pre-provider"),
+                        now,
+                        json!({"reason": "operating_grant_expired_before_genesis_provider_intent",
+                            "timer_exposure": "inert"}),
+                    )?;
+                } else {
+                    // The engine persists intent before its provider fence. No
+                    // intent proves this crash cut remained pre-provider, so
+                    // the same exact occurrence may start once.
+                    match execute_handoff_genesis(config_path, &handoff).await {
+                        Ok(artifact_id) => {
+                            crate::operating::OperatingLedger::open(state_dir)?.advance_handoff(
+                                handoff_id,
+                                State::GenesisCompleted,
+                                &format!("handoff:{handoff_id}:genesis-completed"),
+                                chrono::Utc::now().timestamp_millis(),
+                                json!({"acquisition_id": handoff.spec.genesis_acquisition_id,
+                                    "artifact_id": artifact_id, "resumed_pre_provider": true,
+                                    "timer_exposure": "inert"}),
+                            )?;
+                        }
+                        Err(error) => {
+                            crate::operating::OperatingLedger::open(state_dir)?.advance_handoff(
+                                handoff_id,
+                                State::GenesisRefused,
+                                &format!("handoff:{handoff_id}:genesis-terminal"),
+                                chrono::Utc::now().timestamp_millis(),
+                                json!({"reason": error.to_string(), "human_required": true,
+                                    "timer_exposure": "inert"}),
+                            )?;
+                        }
+                    }
+                }
+            }
+            State::GenesisCompleted => {
+                let config = NqConfig::load(config_path)?;
+                let ledger = crate::operating::OperatingLedger::open(state_dir)?;
+                let readiness = validate_activation_prerequisites(
+                    &config,
+                    &ledger,
+                    &handoff.spec.next_activation_id,
+                    now,
+                )?;
+                let activation_state = ledger
+                    .activation_status(&handoff.spec.next_activation_id)?
+                    .state;
+                if activation_state == ActivationStateV1::Staging {
+                    ledger.mark_validated(
+                        &handoff.spec.next_activation_id,
+                        &format!("handoff:{handoff_id}:activation-validated"),
+                        now,
+                        readiness.clone(),
+                    )?;
+                } else if activation_state != ActivationStateV1::Validated {
+                    bail!("successor activation reached an unexpected state before handoff arm");
+                }
+                ledger.advance_handoff(
+                    handoff_id,
+                    State::Validated,
+                    &format!("handoff:{handoff_id}:validated"),
+                    now,
+                    readiness,
+                )?;
+            }
+            State::Validated => {
+                crate::operating::OperatingLedger::open(state_dir)?.arm_successor_handoff(
+                    handoff_id,
+                    &format!("handoff:{handoff_id}:arm"),
+                    now,
+                )?;
+            }
+            State::Armed
+            | State::AdmissionRefused
+            | State::GenesisRefused
+            | State::OutcomeUnknown
+            | State::Expired => unreachable!("terminal state returned above"),
+        }
+    }
+    bail!("successor handoff exceeded its bounded local transition count")
+}
+
+fn watcher_subject_binding(
+    watcher: &nq_core::WatcherConfig,
+) -> Result<nq_protocol::SubjectBinding> {
+    Ok(nq_protocol::SubjectBinding {
+        subject: nq_protocol::SubjectId::new(watcher.subject.clone())?,
+        scope: nq_protocol::ScopeBinding {
+            kind: nq_protocol::ScopeKind::new(watcher.scope.kind.clone())?,
+            value: watcher.scope.value.clone(),
+        },
+        vantage: nq_protocol::VantageBinding {
+            kind: nq_protocol::VantageKind::new(watcher.vantage.kind.clone())?,
+            value: watcher.vantage.value.clone(),
+        },
+    })
+}
+
+async fn execute_preallocated_successor_admission(
+    config_path: &Path,
+    instance_id: &str,
+    admission_id: &str,
+) -> Result<()> {
+    let config = NqConfig::load(config_path)?;
+    let watcher = config
+        .watcher(instance_id)
+        .with_context(|| format!("unknown successor watcher {instance_id}"))?
+        .clone();
+    let admission_id = admission_id.to_owned();
+    let expected_admission_id = admission_id.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        let mut engine = nq_core::CollectionEngine::open(&config)?;
+        engine.watcher_admit_preallocated(&watcher, &admission_id)
+    })
+    .await??;
+    match outcome {
+        nq_core::engine::WatcherActionOutcome::Activated {
+            admission_id: actual,
+            ..
+        } if actual == expected_admission_id => Ok(()),
+        _ => bail!("ordinary admission owner returned a substituted outcome"),
+    }
+}
+
+async fn execute_handoff_genesis(
+    config_path: &Path,
+    handoff: &crate::operating::SuccessorHandoffV1,
+) -> Result<String> {
+    let spec = &handoff.spec;
+    validate_sha256(&spec.expected_instance_id_sha256)?;
+    validate_sha256(&spec.origin_helper_sha256)?;
+    validate_origin_helper_executable(&spec.origin_helper_path, &spec.origin_helper_sha256)?;
+    let public_key = continuity_verifier(&spec.origin_helper_public_key_path)?;
+    let key_id = nq_core::linode_origin_helper_key_id(&public_key);
+    let verifier = nq_core::SubstrateOriginVerifierV1::for_linode_instance_metadata(
+        nq_core::LINODE_ORIGIN_HELPER_ISSUER_V1.into(),
+        key_id,
+        nq_protocol::Sha256Digest::parse(spec.expected_instance_id_sha256.clone())?,
+        public_key,
+    )?;
+    let account = resolve_account(&spec.origin_helper_account, false)?;
+    let config = NqConfig::load(config_path)?;
+    let watcher = config
+        .watcher(&spec.successor_watcher_instance_id)
+        .context("successor handoff watcher is absent")?
+        .clone();
+    let acquisition_id = spec.genesis_acquisition_id.clone();
+    let mut source = IsolatedLinodeOriginSource {
+        executable: spec.origin_helper_path.clone(),
+        account,
+    };
+    let artifact = tokio::task::spawn_blocking(move || {
+        let mut engine = nq_core::CollectionEngine::open(&config)?;
+        engine.diagnostic_execute_with_substrate_origin(
+            &watcher,
+            &acquisition_id,
+            &verifier,
+            &mut source,
+            None,
+        )
+    })
+    .await??;
+    Ok(artifact.artifact_id().0.to_string())
 }
 
 #[allow(clippy::too_many_lines)]

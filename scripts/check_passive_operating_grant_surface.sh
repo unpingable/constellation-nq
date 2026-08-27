@@ -17,7 +17,8 @@ fail() {
 for schema in \
   nq.passive_load_operating_grant.v1 \
   nq.passive_load_child_grant_issuance.v1 \
-  nq.passive_load_office_activation.v1; do
+  nq.passive_load_office_activation.v1 \
+  nq.passive_load_successor_handoff.v1; do
   rg -q "$schema" "$model" || fail "missing $schema"
 done
 
@@ -36,6 +37,11 @@ grep -q 'operating tick' "$service" || fail "service bypasses transactional gate
 rg -q 'nq.passive_watcher_succession.v1' "$succession" || fail "typed passive watcher succession absent"
 rg -q 'watcher_digest_is_authorized' "$cli" || fail "activation does not consume H succession reachability"
 rg -q 'AdmitSuccessor' "$cli" || fail "fresh successor admission boundary absent"
+rg -q 'watcher_admit_preallocated' "$cli" || fail "handoff cannot invoke exact ordinary admission"
+rg -q 'HandoffTick' "$cli" || fail "bounded successor-handoff evaluator absent"
+rg -q 'WaitingForSample' "$model" || fail "missing-sample readiness state absent"
+rg -q 'AdmissionRefused' "$model" || fail "semantic admission refusal is not fail-closed"
+rg -q 'arm_successor_handoff' "$model" || fail "exact predecessor-disarm/successor-arm transition absent"
 rg -q 'watcher test/admit/admit-successor/rotate/rollback' "$operations" \
   || fail "successor admission is absent from the capability-bounded maintenance boundary"
 rg -q 'watcher admit-successor' "$packaging" \
@@ -45,7 +51,7 @@ if rg -q 'identity_equivalent|same_enough|allow_semantic_drift|wildcard' "$succe
   fail "succession relation contains equivalence or wildcard semantics"
 fi
 
-if rg -q 'InfiniteGrant|auto_renew_operating_grant|create_nightshift|NightshiftClient' "$model" "$service"; then
+if rg -q 'InfiniteGrant|auto_renew_operating_grant|create_nightshift|NightshiftClient|force_handoff|skip_handoff' "$model" "$service"; then
   fail "recursive/infinite authority or Nightshift coupling introduced"
 fi
 if rg -q -e 'diagnostics (execute|acquire-next)|collect ' "$service"; then

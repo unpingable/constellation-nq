@@ -44,11 +44,17 @@ not retroactively revoke a child already issued under H. Retirement, expiry,
 or a policy/context refusal prevents future runtime exposure. This distinction
 is executable protocol law, not a deployment option.
 
-V1 uses explicit child issuance and activation. It does not automatically
-issue H, recursively renew H, or infer authority from a timer or service
-restart. This is the narrow choice: finite delegation reduces repeated human
-semantic review while every G, watcher, admission, relation, and E remains
+V1 permits H to delegate execution of a pre-reviewed successor handoff for
+each exact succession edge in its closed set. All G/E children, watcher
+relations, admission IDs, genesis IDs, and activation manifests are
+materialized before unattended operation. The handoff invokes the ordinary
+admission and diagnostic owners; it cannot choose their outcomes. H never
+issues H, recursively renews itself, or infers authority from a timer or
+service restart. Every G, watcher, admission, relation, E, and handoff remains
 independently inspectable.
+
+The handoff protocol is specified in
+`PASSIVE_LOAD_SUCCESSOR_HANDOFF_V1.md`.
 
 ## Transactional activation
 

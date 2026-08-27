@@ -2499,6 +2499,34 @@ impl CollectionEngine {
         watcher: &WatcherConfig,
         action: &str,
     ) -> Result<WatcherActionOutcome, EngineError> {
+        self.watcher_action_inner(watcher, action, None)
+    }
+
+    /// Run the ordinary admission owner with one exact preallocated candidate
+    /// identity. This is intentionally narrower than a caller-selected
+    /// admission surface: it exists for the finite passive successor handoff,
+    /// while every ordinary admission validation and refusal remains owned by
+    /// this engine.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same typed conformance, acquisition, admission, profile,
+    /// and custody failures as ordinary watcher admission.
+    pub fn watcher_admit_preallocated(
+        &mut self,
+        watcher: &WatcherConfig,
+        admission_id: &str,
+    ) -> Result<WatcherActionOutcome, EngineError> {
+        self.watcher_action_inner(watcher, "admit", Some(admission_id))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn watcher_action_inner(
+        &mut self,
+        watcher: &WatcherConfig,
+        action: &str,
+        preallocated_admission_id: Option<&str>,
+    ) -> Result<WatcherActionOutcome, EngineError> {
         let _guard = InstanceGuard::acquire(
             &self.config.database_path,
             &watcher.instance_id,
@@ -2542,33 +2570,39 @@ impl CollectionEngine {
             .descriptor()
             .digest()
             .map_err(|error| EngineError::Canonical(error.to_string()))?;
-        let lock = AdmissionManager::candidate_with_execution(
-            watcher,
-            CandidateEvidence {
-                profile_digest: descriptor_digest.as_str().to_owned(),
-                protocol_version: nq_protocol::HELPER_PROTOCOL_VERSION.to_owned(),
-                // Until an optional helper support-description exchange is
-                // standardized, the compiled profile vocabulary is the
-                // mechanically possible set. Admission still intersects it
-                // with the configured ceiling; a helper can only narrow
-                // further by using fewer capabilities in each report.
-                declared_capabilities: profile
-                    .descriptor()
-                    .capabilities
-                    .iter()
-                    .map(|term| term.name.clone())
-                    .collect(),
-                conformance: ConformanceReceipt {
-                    tool_version: corpus.version.verifier_version,
-                    protocol_passed: true,
-                    protocol_corpus_digest: corpus.version.corpus_digest.to_string(),
-                    protocol_fixtures_checked: corpus.fixtures_checked,
-                    dry_collection_passed: true,
-                    dry_report_digest: Some(dry.report_digest),
-                },
+        let evidence = CandidateEvidence {
+            profile_digest: descriptor_digest.as_str().to_owned(),
+            protocol_version: nq_protocol::HELPER_PROTOCOL_VERSION.to_owned(),
+            // Until an optional helper support-description exchange is
+            // standardized, the compiled profile vocabulary is the
+            // mechanically possible set. Admission still intersects it
+            // with the configured ceiling; a helper can only narrow
+            // further by using fewer capabilities in each report.
+            declared_capabilities: profile
+                .descriptor()
+                .capabilities
+                .iter()
+                .map(|term| term.name.clone())
+                .collect(),
+            conformance: ConformanceReceipt {
+                tool_version: corpus.version.verifier_version,
+                protocol_passed: true,
+                protocol_corpus_digest: corpus.version.corpus_digest.to_string(),
+                protocol_fixtures_checked: corpus.fixtures_checked,
+                dry_collection_passed: true,
+                dry_report_digest: Some(dry.report_digest),
             },
-            execution_before.clone(),
-        )?;
+        };
+        let lock = if let Some(admission_id) = preallocated_admission_id {
+            AdmissionManager::candidate_with_execution_and_id(
+                watcher,
+                evidence,
+                execution_before.clone(),
+                admission_id.to_owned(),
+            )?
+        } else {
+            AdmissionManager::candidate_with_execution(watcher, evidence, execution_before.clone())?
+        };
         let verification = self.admission.verify_opened_execution(
             watcher,
             &lock,
