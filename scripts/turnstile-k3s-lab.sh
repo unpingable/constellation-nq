@@ -407,11 +407,13 @@ teardown() {
 case "${1:-}" in
     prepare) prepare ;;
     start) start ;;
+    start-agent) start_node agent 3072 ;;
     install) install ;;
     status) status ;;
+    teardown-agent) teardown_node agent ;;
     teardown) teardown ;;
     *)
-        printf 'usage: %s {prepare|start|install|status|teardown}\n' "$0" >&2
+        printf 'usage: %s {prepare|start|start-agent|install|status|teardown-agent|teardown}\n' "$0" >&2
         exit 2
         ;;
 esac
