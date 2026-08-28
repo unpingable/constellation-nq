@@ -1,0 +1,59 @@
+{
+  "schema": "nq.turnstile_k3s_ag_exact_occurrence_qualification_result.v1",
+  "campaign": "TURNSTILE",
+  "campaign_slug": "k3s-ag-exact-occurrence-adapter-v1",
+  "date": "2026-08-28",
+  "branch": "campaign/k3s-exact-occurrence-adapter-v1",
+  "qualified_source_commit": "675e247e85d8e2e1f2801c06445bf863f82b3a5b",
+  "implementation_commit": "90535c80ae57e6b16734cc9751dd81a79ce1fd44",
+  "classifications": {
+    "contract": "PASSIVE-K3S-AG-EXACT-OCCURRENCE-CONTRACT-QUALIFIED",
+    "adapter_core": "PASSIVE-K3S-AG-ADAPTER-CORE-QUALIFIED",
+    "live_substrate": "PASSIVE-K3S-AG-LIVE-NOT-QUALIFIED",
+    "combined": "PASSIVE-K3S-AG-ADAPTER-CORE-QUALIFIED-LIVE-NOT-QUALIFIED"
+  },
+  "authority_counts": {
+    "nq_authority_objects": 0,
+    "ag_authorizations": 0,
+    "docket_attempts": 0,
+    "kubernetes_workloads": 0,
+    "recurrence_attempts": 0,
+    "samples": 0,
+    "acquisitions": 0
+  },
+  "implemented_checkpoints": {
+    "t0": "f8befe404412f48dc06de0103f7019fae1aad5ec",
+    "t1": "123dbd69d1f188583c3d751d5d0a2366c50aa372",
+    "t2": "166aebbc9f7b0a44baf2fa52d2f54871a7cf6d71",
+    "t3": "cf6f87fc53f1013aa72f86fbc9e0d1b966d06ffa",
+    "t4": "d16155b16d4eaedc331f9518ff255d16641892d4",
+    "t5": "90535c80ae57e6b16734cc9751dd81a79ce1fd44"
+  },
+  "primitive": {
+    "selected": "create_only_ownerless_bare_pod",
+    "lease_role": "optional_secondary_mechanical_coordination_only",
+    "controller_authority": false
+  },
+  "checks": {
+    "turnstile_tests_passed": 28,
+    "turnstile_tests_failed": 0,
+    "workspace_clippy_warnings_denied": "passed",
+    "format": "passed",
+    "diff_check": "passed",
+    "parallel_workspace_tests": "limited_by_three_existing_runner_timeouts_after_201_passes_and_one_ignore",
+    "exact_serial_reruns": "three_of_three_passed_without_timeout_change"
+  },
+  "live_environment": {
+    "docker": "29.1.3",
+    "kubectl": "absent",
+    "k3s": "absent",
+    "k3d": "absent",
+    "kind": "absent",
+    "minikube": "absent",
+    "helm": "absent",
+    "campaign_kubeconfig": "absent",
+    "immutable_turnstile_image": "absent"
+  },
+  "shared_semantic_defect_found": false,
+  "live_reentry_required": true
+}
