@@ -2195,6 +2195,8 @@ fn validate_activation_prerequisites(
     {
         bail!("activation observer generation is substituted, inactive, or context-drifted");
     }
+    let sample_store_readiness =
+        nq_passive_load_helper::generation_store_readiness(&activation.spec.generation_path)?;
 
     let watcher = config
         .watcher(&activation.spec.watcher_instance_id)
@@ -2266,6 +2268,7 @@ fn validate_activation_prerequisites(
         "passive_selector": "ready",
         "capacity_context": "ready",
         "sample_store": "ready",
+        "sample_store_readiness": sample_store_readiness,
         "service_manager_deployment": "ready"
     }))
 }

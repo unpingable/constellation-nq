@@ -53,6 +53,8 @@ enum Command {
         policy: PathBuf,
         generation: PathBuf,
     },
+    /// Check existing generation-store custody without sampling or traversal.
+    GenerationStoreReadiness { generation: PathBuf },
     /// Retire one generation without deleting its samples.
     RetireGeneration {
         generation: PathBuf,
@@ -127,6 +129,15 @@ fn main() -> ExitCode {
                 println!(
                     "{}",
                     serde_json::to_string(&status).expect("generation status must serialize")
+                );
+            })
+        }
+        Command::GenerationStoreReadiness { generation } => {
+            nq_passive_load_helper::generation_store_readiness(&generation).map(|readiness| {
+                println!(
+                    "{}",
+                    serde_json::to_string(&readiness)
+                        .expect("generation-store readiness must serialize")
                 );
             })
         }

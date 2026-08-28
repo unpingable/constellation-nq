@@ -36,9 +36,10 @@ use uuid::Uuid;
 mod operational;
 
 pub use operational::{
-    ObserverGenerationSpecV1, ObserverGenerationV1, OperationalPolicyV1, RetentionModeV1,
-    SamplingStartupPolicyV1, generation_status, materialize_generation, observe_generation,
-    retire_generation, revoke_generation_key, sample_once_generation,
+    ObserverGenerationSpecV1, ObserverGenerationStoreReadinessV1, ObserverGenerationV1,
+    OperationalPolicyV1, RetentionModeV1, SamplingStartupPolicyV1, generation_status,
+    generation_store_readiness, materialize_generation, observe_generation, retire_generation,
+    revoke_generation_key, sample_once_generation,
 };
 
 const OBSERVER_CONFIG_SCHEMA: &str = "nq.passive_load_observer_config.v1";

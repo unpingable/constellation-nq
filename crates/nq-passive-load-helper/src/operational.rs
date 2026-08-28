@@ -27,7 +27,7 @@ use super::{
     Error, ExpectedSampleIdentity, MAX_SELECTION_APPEND_OVERHEAD_BYTES, OBSERVER_PROFILE,
     SOURCE_BASIS, acquire_observer_lock, append_sample, available_parallelism, capacity_context,
     executable_digest, load_1m_token, load_samples, load_signing_key, rebuild_selection_index,
-    require_absolute, require_binding, store_bytes, validate_identifier,
+    require_absolute, require_binding, require_sample_store, store_bytes, validate_identifier,
 };
 
 const POLICY_SCHEMA: &str = "nq.passive_load_operational_policy.v1";
@@ -296,6 +296,30 @@ pub struct ObserverGenerationStatusV1 {
     pub previous_generation_id: Option<String>,
 }
 
+/// Bounded read-only proof that the deployment-owned store bound into one
+/// immutable generation exists and presently satisfies its free-space guard.
+/// It deliberately does not traverse retained sample history.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObserverGenerationStoreReadinessV1 {
+    /// Exact readiness projection schema.
+    pub schema: String,
+    /// SHA-256 identity of exact canonical generation bytes.
+    pub generation_id: Sha256Digest,
+    /// Exact generation-bound deployment-owned store pathname.
+    pub sample_store: PathBuf,
+    /// Numeric owner UID observed without name inference.
+    pub owner_uid: u32,
+    /// Numeric owner GID observed without name inference.
+    pub owner_gid: u32,
+    /// Unix permission and special bits (`st_mode` & 07777).
+    pub mode: u32,
+    /// Currently available filesystem bytes.
+    pub free_bytes: u64,
+    /// Immutable generation-required minimum free bytes.
+    pub min_free_bytes: u64,
+}
+
 struct GenerationSession {
     generation: ObserverGenerationV1,
     generation_id: Sha256Digest,
@@ -437,6 +461,39 @@ pub fn generation_status(
         &events,
         Utc::now().timestamp_millis(),
     )
+}
+
+/// Validate the existing deployment-owned sample-store root for one exact
+/// generation without creating a directory, lock, sample, event, or derived
+/// selection object. This is suitable for pre-authority and activation
+/// rechecks because its work is independent of retained-history size.
+///
+/// # Errors
+///
+/// Refuses absent, substituted, world-writable, or under-capacity custody and
+/// malformed or non-canonical generation bytes.
+pub fn generation_store_readiness(
+    generation_path: &Path,
+) -> Result<ObserverGenerationStoreReadinessV1, Error> {
+    let (generation, generation_id, _) = load_generation(generation_path)?;
+    require_sample_store(&generation.spec.sample_store)?;
+    let metadata = fs::symlink_metadata(&generation.spec.sample_store)?;
+    let free_bytes = free_bytes(&generation.spec.sample_store)?;
+    if free_bytes < generation.spec.min_free_bytes {
+        return Err(Error::Exhausted(
+            "required free-space guard refuses generation-store readiness".into(),
+        ));
+    }
+    Ok(ObserverGenerationStoreReadinessV1 {
+        schema: "nq.passive_load_observer_generation_store_readiness.v1".into(),
+        generation_id,
+        sample_store: generation.spec.sample_store,
+        owner_uid: metadata.uid(),
+        owner_gid: metadata.gid(),
+        mode: metadata.mode() & 0o7777,
+        free_bytes,
+        min_free_bytes: generation.spec.min_free_bytes,
+    })
 }
 
 /// Append an explicit terminal administrative retirement. It stops future
@@ -1542,12 +1599,12 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        GENERATION_SPEC_SCHEMA, GenerationEventKindV1, GenerationSampleActionV1,
+        Error, GENERATION_SPEC_SCHEMA, GenerationEventKindV1, GenerationSampleActionV1,
         ObserverGenerationSpecV1, ObserverGenerationV1, OperationalPolicyV1, POLICY_SCHEMA,
         RetentionModeV1, SamplingStartupPolicyV1, decode_public_key, due_or_next_slot,
-        executable_digest, generation_status, load_events, load_generation,
-        load_generation_samples, materialize_generation, new_event, project_status,
-        retire_generation, revoke_generation_key, sampling_slot,
+        executable_digest, generation_status, generation_store_readiness, load_events,
+        load_generation, load_generation_samples, materialize_generation, new_event,
+        project_status, retire_generation, revoke_generation_key, sampling_slot,
     };
     use crate::capacity_context;
 
@@ -1715,6 +1772,53 @@ mod tests {
     fn make_store(path: &Path) {
         fs::create_dir(path).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o750)).unwrap();
+    }
+
+    #[test]
+    fn generation_store_readiness_is_bounded_and_refuses_absence_or_unsafe_mode() {
+        let fixture = Fixture::new(2);
+        let generation = fixture.materialize();
+        let readiness = generation_store_readiness(&fixture.generation_path).unwrap();
+        assert_eq!(readiness.sample_store, generation.spec.sample_store);
+        assert_eq!(readiness.mode, 0o750);
+        assert!(readiness.free_bytes >= readiness.min_free_bytes);
+
+        fs::set_permissions(
+            &generation.spec.sample_store,
+            fs::Permissions::from_mode(0o777),
+        )
+        .unwrap();
+        let error = generation_store_readiness(&fixture.generation_path).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("non-world-writable real directory")
+        );
+
+        fs::set_permissions(
+            &generation.spec.sample_store,
+            fs::Permissions::from_mode(0o750),
+        )
+        .unwrap();
+        fs::remove_dir(&generation.spec.sample_store).unwrap();
+        let error = generation_store_readiness(&fixture.generation_path).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Io(ref source) if source.kind() == std::io::ErrorKind::NotFound
+        ));
+    }
+
+    #[test]
+    fn generation_store_readiness_refuses_failed_capacity_guard() {
+        let fixture = Fixture::new(2);
+        let mut spec: ObserverGenerationSpecV1 =
+            serde_json::from_slice(&fs::read(&fixture.spec_path).unwrap()).unwrap();
+        spec.min_free_bytes = 9_007_199_254_740_991;
+        write_json(&fixture.spec_path, &spec);
+        fixture.materialize();
+        let error = generation_store_readiness(&fixture.generation_path).unwrap_err();
+        assert!(matches!(error, Error::Exhausted(_)));
+        assert!(error.to_string().contains("free-space guard"));
     }
 
     #[test]

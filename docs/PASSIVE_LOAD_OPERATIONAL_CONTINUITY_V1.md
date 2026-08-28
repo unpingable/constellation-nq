@@ -141,6 +141,42 @@ are never accepted for arbitrary new samples indefinitely.
 
 ## Storage, retention, and replay
 
+The package owns only the shared bounded roots. It creates
+`/var/lib/nq-passive-load/samples` as
+`nq-passive-load-observer:nq-passive-load-reader` mode `2750`; package install
+does not know or create a generation-dedicated store. Before materializing G,
+the deployment/charter constructor must allocate a fresh absolute pathname,
+create that one pristine real directory as
+`nq-passive-load-observer:nq-passive-load-reader` mode `0750`, and prove that
+its filesystem satisfies G's free-space floor. The exact pathname is then
+bound into the immutable generation, provider configuration, operating grant,
+activation, and any succession relation. Grant issuance and activation create
+authority, not directories. The observer runtime appends only inside an
+already-prepared store and must never manufacture a missing store after taking
+authority.
+
+This preparation is a pre-authority deployment transition. Its receipt records
+the pathname, owner UID, reader GID, mode, filesystem free bytes, generation
+minimum, and that the directory was pristine. `generation-store-readiness
+GENERATION` is a bounded read-only recheck over the exact canonical generation:
+it verifies a real non-world-writable directory and the free-space floor without
+traversing retained history or creating a lock, sample, event, or selection
+object. Run it under the intended observer execution context after generation
+materialization and before H/G/E issuance; activation repeats the same library
+validation before timer exposure. Service-identity access is additionally
+exercised in the intended observer and provider execution contexts before
+authority.
+
+Absence, pathname replacement, an unsafe mode, failed observer/provider access,
+or insufficient free space refuses before authority. Runtime repeats the real
+directory check before acquiring its observer lock and repeats capacity checks
+before each append. Those checks are fail-closed defense in depth, not implicit
+directory creation. An existing store contains mutable append custody; signed
+samples, the exact generation manifest, and append-only events are canonical
+immutable records. Selection entries/manifests and their current locator are
+content-bound derived state and remain reconstructible under the bounded
+selection law.
+
 V1 exposes only the closed retention mode `retain_all`. Every observer
 generation has a distinct bounded active store, maximum sample count, byte
 ceiling, and required-free-space floor. Before writing a sample the observer
