@@ -1,0 +1,51 @@
+{
+  "schema": "nq.passive_load_selection_performance_qualification.v1",
+  "source_starting_head": "e2435f307bdcdd18ac2e7e77b6caca8a1e256ffc",
+  "host": "sushi-k",
+  "profile": "release",
+  "repeated_lookups_per_checkpoint": 25,
+  "cache_interpretation": "latency includes a post-sync first lookup and repeated lookups; bounded document counts, not cache state, establish algorithmic scaling",
+  "checkpoints": [
+    {
+      "samples": 1440,
+      "first_lookup_us": 2822,
+      "warm_median_us": 1762,
+      "warm_max_us": 2625,
+      "manifest_reads": 13,
+      "entry_reads": 1,
+      "canonical_sample_reads": 1
+    },
+    {
+      "samples": 4334,
+      "first_lookup_us": 3049,
+      "warm_median_us": 1445,
+      "warm_max_us": 2997,
+      "manifest_reads": 15,
+      "entry_reads": 1,
+      "canonical_sample_reads": 1
+    },
+    {
+      "samples": 5760,
+      "first_lookup_us": 662,
+      "warm_median_us": 601,
+      "warm_max_us": 612,
+      "manifest_reads": 15,
+      "entry_reads": 1,
+      "canonical_sample_reads": 1
+    },
+    {
+      "samples": 11520,
+      "first_lookup_us": 3157,
+      "warm_median_us": 1531,
+      "warm_max_us": 3038,
+      "manifest_reads": 16,
+      "entry_reads": 1,
+      "canonical_sample_reads": 1
+    }
+  ],
+  "largest_corpus_relationship": "eight 6-hour generation counts; twice the reviewed 24-hour sample ceiling",
+  "routine_selection_complexity": "O(log retained_samples) immutable manifest reads + one entry + one exact canonical signed sample",
+  "reconstruction_complexity": "O(retained_samples), explicit recovery/startup only",
+  "service_envelope_ms": 90000,
+  "qualified": true
+}

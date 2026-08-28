@@ -7,9 +7,9 @@
 //! computes the pressure verdict, schedules NQ, or falls back to the old helper.
 
 use std::collections::BTreeSet;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt as _, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration as StdDuration, Instant};
@@ -51,6 +51,16 @@ const MAX_CONFIG_BYTES: usize = 65_536;
 const MAX_SAMPLE_BYTES: usize = 65_536;
 const MAX_PROC_BYTES: usize = 4_096;
 const OBSERVER_LOCK_FILE: &str = ".observer.lock";
+const SELECTION_INDEX_LOCK_FILE: &str = ".selection-index.lock";
+const SELECTION_INDEX_DIRECTORY: &str = ".selection-index";
+const SELECTION_INDEX_CURRENT: &str = "current.json";
+const SELECTION_INDEX_DIRTY: &str = "update-in-progress.json";
+const SELECTION_INDEX_ENTRY_SCHEMA: &str = "nq.passive_load_selection_index_entry.v1";
+const SELECTION_INDEX_MANIFEST_SCHEMA: &str = "nq.passive_load_selection_manifest.v1";
+const SELECTION_INDEX_CURRENT_SCHEMA: &str = "nq.passive_load_selection_index_current.v1";
+const SELECTION_INDEX_DIRTY_SCHEMA: &str = "nq.passive_load_selection_index_update.v1";
+const MAX_SELECTION_INDEX_DOCUMENT_BYTES: usize = 16_384;
+const MAX_SELECTION_APPEND_OVERHEAD_BYTES: u64 = 16_384;
 
 /// Process-lifetime serialization and fixed deployment identity for one
 /// observer generation. Opening a second sampler over the same store refuses;
@@ -157,6 +167,98 @@ pub enum Error {
     /// The finite append-only generation is exhausted.
     #[error("passive-load sample generation is exhausted: {0}")]
     Exhausted(String),
+    /// No indexed sample satisfies the exact cutoff and age law.
+    #[error("passive-load selection no eligible sample: {0}")]
+    NoEligibleSample(String),
+    /// Derived selection custody is absent and must be reconstructed.
+    #[error("passive-load selection index missing: {0}")]
+    SelectionIndexMissing(String),
+    /// Derived selection custody is malformed or content-substituted.
+    #[error("passive-load selection index corrupt: {0}")]
+    SelectionIndexCorrupt(String),
+    /// Derived selection custody is incomplete or inconsistent with its chain.
+    #[error("passive-load selection index stale: {0}")]
+    SelectionIndexStale(String),
+    /// An exact indexed canonical sample is absent.
+    #[error("passive-load canonical sample missing: {0}")]
+    CanonicalSampleMissing(String),
+    /// Canonical sample bytes do not match the immutable index commitment.
+    #[error("passive-load canonical sample content mismatch: {0}")]
+    CanonicalSampleMismatch(String),
+}
+
+impl Error {
+    fn selection_reason_code(&self) -> &'static str {
+        match self {
+            Self::NoEligibleSample(_) => "no_eligible_sample",
+            Self::SelectionIndexMissing(_) => "selection_index_missing",
+            Self::SelectionIndexCorrupt(_) => "selection_index_corrupt",
+            Self::SelectionIndexStale(_) => "selection_index_stale",
+            Self::CanonicalSampleMissing(_) => "canonical_sample_missing",
+            Self::CanonicalSampleMismatch(_) => "canonical_sample_content_mismatch",
+            _ => "passive_provider_refused",
+        }
+    }
+}
+
+/// One immutable content-bound projection of one canonical retained sample.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SelectionIndexEntryV1 {
+    schema: String,
+    entry_id: Sha256Digest,
+    generation_id: Sha256Digest,
+    sequence: u64,
+    observed_at: DateTime<Utc>,
+    sample_occurrence_id: String,
+    payload_digest: Sha256Digest,
+    sample_filename: String,
+    sample_document_digest: Sha256Digest,
+}
+
+/// One immutable append-only selection manifest. The predecessor link makes
+/// every state content-bound without making the index evidentiary authority.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SelectionManifestV1 {
+    schema: String,
+    manifest_id: Sha256Digest,
+    generation_id: Sha256Digest,
+    sample_count: u64,
+    latest_entry_id: Option<Sha256Digest>,
+    latest_observed_at: Option<DateTime<Utc>>,
+    previous_manifest_id: Option<Sha256Digest>,
+}
+
+/// Replaceable, reconstructible locator for the latest immutable manifest.
+/// It is never sufficient to select a sample without reopening the manifest,
+/// entry, and canonical signed sample.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SelectionIndexCurrentV1 {
+    schema: String,
+    generation_id: Sha256Digest,
+    sample_count: u64,
+    manifest_id: Sha256Digest,
+}
+
+/// Durable crash marker written before canonical sample persistence and
+/// removed only after the corresponding immutable index state is durable.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SelectionIndexUpdateV1 {
+    schema: String,
+    generation_id: Sha256Digest,
+    sequence: u64,
+    payload_digest: Sha256Digest,
+    sample_document_digest: Sha256Digest,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SelectionLookupStats {
+    manifest_documents: u64,
+    entry_documents: u64,
+    canonical_samples: u64,
 }
 
 /// Generate one software-held sample signing key. It authenticates producer
@@ -222,6 +324,40 @@ pub fn sample_once(config_path: &Path) -> Result<SignedPassiveHostLoadSampleV1, 
     ObserverSession::open(config_path)?.append_one()
 }
 
+/// Reconstruct the derived selection index from exact canonical retained
+/// sample custody. This deliberately performs the expensive full verification
+/// once; ordinary provider selection never does.
+///
+/// # Errors
+///
+/// Refuses any corrupt canonical sample or incompatible existing immutable
+/// index object. It creates no sample, diagnostic occurrence, or authority.
+pub fn reconstruct_selection_index(config_path: &Path) -> Result<(), Error> {
+    let (config, _) = load_toml::<ProviderConfigV1>(config_path)?;
+    validate_provider_config(&config)?;
+    let public_bytes = decode_public_key(&config.producer_public_key_hex)?;
+    let public = VerifyingKey::from_bytes(&public_bytes)
+        .map_err(|_| Error::Invalid("invalid producer public key".into()))?;
+    let samples = load_samples(
+        &config.sample_store,
+        &public,
+        &ExpectedSampleIdentity {
+            observer_profile: &config.observer_profile,
+            observer_artifact_digest: Some(&config.observer_artifact_digest),
+            observer_config_digest: Some(&config.observer_config_digest),
+            producer_issuer: &config.producer_issuer,
+            producer_key_id: &config.producer_key_id,
+            capacity_context_id: &config.capacity_context_id,
+            binding: None,
+        },
+    )?;
+    rebuild_selection_index(
+        &config.sample_store,
+        &samples,
+        &config.observer_config_digest,
+    )
+}
+
 /// Run one long-lived bounded observer. Sampling is anchored to this observer
 /// process and never backfills missed intervals after a stall or restart.
 ///
@@ -266,6 +402,7 @@ impl ObserverSession {
                 binding: Some(&config.binding),
             },
         )?;
+        rebuild_selection_index(&config.sample_store, &existing, &observer_config_digest)?;
         let sample_count = u64::try_from(existing.len()).unwrap_or(u64::MAX);
         let next_sequence = existing
             .last()
@@ -335,14 +472,15 @@ impl ObserverSession {
             .map_err(|error| Error::Invalid(error.to_string()))?;
         let projected = self
             .bytes_used
-            .saturating_add(u64::try_from(document.len()).unwrap_or(u64::MAX));
+            .saturating_add(u64::try_from(document.len()).unwrap_or(u64::MAX))
+            .saturating_add(MAX_SELECTION_APPEND_OVERHEAD_BYTES);
         if projected > self.config.max_store_bytes {
             return Err(Error::Exhausted(
                 "hard store byte bound would be exceeded; no history was deleted".into(),
             ));
         }
         append_sample(&self.config.sample_store, &sample, &document)?;
-        self.bytes_used = projected;
+        self.bytes_used = store_bytes(&self.config.sample_store)?;
         self.sample_count = self.sample_count.saturating_add(1);
         self.next_sequence = self.next_sequence.saturating_add(1);
         Ok(sample)
@@ -401,26 +539,22 @@ pub fn eligible_sample_at(
     let public_bytes = decode_public_key(&config.producer_public_key_hex)?;
     let public = VerifyingKey::from_bytes(&public_bytes)
         .map_err(|_| Error::Invalid("invalid producer public key".into()))?;
-    let sample = load_samples(
+    let expected = ExpectedSampleIdentity {
+        observer_profile: &config.observer_profile,
+        observer_artifact_digest: Some(&config.observer_artifact_digest),
+        observer_config_digest: Some(&config.observer_config_digest),
+        producer_issuer: &config.producer_issuer,
+        producer_key_id: &config.producer_key_id,
+        capacity_context_id: &config.capacity_context_id,
+        binding: Some(binding),
+    };
+    let (sample, _) = select_indexed_sample(
         &config.sample_store,
         &public,
-        &ExpectedSampleIdentity {
-            observer_profile: &config.observer_profile,
-            observer_artifact_digest: Some(&config.observer_artifact_digest),
-            observer_config_digest: Some(&config.observer_config_digest),
-            producer_issuer: &config.producer_issuer,
-            producer_key_id: &config.producer_key_id,
-            capacity_context_id: &config.capacity_context_id,
-            binding: Some(binding),
-        },
-    )?
-    .into_iter()
-    .filter(|sample| {
-        let age = cutoff_at.signed_duration_since(sample.payload.observed_at);
-        age >= chrono::Duration::zero()
-            && u64::try_from(age.num_milliseconds()).unwrap_or(u64::MAX) <= max_age_ms
-    })
-    .max_by_key(|sample| (sample.payload.observed_at, sample.payload.sequence));
+        &expected,
+        cutoff_at,
+        max_age_ms,
+    )?;
     Ok(sample.map(|sample| EligiblePassiveSampleV1 {
         sample_occurrence_id: sample.payload.sample_occurrence_id,
         payload_digest: sample.payload_digest,
@@ -460,7 +594,10 @@ pub fn serve(
                 code: RefusalCode::CollectionFailed,
                 message: "no exact eligible pre-existing passive load sample is available".into(),
                 retriable: true,
-                details: json!({"reason": error.to_string()}),
+                details: json!({
+                    "reason_code": error.selection_reason_code(),
+                    "reason": error.to_string(),
+                }),
             },
         ),
     };
@@ -586,30 +723,23 @@ fn select_sample(
     }
     let public = VerifyingKey::from_bytes(&public_bytes)
         .map_err(|_| Error::Invalid("invalid producer public key".into()))?;
-    let samples = load_samples(
+    let expected = ExpectedSampleIdentity {
+        observer_profile: &config.observer_profile,
+        observer_artifact_digest: Some(&config.observer_artifact_digest),
+        observer_config_digest: Some(&config.observer_config_digest),
+        producer_issuer: &config.producer_issuer,
+        producer_key_id: &config.producer_key_id,
+        capacity_context_id: &config.capacity_context_id,
+        binding: Some(&request.binding),
+    };
+    let (sample, _) = select_indexed_sample(
         &config.sample_store,
         &public,
-        &ExpectedSampleIdentity {
-            observer_profile: &config.observer_profile,
-            observer_artifact_digest: Some(&config.observer_artifact_digest),
-            observer_config_digest: Some(&config.observer_config_digest),
-            producer_issuer: &config.producer_issuer,
-            producer_key_id: &config.producer_key_id,
-            capacity_context_id: &config.capacity_context_id,
-            binding: Some(&request.binding),
-        },
+        &expected,
+        selection.cutoff_at,
+        selection.max_age_ms,
     )?;
-    samples
-        .into_iter()
-        .filter(|sample| {
-            let age = selection
-                .cutoff_at
-                .signed_duration_since(sample.payload.observed_at);
-            age >= chrono::Duration::zero()
-                && u64::try_from(age.num_milliseconds()).unwrap_or(u64::MAX) <= selection.max_age_ms
-        })
-        .max_by_key(|sample| (sample.payload.observed_at, sample.payload.sequence))
-        .ok_or_else(|| Error::Invalid("no sample satisfies cutoff and age".into()))
+    sample.ok_or_else(|| Error::NoEligibleSample("no sample satisfies cutoff and age".into()))
 }
 
 struct ExpectedSampleIdentity<'a> {
@@ -622,6 +752,670 @@ struct ExpectedSampleIdentity<'a> {
     binding: Option<&'a SubjectBinding>,
 }
 
+fn selection_index_directory(store: &Path) -> PathBuf {
+    store.join(SELECTION_INDEX_DIRECTORY)
+}
+
+fn selection_entry_path(store: &Path, sequence: u64) -> PathBuf {
+    selection_index_directory(store).join(format!("entry-{sequence:020}.json"))
+}
+
+fn selection_manifest_path(store: &Path, sample_count: u64) -> PathBuf {
+    selection_index_directory(store).join(format!("manifest-{sample_count:020}.json"))
+}
+
+fn selection_current_path(store: &Path) -> PathBuf {
+    selection_index_directory(store).join(SELECTION_INDEX_CURRENT)
+}
+
+fn selection_dirty_path(store: &Path) -> PathBuf {
+    selection_index_directory(store).join(SELECTION_INDEX_DIRTY)
+}
+
+fn acquire_selection_index_lock(store: &Path, exclusive: bool) -> Result<Flock<File>, Error> {
+    require_sample_store(store)?;
+    let path = store.join(SELECTION_INDEX_LOCK_FILE);
+    let file = if exclusive {
+        OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o640)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(path)?
+    } else {
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::NotFound {
+                    Error::SelectionIndexMissing("selection-index lock is absent".into())
+                } else {
+                    Error::Io(error)
+                }
+            })?
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.mode() & 0o002 != 0 {
+        return Err(Error::SelectionIndexCorrupt(
+            "selection-index lock is not a protected regular file".into(),
+        ));
+    }
+    let argument = if exclusive {
+        FlockArg::LockExclusive
+    } else {
+        FlockArg::LockShared
+    };
+    Flock::lock(file, argument).map_err(|(_, error)| {
+        Error::SelectionIndexCorrupt(format!("selection-index lock failed: {error}"))
+    })
+}
+
+fn ensure_selection_index_directory(store: &Path) -> Result<(), Error> {
+    let directory = selection_index_directory(store);
+    match fs::symlink_metadata(&directory) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_dir() || metadata.mode() & 0o022 != 0 {
+                return Err(Error::SelectionIndexCorrupt(
+                    "selection index is not a protected real directory".into(),
+                ));
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let mut builder = DirBuilder::new();
+            builder.mode(0o750).create(&directory)?;
+            File::open(store)?.sync_all()?;
+        }
+        Err(error) => return Err(Error::Io(error)),
+    }
+    Ok(())
+}
+
+fn selection_entry_id(
+    generation_id: &Sha256Digest,
+    sample: &SignedPassiveHostLoadSampleV1,
+    sample_filename: &str,
+    sample_document_digest: &Sha256Digest,
+) -> Result<Sha256Digest, Error> {
+    semantic_digest(&json!({
+        "schema": SELECTION_INDEX_ENTRY_SCHEMA,
+        "generation_id": generation_id,
+        "sequence": sample.payload.sequence,
+        "observed_at": sample.payload.observed_at,
+        "sample_occurrence_id": sample.payload.sample_occurrence_id,
+        "payload_digest": sample.payload_digest,
+        "sample_filename": sample_filename,
+        "sample_document_digest": sample_document_digest,
+    }))
+    .map_err(|error| Error::SelectionIndexCorrupt(error.to_string()))
+}
+
+fn make_selection_entry(
+    sample: &SignedPassiveHostLoadSampleV1,
+    document: &[u8],
+) -> Result<SelectionIndexEntryV1, Error> {
+    let generation_id = sample.payload.observer_config_digest.clone();
+    let sample_filename = sample_filename(sample);
+    let sample_document_digest = sha256_bytes(document);
+    let entry_id = selection_entry_id(
+        &generation_id,
+        sample,
+        &sample_filename,
+        &sample_document_digest,
+    )?;
+    Ok(SelectionIndexEntryV1 {
+        schema: SELECTION_INDEX_ENTRY_SCHEMA.into(),
+        entry_id,
+        generation_id,
+        sequence: sample.payload.sequence,
+        observed_at: sample.payload.observed_at,
+        sample_occurrence_id: sample.payload.sample_occurrence_id.clone(),
+        payload_digest: sample.payload_digest.clone(),
+        sample_filename,
+        sample_document_digest,
+    })
+}
+
+fn selection_manifest_id(
+    generation_id: &Sha256Digest,
+    sample_count: u64,
+    latest_entry_id: Option<&Sha256Digest>,
+    latest_observed_at: Option<DateTime<Utc>>,
+    previous_manifest_id: Option<&Sha256Digest>,
+) -> Result<Sha256Digest, Error> {
+    semantic_digest(&json!({
+        "schema": SELECTION_INDEX_MANIFEST_SCHEMA,
+        "generation_id": generation_id,
+        "sample_count": sample_count,
+        "latest_entry_id": latest_entry_id,
+        "latest_observed_at": latest_observed_at,
+        "previous_manifest_id": previous_manifest_id,
+    }))
+    .map_err(|error| Error::SelectionIndexCorrupt(error.to_string()))
+}
+
+fn make_selection_manifest(
+    generation_id: &Sha256Digest,
+    sample_count: u64,
+    latest_entry_id: Option<Sha256Digest>,
+    latest_observed_at: Option<DateTime<Utc>>,
+    previous_manifest_id: Option<Sha256Digest>,
+) -> Result<SelectionManifestV1, Error> {
+    let manifest_id = selection_manifest_id(
+        generation_id,
+        sample_count,
+        latest_entry_id.as_ref(),
+        latest_observed_at,
+        previous_manifest_id.as_ref(),
+    )?;
+    Ok(SelectionManifestV1 {
+        schema: SELECTION_INDEX_MANIFEST_SCHEMA.into(),
+        manifest_id,
+        generation_id: generation_id.clone(),
+        sample_count,
+        latest_entry_id,
+        latest_observed_at,
+        previous_manifest_id,
+    })
+}
+
+fn read_bounded_index_json<T: for<'de> Deserialize<'de>>(
+    path: &Path,
+) -> Result<(T, Vec<u8>), Error> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                Error::SelectionIndexMissing(path.display().to_string())
+            } else {
+                Error::Io(error)
+            }
+        })?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.mode() & 0o022 != 0
+        || metadata.len() > MAX_SELECTION_INDEX_DOCUMENT_BYTES as u64
+    {
+        return Err(Error::SelectionIndexCorrupt(format!(
+            "{} is not a bounded protected regular file",
+            path.display()
+        )));
+    }
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut file)
+        .take(u64::try_from(MAX_SELECTION_INDEX_DOCUMENT_BYTES + 1).unwrap_or(u64::MAX))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_SELECTION_INDEX_DOCUMENT_BYTES {
+        return Err(Error::SelectionIndexCorrupt(format!(
+            "{} exceeds the index document bound",
+            path.display()
+        )));
+    }
+    let value = serde_json::from_slice(&bytes)
+        .map_err(|error| Error::SelectionIndexCorrupt(error.to_string()))?;
+    Ok((value, bytes))
+}
+
+fn read_selection_entry(
+    store: &Path,
+    generation_id: &Sha256Digest,
+    sequence: u64,
+) -> Result<SelectionIndexEntryV1, Error> {
+    let path = selection_entry_path(store, sequence);
+    let (entry, bytes) = read_bounded_index_json::<SelectionIndexEntryV1>(&path)?;
+    let canonical = nq_protocol::canonical_json_bytes(&entry)
+        .map_err(|error| Error::SelectionIndexCorrupt(error.to_string()))?;
+    if bytes != canonical
+        || entry.schema != SELECTION_INDEX_ENTRY_SCHEMA
+        || entry.generation_id != *generation_id
+        || entry.sequence != sequence
+        || entry.entry_id
+            != semantic_digest(&json!({
+                "schema": SELECTION_INDEX_ENTRY_SCHEMA,
+                "generation_id": entry.generation_id,
+                "sequence": entry.sequence,
+                "observed_at": entry.observed_at,
+                "sample_occurrence_id": entry.sample_occurrence_id,
+                "payload_digest": entry.payload_digest,
+                "sample_filename": entry.sample_filename,
+                "sample_document_digest": entry.sample_document_digest,
+            }))
+            .map_err(|error| Error::SelectionIndexCorrupt(error.to_string()))?
+    {
+        return Err(Error::SelectionIndexCorrupt(format!(
+            "selection entry {sequence} has invalid canonical identity"
+        )));
+    }
+    Ok(entry)
+}
+
+fn read_selection_manifest(
+    store: &Path,
+    generation_id: &Sha256Digest,
+    sample_count: u64,
+) -> Result<SelectionManifestV1, Error> {
+    let path = selection_manifest_path(store, sample_count);
+    let (manifest, bytes) = read_bounded_index_json::<SelectionManifestV1>(&path)?;
+    let canonical = nq_protocol::canonical_json_bytes(&manifest)
+        .map_err(|error| Error::SelectionIndexCorrupt(error.to_string()))?;
+    let fields_valid = if sample_count == 0 {
+        manifest.latest_entry_id.is_none()
+            && manifest.latest_observed_at.is_none()
+            && manifest.previous_manifest_id.is_none()
+    } else {
+        manifest.latest_entry_id.is_some()
+            && manifest.latest_observed_at.is_some()
+            && manifest.previous_manifest_id.is_some()
+    };
+    if bytes != canonical
+        || manifest.schema != SELECTION_INDEX_MANIFEST_SCHEMA
+        || manifest.generation_id != *generation_id
+        || manifest.sample_count != sample_count
+        || !fields_valid
+        || manifest.manifest_id
+            != selection_manifest_id(
+                &manifest.generation_id,
+                manifest.sample_count,
+                manifest.latest_entry_id.as_ref(),
+                manifest.latest_observed_at,
+                manifest.previous_manifest_id.as_ref(),
+            )?
+    {
+        return Err(Error::SelectionIndexCorrupt(format!(
+            "selection manifest {sample_count} has invalid canonical identity"
+        )));
+    }
+    Ok(manifest)
+}
+
+fn read_selection_current(
+    store: &Path,
+    generation_id: &Sha256Digest,
+) -> Result<SelectionIndexCurrentV1, Error> {
+    let path = selection_current_path(store);
+    let (current, bytes) = read_bounded_index_json::<SelectionIndexCurrentV1>(&path)?;
+    let canonical = nq_protocol::canonical_json_bytes(&current)
+        .map_err(|error| Error::SelectionIndexCorrupt(error.to_string()))?;
+    if bytes != canonical
+        || current.schema != SELECTION_INDEX_CURRENT_SCHEMA
+        || current.generation_id != *generation_id
+    {
+        return Err(Error::SelectionIndexCorrupt(
+            "selection current locator is substituted or noncanonical".into(),
+        ));
+    }
+    let manifest = read_selection_manifest(store, generation_id, current.sample_count)?;
+    if manifest.manifest_id != current.manifest_id {
+        return Err(Error::SelectionIndexStale(
+            "selection current locator does not bind its exact manifest".into(),
+        ));
+    }
+    if selection_manifest_path(store, current.sample_count.saturating_add(1)).exists() {
+        return Err(Error::SelectionIndexStale(
+            "selection current locator trails an immutable later manifest".into(),
+        ));
+    }
+    Ok(current)
+}
+
+fn write_index_immutable<T: Serialize>(path: &Path, value: &T) -> Result<(), Error> {
+    let bytes = nq_protocol::canonical_json_bytes(value)
+        .map_err(|error| Error::SelectionIndexCorrupt(error.to_string()))?;
+    if bytes.len() > MAX_SELECTION_INDEX_DOCUMENT_BYTES {
+        return Err(Error::SelectionIndexCorrupt(
+            "selection index document exceeds closed bound".into(),
+        ));
+    }
+    match fs::read(path) {
+        Ok(existing) if existing == bytes => Ok(()),
+        Ok(_) => Err(Error::SelectionIndexCorrupt(format!(
+            "immutable selection index object changed: {}",
+            path.display()
+        ))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o440)
+                .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+                .open(path)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            File::open(path.parent().expect("index object has parent"))?.sync_all()?;
+            Ok(())
+        }
+        Err(error) => Err(Error::Io(error)),
+    }
+}
+
+fn replace_selection_current(store: &Path, current: &SelectionIndexCurrentV1) -> Result<(), Error> {
+    let directory = selection_index_directory(store);
+    let bytes = nq_protocol::canonical_json_bytes(current)
+        .map_err(|error| Error::SelectionIndexCorrupt(error.to_string()))?;
+    let temporary = directory.join(format!(".current-{}.tmp", Uuid::new_v4()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o440)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(&temporary, selection_current_path(store))?;
+    File::open(directory)?.sync_all()?;
+    Ok(())
+}
+
+fn remove_selection_dirty(store: &Path) -> Result<(), Error> {
+    let dirty = selection_dirty_path(store);
+    match fs::remove_file(&dirty) {
+        Ok(()) => File::open(selection_index_directory(store))?
+            .sync_all()
+            .map_err(Error::Io),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Error::Io(error)),
+    }
+}
+
+fn rebuild_selection_index(
+    store: &Path,
+    samples: &[SignedPassiveHostLoadSampleV1],
+    generation_id: &Sha256Digest,
+) -> Result<(), Error> {
+    let _lock = acquire_selection_index_lock(store, true)?;
+    ensure_selection_index_directory(store)?;
+    let empty = make_selection_manifest(generation_id, 0, None, None, None)?;
+    write_index_immutable(&selection_manifest_path(store, 0), &empty)?;
+    let mut previous_manifest = Some(empty.manifest_id);
+    let mut previous_observed_at = None;
+    for sample in samples {
+        if sample.payload.observer_config_digest != *generation_id {
+            return Err(Error::SelectionIndexCorrupt(
+                "canonical sample belongs to another generation".into(),
+            ));
+        }
+        if previous_observed_at.is_some_and(|prior| sample.payload.observed_at < prior) {
+            return Err(Error::SelectionIndexCorrupt(
+                "canonical sample observation time rolled backward".into(),
+            ));
+        }
+        let document = nq_protocol::canonical_json_bytes(sample)
+            .map_err(|error| Error::SelectionIndexCorrupt(error.to_string()))?;
+        let entry = make_selection_entry(sample, &document)?;
+        write_index_immutable(
+            &selection_entry_path(store, sample.payload.sequence),
+            &entry,
+        )?;
+        let manifest = make_selection_manifest(
+            generation_id,
+            sample.payload.sequence,
+            Some(entry.entry_id),
+            Some(entry.observed_at),
+            previous_manifest.clone(),
+        )?;
+        write_index_immutable(
+            &selection_manifest_path(store, sample.payload.sequence),
+            &manifest,
+        )?;
+        previous_manifest = Some(manifest.manifest_id);
+        previous_observed_at = Some(sample.payload.observed_at);
+    }
+    let sample_count = u64::try_from(samples.len()).unwrap_or(u64::MAX);
+    if selection_entry_path(store, sample_count.saturating_add(1)).exists()
+        || selection_manifest_path(store, sample_count.saturating_add(1)).exists()
+    {
+        return Err(Error::SelectionIndexStale(
+            "selection index contains entries beyond canonical custody".into(),
+        ));
+    }
+    for object in fs::read_dir(selection_index_directory(store))? {
+        let object = object?;
+        let name = object
+            .file_name()
+            .into_string()
+            .map_err(|_| Error::SelectionIndexCorrupt("index filename is not UTF-8".into()))?;
+        if name == SELECTION_INDEX_CURRENT || name == SELECTION_INDEX_DIRTY {
+            continue;
+        }
+        if name.starts_with(".current-")
+            && Path::new(&name)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("tmp"))
+        {
+            fs::remove_file(object.path())?;
+            continue;
+        }
+        let sequence = name
+            .strip_prefix("entry-")
+            .or_else(|| name.strip_prefix("manifest-"))
+            .and_then(|value| value.strip_suffix(".json"))
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| {
+                Error::SelectionIndexCorrupt(format!("unexpected selection index object: {name}"))
+            })?;
+        let maximum = if name.starts_with("manifest-") {
+            sample_count
+        } else {
+            sample_count.max(1)
+        };
+        if sequence > maximum || (name.starts_with("entry-") && sequence == 0) {
+            return Err(Error::SelectionIndexStale(format!(
+                "selection index object is beyond canonical custody: {name}"
+            )));
+        }
+    }
+    File::open(selection_index_directory(store))?.sync_all()?;
+    let current = SelectionIndexCurrentV1 {
+        schema: SELECTION_INDEX_CURRENT_SCHEMA.into(),
+        generation_id: generation_id.clone(),
+        sample_count,
+        manifest_id: previous_manifest.expect("empty manifest always exists"),
+    };
+    replace_selection_current(store, &current)?;
+    remove_selection_dirty(store)
+}
+
+fn append_selection_index(
+    store: &Path,
+    sample: &SignedPassiveHostLoadSampleV1,
+    document: &[u8],
+) -> Result<(), Error> {
+    let generation_id = &sample.payload.observer_config_digest;
+    let current = read_selection_current(store, generation_id)?;
+    if current.sample_count.saturating_add(1) != sample.payload.sequence {
+        return Err(Error::SelectionIndexStale(
+            "selection index sequence does not precede canonical append".into(),
+        ));
+    }
+    if selection_dirty_path(store).exists() {
+        return Err(Error::SelectionIndexStale(
+            "a prior selection-index update requires reconstruction".into(),
+        ));
+    }
+    let update = SelectionIndexUpdateV1 {
+        schema: SELECTION_INDEX_DIRTY_SCHEMA.into(),
+        generation_id: generation_id.clone(),
+        sequence: sample.payload.sequence,
+        payload_digest: sample.payload_digest.clone(),
+        sample_document_digest: sha256_bytes(document),
+    };
+    write_index_immutable(&selection_dirty_path(store), &update)?;
+    append_sample_raw(store, sample, document)?;
+    let entry = make_selection_entry(sample, document)?;
+    write_index_immutable(
+        &selection_entry_path(store, sample.payload.sequence),
+        &entry,
+    )?;
+    let previous = read_selection_manifest(store, generation_id, current.sample_count)?;
+    if previous.manifest_id != current.manifest_id {
+        return Err(Error::SelectionIndexStale(
+            "selection predecessor manifest changed during append".into(),
+        ));
+    }
+    if previous
+        .latest_observed_at
+        .is_some_and(|prior| sample.payload.observed_at < prior)
+    {
+        return Err(Error::SelectionIndexStale(
+            "sample observation time rolled backward".into(),
+        ));
+    }
+    let manifest = make_selection_manifest(
+        generation_id,
+        sample.payload.sequence,
+        Some(entry.entry_id),
+        Some(entry.observed_at),
+        Some(previous.manifest_id),
+    )?;
+    write_index_immutable(
+        &selection_manifest_path(store, sample.payload.sequence),
+        &manifest,
+    )?;
+    replace_selection_current(
+        store,
+        &SelectionIndexCurrentV1 {
+            schema: SELECTION_INDEX_CURRENT_SCHEMA.into(),
+            generation_id: generation_id.clone(),
+            sample_count: sample.payload.sequence,
+            manifest_id: manifest.manifest_id,
+        },
+    )?;
+    remove_selection_dirty(store)
+}
+
+#[allow(clippy::too_many_lines)]
+fn select_indexed_sample(
+    store: &Path,
+    public: &VerifyingKey,
+    expected: &ExpectedSampleIdentity<'_>,
+    cutoff_at: DateTime<Utc>,
+    max_age_ms: u64,
+) -> Result<(Option<SignedPassiveHostLoadSampleV1>, SelectionLookupStats), Error> {
+    require_sample_store(store)?;
+    let directory = selection_index_directory(store);
+    let metadata = fs::symlink_metadata(&directory).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            Error::SelectionIndexMissing("selection index directory is absent".into())
+        } else {
+            Error::Io(error)
+        }
+    })?;
+    if !metadata.file_type().is_dir() || metadata.mode() & 0o022 != 0 {
+        return Err(Error::SelectionIndexCorrupt(
+            "selection index directory is unsafe".into(),
+        ));
+    }
+    let _lock = acquire_selection_index_lock(store, false)?;
+    if selection_dirty_path(store).exists() {
+        return Err(Error::SelectionIndexStale(
+            "selection index update was interrupted; reconstruction required".into(),
+        ));
+    }
+    let generation_id = expected.observer_config_digest.ok_or_else(|| {
+        Error::SelectionIndexCorrupt("selection lacks generation identity".into())
+    })?;
+    let current = read_selection_current(store, generation_id)?;
+    let mut stats = SelectionLookupStats {
+        manifest_documents: 1,
+        ..SelectionLookupStats::default()
+    };
+    if current.sample_count == 0 {
+        return Ok((None, stats));
+    }
+    let mut low = 1_u64;
+    let mut high = current.sample_count;
+    let mut candidate = None;
+    while low <= high {
+        let middle = low + (high - low) / 2;
+        let manifest = read_selection_manifest(store, generation_id, middle)?;
+        stats.manifest_documents = stats.manifest_documents.saturating_add(1);
+        let observed_at = manifest.latest_observed_at.ok_or_else(|| {
+            Error::SelectionIndexCorrupt("nonempty manifest lacks observed time".into())
+        })?;
+        if observed_at <= cutoff_at {
+            candidate = Some(middle);
+            low = middle.saturating_add(1);
+        } else {
+            high = middle.saturating_sub(1);
+        }
+    }
+    let Some(sequence) = candidate else {
+        return Ok((None, stats));
+    };
+    let entry = read_selection_entry(store, generation_id, sequence)?;
+    stats.entry_documents = 1;
+    let manifest = read_selection_manifest(store, generation_id, sequence)?;
+    stats.manifest_documents = stats.manifest_documents.saturating_add(1);
+    if manifest.latest_entry_id.as_ref() != Some(&entry.entry_id)
+        || manifest.latest_observed_at != Some(entry.observed_at)
+    {
+        return Err(Error::SelectionIndexStale(
+            "selected manifest does not bind selected entry".into(),
+        ));
+    }
+    let age = cutoff_at.signed_duration_since(entry.observed_at);
+    if age < chrono::Duration::zero()
+        || u64::try_from(age.num_milliseconds()).unwrap_or(u64::MAX) > max_age_ms
+    {
+        return Ok((None, stats));
+    }
+    let sample_path = store.join(&entry.sample_filename);
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(&sample_path)
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                Error::CanonicalSampleMissing(entry.sample_filename.clone())
+            } else {
+                Error::Io(error)
+            }
+        })?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.mode() & 0o022 != 0
+        || metadata.len() > MAX_SAMPLE_BYTES as u64
+    {
+        return Err(Error::CanonicalSampleMismatch(
+            "indexed canonical sample is not a bounded regular file".into(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut file)
+        .take(u64::try_from(MAX_SAMPLE_BYTES + 1).unwrap_or(u64::MAX))
+        .read_to_end(&mut bytes)?;
+    stats.canonical_samples = 1;
+    if sha256_bytes(&bytes) != entry.sample_document_digest {
+        return Err(Error::CanonicalSampleMismatch(
+            "indexed canonical sample bytes changed".into(),
+        ));
+    }
+    let sample: SignedPassiveHostLoadSampleV1 = serde_json::from_slice(&bytes)
+        .map_err(|error| Error::CanonicalSampleMismatch(error.to_string()))?;
+    let canonical = nq_protocol::canonical_json_bytes(&sample)
+        .map_err(|error| Error::CanonicalSampleMismatch(error.to_string()))?;
+    if canonical != bytes
+        || sample_filename(&sample) != entry.sample_filename
+        || sample.payload.sequence != entry.sequence
+        || sample.payload.observed_at != entry.observed_at
+        || sample.payload.sample_occurrence_id != entry.sample_occurrence_id
+        || sample.payload_digest != entry.payload_digest
+    {
+        return Err(Error::CanonicalSampleMismatch(
+            "indexed canonical sample identity differs from its immutable entry".into(),
+        ));
+    }
+    verify_sample(&sample, public, expected)
+        .map_err(|error| Error::CanonicalSampleMismatch(error.to_string()))?;
+    Ok((Some(sample), stats))
+}
+
+#[allow(clippy::too_many_lines)]
 fn load_samples(
     store: &Path,
     public: &VerifyingKey,
@@ -640,6 +1434,24 @@ fn load_samples(
             if !metadata.file_type().is_file() || metadata.mode() & 0o002 != 0 {
                 return Err(Error::Invalid(
                     "observer lock is not a non-world-writable regular file".into(),
+                ));
+            }
+            continue;
+        }
+        if name == SELECTION_INDEX_LOCK_FILE {
+            let metadata = fs::symlink_metadata(entry.path())?;
+            if !metadata.file_type().is_file() || metadata.mode() & 0o002 != 0 {
+                return Err(Error::Invalid(
+                    "selection-index lock is not a non-world-writable regular file".into(),
+                ));
+            }
+            continue;
+        }
+        if name == SELECTION_INDEX_DIRECTORY {
+            let metadata = fs::symlink_metadata(entry.path())?;
+            if !metadata.file_type().is_dir() || metadata.mode() & 0o022 != 0 {
+                return Err(Error::Invalid(
+                    "selection index is not a non-world-writable real directory".into(),
                 ));
             }
             continue;
@@ -682,6 +1494,14 @@ fn load_samples(
         }
         let bytes = fs::read(entry.path())?;
         let sample: SignedPassiveHostLoadSampleV1 = serde_json::from_slice(&bytes)?;
+        if nq_protocol::canonical_json_bytes(&sample)
+            .map_err(|error| Error::Invalid(error.to_string()))?
+            != bytes
+        {
+            return Err(Error::Invalid(
+                "canonical retained sample bytes were rewritten".into(),
+            ));
+        }
         verify_sample(&sample, public, expected)?;
         let expected_name = sample_filename(&sample);
         if name != expected_name {
@@ -876,6 +1696,15 @@ fn append_sample(
     sample: &SignedPassiveHostLoadSampleV1,
     document: &[u8],
 ) -> Result<(), Error> {
+    let _lock = acquire_selection_index_lock(store, true)?;
+    append_selection_index(store, sample, document)
+}
+
+fn append_sample_raw(
+    store: &Path,
+    sample: &SignedPassiveHostLoadSampleV1,
+    document: &[u8],
+) -> Result<(), Error> {
     let path = store.join(sample_filename(sample));
     let mut file = OpenOptions::new()
         .write(true)
@@ -901,7 +1730,14 @@ fn store_bytes(store: &Path) -> Result<u64, Error> {
     let mut total = 0_u64;
     for entry in fs::read_dir(store)? {
         let entry = entry?;
-        total = total.saturating_add(fs::symlink_metadata(entry.path())?.len());
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if entry.file_name() == SELECTION_INDEX_DIRECTORY && metadata.file_type().is_dir() {
+            for indexed in fs::read_dir(entry.path())? {
+                total = total.saturating_add(fs::symlink_metadata(indexed?.path())?.len());
+            }
+        } else {
+            total = total.saturating_add(metadata.len());
+        }
     }
     Ok(total)
 }
@@ -1046,27 +1882,33 @@ fn read_bounded(path: &Path, max: usize) -> Result<String, Error> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::{self, OpenOptions};
+    use std::fs::{self, File, OpenOptions};
     use std::io::{Seek as _, Write as _};
     use std::os::fd::AsRawFd as _;
     use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _, symlink};
 
     use chrono::Utc;
-    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::{Signer as _, SigningKey};
     use nq_profiles::{ProfileModule as _, host};
     use nq_protocol::{
         Capability, HelperRequest, InstanceId, MonotonicClock, MonotonicDeadline,
-        PassiveHostLoadSampleSelectionV1, ProfileBinding, ProfileId, ProfileVersion, RequestId,
-        ResponseOutcome, ScopeBinding, ScopeKind, Sha256Digest, SubjectBinding, SubjectId,
-        VantageBinding, VantageKind, encode_ndjson, parse_response, sha256_bytes,
+        PassiveHostLoadSamplePayloadV1, PassiveHostLoadSampleSelectionV1, ProfileBinding,
+        ProfileId, ProfileVersion, RequestId, ResponseOutcome, ScopeBinding, ScopeKind,
+        Sha256Digest, SignedPassiveHostLoadSampleV1, SubjectBinding, SubjectId, VantageBinding,
+        VantageKind, canonical_json_bytes, encode_ndjson, parse_response, semantic_digest,
+        sha256_bytes,
     };
     use serde_json::json;
     use tempfile::TempDir;
 
     use super::{
-        CapacityContextV1, OBSERVER_PROFILE, ObserverConfigV1, ObserverSession, ProviderConfigV1,
-        SOURCE_BASIS, capacity_context, eligible_sample_at, executable_digest, load_toml,
-        sample_once, serve,
+        CapacityContextV1, Error, ExpectedSampleIdentity, OBSERVER_PROFILE, ObserverConfigV1,
+        ObserverSession, ProviderConfigV1, SELECTION_INDEX_CURRENT_SCHEMA, SOURCE_BASIS,
+        SelectionIndexCurrentV1, acquire_selection_index_lock, append_sample, append_sample_raw,
+        capacity_context, eligible_sample_at, executable_digest, load_toml,
+        read_selection_manifest, rebuild_selection_index, sample_filename, sample_once,
+        select_indexed_sample, selection_dirty_path, selection_entry_path,
+        selection_index_directory, selection_manifest_path, serve, write_index_immutable,
     };
 
     #[test]
@@ -1247,6 +2089,53 @@ mod tests {
             serve(&self.provider_config_path, frame.as_slice(), &mut output).unwrap();
             parse_response(request, &output).unwrap()
         }
+
+        fn synthetic_sample(
+            &self,
+            sequence: u64,
+            observed_at: chrono::DateTime<Utc>,
+        ) -> (SignedPassiveHostLoadSampleV1, Vec<u8>) {
+            let payload = PassiveHostLoadSamplePayloadV1 {
+                schema: nq_protocol::PASSIVE_HOST_LOAD_SAMPLE_PAYLOAD_SCHEMA_V1.into(),
+                sample_occurrence_id: format!("sample:synthetic-{sequence}"),
+                binding: self.binding.clone(),
+                observed_at,
+                sequence,
+                observer_run_id: "observer-run:synthetic-selection-index".into(),
+                observer_profile: OBSERVER_PROFILE.into(),
+                observer_artifact_digest: self.observer_artifact.clone(),
+                observer_config_digest: self.observer_config_digest.clone(),
+                load_1m_token: "0.25".into(),
+                logical_cpu_count: 4,
+                source_basis: SOURCE_BASIS.into(),
+                capacity_context_id: self.capacity_context_id.clone(),
+            };
+            let payload_digest = semantic_digest(&payload).unwrap();
+            let signature =
+                SigningKey::from_bytes(&[23_u8; 32]).sign(payload_digest.as_str().as_bytes());
+            let sample = SignedPassiveHostLoadSampleV1 {
+                schema: nq_protocol::SIGNED_PASSIVE_HOST_LOAD_SAMPLE_SCHEMA_V1.into(),
+                payload,
+                payload_digest,
+                producer_issuer: "fixture.passive-observer".into(),
+                producer_key_id: "fixture-key-1".into(),
+                signature: hex::encode(signature.to_bytes()),
+            };
+            let document = canonical_json_bytes(&sample).unwrap();
+            (sample, document)
+        }
+
+        fn expected(&self) -> ExpectedSampleIdentity<'_> {
+            ExpectedSampleIdentity {
+                observer_profile: OBSERVER_PROFILE,
+                observer_artifact_digest: Some(&self.observer_artifact),
+                observer_config_digest: Some(&self.observer_config_digest),
+                producer_issuer: "fixture.passive-observer",
+                producer_key_id: "fixture-key-1",
+                capacity_context_id: &self.capacity_context_id,
+                binding: Some(&self.binding),
+            }
+        }
     }
 
     #[test]
@@ -1268,9 +2157,9 @@ mod tests {
             fs::read_dir(fixture.root.path().join("samples"))
                 .unwrap()
                 .filter(|entry| {
-                    entry
-                        .as_ref()
-                        .is_ok_and(|entry| entry.file_name() != ".observer.lock")
+                    entry.as_ref().is_ok_and(|entry| {
+                        entry.file_name().to_string_lossy().starts_with("sample-")
+                    })
                 })
                 .count(),
             1
@@ -1281,7 +2170,16 @@ mod tests {
     fn new_sample_is_distinct_and_missing_sample_refuses_without_fallback() {
         let fixture = Fixture::new();
         let missing = fixture.exchange(&fixture.request("request-missing"));
-        assert!(matches!(missing.outcome, ResponseOutcome::Refusal { .. }));
+        let ResponseOutcome::Refusal { refusal } = missing.outcome else {
+            panic!("missing index must refuse")
+        };
+        assert_eq!(refusal.details["reason_code"], "selection_index_missing");
+        drop(ObserverSession::open(&fixture.observer_config_path).unwrap());
+        let empty = fixture.exchange(&fixture.request("request-empty"));
+        let ResponseOutcome::Refusal { refusal } = empty.outcome else {
+            panic!("valid empty index must refuse")
+        };
+        assert_eq!(refusal.details["reason_code"], "no_eligible_sample");
         let first = sample_once(&fixture.observer_config_path).unwrap();
         let second = sample_once(&fixture.observer_config_path).unwrap();
         assert_ne!(first.payload_digest, second.payload_digest);
@@ -1300,6 +2198,16 @@ mod tests {
     #[test]
     fn handoff_readiness_is_read_only_exact_and_age_bounded() {
         let fixture = Fixture::new();
+        assert!(matches!(
+            eligible_sample_at(
+                &fixture.provider_config_path,
+                &fixture.binding,
+                Utc::now(),
+                60_000,
+            ),
+            Err(Error::SelectionIndexMissing(_))
+        ));
+        drop(ObserverSession::open(&fixture.observer_config_path).unwrap());
         assert!(
             eligible_sample_at(
                 &fixture.provider_config_path,
@@ -1343,6 +2251,381 @@ mod tests {
                 .count(),
             before
         );
+    }
+
+    #[test]
+    fn selection_index_failure_taxonomy_is_exact_and_selected_sample_is_reverified() {
+        let fixture = Fixture::new();
+        let cutoff = Utc::now();
+        assert!(matches!(
+            eligible_sample_at(
+                &fixture.provider_config_path,
+                &fixture.binding,
+                cutoff,
+                60_000,
+            ),
+            Err(Error::SelectionIndexMissing(_))
+        ));
+
+        drop(ObserverSession::open(&fixture.observer_config_path).unwrap());
+        assert!(
+            eligible_sample_at(
+                &fixture.provider_config_path,
+                &fixture.binding,
+                cutoff,
+                60_000,
+            )
+            .unwrap()
+            .is_none()
+        );
+
+        let sample = sample_once(&fixture.observer_config_path).unwrap();
+        let sample_path = fixture
+            .root
+            .path()
+            .join("samples")
+            .join(sample_filename(&sample));
+        fs::remove_file(&sample_path).unwrap();
+        assert!(matches!(
+            eligible_sample_at(
+                &fixture.provider_config_path,
+                &fixture.binding,
+                Utc::now(),
+                60_000,
+            ),
+            Err(Error::CanonicalSampleMissing(_))
+        ));
+
+        let document = canonical_json_bytes(&sample).unwrap();
+        fs::write(&sample_path, &document).unwrap();
+        let mut changed = document;
+        changed.push(b'\n');
+        fs::write(&sample_path, changed).unwrap();
+        assert!(matches!(
+            eligible_sample_at(
+                &fixture.provider_config_path,
+                &fixture.binding,
+                Utc::now(),
+                60_000,
+            ),
+            Err(Error::CanonicalSampleMismatch(_))
+        ));
+    }
+
+    #[test]
+    fn interrupted_append_is_unselectable_until_exact_reconstruction() {
+        let fixture = Fixture::new();
+        drop(ObserverSession::open(&fixture.observer_config_path).unwrap());
+        let observed_at = Utc::now();
+        let (sample, document) = fixture.synthetic_sample(1, observed_at);
+        let store = fixture.root.path().join("samples");
+        let selection_lock = acquire_selection_index_lock(&store, true).unwrap();
+        let update = super::SelectionIndexUpdateV1 {
+            schema: super::SELECTION_INDEX_DIRTY_SCHEMA.into(),
+            generation_id: fixture.observer_config_digest.clone(),
+            sequence: 1,
+            payload_digest: sample.payload_digest.clone(),
+            sample_document_digest: sha256_bytes(&document),
+        };
+        write_index_immutable(&selection_dirty_path(&store), &update).unwrap();
+        append_sample_raw(&store, &sample, &document).unwrap();
+        drop(selection_lock);
+
+        assert!(matches!(
+            eligible_sample_at(
+                &fixture.provider_config_path,
+                &fixture.binding,
+                observed_at + chrono::Duration::milliseconds(1),
+                60_000,
+            ),
+            Err(Error::SelectionIndexStale(_))
+        ));
+
+        drop(ObserverSession::open(&fixture.observer_config_path).unwrap());
+        assert!(!selection_dirty_path(&store).exists());
+        let selected = eligible_sample_at(
+            &fixture.provider_config_path,
+            &fixture.binding,
+            observed_at + chrono::Duration::milliseconds(1),
+            60_000,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(selected.payload_digest, sample.payload_digest);
+    }
+
+    #[test]
+    fn stale_or_corrupt_selection_metadata_refuses_and_loss_reconstructs() {
+        let fixture = Fixture::new();
+        let first = sample_once(&fixture.observer_config_path).unwrap();
+        let second = sample_once(&fixture.observer_config_path).unwrap();
+        let store = fixture.root.path().join("samples");
+        let first_manifest =
+            read_selection_manifest(&store, &fixture.observer_config_digest, 1).unwrap();
+        let stale = SelectionIndexCurrentV1 {
+            schema: SELECTION_INDEX_CURRENT_SCHEMA.into(),
+            generation_id: fixture.observer_config_digest.clone(),
+            sample_count: 1,
+            manifest_id: first_manifest.manifest_id,
+        };
+        super::replace_selection_current(&store, &stale).unwrap();
+        assert!(matches!(
+            eligible_sample_at(
+                &fixture.provider_config_path,
+                &fixture.binding,
+                Utc::now(),
+                60_000,
+            ),
+            Err(Error::SelectionIndexStale(_))
+        ));
+
+        fs::remove_dir_all(selection_index_directory(&store)).unwrap();
+        assert!(matches!(
+            eligible_sample_at(
+                &fixture.provider_config_path,
+                &fixture.binding,
+                Utc::now(),
+                60_000,
+            ),
+            Err(Error::SelectionIndexMissing(_))
+        ));
+        let samples = super::load_samples(
+            &store,
+            &SigningKey::from_bytes(&[23_u8; 32]).verifying_key(),
+            &fixture.expected(),
+        )
+        .unwrap();
+        rebuild_selection_index(&store, &samples, &fixture.observer_config_digest).unwrap();
+        let selected = eligible_sample_at(
+            &fixture.provider_config_path,
+            &fixture.binding,
+            Utc::now(),
+            60_000,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(selected.payload_digest, second.payload_digest);
+        assert_ne!(selected.payload_digest, first.payload_digest);
+
+        let entry = selection_entry_path(&store, 2);
+        fs::set_permissions(&entry, fs::Permissions::from_mode(0o640)).unwrap();
+        fs::write(&entry, b"{}" as &[u8]).unwrap();
+        assert!(matches!(
+            eligible_sample_at(
+                &fixture.provider_config_path,
+                &fixture.binding,
+                Utc::now(),
+                60_000,
+            ),
+            Err(Error::SelectionIndexCorrupt(_))
+        ));
+    }
+
+    #[test]
+    fn selection_and_append_serialize_without_partial_visibility() {
+        let fixture = Fixture::new();
+        let first = sample_once(&fixture.observer_config_path).unwrap();
+        let store = fixture.root.path().join("samples");
+        let exclusive = acquire_selection_index_lock(&store, true).unwrap();
+        let provider = fixture.provider_config_path.clone();
+        let binding = fixture.binding.clone();
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = eligible_sample_at(&provider, &binding, Utc::now(), 60_000);
+            sent.send(result).unwrap();
+        });
+        assert!(
+            received
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err()
+        );
+        drop(exclusive);
+        let selected = received
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        worker.join().unwrap();
+        assert_eq!(selected.payload_digest, first.payload_digest);
+    }
+
+    #[test]
+    fn provider_shared_lock_requires_read_custody_only() {
+        let fixture = Fixture::new();
+        let sample = sample_once(&fixture.observer_config_path).unwrap();
+        let lock = fixture.root.path().join("samples/.selection-index.lock");
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o440)).unwrap();
+        let selected = eligible_sample_at(
+            &fixture.provider_config_path,
+            &fixture.binding,
+            Utc::now(),
+            60_000,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(selected.payload_digest, sample.payload_digest);
+    }
+
+    #[test]
+    fn newest_lookup_reads_logarithmic_manifests_and_one_canonical_sample() {
+        let fixture = Fixture::new();
+        drop(ObserverSession::open(&fixture.observer_config_path).unwrap());
+        let store = fixture.root.path().join("samples");
+        let start = Utc::now() - chrono::Duration::seconds(1);
+        for sequence in 1..=64 {
+            let (sample, document) = fixture.synthetic_sample(
+                sequence,
+                start + chrono::Duration::milliseconds(i64::try_from(sequence).unwrap()),
+            );
+            append_sample(&store, &sample, &document).unwrap();
+        }
+        let public = SigningKey::from_bytes(&[23_u8; 32]).verifying_key();
+        let (selected, stats) =
+            select_indexed_sample(&store, &public, &fixture.expected(), Utc::now(), 60_000)
+                .unwrap();
+        assert_eq!(selected.unwrap().payload.sequence, 64);
+        assert!(stats.manifest_documents <= 9, "stats={stats:?}");
+        assert_eq!(stats.entry_documents, 1);
+        assert_eq!(stats.canonical_samples, 1);
+    }
+
+    #[test]
+    fn corrupt_manifest_refuses_without_falling_back_to_corpus_scan() {
+        let fixture = Fixture::new();
+        let sample = sample_once(&fixture.observer_config_path).unwrap();
+        let store = fixture.root.path().join("samples");
+        let manifest = selection_manifest_path(&store, sample.payload.sequence);
+        fs::set_permissions(&manifest, fs::Permissions::from_mode(0o640)).unwrap();
+        fs::write(&manifest, b"{}" as &[u8]).unwrap();
+        assert!(matches!(
+            eligible_sample_at(
+                &fixture.provider_config_path,
+                &fixture.binding,
+                Utc::now(),
+                60_000,
+            ),
+            Err(Error::SelectionIndexCorrupt(_))
+        ));
+    }
+
+    #[test]
+    fn recomputed_outer_index_hashes_cannot_hide_sample_substitution() {
+        let fixture = Fixture::new();
+        let first = sample_once(&fixture.observer_config_path).unwrap();
+        let second = sample_once(&fixture.observer_config_path).unwrap();
+        let store = fixture.root.path().join("samples");
+        let mut entry = super::read_selection_entry(
+            &store,
+            &fixture.observer_config_digest,
+            second.payload.sequence,
+        )
+        .unwrap();
+        let first_bytes = fs::read(store.join(sample_filename(&first))).unwrap();
+        entry.sample_filename = sample_filename(&first);
+        entry.sample_document_digest = sha256_bytes(&first_bytes);
+        entry.sample_occurrence_id = first.payload.sample_occurrence_id.clone();
+        entry.payload_digest = first.payload_digest.clone();
+        entry.observed_at = first.payload.observed_at;
+        entry.entry_id = super::selection_entry_id(
+            &fixture.observer_config_digest,
+            &SignedPassiveHostLoadSampleV1 {
+                payload: PassiveHostLoadSamplePayloadV1 {
+                    sequence: second.payload.sequence,
+                    ..first.payload.clone()
+                },
+                ..first.clone()
+            },
+            &entry.sample_filename,
+            &entry.sample_document_digest,
+        )
+        .unwrap();
+        let entry_path = selection_entry_path(&store, second.payload.sequence);
+        fs::set_permissions(&entry_path, fs::Permissions::from_mode(0o640)).unwrap();
+        fs::write(&entry_path, canonical_json_bytes(&entry).unwrap()).unwrap();
+
+        let previous = read_selection_manifest(&store, &fixture.observer_config_digest, 1).unwrap();
+        let manifest = super::make_selection_manifest(
+            &fixture.observer_config_digest,
+            2,
+            Some(entry.entry_id),
+            Some(entry.observed_at),
+            Some(previous.manifest_id),
+        )
+        .unwrap();
+        let manifest_path = selection_manifest_path(&store, 2);
+        fs::set_permissions(&manifest_path, fs::Permissions::from_mode(0o640)).unwrap();
+        fs::write(&manifest_path, canonical_json_bytes(&manifest).unwrap()).unwrap();
+        super::replace_selection_current(
+            &store,
+            &SelectionIndexCurrentV1 {
+                schema: SELECTION_INDEX_CURRENT_SCHEMA.into(),
+                generation_id: fixture.observer_config_digest.clone(),
+                sample_count: 2,
+                manifest_id: manifest.manifest_id,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            eligible_sample_at(
+                &fixture.provider_config_path,
+                &fixture.binding,
+                Utc::now(),
+                60_000,
+            ),
+            Err(Error::CanonicalSampleMismatch(_))
+        ));
+    }
+
+    #[test]
+    #[ignore = "explicit synthetic retained-corpus performance qualification"]
+    fn benchmark_selection_index_corpus_scaling() {
+        let fixture = Fixture::new();
+        drop(ObserverSession::open(&fixture.observer_config_path).unwrap());
+        let store = fixture.root.path().join("samples");
+        let public = SigningKey::from_bytes(&[23_u8; 32]).verifying_key();
+        let start = Utc::now() - chrono::Duration::days(3);
+        let checkpoints = [1_440_u64, 4_334, 5_760, 11_520];
+        let mut next_checkpoint = 0_usize;
+        for sequence in 1..=*checkpoints.last().unwrap() {
+            let (sample, document) = fixture.synthetic_sample(
+                sequence,
+                start
+                    + chrono::Duration::seconds(
+                        i64::try_from(sequence.saturating_mul(15)).unwrap(),
+                    ),
+            );
+            append_sample(&store, &sample, &document).unwrap();
+            if checkpoints.get(next_checkpoint) == Some(&sequence) {
+                File::open(&store).unwrap().sync_all().unwrap();
+                let cutoff = sample.payload.observed_at + chrono::Duration::milliseconds(1);
+                let first_started = std::time::Instant::now();
+                let (selected, stats) =
+                    select_indexed_sample(&store, &public, &fixture.expected(), cutoff, 30_000)
+                        .unwrap();
+                let first_us = first_started.elapsed().as_micros();
+                assert_eq!(selected.unwrap().payload.sequence, sequence);
+                let mut warm_us = Vec::new();
+                for _ in 0..25 {
+                    let started = std::time::Instant::now();
+                    let (selected, repeated_stats) =
+                        select_indexed_sample(&store, &public, &fixture.expected(), cutoff, 30_000)
+                            .unwrap();
+                    assert_eq!(selected.unwrap().payload.sequence, sequence);
+                    assert_eq!(repeated_stats, stats);
+                    warm_us.push(started.elapsed().as_micros());
+                }
+                warm_us.sort_unstable();
+                println!(
+                    "{{\"samples\":{sequence},\"first_us\":{first_us},\"warm_median_us\":{},\"warm_max_us\":{},\"manifest_reads\":{},\"entry_reads\":{},\"canonical_sample_reads\":{}}}",
+                    warm_us[warm_us.len() / 2],
+                    warm_us.last().unwrap(),
+                    stats.manifest_documents,
+                    stats.entry_documents,
+                    stats.canonical_samples,
+                );
+                next_checkpoint += 1;
+            }
+        }
     }
 
     #[test]

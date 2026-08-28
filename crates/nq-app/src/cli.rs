@@ -1736,14 +1736,39 @@ async fn successor_handoff_tick(
                 let config = NqConfig::load(config_path)?;
                 let store = Store::open_read_only(&config.database_path)?;
                 let coordination = store.recurrence_status(&handoff.spec.next_enrollment_id)?;
-                if let Some(reason) = successor_handoff_coordination_wait_reason(
+                let gate = successor_admission_gate(
                     coordination.coordination_blocked,
                     coordination.coordination_blocked_reason.as_deref(),
                     coordination.holder_acquisition_id.as_deref(),
                     coordination.outcome_unknown_fences_domain,
                     coordination.provider_safe_next_start_unix_ms,
                     now,
-                ) {
+                    || {
+                        // A coordination wait may outlive the sample that first made the
+                        // handoff ready. Re-run the exact passive eligibility predicate
+                        // only after coordination is available.
+                        let watcher = config
+                            .watcher(&handoff.spec.successor_watcher_instance_id)
+                            .context("successor handoff watcher is absent")?;
+                        let binding = watcher_subject_binding(watcher)?;
+                        let cutoff = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(now)
+                            .context("handoff clock is outside chrono range")?;
+                        let passive = watcher
+                            .passive_host_load_sample
+                            .as_ref()
+                            .context("successor handoff watcher is not passive load")?;
+                        let activation = crate::operating::OperatingLedger::open(state_dir)?
+                            .activation(&handoff.spec.next_activation_id)?;
+                        Ok(nq_passive_load_helper::eligible_sample_at(
+                            &activation.spec.provider_config_path,
+                            &binding,
+                            cutoff,
+                            passive.max_sample_age_ms,
+                        )?
+                        .is_some())
+                    },
+                )?;
+                if let SuccessorAdmissionGate::Wait(reason) = gate {
                     return print_value(
                         &json!({
                             "handoff_id": handoff_id,
@@ -1755,43 +1780,6 @@ async fn successor_handoff_tick(
                             "holder_acquisition_id": coordination.holder_acquisition_id,
                             "provider_safe_next_start_unix_ms":
                                 coordination.provider_safe_next_start_unix_ms,
-                        }),
-                        true,
-                    );
-                }
-
-                // A coordination wait may outlive the sample that first made the
-                // handoff ready.  Re-run the exact passive eligibility predicate
-                // before crossing AdmissionStarted; never let readiness custody
-                // turn into permission to consume a stale sample.
-                let watcher = config
-                    .watcher(&handoff.spec.successor_watcher_instance_id)
-                    .context("successor handoff watcher is absent")?;
-                let binding = watcher_subject_binding(watcher)?;
-                let cutoff = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(now)
-                    .context("handoff clock is outside chrono range")?;
-                let passive = watcher
-                    .passive_host_load_sample
-                    .as_ref()
-                    .context("successor handoff watcher is not passive load")?;
-                let activation = crate::operating::OperatingLedger::open(state_dir)?
-                    .activation(&handoff.spec.next_activation_id)?;
-                if nq_passive_load_helper::eligible_sample_at(
-                    &activation.spec.provider_config_path,
-                    &binding,
-                    cutoff,
-                    passive.max_sample_age_ms,
-                )?
-                .is_none()
-                {
-                    return print_value(
-                        &json!({
-                            "handoff_id": handoff_id,
-                            "state": "sample_ready",
-                            "timer_exposure": "inert",
-                            "attempts_consumed": 0,
-                            "reason": "successor_sample_no_longer_eligible",
-                            "admission_attempted": false,
                         }),
                         true,
                     );
@@ -2045,6 +2033,39 @@ fn successor_handoff_coordination_wait_reason(
         return Some("successor_provider_safe_spacing_active".into());
     }
     None
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SuccessorAdmissionGate {
+    Wait(String),
+    Ready,
+}
+
+fn successor_admission_gate(
+    coordination_blocked: bool,
+    blocked_reason: Option<&str>,
+    holder_acquisition_id: Option<&str>,
+    outcome_unknown_fences_domain: bool,
+    provider_safe_next_start_unix_ms: Option<i64>,
+    now: i64,
+    sample_still_eligible: impl FnOnce() -> Result<bool>,
+) -> Result<SuccessorAdmissionGate> {
+    if let Some(reason) = successor_handoff_coordination_wait_reason(
+        coordination_blocked,
+        blocked_reason,
+        holder_acquisition_id,
+        outcome_unknown_fences_domain,
+        provider_safe_next_start_unix_ms,
+        now,
+    ) {
+        return Ok(SuccessorAdmissionGate::Wait(reason));
+    }
+    if !sample_still_eligible()? {
+        return Ok(SuccessorAdmissionGate::Wait(
+            "successor_sample_no_longer_eligible".into(),
+        ));
+    }
+    Ok(SuccessorAdmissionGate::Ready)
 }
 
 fn watcher_subject_binding(
@@ -4708,6 +4729,49 @@ helper_runtime_dir = "/run/nq/helpers"
             None,
             "exclusive provider-safe boundary is ready at equality"
         );
+
+        let sample_checks = std::cell::Cell::new(0_u8);
+        let occupied = successor_admission_gate(
+            true,
+            Some("domain_occupied"),
+            Some("recurrence:predecessor"),
+            false,
+            None,
+            5_000,
+            || {
+                sample_checks.set(sample_checks.get() + 1);
+                Ok(true)
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            occupied,
+            SuccessorAdmissionGate::Wait("domain_occupied".into())
+        );
+        assert_eq!(
+            sample_checks.get(),
+            0,
+            "blocked coordination is checked first"
+        );
+
+        let stale = successor_admission_gate(false, None, None, false, Some(5_000), 5_000, || {
+            sample_checks.set(sample_checks.get() + 1);
+            Ok(false)
+        })
+        .unwrap();
+        assert_eq!(
+            stale,
+            SuccessorAdmissionGate::Wait("successor_sample_no_longer_eligible".into())
+        );
+        assert_eq!(sample_checks.get(), 1);
+
+        let ready = successor_admission_gate(false, None, None, false, Some(5_000), 5_000, || {
+            sample_checks.set(sample_checks.get() + 1);
+            Ok(true)
+        })
+        .unwrap();
+        assert_eq!(ready, SuccessorAdmissionGate::Ready);
+        assert_eq!(sample_checks.get(), 2);
     }
 
     #[test]

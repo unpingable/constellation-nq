@@ -20,6 +20,8 @@ enum Command {
     SampleOnce { config: PathBuf },
     /// Serve one NQ request over stdin/stdout using only pre-existing samples.
     ServeStdio { config: PathBuf },
+    /// Reconstruct derived selection metadata from canonical retained samples.
+    ReconstructSelectionIndex { config: PathBuf },
     /// Inspect the exact local `available_parallelism()` context without sampling.
     InspectCapacityContext,
     /// Create one raw Ed25519 signing key with mode 0600.
@@ -78,6 +80,9 @@ fn main() -> ExitCode {
         Command::Observe { config } => nq_passive_load_helper::observe(&config),
         Command::SampleOnce { config } => nq_passive_load_helper::sample_once(&config).map(|_| ()),
         Command::ServeStdio { config } => nq_passive_load_helper::serve_stdio(&config),
+        Command::ReconstructSelectionIndex { config } => {
+            nq_passive_load_helper::reconstruct_selection_index(&config)
+        }
         Command::InspectCapacityContext => nq_passive_load_helper::inspect_capacity_context(),
         Command::Keygen {
             private_key,

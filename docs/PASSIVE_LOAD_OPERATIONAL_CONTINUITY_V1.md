@@ -146,8 +146,13 @@ generation has a distinct bounded active store, maximum sample count, byte
 ceiling, and required-free-space floor. Before writing a sample the observer
 checks these guards and refuses rather than deleting history. Samples and
 events are create-new canonical files followed by file and directory sync.
-Malformed or partial files are never selectable; store corruption fails
-closed.
+Immutable derived selection entries/manifests and their crash marker are
+included in the same storage bound. Malformed or partial files are never
+selectable; store corruption fails closed. Routine selection follows
+[`PASSIVE_LOAD_BOUNDED_SELECTION_CUSTODY_V1.md`](PASSIVE_LOAD_BOUNDED_SELECTION_CUSTODY_V1.md)
+and never re-verifies the retained corpus. Explicit reconstruction may perform
+that linear verification because it creates availability metadata, not
+diagnostic authority.
 
 No archive-generation machinery is implemented in V1. Finite generation
 bounds make it unnecessary for the qualified bounded operating window. A

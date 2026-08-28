@@ -167,8 +167,12 @@ The repository implements the stage-one operational spine:
   waits before admission while the shared coordination domain is occupied and
   rechecks sample eligibility afterward, but the installed live release was
   not changed and no third charter is authorized. Long-horizon unattended
-  operation therefore still requires a reviewed bounded sample-selection
-  custody/index law;
+  operation therefore required a reviewed bounded sample-selection
+  custody/index law. That law is now implemented locally as immutable chained
+  entries/manifests plus a reconstructible locator: routine newest selection
+  is logarithmic and exactly verifies only its chosen signed sample. The failed
+  charter remains closed and no deployment or successor charter is implied by
+  this source qualification;
 - a native host profile/helper plus the conformance fixture profile;
 - strict, bounded `SystemSpecV1` validation and deterministic compilation into
   schema-domain-separated `ScopeCut` proposals, ratification-bound cuts,

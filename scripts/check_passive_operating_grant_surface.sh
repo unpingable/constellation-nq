@@ -46,6 +46,8 @@ rg -q 'successor_handoff_coordination_wait_reason' "$cli" \
   || fail "successor admission can begin while its shared coordination domain is unavailable"
 rg -q 'successor_sample_no_longer_eligible' "$cli" \
   || fail "successor admission does not recheck sample eligibility after coordination wait"
+rg -q 'successor_admission_gate' "$cli" \
+  || fail "successor coordination and post-wait eligibility are not one admission gate"
 rg -q 'arm_successor_handoff' "$model" || fail "exact predecessor-disarm/successor-arm transition absent"
 rg -q 'watcher test/admit/admit-successor/rotate/rollback' "$operations" \
   || fail "successor admission is absent from the capability-bounded maintenance boundary"

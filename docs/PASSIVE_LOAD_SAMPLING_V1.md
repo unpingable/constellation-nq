@@ -43,8 +43,9 @@ argv and separately qualified configuration:
 * `observe CONFIG` is a long-lived finite sampler. It directly reads only the
   bounded `/proc/loadavg` source and `available_parallelism()`, signs the raw
   facts, and appends one immutable file per occurrence.
-* `serve-stdio CONFIG` is the admitted NQ provider. It reads and verifies the
-  finite sample store and emits one ordinary `nq.host/v1` report. This path
+* `serve-stdio CONFIG` is the admitted NQ provider. It uses immutable derived
+  selection manifests to locate one candidate, exactly reopens and verifies
+  that canonical signed sample, and emits one ordinary `nq.host/v1` report. This path
   never reads procfs, calls `available_parallelism()`, starts the observer, or
   computes pressure.
 
@@ -128,12 +129,17 @@ refuses; unrelated missing fields do not silently become load-pressure inputs.
 The file name contains the immutable sequence and payload digest. Creation uses
 `O_EXCL`, exact canonical bytes, file synchronization, and directory
 synchronization. Duplicate sequence or occurrence IDs, malformed signatures,
-unexpected files, corruption, and sequence rollback refuse the whole provider
-selection. One nonblocking store lock serializes the observer generation;
+unexpected files, corruption, and sequence rollback refuse canonical index
+reconstruction. One nonblocking store lock serializes the observer generation;
 duplicate sampler starts refuse instead of racing sequence allocation. The
 long-lived observer loads and verifies its fixed executable, key, configuration,
 and prior generation once, rather than rescanning history or hashing its binary
-at every cadence. There is no mutable `latest` authority record.
+at every cadence. There is no mutable `latest` authority record. Routine
+selection follows
+[`PASSIVE_LOAD_BOUNDED_SELECTION_CUSTODY_V1.md`](PASSIVE_LOAD_BOUNDED_SELECTION_CUSTODY_V1.md):
+it opens logarithmically many immutable manifests, then exactly verifies one
+content-bound canonical signed sample. Missing, stale, or corrupt derived
+metadata refuses instead of falling back to a full-corpus provider scan.
 
 ## Temporal selection law
 

@@ -24,10 +24,10 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::{
-    Error, ExpectedSampleIdentity, OBSERVER_PROFILE, SOURCE_BASIS, acquire_observer_lock,
-    append_sample, available_parallelism, capacity_context, executable_digest, load_1m_token,
-    load_samples, load_signing_key, require_absolute, require_binding, store_bytes,
-    validate_identifier,
+    Error, ExpectedSampleIdentity, MAX_SELECTION_APPEND_OVERHEAD_BYTES, OBSERVER_PROFILE,
+    SOURCE_BASIS, acquire_observer_lock, append_sample, available_parallelism, capacity_context,
+    executable_digest, load_1m_token, load_samples, load_signing_key, rebuild_selection_index,
+    require_absolute, require_binding, store_bytes, validate_identifier,
 };
 
 const POLICY_SCHEMA: &str = "nq.passive_load_operational_policy.v1";
@@ -545,6 +545,7 @@ impl GenerationSession {
             return Err(Error::Invalid("generation byte identity changed".into()));
         }
         let samples = load_generation_samples(&generation, &generation_id, &public)?;
+        rebuild_selection_index(&generation.spec.sample_store, &samples, &generation_id)?;
         let mut events = load_events(&generation.spec.sample_store, &generation_id)?;
         recover_sample_events(&generation, &generation_id, &samples, &mut events)?;
         validate_sample_slots(&generation, &generation_id, &samples)?;
@@ -692,7 +693,8 @@ impl GenerationSession {
             canonical_json_bytes(&sample).map_err(|error| Error::Invalid(error.to_string()))?;
         let projected = self
             .bytes_used
-            .saturating_add(u64::try_from(document.len()).unwrap_or(u64::MAX));
+            .saturating_add(u64::try_from(document.len()).unwrap_or(u64::MAX))
+            .saturating_add(MAX_SELECTION_APPEND_OVERHEAD_BYTES);
         if projected > self.generation.spec.max_store_bytes {
             return Err(Error::Exhausted(
                 "hard active-store byte bound would be exceeded".into(),

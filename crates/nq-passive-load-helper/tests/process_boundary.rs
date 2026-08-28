@@ -169,7 +169,7 @@ fn real_process_selects_and_replays_without_sampling() {
             .filter(|entry| {
                 entry
                     .as_ref()
-                    .is_ok_and(|entry| entry.file_name() != ".observer.lock")
+                    .is_ok_and(|entry| entry.file_name().to_string_lossy().starts_with("sample-"))
             })
             .count(),
         1
