@@ -4263,6 +4263,59 @@ mod tests {
     }
 
     #[test]
+    fn enrollment_lifetime_is_creation_relative_at_exact_boundaries() {
+        let mut policy = policy();
+        policy.max_enrollment_lifetime_ms = 120_000;
+        let watcher_digest = format!("sha256:{}", "1".repeat(64));
+        let created_at = 10_000;
+        let generation_start = 40_000;
+        let successor_anchor = generation_start + 60_000;
+        let successor_expiry = generation_start + 120_000;
+        let mut prior_e2 = enrollment(&policy, 1_000).spec;
+        prior_e2.anchor_unix_ms = successor_anchor;
+        prior_e2.expires_at_unix_ms = successor_expiry;
+        let refusal = RecurrenceEnrollmentV1::new(
+            prior_e2.clone(),
+            &policy,
+            &watcher_digest,
+            1_000,
+            created_at,
+        )
+        .expect_err("prior pre-created E2 must exceed the creation-relative ceiling");
+        assert_eq!(refusal.code, "lifetime_exceeds_policy");
+
+        let mut equality = prior_e2.clone();
+        equality.expires_at_unix_ms = created_at + 120_000;
+        RecurrenceEnrollmentV1::new(
+            equality.clone(),
+            &policy,
+            &watcher_digest,
+            1_000,
+            created_at,
+        )
+        .expect("exact policy lifetime boundary");
+
+        equality.expires_at_unix_ms += 1;
+        let refusal =
+            RecurrenceEnrollmentV1::new(equality, &policy, &watcher_digest, 1_000, created_at)
+                .expect_err("one millisecond above the policy boundary must refuse");
+        assert_eq!(refusal.code, "lifetime_exceeds_policy");
+
+        let mut expired = prior_e2.clone();
+        expired.anchor_unix_ms = created_at - 1_000;
+        expired.expires_at_unix_ms = created_at;
+        let refusal =
+            RecurrenceEnrollmentV1::new(expired, &policy, &watcher_digest, 1_000, created_at)
+                .expect_err("enrollment expired at creation must refuse");
+        assert_eq!(refusal.code, "invalid_expiry");
+
+        policy.max_enrollment_lifetime_ms = 180_000;
+        prior_e2.policy_id = policy.policy_id().expect("corrected policy id");
+        RecurrenceEnrollmentV1::new(prior_e2, &policy, &watcher_digest, 1_000, created_at)
+            .expect("bounded full-horizon fixture ceiling must admit pre-created E2");
+    }
+
+    #[test]
     fn deployment_envelope_refuses_each_unsafe_operator_selection() {
         let policy = policy();
         let watcher_digest = format!("sha256:{}", "1".repeat(64));

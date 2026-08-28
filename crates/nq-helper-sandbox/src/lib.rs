@@ -6,13 +6,14 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use nix::fcntl::AtFlags;
+use nix::fcntl::{AtFlags, OFlag, open};
+use nix::sys::stat::Mode;
 use nix::unistd::{Gid, Uid, User, chown, fchownat, getegid, geteuid};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -565,10 +566,7 @@ where
         ));
     }
 
-    let descriptor = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)?;
+    let descriptor = open_path_descriptor(path)?;
     let pinned = descriptor.metadata()?;
     if !pinned.file_type().is_socket()
         || pinned.dev() != before.dev()
@@ -604,6 +602,18 @@ where
         ));
     }
     Ok(())
+}
+
+fn open_path_descriptor(path: &Path) -> io::Result<File> {
+    let descriptor = open(
+        path,
+        OFlag::O_PATH | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(io::Error::from)?;
+    // SAFETY: `nix::fcntl::open` returned a new owned descriptor. Constructing
+    // one `File` transfers that ownership and closes it exactly once.
+    Ok(unsafe { File::from_raw_fd(descriptor) })
 }
 
 fn validate_runtime_root_metadata(metadata: &fs::Metadata) -> io::Result<()> {
@@ -884,10 +894,13 @@ fn install_containment_filter() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nix::fcntl::{FcntlArg, FdFlag, fcntl};
+    use std::cell::Cell;
     use std::time::{Duration, Instant};
 
     const CLONE_PARENT_PROBE_ENV: &str = "NQ_TEST_CLONE_PARENT_PROBE";
     const CLONE_PARENT_SUPERVISOR_ENV: &str = "NQ_TEST_CLONE_PARENT_SUPERVISOR";
+    const SOCKET_DESCRIPTOR_PROBE_ENV: &str = "NQ_TEST_SOCKET_DESCRIPTOR_PROBE";
 
     fn status_field<'a>(status: &'a str, name: &str) -> &'a str {
         status
@@ -941,6 +954,101 @@ mod tests {
     }
 
     #[test]
+    fn socket_path_descriptor_has_kernel_path_flags_and_cannot_read() {
+        let directory = tempfile::tempdir().expect("socket descriptor directory");
+        let socket = directory.path().join("helper.sock");
+        let _listener = match std::os::unix::net::UnixListener::bind(&socket) {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping socket descriptor test: execution sandbox denies AF_UNIX bind");
+                return;
+            }
+            Err(error) => panic!("bind test socket: {error}"),
+        };
+        let descriptor = open_path_descriptor(&socket).expect("open socket with O_PATH");
+        let status_flags = OFlag::from_bits_retain(
+            fcntl(descriptor.as_raw_fd(), FcntlArg::F_GETFL).expect("read status flags"),
+        );
+        assert!(status_flags.contains(OFlag::O_PATH));
+        assert_eq!(status_flags.bits() & (libc::O_WRONLY | libc::O_RDWR), 0);
+        let descriptor_flags = FdFlag::from_bits_retain(
+            fcntl(descriptor.as_raw_fd(), FcntlArg::F_GETFD).expect("read descriptor flags"),
+        );
+        assert!(descriptor_flags.contains(FdFlag::FD_CLOEXEC));
+        assert!(
+            descriptor
+                .metadata()
+                .expect("socket metadata")
+                .file_type()
+                .is_socket()
+        );
+        let mut byte = [0_u8; 1];
+        let read_error = nix::unistd::read(descriptor.as_raw_fd(), &mut byte)
+            .expect_err("O_PATH descriptor must not permit content reads");
+        assert_eq!(read_error, nix::errno::Errno::EBADF);
+    }
+
+    #[test]
+    fn socket_custody_refuses_invalid_targets() {
+        let directory = tempfile::tempdir().expect("invalid target directory");
+        let regular = directory.path().join("regular");
+        let symlink = directory.path().join("symlink");
+        fs::write(&regular, b"operator state").expect("write regular target");
+        std::os::unix::fs::symlink(&regular, &symlink).expect("create symlink target");
+        for path in [&regular, &symlink] {
+            let error = take_unix_socket_custody(path, geteuid().as_raw(), getegid().as_raw())
+                .expect_err("non-socket target must refuse");
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        }
+        assert_eq!(
+            fs::read(&regular).expect("regular target bytes"),
+            b"operator state"
+        );
+    }
+
+    #[test]
+    #[ignore = "invoked by socket_path_descriptor_contract_holds_in_separate_process"]
+    fn socket_path_descriptor_process_probe() {
+        let path = std::env::var_os(SOCKET_DESCRIPTOR_PROBE_ENV)
+            .map(PathBuf::from)
+            .expect("socket descriptor probe path");
+        take_unix_socket_custody(&path, geteuid().as_raw(), getegid().as_raw())
+            .expect("socket custody in separate process");
+    }
+
+    #[test]
+    fn socket_path_descriptor_contract_holds_in_separate_process() {
+        let directory = tempfile::tempdir().expect("socket process directory");
+        let socket = directory.path().join("helper.sock");
+        let _listener = match std::os::unix::net::UnixListener::bind(&socket) {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping socket process test: execution sandbox denies AF_UNIX bind");
+                return;
+            }
+            Err(error) => panic!("bind test socket: {error}"),
+        };
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).expect("socket mode");
+        let executable = std::env::current_exe().expect("current sandbox test executable");
+        let output = Command::new(executable)
+            .args([
+                "--ignored",
+                "--exact",
+                "tests::socket_path_descriptor_process_probe",
+                "--nocapture",
+            ])
+            .env(SOCKET_DESCRIPTOR_PROBE_ENV, &socket)
+            .output()
+            .expect("spawn socket descriptor process probe");
+        assert!(
+            output.status.success(),
+            "socket descriptor subprocess refused: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn socket_symlink_swap_never_mutates_the_replacement_target() {
         let directory = tempfile::tempdir().expect("socket custody directory");
         let socket = directory.path().join("helper.sock");
@@ -959,12 +1067,18 @@ mod tests {
         fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).expect("target mode");
         let before = fs::symlink_metadata(&target).expect("target metadata");
 
+        let after_pin_ran = Cell::new(false);
         let error =
             take_unix_socket_custody_inner(&socket, geteuid().as_raw(), getegid().as_raw(), || {
+                after_pin_ran.set(true);
                 fs::rename(&socket, &displaced)?;
                 std::os::unix::fs::symlink(&target, &socket)
             })
             .expect_err("pathname replacement must fail closed");
+        assert!(
+            after_pin_ran.get(),
+            "negative case must execute after the O_PATH pin"
+        );
         assert!(matches!(
             error.kind(),
             io::ErrorKind::Other | io::ErrorKind::PermissionDenied
