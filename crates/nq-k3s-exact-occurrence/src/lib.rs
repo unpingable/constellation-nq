@@ -8,6 +8,8 @@ use std::collections::BTreeMap;
 
 /// Mechanics-separated exact execute/reconcile boundary.
 pub mod executor;
+/// Portable Kubernetes origin and capacity fact law.
+pub mod origin_capacity;
 
 use nq_protocol::{CanonicalizationError, Sha256Digest, semantic_digest};
 use serde::{Deserialize, Serialize};
