@@ -1,0 +1,32 @@
+{
+  "schema": "nq.socketwrench_s4_vm_authority_lifecycle_result.v1",
+  "campaign": "SOCKETWRENCH",
+  "campaign_slug": "passive-vm-lifecycle-repair-v1",
+  "classification": "PASSIVE-VM-AUTHORITY-LIFECYCLE-NOT-STARTED",
+  "reason": "required S3 release reproducibility did not qualify under the final hard 750000-KiB scratch ceiling",
+  "source_commit": "7a6b7c02acbd8c5de0bb92ebda77ebb905828bf5",
+  "target": null,
+  "target_created": false,
+  "authority_counts": {
+    "h": 0,
+    "g": 0,
+    "e": 0,
+    "watchers": 0,
+    "admissions": 0,
+    "activations": 0,
+    "samples": 0,
+    "recurrence_attempts": 0,
+    "acquisitions": 0,
+    "handoffs": 0,
+    "fences": 0,
+    "outcome_unknown": 0
+  },
+  "generated_state": {
+    "coordination_domain": false,
+    "sample_store": false,
+    "live_key": false,
+    "evidence_root": false
+  },
+  "replacement_run_created": false,
+  "observability_handoff": "OBSERVABILITY-HANDOFF-INCOMPLETE"
+}

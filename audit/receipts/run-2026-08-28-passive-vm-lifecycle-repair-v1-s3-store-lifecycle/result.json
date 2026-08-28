@@ -1,0 +1,75 @@
+{
+  "schema": "nq.socketwrench_s3_generation_store_lifecycle_result.v1",
+  "campaign": "SOCKETWRENCH",
+  "campaign_slug": "passive-vm-lifecycle-repair-v1",
+  "classification": "PASSIVE-GENERATION-STORE-LIFECYCLE-QUALIFIED-WITH-RELEASE-LIMITATION",
+  "lifecycle_classification": "PASSIVE-GENERATION-STORE-LIFECYCLE-QUALIFIED",
+  "release_reproducibility_classification": "PASSIVE-S3-RELEASE-REPRODUCIBILITY-NOT-QUALIFIED",
+  "branch": "campaign/passive-vm-lifecycle-repair-v1",
+  "parent_commit": "675e247e85d8e2e1f2801c06445bf863f82b3a5b",
+  "source_commit": "7a6b7c02acbd8c5de0bb92ebda77ebb905828bf5",
+  "release": {
+    "package_sha256": "caa373d50f14d930d04a9b02b27655eea8685be220eda2c957bc6254b990c30a",
+    "tar_sha256": "6afb6a3b7f5661a9d38972ce58c312dc3a371b7a8235317a56cb2f54bcde620f",
+    "nq_sha256": "fd841a7acaacff978df793b3fe676017030e5f0328987e0591778a141ad963e9",
+    "nqd_sha256": "25558e3710d33c4a61d25cf9b6ad2c08910559e1776c065e4b400c974c18f731",
+    "host_helper_sha256": "cd12ed5620a34fae531cbb5d451fd5b3519395ce2f3402a12d3fd4e7d3a87494",
+    "linode_origin_helper_sha256": "6f54053238de79cccd4d2cd540a844c4955e960c9179472a38c872f5daed2bf7",
+    "passive_helper_sha256": "29256592dbc963a9aa3c3d6886c15afbb8114d5d143c4fdd859849d09ef8045c"
+  },
+  "musl_provenance": {
+    "musl_deb_sha256": "9f0883c20b4b746e05e947bafd99cb933f5494ffaaa6fcd360cbe1fbcf264883",
+    "musl_dev_deb_sha256": "4b451ecb6a0f8469883058cf22a807f3bd9cc16d115cc08b7efc35fe8eb44db2",
+    "musl_tools_deb_sha256": "46c01d212d3eb3a1322693089037f0a5c92383a089d39c392db3c86c19ffb229",
+    "musl_gcc_specs_sha256": "00591912cc91feb41f498f31a6d1843c9b326564a4a779e450cfb8fb8a1f4452",
+    "compiler_wrapper_sha256": "617611c69a08d772298ffe2358fdc9b7a53eb9a389a9590281108dcaa6f58820"
+  },
+  "installed_material": {
+    "nqd_unit_sha256": "cdb3990e6420102ac04ce189af3f9266bee2a0f919118f2609895dd371da199d",
+    "observer_unit_sha256": "69ddc31daa0f238c315707b1c204769887ac5c700e42e35570e59701a974d542",
+    "recurrence_service_sha256": "fa41bf306b91e0a106856a12e2f23cfeb5f67ae321e45d0e7324debb3f590b09",
+    "recurrence_timer_sha256": "8c8b6a3a3faff48519b779fc29b2f61d3bbb457dc2c27310c7d011b490421dd3",
+    "sysusers_sha256": "18d926bb7fd1c2fd512f2bed2c3dec08826236556dd9ad306fac67f5e5c72d08",
+    "tmpfiles_sha256": "b675c201ac3e26297841eedc489b8662bd55d942274f197b9b406b9262c43ab6",
+    "postinst_sha256": "5498795712898361910ee1f5b1d578dd481c8a002ed7f7893aca5e77411b35e6",
+    "prerm_sha256": "44ba4af4cb9d14781519dcf3e991c3c3d4c95901028a3719ddc4b47870b654a1",
+    "postrm_sha256": "73428bb638cf05b2c19148e2f44e63f1c0d4e45bdc35aad8498892ed9137900d",
+    "control_template_sha256": "5444f3ab45691c32cb88e3657551782814c2cc299673e0293a8d1e55263570fa"
+  },
+  "qualification": {
+    "focused_tests_passed": 2,
+    "serial_workspace": "pass",
+    "clippy_warnings_denied": "pass",
+    "format": "pass",
+    "diff_check": "pass",
+    "structural_checks": "pass",
+    "release_bundle": "pass",
+    "failure_atomicity": "pass",
+    "reproducibility_gate": "fail_closed"
+  },
+  "reproducibility_attempts": [
+    {"limit_kib": 393216, "observed_kib": 579648, "exit": 1},
+    {"limit_kib": 600000, "observed_kib": 620008, "exit": 1},
+    {"limit_kib": 700000, "observed_kib": 701644, "exit": 1},
+    {"limit_kib": 750000, "observed_kib": 793384, "exit": 1, "both_candidate_packages_created": true}
+  ],
+  "reproducibility_certified": false,
+  "authority_counts": {
+    "h": 0,
+    "g": 0,
+    "e": 0,
+    "watchers": 0,
+    "admissions": 0,
+    "activations": 0,
+    "samples": 0,
+    "recurrence_attempts": 0,
+    "acquisitions": 0,
+    "handoffs": 0,
+    "fences": 0
+  },
+  "glasshopper_assessment": {
+    "shared_source_law": true,
+    "store_absence_factually_disproved": true,
+    "live_evidence_misleading": false
+  }
+}
