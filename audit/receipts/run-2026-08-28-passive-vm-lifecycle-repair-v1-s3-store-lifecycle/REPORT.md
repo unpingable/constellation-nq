@@ -1,7 +1,7 @@
 # SOCKETWRENCH S3 — generation-store lifecycle
 
-Campaign: `SOCKETWRENCH`  
-Slug: `passive-vm-lifecycle-repair-v1`  
+Campaign: `SOCKETWRENCH`
+Slug: `passive-vm-lifecycle-repair-v1`
 Classification: `PASSIVE-GENERATION-STORE-LIFECYCLE-QUALIFIED-WITH-RELEASE-LIMITATION`
 
 Independent subresults:
