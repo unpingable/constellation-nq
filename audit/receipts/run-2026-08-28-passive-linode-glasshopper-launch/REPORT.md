@@ -2,7 +2,7 @@
 
 ## Classification
 
-`PASSIVE-LINODE-FRESH-24H-LAUNCH-QUALIFIED`
+`PASSIVE-LINODE-FRESH-24H-LAUNCH-QUALIFIED-WITH-LIMITATION`
 
 Campaign `GLASSHOPPER`, canonical slug
 `passive-linode-canonical-relation-relaunch-v1`.
@@ -152,6 +152,24 @@ The launch service began at `2026-08-28T21:45:00.012685Z` and durably completed
 at `2026-08-28T21:45:05.868Z` with systemd result `success`. No launch failure
 latch exists. The elapsed launch timer is disabled and has no next elapse, so
 it cannot create a second activation.
+
+There was one disclosed launch-mechanics limitation. At
+`2026-08-28T21:45:02.096580Z`, after the recurrence timer had been exposed but
+before final state-directory ownership and G1 arming, a mechanical wake tried
+to inspect a staged activation. It refused at the pathname permission boundary
+and the service exited 1 at `21:45:02.135687Z`. The append-only ledgers prove
+that this staging wake created zero acquisitions, attempts, coordination
+claims, fencing epochs, provider starts, or `outcome_unknown` results. The
+first recurrence acquisition was created only at `21:45:32.187Z`, after exact
+activation, and completed normally. Thus the required zero-attempt staging
+property held, no provider boundary was crossed, and no retry crossed a fence.
+The service's next successful run cleared its transient failed state.
+
+The limitation is in campaign unit sequencing: recurrence was mechanically
+wakeable before state ownership was finalized. It is not a shared NQ semantic
+defect and does not make the authority ledger or subsequent 24-hour evidence
+ambiguous. The running charter is therefore preserved rather than failed
+closed, but the launch is not reported as an unqualified pass.
 
 Fresh G1 admission
 `6ebbd5b8-173b-4596-863e-78766df4ce72` activated. Activation

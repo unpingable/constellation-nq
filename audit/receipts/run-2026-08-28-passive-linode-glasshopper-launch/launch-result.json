@@ -1,6 +1,6 @@
 {
   "schema": "nq.passive_linode_glasshopper_fresh_24h_launch_result.v1",
-  "classification": "PASSIVE-LINODE-FRESH-24H-LAUNCH-QUALIFIED",
+  "classification": "PASSIVE-LINODE-FRESH-24H-LAUNCH-QUALIFIED-WITH-LIMITATION",
   "campaign": "GLASSHOPPER",
   "campaign_slug": "passive-linode-canonical-relation-relaunch-v1",
   "qualified_base_commit": "675e247e85d8e2e1f2801c06445bf863f82b3a5b",
@@ -23,6 +23,19 @@
     "service_result": "success",
     "failure_latch_present": false,
     "replacement_created": false
+  },
+  "staging_wake_limitation": {
+    "service_started_at": "2026-08-28T21:45:02.096580Z",
+    "service_failed_at": "2026-08-28T21:45:02.135687Z",
+    "reason": "staged_activation_permission_boundary_before_final_state_ownership",
+    "recurrence_acquisitions_created": 0,
+    "recurrence_attempts_consumed": 0,
+    "coordination_claims": 0,
+    "fencing_epochs": 0,
+    "provider_starts": 0,
+    "outcome_unknown": 0,
+    "first_later_authorized_acquisition_created_at": "2026-08-28T21:45:32.187Z",
+    "shared_source_semantic_defect": false
   },
   "grant_id": "sha256:00f548a1d311833439b8042d74261b044e6f596453314dcc26725268e6d14e6d",
   "grant_post_issuance_state": {
