@@ -1,8 +1,16 @@
 # NQ k3s / AG exact-occurrence execution contract V1
 
-Status: **contract decision; implementation entry gate closed**
+Status: **TURNSTILE T0-T3 implemented; primitive adjudicated separately**
 
-Classification: `PASSIVE-K3S-AG-EXECUTION-CONTRACT-SPECIFIED-ADAPTER-BLOCKED`
+Campaign: `TURNSTILE`
+
+Campaign slug: `k3s-ag-exact-occurrence-adapter-v1`
+
+The original entry-gate classification in this document was
+`PASSIVE-K3S-AG-EXECUTION-CONTRACT-SPECIFIED-ADAPTER-BLOCKED`. TURNSTILE then
+implemented T0-T3 on the scoped successor branch. The post-T3 primitive
+decision is recorded in `K3S_AG_TURNSTILE_PRIMITIVE_DECISION_V1.md`; this
+document remains the constitutional contract and historical entry decision.
 
 This document specifies the narrow boundary by which an already-prepared NQ
 occurrence could be governed by AG, custodied by Docket, and executed by
