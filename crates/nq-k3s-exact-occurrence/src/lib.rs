@@ -6,6 +6,8 @@
 
 use std::collections::BTreeMap;
 
+/// Immutable OCI identity and external evidence-custody law.
+pub mod artifact_evidence;
 /// Mechanics-separated exact execute/reconcile boundary.
 pub mod executor;
 /// Portable Kubernetes origin and capacity fact law.
