@@ -1,0 +1,8 @@
+{
+  "argv": [
+    "systemctl",
+    "is-enabled",
+    "nq-recurring-office.service"
+  ],
+  "status": 0
+}

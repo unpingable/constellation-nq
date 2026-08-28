@@ -1,0 +1,34 @@
+{
+  "campaign": "SOCKETWRENCH",
+  "slug": "passive-vm-lifecycle-repair-v1",
+  "source_base": "675e247e85d8e2e1f2801c06445bf863f82b3a5b",
+  "source_commit": "4e109f889330b876e7c1776b27fcde697ef77f21",
+  "branch": "campaign/passive-vm-lifecycle-repair-v1",
+  "classifications": {
+    "s0": "PASSIVE-VM-AF-UNIX-CUSTODY-REPAIRED-AND-QUALIFIED",
+    "s1": "PASSIVE-VM-E2-LIFETIME-FIXTURE-QUALIFIED"
+  },
+  "first_packaged_refusal": {
+    "stage": "open AF_UNIX pathname",
+    "target": "x86_64-unknown-linux-musl",
+    "observed_flags": "O_RDONLY|O_LARGEFILE|O_NOFOLLOW|O_CLOEXEC",
+    "observed_errno": "ENXIO",
+    "before_fchownat": true
+  },
+  "corrected_open_flags": "O_PATH|O_NOFOLLOW|O_CLOEXEC",
+  "fchownat_permission_boundary": "CAP_CHOWN",
+  "enrollment_lifetime": {
+    "law": "expires_at_unix_ms-created_at_unix_ms <= max_enrollment_lifetime_ms",
+    "old_120s_precreated_e2": "lifetime_exceeds_policy",
+    "equality_120s": "accepted",
+    "over_by_1ms": "lifetime_exceeds_policy",
+    "expired_at_creation": "invalid_expiry",
+    "corrected_fixture_ceiling_ms": 180000
+  },
+  "release": {
+    "package_sha256": "821c8f7f5dc536c46222c514f9d3b0114efd23a9045bf946d1eb76cd0ddcf0a8",
+    "nq_sha256": "686f6928767a9896e359b1b9a6cf054ee4759fd586586977330c54ab32b68f1c",
+    "passive_helper_sha256": "901272c1a54ca10e8ba610ce706bc54d455f17602398bc5c13e65b68e4073134",
+    "origin_helper_sha256": "087febe3831c9eb4a6ce0ef31bde18bf923bab43ac58367db6b675b6c5ff5c3c"
+  }
+}

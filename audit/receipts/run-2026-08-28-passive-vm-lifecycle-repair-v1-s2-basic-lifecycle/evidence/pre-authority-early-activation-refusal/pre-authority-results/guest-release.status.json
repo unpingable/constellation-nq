@@ -1,0 +1,8 @@
+{
+  "argv": [
+    "sh",
+    "-c",
+    ". /etc/os-release; printf '%s:%s\\n' \"$ID\" \"$VERSION_ID\""
+  ],
+  "status": 0
+}

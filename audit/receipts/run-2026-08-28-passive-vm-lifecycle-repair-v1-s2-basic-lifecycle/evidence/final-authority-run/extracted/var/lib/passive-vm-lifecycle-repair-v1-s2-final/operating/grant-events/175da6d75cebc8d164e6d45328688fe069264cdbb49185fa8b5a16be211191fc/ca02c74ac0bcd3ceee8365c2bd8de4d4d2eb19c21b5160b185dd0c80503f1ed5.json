@@ -1,0 +1,1 @@
+{"detail":{},"event_id":"sha256:ca02c74ac0bcd3ceee8365c2bd8de4d4d2eb19c21b5160b185dd0c80503f1ed5","event_kind":"activated","occurred_at_unix_ms":1787953270152,"operation_id":"socketwrench-activate-cb56c601526846cc","schema":"nq.passive_load_operating_event.v1","sequence":0,"target_id":"sha256:175da6d75cebc8d164e6d45328688fe069264cdbb49185fa8b5a16be211191fc"}

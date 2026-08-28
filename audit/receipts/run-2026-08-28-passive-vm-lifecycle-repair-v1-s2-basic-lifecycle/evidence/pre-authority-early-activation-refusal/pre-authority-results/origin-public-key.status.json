@@ -1,0 +1,11 @@
+{
+  "argv": [
+    "runuser",
+    "-u",
+    "nq-origin-helper",
+    "--",
+    "/usr/lib/nq/helpers/nq-linode-origin-helper",
+    "--public-key"
+  ],
+  "status": 0
+}

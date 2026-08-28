@@ -1,0 +1,9 @@
+{
+  "argv": [
+    "systemctl",
+    "disable",
+    "--now",
+    "nq-passive-vm-lifecycle-repair-v1-s2-final-recurrence.service"
+  ],
+  "status": 0
+}

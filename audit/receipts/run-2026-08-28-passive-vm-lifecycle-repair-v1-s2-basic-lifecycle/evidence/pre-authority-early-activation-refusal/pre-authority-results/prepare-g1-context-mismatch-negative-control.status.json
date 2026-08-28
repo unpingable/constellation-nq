@@ -1,0 +1,10 @@
+{
+  "argv": [
+    "/usr/lib/nq/helpers/nq-passive-load-helper",
+    "prepare-generation",
+    "/etc/passive-vm-lifecycle-repair-v1/observer-policy.json",
+    "/etc/passive-vm-lifecycle-repair-v1/g1-spec.json",
+    "/var/tmp/passive-vm-lifecycle-repair-v1-results/must-not-materialize-generation.json"
+  ],
+  "status": 2
+}

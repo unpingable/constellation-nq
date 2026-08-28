@@ -1,0 +1,8 @@
+{
+  "argv": [
+    "systemctl",
+    "is-enabled",
+    "nq-passive-load-observer.service"
+  ],
+  "status": 0
+}

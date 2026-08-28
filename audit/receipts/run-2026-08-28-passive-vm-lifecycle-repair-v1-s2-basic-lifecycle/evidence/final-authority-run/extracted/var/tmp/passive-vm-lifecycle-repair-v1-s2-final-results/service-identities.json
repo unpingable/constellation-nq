@@ -1,0 +1,22 @@
+{
+  "nq": {
+    "gid": 988,
+    "uid": 988
+  },
+  "nq-helper": {
+    "gid": 987,
+    "uid": 987
+  },
+  "nq-origin-helper": {
+    "gid": 986,
+    "uid": 986
+  },
+  "nq-passive-load-observer": {
+    "gid": 985,
+    "uid": 985
+  },
+  "nq-passive-load-reader": {
+    "gid": 984,
+    "uid": 984
+  }
+}

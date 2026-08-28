@@ -1,0 +1,22 @@
+{
+  "grant_status": {
+    "active": false,
+    "aggregate_acquisitions_issued": 8,
+    "aggregate_acquisitions_remaining": 0,
+    "aggregate_samples_issued": 24,
+    "aggregate_samples_remaining": 0,
+    "expires_at_unix_ms": 1787953390000,
+    "grant_id": "sha256:175da6d75cebc8d164e6d45328688fe069264cdbb49185fa8b5a16be211191fc",
+    "observer_generations_issued": 2,
+    "observer_generations_remaining": 0,
+    "recurrence_enrollments_issued": 2,
+    "recurrence_enrollments_remaining": 0,
+    "schema": "nq.passive_load_operating_grant_status.v1",
+    "successor_handoffs_remaining": 1,
+    "successor_handoffs_staged": 0,
+    "terminal_reason": "child_budgets_exhausted",
+    "watcher_succession_edges_issued": 1,
+    "watcher_succession_edges_remaining": 0
+  },
+  "timer_enabled": false
+}

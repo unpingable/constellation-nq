@@ -1,0 +1,1 @@
+{"producer_issuer":"nq-passive-load-observer:passive-vm-lifecycle-repair-v1-s2","producer_key_id":"passive-vm-lifecycle-repair-v1-s2-key-1","public_key_digest":"sha256:4abe3ea8ff94e3e043241a9252534ea0d70f9c6efd80da495c94e8783dce6f33","public_key_hex":"73ed5fd4575db5ad62da68cb33993900d2e2187870d3077a9d1b94feb4d82a2e","schema":"nq.passive_load_sample_key_receipt.v1"}

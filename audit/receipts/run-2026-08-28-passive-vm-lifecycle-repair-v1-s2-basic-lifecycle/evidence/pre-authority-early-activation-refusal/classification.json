@@ -1,0 +1,21 @@
+{
+  "classification": "PASSIVE-VM-PREAUTHORITY-ORDERING-FIXTURE-REFUSED",
+  "campaign": "SOCKETWRENCH",
+  "slug": "passive-vm-lifecycle-repair-v1",
+  "source_commit": "4e109f889330b876e7c1776b27fcde697ef77f21",
+  "vm_instance_id": "passive-vm-lifecycle-repair-v1-s2-basic",
+  "vm_hostname": "socketwrench-s2-basic",
+  "grant_candidate_id": "sha256:f62c8b7fe4848c3a84c52546e4bfe93f9adbab20c33a9a8382c7940f0b102d62",
+  "grant_candidate_receipt_authority_created": false,
+  "refusal": "operating grant is outside its finite activation interval",
+  "cause": "fixture called grant-activate before H.not_before",
+  "not_before_unix_ms": 1787952470000,
+  "created_at_unix_ms": 1787952413561,
+  "grant_activated": false,
+  "h_children_issued": 0,
+  "office_activations_created": 0,
+  "timer_created_or_enabled": false,
+  "recurrence_attempts": 0,
+  "portability_defect": false,
+  "correct_fixture_order": "wait_until(not_before) then grant-activate"
+}

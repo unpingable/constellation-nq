@@ -1,0 +1,14 @@
+{
+  "argv": [
+    "runuser",
+    "-u",
+    "nq-passive-load-observer",
+    "--",
+    "/usr/lib/nq/helpers/nq-passive-load-helper",
+    "keygen",
+    "/var/lib/nq-passive-load/keys/passive-vm-lifecycle-repair-v1-s2-final.key",
+    "nq-passive-load-observer:passive-vm-lifecycle-repair-v1-s2-final",
+    "passive-vm-lifecycle-repair-v1-s2-final-key-1"
+  ],
+  "status": 0
+}

@@ -1,0 +1,8 @@
+{
+  "argv": [
+    "dpkg",
+    "-i",
+    "/home/nqtest/socketwrench-nq-ng.deb"
+  ],
+  "status": 0
+}

@@ -1,0 +1,99 @@
+schema = "nq.config.v1"
+database_path = "/var/lib/passive-vm-lifecycle-repair-v1/nq.db"
+socket_path = "/run/passive-vm-lifecycle-repair-v1/nqd.sock"
+admissions_dir = "/var/lib/passive-vm-lifecycle-repair-v1/admissions"
+helper_runtime_dir = "/run/passive-vm-lifecycle-repair-v1/helpers"
+
+[[watchers]]
+instance_id = "passive-vm-lifecycle-repair-v1-w1-d8967c2f6cd6ff16"
+carrier = "stdio"
+subject = "host:passive-vm-lifecycle-repair-v1"
+capability_ceiling = ["read_procfs", "read_system_info"]
+checkpoint_policy = "disabled"
+[watchers.command]
+executable = "/usr/lib/nq/helpers/nq-passive-load-helper"
+args = ["serve-stdio", "/etc/passive-vm-lifecycle-repair-v1/provider-g1.json"]
+env = {}
+execution_account = "nq-passive-load-reader"
+working_directory = "/usr"
+[watchers.profile]
+id = "nq.host"
+version = 1
+[watchers.scope]
+kind = "host"
+value = { id = "passive-vm-lifecycle-repair-v1" }
+[watchers.vantage]
+kind = "local"
+value = {}
+[watchers.schedule]
+interval_seconds = 86400
+jitter_seconds = 0
+deadline_ms = 10000
+retry_backoff_seconds = 1
+max_retry_backoff_seconds = 10
+[watchers.resources]
+max_response_bytes = 1048576
+max_stderr_bytes = 65536
+max_observations = 1
+max_address_space_bytes = 536870912
+max_cpu_seconds = 30
+max_processes = 4
+max_open_files = 64
+max_file_bytes = 67108864
+[watchers.passive_host_load_sample]
+schema = "nq.passive_host_load_provider_config.v1"
+max_sample_age_ms = 15000
+observer_profile = "nq.host_load_passive_sampler.v1"
+observer_artifact_digest = "sha256:901272c1a54ca10e8ba610ce706bc54d455f17602398bc5c13e65b68e4073134"
+observer_config_digest = "sha256:d31e74428f8347ed9b0f8bb2000e035f8208de7bd6f2e80d68e98b104764c74b"
+producer_issuer = "nq-passive-load-observer:passive-vm-lifecycle-repair-v1-s2"
+producer_key_id = "passive-vm-lifecycle-repair-v1-s2-key-1"
+producer_public_key_hex = "73ed5fd4575db5ad62da68cb33993900d2e2187870d3077a9d1b94feb4d82a2e"
+capacity_context_id = "sha256:57ea44cbe5f710ffdb266bec063b107d38176f109c4d9d0fe5b43334a87b9e77"
+
+[[watchers]]
+instance_id = "passive-vm-lifecycle-repair-v1-w2-ae01c56ee5a3f702"
+carrier = "stdio"
+subject = "host:passive-vm-lifecycle-repair-v1"
+capability_ceiling = ["read_procfs", "read_system_info"]
+checkpoint_policy = "disabled"
+[watchers.command]
+executable = "/usr/lib/nq/helpers/nq-passive-load-helper"
+args = ["serve-stdio", "/etc/passive-vm-lifecycle-repair-v1/provider-g2.json"]
+env = {}
+execution_account = "nq-passive-load-reader"
+working_directory = "/usr"
+[watchers.profile]
+id = "nq.host"
+version = 1
+[watchers.scope]
+kind = "host"
+value = { id = "passive-vm-lifecycle-repair-v1" }
+[watchers.vantage]
+kind = "local"
+value = {}
+[watchers.schedule]
+interval_seconds = 86400
+jitter_seconds = 0
+deadline_ms = 10000
+retry_backoff_seconds = 1
+max_retry_backoff_seconds = 10
+[watchers.resources]
+max_response_bytes = 1048576
+max_stderr_bytes = 65536
+max_observations = 1
+max_address_space_bytes = 536870912
+max_cpu_seconds = 30
+max_processes = 4
+max_open_files = 64
+max_file_bytes = 67108864
+[watchers.passive_host_load_sample]
+schema = "nq.passive_host_load_provider_config.v1"
+max_sample_age_ms = 15000
+observer_profile = "nq.host_load_passive_sampler.v1"
+observer_artifact_digest = "sha256:901272c1a54ca10e8ba610ce706bc54d455f17602398bc5c13e65b68e4073134"
+observer_config_digest = "sha256:7d82607b8e70a40cf84c08dd6c3045ef0d0407f71de84d2b4d65aa0e09521fca"
+producer_issuer = "nq-passive-load-observer:passive-vm-lifecycle-repair-v1-s2"
+producer_key_id = "passive-vm-lifecycle-repair-v1-s2-key-1"
+producer_public_key_hex = "73ed5fd4575db5ad62da68cb33993900d2e2187870d3077a9d1b94feb4d82a2e"
+capacity_context_id = "sha256:57ea44cbe5f710ffdb266bec063b107d38176f109c4d9d0fe5b43334a87b9e77"

@@ -1,0 +1,4 @@
+{
+  "error": "grant-activate failed with status 1: nq: operating grant is outside its finite activation interval\n",
+  "traceback": "Traceback (most recent call last):\n  File \"/home/nqtest/guest-passive-qualification.py\", line 783, in <module>\n    main()\n  File \"/home/nqtest/guest-passive-qualification.py\", line 499, in main\n    run_nq(\"grant-activate\", [\"operating\", \"grant-activate\", grant_id, \"--operation-id\", f\"socketwrench-activate-{secrets.token_hex(8)}\", \"--state-dir\", str(OPERATING)])\n  File \"/home/nqtest/guest-passive-qualification.py\", line 91, in run_nq\n    return run(\n           ^^^^\n  File \"/home/nqtest/guest-passive-qualification.py\", line 80, in run\n    raise RuntimeError(f\"{label} failed with status {completed.returncode}: {completed.stderr[-1200:]}\")\nRuntimeError: grant-activate failed with status 1: nq: operating grant is outside its finite activation interval\n\n"
+}

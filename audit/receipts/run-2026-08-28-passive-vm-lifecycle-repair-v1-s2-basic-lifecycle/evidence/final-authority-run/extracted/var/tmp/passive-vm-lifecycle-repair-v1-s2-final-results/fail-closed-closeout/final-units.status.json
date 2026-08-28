@@ -1,0 +1,10 @@
+{
+  "argv": [
+    "systemctl",
+    "list-units",
+    "--all",
+    "--no-legend",
+    "nq-passive-vm-lifecycle-repair-v1-s2-final*"
+  ],
+  "status": 0
+}

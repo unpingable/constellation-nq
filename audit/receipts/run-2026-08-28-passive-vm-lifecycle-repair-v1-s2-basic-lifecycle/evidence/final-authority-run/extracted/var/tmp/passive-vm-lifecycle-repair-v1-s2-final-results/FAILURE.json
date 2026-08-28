@@ -1,0 +1,4 @@
+{
+  "error": "g1-sample-1 failed with status 2: nq-passive-load-helper: passive-load I/O failed: No such file or directory (os error 2)\n",
+  "traceback": "Traceback (most recent call last):\n  File \"/home/nqtest/guest-passive-qualification.py\", line 784, in <module>\n    main()\n  File \"/home/nqtest/guest-passive-qualification.py\", line 548, in main\n    run_observer(\"g1-sample-1\", [\"sample-once-generation\", str(CONTROL / \"observer-policy.json\"), generations[0][\"path\"]])\n  File \"/home/nqtest/guest-passive-qualification.py\", line 121, in run_observer\n    return run(\n           ^^^^\n  File \"/home/nqtest/guest-passive-qualification.py\", line 80, in run\n    raise RuntimeError(f\"{label} failed with status {completed.returncode}: {completed.stderr[-1200:]}\")\nRuntimeError: g1-sample-1 failed with status 2: nq-passive-load-helper: passive-load I/O failed: No such file or directory (os error 2)\n\n"
+}

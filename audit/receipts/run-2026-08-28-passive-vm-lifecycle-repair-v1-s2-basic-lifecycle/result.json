@@ -1,0 +1,55 @@
+{
+  "campaign": "SOCKETWRENCH",
+  "slug": "passive-vm-lifecycle-repair-v1",
+  "classification": "PASSIVE-VM-AUTHORITY-LIFECYCLE-NOT-QUALIFIED",
+  "subclassification": "FIRST SAMPLE STORE ABSENT",
+  "source_base": "675e247e85d8e2e1f2801c06445bf863f82b3a5b",
+  "source_commit": "4e109f889330b876e7c1776b27fcde697ef77f21",
+  "branch": "campaign/passive-vm-lifecycle-repair-v1",
+  "fixture_defect": {
+    "missing_path": "/var/lib/nq-passive-load/samples/passive-vm-lifecycle-repair-v1-s2-final/g1",
+    "first_refusal": "nq-passive-load-helper: passive-load I/O failed: No such file or directory (os error 2)",
+    "product_refusal_correct": true,
+    "portability_law": false
+  },
+  "authority": {
+    "h": "sha256:175da6d75cebc8d164e6d45328688fe069264cdbb49185fa8b5a16be211191fc",
+    "relation": "sha256:3fee289d565a597a7df122ac534f2c506531d5b414c5cad9bf054d69ca08ddf7",
+    "g": [
+      "sha256:449c8c7b2bb8a6337e56bcf51e2cec08193ddc1baf2fe6cf36964ea076087d6e",
+      "sha256:9f167d35af6b516cdaf1e8049d99104f94a307810eb70ffb371ebb48d1730cdb"
+    ],
+    "e": [
+      "sha256:e07cccf06de8523a4c9ed4e797cd8bbe4a9e418bd9d7446cad31e9a84e332b84",
+      "sha256:fa79a1740e991f4704ba34af087e5ffa7cbd4519913216e492bc1bb9a97415de"
+    ]
+  },
+  "observed": {
+    "admissions": 0,
+    "activations": 0,
+    "samples": 0,
+    "recurrence_attempts": 0,
+    "acquisitions": 0,
+    "skipped_slots": 0,
+    "handoffs": 0,
+    "provider_starts": 0,
+    "fencing_epochs": 0,
+    "outcome_unknown": 0
+  },
+  "closeout": {
+    "h": "retired",
+    "e_revoked": 2,
+    "watchers_admitted": 0,
+    "generation_runtime_state": "never_materialized",
+    "live_generation_key_path_present": false,
+    "matching_units": 0,
+    "matching_timers": 0,
+    "vm_powered_off": true,
+    "qemu_img_check": "PASS",
+    "replacement_after_authority": false
+  },
+  "evidence": {
+    "terminal_archive_sha256": "f7eba691c0aaf2dd8069301353709c02c82042dc5375a19dcc5172106de129bb",
+    "generation_key_sha256": "f31e64b7e0017c465dbb888c4e4880669038e995d71f864562fcdb68bcab6161"
+  }
+}

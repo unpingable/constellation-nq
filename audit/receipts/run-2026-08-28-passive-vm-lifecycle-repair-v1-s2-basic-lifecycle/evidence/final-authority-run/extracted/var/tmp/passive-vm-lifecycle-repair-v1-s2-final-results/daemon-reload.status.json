@@ -1,0 +1,7 @@
+{
+  "argv": [
+    "systemctl",
+    "daemon-reload"
+  ],
+  "status": 0
+}
