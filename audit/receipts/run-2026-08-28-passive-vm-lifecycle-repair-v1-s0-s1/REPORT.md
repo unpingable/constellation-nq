@@ -1,7 +1,7 @@
 # SOCKETWRENCH S0/S1 — AF_UNIX custody and enrollment-fixture repair
 
-Date: 2026-08-28  
-Campaign: SOCKETWRENCH  
+Date: 2026-08-28
+Campaign: SOCKETWRENCH
 Slug: `passive-vm-lifecycle-repair-v1`
 
 ## Classification
