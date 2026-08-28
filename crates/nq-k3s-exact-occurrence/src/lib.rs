@@ -6,6 +6,9 @@
 
 use std::collections::BTreeMap;
 
+/// Mechanics-separated exact execute/reconcile boundary.
+pub mod executor;
+
 use nq_protocol::{CanonicalizationError, Sha256Digest, semantic_digest};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -790,6 +793,51 @@ impl ExactOccurrenceMachineV1 {
             claim,
             runtime,
             unknown,
+        };
+        Ok(TransitionEffectV1::Applied)
+    }
+
+    /// Settles an outcome-unknown occurrence from later exact read-only evidence.
+    ///
+    /// This transition never permits another execution. It only replaces an
+    /// uncertainty projection with a definite result for the same retained
+    /// authorization, claim, and optional runtime identity.
+    ///
+    /// # Errors
+    ///
+    /// Refuses unless the current state is `outcome_unknown`, or when a
+    /// terminal replay substitutes retained exact evidence.
+    pub fn settle_outcome_unknown(
+        &mut self,
+        terminal: TerminalBindingV1,
+    ) -> Result<TransitionEffectV1, OccurrenceError> {
+        if let Some(existing) = self.terminal_binding() {
+            return if existing == &terminal {
+                Ok(TransitionEffectV1::IdempotentReplay)
+            } else {
+                Err(OccurrenceError::ReplayConflict("terminal result"))
+            };
+        }
+        let OccurrenceStateV1::OutcomeUnknown {
+            authorization,
+            claim,
+            runtime,
+            ..
+        } = &self.state
+        else {
+            return Err(self.invalid_transition("terminal_from_reconciliation"));
+        };
+        if terminal.class != TerminalClassV1::Refused && runtime.is_none() {
+            return Err(OccurrenceError::InvalidPlan(
+                "reconciled terminal effect lacks runtime",
+            ));
+        }
+        self.validate_terminal_time(terminal.terminal_at_unix_ms, runtime.as_ref())?;
+        self.state = OccurrenceStateV1::Terminal {
+            authorization: authorization.clone(),
+            claim: claim.clone(),
+            runtime: runtime.clone(),
+            terminal,
         };
         Ok(TransitionEffectV1::Applied)
     }
