@@ -1444,7 +1444,7 @@ async fn operating_command(
                 operator_occurrence_id,
                 now,
             )?;
-            print_canonical_value(&relation)
+            print_exact_canonical_value(&relation)
         }
         OperatingCommand::IssueWatcherSuccession {
             grant_id,
@@ -4387,12 +4387,20 @@ fn print_value(value: &impl Serialize, json_output: bool) -> Result<()> {
     Ok(())
 }
 
-fn print_canonical_value(value: &impl Serialize) -> Result<()> {
+fn write_exact_canonical_value(value: &impl Serialize, output: &mut impl Write) -> Result<()> {
     let bytes = nq_protocol::canonical_json_bytes(value)?;
-    println!(
-        "{}",
-        String::from_utf8(bytes).context("canonical JSON is not UTF-8")?
-    );
+    output.write_all(&bytes)?;
+    Ok(())
+}
+
+fn print_exact_canonical_value(value: &impl Serialize) -> Result<()> {
+    write_exact_canonical_value(value, &mut std::io::stdout().lock())
+}
+
+fn print_canonical_line(value: &impl Serialize) -> Result<()> {
+    let mut output = std::io::stdout().lock();
+    write_exact_canonical_value(value, &mut output)?;
+    output.write_all(b"\n")?;
     Ok(())
 }
 
@@ -4492,7 +4500,7 @@ async fn run_watcher_action(
             if json_output
                 && let Some(envelope) = watcher_action_error_envelope(instance_id, action, &error)
             {
-                print_canonical_value(&envelope)?;
+                print_canonical_line(&envelope)?;
             }
             Err(error.into())
         }
