@@ -1,0 +1,90 @@
+{
+  "schema": "nq.passive_load_replacement_charter_receipt.v1",
+  "classification": "replacement_charter_failed_closed_third_handoff_outcome_unknown",
+  "planned_interval": {
+    "not_before": "2026-08-27T18:00:00Z",
+    "expires_exclusive": "2026-08-28T18:00:00Z"
+  },
+  "actual_closeout_started": "2026-08-28T12:06:20Z",
+  "operating_grant_id": "sha256:13dd77121ce3786cf967a4e0e98993e1639dc94612cdb17ce5309d49ba8df06d",
+  "capacity_context_id": "sha256:6c6e34b0e088655fce62d4dd15ea355e6d79015736c6e0fb5b8219feac492c7d",
+  "profile": {
+    "sample_interval_ms": 15000,
+    "acquisition_interval_ms": 300000,
+    "generation_duration_ms": 21600000,
+    "generation_max_samples": 1440,
+    "enrollment_duration_ms": 21600000,
+    "enrollment_max_occurrences": 72,
+    "h_max_generations": 4,
+    "h_max_enrollments": 4,
+    "h_max_succession_edges": 3,
+    "h_max_samples": 5760,
+    "h_max_acquisitions": 288,
+    "retention": "retain_all",
+    "min_free_bytes": 10737418240
+  },
+  "samples": {
+    "g1": 1430,
+    "g2": 1440,
+    "g3": 1440,
+    "g4": 24,
+    "total": 4334,
+    "bytes": 10143744
+  },
+  "recurrence": {
+    "e1_occurrences": 71,
+    "e1_completed": 70,
+    "e1_skipped": [[50, 50]],
+    "e2_occurrences": 70,
+    "e2_completed": 70,
+    "e2_skipped": [[46, 46], [70, 70]],
+    "e3_occurrences": 54,
+    "e3_completed": 53,
+    "e3_skipped": [[12, 12], [36, 36], [50, 50]],
+    "e4_occurrences": 0,
+    "completed_total": 193
+  },
+  "terminal_handoff": {
+    "handoff_id": "sha256:a46648572c5dab442f0c29496ecf4cbbc7effaaad406750f6934056db4139c1e",
+    "relation_id": "sha256:22bf46899a5e9a2f5df4b37ff29d93b58d559a2b339dca2729b26122f0898fdf",
+    "successor_watcher": "labelwatch-host-passive-24h-r2-g4",
+    "expected_admission_id": "d1e9fb00-3705-4894-9963-cd011ef02ab3",
+    "state": "outcome_unknown",
+    "exact_admission_custody": false,
+    "timer_exposure": "inert",
+    "event_id": "sha256:ec547057921392bfa2d1393822b9d00bd960d554b042020e06a8c98933ac33da"
+  },
+  "unresolved_passive_occurrence": {
+    "acquisition_id": "recurrence:4d452935962a2a9bb82fceee832a3f3b31accba312928afef406da52ce7430b2",
+    "fencing_epoch": 194,
+    "provider_activity_evidence_id": "sha256:9b446b2e04c86cf71ce9704ce3c21e81e3c44243dea40b02072651123610e5ea",
+    "provider_activity_claim": "provider_quiescent",
+    "diagnostic_result": "unrecovered"
+  },
+  "storage": {
+    "charter_bytes": 16110692,
+    "total_attributable_bytes": 26254436,
+    "available_bytes_at_close": 26273411072,
+    "archive_required_for_one_day": false
+  },
+  "closeout": {
+    "h_retirement_event_id": "sha256:d69b43e9977eafde489faf84a75b5e33393f67e10eb17e9a0586dbf05db14ce2",
+    "observer_services_active": false,
+    "recurrence_service_active": false,
+    "timers_enabled": false,
+    "all_activations_closed": true,
+    "all_generations_retired": true,
+    "all_enrollments_revoked": true,
+    "third_charter_authorized": false
+  },
+  "nightshift_new_files": 0,
+  "a4": {
+    "acquisition_id": "recurrence:d555a10d2b4f11e7c6d550f43a6fd6d07631573bec5c14b54d09ca6b8e04beea",
+    "diagnostic_outcome": "unknown",
+    "provider_activity": "unknown",
+    "coordination_domain_id": "linode:labelwatch-host",
+    "coordination": "fenced_outcome_unknown",
+    "fencing_epoch": 1,
+    "unchanged": true
+  }
+}

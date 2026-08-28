@@ -63,7 +63,10 @@ if rg -q 'NightshiftClient|nightshift::|create_nightshift|run_nightshift' "$stor
 fi
 
 grep -q 'operating tick' "$service" || fail "one-shot service does not invoke transactional operating tick"
-grep -q 'NQ_OFFICE_ACTIVATION_ID' "$service" || fail "service manager bypasses exact activation identity"
+grep -q 'operating tick-grant' "$service" \
+  || fail "service manager bypasses the finite H-scoped activation projection"
+grep -q 'NQ_OPERATING_GRANT_ID' "$service" \
+  || fail "service manager does not bind one exact finite operating grant"
 rg -q 'office_not_canonically_armed' "$root/crates/nq-app/src/operating.rs" || fail "pre-Armed timer gate is missing"
 rg -q 'attempts_consumed: 0' "$root/crates/nq-app/src/operating.rs" \
   || fail "pre-Armed timer gate does not prove zero recurrence attempt consumption"

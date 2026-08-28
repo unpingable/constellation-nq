@@ -156,6 +156,19 @@ The repository implements the stage-one operational spine:
   continuity without creating one another or any Nightshift cycle. V1 retains
   all samples in each finite store and deliberately adds no deletion, archive,
   automatic key roll, or recursive renewal surface;
+- a finite higher-level passive operating grant and transactional office
+  activation boundary. One immutable H may pre-issue only its bounded ordinary
+  G/E children and typed, directed watcher-succession edges; distinct successor
+  watchers still require fresh ordinary admission and genesis. Timer wakeups
+  are semantically inert until an exact activation is Armed, and neither H nor
+  a service manager may renew H. The first replacement 24-hour charter closed
+  fail-closed at its third handoff after retain-all passive sample selection
+  exceeded the deployed one-shot process envelope. The handoff evaluator now
+  waits before admission while the shared coordination domain is occupied and
+  rechecks sample eligibility afterward, but the installed live release was
+  not changed and no third charter is authorized. Long-horizon unattended
+  operation therefore still requires a reviewed bounded sample-selection
+  custody/index law;
 - a native host profile/helper plus the conformance fixture profile;
 - strict, bounded `SystemSpecV1` validation and deterministic compilation into
   schema-domain-separated `ScopeCut` proposals, ratification-bound cuts,

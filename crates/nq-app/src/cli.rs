@@ -1726,6 +1726,77 @@ async fn successor_handoff_tick(
                 )?;
             }
             State::SampleReady => {
+                // Admission is itself a provider-facing diagnostic operation.  A
+                // successor sample being ready does not make that operation
+                // compositionally schedulable while the shared recurrence domain
+                // is still held (or while its provider-safe spacing fence is
+                // active).  Stay before AdmissionStarted so a service-manager
+                // timeout/restart cannot turn ordinary coordination delay into an
+                // epistemic outcome_unknown cut.
+                let config = NqConfig::load(config_path)?;
+                let store = Store::open_read_only(&config.database_path)?;
+                let coordination = store.recurrence_status(&handoff.spec.next_enrollment_id)?;
+                if let Some(reason) = successor_handoff_coordination_wait_reason(
+                    coordination.coordination_blocked,
+                    coordination.coordination_blocked_reason.as_deref(),
+                    coordination.holder_acquisition_id.as_deref(),
+                    coordination.outcome_unknown_fences_domain,
+                    coordination.provider_safe_next_start_unix_ms,
+                    now,
+                ) {
+                    return print_value(
+                        &json!({
+                            "handoff_id": handoff_id,
+                            "state": "sample_ready",
+                            "timer_exposure": "inert",
+                            "attempts_consumed": 0,
+                            "reason": reason,
+                            "coordination_domain_id": coordination.coordination_domain_id,
+                            "holder_acquisition_id": coordination.holder_acquisition_id,
+                            "provider_safe_next_start_unix_ms":
+                                coordination.provider_safe_next_start_unix_ms,
+                        }),
+                        true,
+                    );
+                }
+
+                // A coordination wait may outlive the sample that first made the
+                // handoff ready.  Re-run the exact passive eligibility predicate
+                // before crossing AdmissionStarted; never let readiness custody
+                // turn into permission to consume a stale sample.
+                let watcher = config
+                    .watcher(&handoff.spec.successor_watcher_instance_id)
+                    .context("successor handoff watcher is absent")?;
+                let binding = watcher_subject_binding(watcher)?;
+                let cutoff = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(now)
+                    .context("handoff clock is outside chrono range")?;
+                let passive = watcher
+                    .passive_host_load_sample
+                    .as_ref()
+                    .context("successor handoff watcher is not passive load")?;
+                let activation = crate::operating::OperatingLedger::open(state_dir)?
+                    .activation(&handoff.spec.next_activation_id)?;
+                if nq_passive_load_helper::eligible_sample_at(
+                    &activation.spec.provider_config_path,
+                    &binding,
+                    cutoff,
+                    passive.max_sample_age_ms,
+                )?
+                .is_none()
+                {
+                    return print_value(
+                        &json!({
+                            "handoff_id": handoff_id,
+                            "state": "sample_ready",
+                            "timer_exposure": "inert",
+                            "attempts_consumed": 0,
+                            "reason": "successor_sample_no_longer_eligible",
+                            "admission_attempted": false,
+                        }),
+                        true,
+                    );
+                }
+
                 crate::operating::OperatingLedger::open(state_dir)?.advance_handoff(
                     handoff_id,
                     State::AdmissionStarted,
@@ -1950,6 +2021,30 @@ async fn successor_handoff_tick(
         }
     }
     bail!("successor handoff exceeded its bounded local transition count")
+}
+
+fn successor_handoff_coordination_wait_reason(
+    coordination_blocked: bool,
+    blocked_reason: Option<&str>,
+    holder_acquisition_id: Option<&str>,
+    outcome_unknown_fences_domain: bool,
+    provider_safe_next_start_unix_ms: Option<i64>,
+    now: i64,
+) -> Option<String> {
+    if outcome_unknown_fences_domain {
+        return Some("successor_coordination_outcome_unknown_fence".into());
+    }
+    if coordination_blocked || holder_acquisition_id.is_some() {
+        return Some(
+            blocked_reason
+                .unwrap_or("successor_coordination_domain_occupied")
+                .to_owned(),
+        );
+    }
+    if provider_safe_next_start_unix_ms.is_some_and(|not_before| now < not_before) {
+        return Some("successor_provider_safe_spacing_active".into());
+    }
+    None
 }
 
 fn watcher_subject_binding(
@@ -4560,6 +4655,58 @@ helper_runtime_dir = "/run/nq/helpers"
                 "--same-enough",
             ])
             .is_err()
+        );
+    }
+
+    #[test]
+    fn successor_handoff_waits_before_admission_for_shared_domain_and_spacing() {
+        assert_eq!(
+            successor_handoff_coordination_wait_reason(
+                true,
+                Some("domain_occupied"),
+                Some("recurrence:predecessor"),
+                false,
+                Some(5_000),
+                4_000,
+            )
+            .as_deref(),
+            Some("domain_occupied")
+        );
+        assert_eq!(
+            successor_handoff_coordination_wait_reason(
+                true,
+                Some("outcome_unknown_domain_fence"),
+                Some("recurrence:unknown"),
+                true,
+                None,
+                4_000,
+            )
+            .as_deref(),
+            Some("successor_coordination_outcome_unknown_fence")
+        );
+        assert_eq!(
+            successor_handoff_coordination_wait_reason(
+                false,
+                None,
+                None,
+                false,
+                Some(5_000),
+                4_999,
+            )
+            .as_deref(),
+            Some("successor_provider_safe_spacing_active")
+        );
+        assert_eq!(
+            successor_handoff_coordination_wait_reason(
+                false,
+                None,
+                None,
+                false,
+                Some(5_000),
+                5_000,
+            ),
+            None,
+            "exclusive provider-safe boundary is ready at equality"
         );
     }
 

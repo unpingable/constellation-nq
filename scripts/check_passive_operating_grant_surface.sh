@@ -42,6 +42,10 @@ rg -q 'watcher_admit_preallocated' "$cli" || fail "handoff cannot invoke exact o
 rg -q 'HandoffTick' "$cli" || fail "bounded successor-handoff evaluator absent"
 rg -q 'WaitingForSample' "$model" || fail "missing-sample readiness state absent"
 rg -q 'AdmissionRefused' "$model" || fail "semantic admission refusal is not fail-closed"
+rg -q 'successor_handoff_coordination_wait_reason' "$cli" \
+  || fail "successor admission can begin while its shared coordination domain is unavailable"
+rg -q 'successor_sample_no_longer_eligible' "$cli" \
+  || fail "successor admission does not recheck sample eligibility after coordination wait"
 rg -q 'arm_successor_handoff' "$model" || fail "exact predecessor-disarm/successor-arm transition absent"
 rg -q 'watcher test/admit/admit-successor/rotate/rollback' "$operations" \
   || fail "successor admission is absent from the capability-bounded maintenance boundary"

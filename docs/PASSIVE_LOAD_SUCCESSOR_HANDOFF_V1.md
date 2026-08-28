@@ -56,6 +56,16 @@ is terminal. A restart that finds `admission_started` without the exact
 admission and active binding records `outcome_unknown`; it does not retry
 against a later sample.
 
+Sample readiness is not compositional scheduling permission. Before appending
+`admission_started`, the evaluator projects the successor enrollment's exact
+coordination domain. A predecessor acquisition holder, an outcome-unknown
+domain fence, or an unelapsed provider-safe start-spacing boundary leaves the
+handoff at `sample_ready`, timer-inert, with zero admission attempts consumed.
+The evaluator also rechecks the ordinary passive sample-eligibility predicate
+after that wait. A stale or missing successor sample cannot cross the admission
+fence. This prevents a service-manager timeout during ordinary coordination
+delay from being misclassified as an unknown admission outcome.
+
 After exact admission custody exists, the handoff initiates one preallocated
 genesis acquisition through the already-qualified Linode V3 origin boundary.
 The NQ acquisition intent remains the provider fence. A pre-provider crash may
