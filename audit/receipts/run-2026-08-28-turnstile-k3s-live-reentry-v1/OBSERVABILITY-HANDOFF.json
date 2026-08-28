@@ -1,0 +1,119 @@
+{
+  "schema": "nq.observability_handoff.v1",
+  "status": "INCOMPLETE",
+  "campaign": "TURNSTILE",
+  "campaign_slug": "k3s-ag-exact-occurrence-adapter-v1",
+  "descriptive_only": true,
+  "rbac_installed": false,
+  "cluster": {
+    "control_host": "crow",
+    "api_endpoint": "https://127.0.0.1:16443",
+    "kubernetes_version": "v1.36.4+k3s1",
+    "kubernetes_commit": "4dedb15be78017a8ddd5b9e81acd44f3481078ed",
+    "container_runtime": "containerd://2.3.4-k3s1.36",
+    "kube_system_namespace_uid": "729fc0ae-4c8a-407c-9c32-05aa54320ece",
+    "api_ca_sha256_fingerprint": "0E:39:F1:EC:27:D6:24:B6:AF:40:9C:63:BD:B0:47:04:5B:16:B2:DB:F5:C9:5D:61:CC:B5:F4:65:F8:0C:E7:D5",
+    "terminal_state": "campaign_vms_powered_off",
+    "api_reachable_at_closeout": false
+  },
+  "nodes": [
+    {
+      "name": "turnstile-server",
+      "uid": "0680bf6e-9768-4552-afb0-6ce500e37550",
+      "provider_id": "k3s://turnstile-server",
+      "internal_ip": "10.89.0.11",
+      "pod_cidr": "10.42.0.0/24",
+      "ready_last_observed": true
+    },
+    {
+      "name": "turnstile-agent",
+      "uid": "a0303433-733b-4f62-b211-6a761dd8c81e",
+      "provider_id": "k3s://turnstile-agent",
+      "internal_ip": "10.89.0.12",
+      "pod_cidr": "10.42.2.0/24",
+      "ready_last_observed": true
+    }
+  ],
+  "namespace": {
+    "name": "turnstile-k3s-ag-v1",
+    "uid": "71792e3f-d491-4b67-8a98-221a7704f409"
+  },
+  "service_account": {
+    "name": "turnstile-exact-occurrence",
+    "uid": "0e3e40b3-deba-43b0-9a43-2d783e640a90",
+    "automount_service_account_token": false
+  },
+  "workload": {
+    "state": "absent",
+    "kind": null,
+    "name": null,
+    "uid": null,
+    "pod_uid": null,
+    "labels": null,
+    "container_id": null,
+    "expected_reported_host": null,
+    "reported_identity": null,
+    "readiness": null,
+    "restart_count": null,
+    "probes": null
+  },
+  "campaign_services": [],
+  "campaign_endpoints": [],
+  "control_service": {
+    "namespace": "default",
+    "name": "kubernetes",
+    "cluster_ip": "10.43.0.1",
+    "port": 443,
+    "endpoint": "10.89.0.11:6443"
+  },
+  "storage_class": {
+    "name": "turnstile-external-retain-v1",
+    "uid": "adfb0666-917e-4e47-b6b4-8165e2b8cfee",
+    "provisioner": "kubernetes.io/no-provisioner",
+    "reclaim_policy": "Retain",
+    "volume_binding_mode": "Immediate"
+  },
+  "volumes": [
+    {
+      "role": "canonical_nq_custody",
+      "pv_name": "turnstile-canonical-nq-custody-v1",
+      "pv_uid": "e997c689-78ca-47de-908e-741e03cd3dd3",
+      "pvc_name": "canonical-nq-custody",
+      "pvc_uid": "01fd0349-6121-43c3-811c-5495462dd145",
+      "capacity": "100Gi",
+      "state": "Bound"
+    },
+    {
+      "role": "external_journal",
+      "pv_name": "turnstile-external-journal-v1",
+      "pv_uid": "662895b6-c596-4401-bf7d-00641e16b1b6",
+      "pvc_name": "external-journal",
+      "pvc_uid": "e9338b94-c6d4-4edd-9ef8-c165ce1f5abd",
+      "capacity": "10Gi",
+      "state": "Bound"
+    },
+    {
+      "role": "terminal_receipts",
+      "pv_name": "turnstile-terminal-receipts-v1",
+      "pv_uid": "503b400d-29d4-45f8-bdcd-de36e909c704",
+      "pvc_name": "terminal-receipts",
+      "pvc_uid": "591ec4c0-d4e8-4b3f-a5e5-f41f496bef3b",
+      "capacity": "10Gi",
+      "state": "Bound"
+    }
+  ],
+  "network_boundaries": {
+    "ssh_loopback_forwards": ["127.0.0.1:19221", "127.0.0.1:19222"],
+    "api_loopback_forward": "127.0.0.1:16443",
+    "guest_nat": "10.0.2.0/24 restricted",
+    "cluster_link": "10.89.0.0/24 loopback-bound QEMU multicast",
+    "pod_cidrs": ["10.42.0.0/24", "10.42.2.0/24"]
+  },
+  "candidate_rbac": {
+    "installed": false,
+    "cluster_get_list_watch": ["namespaces", "nodes", "persistentvolumes", "storageclasses"],
+    "namespace_get_list_watch": ["serviceaccounts", "persistentvolumeclaims"],
+    "deferred_until_actual_workload": ["pods", "pods/status", "events", "services", "endpoints", "endpointslices"]
+  },
+  "incomplete_reason": "T10 lacks a ratified Kubernetes node-host origin/capacity acquisition contract; no T11 workload exists."
+}

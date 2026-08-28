@@ -1,0 +1,69 @@
+{
+  "schema": "nq.turnstile_k3s_live_reentry_result.v1",
+  "campaign": "TURNSTILE",
+  "campaign_slug": "k3s-ag-exact-occurrence-adapter-v1",
+  "recorded_at": "2026-08-28T22:59:36Z",
+  "historical_live_classification_preserved": "PASSIVE-K3S-AG-LIVE-NOT-QUALIFIED",
+  "new_classification": "PASSIVE-K3S-AG-LIVE-PREAUTH-QUALIFIED-ORIGIN-CAPACITY-BLOCKED",
+  "checkpoints": {
+    "T7": "PASSIVE-K3S-AG-LIVE-ENVIRONMENT-QUALIFIED",
+    "T8": "PASSIVE-K3S-AG-LIVE-OCI-CUSTODY-QUALIFIED",
+    "T9": "PASSIVE-K3S-AG-LIVE-EVIDENCE-CUSTODY-QUALIFIED",
+    "T10": "PASSIVE-K3S-AG-LIVE-ORIGIN-CAPACITY-NOT-QUALIFIED",
+    "T11": "PASSIVE-K3S-AG-LIVE-OCCURRENCE-NOT-STARTED",
+    "T12": "PASSIVE-K3S-AG-LIVE-RECONCILIATION-NOT-STARTED"
+  },
+  "source": {
+    "qualified_base": "675e247e85d8e2e1f2801c06445bf863f82b3a5b",
+    "branch": "campaign/k3s-exact-occurrence-adapter-v1",
+    "implementation_head_before_receipt": "7cfa51b6b0cfa56012d3cce9471bec8c62e2adac",
+    "oci_source_commit": "38bb32736d93c7982adae9312b09125fbce63df3"
+  },
+  "authority_counts": {
+    "ag_authorizations": 0,
+    "nq_prepared_occurrences": 0,
+    "nq_claims": 0,
+    "kubernetes_workloads": 0,
+    "runtime_occurrences": 0,
+    "docket_attempts": 0
+  },
+  "cluster": {
+    "kube_system_namespace_uid": "729fc0ae-4c8a-407c-9c32-05aa54320ece",
+    "server_node_uid": "0680bf6e-9768-4552-afb0-6ce500e37550",
+    "agent_node_uid": "a0303433-733b-4f62-b211-6a761dd8c81e",
+    "version": "v1.36.4+k3s1",
+    "last_live_state": "both_nodes_ready_zero_campaign_workloads_three_pvcs_bound",
+    "terminal_state": "campaign_vms_powered_off_external_evidence_preserved",
+    "api_reachable_at_closeout": false,
+    "server_overlay_sha256": "19c116b805cf1f7a612db1fe8cdad388dc966f7501702943a7e91e5edecd0a68",
+    "agent_overlay_sha256": "93dd8acb62bf19d0421e5a665ffe1abbedc00ef31520e7d96f8937de8d7dc40d"
+  },
+  "oci": {
+    "image_reference": "turnstile.local/nq@sha256:ffd3c57744011b3234b2c383b12c1b47052d20b5b566938470bc71cea3a2832b",
+    "manifest_digest": "sha256:ffd3c57744011b3234b2c383b12c1b47052d20b5b566938470bc71cea3a2832b",
+    "config_digest": "sha256:608df10b3a41629bdbd6128729e4afeb010ad334a340085cd877001392033bcd",
+    "layer_digest": "sha256:329a87e9ab218df9a6b5608b5f33b1292d2844ce5754688961d9204b7a255e3f",
+    "archive_sha256": "0686361426aa0a1b06f978fbe833b9a0d4d477aaac4cea430674d9b3687839b9",
+    "nq_sha256": "b56b39d2a3c3c689158d30db501f064bbe8696fcbfe8a6d3002808eddaee26e8",
+    "passive_helper_sha256": "62afc9479869a971e20eb26d2f136e3a01369c747c311c6377b2a715c1113f33"
+  },
+  "external_evidence": {
+    "probe_custody_digest": "sha256:f213a10dd0361dd5d93cef0a1a6368298684148d6f852e497adddd3eb382a540",
+    "probe_chain_digest": "sha256:570104877c874c36435abf02aa3ea3d1579723d7757c86478237c4dbe1e3674d",
+    "custody_file_sha256": "119e33a15f473d1a3c91443b56860da40eea80e4701e977802d1812dbc73e85f",
+    "event_file_sha256": "521b35befa26a1a34179762eeacf06c4b9a42b19ad51eb2b67eac50a74cb862e",
+    "writer_restart": "qualified",
+    "runtime_service_restart": "qualified",
+    "agent_vm_loss_and_same_uid_rejoin": "qualified"
+  },
+  "t10_blocker": {
+    "shared_semantic_defect": false,
+    "reason": "No ratified Kubernetes node-host origin/capacity acquisition contract or verifier exists. The only production recurrence origin helper is Linode-specific; raw SSH procfs/cgroup observations cannot be promoted into node_host_delegated authority facts.",
+    "reentry_requires": [
+      "a ratified Kubernetes node-host subject/scope/vantage and acquisition contract",
+      "an independently pinned collector/verifier binding exact node UID, provider coordinate, procfs source, cgroup-v2 source, and freshness",
+      "a consequence-time capacity projection for the exact Pod resource envelope",
+      "integration into NQ recurrence without reusing the Linode origin profile"
+    ]
+  }
+}
