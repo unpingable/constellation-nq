@@ -1,0 +1,20 @@
+{
+  "schema": "nq.passive_glasshopper_canonical_relation_repair_result.v1",
+  "classification": "PASSIVE-CANONICAL-RELATION-PRODUCER-QUALIFIED",
+  "qualified_base_commit": "675e247e85d8e2e1f2801c06445bf863f82b3a5b",
+  "receipt_custody_commit": "e0d7039",
+  "repaired_source_commit": "241af7cef6a8ce2c980e20cc3c467710318200bf",
+  "strict_reader_changed": false,
+  "producer_appends_lf": false,
+  "lf_negative_control_refuses": true,
+  "typed_diagnostic_line_contract_preserved": true,
+  "release": {
+    "package_sha256": "4f7625c029cc5efb090d292581deb2e6c014114813f675a1f21857ab6deb1886",
+    "tarball_sha256": "b652bc136a1d0560f68bbcb2c05d95990ad02a2d8f0eb8ff57dfcf7c3ad9344d",
+    "nq_sha256": "d12ee481cec6d149d634f7b3a349398eb4d271a767d9b6178636b60ef9d33d69",
+    "nqd_sha256": "3a922f61a6fd7c9310b264d40d431f2f53d984b29e22966351b37bbe6a2a40af",
+    "host_helper_sha256": "cd12ed5620a34fae531cbb5d451fd5b3519395ce2f3402a12d3fd4e7d3a87494",
+    "origin_helper_sha256": "ff5c3ab94e423484cc2698623cf1efb81f3394dc2df7d3f1ce479b30c0e193e6",
+    "passive_helper_sha256": "a966ad1a36a8c61a75fe866a115a3531446ca2bbf3a7795e8af406af4182fc08"
+  }
+}
