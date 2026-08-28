@@ -1,0 +1,98 @@
+{
+  "schema": "nq.passive_k3s_ag_exact_occurrence_contract_decision.v1",
+  "classification": "PASSIVE-K3S-AG-EXECUTION-CONTRACT-SPECIFIED-ADAPTER-BLOCKED",
+  "interval": {
+    "started_at": "2026-08-28T19:03:19Z",
+    "completed_at": "2026-08-28T19:08:05Z"
+  },
+  "control_host": {
+    "hostname": "crow",
+    "kernel": "Linux 6.5.0-44-generic",
+    "architecture": "x86_64"
+  },
+  "source": {
+    "nq": {
+      "branch": "campaign/k3s-exact-occurrence-adapter-v1",
+      "lineage_branch": "campaign/passive-watcher-succession-v1",
+      "commit": "675e247e85d8e2e1f2801c06445bf863f82b3a5b"
+    },
+    "ag_ng": {
+      "inspected_commit": "37dbbbf4ce7024c82541fa8dd6839179f00ca1b2",
+      "lineage_branch": "campaign/governed-campaign-loop-v1-worker-vm"
+    },
+    "docket_runtime": {
+      "commit": "c49ad8d0f26fb2a13b9dbafdde84d7abfe1f867b",
+      "qualified_transport_ancestor": "ab8f90ba26362529c3aff341d325d4eaee9a271d",
+      "qualified_layering_ancestor": "f7a0018"
+    }
+  },
+  "decision": {
+    "ag_docket_exact_occurrence_transport": "sufficient",
+    "nq_prepared_occurrence_boundary": "absent",
+    "kubernetes_origin_capacity_role": "absent",
+    "immutable_oci_artifact": "absent",
+    "adapter_implementation": "not_started",
+    "cluster_creation": "not_started"
+  },
+  "selected_contract": {
+    "executor_transport": "docket.governed-executor-transport/v1",
+    "kubernetes_primitive": "bare_pod",
+    "restart_policy": "Never",
+    "controller_owned_workload": false,
+    "replacement_pod_is_continuation": false,
+    "canonical_fence": "external_durable_adapter_journal",
+    "kubernetes_is_authority": false,
+    "docket_is_nq_authority": false
+  },
+  "blockers": [
+    "NQ recurrence allocation, coordination claim, provider fence, and provider invocation are coupled in one command",
+    "NQ exposes no immutable prepared exact occurrence with separate execute and mechanics-free reconcile operations",
+    "NQ recurrence origin binding is Linode-only",
+    "passive observer capacity and restart semantics are qualified only for the static systemd deployment",
+    "no qualified immutable OCI artifact or persistent Kubernetes custody representation exists"
+  ],
+  "targeted_checks": [
+    {
+      "repository": "nq",
+      "command": "cargo test --locked -p nq-store recurrence",
+      "passed": 19,
+      "failed": 0
+    },
+    {
+      "repository": "docket_runtime",
+      "command": "cargo test --locked -p gwr-local governed_loop",
+      "passed": 17,
+      "failed": 0
+    },
+    {
+      "repository": "ag_ng",
+      "command": "DOCKET_EXECUTOR_TRANSPORT_CORPUS=.../corpus.json cargo test --locked -p ag-app --test executor_transport_conformance -- --ignored",
+      "passed": 1,
+      "failed": 0
+    }
+  ],
+  "substrate": {
+    "docker_version": "29.1.3",
+    "docker_context": "default",
+    "k3s": "absent",
+    "kubectl": "absent",
+    "helm": "absent",
+    "kind": "absent",
+    "minikube": "absent",
+    "k3d": "absent",
+    "kubeconfig": "absent",
+    "rancher_k3s_latest_image": "absent"
+  },
+  "created_counts": {
+    "kubernetes_objects": 0,
+    "nq_authority_identities": 0,
+    "ag_proposals": 0,
+    "ag_spends": 0,
+    "ag_issuances": 0,
+    "docket_attempts": 0,
+    "recurrence_attempts": 0,
+    "samples": 0,
+    "acquisitions": 0
+  },
+  "prepared_object_capable_of_activation": false
+}
