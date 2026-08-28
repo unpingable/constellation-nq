@@ -387,7 +387,7 @@ teardown_node() {
     fi
     test "$(tr -d '\0' <"/proc/${pid}/cmdline" | sed 's/qemu-system-x86_64.*/qemu-system-x86_64/')" = qemu-system-x86_64 \
         || die "pid ${pid} is not a QEMU process"
-    printf 'system_powerdown\n' | socat - "UNIX-CONNECT:${directory}/monitor.sock" >/dev/null
+    printf 'system_powerdown\n' | nc -U "${directory}/monitor.sock" >/dev/null
     for attempt in $(seq 1 30); do
         if ! kill -0 "${pid}" 2>/dev/null; then
             mv "${directory}/qemu.pid" "${directory}/qemu.pid.closed"
@@ -399,7 +399,7 @@ teardown_node() {
 }
 
 teardown() {
-    require_command socat
+    require_command nc
     teardown_node agent
     teardown_node server
 }
@@ -410,7 +410,7 @@ case "${1:-}" in
     start-agent) start_node agent 3072 ;;
     install) install ;;
     status) status ;;
-    teardown-agent) teardown_node agent ;;
+    teardown-agent) require_command nc; teardown_node agent ;;
     teardown) teardown ;;
     *)
         printf 'usage: %s {prepare|start|start-agent|install|status|teardown-agent|teardown}\n' "$0" >&2
