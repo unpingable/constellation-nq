@@ -1,0 +1,64 @@
+{
+  "schema": "nq.passive_linode_fresh_24h_launch_result.v1",
+  "classification": "PASSIVE-LINODE-FRESH-24H-LAUNCH-NOT-QUALIFIED",
+  "reason_code": "succession_relation_not_exact_canonical_json",
+  "source_commit": "675e247e85d8e2e1f2801c06445bf863f82b3a5b",
+  "target": "root@labelwatch.neutral.zone",
+  "target_address": "192.46.223.21",
+  "package_sha256": "f3917533e3bddc4fe53ac46370f19c4872deb1d1d335d7b10805753ef281abb5",
+  "nq_sha256": "f5c59385d1c960c841cb05f2b6a788469e38ebe3221a98a3dbe77e1c6183d03c",
+  "passive_helper_sha256": "901272c1a54ca10e8ba610ce706bc54d455f17602398bc5c13e65b68e4073134",
+  "origin_helper_sha256": "b005a20ca115fc222289788bdcc3a54c9c66d4c25549c90ea5d3a1b3ff6b8ea3",
+  "declared_interval": {
+    "start": "2026-08-28T20:00:00Z",
+    "end_exclusive": "2026-08-29T20:00:00Z"
+  },
+  "grant_id": "sha256:627d1e186f4533ffbf92b8271b018bc7629c822ed256d8923d1116d11f547606",
+  "grant_activated_at_unix_ms": 1787947200513,
+  "policy_id": "sha256:9a7a11138c59367eaa05d6ba6b3faf85932bbbd08081809014a25dbdd4b97102",
+  "coordination_domain": "passive-load-24h:a24-20260828-7b446fdf:labelwatch-host:v1",
+  "generation_ids": [
+    "sha256:bddc67fb5dc81856b58017f8a3075cc80ac16ce903b1236dc72ab185577e6357",
+    "sha256:c0619fb27056f1e3e33a1f52df854ffae8d21d3b862a42332735bb1be46ffdc1",
+    "sha256:0455c25fa7ccfe68c088853604cac948472f086b23bcbc41a88ce3a94a7f6a6e",
+    "sha256:32dc49a9cb1787800f43a11b1ec3667777fe0f87d83c63f1a7afb290bb34b055"
+  ],
+  "enrollment_ids": [
+    "sha256:e0bd4edf0b877cab985615d014a4e531b27c4eff77ceed846d374de6306ae79d",
+    "sha256:77a9c71fe82d3f38667984ba0b72eae474ac18f4c96ca81ca563366726bad047",
+    "sha256:febcd8475f6fd681e0042211072fb8637efc75b1e7e9ea591c344867c8ceb9b9",
+    "sha256:3bb73a2638cab3c4f01dabc0467ad5ee5734ad24d1680385183d9cd0ab255f85"
+  ],
+  "succession_relation_ids": [
+    "sha256:1b1330066e89c7b3d12ff5a511f8cbd5cb854b8f70fdf5f9113adc005595f931",
+    "sha256:92d8e9e2932891d160e20b444e94b358dd90ea8ee895e2a54531e4ae9a40e48f",
+    "sha256:67fffd7de785317640f212489bf3c7bba3b8497ae2739618186f6804f0d83ccb"
+  ],
+  "limits": {
+    "sample_interval_ms": 15000,
+    "acquisition_interval_ms": 300000,
+    "generation_count": 4,
+    "samples_per_generation": 1440,
+    "enrollment_count": 4,
+    "acquisitions_per_enrollment": 72,
+    "succession_edges": 3,
+    "aggregate_samples": 5760,
+    "aggregate_acquisitions": 288,
+    "min_free_bytes": 10737418240
+  },
+  "observed": {
+    "generation_child_issuances": 0,
+    "enrollment_child_issuances": 0,
+    "succession_edge_issuances": 0,
+    "admissions": 0,
+    "activations": 0,
+    "recurrence_attempts": 0,
+    "acquisitions": 0,
+    "canonical_samples": 0,
+    "fencing_epochs": 0,
+    "provider_starts": 0,
+    "nightshift_cycles": 0,
+    "old_helper_acquisitions": 0
+  },
+  "replacement_created": false
+}
