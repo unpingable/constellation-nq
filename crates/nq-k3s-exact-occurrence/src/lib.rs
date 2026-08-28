@@ -10,6 +10,8 @@ use std::collections::BTreeMap;
 pub mod artifact_evidence;
 /// Mechanics-separated exact execute/reconcile boundary.
 pub mod executor;
+/// Closed authority-neutral bare-Pod representation and runtime observation.
+pub mod kubernetes;
 /// Portable Kubernetes origin and capacity fact law.
 pub mod origin_capacity;
 
