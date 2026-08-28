@@ -272,7 +272,7 @@ fn create_exact_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(0o400)
+        .mode(0o444)
         .open(path)?;
     file.write_all(bytes)?;
     file.sync_all()
