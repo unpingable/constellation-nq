@@ -10,6 +10,7 @@ members = [
     "crates/nq-core",
     "crates/nq-app",
     "crates/nq-host-helper",
+    "crates/nq-k3s-exact-occurrence",
     "crates/nq-linode-origin-helper",
     "crates/nq-passive-load-helper",
 ]

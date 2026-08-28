@@ -687,6 +687,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nq-k3s-exact-occurrence"
+version = "0.1.0"
+dependencies = [
+ "nq-protocol",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "nq-linode-origin-helper"
 version = "0.1.0"
 dependencies = [
