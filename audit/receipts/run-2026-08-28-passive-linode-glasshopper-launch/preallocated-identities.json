@@ -1,0 +1,16 @@
+{
+  "schema": "nq.passive_load_24h_fresh_preallocated_identities.v1",
+  "token": "gh24-20260828-f249176c",
+  "successor_admission_ids": {
+    "g2": "67f56507-888e-46e6-8b4c-fddc688b27ad",
+    "g3": "491c47e5-6a62-4727-9db1-faadff2f53e4",
+    "g4": "98536e4c-65aa-4701-8f8f-1e0051bfd843"
+  },
+  "genesis_acquisition_ids": {
+    "g1": "linode-gh24-20260828-f249176c-g1-genesis-13032cb3-cf57-4e81-b087-ac7582d2cba3",
+    "g2": "linode-gh24-20260828-f249176c-g2-genesis-c1566099-8b52-4a75-afd9-8e674a6b3820",
+    "g3": "linode-gh24-20260828-f249176c-g3-genesis-96ea280b-cae5-4ddc-8b6e-56c1482d7cec",
+    "g4": "linode-gh24-20260828-f249176c-g4-genesis-205f2c89-cc67-4cf0-8c55-65090c9ae10b"
+  },
+  "grant_id": "sha256:00f548a1d311833439b8042d74261b044e6f596453314dcc26725268e6d14e6d"
+}

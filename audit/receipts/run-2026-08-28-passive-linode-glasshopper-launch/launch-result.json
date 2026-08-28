@@ -1,0 +1,103 @@
+{
+  "schema": "nq.passive_linode_glasshopper_fresh_24h_launch_result.v1",
+  "classification": "PASSIVE-LINODE-FRESH-24H-LAUNCH-QUALIFIED",
+  "campaign": "GLASSHOPPER",
+  "campaign_slug": "passive-linode-canonical-relation-relaunch-v1",
+  "qualified_base_commit": "675e247e85d8e2e1f2801c06445bf863f82b3a5b",
+  "release_source_commit": "241af7cef6a8ce2c980e20cc3c467710318200bf",
+  "target": "root@labelwatch.neutral.zone",
+  "target_address": "192.46.223.21",
+  "package_sha256": "4f7625c029cc5efb090d292581deb2e6c014114813f675a1f21857ab6deb1886",
+  "nq_sha256": "d12ee481cec6d149d634f7b3a349398eb4d271a767d9b6178636b60ef9d33d69",
+  "nqd_sha256": "3a922f61a6fd7c9310b264d40d431f2f53d984b29e22966351b37bbe6a2a40af",
+  "host_helper_sha256": "cd12ed5620a34fae531cbb5d451fd5b3519395ce2f3402a12d3fd4e7d3a87494",
+  "origin_helper_sha256": "ff5c3ab94e423484cc2698623cf1efb81f3394dc2df7d3f1ce479b30c0e193e6",
+  "passive_helper_sha256": "a966ad1a36a8c61a75fe866a115a3531446ca2bbf3a7795e8af406af4182fc08",
+  "declared_interval": {
+    "start": "2026-08-28T21:45:00Z",
+    "end_exclusive": "2026-08-29T21:45:00Z"
+  },
+  "launch": {
+    "service_started_at": "2026-08-28T21:45:00.012685Z",
+    "durable_complete_at": "2026-08-28T21:45:05.868Z",
+    "service_result": "success",
+    "failure_latch_present": false,
+    "replacement_created": false
+  },
+  "grant_id": "sha256:00f548a1d311833439b8042d74261b044e6f596453314dcc26725268e6d14e6d",
+  "grant_post_issuance_state": {
+    "active": false,
+    "terminal_reason": "child_budgets_exhausted"
+  },
+  "policy_id": "sha256:e782f1bfd8a3cdcf1a1447324ff733c312eab553d2a1d05934cf36072bf68bad",
+  "coordination_domain": "passive-load-24h:gh24-20260828-f249176c:labelwatch-host:v1",
+  "generation_ids": [
+    "sha256:a5300ed988237fa39dd395766942379bb098c5b2952e056ca60b3fee068b8c81",
+    "sha256:350c281aba27ff8418049dd5b261201246a34a00fdf2a9006d1feddb7d3b11a8",
+    "sha256:31eb4bb1fc06e1575a9eedd14d47189f06cd629d8346c9e113c5dd144ae61a01",
+    "sha256:cb569a8522976f4cbcfa71421ca5dac4ddfe38e8a622c3595cd57a0e60430ab2"
+  ],
+  "enrollment_ids": [
+    "sha256:825fff1126c07bacc7067ea03a6a92a494d5be17f4c70cc31806585ccb2ecf0b",
+    "sha256:f89c702a9269162942707504cc7ec251eac2c0615c6a340f396ea3eec4be6e42",
+    "sha256:8f93a4f23169008b42a8a457fdc16e94f5e41c880e5717f20470ca953e04f18e",
+    "sha256:449d34a2cc18487052c21fe38bf07a210a7070bcca4c38fc7c53b51cc4bca376"
+  ],
+  "watcher_instance_ids": [
+    "labelwatch-host-gh24-20260828-f249176c-g1",
+    "labelwatch-host-gh24-20260828-f249176c-g2",
+    "labelwatch-host-gh24-20260828-f249176c-g3",
+    "labelwatch-host-gh24-20260828-f249176c-g4"
+  ],
+  "admission_ids": [
+    "6ebbd5b8-173b-4596-863e-78766df4ce72",
+    "67f56507-888e-46e6-8b4c-fddc688b27ad",
+    "491c47e5-6a62-4727-9db1-faadff2f53e4",
+    "98536e4c-65aa-4701-8f8f-1e0051bfd843"
+  ],
+  "activation_ids": [
+    "sha256:bafc9f1d4ef692ab085cf9f30493744083da63fed2fef817ba1507502dff4c97",
+    "sha256:835637e100fdd4bf785bfd04d91a2f762dcad0ad1aeeb0467ff3587b527223b1",
+    "sha256:43e3fad406feaaa66b6911292b334b58883b152fcdc6977c7a1900d297939a3c",
+    "sha256:f69f8ece23baf511732c34045c502a4a69d760516597f4e6409635a633346340"
+  ],
+  "succession_relation_ids": [
+    "sha256:6aea58a531524e4088030088f3e4b46df33a8a0fa77a846e60ae5ffe7486a40d",
+    "sha256:c203a4ae3a6c7576db94dfd8badc392f976b0faaf2fe1e56e1c18f0a96b861f6",
+    "sha256:1c6d7b9c14d371cdfa7796ee1f7e796f94123fb3a03e699a669ab06495941305"
+  ],
+  "handoff_ids": [
+    "sha256:d1816575986f8c6cc39b5f2f9cfa6479678f6f4db35a0c595a13e2b61b0830fe",
+    "sha256:05daceb5823f1d3ea12d6f2f1ab400c624f5c882cf6fda325b79f4ac54b51af1",
+    "sha256:6d8653c048a62ab499d987af21175544ad71975e366ee097488e4a4d4d82f982"
+  ],
+  "limits": {
+    "sample_interval_ms": 15000,
+    "acquisition_interval_ms": 300000,
+    "generation_count": 4,
+    "samples_per_generation": 1440,
+    "enrollment_count": 4,
+    "acquisitions_per_enrollment": 72,
+    "succession_edges": 3,
+    "aggregate_samples": 5760,
+    "aggregate_acquisitions": 288,
+    "missed_slot_policy": "latest_only",
+    "retention_mode": "retain_all",
+    "min_free_bytes": 10737418240
+  },
+  "first_observation": {
+    "observed_at": "2026-08-28T21:47:44.215Z",
+    "samples_by_generation": [12, 0, 0, 0],
+    "recurrence_acquisitions": 1,
+    "recurrence_provider_starts": 1,
+    "recurrence_provider_succeeded": 1,
+    "first_fencing_epoch": 1,
+    "skipped_slots": 0,
+    "coordination_deferrals": 0,
+    "refusals": 0,
+    "free_bytes": 25539907584,
+    "nightshift_cycles": 0,
+    "old_helper_acquisitions": 0
+  },
+  "terminal_result_pending": true
+}

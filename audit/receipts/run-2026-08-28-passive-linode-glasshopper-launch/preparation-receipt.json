@@ -1,0 +1,38 @@
+{
+  "schema": "nq.passive_load_fresh_24h_preparation_receipt.v1",
+  "token": "gh24-20260828-f249176c",
+  "interval": {
+    "start": "2026-08-28T21:45:00Z",
+    "end_exclusive": "2026-08-29T21:45:00Z"
+  },
+  "grant_id": "sha256:00f548a1d311833439b8042d74261b044e6f596453314dcc26725268e6d14e6d",
+  "policy_id": "sha256:e782f1bfd8a3cdcf1a1447324ff733c312eab553d2a1d05934cf36072bf68bad",
+  "coordination_domain": "passive-load-24h:gh24-20260828-f249176c:labelwatch-host:v1",
+  "signing_key_id": "passive-load-gh24-20260828-f249176c-key1",
+  "signing_key_receipt": {
+    "producer_issuer": "nq-passive-load-observer:gh24-20260828-f249176c",
+    "producer_key_id": "passive-load-gh24-20260828-f249176c-key1",
+    "public_key_digest": "sha256:1a7df851f72f4dbd79c574a60332d6b91408425e3c4fa58b03d542380a7297eb",
+    "public_key_hex": "74d775194af70d1dcc4368681f85d57225adc8f42b4dae0791ed485c4216ca1d",
+    "schema": "nq.passive_load_sample_key_receipt.v1"
+  },
+  "generations": [
+    "sha256:a5300ed988237fa39dd395766942379bb098c5b2952e056ca60b3fee068b8c81",
+    "sha256:350c281aba27ff8418049dd5b261201246a34a00fdf2a9006d1feddb7d3b11a8",
+    "sha256:31eb4bb1fc06e1575a9eedd14d47189f06cd629d8346c9e113c5dd144ae61a01",
+    "sha256:cb569a8522976f4cbcfa71421ca5dac4ddfe38e8a622c3595cd57a0e60430ab2"
+  ],
+  "enrollments_materialized": [
+    "sha256:825fff1126c07bacc7067ea03a6a92a494d5be17f4c70cc31806585ccb2ecf0b",
+    "sha256:f89c702a9269162942707504cc7ec251eac2c0615c6a340f396ea3eec4be6e42",
+    "sha256:8f93a4f23169008b42a8a457fdc16e94f5e41c880e5717f20470ca953e04f18e"
+  ],
+  "e4_materialization": "deferred_until_interval_start_to_obey_24h_policy_ceiling",
+  "succession_relations": [
+    "sha256:6aea58a531524e4088030088f3e4b46df33a8a0fa77a846e60ae5ffe7486a40d",
+    "sha256:c203a4ae3a6c7576db94dfd8badc392f976b0faaf2fe1e56e1c18f0a96b861f6",
+    "sha256:1c6d7b9c14d371cdfa7796ee1f7e796f94123fb3a03e699a669ab06495941305"
+  ],
+  "activation_count": 0,
+  "timer_exposure": "inert"
+}
