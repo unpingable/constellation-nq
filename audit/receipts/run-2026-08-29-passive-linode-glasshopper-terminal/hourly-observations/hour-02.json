@@ -1,0 +1,60 @@
+{
+  "schema": "nq.passive_linode_glasshopper_hourly_observation.v1",
+  "artifact_kind": "read_only_interim_observation",
+  "campaign": "GLASSHOPPER",
+  "token": "gh24-20260828-f249176c",
+  "observed_at": "2026-08-28T23:46:34.544Z",
+  "elapsed_from_authority_start_seconds": 7294.544,
+  "current_generation": "g1",
+  "samples_by_generation": [488, 0, 0, 0],
+  "latest_sample_sequence": 487,
+  "sample_bytes_g1": 1757817,
+  "free_bytes": 25376256000,
+  "ledger_bytes": 2613248,
+  "recurrence_at_snapshot": {
+    "acquisitions_created": 25,
+    "provider_invocations_started": 24,
+    "provider_succeeded": 24,
+    "waiting_provider_safe_spacing": 1,
+    "skipped_slots": 0,
+    "coordination_deferred_events": 0,
+    "coordination_claimed": 24,
+    "coordination_released": 24,
+    "refusals": 0
+  },
+  "provider_spacing_followup": {
+    "observed_at": "2026-08-28T23:49:12.356Z",
+    "slot_index": 24,
+    "created_at_unix_ms": 1787960712741,
+    "provider_started_at_unix_ms": 1787960834066,
+    "provider_succeeded_at_unix_ms": 1787960836785,
+    "attempt_number": 1,
+    "fencing_epoch": 25,
+    "outcome": "provider_succeeded"
+  },
+  "bounded_selection_attribution": {
+    "all_provider_intakes_including_genesis": 26,
+    "min_provider_intake_ms": 18.990,
+    "avg_provider_intake_ms": 20.958,
+    "max_provider_intake_ms": 39.026,
+    "latest_four_provider_intake_ms": [19.030, 18.990, 19.996, 20.961],
+    "broad_provider_boundary_ms_slot_0": 472,
+    "broad_provider_boundary_ms_slot_23": 2311,
+    "broad_provider_boundary_ms_slot_24": 2719,
+    "provider_intake_contains_indexed_sample_selection": true,
+    "retained_corpus_selection_scaling_observed": false,
+    "interpretation": "the growing broad recurrence event interval is outside the provider intake containing bounded indexed selection"
+  },
+  "services": {
+    "current_observer": "active",
+    "observer_result": "success",
+    "recurrence_timer": "active",
+    "recurrence_service_latest_result": "success",
+    "closeout_timer": "active",
+    "failed_campaign_units": 0
+  },
+  "staging_wake_limitation_preserved": true,
+  "shared_semantic_defect_observed": false,
+  "mutation_performed": false,
+  "terminal_classification_pending": true
+}
