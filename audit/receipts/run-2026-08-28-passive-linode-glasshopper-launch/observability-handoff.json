@@ -1,0 +1,124 @@
+{
+  "schema": "nq.observability_handoff_descriptive.v1",
+  "artifact_kind": "descriptive_non_receipt_non_verdict",
+  "campaign": "GLASSHOPPER",
+  "token": "gh24-20260828-f249176c",
+  "observed_interval": {
+    "start": "2026-08-28T22:15:29.955Z",
+    "end": "2026-08-28T22:15:53.427Z"
+  },
+  "target": {
+    "control_name": "labelwatch.neutral.zone",
+    "resolved_ipv4": "192.46.223.21",
+    "os": "Ubuntu 22.04.5 LTS",
+    "architecture": "x86_64"
+  },
+  "reported_host": {
+    "expected_reported_host": "labelwatch-host",
+    "os_reported_hostname": "localhost",
+    "exporter_reported_nodename": "localhost",
+    "passive_sample_hostname": null,
+    "os_equals_exporter": true,
+    "os_equals_expected": false,
+    "exporter_equals_expected": false,
+    "passive_sample_equals_expected": false,
+    "identity_inference_permitted": false
+  },
+  "network_surfaces": [
+    {
+      "name": "authorized_ssh_control",
+      "address": "labelwatch.neutral.zone",
+      "port": 22,
+      "route": "ssh",
+      "bind_class": "ipv4_ipv6_wildcard",
+      "network_classification": "authenticated_management",
+      "status": "reachable_from_control_host"
+    },
+    {
+      "name": "prometheus_node_exporter",
+      "address": "0.0.0.0",
+      "port": 9100,
+      "route": "/metrics",
+      "bind_class": "non_loopback_wildcard",
+      "network_classification": "generic_os_metrics_not_charter_authority",
+      "status": "loopback_http_read_succeeded_external_reachability_not_tested"
+    },
+    {
+      "name": "preexisting_nq_monitor",
+      "address": "0.0.0.0",
+      "port": 9848,
+      "route": "/",
+      "bind_class": "non_loopback_wildcard",
+      "network_classification": "preexisting_unbound_to_glasshopper",
+      "status": "loopback_http_200_external_reachability_not_tested"
+    },
+    {
+      "name": "preexisting_nq_witness",
+      "address": "127.0.0.1",
+      "port": 9847,
+      "route": "/state",
+      "bind_class": "loopback_only",
+      "network_classification": "preexisting_unbound_to_glasshopper",
+      "status": "loopback_http_200"
+    },
+    {
+      "name": "preexisting_receipts_feed",
+      "address": "0.0.0.0",
+      "port": 8100,
+      "route": "/",
+      "bind_class": "non_loopback_wildcard",
+      "network_classification": "unrelated_host_activity",
+      "status": "loopback_http_200_external_reachability_not_tested"
+    },
+    {
+      "name": "glasshopper_nqd_socket",
+      "address": "/run/nq-gh24-f249176c/nqd.sock",
+      "port": null,
+      "route": null,
+      "bind_class": "local_unix_path",
+      "network_classification": "configured_but_not_running",
+      "status": "socket_absent_expected"
+    }
+  ],
+  "canonical_status_surfaces": [
+    "systemd_state_and_journal_over_authenticated_control_path",
+    "immutable_sample_files",
+    "append_only_sqlite_ledgers",
+    "campaign_receipt_directory"
+  ],
+  "storage": {
+    "configuration_root": "/etc/nq-passive-24h-gh24-20260828-f249176c",
+    "charter_root": "/var/lib/nq-passive-load/charter-gh24-20260828-f249176c",
+    "ledger": "/var/lib/nq-passive-load/charter-gh24-20260828-f249176c/nq.db",
+    "sample_roots_are_distinct_by_generation": true,
+    "retention": "retain_all"
+  },
+  "expected_live_state": {
+    "current_generation": "g1",
+    "g1_observer": "active",
+    "recurrence_timer": "enabled_active",
+    "future_observer_timers": "enabled_active",
+    "handoff_timers": "enabled_active",
+    "launch_timer": "disabled_no_next_elapse",
+    "closeout_timer": "enabled_active",
+    "closeout_next_elapse": "2026-08-29T21:45:05Z",
+    "staging_wake_limitation_must_be_preserved": true
+  },
+  "non_assertions": [
+    "external_reachability_of_wildcard_listeners",
+    "firewall_or_tls_routing_policy",
+    "dashboard_correctness",
+    "prometheus_scrape_configuration",
+    "preexisting_monitor_binding_to_glasshopper",
+    "hostname_as_substrate_identity",
+    "whole_host_health",
+    "terminal_24h_result"
+  ],
+  "closeout_rendezvous": {
+    "status": "READY",
+    "authority_end": "2026-08-29T21:45:00Z",
+    "timer_elapse": "2026-08-29T21:45:05Z",
+    "terminal_evidence_still_required": true
+  },
+  "contains_credentials": false
+}
