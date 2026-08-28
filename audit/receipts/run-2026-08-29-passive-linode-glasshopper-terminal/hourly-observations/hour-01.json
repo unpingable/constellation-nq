@@ -1,0 +1,38 @@
+{
+  "schema": "nq.passive_linode_glasshopper_hourly_observation.v1",
+  "artifact_kind": "read_only_interim_observation",
+  "campaign": "GLASSHOPPER",
+  "token": "gh24-20260828-f249176c",
+  "observed_at": "2026-08-28T22:47:27.966Z",
+  "elapsed_from_authority_start_seconds": 3747.966,
+  "current_generation": "g1",
+  "samples_by_generation": [251, 0, 0, 0],
+  "latest_sample_sequence": 250,
+  "sample_bytes_g1": 906724,
+  "free_bytes": 25556717568,
+  "ledger_bytes": 1777664,
+  "recurrence": {
+    "acquisitions_created": 13,
+    "provider_invocations_started": 13,
+    "provider_succeeded": 13,
+    "skipped_slots": 0,
+    "coordination_deferred": 0,
+    "coordination_claimed": 13,
+    "coordination_released": 13,
+    "all_provider_intakes_including_genesis": 14,
+    "max_provider_intake_ms": 39.026,
+    "refusals": 0
+  },
+  "services": {
+    "current_observer": "active",
+    "observer_result": "success",
+    "recurrence_timer": "active",
+    "recurrence_service_latest_result": "success",
+    "closeout_timer": "active",
+    "closeout_next": "2026-08-29T21:45:05Z",
+    "failed_campaign_units": 0
+  },
+  "staging_wake_limitation_preserved": true,
+  "mutation_performed": false,
+  "terminal_classification_pending": true
+}
