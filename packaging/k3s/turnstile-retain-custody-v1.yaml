@@ -1,0 +1,146 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: turnstile-k3s-ag-v1
+  labels:
+    nq.campaign/name: TURNSTILE
+    nq.campaign/slug: k3s-ag-exact-occurrence-adapter-v1
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: turnstile-exact-occurrence
+  namespace: turnstile-k3s-ag-v1
+  labels:
+    nq.campaign/name: TURNSTILE
+    nq.campaign/slug: k3s-ag-exact-occurrence-adapter-v1
+automountServiceAccountToken: false
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: turnstile-external-retain-v1
+  labels:
+    nq.campaign/name: TURNSTILE
+    nq.campaign/slug: k3s-ag-exact-occurrence-adapter-v1
+provisioner: kubernetes.io/no-provisioner
+reclaimPolicy: Retain
+volumeBindingMode: Immediate
+allowVolumeExpansion: false
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: turnstile-canonical-nq-custody-v1
+  labels:
+    nq.campaign/name: TURNSTILE
+    nq.campaign/slug: k3s-ag-exact-occurrence-adapter-v1
+    nq.custody/role: canonical-nq-custody
+spec:
+  capacity:
+    storage: 100Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: turnstile-external-retain-v1
+  hostPath:
+    path: /mnt/turnstile-custody/canonical
+    type: Directory
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: turnstile-external-journal-v1
+  labels:
+    nq.campaign/name: TURNSTILE
+    nq.campaign/slug: k3s-ag-exact-occurrence-adapter-v1
+    nq.custody/role: external-journal
+spec:
+  capacity:
+    storage: 10Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: turnstile-external-retain-v1
+  hostPath:
+    path: /mnt/turnstile-custody/journal
+    type: Directory
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: turnstile-terminal-receipts-v1
+  labels:
+    nq.campaign/name: TURNSTILE
+    nq.campaign/slug: k3s-ag-exact-occurrence-adapter-v1
+    nq.custody/role: terminal-receipts
+spec:
+  capacity:
+    storage: 10Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: turnstile-external-retain-v1
+  hostPath:
+    path: /mnt/turnstile-custody/receipts
+    type: Directory
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: canonical-nq-custody
+  namespace: turnstile-k3s-ag-v1
+  labels:
+    nq.campaign/name: TURNSTILE
+    nq.campaign/slug: k3s-ag-exact-occurrence-adapter-v1
+    nq.custody/role: canonical-nq-custody
+spec:
+  accessModes:
+    - ReadWriteOnce
+  volumeMode: Filesystem
+  storageClassName: turnstile-external-retain-v1
+  volumeName: turnstile-canonical-nq-custody-v1
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: external-journal
+  namespace: turnstile-k3s-ag-v1
+  labels:
+    nq.campaign/name: TURNSTILE
+    nq.campaign/slug: k3s-ag-exact-occurrence-adapter-v1
+    nq.custody/role: external-journal
+spec:
+  accessModes:
+    - ReadWriteOnce
+  volumeMode: Filesystem
+  storageClassName: turnstile-external-retain-v1
+  volumeName: turnstile-external-journal-v1
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: terminal-receipts
+  namespace: turnstile-k3s-ag-v1
+  labels:
+    nq.campaign/name: TURNSTILE
+    nq.campaign/slug: k3s-ag-exact-occurrence-adapter-v1
+    nq.custody/role: terminal-receipts
+spec:
+  accessModes:
+    - ReadWriteOnce
+  volumeMode: Filesystem
+  storageClassName: turnstile-external-retain-v1
+  volumeName: turnstile-terminal-receipts-v1
+  resources:
+    requests:
+      storage: 10Gi
