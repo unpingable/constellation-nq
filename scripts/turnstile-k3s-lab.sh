@@ -390,7 +390,11 @@ teardown_node() {
     printf 'system_powerdown\n' | nc -U "${directory}/monitor.sock" >/dev/null
     for attempt in $(seq 1 30); do
         if ! kill -0 "${pid}" 2>/dev/null; then
-            mv "${directory}/qemu.pid" "${directory}/qemu.pid.closed"
+            if test -f "${directory}/qemu.pid"; then
+                mv "${directory}/qemu.pid" "${directory}/qemu.pid.closed"
+            else
+                printf '%s\n' "${pid}" >"${directory}/qemu.pid.closed"
+            fi
             return 0
         fi
         sleep 1
