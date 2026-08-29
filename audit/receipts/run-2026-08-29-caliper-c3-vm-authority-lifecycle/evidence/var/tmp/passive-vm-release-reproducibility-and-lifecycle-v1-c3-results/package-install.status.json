@@ -1,0 +1,8 @@
+{
+  "argv": [
+    "dpkg",
+    "-i",
+    "/home/nqtest/caliper-nq-ng.deb"
+  ],
+  "status": 0
+}

@@ -1,0 +1,58 @@
+{
+  "schema": "nq.observability_handoff.v1",
+  "artifact_role": "descriptive deployment evidence only",
+  "campaign": "CALIPER",
+  "campaign_slug": "passive-vm-release-reproducibility-and-lifecycle-v1",
+  "environment_id": "CALIPER/passive-vm-release-reproducibility-and-lifecycle-v1/c3",
+  "status": "OBSERVABILITY-HANDOFF-READY",
+  "identity": {
+    "vm_id": "caliper-c3-vm-20260829",
+    "canonical_hostname": "caliper-c3-vm",
+    "reported_hostname": "caliper-c3-vm",
+    "expected_reported_host": "caliper-c3-vm",
+    "exact_match": true,
+    "controller_target_ip": "127.0.0.1",
+    "stable_dns": []
+  },
+  "access": {
+    "routes": [
+      {
+        "protocol": "ssh",
+        "host": "127.0.0.1",
+        "port": 22991,
+        "boundary": "controller-loopback-private"
+      }
+    ],
+    "health_urls": [],
+    "prometheus_urls": [],
+    "credentials_included": false
+  },
+  "runtime": {
+    "kind": "local-kvm-vm",
+    "os": "Ubuntu 24.04.4",
+    "kernel": "6.8.0-138-generic",
+    "vcpus": 2,
+    "configured_memory_bytes": 2147483648,
+    "observed_memory_bytes": 2063220736,
+    "systemd_units": [
+      "nqd.service",
+      "nq-passive-load-observer.service",
+      "nq-recurring-office.service",
+      "nq-recurring-office.timer"
+    ],
+    "planned_unit_not_created": "nq-passive-vm-release-reproducibility-and-lifecycle-v1-c3-recurrence.service",
+    "http_health_declared": false,
+    "prometheus_exporter_declared": false
+  },
+  "expected_state": {
+    "enabled_recurring_timers": 0,
+    "sample_store_mode": "0750",
+    "closeout_requires_vm_powered_off": true,
+    "vm_powered_off": true,
+    "controller_route_reachable_at_closeout": false,
+    "authority_objects_created": 0,
+    "service_state_is_semantic_verdict": false
+  },
+  "kubernetes": null,
+  "monitor_rbac_proposal": null
+}

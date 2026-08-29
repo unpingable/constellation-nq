@@ -1,0 +1,81 @@
+{
+  "schema": "nq.caliper_vm_authority_lifecycle_result.v1",
+  "campaign": "CALIPER",
+  "campaign_slug": "passive-vm-release-reproducibility-and-lifecycle-v1",
+  "classification": "PASSIVE-VM-AUTHORITY-LIFECYCLE-NOT-QUALIFIED",
+  "subclassification": "PRE-AUTHORITY GENERATION-STORE MODE CONTRACT MISMATCH",
+  "release_source_commit": "e06a7b85699d23bbc0637fd4a1288f8c15afcbc8",
+  "fixture_commit": "e46f15a38030e720246909b70a114d265c0f08fc",
+  "vm": {
+    "environment_id": "caliper-c3-vm-20260829",
+    "hostname": "caliper-c3-vm",
+    "expected_reported_host": "caliper-c3-vm",
+    "identity_match": true,
+    "base_image_sha256": "d0fe84bb5f80853425fa6be28e2c106f30104c3cfe8611933f2e65c9b63f0e30",
+    "vcpus": 2,
+    "configured_memory_bytes": 2147483648,
+    "observed_memory_bytes": 2063220736,
+    "overlay_virtual_bytes": 21474836480,
+    "powered_off": true,
+    "overlay_check": "pass"
+  },
+  "release": {
+    "deb_sha256": "7690816a1e574e32eb6606619bbed980ee3e6ea2469a745d685b065693c6566d",
+    "nq_sha256": "fd841a7acaacff978df793b3fe676017030e5f0328987e0591778a141ad963e9",
+    "nqd_sha256": "25558e3710d33c4a61d25cf9b6ad2c08910559e1776c065e4b400c974c18f731",
+    "passive_helper_sha256": "29256592dbc963a9aa3c3d6886c15afbb8114d5d143c4fdd859849d09ef8045c"
+  },
+  "pre_authority": {
+    "generation_id": "sha256:4c32a1dd8ed83ad99054c7c8757a57d048a121d24c5722083dadbd05f443c53e",
+    "sample_store": "/var/lib/nq-passive-load/samples/passive-vm-release-reproducibility-and-lifecycle-v1-c3/g1",
+    "expected_mode": "0750",
+    "observed_mode": "02750",
+    "observed_mode_decimal": 1512,
+    "owner_uid": 985,
+    "owner_gid": 984,
+    "free_bytes": 17871306752,
+    "min_free_bytes": 10737418240,
+    "product_readiness_exit": 0,
+    "fixture_assertion_refused": true,
+    "sgid_inherited_from_packaged_parent": true,
+    "world_writable": false,
+    "unsafe_write_authority_added": false
+  },
+  "authority_counts": {
+    "h": 0,
+    "g_child_issuances": 0,
+    "e_enrollments": 0,
+    "e_child_issuances": 0,
+    "watchers": 0,
+    "admissions": 0,
+    "activations": 0,
+    "samples": 0,
+    "recurrence_attempts": 0,
+    "acquisitions": 0,
+    "handoffs": 0,
+    "provider_starts": 0,
+    "fences": 0,
+    "outcome_unknown": 0
+  },
+  "closeout": {
+    "live_signing_key_path_present": false,
+    "unused_key_sha256": "6fc48ed126a6828790fdde6352a1c9006c37c74faae3fd140cfcebacf1b8ecc3",
+    "operating_state_entries": 0,
+    "nq_database_present": false,
+    "nq_config_present": false,
+    "custom_recurrence_unit_created": false,
+    "packaged_units_active": 0,
+    "packaged_timer_enabled": false,
+    "replacement_vm_or_run": false,
+    "terminal_archive_sha256": "8d2085425302f3afca26adafd585a54d932f97649a44281d4f4820a6ce88664e",
+    "serial_log_sha256": "8b54c09df272bd4f7620f6d3ee3eda26514ab290aac202d6d18feb7372b05791"
+  },
+  "glasshopper": {
+    "live_accessed": false,
+    "source_contains_later_exact_0750_law": false,
+    "existing_handoff_store_mode": "02750",
+    "evidence_invalidated": false,
+    "perturbed": false
+  },
+  "observability_handoff": "OBSERVABILITY-HANDOFF-READY"
+}

@@ -1,0 +1,8 @@
+{
+  "argv": [
+    "systemctl",
+    "is-active",
+    "nqd.service"
+  ],
+  "status": 3
+}

@@ -1,0 +1,1 @@
+{"capacity_context":{"cgroup_mode":"v2","cpu_max":null,"cpus_allowed_list":"0-1","cpuset_cpus_effective":null,"schema":"nq.available_parallelism_context.v1"},"capacity_context_id":"sha256:57ea44cbe5f710ffdb266bec063b107d38176f109c4d9d0fe5b43334a87b9e77","logical_cpu_count":2,"schema":"nq.passive_load_capacity_context_inspection.v1"}

@@ -1,0 +1,1 @@
+{"schema":"nq.passive_load_observer_generation_store_readiness.v1","generation_id":"sha256:4c32a1dd8ed83ad99054c7c8757a57d048a121d24c5722083dadbd05f443c53e","sample_store":"/var/lib/nq-passive-load/samples/passive-vm-release-reproducibility-and-lifecycle-v1-c3/g1","owner_uid":985,"owner_gid":984,"mode":1512,"free_bytes":17871306752,"min_free_bytes":10737418240}
