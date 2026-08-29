@@ -7,6 +7,9 @@ for command_name in jq sha256sum stat tar gzip find diff mktemp; do require_comm
 test -n "${ROOT}" && test -d "${ROOT}" || die "usage: verify-bedrock-oci-release.sh RELEASE_ROOT"
 ROOT="$(cd "${ROOT}" && pwd -P)"
 test -f "${ROOT}/release-digests.sha256" || die "release digest manifest is absent"
+test -z "$(find "${ROOT}" -type l -print -quit)" || die "retained release contains a symbolic link"
+expected_files="$(( $(wc -l <"${ROOT}/release-digests.sha256") + 1 ))"
+test "$(find "${ROOT}" -type f | wc -l)" = "${expected_files}" || die "retained release inventory is not exact"
 (cd "${ROOT}" && sha256sum -c release-digests.sha256 >/dev/null) || die "retained release digest mismatch"
 
 jq -e '.schema == "nq.bedrock_oci_input_pins.v1" and (.inputs | length == 7)' "${ROOT}/input-pins.json" >/dev/null || die "input pin manifest is invalid"
@@ -34,12 +37,19 @@ diff_id="$(jq -er '.rootfs.diff_ids | if length == 1 then .[0] else error("cardi
 test "sha256:$(gzip -cd "${layer}" | sha256sum | awk '{print $1}')" = "${diff_id}" || die "layer diff-id mismatch"
 
 facts="${ROOT}/oci-artifact-facts.json"
-jq -e --arg manifest "${manifest_digest}" --arg config "${config_digest}" --arg layer "${layer_digest}" --arg diff_id "${diff_id}" \
-    '.schema == "nq.bedrock_oci_artifact_facts.v2" and .manifest_digest == $manifest and .image_config_digest == $config and .layers[0].digest == $layer and .layers[0].diff_id == $diff_id and (.copied_inputs | length == 7)' "${facts}" >/dev/null \
+pins_digest="sha256:$(sha256sum "${ROOT}/input-pins.json" | awk '{print $1}')"
+jq -e --slurpfile pins "${ROOT}/input-pins.json" --arg manifest "${manifest_digest}" --argjson manifest_size "${manifest_size}" \
+    --arg config "${config_digest}" --argjson config_size "${config_size}" --arg layer "${layer_digest}" --argjson layer_size "${layer_size}" \
+    --arg diff_id "${diff_id}" --arg pins_digest "${pins_digest}" \
+    '.schema == "nq.bedrock_oci_artifact_facts.v2" and .manifest_digest == $manifest and .manifest_size_bytes == $manifest_size and
+     .image_config_digest == $config and .image_config_size_bytes == $config_size and .layers[0].digest == $layer and
+     .layers[0].size_bytes == $layer_size and .layers[0].diff_id == $diff_id and
+     .configuration_digests.input_pins_v1 == $pins_digest and .copied_inputs == $pins[0].inputs' "${facts}" >/dev/null \
     || die "artifact facts do not bind the retained OCI graph"
 archive_digest="$(jq -er '.archive.digest' "${facts}")"; archive="$(find "${ROOT}" -maxdepth 1 -type f -name 'bedrock-nq-*.oci.tar' -print)"
 test -n "${archive}" && test "$(printf '%s\n' "${archive}" | wc -l)" = 1 || die "OCI archive cardinality mismatch"
 test "sha256:$(sha256sum "${archive}" | awk '{print $1}')" = "${archive_digest}" || die "OCI archive digest mismatch"
+test "$(stat -c %s "${archive}")" = "$(jq -er '.archive.size_bytes' "${facts}")" || die "OCI archive size mismatch"
 scratch="$(mktemp -d)"; trap 'rm -rf "${scratch}"' EXIT
 tar -xf "${archive}" -C "${scratch}"
 diff -qr --no-dereference "${ROOT}/layout" "${scratch}" >/dev/null || die "archive does not reopen to the retained layout"

@@ -20,11 +20,21 @@ done
 git cat-file -e "${SOURCE_COMMIT}^{commit}" || die "source commit is unavailable"
 test -z "$(git status --short)" || die "source worktree is not clean"
 jq -e '
+  keys == ["inputs","schema"] and
   .schema == "nq.bedrock_oci_input_pins.v1" and
   (.inputs | type == "array" and length == 7) and
-  ([.inputs[].id] | unique | length == 7) and
   ([.inputs[].destination] | unique | length == 7) and
+  ([.inputs[] | {id,destination,mode}] | sort_by(.id)) == [
+    {"id":"dynamic_loader","destination":"/lib64/ld-linux-x86-64.so.2","mode":"0755"},
+    {"id":"libc","destination":"/lib/x86_64-linux-gnu/libc.so.6","mode":"0644"},
+    {"id":"libgcc_s","destination":"/lib/x86_64-linux-gnu/libgcc_s.so.1","mode":"0644"},
+    {"id":"libm","destination":"/lib/x86_64-linux-gnu/libm.so.6","mode":"0644"},
+    {"id":"nq","destination":"/usr/bin/nq","mode":"0755"},
+    {"id":"passive_helper","destination":"/usr/lib/nq/helpers/nq-passive-load-helper","mode":"0755"},
+    {"id":"runtime_carrier","destination":"/usr/bin/nq-bedrock-runtime-carrier","mode":"0755"}
+  ] and
   all(.inputs[];
+    keys == ["destination","id","mode","sha256","size_bytes","source"] and
     (.id | type == "string" and length > 0) and
     (.source | type == "string" and length > 0) and
     (.destination | type == "string" and startswith("/") and (contains("..") | not)) and
