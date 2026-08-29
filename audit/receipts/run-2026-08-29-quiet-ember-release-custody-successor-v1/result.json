@@ -1,0 +1,80 @@
+{
+  "schema": "nq.quiet_ember_release_custody_successor_result.v1",
+  "campaign": "QUIET-EMBER",
+  "campaign_slug": "release-custody-successor-v1",
+  "date": "2026-08-29",
+  "classification": "QUALIFIED-SUCCESSOR-RETAINED-OCI-RELEASE-CUSTODY-V1",
+  "authority_granted": false,
+  "lineage": {
+    "source_base": "7c361a9b43c6eb25645dcde5fa5222ae5a70ac28",
+    "prior_implementation": "35a3cc9ea956d93697e3cfc73f7a7bd3733f415a",
+    "prior_refused_result_head": "f7cdf9e9c87faccb42cc6c0f9191b24be650a6d4",
+    "successor_specimen_source": "98419132b91619304351381f05dc2ca7a05c2167",
+    "branch": "campaign/quiet-ember-release-custody-successor-v1"
+  },
+  "release": {
+    "retained_file_count": 18,
+    "image_reference": "bedrock.local/nq@sha256:94c82c5b69b94660918ad34be401217c42d9f4888489bd15f26b5f6ad306181a",
+    "manifest_digest": "sha256:94c82c5b69b94660918ad34be401217c42d9f4888489bd15f26b5f6ad306181a",
+    "manifest_size_bytes": 408,
+    "config_digest": "sha256:fac2c5e7fd1a282e4e6749a3eaa20a60abdff1fdd01bd0a09ab3af43d3267929",
+    "config_size_bytes": 1273,
+    "layer_digest": "sha256:0d8511437a524965a8f94d51a5822c196de8e7227d759a3b56ce81f1de43956d",
+    "layer_size_bytes": 11423603,
+    "layer_diff_id": "sha256:b791c62a06866c09c19a80791037a9be923833ff8716c52b6e551aa9d95017ec",
+    "archive_digest": "sha256:fbf0378137ee1b2f8209169ff3e2ea32aaf8088111845623dea0ab8a3594774c",
+    "archive_size_bytes": 11438080,
+    "release_digest_manifest_sha256": "a2546401b8789a90968d360504787a534b55e2fffdc4b3aa068eb9df7afd7798",
+    "input_pins_digest": "sha256:f092983089528e1fb3523bb7e3200529bca3963b427a0a83b507039cb95ecb8b",
+    "nq_executable_digest": "sha256:f926f9ef33bc24bb38f774950766e438373dd759364550e5efbc763a5ffa804f",
+    "passive_helper_digest": "sha256:5aba0096fbe824d18a6e5ad646d414cb2b0fff1adba3687df3974acd0883aa98",
+    "runtime_carrier_digest": "sha256:a102413a5db548b99cfedeac23cc4621477793ae45d7b80491fb66cada20cf77"
+  },
+  "qualification": {
+    "offline_verify_generated": "passed",
+    "offline_verify_retained": "passed",
+    "retained_input_reconstruction": "byte_identical_entire_release",
+    "same_size_content_mutation": "refused_before_manifest_empty_stdout",
+    "focused_library_tests_passed": 9,
+    "real_parent_death_tests_passed": 1,
+    "focused_tests_failed": 0,
+    "workspace_tests": "passed_with_zero_failures",
+    "strict_clippy": "passed",
+    "format": "passed",
+    "shell_syntax": "passed",
+    "shellcheck": "unavailable_not_claimed",
+    "json": "passed",
+    "diff_check": "passed"
+  },
+  "live_effect_counts": {
+    "ag_authorizations": 0,
+    "nq_authority_objects": 0,
+    "nq_claims": 0,
+    "nq_fences": 0,
+    "nq_releases": 0,
+    "mechanics_invocations": 0,
+    "docket_attempts": 0,
+    "kubernetes_workloads": 0,
+    "provider_starts": 0,
+    "vms": 0,
+    "listeners": 0,
+    "live_route_changes": 0,
+    "recurrence_attempts": 0,
+    "samples": 0,
+    "acquisitions": 0
+  },
+  "teardown": {
+    "retained_artifacts": ["repository-custodied release bundle"],
+    "retained_processes": 0,
+    "retained_listeners": 0,
+    "retained_vms": 0,
+    "retained_secrets": 0,
+    "obligations": []
+  },
+  "nonclaims": [
+    "does not rewrite the prior refused result",
+    "not an AG or NQ authorization",
+    "not a container activation",
+    "not permission to start BEDROCK B6 or OPEN-QUARRY"
+  ]
+}
