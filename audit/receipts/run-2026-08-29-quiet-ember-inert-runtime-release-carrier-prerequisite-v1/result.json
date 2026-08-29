@@ -1,0 +1,33 @@
+{
+  "schema": "nq.campaign_result.v1",
+  "campaign": "QUIET-EMBER",
+  "slug": "inert-runtime-release-carrier-prerequisite-v1",
+  "classification": "QUALIFIED-PREREQUISITE-INERT-RUNTIME-RELEASE-CARRIER-V1",
+  "authority_granted": false,
+  "source_base": "7c361a9b43c6eb25645dcde5fa5222ae5a70ac28",
+  "implementation_commit": "35a3cc9ea956d93697e3cfc73f7a7bd3733f415a",
+  "qualification": {
+    "focused_unit_cases_passed": 9,
+    "real_parent_death_cases_passed": 1,
+    "failed": 0,
+    "strict_clippy": "pass",
+    "full_workspace_tests": "pass_zero_failures",
+    "format": "pass",
+    "oci_layout_reopen": "pass"
+  },
+  "oci": {
+    "image_reference": "bedrock.local/nq@sha256:0faebb357b63c4d48ae38d25c15d166dbc89653ab961ca360f6ae64c8a4a63b1",
+    "config_digest": "sha256:e56ae1e46c93723ca2f05fc2972837be85eb119caa09250d0dfab895613cb342",
+    "layer_digest": "sha256:0a9765a91eb70388b48a84ae552b12ae257e0cd7e735ff5f28f1b973ed510b00",
+    "carrier_digest": "sha256:34691c0d39574336f86128d77ddcd1475767da36f6518772ded08da3670c3b82"
+  },
+  "live_counts": {
+    "authority_events": 0,
+    "nq_claims_fences_releases": 0,
+    "kubernetes_objects": 0,
+    "provider_starts": 0,
+    "vms": 0,
+    "listeners": 0
+  },
+  "teardown_obligations": []
+}
