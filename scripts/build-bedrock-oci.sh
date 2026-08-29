@@ -30,7 +30,7 @@ jq -e '
     (.destination | type == "string" and startswith("/") and (contains("..") | not)) and
     (.mode == "0755" or .mode == "0644") and
     (.size_bytes | type == "number" and . >= 0 and floor == .) and
-    (.sha256 | test("^[0-9a-f]{64}$"))))
+    (.sha256 | test("^[0-9a-f]{64}$")))
 ' "${PIN_FILE}" >/dev/null || die "input pins are not the closed V1 shape"
 
 layout="${OUTPUT_ROOT}/layout"
