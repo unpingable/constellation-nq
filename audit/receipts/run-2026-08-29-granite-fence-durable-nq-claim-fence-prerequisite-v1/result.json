@@ -1,0 +1,68 @@
+{
+  "schema": "nq.granite_fence_prerequisite_result.v1",
+  "campaign": "GRANITE-FENCE",
+  "campaign_slug": "durable-nq-claim-fence-prerequisite-v1",
+  "date": "2026-08-29",
+  "classification": "QUALIFIED-PREREQUISITE-DURABLE-STANDALONE-NQ-CLAIM-FENCE-V1",
+  "predecessor_refusal_commit": "5fc7cc8212eb182bba54a2c92b7b37bd44b0cf69",
+  "source_commit": "7c361a9b43c6eb25645dcde5fa5222ae5a70ac28",
+  "implementation_commit": "a73edb188ac4d9746a720432f5b9cfc3b9110e6e",
+  "branch": "campaign/granite-fence-durable-nq-claim-fence-prerequisite-v1",
+  "interface": {
+    "crate": "crates/nq-standalone-claim-fence",
+    "standalone_from_recurring_tick": true,
+    "mechanics_runner_present": false,
+    "authorization_interpretation_present": false,
+    "claim_identity": "domain_separated_length_framed_canonical_json",
+    "transition_identity": "domain_separated_length_framed_canonical_json",
+    "active_claims_per_coordination_domain": 1,
+    "release_cardinality_per_claim": 1,
+    "exact_replay_is_read_only": true
+  },
+  "allowed_histories": [
+    "claimed->fenced->released->terminal",
+    "claimed->fenced->released->outcome_unknown->terminal"
+  ],
+  "qualification": {
+    "focused_library_tests_passed": 10,
+    "real_cli_integration_tests_passed": 1,
+    "focused_tests_failed": 0,
+    "workspace_tests": "passed_with_zero_failures",
+    "documentation_tests": "passed_with_zero_failures",
+    "format": "passed",
+    "clippy_warnings_denied": "passed",
+    "diff_check": "passed"
+  },
+  "live_effect_counts": {
+    "ag_authorizations": 0,
+    "nq_authority_objects": 0,
+    "nq_claims": 0,
+    "nq_fences": 0,
+    "nq_releases": 0,
+    "mechanics_invocations": 0,
+    "docket_attempts": 0,
+    "kubernetes_workloads": 0,
+    "provider_starts": 0,
+    "vms": 0,
+    "listeners": 0,
+    "live_route_changes": 0,
+    "recurrence_attempts": 0,
+    "samples": 0,
+    "acquisitions": 0
+  },
+  "teardown": {
+    "retained_processes": 0,
+    "retained_listeners": 0,
+    "retained_vms": 0,
+    "retained_temporary_artifacts": 0,
+    "retained_secrets": 0,
+    "obligations": []
+  },
+  "next_gate": "RIVER-CLERK remains a distinct Docket process-adapter campaign; BEDROCK B6/OPEN-QUARRY remains prohibited until all prerequisites independently qualify",
+  "nonclaims": [
+    "not an AG or NQ authorization",
+    "not a mechanics executor",
+    "not a live NQ claim or fence",
+    "not a BEDROCK B6 first-live-occurrence result"
+  ]
+}
