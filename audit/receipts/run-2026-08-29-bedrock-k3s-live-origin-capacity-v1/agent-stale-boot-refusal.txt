@@ -1,0 +1,1 @@
+BEDROCK origin/capacity verification refused: node observation refused: signed observation content
