@@ -1,0 +1,1 @@
+{"cmd":["--version"],"entrypoint":["/usr/bin/nq"],"environment":["PATH=/usr/bin:/usr/lib/nq/helpers"],"source_config_digest":"sha256:7190e6d3c3dede7a1402a3d6031a627e5c9f62182ea52931ea43fdee7cc8570d"}
