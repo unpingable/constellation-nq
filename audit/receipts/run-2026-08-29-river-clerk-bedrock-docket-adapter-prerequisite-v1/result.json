@@ -1,0 +1,68 @@
+{
+  "schema": "nq.river_clerk_bedrock_adapter_prerequisite_result.v1",
+  "campaign": "RIVER-CLERK",
+  "campaign_slug": "bedrock-docket-adapter-prerequisite-v1",
+  "date": "2026-08-29",
+  "classification": "NOT-QUALIFIED-IDENTITY-CONTRACT-SUCCESSOR-REQUIRED",
+  "component_classifications": {
+    "docket_process_host": "QUALIFIED-INDEPENDENT-DOCKET-HALF",
+    "granite_fence": "QUALIFIED-INDEPENDENT-NQ-PREREQUISITE",
+    "nq_bedrock_adapter": "NOT-IMPLEMENTABLE-UNDER-RETAINED-V1-IDENTITIES",
+    "composed_bedrock_executor_prerequisite": "NOT-QUALIFIED"
+  },
+  "custody": {
+    "nq_base": "7c361a9b43c6eb25645dcde5fa5222ae5a70ac28",
+    "granite_fence_implementation": "a73edb188ac4d9746a720432f5b9cfc3b9110e6e",
+    "granite_fence_successor_cherry_pick": "baf6b709333965ca408f6a949872f9e47f940a70",
+    "docket_base": "c49ad8d0f26fb2a13b9dbafdde84d7abfe1f867b",
+    "docket_head": "13d37da4dbff3164e96d555172f4cf4d3c961117",
+    "nq_branch": "campaign/river-clerk-bedrock-docket-adapter-prerequisite-v1",
+    "docket_branch": "campaign/live-docket-executor-prerequisite-v1"
+  },
+  "docket_artifacts": {
+    "consumer_requirements_sha256": "681f054d6a5f045b74c722140422117cd9956665517716451c35e9ab8c3bb8c2",
+    "transport_contract_sha256": "b54f8db4d89c7e422733757f7a69b7fcc7420ce225f782f493c703c8e39e41a1",
+    "conformance_corpus_sha256": "3e58081f7cc36ecfad44ee9860c77ec5784b34c91e7c707d126f00ef778cf687"
+  },
+  "identity_conflict": {
+    "docket_required_equality": "dispatch.work == local_docket_host_plan_id == ag_issuance.work",
+    "nq_v1_required_equality": "authorization.ag_work == prepared_occurrence.plan_id",
+    "host_plan_content_binds_adapter_program_and_config": true,
+    "prepared_plan_and_host_plan_domains_are_distinct": true,
+    "embedding_creates_digest_dependency_cycle": true,
+    "v1_weakened": false,
+    "v2_introduced": false
+  },
+  "live_effect_counts": {
+    "ag_authorizations": 0,
+    "nq_authority_objects": 0,
+    "nq_claims": 0,
+    "nq_fences": 0,
+    "nq_releases": 0,
+    "mechanics_invocations": 0,
+    "docket_attempts": 0,
+    "kubernetes_workloads": 0,
+    "provider_starts": 0,
+    "vms": 0,
+    "listeners": 0,
+    "live_route_changes": 0,
+    "recurrence_attempts": 0,
+    "samples": 0,
+    "acquisitions": 0
+  },
+  "teardown": {
+    "retained_processes": 0,
+    "retained_listeners": 0,
+    "retained_vms": 0,
+    "retained_temporary_artifacts": 0,
+    "retained_secrets": 0,
+    "obligations": []
+  },
+  "resume_point": "separately authorize a versioned NQ successor with distinct explicit NQ prepared-plan and Docket executor-plan identities, then requalify the composed adapter without changing Docket V1",
+  "nonclaims": [
+    "not a complete BEDROCK executor prerequisite",
+    "not an adapter qualification",
+    "not an AG or NQ authorization",
+    "not permission to start BEDROCK B6 or OPEN-QUARRY"
+  ]
+}
