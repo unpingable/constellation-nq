@@ -1,0 +1,74 @@
+{
+  "schema": "nq.passive_linode_glasshopper_hourly_observation.v1",
+  "artifact_kind": "read_only_interim_observation",
+  "campaign": "GLASSHOPPER",
+  "token": "gh24-20260828-f249176c",
+  "observed_at": "2026-08-29T06:50:15.680Z",
+  "elapsed_from_authority_start_seconds": 32715.680,
+  "current_generation": "g2",
+  "samples_by_generation": [1440, 741, 0, 0],
+  "free_bytes": 25312534528,
+  "ledger_bytes": 9216000,
+  "recurrence": {
+    "acquisitions_created": 108,
+    "provider_invocations_started": 106,
+    "provider_succeeded": 106,
+    "skipped_slots": 1,
+    "coordination_deferred": 0,
+    "coordination_claimed": 106,
+    "coordination_released": 106,
+    "all_provider_intakes_including_two_geneses": 108,
+    "provider_terminal_failed": 0,
+    "outcome_unknown": 0,
+    "refusals": 0
+  },
+  "skipped_slot_observation": {
+    "enrollment_id": "sha256:f89c702a9269162942707504cc7ec251eac2c0615c6a340f396ea3eec4be6e42",
+    "event_slot_index": 32,
+    "scheduled_for_unix_ms": 1787984700000,
+    "occurred_at_unix_ms": 1787984717028,
+    "policy": "latest_only",
+    "skipped_from": 31,
+    "skipped_to": 31,
+    "catch_up_burst_observed": false
+  },
+  "created_only_occurrences": [
+    {
+      "watcher_instance_id": "labelwatch-host-gh24-20260828-f249176c-g1",
+      "acquisition_id": "recurrence:d562a282d7ba8d1a6ddd29bd4d61e196d5cda6ca5a4394f79e1e84261fd4507e",
+      "slot_index": 71,
+      "created_at_unix_ms": 1787974998710,
+      "state_at_snapshot": "created_only_after_g1_expiry",
+      "attempts": 0,
+      "provider_starts": 0,
+      "fences": 0,
+      "terminal_outcome_inferred": false
+    },
+    {
+      "watcher_instance_id": "labelwatch-host-gh24-20260828-f249176c-g2",
+      "slot_index": 36,
+      "created_at_unix_ms": 1787985955717,
+      "state_at_snapshot": "ordinary_current_provider_spacing_wait",
+      "terminal_outcome_inferred": false
+    }
+  ],
+  "services": {
+    "g1_observer": "inactive_success",
+    "g2_observer": "active_running",
+    "g3_observer": "inactive",
+    "g4_observer": "inactive",
+    "recurrence_timer": "active_waiting",
+    "recurrence_service_latest_result": "success",
+    "closeout_timer": "active_waiting",
+    "closeout_next": "2026-08-29T21:45:05Z",
+    "closeout_service": "inactive_success"
+  },
+  "staging_wake_limitation_preserved": true,
+  "expected_reported_host": "labelwatch-host",
+  "os_and_exporter_reported_host": "localhost",
+  "reported_host_discrepancy_preserved": true,
+  "shared_semantic_defect_observed": false,
+  "terminal_limitation_candidate": "g1_slot_71_created_only_after_generation_expiry",
+  "mutation_performed": false,
+  "terminal_classification_pending": true
+}
