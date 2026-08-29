@@ -1767,9 +1767,11 @@ fn acquire_observer_lock(store: &Path) -> Result<Flock<File>, Error> {
 fn require_sample_store(path: &Path) -> Result<(), Error> {
     require_absolute("sample_store", path)?;
     let metadata = fs::symlink_metadata(path)?;
-    if !metadata.file_type().is_dir() || metadata.mode() & 0o002 != 0 {
+    let mode = metadata.mode() & 0o7777;
+    if !metadata.file_type().is_dir() || !matches!(mode, 0o750 | 0o2750) {
         return Err(Error::Invalid(
-            "sample store must be a non-world-writable real directory".into(),
+            "sample store must be a real directory with mode 0750 or inherited-setgid mode 02750"
+                .into(),
         ));
     }
     Ok(())

@@ -470,8 +470,9 @@ pub fn generation_status(
 ///
 /// # Errors
 ///
-/// Refuses absent, substituted, world-writable, or under-capacity custody and
-/// malformed or non-canonical generation bytes.
+/// Refuses absent, substituted, mode-contract-invalid, or under-capacity
+/// custody and malformed or non-canonical generation bytes. The closed mode
+/// contract admits exact `0750` and the intentional setgid-inherited `02750`.
 pub fn generation_store_readiness(
     generation_path: &Path,
 ) -> Result<ObserverGenerationStoreReadinessV1, Error> {
@@ -1785,6 +1786,14 @@ mod tests {
 
         fs::set_permissions(
             &generation.spec.sample_store,
+            fs::Permissions::from_mode(0o2750),
+        )
+        .unwrap();
+        let inherited = generation_store_readiness(&fixture.generation_path).unwrap();
+        assert_eq!(inherited.mode, 0o2750);
+
+        fs::set_permissions(
+            &generation.spec.sample_store,
             fs::Permissions::from_mode(0o777),
         )
         .unwrap();
@@ -1792,8 +1801,23 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("non-world-writable real directory")
+                .contains("mode 0750 or inherited-setgid mode 02750")
         );
+
+        for mode in [0o770, 0o700, 0o1750, 0o3750] {
+            fs::set_permissions(
+                &generation.spec.sample_store,
+                fs::Permissions::from_mode(mode),
+            )
+            .unwrap();
+            let error = generation_store_readiness(&fixture.generation_path).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("mode 0750 or inherited-setgid mode 02750"),
+                "mode {mode:o} unexpectedly satisfied the store contract"
+            );
+        }
 
         fs::set_permissions(
             &generation.spec.sample_store,

@@ -147,8 +147,11 @@ The package owns only the shared bounded roots. It creates
 does not know or create a generation-dedicated store. Before materializing G,
 the deployment/charter constructor must allocate a fresh absolute pathname,
 create that one pristine real directory as
-`nq-passive-load-observer:nq-passive-load-reader` mode `0750`, and prove that
-its filesystem satisfies G's free-space floor. The exact pathname is then
+`nq-passive-load-observer:nq-passive-load-reader`, and prove that its mode is
+exactly `0750` or the setgid-inherited `02750` and that its filesystem satisfies
+G's free-space floor. The parent deliberately carries setgid so descendants
+retain the intended reader group; a constructor must not clear an inherited
+setgid bit merely to normalize the numeric mode. The exact pathname is then
 bound into the immutable generation, provider configuration, operating grant,
 activation, and any succession relation. Grant issuance and activation create
 authority, not directories. The observer runtime appends only inside an
@@ -159,7 +162,8 @@ This preparation is a pre-authority deployment transition. Its receipt records
 the pathname, owner UID, reader GID, mode, filesystem free bytes, generation
 minimum, and that the directory was pristine. `generation-store-readiness
 GENERATION` is a bounded read-only recheck over the exact canonical generation:
-it verifies a real non-world-writable directory and the free-space floor without
+it verifies a real directory with the closed `0750 | 02750` permission contract
+and the free-space floor without
 traversing retained history or creating a lock, sample, event, or selection
 object. Run it under the intended observer execution context after generation
 materialization and before H/G/E issuance; activation repeats the same library

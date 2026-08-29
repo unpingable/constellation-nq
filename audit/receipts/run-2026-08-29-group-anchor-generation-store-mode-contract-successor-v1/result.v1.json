@@ -1,0 +1,32 @@
+{
+  "schema": "nq.campaign-result/v1",
+  "campaign": "GROUP-ANCHOR",
+  "slug": "generation-store-mode-contract-successor-v1",
+  "classified_at": "2026-08-29T17:33:59Z",
+  "predecessor": {
+    "campaign": "CALIPER",
+    "commit": "74127fc0a121a0408ce6b5262ddf22f5e2d6f839",
+    "terminal_result_reopened": false
+  },
+  "classification": "implementation_qualified_local_fixture",
+  "qualified_mode_set": [
+    "0750",
+    "02750"
+  ],
+  "inherited_setgid_intentional": true,
+  "normalizes_inherited_setgid": false,
+  "authority_counts": {
+    "operating_grants": 0,
+    "generation_issuances": 0,
+    "enrollments": 0,
+    "admissions": 0,
+    "activations": 0
+  },
+  "live_vm_lifecycle": "not_started_requires_distinct_successor",
+  "tests": {
+    "helper_crate": "34 passed; 1 ignored",
+    "process_boundary": "3 passed",
+    "clippy_denies_warnings": "passed",
+    "diff_check": "passed"
+  }
+}
