@@ -80,6 +80,8 @@ pub struct NodeObservationContractV1 {
 pub struct NodeApiFactsV1 {
     /// Node name.
     pub name: String,
+    /// Exact Hostname address reported in Node status.
+    pub reported_hostname: String,
     /// Immutable node UID.
     pub uid: String,
     /// Provider ID.
@@ -692,7 +694,7 @@ impl SignedNodeObservationV1 {
             || self.observation.acquisition_id != basis.acquisition_id
             || self.observation.basis_digest != basis_digest
             || self.observation_digest != observation_digest
-            || self.observation.reported_hostname != basis.node.name
+            || self.observation.reported_hostname != basis.node.reported_hostname
             || self.observation.machine_id != basis.node.machine_id
             || self.observation.boot_id != basis.node.boot_id
             || self.observation.kernel_release != basis.node.kernel_version
@@ -1056,6 +1058,7 @@ mod tests {
             },
             node: NodeApiFactsV1 {
                 name: "bedrock-node-a".into(),
+                reported_hostname: "bedrock-node-a-os".into(),
                 uid: "node-uid-a".into(),
                 provider_id: "k3s://bedrock-node-a".into(),
                 machine_id: "machine-a".into(),
@@ -1100,7 +1103,7 @@ mod tests {
             schema: OBSERVATION_SCHEMA_V1.into(),
             acquisition_id: basis.acquisition_id.clone(),
             basis_digest: semantic_digest(basis).unwrap(),
-            reported_hostname: basis.node.name.clone(),
+            reported_hostname: basis.node.reported_hostname.clone(),
             machine_id: basis.node.machine_id.clone(),
             boot_id: basis.node.boot_id.clone(),
             kernel_release: basis.node.kernel_version.clone(),
@@ -1388,6 +1391,20 @@ mod tests {
         let mut changed = basis.clone();
         changed.node.uid = "node-uid-b".into();
         changed.placement.node_uid = changed.node.uid.clone();
+        assert!(
+            observation
+                .verify_pre_runtime(&changed, &contract, &key.verifying_key(), 1200)
+                .is_err()
+        );
+        let mut changed = basis.clone();
+        changed.node.reported_hostname = "substituted-hostname".into();
+        assert!(
+            observation
+                .verify_pre_runtime(&changed, &contract, &key.verifying_key(), 1200)
+                .is_err()
+        );
+        let mut changed = basis.clone();
+        changed.node.reported_hostname = "substituted-hostname".into();
         assert!(
             observation
                 .verify_pre_runtime(&changed, &contract, &key.verifying_key(), 1200)

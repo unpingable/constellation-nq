@@ -1,4 +1,4 @@
-# BEDROCK Kubernetes origin/capacity acquisition V1
+| node identity | exact API node name, API Hostname address, UID, provider ID, machine ID, and boot ID bind placement, reported OS identity, and node incarnation without treating names as aliases | name/Hostname/UID/provider/machine/boot from API; Hostname/machine/boot independently compared with node observation | node-specific; UID/machine remain across reboot, boot ID changes; replacement refuses | raw SSH facts were not attributable to exact API facts |# BEDROCK Kubernetes origin/capacity acquisition V1
 
 Campaign: `BEDROCK`
 
@@ -121,8 +121,10 @@ Kubernetes reconciliation cannot advance this state machine.
   scheduling; a recreated cluster changes them.
 * node UID and machine ID identify the admitted node. A replacement changes the
   binding. Boot ID changes on reboot and forces a fresh Stage-A observation.
-* node names and provider IDs are compared exactly but are not sufficient on
-  their own.
+* the API object name fixes placement. The API-reported Hostname address binds
+  the operating-system hostname observed on that node. They may differ and are
+  never treated as aliases. Node names and provider IDs are compared exactly
+  but are not sufficient on their own.
 * procfs/cgroup mount IDs and process cgroup paths are observed facts and may
   change across reboot/runtime changes; they are not durable identity.
 * placement is fixed to one node and `rescheduling_allowed=false` in V1.
