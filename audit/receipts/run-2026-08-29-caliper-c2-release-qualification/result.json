@@ -1,0 +1,60 @@
+{
+  "schema": "nq.caliper_release_qualification_result.v1",
+  "campaign": "CALIPER",
+  "campaign_slug": "passive-vm-release-reproducibility-and-lifecycle-v1",
+  "classification": "PASSIVE-VM-RELEASE-REPRODUCIBILITY-QUALIFIED",
+  "parent_commit": "183e95cd2766c80c720e275a8042a6b4349aad4a",
+  "qualified_lifecycle_law_commit": "7a6b7c02acbd8c5de0bb92ebda77ebb905828bf5",
+  "source_commit": "e06a7b85699d23bbc0637fd4a1288f8c15afcbc8",
+  "architecture": "amd64",
+  "toolchain": {
+    "rustc": "1.94.0",
+    "cargo": "1.94.0",
+    "compiler_wrapper_sha256": "617611c69a08d772298ffe2358fdc9b7a53eb9a389a9590281108dcaa6f58820",
+    "musl_gcc_specs_sha256": "00591912cc91feb41f498f31a6d1843c9b326564a4a779e450cfb8fb8a1f4452"
+  },
+  "release": {
+    "tar_sha256": "fc693876484d77a31adbf521ce12e968b7277848674915dc540988867b86a99f",
+    "deb_sha256": "7690816a1e574e32eb6606619bbed980ee3e6ea2469a745d685b065693c6566d",
+    "embedded_manifest_sha256": "c752cbd45aafe3d18532bf5f49a3f719058bd5094b3b3be543cc5b299c75b143",
+    "payload_files": 84,
+    "clean_builds": 2,
+    "binary_checksums_equal": true,
+    "package_contents_equal": true,
+    "scratch_limit_kib": 393216,
+    "scratch_peak_kib": 316628
+  },
+  "executables": {
+    "nq_sha256": "fd841a7acaacff978df793b3fe676017030e5f0328987e0591778a141ad963e9",
+    "nqd_sha256": "25558e3710d33c4a61d25cf9b6ad2c08910559e1776c065e4b400c974c18f731",
+    "host_helper_sha256": "cd12ed5620a34fae531cbb5d451fd5b3519395ce2f3402a12d3fd4e7d3a87494",
+    "linode_origin_helper_sha256": "6f54053238de79cccd4d2cd540a844c4955e960c9179472a38c872f5daed2bf7",
+    "passive_helper_sha256": "29256592dbc963a9aa3c3d6886c15afbb8114d5d143c4fdd859849d09ef8045c"
+  },
+  "qualification": {
+    "focused_af_unix": "pass",
+    "enrollment_lifetime": "pass",
+    "generation_store": "pass",
+    "process_boundary": "pass",
+    "locked_workspace_all_targets": "pass",
+    "clippy_warnings_denied": "pass",
+    "format": "pass",
+    "structural_checks": "pass",
+    "release_verifiers": "pass",
+    "release_failure_atomicity": "pass",
+    "git_diff_check": "pass"
+  },
+  "c3_authorized": true,
+  "authority_counts": {
+    "h": 0,
+    "g": 0,
+    "e": 0,
+    "admissions": 0,
+    "activations": 0,
+    "samples": 0,
+    "recurrence_attempts": 0,
+    "acquisitions": 0,
+    "handoffs": 0,
+    "fences": 0
+  }
+}
