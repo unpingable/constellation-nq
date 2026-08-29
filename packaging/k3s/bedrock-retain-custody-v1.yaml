@@ -1,0 +1,146 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bedrock-k3s-ag-v1
+  labels:
+    nq.campaign/name: BEDROCK
+    nq.campaign/slug: k3s-live-origin-capacity-qualification-v1
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bedrock-exact-occurrence
+  namespace: bedrock-k3s-ag-v1
+  labels:
+    nq.campaign/name: BEDROCK
+    nq.campaign/slug: k3s-live-origin-capacity-qualification-v1
+automountServiceAccountToken: false
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: bedrock-external-retain-v1
+  labels:
+    nq.campaign/name: BEDROCK
+    nq.campaign/slug: k3s-live-origin-capacity-qualification-v1
+provisioner: kubernetes.io/no-provisioner
+reclaimPolicy: Retain
+volumeBindingMode: Immediate
+allowVolumeExpansion: false
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: bedrock-canonical-nq-custody-v1
+  labels:
+    nq.campaign/name: BEDROCK
+    nq.campaign/slug: k3s-live-origin-capacity-qualification-v1
+    nq.custody/role: canonical-nq-custody
+spec:
+  capacity:
+    storage: 100Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: bedrock-external-retain-v1
+  hostPath:
+    path: /mnt/bedrock-custody/canonical
+    type: Directory
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: bedrock-external-journal-v1
+  labels:
+    nq.campaign/name: BEDROCK
+    nq.campaign/slug: k3s-live-origin-capacity-qualification-v1
+    nq.custody/role: external-journal
+spec:
+  capacity:
+    storage: 10Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: bedrock-external-retain-v1
+  hostPath:
+    path: /mnt/bedrock-custody/journal
+    type: Directory
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: bedrock-terminal-receipts-v1
+  labels:
+    nq.campaign/name: BEDROCK
+    nq.campaign/slug: k3s-live-origin-capacity-qualification-v1
+    nq.custody/role: terminal-receipts
+spec:
+  capacity:
+    storage: 10Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: bedrock-external-retain-v1
+  hostPath:
+    path: /mnt/bedrock-custody/receipts
+    type: Directory
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: canonical-nq-custody
+  namespace: bedrock-k3s-ag-v1
+  labels:
+    nq.campaign/name: BEDROCK
+    nq.campaign/slug: k3s-live-origin-capacity-qualification-v1
+    nq.custody/role: canonical-nq-custody
+spec:
+  accessModes:
+    - ReadWriteOnce
+  volumeMode: Filesystem
+  storageClassName: bedrock-external-retain-v1
+  volumeName: bedrock-canonical-nq-custody-v1
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: external-journal
+  namespace: bedrock-k3s-ag-v1
+  labels:
+    nq.campaign/name: BEDROCK
+    nq.campaign/slug: k3s-live-origin-capacity-qualification-v1
+    nq.custody/role: external-journal
+spec:
+  accessModes:
+    - ReadWriteOnce
+  volumeMode: Filesystem
+  storageClassName: bedrock-external-retain-v1
+  volumeName: bedrock-external-journal-v1
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: terminal-receipts
+  namespace: bedrock-k3s-ag-v1
+  labels:
+    nq.campaign/name: BEDROCK
+    nq.campaign/slug: k3s-live-origin-capacity-qualification-v1
+    nq.custody/role: terminal-receipts
+spec:
+  accessModes:
+    - ReadWriteOnce
+  volumeMode: Filesystem
+  storageClassName: bedrock-external-retain-v1
+  volumeName: bedrock-terminal-receipts-v1
+  resources:
+    requests:
+      storage: 10Gi
