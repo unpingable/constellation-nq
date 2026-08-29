@@ -1,0 +1,51 @@
+{
+  "schema": "nq.caliper_release_reproducibility_boundary_result.v1",
+  "campaign": "CALIPER",
+  "campaign_slug": "passive-vm-release-reproducibility-and-lifecycle-v1",
+  "classification": "PASSIVE-VM-RELEASE-REPRODUCIBILITY-BOUNDARY-QUALIFIED",
+  "parent_campaign": "SOCKETWRENCH",
+  "parent_commit": "183e95cd2766c80c720e275a8042a6b4349aad4a",
+  "qualified_lifecycle_law_commit": "7a6b7c02acbd8c5de0bb92ebda77ebb905828bf5",
+  "bounded_quantity": {
+    "name": "aggregate reproducibility harness scratch allocation",
+    "measurement": "du -sk of the complete temporary harness",
+    "class": "temporary workspace regression tripwire",
+    "default_limit_kib": 393216
+  },
+  "root_cause": {
+    "kind": "stale workspace state duplicated into two source fixtures",
+    "predecessor_untracked_campaign_local_kib": 237756,
+    "duplicated_contribution_kib": 475512,
+    "prior_observed_peak_kib": 793384,
+    "product_growth": false,
+    "threshold_changed": false,
+    "source_changed": false
+  },
+  "clean_measurements": [
+    {
+      "limit_kib": 750000,
+      "peak_kib": 316604,
+      "exit": 0
+    },
+    {
+      "limit_kib": 393216,
+      "peak_kib": 316604,
+      "exit": 0
+    }
+  ],
+  "repeated_artifacts": {
+    "tar_sha256": "fc693876484d77a31adbf521ce12e968b7277848674915dc540988867b86a99f",
+    "deb_sha256": "7690816a1e574e32eb6606619bbed980ee3e6ea2469a745d685b065693c6566d",
+    "embedded_manifest_sha256": "c752cbd45aafe3d18532bf5f49a3f719058bd5094b3b3be543cc5b299c75b143",
+    "payload_files": 84
+  },
+  "c2_authorized": true,
+  "c3_authorized": false,
+  "authority_counts": {
+    "h": 0,
+    "g": 0,
+    "e": 0,
+    "admissions": 0,
+    "activations": 0
+  }
+}
