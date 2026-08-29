@@ -1,0 +1,100 @@
+{
+  "schema": "nq.campaign-result/v1",
+  "campaign": "CROWNED-STORE",
+  "slug": "crowned-store-authority-lifecycle-successor-v1",
+  "classified_at": "2026-08-29T18:58:00Z",
+  "predecessors": [
+    {
+      "campaign": "CALIPER",
+      "commit": "74127fc0a121a0408ce6b5262ddf22f5e2d6f839",
+      "terminal_result_reopened": false
+    },
+    {
+      "campaign": "GROUP-ANCHOR",
+      "commit": "a56342762a8b46f4c01b5885c7d7c5728ab27a60",
+      "classification": "implementation_qualified_local_fixture"
+    }
+  ],
+  "classification": "PASSIVE-VM-AUTHORITY-LIFECYCLE-NOT-QUALIFIED",
+  "subclassification": "PROVIDER-CONFIG-CARRIER-MISMATCH-AFTER-AUTHORITY",
+  "release": {
+    "source_commit": "a56342762a8b46f4c01b5885c7d7c5728ab27a60",
+    "deb_sha256": "dfb8e57c6decb87647f66f1f89d0126f215541701c60143dc1166128b82e35d1",
+    "tar_sha256": "dd6725c8c7886a608f549d3da6dcfb459f804c312b792c8530818f3f18f64812",
+    "reproducibility": "byte-for-byte qualified across two independently assembled cases",
+    "reproducibility_scratch_peak_kib": 317436,
+    "reproducibility_scratch_limit_kib": 393216
+  },
+  "occurrences": [
+    {
+      "id": "crowned-store-vm-20260829-v1",
+      "classification": "PRE-AUTHORITY-CONTROLLER-STATUS-TEXT-REFUSAL",
+      "authority_counts": {
+        "h": 0,
+        "g_child_issuances": 0,
+        "e_enrollments": 0,
+        "e_child_issuances": 0,
+        "samples": 0,
+        "recurrence_attempts": 0,
+        "acquisitions": 0
+      },
+      "reopened": false
+    },
+    {
+      "id": "crowned-store-vm-20260829-v2",
+      "classification": "TERMINAL-FAILURE",
+      "consumed": true,
+      "authority_counts": {
+        "h_created": 1,
+        "h_activated": 1,
+        "g_child_issuances": 2,
+        "e_enrollments": 2,
+        "e_child_issuances": 2,
+        "watcher_configurations": 2,
+        "admissions": 0,
+        "office_activations": 0,
+        "samples": 1,
+        "recurrence_attempts": 0,
+        "acquisitions": 0,
+        "handoffs": 0,
+        "succession_relations": 1,
+        "provider_starts": 0,
+        "fences": 0,
+        "outcome_unknown": 0
+      },
+      "grant_id": "sha256:0881aea29c05ecc15ec61fd8a74a3b59155f8953c3e9dc7cc436c4a68bc87473",
+      "g1_generation_id": "sha256:4483326bc95b3a1f3a9eea3e00e8ac03f09c9a1908df8b19484d4599bdcfe0c6",
+      "g2_generation_id": "sha256:1e4be63d4a5d6389211995712f46bec32268e24ff6d36f42106cb1c88ee3e691",
+      "g1_store_mode_decimal": 1512,
+      "g2_store_mode_decimal": 1512,
+      "resolved_mode_contract_satisfied": true,
+      "terminal_step": "g1-index-reconstruct",
+      "terminal_exit_status": 2
+    }
+  ],
+  "terminal_failure": {
+    "fixture_path": "/etc/crowned-store-authority-lifecycle-successor-v1/provider-g1.json",
+    "fixture_encoding": "JSON",
+    "required_encoding": "TOML",
+    "implementation_boundary": "nq-passive-load-helper reconstruct-selection-index",
+    "failure": "provider configuration TOML parse refused at line 1 column 1",
+    "fresh_successor_required": true,
+    "resume_point": "derive a new campaign fixture that emits the exact ProviderConfigV1 TOML carrier, qualify it before authority, and mint a new occurrence"
+  },
+  "evidence": {
+    "terminal_archive_sha256": "2ece16ef00165b7f20f8cd0aa94edfc1f740a20fcd1dd91cfeb018429992b049",
+    "terminal_archive_excludes_private_signing_key": true,
+    "v2_serial_sha256": "6325fafb05bc4a388851c2259fee2699f9b2ca23972b04355854301884145c48",
+    "v1_serial_sha256": "8d0b233c4f66e3d71ca66bc5d05e56de2f785f7f4273f1a2f7b8187d631665a7"
+  },
+  "closeout": {
+    "vms_powered_off": true,
+    "loopback_port_24124_closed": true,
+    "overlay_checks": "pass for v1 and v2 before teardown",
+    "campaign_private_key_in_retained_repository_evidence": false,
+    "campaign_vm_state_removed": true,
+    "removed_state_recoverable_from_retained_repository_evidence": false,
+    "live_or_production_mutations": false,
+    "glasshopper_touched": false
+  }
+}

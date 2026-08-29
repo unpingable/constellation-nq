@@ -1,0 +1,17 @@
+Traceback (most recent call last):
+  File "/home/nqtest/crowned-store-guest-driver.py", line 812, in <module>
+    main()
+  File "/home/nqtest/crowned-store-guest-driver.py", line 572, in main
+    run_observer("g1-index-reconstruct", ["reconstruct-selection-index", providers[0]["path"]])
+  File "/home/nqtest/crowned-store-guest-driver.py", line 121, in run_observer
+    return run(
+           ^^^^
+  File "/home/nqtest/crowned-store-guest-driver.py", line 80, in run
+    raise RuntimeError(f"{label} failed with status {completed.returncode}: {completed.stderr[-1200:]}")
+RuntimeError: g1-index-reconstruct failed with status 2: nq-passive-load-helper: passive-load configuration failed: TOML parse error at line 1, column 1
+  |
+1 | {"capacity_context_id":"sha256:57ea44cbe5f710ffdb266bec063b107d38176f109c4d9d0fe5b43334a87b9e77","max_sample_age_ms":15000,"observer_artifact_digest":"sha256:6dabcc6f85e7414d8b3c3896f43e6f38dbb4b8bd8babb31eead2fc493d9c6231","observer_config_digest":"sha256:4483326bc95b3a1f3a9eea3e00e8ac03f09c9a1908df8b19484d4599bdcfe0c6","observer_profile":"nq.host_load_passive_sampler.v1","producer_issuer":"nq-passive-load-observer:crowned-store-authority-lifecycle-successor-v1","producer_key_id":"crowned-store-authority-lifecycle-successor-v1-key-1","producer_public_key_hex":"b7803e105458d67bfa2587426353f68a29677b4d4ba46e6460ef1000ae37aa65","sample_store":"/var/lib/nq-passive-load/samples/crowned-store-authority-lifecycle-successor-v1/g1","schema":"nq.passive_load_provider_config.v1"}
+  | ^
+invalid key
+
+

@@ -1,0 +1,2 @@
+result=refused
+exit_status=1
