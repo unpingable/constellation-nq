@@ -690,6 +690,10 @@ dependencies = [
 name = "nq-k3s-exact-occurrence"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
+ "hex",
+ "libc",
+ "nix",
  "nq-protocol",
  "serde",
  "serde_json",

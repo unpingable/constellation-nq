@@ -14,6 +14,8 @@ pub mod executor;
 pub mod filesystem_evidence;
 /// Closed authority-neutral bare-Pod representation and runtime observation.
 pub mod kubernetes;
+/// BEDROCK one-shot node origin/capacity observation law.
+pub mod node_observation;
 /// Portable Kubernetes origin and capacity fact law.
 pub mod origin_capacity;
 
@@ -21,10 +23,10 @@ use nq_protocol::{CanonicalizationError, Sha256Digest, semantic_digest};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Human campaign name retained in every TURNSTILE plan.
-pub const CAMPAIGN_NAME: &str = "TURNSTILE";
-/// Canonical campaign slug retained in every TURNSTILE plan.
-pub const CAMPAIGN_SLUG: &str = "k3s-ag-exact-occurrence-adapter-v1";
+/// Human successor-campaign name retained in every BEDROCK plan.
+pub const CAMPAIGN_NAME: &str = "BEDROCK";
+/// Canonical successor-campaign slug retained in every BEDROCK plan.
+pub const CAMPAIGN_SLUG: &str = "k3s-live-origin-capacity-qualification-v1";
 /// Immutable prepared-plan schema.
 pub const PREPARED_PLAN_SCHEMA_V1: &str = "nq.k3s_exact_occurrence_execution_plan.v1";
 /// Content-bound prepared-occurrence wrapper schema.

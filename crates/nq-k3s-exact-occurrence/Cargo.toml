@@ -1,6 +1,6 @@
 [package]
 name = "nq-k3s-exact-occurrence"
-description = "TURNSTILE exact-occurrence preparation and execution boundary for NQ"
+description = "BEDROCK successor exact-occurrence origin and capacity boundary for NQ"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,10 @@ rust-version.workspace = true
 authors.workspace = true
 
 [dependencies]
+ed25519-dalek.workspace = true
+hex.workspace = true
+libc.workspace = true
+nix.workspace = true
 nq-protocol = { path = "../nq-protocol" }
 serde.workspace = true
 serde_json.workspace = true
