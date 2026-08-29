@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SLUG="k3s-live-origin-capacity-qualification-v1"
+SLUG="quiet-ember-inert-runtime-release-carrier-prerequisite-v1"
 LAB_ROOT="${BEDROCK_LAB_ROOT:-/data/git/.bedrock-lab/${SLUG}}"
 OUTPUT_ROOT="${LAB_ROOT}/oci"
 SOURCE_ROOT="$(git rev-parse --show-toplevel)"
@@ -9,6 +9,7 @@ SOURCE_COMMIT="$(git rev-parse HEAD)"
 SOURCE_EPOCH="$(git show -s --format=%ct HEAD)"
 NQ_BINARY="${SOURCE_ROOT}/target/release/nq"
 PASSIVE_HELPER="${SOURCE_ROOT}/target/release/nq-passive-load-helper"
+CARRIER_BINARY="${SOURCE_ROOT}/target/release/nq-bedrock-runtime-carrier"
 IMAGE_REPOSITORY="bedrock.local/nq"
 
 die() {
@@ -26,6 +27,7 @@ done
 
 test -x "${NQ_BINARY}" || die "release nq executable is absent"
 test -x "${PASSIVE_HELPER}" || die "release passive helper is absent"
+test -x "${CARRIER_BINARY}" || die "release runtime carrier is absent"
 test -z "$(git status --short)" || die "source worktree is not clean"
 
 layout="${OUTPUT_ROOT}/layout"
@@ -43,6 +45,7 @@ mkdir -p \
 
 install -m 0755 "${NQ_BINARY}" "${rootfs}/usr/bin/nq"
 install -m 0755 "${PASSIVE_HELPER}" "${rootfs}/usr/lib/nq/helpers/nq-passive-load-helper"
+install -m 0755 "${CARRIER_BINARY}" "${rootfs}/usr/bin/nq-bedrock-runtime-carrier"
 install -m 0755 /lib64/ld-linux-x86-64.so.2 "${rootfs}/lib64/ld-linux-x86-64.so.2"
 install -m 0644 /lib/x86_64-linux-gnu/libc.so.6 "${rootfs}/lib/x86_64-linux-gnu/libc.so.6"
 install -m 0644 /lib/x86_64-linux-gnu/libm.so.6 "${rootfs}/lib/x86_64-linux-gnu/libm.so.6"
@@ -50,6 +53,7 @@ install -m 0644 /lib/x86_64-linux-gnu/libgcc_s.so.1 "${rootfs}/lib/x86_64-linux-
 
 nq_digest="sha256:$(sha256sum "${NQ_BINARY}" | awk '{print $1}')"
 helper_digest="sha256:$(sha256sum "${PASSIVE_HELPER}" | awk '{print $1}')"
+carrier_digest="sha256:$(sha256sum "${CARRIER_BINARY}" | awk '{print $1}')"
 jq -cn \
     --arg schema nq.bedrock_image_identity.v1 \
     --arg campaign BEDROCK \
@@ -57,8 +61,9 @@ jq -cn \
     --arg source_commit "${SOURCE_COMMIT}" \
     --arg nq_executable_digest "${nq_digest}" \
     --arg passive_helper_digest "${helper_digest}" \
-    --arg invocation '/usr/bin/nq --version' \
-    '{schema:$schema,campaign:$campaign,slug:$slug,source_commit:$source_commit,nq_executable_digest:$nq_executable_digest,passive_helper_digest:$passive_helper_digest,default_invocation:$invocation}' \
+    --arg runtime_carrier_digest "${carrier_digest}" \
+    --arg invocation '/usr/bin/nq-bedrock-runtime-carrier --binding /run/nq/binding.json --release /run/nq/release.json --state /var/lib/nq/carrier/state.sqlite3 --executable /usr/bin/nq' \
+    '{schema:$schema,campaign:$campaign,slug:$slug,source_commit:$source_commit,nq_executable_digest:$nq_executable_digest,passive_helper_digest:$passive_helper_digest,runtime_carrier_digest:$runtime_carrier_digest,default_invocation:$invocation}' \
     >"${rootfs}/etc/nq/bedrock-image.json"
 chmod 0444 "${rootfs}/etc/nq/bedrock-image.json"
 configuration_digest="sha256:$(sha256sum "${rootfs}/etc/nq/bedrock-image.json" | awk '{print $1}')"
@@ -87,7 +92,8 @@ jq -cn \
     --arg revision "${SOURCE_COMMIT}" \
     --arg nq_digest "${nq_digest}" \
     --arg helper_digest "${helper_digest}" \
-    '{architecture:"amd64",os:"linux",created:$created,config:{User:"65532:65532",Env:["PATH=/usr/bin:/usr/lib/nq/helpers"],Entrypoint:["/usr/bin/nq"],Cmd:["--version"],WorkingDir:"/",Labels:{"org.opencontainers.image.revision":$revision,"org.opencontainers.image.source":"BEDROCK/k3s-live-origin-capacity-qualification-v1","nq.bedrock.nq-digest":$nq_digest,"nq.bedrock.passive-helper-digest":$helper_digest}},rootfs:{type:"layers",diff_ids:[$diff_id]},history:[{created:$created,created_by:"scripts/build-bedrock-oci.sh",comment:"exact BEDROCK nq and passive helper"}]}' \
+    --arg carrier_digest "${carrier_digest}" \
+    '{architecture:"amd64",os:"linux",created:$created,config:{User:"65532:65532",Env:["PATH=/usr/bin:/usr/lib/nq/helpers"],Entrypoint:["/usr/bin/nq-bedrock-runtime-carrier"],Cmd:["--binding","/run/nq/binding.json","--release","/run/nq/release.json","--state","/var/lib/nq/carrier/state.sqlite3","--executable","/usr/bin/nq"],WorkingDir:"/",Labels:{"org.opencontainers.image.revision":$revision,"org.opencontainers.image.source":"BEDROCK/quiet-ember-inert-runtime-release-carrier-prerequisite-v1","nq.bedrock.nq-digest":$nq_digest,"nq.bedrock.passive-helper-digest":$helper_digest,"nq.bedrock.runtime-carrier-digest":$carrier_digest}},rootfs:{type:"layers",diff_ids:[$diff_id]},history:[{created:$created,created_by:"scripts/build-bedrock-oci.sh",comment:"exact BEDROCK nq, passive helper, and inert runtime carrier"}]}' \
     >"${config_json}"
 config_digest="sha256:$(sha256sum "${config_json}" | awk '{print $1}')"
 config_size="$(stat -c %s "${config_json}")"
@@ -134,8 +140,9 @@ jq -cn \
     --arg source_commit "${SOURCE_COMMIT}" \
     --arg nq_digest "${nq_digest}" \
     --arg helper_digest "${helper_digest}" \
+    --arg carrier_digest "${carrier_digest}" \
     --arg configuration_digest "${configuration_digest}" \
-    '{schema:$schema,image_reference:$image_reference,object_kind:"image_manifest",manifest_digest:$manifest_digest,selected_manifest_digest:null,image_config_digest:$image_config_digest,platform:{os:"linux",architecture:"amd64",variant:null},layers:[{media_type:"application/vnd.oci.image.layer.v1.tar+gzip",digest:$layer_digest,size_bytes:$layer_size}],source_commit:$source_commit,nq_executable_digest:$nq_digest,passive_helper_digest:$helper_digest,configuration_digests:{bedrock_image_v1:$configuration_digest}}' \
+    '{schema:$schema,image_reference:$image_reference,object_kind:"image_manifest",manifest_digest:$manifest_digest,selected_manifest_digest:null,image_config_digest:$image_config_digest,platform:{os:"linux",architecture:"amd64",variant:null},layers:[{media_type:"application/vnd.oci.image.layer.v1.tar+gzip",digest:$layer_digest,size_bytes:$layer_size}],source_commit:$source_commit,nq_executable_digest:$nq_digest,passive_helper_digest:$helper_digest,runtime_carrier_digest:$carrier_digest,configuration_digests:{bedrock_image_v1:$configuration_digest}}' \
     >"${facts}"
 
 sha256sum \

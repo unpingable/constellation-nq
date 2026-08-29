@@ -13,6 +13,7 @@ members = [
     "crates/nq-k3s-exact-occurrence",
     "crates/nq-linode-origin-helper",
     "crates/nq-passive-load-helper",
+    "crates/nq-bedrock-runtime-carrier",
 ]
 
 [workspace.package]
