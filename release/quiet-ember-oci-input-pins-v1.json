@@ -1,0 +1,61 @@
+{
+  "schema": "nq.bedrock_oci_input_pins.v1",
+  "inputs": [
+    {
+      "id": "nq",
+      "source": "target/release/nq",
+      "destination": "/usr/bin/nq",
+      "mode": "0755",
+      "size_bytes": 19446968,
+      "sha256": "f926f9ef33bc24bb38f774950766e438373dd759364550e5efbc763a5ffa804f"
+    },
+    {
+      "id": "passive_helper",
+      "source": "target/release/nq-passive-load-helper",
+      "destination": "/usr/lib/nq/helpers/nq-passive-load-helper",
+      "mode": "0755",
+      "size_bytes": 3449104,
+      "sha256": "5aba0096fbe824d18a6e5ad646d414cb2b0fff1adba3687df3974acd0883aa98"
+    },
+    {
+      "id": "runtime_carrier",
+      "source": "target/release/nq-bedrock-runtime-carrier",
+      "destination": "/usr/bin/nq-bedrock-runtime-carrier",
+      "mode": "0755",
+      "size_bytes": 3738624,
+      "sha256": "a102413a5db548b99cfedeac23cc4621477793ae45d7b80491fb66cada20cf77"
+    },
+    {
+      "id": "dynamic_loader",
+      "source": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+      "destination": "/lib64/ld-linux-x86-64.so.2",
+      "mode": "0755",
+      "size_bytes": 236616,
+      "sha256": "cd4df4f3c7b83673d61189bf2eaebd33ca4f2853ab9772b8a25e025ef99b1e81"
+    },
+    {
+      "id": "libc",
+      "source": "/lib/x86_64-linux-gnu/libc.so.6",
+      "destination": "/lib/x86_64-linux-gnu/libc.so.6",
+      "mode": "0644",
+      "size_bytes": 2125328,
+      "sha256": "8db37cf3f2169f59a0f07ef1fea308c35656668c64c8ff294e1860f4121eb161"
+    },
+    {
+      "id": "libm",
+      "source": "/lib/x86_64-linux-gnu/libm.so.6",
+      "destination": "/lib/x86_64-linux-gnu/libm.so.6",
+      "mode": "0644",
+      "size_bytes": 952616,
+      "sha256": "e9c4b28d340e415b8137480ec442662f981e1399386c5931dae0e886e3639e91"
+    },
+    {
+      "id": "libgcc_s",
+      "source": "/lib/x86_64-linux-gnu/libgcc_s.so.1",
+      "destination": "/lib/x86_64-linux-gnu/libgcc_s.so.1",
+      "mode": "0644",
+      "size_bytes": 183024,
+      "sha256": "d93224d2b0dab4247598be683adca02f5cf00586f99c187579cd7e92058fb7cb"
+    }
+  ]
+}
