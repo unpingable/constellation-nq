@@ -72,6 +72,11 @@ kubeconfig="${LAB_ROOT}/kubeconfig/bedrock-k3s.yaml"
 mkdir -p "${LAB_ROOT}/secrets" "${LAB_ROOT}/kubeconfig"
 chmod 700 "${LAB_ROOT}/secrets" "${LAB_ROOT}/kubeconfig"
 
+ssh_node server \
+    'sudo chown 65532:65532 /mnt/bedrock-custody/canonical /mnt/bedrock-custody/journal /mnt/bedrock-custody/receipts && sudo chmod 0700 /mnt/bedrock-custody/canonical /mnt/bedrock-custody/journal /mnt/bedrock-custody/receipts'
+ssh_node agent \
+    'test "$(stat -c %u:%g:%a /mnt/bedrock-custody/canonical)" = 65532:65532:700 && test "$(stat -c %u:%g:%a /mnt/bedrock-custody/journal)" = 65532:65532:700 && test "$(stat -c %u:%g:%a /mnt/bedrock-custody/receipts)" = 65532:65532:700'
+
 cat >"${server_unit}" <<'EOF'
 [Unit]
 Description=BEDROCK campaign-owned k3s server
