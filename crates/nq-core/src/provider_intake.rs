@@ -1290,6 +1290,47 @@ mod tests {
     }
 
     #[test]
+    fn alternate_reported_subject_is_protocol_refused_before_report_admission() {
+        let request = request();
+        let mut report = candidate_report(
+            &request,
+            "reported-subject-fixture",
+            nq_protocol::sha256_bytes(b"reported-subject fixture"),
+            Vec::new(),
+        );
+        report.binding.subject =
+            SubjectId::new("fixture:alternate-reported-subject").expect("alternate subject");
+        let response = HelperResponse::report(&request, report);
+        let raw = nq_protocol::encode_ndjson(&response).expect("framed candidate response");
+
+        let intake = ProviderIntakeV1::from_capture(
+            attempt(request, "alternate-reported-subject"),
+            capture(raw, AcquisitionOutcome::Response),
+            &ResourceLimits::default(),
+        )
+        .expect("rejected provider bytes remain in raw custody");
+
+        assert!(matches!(
+            &intake.record().interpretation,
+            ProviderResponseInterpretationV1::ProtocolRejected {
+                rejection: ProtocolRejection {
+                    failure: crate::engine::ProtocolRejectionFailure::Validation {
+                        error: crate::engine::ProtocolValidationFailure::EchoMismatch { field },
+                    },
+                    ..
+                },
+            } if field == "outcome.report.binding"
+        ));
+        assert_eq!(
+            intake
+                .to_store_input(&local_run(&intake))
+                .expect("store rejected intake")
+                .interpretation_kind,
+            "protocol_rejected"
+        );
+    }
+
+    #[test]
     fn exact_raw_refusal_and_context_are_one_validated_intake() {
         let request = request();
         let response = HelperResponse::refusal(

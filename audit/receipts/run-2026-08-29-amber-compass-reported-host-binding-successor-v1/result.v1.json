@@ -1,0 +1,27 @@
+{
+  "schema": "nq.campaign-result/v1",
+  "campaign": "AMBER-COMPASS",
+  "slug": "reported-host-binding-successor-v1",
+  "classified_at": "2026-08-29T17:39:12Z",
+  "canonical_base": "59abd3bcb2d0cc30657a659b3ebc57b981289d9f",
+  "predecessor": {
+    "campaign": "LANTERNWAKE",
+    "repository": "classic-nq",
+    "terminal_result_reopened": false
+  },
+  "classification": "native_identity_boundary_qualified_local_fixture_live_route_unqualified",
+  "native_expected_identity": "HelperRequest.binding",
+  "decoded_report_identity": "EvidenceReport.binding",
+  "comparison_boundary": "protocol_validation_before_profile_admission",
+  "alternate_identity_result": "protocol_rejected",
+  "rejection_field": "outcome.report.binding",
+  "admitted_observations": 0,
+  "raw_rejected_intake_retained": true,
+  "live_route": {
+    "qualified": false,
+    "reason": "no separate authorized successor-NQ route present",
+    "glasshopper_used": false
+  },
+  "authority_created": false,
+  "services_changed": false
+}
