@@ -1,0 +1,46 @@
+{
+  "schema": "nq.bedrock_origin_capacity_contract_result.v1",
+  "campaign": "BEDROCK",
+  "campaign_slug": "k3s-live-origin-capacity-qualification-v1",
+  "classification": "PASSIVE-K3S-AG-DEFERRED-ORIGIN-CAPACITY-CONTRACT-QUALIFIED",
+  "parent_commit": "1dbae78451abb6958bb30b94c65cacbd0666ef0e",
+  "source_commit": "a107ac5b2bef3e09b65f47be6a79fb831381ef9e",
+  "branch": "campaign/k3s-live-origin-capacity-qualification-v1",
+  "observer_sha256": "6bd397593dbc053b6dfeee6eeec1716c2651672e8617c84be3a6679ae316451d",
+  "qualification": {
+    "crate_tests_passed": 37,
+    "crate_tests_failed": 0,
+    "focused_bedrock_tests": 5,
+    "format": "passed",
+    "clippy_warnings_denied": "passed",
+    "diff_check": "passed",
+    "release_build": "passed"
+  },
+  "two_stage_law": {
+    "stage_a": "content_bound_pre_runtime_plan_with_mandatory_deferred_facts",
+    "stage_b": "exact_in_container_runtime_recheck_before_nq_claim_and_one_use_release",
+    "kubernetes_authority": false,
+    "bootstrap_is_semantic_execution": false
+  },
+  "authority_counts": {
+    "ag_authorizations": 0,
+    "nq_prepared_occurrences": 0,
+    "nq_claims": 0,
+    "execution_releases": 0,
+    "kubernetes_workloads": 0,
+    "runtime_occurrences": 0,
+    "docket_attempts": 0,
+    "recurrence_attempts": 0,
+    "samples": 0,
+    "acquisitions": 0
+  },
+  "vm_state": "not_started",
+  "shared_semantic_defect_applicable_to_glasshopper": false,
+  "next_gate": "B3 recover exact campaign-owned cluster and reprove T7-T9 with zero authority/workload; then B4 live pre-runtime plan qualification",
+  "nonclaims": [
+    "not a B4 live origin/capacity result",
+    "not an AG authorization",
+    "not a Kubernetes workload",
+    "not monitor health evidence"
+  ]
+}
