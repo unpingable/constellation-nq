@@ -17,6 +17,12 @@ rg -q 'nightshift_claim_widening' "$source_file"
 rg -q 'failure_as_world_claim' "$source_file"
 rg -q 'payload schema is unknown and remains raw-only' "$source_file"
 rg -q 'producer class alone grants no evidentiary precedence' "$source_file"
+rg -q 'producer_identity_digest' "$source_file"
+rg -q 'public_key_digest' "$source_file"
+rg -q 'subject_basis_kind_mismatch' "$source_file"
+rg -q 'coverage_incomplete' "$source_file"
+rg -q 'receiver_custody_inversion' "$source_file"
+rg -q 'evaluation_time_inversion' "$source_file"
 
 if rg -n 'pub (aggregate_health|overall_health|temporal_currentness|remediation|authority):' "$source_file"; then
   echo 'NQ operational qualifier absorbed another office or an aggregate' >&2

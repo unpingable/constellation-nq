@@ -4,12 +4,13 @@ FIELD-CLOCK adds `nq.operational-observation-qualification/v1` beside, not in
 place of, `nq.diagnostic_execution.v2`.
 
 The profile pins exact Monitor result head
-`0569a7dcfdcd500c118fd209d5676bb902d089b3`, exact subject identities,
-permitted producer principals, payload schemas, coverage dimensions, bounded
-claims, and exact JSON pointers. The intake reopens the signed Monitor body,
+`6e1c1fc9aa00b4598662a0ce544c13dbadd14236`, exact subject identities,
+permitted producer principal plus exact principal/key digests, payload schemas,
+coverage dimensions, bounded claims, and exact JSON pointers. The intake reopens the signed Monitor body,
 its domain-separated Ed25519 signature, subject and producer identities, and
 the exact `operational.content.v1` payload bytes. Receiver custody time remains
-separate from producer observation time.
+separate from producer observation time, cannot precede acquisition completion,
+and cannot follow NQ evaluation.
 
 Each input independently retains:
 
@@ -35,4 +36,3 @@ Nightshift projection may retain a subset while evidence becomes stale or
 inapplicable, but validation refuses any added claim. Nightshift owns temporal
 lineage, currentness, re-observation, and attention; it cannot widen NQ.
 Casework later displays these owner records and gains no authority.
-

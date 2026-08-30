@@ -5,10 +5,7 @@
 //! contradiction, and later temporal applicability as distinct facts.
 #![allow(missing_docs)]
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    net::IpAddr,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -21,7 +18,7 @@ pub const OPERATIONAL_QUALIFICATION_SCHEMA_V1: &str = "nq.operational-observatio
 pub const MONITOR_OPERATIONAL_SCHEMA_V1: &str = "monitor.operational-acquisition/v1";
 pub const MONITOR_SIGNATURE_DOMAIN_V1: &str = "monitor.operational-observation.v1";
 pub const MONITOR_CONTENT_DIGEST_DOMAIN_V1: &str = "operational.content.v1";
-pub const FIELD_CLOCK_MONITOR_RESULT_HEAD: &str = "0569a7dcfdcd500c118fd209d5676bb902d089b3";
+pub const FIELD_CLOCK_MONITOR_RESULT_HEAD: &str = "6e1c1fc9aa00b4598662a0ce544c13dbadd14236";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -34,11 +31,19 @@ pub struct OperationalClaimRuleV1 {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct AcceptedProducerIdentityV1 {
+    pub principal_id: String,
+    pub producer_identity_digest: String,
+    pub public_key_digest: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct OperationalQualificationProfileV1 {
     pub profile_id: String,
     pub monitor_contract_head: String,
     pub accepted_subject_identity_digests: Vec<String>,
-    pub accepted_producer_principal_ids: Vec<String>,
+    pub accepted_producer_identities: Vec<AcceptedProducerIdentityV1>,
     pub accepted_payload_schemas: Vec<String>,
     pub claims: Vec<OperationalClaimRuleV1>,
 }
@@ -62,11 +67,49 @@ impl OperationalQualificationProfileV1 {
             &self.accepted_subject_identity_digests,
             true,
         )?;
-        sorted(
-            "producer identities",
-            &self.accepted_producer_principal_ids,
-            true,
-        )?;
+        if self.accepted_producer_identities.is_empty()
+            || self.accepted_producer_identities.len() > 64
+        {
+            return Err(error(
+                "invalid_producer_identities",
+                "producer identity set is empty or oversized",
+            ));
+        }
+        let mut producer_keys = BTreeSet::new();
+        for producer in &self.accepted_producer_identities {
+            token("producer principal", &producer.principal_id)?;
+            monitor_sha256_digest(
+                "producer identity digest",
+                &producer.producer_identity_digest,
+            )?;
+            monitor_sha256_digest("producer public-key digest", &producer.public_key_digest)?;
+            if !producer_keys.insert((
+                producer.principal_id.as_str(),
+                producer.producer_identity_digest.as_str(),
+                producer.public_key_digest.as_str(),
+            )) {
+                return Err(error(
+                    "invalid_producer_identities",
+                    "producer identity is duplicated",
+                ));
+            }
+        }
+        if self.accepted_producer_identities.windows(2).any(|pair| {
+            (
+                &pair[0].principal_id,
+                &pair[0].producer_identity_digest,
+                &pair[0].public_key_digest,
+            ) >= (
+                &pair[1].principal_id,
+                &pair[1].producer_identity_digest,
+                &pair[1].public_key_digest,
+            )
+        }) {
+            return Err(error(
+                "invalid_producer_identities",
+                "producer identities must be sorted and unique",
+            ));
+        }
         sorted("payload schemas", &self.accepted_payload_schemas, true)?;
         if self.claims.is_empty() || self.claims.len() > 64 {
             return Err(error(
@@ -254,7 +297,7 @@ pub fn qualify_operational_observations(
         if !seen.insert(input.input_id.clone()) {
             return Err(error("duplicate_input", "input identity is duplicated"));
         }
-        qualified.push(qualify_one(profile, input));
+        qualified.push(qualify_one(profile, input, evaluated_at));
     }
     let contradictions = contradictions(&qualified);
     Ok(OperationalQualificationArtifactV1 {
@@ -276,6 +319,7 @@ pub fn qualify_operational_observations(
 fn qualify_one(
     profile: &OperationalQualificationProfileV1,
     input: &OperationalEvidenceInputV1,
+    evaluated_at: DateTime<Utc>,
 ) -> QualifiedOperationalInputV1 {
     let raw_digest = sha256_bytes(&input.signed_monitor_record);
     let mut result = QualifiedOperationalInputV1 {
@@ -315,6 +359,20 @@ fn qualify_one(
     result.producer_observed_at = reopened.producer_observed_at;
     result.payload_schema.clone_from(&reopened.payload_schema);
 
+    if input.receiver_custody_at < reopened.acquisition_ended_at {
+        result.refusals.push(refusal(
+            "receiver_custody_inversion",
+            "receiver custody precedes completion of the signed acquisition".to_owned(),
+        ));
+        return result;
+    }
+    if evaluated_at < input.receiver_custody_at {
+        result.refusals.push(refusal(
+            "evaluation_time_inversion",
+            "NQ evaluation precedes receiver custody".to_owned(),
+        ));
+        return result;
+    }
     if !profile
         .accepted_subject_identity_digests
         .contains(&reopened.subject_digest)
@@ -325,10 +383,11 @@ fn qualify_one(
         ));
         return result;
     }
-    if !profile
-        .accepted_producer_principal_ids
-        .contains(&reopened.principal_id)
-    {
+    if !profile.accepted_producer_identities.iter().any(|accepted| {
+        accepted.principal_id == reopened.principal_id
+            && accepted.producer_identity_digest == reopened.producer_digest
+            && accepted.public_key_digest == reopened.public_key_digest
+    }) {
         result.refusals.push(refusal(
             "producer_identity_mismatch",
             "producer is outside the exact qualification profile".to_owned(),
@@ -404,10 +463,12 @@ struct ReopenedMonitor {
     record_digest: String,
     subject_digest: String,
     producer_digest: String,
+    public_key_digest: String,
     principal_id: String,
     producer_class: String,
     outcome: String,
     producer_observed_at: Option<DateTime<Utc>>,
+    acquisition_ended_at: DateTime<Utc>,
     payload_schema: Option<String>,
     observed_dimensions: Vec<String>,
     payload: Option<Value>,
@@ -486,12 +547,24 @@ fn reopen_monitor(
             "producer key algorithm is unsupported",
         ));
     }
-    let public = hex::decode(string(producer, "public_key_hex")?)
-        .map_err(|e| error("public_key_malformed", e.to_string()))?;
-    if public.len() != 32
-        || string(producer, "public_key_digest")?
-            != monitor_digest("operational.ed25519.public-key.v1", &[&public])
+    token("producer principal", string(producer, "principal_id")?)?;
+    token("collector identity", string(producer, "collector_id")?)?;
+    token("producer class", string(producer, "producer_class")?)?;
+    let public_hex = string(producer, "public_key_hex")?;
+    if public_hex.len() != 64
+        || !public_hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
+        return Err(error(
+            "public_key_malformed",
+            "producer public key is not exact lowercase hex",
+        ));
+    }
+    let public =
+        hex::decode(public_hex).map_err(|e| error("public_key_malformed", e.to_string()))?;
+    let public_key_digest = monitor_digest("operational.ed25519.public-key.v1", &[&public]);
+    if string(producer, "public_key_digest")? != public_key_digest {
         return Err(error(
             "producer_key_mismatch",
             "producer public key identity is invalid",
@@ -516,8 +589,19 @@ fn reopen_monitor(
             .map_err(|_| error("public_key_malformed", "public key length is invalid"))?,
     )
     .map_err(|e| error("public_key_malformed", e.to_string()))?;
-    let signature = hex::decode(string(&root, "signature_hex")?)
-        .map_err(|e| error("signature_malformed", e.to_string()))?;
+    let signature_hex = string(&root, "signature_hex")?;
+    if signature_hex.len() != 128
+        || !signature_hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(error(
+            "signature_malformed",
+            "signature is not exact lowercase hex",
+        ));
+    }
+    let signature =
+        hex::decode(signature_hex).map_err(|e| error("signature_malformed", e.to_string()))?;
     let signature: [u8; 64] = signature
         .try_into()
         .map_err(|_| error("signature_malformed", "signature length is invalid"))?;
@@ -576,19 +660,23 @@ fn reopen_monitor(
         record_digest: monitor_digest("operational.acquisition-record.v1", &[body_bytes]),
         subject_digest,
         producer_digest,
+        public_key_digest,
         principal_id: string(producer, "principal_id")?.to_owned(),
         producer_class: string(producer, "producer_class")?.to_owned(),
         outcome,
         producer_observed_at,
+        acquisition_ended_at: semantics.acquisition_ended_at,
         payload_schema,
         observed_dimensions,
         payload,
     })
 }
 
+#[derive(Debug)]
 struct MonitorBodySemantics {
     outcome: String,
     producer_observed_at: Option<DateTime<Utc>>,
+    acquisition_ended_at: DateTime<Utc>,
     observed_dimensions: Vec<String>,
 }
 
@@ -597,30 +685,35 @@ fn validate_monitor_body(
     body: &Value,
 ) -> Result<MonitorBodySemantics, OperationalQualificationError> {
     let subject = object(body, "subject")?;
-    exact_keys(subject, &["kind", "namespace", "stable_id", "coordinates"])?;
-    let stable_id = string(subject, "stable_id")?;
-    if stable_id.starts_with('/')
-        || stable_id.starts_with("./")
-        || stable_id.contains("://")
-        || stable_id.starts_with("unix:")
-        || stable_id.parse::<IpAddr>().is_ok()
-        || (stable_id.contains('.') && !stable_id.contains(':'))
-    {
-        return Err(error(
-            "locator_as_identity",
-            "Monitor subject identity is supplied by locator data",
-        ));
+    exact_keys(subject, &["kind", "namespace", "stable_basis"])?;
+    token("subject namespace", string(subject, "namespace")?)?;
+    validate_subject_basis(subject)?;
+
+    let locators = body
+        .get("locators")
+        .and_then(Value::as_array)
+        .ok_or_else(|| error("field_type", "locators is not an array"))?;
+    if locators.len() > 32 {
+        return Err(error("invalid_collection", "locators is oversized"));
     }
-    if !subject.get("coordinates").is_some_and(Value::is_object)
-        || subject
-            .get("coordinates")
-            .and_then(Value::as_object)
-            .is_some_and(serde_json::Map::is_empty)
-    {
-        return Err(error(
-            "subject_coordinates_missing",
-            "typed subject coordinates are absent",
-        ));
+    for locator in locators {
+        exact_keys(locator, &["kind", "value", "observed_at"])?;
+        if ![
+            "local_path",
+            "host_label",
+            "dns_name",
+            "ip_address",
+            "url",
+            "socket",
+            "scheduler_display_name",
+            "repository_checkout",
+        ]
+        .contains(&string(locator, "kind")?)
+        {
+            return Err(error("locator_kind_unknown", "locator kind is unsupported"));
+        }
+        text("locator value", string(locator, "value")?)?;
+        monitor_time("locator observation time", string(locator, "observed_at")?)?;
     }
 
     let acquisition = object(body, "acquisition")?;
@@ -635,12 +728,24 @@ fn validate_monitor_body(
             "raw_basis_digest",
         ],
     )?;
-    let started_at: DateTime<Utc> = string(acquisition, "started_at")?
-        .parse()
-        .map_err(|e| error("acquisition_time_invalid", format!("{e}")))?;
-    let ended_at: DateTime<Utc> = string(acquisition, "ended_at")?
-        .parse()
-        .map_err(|e| error("acquisition_time_invalid", format!("{e}")))?;
+    token("acquisition attempt", string(acquisition, "attempt_id")?)?;
+    token(
+        "acquisition diagnostic",
+        string(acquisition, "diagnostic_code")?,
+    )?;
+    if let Some(raw_basis) = acquisition
+        .get("raw_basis_digest")
+        .filter(|value| !value.is_null())
+    {
+        monitor_sha256_digest(
+            "raw acquisition basis",
+            raw_basis
+                .as_str()
+                .ok_or_else(|| error("field_type", "raw basis digest is not a string"))?,
+        )?;
+    }
+    let started_at = monitor_time("acquisition start", string(acquisition, "started_at")?)?;
+    let ended_at = monitor_time("acquisition end", string(acquisition, "ended_at")?)?;
     if started_at > ended_at {
         return Err(error(
             "timestamp_inversion",
@@ -670,6 +775,7 @@ fn validate_monitor_body(
         lineage,
         &["epoch", "sequence", "predecessor_observation_digest"],
     )?;
+    token("observation epoch", string(lineage, "epoch")?)?;
     let sequence = lineage
         .get("sequence")
         .and_then(Value::as_u64)
@@ -683,6 +789,9 @@ fn validate_monitor_body(
             "lineage_invalid",
             "sequence and predecessor observation are inconsistent",
         ));
+    }
+    if let Some(predecessor) = predecessor {
+        monitor_sha256_digest("predecessor observation", predecessor)?;
     }
 
     let coverage = object(body, "coverage")?;
@@ -711,12 +820,31 @@ fn validate_monitor_body(
             "coverage is inconsistent with its exact denominator",
         ));
     }
+    let covered = observed.iter().chain(&omitted).collect::<BTreeSet<_>>();
+    if expected
+        .iter()
+        .any(|dimension| !covered.contains(dimension))
+    {
+        return Err(error(
+            "coverage_incomplete",
+            "every expected dimension must be observed or explicitly omitted",
+        ));
+    }
+    let attachments = body
+        .get("attachments")
+        .and_then(Value::as_array)
+        .ok_or_else(|| error("field_type", "attachments is not an array"))?;
+    if attachments.len() > 32 {
+        return Err(error("invalid_collection", "attachments is oversized"));
+    }
+    for attachment in attachments {
+        validate_content_reference(attachment)?;
+    }
     let producer_observed_at = body
         .get("producer_observed_at")
         .and_then(Value::as_str)
-        .map(str::parse)
-        .transpose()
-        .map_err(|e| error("observation_time_invalid", format!("{e}")))?;
+        .map(|value| monitor_time("producer observation time", value))
+        .transpose()?;
     if outcome == "observation_produced" {
         let observed_at = producer_observed_at.ok_or_else(|| {
             error(
@@ -738,6 +866,8 @@ fn validate_monitor_body(
                 "produced observation lacks payload custody",
             ));
         }
+        token("payload schema", string(body, "payload_schema")?)?;
+        validate_content_reference(object(body, "payload")?)?;
     } else if producer_observed_at.is_some()
         || body
             .get("payload_schema")
@@ -753,8 +883,107 @@ fn validate_monitor_body(
     Ok(MonitorBodySemantics {
         outcome,
         producer_observed_at,
+        acquisition_ended_at: ended_at,
         observed_dimensions: observed,
     })
+}
+
+fn validate_subject_basis(subject: &Value) -> Result<(), OperationalQualificationError> {
+    let kind = string(subject, "kind")?;
+    let basis = object(subject, "stable_basis")?;
+    let fields: &[&str] = match kind {
+        "host" => &["basis_type", "machine_identity"],
+        "service_instance" => &["basis_type", "service_identity", "instance_identity"],
+        "deployment_release" => &["basis_type", "deployment_identity", "release_identity"],
+        "repository_revision" => &["basis_type", "repository_identity", "revision_identity"],
+        "scheduler_job" => &["basis_type", "scheduler_identity", "job_identity"],
+        "ecad_design_revision" => &["basis_type", "design_identity", "revision_identity"],
+        "toolchain" => &["basis_type", "toolchain_identity"],
+        "pdk" => &["basis_type", "pdk_identity"],
+        "license_entitlement" => &["basis_type", "entitlement_identity"],
+        "worker" => &["basis_type", "worker_identity"],
+        "artifact_set" => &["basis_type", "artifact_set_identity"],
+        "stage_occurrence" => &["basis_type", "run_identity", "stage_occurrence_identity"],
+        _ => {
+            return Err(error(
+                "subject_kind_unknown",
+                "Monitor subject kind is outside the closed contract",
+            ));
+        }
+    };
+    exact_keys(basis, fields)?;
+    if string(basis, "basis_type")? != kind {
+        return Err(error(
+            "subject_basis_kind_mismatch",
+            "subject kind and stable-basis contract differ",
+        ));
+    }
+    for field in fields
+        .iter()
+        .copied()
+        .filter(|field| *field != "basis_type")
+    {
+        monitor_sha256_digest("stable subject basis", string(basis, field)?)?;
+    }
+    Ok(())
+}
+
+fn validate_content_reference(value: &Value) -> Result<(), OperationalQualificationError> {
+    exact_keys(
+        value,
+        &["media_type", "digest_domain", "digest", "byte_length"],
+    )?;
+    token("content media type", string(value, "media_type")?)?;
+    if string(value, "digest_domain")? != MONITOR_CONTENT_DIGEST_DOMAIN_V1 {
+        return Err(error(
+            "payload_digest_law_unknown",
+            "content digest domain is unsupported",
+        ));
+    }
+    monitor_sha256_digest("content digest", string(value, "digest")?)?;
+    if value.get("byte_length").and_then(Value::as_u64) == Some(0)
+        || value.get("byte_length").and_then(Value::as_u64).is_none()
+    {
+        return Err(error(
+            "content_length_invalid",
+            "content byte length is absent or zero",
+        ));
+    }
+    Ok(())
+}
+
+fn monitor_time(field: &str, value: &str) -> Result<DateTime<Utc>, OperationalQualificationError> {
+    text(field, value)?;
+    if !value.ends_with('Z') {
+        return Err(error(
+            "timestamp_noncanonical",
+            format!("{field} is not canonical UTC RFC3339"),
+        ));
+    }
+    value
+        .parse()
+        .map_err(|parse_error| error("timestamp_invalid", format!("{field}: {parse_error}")))
+}
+
+fn monitor_sha256_digest(field: &str, value: &str) -> Result<(), OperationalQualificationError> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return Err(error(
+            "digest_invalid",
+            format!("{field} lacks sha256 prefix"),
+        ));
+    };
+    if hex.len() != 64
+        || !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || hex.bytes().all(|byte| byte == b'0')
+    {
+        return Err(error(
+            "digest_invalid",
+            format!("{field} is not a canonical nonzero sha256 digest"),
+        ));
+    }
+    Ok(())
 }
 
 fn contradictions(inputs: &[QualifiedOperationalInputV1]) -> Vec<OperationalContradictionV1> {
@@ -972,7 +1201,15 @@ mod tests {
         let signing = SigningKey::from_bytes(&[key_byte; 32]);
         let public = signing.verifying_key().to_bytes();
         let producer = json!({"principal_id":principal,"collector_id":"collector:fixture","key_algorithm":"ed25519","public_key_hex":hex::encode(public),"public_key_digest":monitor_digest("operational.ed25519.public-key.v1", &[&public]),"producer_class":producer_class});
-        let subject = json!({"kind":"service_instance","namespace":"inventory:fixture","stable_id":subject_id,"coordinates":{"uuid":"98ab"}});
+        let subject = json!({
+            "kind":"service_instance",
+            "namespace":"inventory:fixture",
+            "stable_basis":{
+                "basis_type":"service_instance",
+                "service_identity":monitor_digest("fixture.subject.service", &[b"service"]),
+                "instance_identity":monitor_digest("fixture.subject.instance", &[subject_id.as_bytes()])
+            }
+        });
         let payload_ref=payload.map(|bytes|json!({"media_type":"application/json","digest_domain":MONITOR_CONTENT_DIGEST_DOMAIN_V1,"digest":monitor_digest(MONITOR_CONTENT_DIGEST_DOMAIN_V1,&[bytes]),"byte_length":bytes.len()}));
         let produced = outcome == "observation_produced";
         let body = json!({"schema":MONITOR_OPERATIONAL_SCHEMA_V1,"producer":producer,"subject":subject,"locators":[],"acquisition":{"attempt_id":"attempt:1","started_at":"2026-08-30T01:00:00Z","ended_at":"2026-08-30T01:00:01Z","outcome":outcome,"diagnostic_code":outcome,"raw_basis_digest":monitor_digest("fixture",&[b"raw"])},"lineage":{"epoch":"epoch:1","sequence":0,"predecessor_observation_digest":null},"producer_observed_at":if produced{Some("2026-08-30T01:00:00Z")}else{None},"payload_schema":if produced{Some("fixture.service-fact/v1")}else{None},"payload":payload_ref,"attachments":[],"coverage":{"expected_dimensions":["availability"],"observed_dimensions":if produced{vec!["availability"]}else{vec![]},"omitted_dimensions":if produced{vec![]}else{vec!["availability"]}},"grants_authority":false});
@@ -991,7 +1228,7 @@ mod tests {
                 "operational.subject.v1",
                 &[subject],
             )],
-            accepted_producer_principal_ids: vec!["producer:fixture".into()],
+            accepted_producer_identities: vec![accepted_producer(record)],
             accepted_payload_schemas: vec!["fixture.service-fact/v1".into()],
             claims: vec![OperationalClaimRuleV1 {
                 claim_id: "claim:availability".into(),
@@ -999,6 +1236,21 @@ mod tests {
                 payload_json_pointer: "/facts/available".into(),
                 proposition: "service availability testimony".into(),
             }],
+        }
+    }
+    fn accepted_producer(record: &[u8]) -> AcceptedProducerIdentityV1 {
+        let body_bytes = extract_object_field(record, "body").unwrap();
+        let producer = extract_object_field(body_bytes, "producer").unwrap();
+        let producer_value: Value = serde_json::from_slice(producer).unwrap();
+        AcceptedProducerIdentityV1 {
+            principal_id: string(&producer_value, "principal_id").unwrap().to_owned(),
+            producer_identity_digest: monitor_digest(
+                "operational.producer-principal.v1",
+                &[producer],
+            ),
+            public_key_digest: string(&producer_value, "public_key_digest")
+                .unwrap()
+                .to_owned(),
         }
     }
     fn input(id: &str, record: Vec<u8>, payload: Option<&[u8]>) -> OperationalEvidenceInputV1 {
@@ -1010,7 +1262,7 @@ mod tests {
         }
     }
     #[test]
-    fn supports_exact_claim_and_refuses_payload_subject_and_producer_substitution() {
+    fn supports_exact_claim_and_refuses_payload_subject_and_exact_key_substitution() {
         let payload = br#"{"facts":{"available":true}}"#;
         let record = signed_record(
             7,
@@ -1054,6 +1306,24 @@ mod tests {
         assert_eq!(
             refused.inputs[0].refusals[0].code,
             "subject_identity_mismatch"
+        );
+        let substituted = signed_record(
+            8,
+            "producer:fixture",
+            "observation_produced",
+            "service-instance:98ab",
+            Some(payload),
+            "instrumented_monitor",
+        );
+        let refused = qualify_operational_observations(
+            &profile,
+            &[input("one", substituted, Some(payload))],
+            artifact.evaluated_at,
+        )
+        .unwrap();
+        assert_eq!(
+            refused.inputs[0].refusals[0].code,
+            "producer_identity_mismatch"
         );
         let substituted = signed_record(
             8,
@@ -1129,7 +1399,7 @@ mod tests {
             Some(yes),
             "instrumented_monitor",
         );
-        let profile = profile(&first);
+        let mut profile = profile(&first);
         let second = signed_record(
             8,
             "producer:fixture",
@@ -1138,6 +1408,21 @@ mod tests {
             Some(no),
             "agent_authored",
         );
+        profile
+            .accepted_producer_identities
+            .push(accepted_producer(&second));
+        profile.accepted_producer_identities.sort_by(|left, right| {
+            (
+                &left.principal_id,
+                &left.producer_identity_digest,
+                &left.public_key_digest,
+            )
+                .cmp(&(
+                    &right.principal_id,
+                    &right.producer_identity_digest,
+                    &right.public_key_digest,
+                ))
+        });
         let artifact = qualify_operational_observations(
             &profile,
             &[input("a", first, Some(yes)), input("b", second, Some(no))],
@@ -1155,6 +1440,88 @@ mod tests {
                 .unwrap_err()
                 .code,
             "nightshift_claim_widening"
+        );
+    }
+
+    #[test]
+    fn monitor_identity_coverage_and_time_laws_are_reopened() {
+        let payload = br#"{"facts":{"available":true}}"#;
+        let record = signed_record(
+            7,
+            "producer:fixture",
+            "observation_produced",
+            "service-instance:98ab",
+            Some(payload),
+            "instrumented_monitor",
+        );
+        let root: Value = serde_json::from_slice(&record).unwrap();
+        let mut body = root.get("body").unwrap().clone();
+        body["subject"] = json!({
+            "kind":"host",
+            "namespace":"inventory:fixture",
+            "stable_basis":{"basis_type":"host","machine_identity":"service.example"}
+        });
+        assert_eq!(
+            validate_monitor_body(&body).unwrap_err().code,
+            "digest_invalid"
+        );
+
+        let mut body = root.get("body").unwrap().clone();
+        body["coverage"]["expected_dimensions"] = json!(["availability", "revision"]);
+        assert_eq!(
+            validate_monitor_body(&body).unwrap_err().code,
+            "coverage_incomplete"
+        );
+
+        let mut body = root.get("body").unwrap().clone();
+        body["acquisition"]["started_at"] = json!("not-a-timeTstillZ");
+        assert_eq!(
+            validate_monitor_body(&body).unwrap_err().code,
+            "timestamp_invalid"
+        );
+
+        let mut body = root.get("body").unwrap().clone();
+        body["producer_observed_at"] = json!("2026-08-30T01:00:02Z");
+        assert_eq!(
+            validate_monitor_body(&body).unwrap_err().code,
+            "observation_time_inversion"
+        );
+    }
+
+    #[test]
+    fn receiver_custody_and_evaluation_are_ordered() {
+        let payload = br#"{"facts":{"available":true}}"#;
+        let record = signed_record(
+            7,
+            "producer:fixture",
+            "observation_produced",
+            "service-instance:98ab",
+            Some(payload),
+            "instrumented_monitor",
+        );
+        let profile = profile(&record);
+        let mut before_acquisition = input("early", record.clone(), Some(payload));
+        before_acquisition.receiver_custody_at = "2026-08-30T00:59:59Z".parse().unwrap();
+        let artifact = qualify_operational_observations(
+            &profile,
+            &[before_acquisition],
+            "2026-08-30T01:00:03Z".parse().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            artifact.inputs[0].refusals[0].code,
+            "receiver_custody_inversion"
+        );
+
+        let artifact = qualify_operational_observations(
+            &profile,
+            &[input("future", record, Some(payload))],
+            "2026-08-30T01:00:01Z".parse().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            artifact.inputs[0].refusals[0].code,
+            "evaluation_time_inversion"
         );
     }
 }
