@@ -13,6 +13,7 @@ pub mod diagnostic_execution_v2;
 pub mod engine;
 pub mod evaluator_identity;
 pub mod identity;
+pub mod operational_qualification;
 pub mod provider_intake;
 pub mod public;
 pub mod runner;
@@ -73,6 +74,7 @@ pub use identity::{
     MAX_LAUNCH_ARTIFACTS, MAX_LAUNCH_RETAINED_FDS, MAX_LAUNCH_TOTAL_BYTES,
     MAX_RESIDENT_LAUNCH_BYTES, VerifiedLaunch,
 };
+pub use operational_qualification::*;
 pub use provider_intake::{
     LOCAL_HELPER_PROVIDER_SEMANTICS_SCHEMA, PROVIDER_IDENTITY_SCHEMA,
     PROVIDER_INTAKE_CONTEXT_SCHEMA, PROVIDER_INTAKE_SCHEMA, ProviderIdentitySchema,
