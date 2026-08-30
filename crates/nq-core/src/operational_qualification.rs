@@ -18,7 +18,7 @@ pub const OPERATIONAL_QUALIFICATION_SCHEMA_V1: &str = "nq.operational-observatio
 pub const MONITOR_OPERATIONAL_SCHEMA_V1: &str = "monitor.operational-acquisition/v1";
 pub const MONITOR_SIGNATURE_DOMAIN_V1: &str = "monitor.operational-observation.v1";
 pub const MONITOR_CONTENT_DIGEST_DOMAIN_V1: &str = "operational.content.v1";
-pub const FIELD_CLOCK_MONITOR_RESULT_HEAD: &str = "6e1c1fc9aa00b4598662a0ce544c13dbadd14236";
+pub const FIELD_CLOCK_MONITOR_RESULT_HEAD: &str = "b2d52fe34f146774cbf5601819982c267c7fb082";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -685,7 +685,10 @@ fn validate_monitor_body(
     body: &Value,
 ) -> Result<MonitorBodySemantics, OperationalQualificationError> {
     let subject = object(body, "subject")?;
-    exact_keys(subject, &["kind", "namespace", "stable_basis"])?;
+    exact_keys(
+        subject,
+        &["kind", "namespace", "basis_contract", "stable_basis"],
+    )?;
     token("subject namespace", string(subject, "namespace")?)?;
     validate_subject_basis(subject)?;
 
@@ -891,19 +894,55 @@ fn validate_monitor_body(
 fn validate_subject_basis(subject: &Value) -> Result<(), OperationalQualificationError> {
     let kind = string(subject, "kind")?;
     let basis = object(subject, "stable_basis")?;
-    let fields: &[&str] = match kind {
-        "host" => &["basis_type", "machine_identity"],
-        "service_instance" => &["basis_type", "service_identity", "instance_identity"],
-        "deployment_release" => &["basis_type", "deployment_identity", "release_identity"],
-        "repository_revision" => &["basis_type", "repository_identity", "revision_identity"],
-        "scheduler_job" => &["basis_type", "scheduler_identity", "job_identity"],
-        "ecad_design_revision" => &["basis_type", "design_identity", "revision_identity"],
-        "toolchain" => &["basis_type", "toolchain_identity"],
-        "pdk" => &["basis_type", "pdk_identity"],
-        "license_entitlement" => &["basis_type", "entitlement_identity"],
-        "worker" => &["basis_type", "worker_identity"],
-        "artifact_set" => &["basis_type", "artifact_set_identity"],
-        "stage_occurrence" => &["basis_type", "run_identity", "stage_occurrence_identity"],
+    let (contract, fields): (&str, &[&str]) = match kind {
+        "host" => (
+            "monitor.subject-basis.host-machine/v1",
+            &["basis_type", "machine_identity"],
+        ),
+        "service_instance" => (
+            "monitor.subject-basis.service-instance-registry/v1",
+            &["basis_type", "service_identity", "instance_identity"],
+        ),
+        "deployment_release" => (
+            "monitor.subject-basis.deployment-release-content/v1",
+            &["basis_type", "deployment_identity", "release_identity"],
+        ),
+        "repository_revision" => (
+            "monitor.subject-basis.repository-revision-content/v1",
+            &["basis_type", "repository_identity", "revision_identity"],
+        ),
+        "scheduler_job" => (
+            "monitor.subject-basis.scheduler-job-occurrence/v1",
+            &["basis_type", "scheduler_identity", "job_identity"],
+        ),
+        "ecad_design_revision" => (
+            "monitor.subject-basis.ecad-design-revision-content/v1",
+            &["basis_type", "design_identity", "revision_identity"],
+        ),
+        "toolchain" => (
+            "monitor.subject-basis.toolchain-content/v1",
+            &["basis_type", "toolchain_identity"],
+        ),
+        "pdk" => (
+            "monitor.subject-basis.pdk-content/v1",
+            &["basis_type", "pdk_identity"],
+        ),
+        "license_entitlement" => (
+            "monitor.subject-basis.license-entitlement-registry/v1",
+            &["basis_type", "entitlement_identity"],
+        ),
+        "worker" => (
+            "monitor.subject-basis.worker-registry/v1",
+            &["basis_type", "worker_identity"],
+        ),
+        "artifact_set" => (
+            "monitor.subject-basis.artifact-set-content/v1",
+            &["basis_type", "artifact_set_identity"],
+        ),
+        "stage_occurrence" => (
+            "monitor.subject-basis.stage-occurrence/v1",
+            &["basis_type", "run_identity", "stage_occurrence_identity"],
+        ),
         _ => {
             return Err(error(
                 "subject_kind_unknown",
@@ -911,6 +950,12 @@ fn validate_subject_basis(subject: &Value) -> Result<(), OperationalQualificatio
             ));
         }
     };
+    if string(subject, "basis_contract")? != contract {
+        return Err(error(
+            "unsupported_subject_basis_contract",
+            "subject stable-basis contract is not the family-owned v1 contract",
+        ));
+    }
     exact_keys(basis, fields)?;
     if string(basis, "basis_type")? != kind {
         return Err(error(
@@ -1204,6 +1249,7 @@ mod tests {
         let subject = json!({
             "kind":"service_instance",
             "namespace":"inventory:fixture",
+            "basis_contract":"monitor.subject-basis.service-instance-registry/v1",
             "stable_basis":{
                 "basis_type":"service_instance",
                 "service_identity":monitor_digest("fixture.subject.service", &[b"service"]),
@@ -1459,11 +1505,19 @@ mod tests {
         body["subject"] = json!({
             "kind":"host",
             "namespace":"inventory:fixture",
+            "basis_contract":"monitor.subject-basis.host-machine/v1",
             "stable_basis":{"basis_type":"host","machine_identity":"service.example"}
         });
         assert_eq!(
             validate_monitor_body(&body).unwrap_err().code,
             "digest_invalid"
+        );
+
+        let mut body = root.get("body").unwrap().clone();
+        body["subject"]["basis_contract"] = json!("monitor.subject-basis.hostname-hash/v1");
+        assert_eq!(
+            validate_monitor_body(&body).unwrap_err().code,
+            "unsupported_subject_basis_contract"
         );
 
         let mut body = root.get("body").unwrap().clone();

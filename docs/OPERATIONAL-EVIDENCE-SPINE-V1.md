@@ -4,13 +4,18 @@ FIELD-CLOCK adds `nq.operational-observation-qualification/v1` beside, not in
 place of, `nq.diagnostic_execution.v2`.
 
 The profile pins exact Monitor result head
-`6e1c1fc9aa00b4598662a0ce544c13dbadd14236`, exact subject identities,
+`b2d52fe34f146774cbf5601819982c267c7fb082`, exact subject identities,
 permitted producer principal plus exact principal/key digests, payload schemas,
 coverage dimensions, bounded claims, and exact JSON pointers. The intake reopens the signed Monitor body,
 its domain-separated Ed25519 signature, subject and producer identities, and
 the exact `operational.content.v1` payload bytes. Receiver custody time remains
 separate from producer observation time, cannot precede acquisition completion,
 and cannot follow NQ evaluation.
+
+Each exact subject digest includes Monitor's versioned, family-owned stable
+basis contract. NQ reopens and permits only that contract for the named subject
+family. It does not infer digest preimages; locator records remain separate,
+and an unsupported locator-derived basis contract refuses.
 
 Each input independently retains:
 
