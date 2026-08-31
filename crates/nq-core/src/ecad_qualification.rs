@@ -6,7 +6,7 @@ use crate::{
 };
 
 /// Exact Monitor fixture-generator checkpoint.
-pub const SILICON_MONITOR_FIXTURE_HEAD: &str = "43d511b0c867d440d0cda094960684d98df24779";
+pub const SILICON_MONITOR_FIXTURE_HEAD: &str = "f7172835e1ed67df27ac0e8df4789342f0082394";
 /// Closed SILICON ECAD NQ profile identity.
 pub const SILICON_ECAD_PROFILE_ID: &str = "profile:silicon-orchard-ecad-stage:v1";
 /// Exact Monitor ECAD payload schema admitted by the profile.
