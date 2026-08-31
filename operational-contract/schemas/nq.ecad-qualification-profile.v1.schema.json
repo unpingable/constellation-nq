@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "nq.ecad-qualification-profile/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "profile_id", "monitor_contract_head", "accepted_subject_identity_digests",
+    "accepted_producer_identities", "accepted_payload_schemas", "claims"
+  ],
+  "properties": {
+    "profile_id": { "const": "profile:silicon-orchard-ecad-stage:v1" },
+    "monitor_contract_head": { "const": "b2d52fe34f146774cbf5601819982c267c7fb082" },
+    "accepted_subject_identity_digests": {
+      "type": "array", "minItems": 15, "maxItems": 15,
+      "uniqueItems": true, "items": { "$ref": "#/$defs/digest" }
+    },
+    "accepted_producer_identities": {
+      "type": "array", "minItems": 8, "maxItems": 8,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["principal_id", "producer_identity_digest", "public_key_digest"],
+        "properties": {
+          "principal_id": { "$ref": "#/$defs/token" },
+          "producer_identity_digest": { "$ref": "#/$defs/digest" },
+          "public_key_digest": { "$ref": "#/$defs/digest" }
+        }
+      }
+    },
+    "accepted_payload_schemas": {
+      "const": ["monitor.ecad-stage-observation/v1"]
+    },
+    "claims": {
+      "type": "array", "minItems": 27, "maxItems": 27,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["claim_id", "coverage_dimension", "payload_json_pointer", "proposition"],
+        "properties": {
+          "claim_id": { "$ref": "#/$defs/token" },
+          "coverage_dimension": { "$ref": "#/$defs/token" },
+          "payload_json_pointer": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "proposition": { "type": "string", "minLength": 1, "maxLength": 512 }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "token": { "type": "string", "minLength": 1, "maxLength": 128 }
+  }
+}

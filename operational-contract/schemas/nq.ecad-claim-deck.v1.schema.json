@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "nq.ecad-claim-deck/v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "deck_id", "checker_id", "profile_id", "required_claims",
+    "requires_full_evidence", "process_exit_alone_is_sufficient",
+    "grants_authority"
+  ],
+  "properties": {
+    "schema": { "const": "nq.ecad-claim-deck/v1" },
+    "deck_id": { "const": "deck:silicon-orchard-open-counter:v1" },
+    "checker_id": { "const": "checker:silicon-orchard-exact-evidence:v1" },
+    "profile_id": { "const": "profile:silicon-orchard-ecad-stage:v1" },
+    "required_claims": {
+      "type": "array", "minItems": 27, "maxItems": 27,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["claim_id", "expected_value_digest"],
+        "properties": {
+          "claim_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "expected_value_digest": { "$ref": "#/$defs/digest" }
+        }
+      }
+    },
+    "requires_full_evidence": { "const": true },
+    "process_exit_alone_is_sufficient": { "const": false },
+    "grants_authority": { "const": false }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+  }
+}
