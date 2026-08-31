@@ -145,8 +145,14 @@ fn main() {
             )
             .expect("SILICON qualification");
             let input_id = format!("silicon:{}", entry.scenario);
-            let eligibility = check_silicon_orchard_eligibility(&deck, &qualification, &input_id)
-                .expect("closed eligibility");
+            let eligibility = check_silicon_orchard_eligibility(
+                nq_core::SILICON_MONITOR_FIXTURE_HEAD,
+                RAW_BUNDLE,
+                &deck,
+                &qualification,
+                &input_id,
+            )
+            .expect("closed eligibility");
             Case {
                 scenario: entry.scenario.clone(),
                 qualification,

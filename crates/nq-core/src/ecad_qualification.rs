@@ -1,7 +1,9 @@
 //! Closed NQ claim profile for the SILICON-ORCHARD open ECAD corpus.
 
-use nq_protocol::{Sha256Digest, semantic_digest};
+use chrono::{DateTime, TimeZone as _, Utc};
+use nq_protocol::{Sha256Digest, canonical_json_bytes, semantic_digest, sha256_bytes};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
@@ -10,7 +12,12 @@ use crate::{
 };
 
 /// Exact Monitor fixture-generator checkpoint.
-pub const SILICON_MONITOR_FIXTURE_HEAD: &str = "b00609c8d13c09f68debc884ec1a56b77f1234ce";
+pub const SILICON_MONITOR_FIXTURE_HEAD: &str = "bb75c4325f903f2c544e9758b5ea8d30c8bbc773";
+/// Exact byte identity of the accepted Monitor fixture bundle.
+pub const SILICON_MONITOR_BUNDLE_DIGEST: &str =
+    "sha256:fa51387ed569064281f63576e46de44628e2833bfbec2955fc7d990209ae173f";
+/// Exact DISTANT-BELL result used by the retained traversal fixture.
+pub const SILICON_DISTANT_RESULT_HEAD: &str = "8a1adaae27a5da70398b445c152cd4e7548b0289";
 /// Closed SILICON ECAD NQ profile identity.
 pub const SILICON_ECAD_PROFILE_ID: &str = "profile:silicon-orchard-ecad-stage:v1";
 /// Exact Monitor ECAD payload schema admitted by the profile.
@@ -296,6 +303,9 @@ pub const SILICON_ECAD_ELIGIBILITY_SCHEMA_V1: &str = "nq.ecad-evidence-eligibili
 pub const SILICON_ECAD_DECK_ID: &str = "deck:silicon-orchard-open-counter:v1";
 /// Exact closed SILICON checker identity.
 pub const SILICON_ECAD_CHECKER_ID: &str = "checker:silicon-orchard-exact-evidence:v1";
+/// Exact JCS identity of the immutable 27-claim deck.
+pub const SILICON_ECAD_DECK_DIGEST: &str =
+    "sha256:7f9ba67910df6962e4e02cb2e1fa75562a59889e16cef3c9133c90aa090cea0d";
 
 #[allow(missing_docs)]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -326,35 +336,27 @@ impl EcadClaimDeckV1 {
     /// # Errors
     /// Returns an error when any closed deck invariant differs.
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema != SILICON_ECAD_CLAIM_DECK_SCHEMA_V1
-            || self.deck_id != SILICON_ECAD_DECK_ID
-            || self.checker_id != SILICON_ECAD_CHECKER_ID
-            || self.profile_id != SILICON_ECAD_PROFILE_ID
-            || !self.requires_full_evidence
-            || self.process_exit_alone_is_sufficient
-            || self.grants_authority
+        let exact = silicon_orchard_claim_deck();
+        if self.schema != exact.schema
+            || self.deck_id != exact.deck_id
+            || self.checker_id != exact.checker_id
+            || self.profile_id != exact.profile_id
+            || self.requires_full_evidence != exact.requires_full_evidence
+            || self.process_exit_alone_is_sufficient != exact.process_exit_alone_is_sufficient
+            || self.grants_authority != exact.grants_authority
         {
             return Err("ecad_claim_deck_identity_invalid".into());
         }
-        let profile = silicon_orchard_ecad_profile();
-        let profile_ids: Vec<_> = profile
-            .claims
-            .iter()
-            .map(|value| value.claim_id.as_str())
-            .collect();
-        let deck_ids: Vec<_> = self
+        if self
             .required_claims
             .iter()
-            .map(|value| value.claim_id.as_str())
-            .collect();
-        if deck_ids != profile_ids
-            || self.required_claims.len() > 64
-            || self
-                .required_claims
-                .iter()
-                .any(|value| value.expected_value_digest.as_str().is_empty())
+            .map(|claim| &claim.claim_id)
+            .ne(exact.required_claims.iter().map(|claim| &claim.claim_id))
         {
             return Err("ecad_claim_deck_domain_invalid".into());
+        }
+        if self.required_claims != exact.required_claims {
+            return Err("ecad_claim_deck_content_invalid".into());
         }
         Ok(())
     }
@@ -365,7 +367,11 @@ impl EcadClaimDeckV1 {
     /// Returns an error when deck validation or canonicalization fails.
     pub fn deck_digest(&self) -> Result<Sha256Digest, String> {
         self.validate()?;
-        semantic_digest(self).map_err(|value| value.to_string())
+        let digest = semantic_digest(self).map_err(|value| value.to_string())?;
+        if digest.as_str() != SILICON_ECAD_DECK_DIGEST {
+            return Err("ecad_claim_deck_digest_invalid".into());
+        }
+        Ok(digest)
     }
 }
 
@@ -528,16 +534,428 @@ pub fn silicon_orchard_claim_deck() -> EcadClaimDeckV1 {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SiliconMonitorBundleV1 {
+    schema: String,
+    monitor_result_head: String,
+    distant_result_head: String,
+    entries: Vec<SiliconMonitorEntryV1>,
+    distant_traversal: Value,
+    nonclaims: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SiliconMonitorEntryV1 {
+    scenario: String,
+    subject_identity_digest: String,
+    producer_identity_digest: String,
+    signed_monitor_record: Value,
+    signed_monitor_record_json: String,
+    exact_payload: Option<Value>,
+    exact_payload_json: Option<String>,
+}
+
+const SILICON_SCENARIOS: [&str; 20] = [
+    "nominal",
+    "exit-zero-missing-output",
+    "digest-mismatch",
+    "wrong-design-revision",
+    "wrong-revision",
+    "wrong-tool",
+    "wrong-pdk",
+    "license-unavailable-before-start",
+    "license-no-response",
+    "healthy-wrong-subject",
+    "worker-loss",
+    "repository-custody-historical",
+    "repository-custody-successor",
+    "scheduler-running-source",
+    "worker-absent-source",
+    "scheduler-contradiction-a",
+    "scheduler-contradiction-b",
+    "stale-artifact",
+    "delayed-duplicate-delivery",
+    "agent-contradiction",
+];
+
+fn exact_value_keys(value: &Value, expected: &[&str]) -> Result<(), String> {
+    let actual = value
+        .as_object()
+        .ok_or_else(|| "silicon_custody_object_invalid".to_owned())?
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let expected = expected.iter().copied().collect::<BTreeSet<_>>();
+    if actual != expected {
+        return Err("silicon_custody_fields_invalid".into());
+    }
+    Ok(())
+}
+
+fn retained_object(reference: &Value, domain: &str) -> Result<Value, String> {
+    exact_value_keys(reference, &["digest", "byte_length", "bytes_hex"])?;
+    let bytes = hex::decode(
+        reference
+            .get("bytes_hex")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "silicon_retained_bytes_invalid".to_owned())?,
+    )
+    .map_err(|_| "silicon_retained_bytes_invalid".to_owned())?;
+    if reference.get("byte_length").and_then(Value::as_u64) != Some(bytes.len() as u64)
+        || reference.get("digest").and_then(Value::as_str)
+            != Some(crate::operational_qualification::monitor_digest(domain, &[&bytes]).as_str())
+    {
+        return Err("silicon_retained_content_binding_invalid".into());
+    }
+    let parsed: Value =
+        serde_json::from_slice(&bytes).map_err(|_| "silicon_retained_json_invalid".to_owned())?;
+    if canonical_json_bytes(&parsed).map_err(|_| "silicon_retained_json_invalid".to_owned())?
+        != bytes
+    {
+        return Err("silicon_retained_json_noncanonical".into());
+    }
+    Ok(parsed)
+}
+
+struct DistantIntakeV1 {
+    observation: Vec<u8>,
+    payload: Vec<u8>,
+    received_at: DateTime<Utc>,
+}
+
+#[allow(clippy::too_many_lines)]
+fn validate_distant_custody(
+    traversal: &Value,
+    delayed: &SiliconMonitorEntryV1,
+) -> Result<DistantIntakeV1, String> {
+    exact_value_keys(
+        traversal,
+        &[
+            "schema",
+            "source_scenario",
+            "message",
+            "receiver_policy",
+            "partition_attempt_record",
+            "first_custody_attempt_record",
+            "retry_custody_attempt_record",
+            "first_custody_receipt",
+            "replayed_custody_receipt",
+            "retained_receiver_inbox",
+            "retained_receiver_receipt",
+            "retained_receiver_lineage",
+            "retained_sender_attempts",
+            "retained_sender_delivered",
+            "sender_pending_ids_after_reopen",
+            "duplicate_converged",
+            "grants_authority",
+        ],
+    )?;
+    if traversal["schema"] != "monitor.ecad-distant-traversal-evidence/v1"
+        || traversal["source_scenario"] != "delayed-duplicate-delivery"
+        || traversal["duplicate_converged"] != true
+        || traversal["grants_authority"] != false
+        || traversal["sender_pending_ids_after_reopen"]
+            .as_array()
+            .is_none_or(|values| !values.is_empty())
+    {
+        return Err("silicon_distant_disposition_invalid".into());
+    }
+    let message = &traversal["message"];
+    let observation = hex::decode(
+        message["body"]["observation"]["bytes_hex"]
+            .as_str()
+            .ok_or_else(|| "silicon_distant_observation_invalid".to_owned())?,
+    )
+    .map_err(|_| "silicon_distant_observation_invalid".to_owned())?;
+    let payload = hex::decode(
+        message["body"]["payload"]["bytes_hex"]
+            .as_str()
+            .ok_or_else(|| "silicon_distant_payload_invalid".to_owned())?,
+    )
+    .map_err(|_| "silicon_distant_payload_invalid".to_owned())?;
+    if observation != delayed.signed_monitor_record_json.as_bytes()
+        || payload
+            != delayed
+                .exact_payload_json
+                .as_deref()
+                .ok_or_else(|| "silicon_distant_payload_missing".to_owned())?
+                .as_bytes()
+        || message["body"]["observation"]["byte_length"].as_u64() != Some(observation.len() as u64)
+        || message["body"]["observation"]["digest"].as_str()
+            != Some(
+                crate::operational_qualification::monitor_digest(
+                    "store-forward.observation-bytes.v1",
+                    &[&observation],
+                )
+                .as_str(),
+            )
+        || message["body"]["payload"]["byte_length"].as_u64() != Some(payload.len() as u64)
+        || message["body"]["payload"]["digest"].as_str()
+            != Some(
+                crate::operational_qualification::monitor_digest(
+                    "operational.content.v1",
+                    &[&payload],
+                )
+                .as_str(),
+            )
+    {
+        return Err("silicon_distant_source_binding_invalid".into());
+    }
+    let first_receipt = &traversal["first_custody_receipt"];
+    let replayed_receipt = &traversal["replayed_custody_receipt"];
+    if first_receipt != replayed_receipt
+        || first_receipt["body"]["message_id"] != message["message_id"]
+        || first_receipt["body"]["source_observation_id"]
+            != message["body"]["source_observation_id"]
+        || first_receipt["body"]["source_observation_bytes_digest"]
+            != message["body"]["observation"]["digest"]
+        || first_receipt["body"]["signed_message_digest"]
+            != "sha256:0dee02721577328d5669805d4595dfd72836a937938a5e0f2d0667c4a55f7be1"
+        || first_receipt["body"]["admission_policy_digest"]
+            != "sha256:c1025968b89b56f397681fb99e5bdff48cc24557a1a8a956d3df49161adae818"
+        || first_receipt["body"]["scope"] != "transport_custody_only"
+    {
+        return Err("silicon_distant_receipt_binding_invalid".into());
+    }
+    let partition = &traversal["partition_attempt_record"];
+    let first = &traversal["first_custody_attempt_record"];
+    let retry = &traversal["retry_custody_attempt_record"];
+    if partition["delivery"]["message"] != *message
+        || first["delivery"]["message"] != *message
+        || retry["delivery"]["message"] != *message
+        || partition["outcome"] != "partition"
+        || !partition["receipt"].is_null()
+        || first["outcome"] != "custody_confirmed"
+        || first["receipt"] != *first_receipt
+        || retry["outcome"] != "custody_confirmed"
+        || retry["receipt"] != *replayed_receipt
+    {
+        return Err("silicon_distant_attempt_binding_invalid".into());
+    }
+    let inbox = retained_object(
+        &traversal["retained_receiver_inbox"],
+        "ecad.retained-receiver-inbox.v1",
+    )?;
+    let receipt = retained_object(
+        &traversal["retained_receiver_receipt"],
+        "ecad.retained-receiver-receipt.v1",
+    )?;
+    let lineage = retained_object(
+        &traversal["retained_receiver_lineage"],
+        "ecad.retained-receiver-lineage.v1",
+    )?;
+    let delivered = retained_object(
+        &traversal["retained_sender_delivered"],
+        "ecad.retained-sender-delivered.v1",
+    )?;
+    if inbox["message"] != *message
+        || inbox["first_attempt_id"] != "attempt:silicon-wire:first-custody"
+        || inbox["first_received_at"] != first_receipt["body"]["received_at"]
+        || receipt != *first_receipt
+        || delivered != *first_receipt
+        || lineage["claim"]["message_id"] != message["message_id"]
+        || lineage["custody_receipt"] != *first_receipt
+    {
+        return Err("silicon_distant_retained_graph_invalid".into());
+    }
+    let retained_attempts = traversal["retained_sender_attempts"]
+        .as_array()
+        .ok_or_else(|| "silicon_distant_attempt_tree_invalid".to_owned())?;
+    if retained_attempts.len() != 3 {
+        return Err("silicon_distant_attempt_tree_invalid".into());
+    }
+    let retained_attempts = retained_attempts
+        .iter()
+        .map(|retained| retained_object(retained, "ecad.retained-sender-attempt.v1"))
+        .collect::<Result<Vec<_>, _>>()?;
+    if [partition, first, retry]
+        .iter()
+        .any(|expected| !retained_attempts.contains(expected))
+    {
+        return Err("silicon_distant_attempt_tree_invalid".into());
+    }
+    let received_at = DateTime::parse_from_rfc3339(
+        first_receipt["body"]["received_at"]
+            .as_str()
+            .ok_or_else(|| "silicon_distant_receipt_time_invalid".to_owned())?,
+    )
+    .map_err(|_| "silicon_distant_receipt_time_invalid".to_owned())?
+    .with_timezone(&Utc);
+    Ok(DistantIntakeV1 {
+        observation,
+        payload,
+        received_at,
+    })
+}
+
+fn exact_silicon_bundle(
+    monitor_fixture_head: &str,
+    exact_bundle_bytes: &[u8],
+) -> Result<SiliconMonitorBundleV1, String> {
+    if monitor_fixture_head != SILICON_MONITOR_FIXTURE_HEAD {
+        return Err("silicon_monitor_fixture_head_mismatch".into());
+    }
+    if exact_bundle_bytes.len() > 1024 * 1024
+        || sha256_bytes(exact_bundle_bytes).as_str() != SILICON_MONITOR_BUNDLE_DIGEST
+    {
+        return Err("silicon_monitor_bundle_digest_mismatch".into());
+    }
+    let bundle: SiliconMonitorBundleV1 = serde_json::from_slice(exact_bundle_bytes)
+        .map_err(|_| "silicon_monitor_bundle_malformed".to_owned())?;
+    let scenarios = bundle
+        .entries
+        .iter()
+        .map(|entry| entry.scenario.as_str())
+        .collect::<Vec<_>>();
+    if bundle.schema != "monitor.ecad-golden-fixture/v1"
+        || bundle.monitor_result_head != FIELD_CLOCK_MONITOR_RESULT_HEAD
+        || bundle.distant_result_head != SILICON_DISTANT_RESULT_HEAD
+        || scenarios != SILICON_SCENARIOS
+        || bundle.nonclaims
+            != [
+                "process exit is not an ECAD result",
+                "transport custody is not claim support or currentness",
+                "fixture testimony grants no remediation or target-effect authority",
+            ]
+    {
+        return Err("silicon_monitor_bundle_contract_mismatch".into());
+    }
+    let delayed = bundle
+        .entries
+        .iter()
+        .find(|entry| entry.scenario == "delayed-duplicate-delivery")
+        .ok_or_else(|| "silicon_delayed_input_missing".to_owned())?;
+    validate_distant_custody(&bundle.distant_traversal, delayed)?;
+    for entry in &bundle.entries {
+        let record: Value = serde_json::from_str(&entry.signed_monitor_record_json)
+            .map_err(|_| "silicon_monitor_entry_record_invalid".to_owned())?;
+        let payload = entry
+            .exact_payload_json
+            .as_deref()
+            .map(serde_json::from_str::<Value>)
+            .transpose()
+            .map_err(|_| "silicon_monitor_entry_payload_invalid".to_owned())?;
+        if record != entry.signed_monitor_record || payload != entry.exact_payload {
+            return Err("silicon_monitor_entry_raw_binding_invalid".into());
+        }
+        let input = silicon_input(&bundle, &entry.scenario)?;
+        let qualified = crate::qualify_operational_observations(
+            &silicon_orchard_ecad_profile(),
+            &[input],
+            Utc.with_ymd_and_hms(2026, 8, 30, 16, 40, 0)
+                .single()
+                .expect("fixed NQ qualification time"),
+        )
+        .map_err(|error| error.to_string())?;
+        let reopened = &qualified.inputs[0];
+        if reopened.subject_identity_digest.as_deref() != Some(&entry.subject_identity_digest)
+            || reopened.producer_identity_digest.as_deref() != Some(&entry.producer_identity_digest)
+        {
+            return Err("silicon_monitor_entry_provenance_invalid".into());
+        }
+    }
+    Ok(bundle)
+}
+
+fn silicon_group(scenario: &str) -> Result<Vec<&'static str>, String> {
+    match scenario {
+        "scheduler-running-source" | "worker-absent-source" => {
+            Ok(vec!["scheduler-running-source", "worker-absent-source"])
+        }
+        "scheduler-contradiction-a" | "scheduler-contradiction-b" | "agent-contradiction" => {
+            Ok(vec![
+                "scheduler-contradiction-a",
+                "scheduler-contradiction-b",
+                "agent-contradiction",
+            ])
+        }
+        value if SILICON_SCENARIOS.contains(&value) => Ok(vec![
+            SILICON_SCENARIOS
+                .iter()
+                .copied()
+                .find(|candidate| *candidate == value)
+                .expect("closed scenario"),
+        ]),
+        _ => Err("ecad_checker_input_missing".into()),
+    }
+}
+
+fn silicon_input(
+    bundle: &SiliconMonitorBundleV1,
+    scenario: &str,
+) -> Result<crate::OperationalEvidenceInputV1, String> {
+    let entry = bundle
+        .entries
+        .iter()
+        .find(|entry| entry.scenario == scenario)
+        .ok_or_else(|| "ecad_checker_input_missing".to_owned())?;
+    let (signed_monitor_record, payload_bytes, receiver_custody_at) =
+        if scenario == "delayed-duplicate-delivery" {
+            let intake = validate_distant_custody(&bundle.distant_traversal, entry)?;
+            (intake.observation, Some(intake.payload), intake.received_at)
+        } else {
+            (
+                entry.signed_monitor_record_json.as_bytes().to_vec(),
+                entry
+                    .exact_payload_json
+                    .as_ref()
+                    .map(|payload| payload.as_bytes().to_vec()),
+                Utc.with_ymd_and_hms(2026, 8, 30, 16, 30, 0)
+                    .single()
+                    .expect("fixed NQ custody time"),
+            )
+        };
+    Ok(crate::OperationalEvidenceInputV1 {
+        input_id: format!("silicon:{scenario}"),
+        signed_monitor_record,
+        payload_bytes,
+        receiver_custody_at,
+    })
+}
+
+fn recompute_silicon_qualification(
+    bundle: &SiliconMonitorBundleV1,
+    input_id: &str,
+) -> Result<crate::OperationalQualificationArtifactV1, String> {
+    let scenario = input_id
+        .strip_prefix("silicon:")
+        .ok_or_else(|| "ecad_checker_input_missing".to_owned())?;
+    let inputs = silicon_group(scenario)?
+        .into_iter()
+        .map(|member| silicon_input(bundle, member))
+        .collect::<Result<Vec<_>, _>>()?;
+    crate::qualify_operational_observations(
+        &silicon_orchard_ecad_profile(),
+        &inputs,
+        Utc.with_ymd_and_hms(2026, 8, 30, 16, 40, 0)
+            .single()
+            .expect("fixed NQ qualification time"),
+    )
+    .map_err(|error| error.to_string())
+}
+
 /// Check one qualified input against the exact closed deck.
 ///
 /// # Errors
 /// Returns an error when deck, profile, or input identity is invalid.
 pub fn check_silicon_orchard_eligibility(
+    monitor_fixture_head: &str,
+    exact_monitor_bundle_bytes: &[u8],
     deck: &EcadClaimDeckV1,
     artifact: &crate::OperationalQualificationArtifactV1,
     input_id: &str,
 ) -> Result<EcadEligibilityCheckV1, String> {
     deck.validate()?;
+    silicon_orchard_ecad_profile()
+        .validate()
+        .map_err(|error| error.to_string())?;
+    let bundle = exact_silicon_bundle(monitor_fixture_head, exact_monitor_bundle_bytes)?;
+    let recomputed = recompute_silicon_qualification(&bundle, input_id)?;
+    if artifact != &recomputed {
+        return Err("ecad_checker_qualification_artifact_mismatch".into());
+    }
     if artifact.profile_id != deck.profile_id {
         return Err("ecad_checker_profile_mismatch".into());
     }

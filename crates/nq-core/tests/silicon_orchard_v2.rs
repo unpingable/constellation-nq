@@ -2,12 +2,29 @@
 
 use chrono::{DateTime, TimeZone as _, Utc};
 use nq_core::{
-    EcadEligibilityDispositionV1, OperationalEvidenceInputV1, OperationalQualificationArtifactV1,
-    check_silicon_orchard_eligibility, qualify_operational_observations,
-    silicon_orchard_claim_deck, silicon_orchard_ecad_profile,
+    EcadEligibilityCheckV1, EcadEligibilityDispositionV1, OperationalEvidenceInputV1,
+    OperationalQualificationArtifactV1, SILICON_MONITOR_FIXTURE_HEAD,
+    check_silicon_orchard_eligibility as check_exact_silicon_orchard_eligibility,
+    qualify_operational_observations, silicon_orchard_claim_deck, silicon_orchard_ecad_profile,
 };
 use serde::Deserialize;
 use serde_json::Value;
+
+const RAW_BUNDLE: &[u8] = include_bytes!("fixtures/silicon-orchard/monitor-bundle.v1.json");
+
+fn check_silicon_orchard_eligibility(
+    deck: &nq_core::EcadClaimDeckV1,
+    artifact: &OperationalQualificationArtifactV1,
+    input_id: &str,
+) -> Result<EcadEligibilityCheckV1, String> {
+    check_exact_silicon_orchard_eligibility(
+        SILICON_MONITOR_FIXTURE_HEAD,
+        RAW_BUNDLE,
+        deck,
+        artifact,
+        input_id,
+    )
+}
 
 #[derive(Deserialize)]
 struct Bundle {
@@ -23,10 +40,7 @@ struct Entry {
 }
 
 fn bundle() -> Bundle {
-    serde_json::from_slice(include_bytes!(
-        "fixtures/silicon-orchard/monitor-bundle.v1.json"
-    ))
-    .unwrap()
+    serde_json::from_slice(RAW_BUNDLE).unwrap()
 }
 
 fn entry<'a>(bundle: &'a Bundle, scenario: &str) -> &'a Entry {
@@ -386,9 +400,10 @@ fn profile_and_deck_machine_schemas_match_closed_runtime_fields() {
         profile_schema["properties"]["accepted_producer_identities"]["minItems"].as_u64(),
         Some(8)
     );
+    assert_eq!(profile_schema["const"], profile_value);
     assert_eq!(
-        deck_schema["properties"]["required_claims"]["minItems"].as_u64(),
-        Some(27)
+        deck_schema["properties"]["required_claims"]["const"],
+        deck_value["required_claims"],
     );
 
     let mut unknown_profile = profile_value.clone();
@@ -410,4 +425,148 @@ fn profile_and_deck_machine_schemas_match_closed_runtime_fields() {
         .unwrap()
         .remove("requires_full_evidence");
     assert!(serde_json::from_value::<EcadClaimDeckV1>(missing_deck).is_err());
+}
+#[test]
+fn claim_deck_values_and_semantic_identity_are_immutable() {
+    use nq_core::SILICON_ECAD_DECK_DIGEST;
+    use nq_protocol::Sha256Digest;
+
+    let deck = silicon_orchard_claim_deck();
+    assert_eq!(deck.required_claims.len(), 27);
+    assert_eq!(
+        deck.deck_digest().unwrap().as_str(),
+        SILICON_ECAD_DECK_DIGEST
+    );
+
+    let mut replaced_value = deck.clone();
+    replaced_value.required_claims[0].expected_value_digest = Sha256Digest::parse(
+        "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+    )
+    .unwrap();
+    assert_eq!(
+        replaced_value.validate().unwrap_err(),
+        "ecad_claim_deck_content_invalid"
+    );
+
+    let mut resealed_replacement = replaced_value;
+    resealed_replacement.deck_id = "deck:silicon-orchard-open-counter:v1".into();
+    assert_eq!(
+        resealed_replacement.deck_digest().unwrap_err(),
+        "ecad_claim_deck_content_invalid"
+    );
+}
+
+#[test]
+fn exact_monitor_head_raw_provenance_input_and_custody_substitutions_refuse() {
+    let bundle = bundle();
+    let artifact = qualify(&bundle, &["nominal"]);
+    let deck = silicon_orchard_claim_deck();
+
+    assert_eq!(
+        check_exact_silicon_orchard_eligibility(
+            "bb75c4325f903f2c544e9758b5ea8d30c8bbc770",
+            RAW_BUNDLE,
+            &deck,
+            &artifact,
+            "silicon:nominal",
+        )
+        .unwrap_err(),
+        "silicon_monitor_fixture_head_mismatch"
+    );
+
+    let mut raw_with_whitespace = RAW_BUNDLE.to_vec();
+    raw_with_whitespace.push(b' ');
+    assert_eq!(
+        check_exact_silicon_orchard_eligibility(
+            SILICON_MONITOR_FIXTURE_HEAD,
+            &raw_with_whitespace,
+            &deck,
+            &artifact,
+            "silicon:nominal",
+        )
+        .unwrap_err(),
+        "silicon_monitor_bundle_digest_mismatch"
+    );
+
+    for mutation in [
+        |value: &mut Value| value["monitor_result_head"] = Value::String("0".repeat(40)),
+        |value: &mut Value| {
+            value["entries"][0]["subject_identity_digest"] =
+                Value::String(format!("sha256:{}", "1".repeat(64)));
+        },
+        |value: &mut Value| {
+            value["entries"][0]["signed_monitor_record_json"] =
+                value["entries"][1]["signed_monitor_record_json"].clone();
+        },
+        |value: &mut Value| {
+            value["distant_traversal"]["first_custody_receipt"]["body"]["received_at"] =
+                Value::String("2026-08-30T16:03:01Z".into());
+        },
+    ] {
+        let mut substituted: Value = serde_json::from_slice(RAW_BUNDLE).unwrap();
+        mutation(&mut substituted);
+        let bytes = serde_json::to_vec(&substituted).unwrap();
+        assert_eq!(
+            check_exact_silicon_orchard_eligibility(
+                SILICON_MONITOR_FIXTURE_HEAD,
+                &bytes,
+                &deck,
+                &artifact,
+                "silicon:nominal",
+            )
+            .unwrap_err(),
+            "silicon_monitor_bundle_digest_mismatch"
+        );
+    }
+}
+
+#[test]
+fn eligibility_requires_full_recomputed_artifact_equality() {
+    use nq_protocol::Sha256Digest;
+
+    let bundle = bundle();
+    let artifact = qualify(&bundle, &["nominal"]);
+    let deck = silicon_orchard_claim_deck();
+    assert_eq!(
+        check_silicon_orchard_eligibility(&deck, &artifact, "silicon:nominal")
+            .unwrap()
+            .disposition,
+        EcadEligibilityDispositionV1::EvidenceEligible
+    );
+
+    let mut variants = Vec::new();
+    let mut altered_head = artifact.clone();
+    altered_head.monitor_contract_head = "0".repeat(40);
+    variants.push(altered_head);
+
+    let mut altered_raw = artifact.clone();
+    altered_raw.inputs[0].raw_record_digest = Sha256Digest::parse(
+        "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+    )
+    .unwrap();
+    variants.push(altered_raw);
+
+    let mut altered_custody = artifact.clone();
+    altered_custody.inputs[0].receiver_custody_at += chrono::Duration::seconds(1);
+    variants.push(altered_custody);
+
+    let mut altered_claim = artifact.clone();
+    altered_claim.inputs[0].claim_support[0].value_digest = Sha256Digest::parse(
+        "sha256:0000000000000000000000000000000000000000000000000000000000000002",
+    )
+    .unwrap();
+    variants.push(altered_claim);
+
+    let mut altered_nonclaim = artifact.clone();
+    altered_nonclaim
+        .nonclaims
+        .push("invented disposition".into());
+    variants.push(altered_nonclaim);
+
+    for substituted in variants {
+        assert_eq!(
+            check_silicon_orchard_eligibility(&deck, &substituted, "silicon:nominal").unwrap_err(),
+            "ecad_checker_qualification_artifact_mismatch"
+        );
+    }
 }

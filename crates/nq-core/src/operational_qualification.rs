@@ -1059,7 +1059,7 @@ fn contradictions(inputs: &[QualifiedOperationalInputV1]) -> Vec<OperationalCont
     output
 }
 
-fn monitor_digest(domain: &str, parts: &[&[u8]]) -> String {
+pub(crate) fn monitor_digest(domain: &str, parts: &[&[u8]]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"monitor-skunkworks.digest.v1\0");
     hasher.update((domain.len() as u64).to_be_bytes());

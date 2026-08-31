@@ -4,31 +4,154 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schema", "deck_id", "checker_id", "profile_id", "required_claims",
-    "requires_full_evidence", "process_exit_alone_is_sufficient",
+    "schema",
+    "deck_id",
+    "checker_id",
+    "profile_id",
+    "required_claims",
+    "requires_full_evidence",
+    "process_exit_alone_is_sufficient",
     "grants_authority"
   ],
   "properties": {
-    "schema": { "const": "nq.ecad-claim-deck/v1" },
-    "deck_id": { "const": "deck:silicon-orchard-open-counter:v1" },
-    "checker_id": { "const": "checker:silicon-orchard-exact-evidence:v1" },
-    "profile_id": { "const": "profile:silicon-orchard-ecad-stage:v1" },
-    "required_claims": {
-      "type": "array", "minItems": 27, "maxItems": 27,
-      "items": {
-        "type": "object", "additionalProperties": false,
-        "required": ["claim_id", "expected_value_digest"],
-        "properties": {
-          "claim_id": { "type": "string", "minLength": 1, "maxLength": 128 },
-          "expected_value_digest": { "$ref": "#/$defs/digest" }
-        }
-      }
+    "schema": {
+      "const": "nq.ecad-claim-deck/v1"
     },
-    "requires_full_evidence": { "const": true },
-    "process_exit_alone_is_sufficient": { "const": false },
-    "grants_authority": { "const": false }
+    "deck_id": {
+      "const": "deck:silicon-orchard-open-counter:v1"
+    },
+    "checker_id": {
+      "const": "checker:silicon-orchard-exact-evidence:v1"
+    },
+    "profile_id": {
+      "const": "profile:silicon-orchard-ecad-stage:v1"
+    },
+    "required_claims": {
+      "const": [
+        {
+          "claim_id": "ecad:design-revision",
+          "expected_value_digest": "sha256:da1497dac6f872ea70ee4260c1cee22089d03f80295e1935dfe964d885d0014d"
+        },
+        {
+          "claim_id": "ecad:observed-design-revision",
+          "expected_value_digest": "sha256:da1497dac6f872ea70ee4260c1cee22089d03f80295e1935dfe964d885d0014d"
+        },
+        {
+          "claim_id": "ecad:design-revision-match",
+          "expected_value_digest": "sha256:b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b"
+        },
+        {
+          "claim_id": "ecad:input-artifact",
+          "expected_value_digest": "sha256:3b06decef940c7d43bd2c0b3043c0678486ad8798745fe2e28ed2d50d18ed22b"
+        },
+        {
+          "claim_id": "ecad:license",
+          "expected_value_digest": "sha256:8b7092cc4b053d88fdfb7df09c11c9242c36aba5d07e422786913868eda34bfc"
+        },
+        {
+          "claim_id": "ecad:license-identity",
+          "expected_value_digest": "sha256:39b085a4293ef08852bad17c60d5b48c3dc60d3455ec2eef379bc68a1f18249c"
+        },
+        {
+          "claim_id": "ecad:output-artifact",
+          "expected_value_digest": "sha256:856181e9b02a4d668b8bb8ce323ea87478432cbb9c21bc36039053808a230650"
+        },
+        {
+          "claim_id": "ecad:observed-output-artifact",
+          "expected_value_digest": "sha256:856181e9b02a4d668b8bb8ce323ea87478432cbb9c21bc36039053808a230650"
+        },
+        {
+          "claim_id": "ecad:output-present",
+          "expected_value_digest": "sha256:b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b"
+        },
+        {
+          "claim_id": "ecad:output-digest-match",
+          "expected_value_digest": "sha256:b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b"
+        },
+        {
+          "claim_id": "ecad:pdk-identity",
+          "expected_value_digest": "sha256:30610d97535a1f1250d9bde93fc6283c6180a68bff23a8867ac884b2411aa884"
+        },
+        {
+          "claim_id": "ecad:observed-pdk-identity",
+          "expected_value_digest": "sha256:30610d97535a1f1250d9bde93fc6283c6180a68bff23a8867ac884b2411aa884"
+        },
+        {
+          "claim_id": "ecad:pdk-match",
+          "expected_value_digest": "sha256:b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b"
+        },
+        {
+          "claim_id": "ecad:repository-revision",
+          "expected_value_digest": "sha256:1b87225ddb369ca045389f1e35c0261c9da37a0f2a5349cfae9c5cf757b41c31"
+        },
+        {
+          "claim_id": "ecad:observed-repository-revision",
+          "expected_value_digest": "sha256:1b87225ddb369ca045389f1e35c0261c9da37a0f2a5349cfae9c5cf757b41c31"
+        },
+        {
+          "claim_id": "ecad:repository-revision-match",
+          "expected_value_digest": "sha256:b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b"
+        },
+        {
+          "claim_id": "ecad:scheduler-job",
+          "expected_value_digest": "sha256:6e04d52b8f3e9ff40a9df85f7210c7e545034f07fd200fe1f017615a7484597c"
+        },
+        {
+          "claim_id": "ecad:scheduler-observation",
+          "expected_value_digest": "sha256:7093fda846e50b267da144f7b3683ee1dd8838506939f6052b7370dd01fa2ad0"
+        },
+        {
+          "claim_id": "ecad:stage-occurrence",
+          "expected_value_digest": "sha256:f8f7b8d15ae41d676d2b061fe412e526baf55d2350842a739583634586209731"
+        },
+        {
+          "claim_id": "ecad:stage-name",
+          "expected_value_digest": "sha256:2ad47ffa2c44e63f601770d25d4ca879bf9edef3a1ead64bcf60f905f33496f0"
+        },
+        {
+          "claim_id": "ecad:toolchain-identity",
+          "expected_value_digest": "sha256:d0e6563db1ad19ac1aae7fcc67cebeacf33967f7e5b2077d8b63c3a105ab96c9"
+        },
+        {
+          "claim_id": "ecad:observed-toolchain-identity",
+          "expected_value_digest": "sha256:d0e6563db1ad19ac1aae7fcc67cebeacf33967f7e5b2077d8b63c3a105ab96c9"
+        },
+        {
+          "claim_id": "ecad:toolchain-match",
+          "expected_value_digest": "sha256:b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b"
+        },
+        {
+          "claim_id": "ecad:worker-identity",
+          "expected_value_digest": "sha256:0b2c20c7c0d81961ad9f7d31b55dfc5dbd73ed8f3a095e29e0f9d56fd9f964ad"
+        },
+        {
+          "claim_id": "ecad:worker-observation",
+          "expected_value_digest": "sha256:94332144d941eb1212c9af7f968e215a7042bf94925c9c10b21de97a2f0cea06"
+        },
+        {
+          "claim_id": "ecad:artifact-observed-at",
+          "expected_value_digest": "sha256:19466be86fa2441746800c7b345c30db23b919850d8e6d5b57edbd9618570f86"
+        },
+        {
+          "claim_id": "ecad:process-exit-code",
+          "expected_value_digest": "sha256:5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+        }
+      ]
+    },
+    "requires_full_evidence": {
+      "const": true
+    },
+    "process_exit_alone_is_sufficient": {
+      "const": false
+    },
+    "grants_authority": {
+      "const": false
+    }
   },
   "$defs": {
-    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
   }
 }

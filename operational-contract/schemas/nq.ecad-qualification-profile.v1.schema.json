@@ -4,47 +4,332 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "profile_id", "monitor_contract_head", "accepted_subject_identity_digests",
-    "accepted_producer_identities", "accepted_payload_schemas", "claims"
+    "profile_id",
+    "monitor_contract_head",
+    "accepted_subject_identity_digests",
+    "accepted_producer_identities",
+    "accepted_payload_schemas",
+    "claims"
   ],
   "properties": {
-    "profile_id": { "const": "profile:silicon-orchard-ecad-stage:v1" },
-    "monitor_contract_head": { "const": "b2d52fe34f146774cbf5601819982c267c7fb082" },
+    "profile_id": {
+      "const": "profile:silicon-orchard-ecad-stage:v1"
+    },
+    "monitor_contract_head": {
+      "const": "b2d52fe34f146774cbf5601819982c267c7fb082"
+    },
     "accepted_subject_identity_digests": {
-      "type": "array", "minItems": 15, "maxItems": 15,
-      "uniqueItems": true, "items": { "$ref": "#/$defs/digest" }
+      "type": "array",
+      "minItems": 15,
+      "maxItems": 15,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/digest"
+      }
     },
     "accepted_producer_identities": {
-      "type": "array", "minItems": 8, "maxItems": 8,
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
       "items": {
-        "type": "object", "additionalProperties": false,
-        "required": ["principal_id", "producer_identity_digest", "public_key_digest"],
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "principal_id",
+          "producer_identity_digest",
+          "public_key_digest"
+        ],
         "properties": {
-          "principal_id": { "$ref": "#/$defs/token" },
-          "producer_identity_digest": { "$ref": "#/$defs/digest" },
-          "public_key_digest": { "$ref": "#/$defs/digest" }
+          "principal_id": {
+            "$ref": "#/$defs/token"
+          },
+          "producer_identity_digest": {
+            "$ref": "#/$defs/digest"
+          },
+          "public_key_digest": {
+            "$ref": "#/$defs/digest"
+          }
         }
       }
     },
     "accepted_payload_schemas": {
-      "const": ["monitor.ecad-stage-observation/v1"]
+      "const": [
+        "monitor.ecad-stage-observation/v1"
+      ]
     },
     "claims": {
-      "type": "array", "minItems": 27, "maxItems": 27,
+      "type": "array",
+      "minItems": 27,
+      "maxItems": 27,
       "items": {
-        "type": "object", "additionalProperties": false,
-        "required": ["claim_id", "coverage_dimension", "payload_json_pointer", "proposition"],
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "claim_id",
+          "coverage_dimension",
+          "payload_json_pointer",
+          "proposition"
+        ],
         "properties": {
-          "claim_id": { "$ref": "#/$defs/token" },
-          "coverage_dimension": { "$ref": "#/$defs/token" },
-          "payload_json_pointer": { "type": "string", "minLength": 1, "maxLength": 256 },
-          "proposition": { "type": "string", "minLength": 1, "maxLength": 512 }
+          "claim_id": {
+            "$ref": "#/$defs/token"
+          },
+          "coverage_dimension": {
+            "$ref": "#/$defs/token"
+          },
+          "payload_json_pointer": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "proposition": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
         }
       }
     }
   },
   "$defs": {
-    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-    "token": { "type": "string", "minLength": 1, "maxLength": 128 }
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "token": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    }
+  },
+  "const": {
+    "profile_id": "profile:silicon-orchard-ecad-stage:v1",
+    "monitor_contract_head": "b2d52fe34f146774cbf5601819982c267c7fb082",
+    "accepted_subject_identity_digests": [
+      "sha256:0de604d1a6b4b606d8753b1106c8c1bf95027b5c19ecf5d4287b2734250733ca",
+      "sha256:117dcc2332cb243a919503d815e95b5406a061b1f3f4f0f83665c17ecb36b7e9",
+      "sha256:22608157b5a8a535cad1abf1bffd17980a2a4de225126ab8b705bcfe02e5fbee",
+      "sha256:2964f2e50aa7134d82dbfb55a608370098b582e0701769c27b953877168c60a1",
+      "sha256:3f7ccaad2ba1503ef6f71aac90a1682a3383ab0f672a5c0b8e98079c41437882",
+      "sha256:5e1990110d8ddec3d70e99f2dcdf8909c695a78baaa912a06c2dbe9dae28727b",
+      "sha256:685aa649b2e95ec91dc6149315803ee10f4d626e11c8adfd2f0e7486fd50e628",
+      "sha256:798940b4ce34d78b0bc3fefa74b25461c83f6a62b03d08393d8d01e7d3165741",
+      "sha256:7e7040ead4320585d40a35947ad85d27903729f5c589c510eac6744128e49e4f",
+      "sha256:919aef93f266c571cac2fdb766b3ee22c5e8a5ec4ed605c1c2b55b1bb20a9ebb",
+      "sha256:9a29016cdccc13b47c88ffb7e508c646bfbf18dac4e13712d8d81a97dd3e5f5a",
+      "sha256:b189d8cdde834f7ee20f288a63169b883a35bb779604a48dc3f67c69de8ff1df",
+      "sha256:c75ce342b99b32d1731bb02b70cc169690c98b2ecc1f1817c246031df3498e91",
+      "sha256:ee770dd947948627c2aaaf74a9f53b67f6be02b1a92dc9f19532a969047db0c9",
+      "sha256:f4f24b5d869622878e9efcc09e628156507be3fd1debafc03dc54adb69551ce2"
+    ],
+    "accepted_producer_identities": [
+      {
+        "principal_id": "producer:silicon:agent_worker",
+        "producer_identity_digest": "sha256:cc8c8bb5f206c917911e06db6d57a59f0c5e3fd1f09687dd8a62e40e7129a865",
+        "public_key_digest": "sha256:85daede4351d4f0f0b2e952c602b82665e73b759632d6a4ea343ef206a56cdc4"
+      },
+      {
+        "principal_id": "producer:silicon:artifact_monitor",
+        "producer_identity_digest": "sha256:d23a4830cf73009eb8b5d088f54b4df4568210fdd8f0c081d9e6718503c249b6",
+        "public_key_digest": "sha256:a43e32521f7c5c650378f6ad829221cf7b4481d1dc0151d30fa201b2647c485b"
+      },
+      {
+        "principal_id": "producer:silicon:license_monitor",
+        "producer_identity_digest": "sha256:3043d6609a616422262f66aca29cac02d60257a85ac3c2fb3562594840e72285",
+        "public_key_digest": "sha256:6c791c32ca5ac1d1af8574c0c5bb2da52ddc58aec690dcdad8400dfe8dee6a95"
+      },
+      {
+        "principal_id": "producer:silicon:repository_monitor",
+        "producer_identity_digest": "sha256:2b1739cd369053860e35b1e94561705abdd0ad76ace255f17c1e8011e5218bef",
+        "public_key_digest": "sha256:151704051f09c42063fb8e3795d69f18eb602f492c452fd574945b07ced93b66"
+      },
+      {
+        "principal_id": "producer:silicon:result_checker",
+        "producer_identity_digest": "sha256:abbbbcf9fb9fc7c538cf733076c89bd9fbb9fdbe3f28ee344387a34a2b81e216",
+        "public_key_digest": "sha256:9b11ca401fbaf31ca81b008b9291ee216de6bd6ca8f80eb836eb641af1e96b41"
+      },
+      {
+        "principal_id": "producer:silicon:scheduler_monitor",
+        "producer_identity_digest": "sha256:cde6225beab4f9c955ca5c74420bb2e499d71aa892ae5aedf896374815ebcea2",
+        "public_key_digest": "sha256:65b1acff4d30ad6f53a1f29cdc42420cfda4119f54b4f50dcd2a6aa437f8ce61"
+      },
+      {
+        "principal_id": "producer:silicon:tool_environment_monitor",
+        "producer_identity_digest": "sha256:0fb616e6ee4967346b45a33da18a9ffe05f53acf19f221ee88447fe21daf4a64",
+        "public_key_digest": "sha256:72da124d521032453f18490030979e97809454a6e62c8705d85b10dd1293144a"
+      },
+      {
+        "principal_id": "producer:silicon:worker_monitor",
+        "producer_identity_digest": "sha256:acdb74da07750a6023717b3462112212231c711914db3a44498e68f0ef7c194c",
+        "public_key_digest": "sha256:04f76626a217cae5ca3293e482d094329177bde164535437a79466bba57a1045"
+      }
+    ],
+    "accepted_payload_schemas": [
+      "monitor.ecad-stage-observation/v1"
+    ],
+    "claims": [
+      {
+        "claim_id": "ecad:design-revision",
+        "coverage_dimension": "design_revision",
+        "payload_json_pointer": "/identities/design_revision",
+        "proposition": "exact ECAD design revision identity"
+      },
+      {
+        "claim_id": "ecad:observed-design-revision",
+        "coverage_dimension": "design_revision",
+        "payload_json_pointer": "/observed_design_revision",
+        "proposition": "exact observed ECAD design revision identity"
+      },
+      {
+        "claim_id": "ecad:design-revision-match",
+        "coverage_dimension": "design_revision",
+        "payload_json_pointer": "/design_revision_matches",
+        "proposition": "design revision comparison observation"
+      },
+      {
+        "claim_id": "ecad:input-artifact",
+        "coverage_dimension": "input_artifact",
+        "payload_json_pointer": "/identities/input_artifact_set",
+        "proposition": "exact input artifact-set identity"
+      },
+      {
+        "claim_id": "ecad:license",
+        "coverage_dimension": "license",
+        "payload_json_pointer": "/license_observation",
+        "proposition": "observed license response"
+      },
+      {
+        "claim_id": "ecad:license-identity",
+        "coverage_dimension": "license",
+        "payload_json_pointer": "/identities/license_entitlement",
+        "proposition": "exact license entitlement identity"
+      },
+      {
+        "claim_id": "ecad:output-artifact",
+        "coverage_dimension": "output_artifact",
+        "payload_json_pointer": "/identities/output_artifact_set",
+        "proposition": "exact output artifact-set identity"
+      },
+      {
+        "claim_id": "ecad:observed-output-artifact",
+        "coverage_dimension": "output_artifact",
+        "payload_json_pointer": "/observed_output_artifact_set",
+        "proposition": "exact observed output artifact-set identity or absence"
+      },
+      {
+        "claim_id": "ecad:output-present",
+        "coverage_dimension": "output_artifact",
+        "payload_json_pointer": "/output_present",
+        "proposition": "output presence observation"
+      },
+      {
+        "claim_id": "ecad:output-digest-match",
+        "coverage_dimension": "output_artifact",
+        "payload_json_pointer": "/output_digest_matches",
+        "proposition": "output digest comparison observation"
+      },
+      {
+        "claim_id": "ecad:pdk-identity",
+        "coverage_dimension": "pdk",
+        "payload_json_pointer": "/identities/pdk",
+        "proposition": "exact PDK identity"
+      },
+      {
+        "claim_id": "ecad:observed-pdk-identity",
+        "coverage_dimension": "pdk",
+        "payload_json_pointer": "/observed_pdk",
+        "proposition": "exact observed PDK identity"
+      },
+      {
+        "claim_id": "ecad:pdk-match",
+        "coverage_dimension": "pdk",
+        "payload_json_pointer": "/pdk_matches",
+        "proposition": "PDK comparison observation"
+      },
+      {
+        "claim_id": "ecad:repository-revision",
+        "coverage_dimension": "repository_revision",
+        "payload_json_pointer": "/identities/repository_revision",
+        "proposition": "exact repository revision identity"
+      },
+      {
+        "claim_id": "ecad:observed-repository-revision",
+        "coverage_dimension": "repository_revision",
+        "payload_json_pointer": "/observed_repository_revision",
+        "proposition": "exact observed repository revision identity"
+      },
+      {
+        "claim_id": "ecad:repository-revision-match",
+        "coverage_dimension": "repository_revision",
+        "payload_json_pointer": "/repository_revision_matches",
+        "proposition": "repository revision comparison observation"
+      },
+      {
+        "claim_id": "ecad:scheduler-job",
+        "coverage_dimension": "scheduler",
+        "payload_json_pointer": "/identities/scheduler_job",
+        "proposition": "exact scheduler-job occurrence identity"
+      },
+      {
+        "claim_id": "ecad:scheduler-observation",
+        "coverage_dimension": "scheduler",
+        "payload_json_pointer": "/scheduler_observation",
+        "proposition": "scheduler observation"
+      },
+      {
+        "claim_id": "ecad:stage-occurrence",
+        "coverage_dimension": "stage",
+        "payload_json_pointer": "/identities/stage_occurrence",
+        "proposition": "exact stage occurrence identity"
+      },
+      {
+        "claim_id": "ecad:stage-name",
+        "coverage_dimension": "stage",
+        "payload_json_pointer": "/stage_name",
+        "proposition": "stage name observation"
+      },
+      {
+        "claim_id": "ecad:toolchain-identity",
+        "coverage_dimension": "toolchain",
+        "payload_json_pointer": "/identities/toolchain",
+        "proposition": "exact toolchain identity"
+      },
+      {
+        "claim_id": "ecad:observed-toolchain-identity",
+        "coverage_dimension": "toolchain",
+        "payload_json_pointer": "/observed_toolchain",
+        "proposition": "exact observed toolchain identity"
+      },
+      {
+        "claim_id": "ecad:toolchain-match",
+        "coverage_dimension": "toolchain",
+        "payload_json_pointer": "/toolchain_matches",
+        "proposition": "toolchain comparison observation"
+      },
+      {
+        "claim_id": "ecad:worker-identity",
+        "coverage_dimension": "worker",
+        "payload_json_pointer": "/identities/worker",
+        "proposition": "exact worker identity"
+      },
+      {
+        "claim_id": "ecad:worker-observation",
+        "coverage_dimension": "worker",
+        "payload_json_pointer": "/worker_observation",
+        "proposition": "worker observation"
+      },
+      {
+        "claim_id": "ecad:artifact-observed-at",
+        "coverage_dimension": "output_artifact",
+        "payload_json_pointer": "/artifact_observed_at",
+        "proposition": "artifact observation time"
+      },
+      {
+        "claim_id": "ecad:process-exit-code",
+        "coverage_dimension": "stage",
+        "payload_json_pointer": "/process_exit_code",
+        "proposition": "process exit code as mechanics only"
+      }
+    ]
   }
 }
