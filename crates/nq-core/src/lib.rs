@@ -10,6 +10,7 @@ pub mod coordination;
 pub mod diagnostic_execution;
 pub mod diagnostic_execution_supported;
 pub mod diagnostic_execution_v2;
+pub mod ecad_qualification;
 pub mod engine;
 pub mod evaluator_identity;
 pub mod identity;
@@ -46,6 +47,7 @@ pub use diagnostic_execution_v2::{
     ProfileRefusalBindingV2, ReceivedInputV2, RefusedInputV2, UnsupportedCauseV2,
     UnsupportedCodeV2, UnsupportedOriginV2,
 };
+pub use ecad_qualification::*;
 pub use engine::{
     AcquisitionFailure, AcquisitionFailureClass, AcquisitionRefusal, AdmissionRefusal,
     AdmissionRefusalBoundary, AdmissionRefusalCode, AdmissionRefusalDetails,
