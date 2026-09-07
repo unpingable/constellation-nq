@@ -2238,6 +2238,7 @@ impl CollectionEngine {
     ///
     /// Returns a version, integrity, or database-opening error.
     pub fn open(config: &NqConfig) -> Result<Self, EngineError> {
+        validate_compiled_config(config)?;
         let store = Store::open(&config.database_path)?;
         validate_provider_intake_history(&store)?;
         validate_diagnostic_artifact_history(&store)?;
@@ -2259,6 +2260,7 @@ impl CollectionEngine {
         config: &NqConfig,
         evaluator_identity: Result<EvaluatorRuntimeIdentity, String>,
     ) -> Result<Self, EngineError> {
+        validate_compiled_config(config)?;
         let store = Store::open(&config.database_path)?;
         validate_provider_intake_history(&store)?;
         validate_diagnostic_artifact_history(&store)?;
@@ -2443,6 +2445,7 @@ impl CollectionEngine {
         watcher: &WatcherConfig,
         action: &str,
     ) -> Result<WatcherActionOutcome, EngineError> {
+        validate_compiled_watcher(watcher)?;
         let _guard = InstanceGuard::acquire(
             &self.config.database_path,
             &watcher.instance_id,
@@ -5679,78 +5682,83 @@ fn resolve(watcher: &WatcherConfig) -> Result<&'static dyn ProfileModule, Engine
 /// Returns the exact instance and catalog vocabulary mismatch.
 pub fn validate_compiled_config(config: &NqConfig) -> Result<(), EngineError> {
     for watcher in &config.watchers {
-        let profile = resolve(watcher)?;
-        let descriptor = profile.descriptor();
-        if !watcher.subject.starts_with(&descriptor.subjects.namespace) {
-            return Err(EngineError::Profile(format!(
-                "instance {} subject is outside profile namespace {}",
-                watcher.instance_id, descriptor.subjects.namespace
-            )));
-        }
-        if !descriptor
-            .scope_kinds
+        validate_compiled_watcher(watcher)?;
+    }
+    Ok(())
+}
+
+fn validate_compiled_watcher(watcher: &WatcherConfig) -> Result<(), EngineError> {
+    let profile = resolve(watcher)?;
+    let descriptor = profile.descriptor();
+    if !watcher.subject.starts_with(&descriptor.subjects.namespace) {
+        return Err(EngineError::Profile(format!(
+            "instance {} subject is outside profile namespace {}",
+            watcher.instance_id, descriptor.subjects.namespace
+        )));
+    }
+    if !descriptor
+        .scope_kinds
+        .iter()
+        .any(|term| term.name == watcher.scope.kind)
+    {
+        return Err(EngineError::Profile(format!(
+            "instance {} uses unknown scope kind {}",
+            watcher.instance_id, watcher.scope.kind
+        )));
+    }
+    if !descriptor
+        .vantages
+        .iter()
+        .any(|term| term.name == watcher.vantage.kind)
+    {
+        return Err(EngineError::Profile(format!(
+            "instance {} uses unknown vantage {}",
+            watcher.instance_id, watcher.vantage.kind
+        )));
+    }
+    if let Some(capability) = watcher.capability_ceiling.iter().find(|capability| {
+        !descriptor
+            .capabilities
             .iter()
-            .any(|term| term.name == watcher.scope.kind)
-        {
-            return Err(EngineError::Profile(format!(
-                "instance {} uses unknown scope kind {}",
-                watcher.instance_id, watcher.scope.kind
-            )));
-        }
-        if !descriptor
-            .vantages
-            .iter()
-            .any(|term| term.name == watcher.vantage.kind)
-        {
-            return Err(EngineError::Profile(format!(
-                "instance {} uses unknown vantage {}",
-                watcher.instance_id, watcher.vantage.kind
-            )));
-        }
-        if let Some(capability) = watcher.capability_ceiling.iter().find(|capability| {
-            !descriptor
-                .capabilities
-                .iter()
-                .any(|term| term.name == capability.as_str())
-        }) {
-            return Err(EngineError::Profile(format!(
-                "instance {} capability ceiling contains profile-unknown {}",
-                watcher.instance_id, capability
-            )));
-        }
-        let context = ValidationContext {
-            instance_id: watcher.instance_id.clone(),
-            request_subject: watcher.subject.clone(),
-            scope: ScopeGrant {
-                kind: watcher.scope.kind.clone(),
-                value: watcher.scope.value.clone(),
-            },
-            vantage: VantageGrant {
-                kind: watcher.vantage.kind.clone(),
-                value: watcher.vantage.value.clone(),
-            },
-            granted_capabilities: watcher.capability_ceiling.clone(),
-            received_at: Utc::now(),
-            max_observations: u32::try_from(watcher.resources.max_observations)
-                .unwrap_or(u32::MAX)
-                .min(descriptor.limits.max_observations),
-            max_future_skew: Duration::seconds(60),
-        };
-        profile.validate_binding(&context).map_err(|refusal| {
+            .any(|term| term.name == capability.as_str())
+    }) {
+        return Err(EngineError::Profile(format!(
+            "instance {} capability ceiling contains profile-unknown {}",
+            watcher.instance_id, capability
+        )));
+    }
+    let context = ValidationContext {
+        instance_id: watcher.instance_id.clone(),
+        request_subject: watcher.subject.clone(),
+        scope: ScopeGrant {
+            kind: watcher.scope.kind.clone(),
+            value: watcher.scope.value.clone(),
+        },
+        vantage: VantageGrant {
+            kind: watcher.vantage.kind.clone(),
+            value: watcher.vantage.value.clone(),
+        },
+        granted_capabilities: watcher.capability_ceiling.clone(),
+        received_at: Utc::now(),
+        max_observations: u32::try_from(watcher.resources.max_observations)
+            .unwrap_or(u32::MAX)
+            .min(descriptor.limits.max_observations),
+        max_future_skew: Duration::seconds(60),
+    };
+    profile.validate_binding(&context).map_err(|refusal| {
+        EngineError::Profile(format!(
+            "instance {} binding refused at {:?}/{:?}: {}",
+            watcher.instance_id, refusal.boundary, refusal.code, refusal.message
+        ))
+    })?;
+    profile
+        .validate_threshold_policy(&context, watcher.threshold_policy.as_ref())
+        .map_err(|refusal| {
             EngineError::Profile(format!(
-                "instance {} binding refused at {:?}/{:?}: {}",
+                "instance {} threshold policy refused at {:?}/{:?}: {}",
                 watcher.instance_id, refusal.boundary, refusal.code, refusal.message
             ))
         })?;
-        profile
-            .validate_threshold_policy(&context, watcher.threshold_policy.as_ref())
-            .map_err(|refusal| {
-                EngineError::Profile(format!(
-                    "instance {} threshold policy refused at {:?}/{:?}: {}",
-                    watcher.instance_id, refusal.boundary, refusal.code, refusal.message
-                ))
-            })?;
-    }
     Ok(())
 }
 
@@ -12041,6 +12049,24 @@ sys.stdout.write("\n")
     fn compiled_config_accepts_valid_host_binding() {
         let config = NqConfig::from_toml(&host_example_text()).expect("valid host example");
         validate_compiled_config(&config).expect("compiled profile binding");
+    }
+
+    #[test]
+    fn invalid_compiled_binding_refuses_before_store_creation() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database_path = directory.path().join("must-not-exist.sqlite");
+        let text = host_example_text()
+            .replace(r#"value = { id = "local" }"#, r#"value = { id = "other" }"#);
+        let mut config = NqConfig::from_toml(&text).expect("shape-valid configuration");
+        config.database_path = database_path.clone();
+        assert!(matches!(
+            CollectionEngine::open(&config),
+            Err(EngineError::Profile(_))
+        ));
+        assert!(
+            !database_path.exists(),
+            "profile refusal must precede SQLite creation"
+        );
     }
 
     #[test]

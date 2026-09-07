@@ -1,7 +1,7 @@
 # Operator-beta systemd and HTTP observation contract v1
 
 **Recorded:** 2026-09-07
-**Status:** `M1B_NQ_NG_CONTRACT_ACCEPTED__IMPLEMENTATION_READY`
+**Status:** `M1B_NQ_NG_IMPLEMENTATION_CORRECTION_READY_FOR_REAUDIT`
 
 **Review history:** subjects
 `a0b166eb5e7ff0d2d0a5074c2a284dc4c831d6f6` and
@@ -10,6 +10,13 @@
 `8d6dca69e9171e6acdde3d3108d50a6a0f5db886` then returned
 `ACCEPTED / PROCEED`. Acceptance covers this contract only; it carries no
 runtime, package, VM, Docket-composition, or complete-M1 qualification.
+
+Implementation subject `49486577b35f49c8227adf4693686a4ab4dc300b` returned
+`NOT_ACCEPTED / CORRECTION_REQUIRED`: detector report selection lacked exact
+instance filtering, public admission could bypass profile-owned policy validation,
+and NQ could not reopen the fixture-owned service-subject preimage. The current
+non-rewriting correction closes those three bounded findings; acquisition, package,
+VM, and Docket composition remain held pending independent re-audit.
 
 **NQ-ng successor base:**
 `d9c9f419283ec690014f706c5a6738451918f0f7`
@@ -149,7 +156,10 @@ digests are recomputed from their existing canonical descriptors. Per-run data
 must not rotate the compiled detector, question, cohort, or build identity.
 
 Fixture-specific verdict inputs use the existing V2 `threshold_policy` field.
-The fixture owner retains one immutable JCS policy per profile. The systemd
+The fixture owner retains one immutable JCS policy per profile. Each policy
+embeds the exact fixture-owned `constellation.operator_beta.service_subject.v1`
+object as retained input so NQ can canonicalize it and recompute the AG-compatible
+subject identity; this copy grants NQ no ownership of fixture or AG semantics. The systemd
 policy schema is `nq.operator_beta.systemd_unit_threshold_policy.v1`; it binds
 fixture run, common subject, complete request-scope identity, and expected
 `LoadState=loaded`, `ActiveState=active`, `SubState=running`, and

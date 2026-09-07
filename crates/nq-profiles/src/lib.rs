@@ -9,6 +9,7 @@
 mod descriptor;
 mod detector;
 mod identity;
+mod operator_beta_subject;
 mod projection;
 mod registry;
 mod validation;

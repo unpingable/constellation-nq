@@ -6,7 +6,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use nix::unistd::{Gid, Uid};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -230,6 +230,7 @@ impl AdmissionManager {
             .intersection(&watcher.capability_ceiling)
             .cloned()
             .collect();
+        validate_candidate_profile(watcher, &evidence, &granted_capabilities)?;
         Ok(AdmissionLock {
             schema: ADMISSION_SCHEMA.into(),
             admission_id: uuid::Uuid::new_v4().to_string(),
@@ -508,6 +509,84 @@ impl AdmissionLock {
     }
 }
 
+fn validate_candidate_profile(
+    watcher: &WatcherConfig,
+    evidence: &CandidateEvidence,
+    granted_capabilities: &BTreeSet<String>,
+) -> Result<(), AdmissionError> {
+    let profile = nq_profiles::resolve_profile(&watcher.profile.id, watcher.profile.version)
+        .ok_or_else(|| AdmissionError::ProfileDrift {
+            instance_id: watcher.instance_id.clone(),
+            message: "configured profile is not in the compiled registry".into(),
+        })?;
+    let descriptor = profile.descriptor();
+    let descriptor_digest = descriptor
+        .digest()
+        .map_err(|error| AdmissionError::ProfileDrift {
+            instance_id: watcher.instance_id.clone(),
+            message: format!("compiled descriptor is not canonical: {error}"),
+        })?;
+    if evidence.profile_digest != descriptor_digest.as_str() {
+        return Err(AdmissionError::ProfileDrift {
+            instance_id: watcher.instance_id.clone(),
+            message: "candidate profile digest differs from the compiled descriptor".into(),
+        });
+    }
+    if !watcher.subject.starts_with(&descriptor.subjects.namespace)
+        || !descriptor
+            .scope_kinds
+            .iter()
+            .any(|term| term.name == watcher.scope.kind)
+        || !descriptor
+            .vantages
+            .iter()
+            .any(|term| term.name == watcher.vantage.kind)
+        || watcher.capability_ceiling.iter().any(|capability| {
+            !descriptor
+                .capabilities
+                .iter()
+                .any(|term| term.name == capability.as_str())
+        })
+    {
+        return Err(AdmissionError::ProfileDrift {
+            instance_id: watcher.instance_id.clone(),
+            message:
+                "candidate subject, scope, vantage, or capability is outside the compiled profile"
+                    .into(),
+        });
+    }
+    let context = nq_profiles::ValidationContext {
+        instance_id: watcher.instance_id.clone(),
+        request_subject: watcher.subject.clone(),
+        scope: nq_profiles::ScopeGrant {
+            kind: watcher.scope.kind.clone(),
+            value: watcher.scope.value.clone(),
+        },
+        vantage: nq_profiles::VantageGrant {
+            kind: watcher.vantage.kind.clone(),
+            value: watcher.vantage.value.clone(),
+        },
+        granted_capabilities: granted_capabilities.clone(),
+        received_at: Utc::now(),
+        max_observations: u32::try_from(watcher.resources.max_observations)
+            .unwrap_or(u32::MAX)
+            .min(descriptor.limits.max_observations),
+        max_future_skew: Duration::seconds(60),
+    };
+    profile
+        .validate_binding(&context)
+        .map_err(|refusal| AdmissionError::ProfileDrift {
+            instance_id: watcher.instance_id.clone(),
+            message: format!("profile binding refused: {}", refusal.message),
+        })?;
+    profile
+        .validate_threshold_policy(&context, watcher.threshold_policy.as_ref())
+        .map_err(|refusal| AdmissionError::ProfileDrift {
+            instance_id: watcher.instance_id.clone(),
+            message: format!("profile threshold policy refused: {}", refusal.message),
+        })
+}
+
 fn config_digest(watcher: &WatcherConfig) -> Result<String, AdmissionError> {
     canonical_json(watcher).map(|bytes| digest_bytes(&bytes))
 }
@@ -588,6 +667,7 @@ fn io_error(path: &Path, source: io::Error) -> AdmissionError {
 
 #[cfg(test)]
 mod tests {
+    use nq_profiles::ProfileModule;
     use std::collections::BTreeMap;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -626,35 +706,56 @@ mod tests {
                 kind: "local".into(),
                 value: serde_json::json!({}),
             },
-            capability_ceiling: BTreeSet::from(["fixture.read".into()]),
+            capability_ceiling: BTreeSet::new(),
             schedule: ScheduleConfig::default(),
             resources: ResourceLimits::default(),
             checkpoint_policy: CheckpointPolicy::Disabled,
         }
     }
 
-    fn candidate(manager: AdmissionManager, watcher: &WatcherConfig) -> AdmissionLock {
+    fn profile_digest() -> String {
+        nq_profiles::resolve_profile("nq.conformance", 1)
+            .expect("compiled conformance profile")
+            .descriptor()
+            .digest()
+            .expect("canonical descriptor")
+            .as_str()
+            .to_owned()
+    }
+
+    fn candidate_evidence(watcher: &WatcherConfig) -> CandidateEvidence {
         let corpus = nq_protocol::verify_embedded_conformance_corpus().unwrap();
-        manager
-            .candidate(
-                watcher,
-                CandidateEvidence {
-                    profile_digest: format!("sha256:{}", "a".repeat(64)),
-                    protocol_version: nq_protocol::HELPER_PROTOCOL_VERSION.into(),
-                    declared_capabilities: BTreeSet::from([
-                        "fixture.read".into(),
-                        "forbidden".into(),
-                    ]),
-                    conformance: ConformanceReceipt {
-                        tool_version: corpus.version.verifier_version,
-                        protocol_passed: true,
-                        protocol_corpus_digest: corpus.version.corpus_digest.to_string(),
-                        protocol_fixtures_checked: corpus.fixtures_checked,
-                        dry_collection_passed: true,
-                        dry_report_digest: Some(format!("sha256:{}", "b".repeat(64))),
-                    },
-                },
+        CandidateEvidence {
+            profile_digest: nq_profiles::resolve_profile(
+                &watcher.profile.id,
+                watcher.profile.version,
             )
+            .expect("compiled profile")
+            .descriptor()
+            .digest()
+            .expect("canonical profile descriptor")
+            .as_str()
+            .to_owned(),
+            protocol_version: nq_protocol::HELPER_PROTOCOL_VERSION.into(),
+            declared_capabilities: {
+                let mut declared = watcher.capability_ceiling.clone();
+                declared.insert("forbidden".into());
+                declared
+            },
+            conformance: ConformanceReceipt {
+                tool_version: corpus.version.verifier_version,
+                protocol_passed: true,
+                protocol_corpus_digest: corpus.version.corpus_digest.to_string(),
+                protocol_fixtures_checked: corpus.fixtures_checked,
+                dry_collection_passed: true,
+                dry_report_digest: Some(format!("sha256:{}", "b".repeat(64))),
+            },
+        }
+    }
+
+    fn candidate(manager: AdmissionManager, watcher: &WatcherConfig) -> AdmissionLock {
+        manager
+            .candidate(watcher, candidate_evidence(watcher))
             .unwrap()
     }
 
@@ -666,10 +767,7 @@ mod tests {
         fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
         let watcher = watcher(helper, dir.path().to_path_buf());
         let lock = candidate(AdmissionManager, &watcher);
-        assert_eq!(
-            lock.granted_capabilities,
-            BTreeSet::from(["fixture.read".into()])
-        );
+        assert!(lock.granted_capabilities.is_empty());
         let account = lock
             .execution
             .execution_account
@@ -696,7 +794,7 @@ mod tests {
             .verify(
                 &watcher,
                 &loaded,
-                &format!("sha256:{}", "a".repeat(64)),
+                &profile_digest(),
                 nq_protocol::HELPER_PROTOCOL_VERSION,
             )
             .unwrap();
@@ -740,7 +838,7 @@ mod tests {
             manager.verify(
                 &watcher,
                 &lock,
-                &format!("sha256:{}", "a".repeat(64)),
+                &profile_digest(),
                 nq_protocol::HELPER_PROTOCOL_VERSION
             ),
             Err(AdmissionError::ConfigDrift { .. })
@@ -751,7 +849,7 @@ mod tests {
             manager.verify(
                 &watcher,
                 &lock,
-                &format!("sha256:{}", "a".repeat(64)),
+                &profile_digest(),
                 nq_protocol::HELPER_PROTOCOL_VERSION
             ),
             Err(AdmissionError::Binary(_))
@@ -777,7 +875,7 @@ mod tests {
             manager.verify(
                 &watcher,
                 &lock,
-                &format!("sha256:{}", "a".repeat(64)),
+                &profile_digest(),
                 nq_protocol::HELPER_PROTOCOL_VERSION
             ),
             Err(AdmissionError::Binary(_))
@@ -785,7 +883,7 @@ mod tests {
     }
 
     #[test]
-    fn threshold_policy_is_retained_exactly_and_cannot_be_substituted() {
+    fn profile_owned_policy_validation_precedes_admission() {
         let dir = tempfile::tempdir().unwrap();
         let helper = dir.path().join("helper");
         fs::write(&helper, b"executable").unwrap();
@@ -802,33 +900,177 @@ mod tests {
             digest: nq_protocol::semantic_digest(&value).unwrap(),
             value,
         });
-        let manager = AdmissionManager;
-        let lock = candidate(manager, &watcher);
-        assert_eq!(lock.threshold_policy, watcher.threshold_policy);
-        lock.validate_shape().expect("policy-bearing lock shape");
-
-        let canonical = nq_protocol::canonical_json_bytes(&lock).unwrap();
-        let reopened: AdmissionLock = serde_json::from_slice(&canonical).unwrap();
-        assert_eq!(reopened, lock);
-        manager
-            .verify(
-                &watcher,
-                &reopened,
-                &format!("sha256:{}", "a".repeat(64)),
-                nq_protocol::HELPER_PROTOCOL_VERSION,
-            )
-            .expect("exact policy-bearing lock reopens");
-
-        watcher.threshold_policy.as_mut().unwrap().version = "fixture-002".to_owned();
         assert!(matches!(
-            manager.verify(
-                &watcher,
-                &reopened,
-                &format!("sha256:{}", "a".repeat(64)),
-                nq_protocol::HELPER_PROTOCOL_VERSION
-            ),
-            Err(AdmissionError::ConfigDrift { .. } | AdmissionError::ProfileDrift { .. })
+            AdmissionManager.candidate(&watcher, candidate_evidence(&watcher)),
+            Err(AdmissionError::ProfileDrift { .. })
         ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn operator_beta_policies_are_owner_validated_before_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let helper = dir.path().join("helper");
+        fs::write(&helper, b"executable").unwrap();
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+        let service_subject = serde_json::json!({
+            "schema": "constellation.operator_beta.service_subject.v1",
+            "campaign_id": "constellation-operator-beta-2026",
+            "fixture_run_id": "fixture-001",
+            "target_machine_identity": "machine:fixture-001",
+            "unit_name": "constellation-beta-http-fixture.service",
+            "unit_file_sha256": format!("sha256:{}", "c".repeat(64)),
+        });
+        let bytes = nq_protocol::canonical_json_bytes(&service_subject).unwrap();
+        let domain = "constellation/operator-beta/service-subject/v1";
+        let mut hasher = Sha256::new();
+        hasher.update(b"ag-ng\0digest\0v1\0");
+        hasher.update((domain.len() as u128).to_be_bytes());
+        hasher.update(domain.as_bytes());
+        hasher.update((bytes.len() as u128).to_be_bytes());
+        hasher.update(bytes);
+        let subject = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        let mut systemd = watcher(helper.clone(), dir.path().to_path_buf());
+        systemd.instance_id = "operator-beta-systemd".into();
+        systemd.profile = ProfileSelection {
+            id: nq_profiles::systemd_unit::PROFILE_ID.into(),
+            version: nq_profiles::systemd_unit::PROFILE_VERSION,
+        };
+        systemd.subject.clone_from(&subject);
+        systemd.scope = ScopeConfig {
+            kind: "systemd_unit".into(),
+            value: serde_json::json!({
+                "schema": "nq.operator_beta.systemd_unit_scope.v1",
+                "subject_identity": subject,
+                "target_machine_identity": "machine:fixture-001",
+                "unit_name": "constellation-beta-http-fixture.service",
+                "unit_file_sha256": format!("sha256:{}", "c".repeat(64)),
+                "manager_interface": "org.freedesktop.systemd1",
+                "properties": ["LoadState", "ActiveState", "SubState", "UnitFileState"],
+            }),
+        };
+        systemd.vantage = VantageConfig {
+            kind: "target_local".into(),
+            value: serde_json::json!({}),
+        };
+        systemd.capability_ceiling = BTreeSet::from(["read_systemd_unit".into()]);
+        let descriptor = nq_profiles::systemd_unit::MODULE.descriptor();
+        let systemd_scope = serde_json::json!({
+            "id": "nq.scope.systemd_unit",
+            "version": descriptor.profile.version.to_string(),
+            "digest": nq_protocol::semantic_digest(&serde_json::json!({
+                "schema": "nq.diagnostic_scope.v1",
+                "subject": systemd.subject,
+                "scope": {
+                    "kind": systemd.scope.kind,
+                    "value": systemd.scope.value,
+                },
+                "profile": {
+                    "id": descriptor.profile.id,
+                    "version": descriptor.profile.version.to_string(),
+                    "digest": descriptor.digest().unwrap().as_str(),
+                },
+            })).unwrap(),
+        });
+        let value = serde_json::json!({
+            "schema": nq_profiles::systemd_unit::THRESHOLD_POLICY_SCHEMA,
+            "fixture_run_id": "fixture-001",
+            "service_subject": service_subject,
+            "subject_identity": systemd.subject,
+            "request_scope": systemd_scope,
+            "expected_load_state": "loaded",
+            "expected_active_state": "active",
+            "expected_sub_state": "running",
+            "expected_unit_file_state": "disabled",
+        });
+        systemd.threshold_policy = Some(nq_profiles::ThresholdPolicyInput {
+            id: nq_profiles::systemd_unit::THRESHOLD_POLICY_ID.into(),
+            version: "fixture-001".into(),
+            digest: nq_protocol::semantic_digest(&value).unwrap(),
+            value,
+        });
+        let systemd_lock = AdmissionManager
+            .candidate(&systemd, candidate_evidence(&systemd))
+            .unwrap();
+        assert_eq!(systemd_lock.threshold_policy, systemd.threshold_policy);
+
+        let mut wrong_descriptor = candidate_evidence(&systemd);
+        wrong_descriptor.profile_digest = format!("sha256:{}", "e".repeat(64));
+        assert!(matches!(
+            AdmissionManager.candidate(&systemd, wrong_descriptor),
+            Err(AdmissionError::ProfileDrift { .. })
+        ));
+        let mut wrong_subject = systemd.clone();
+        let policy = wrong_subject.threshold_policy.as_mut().unwrap();
+        policy.value["service_subject"]["target_machine_identity"] =
+            serde_json::json!("machine:substituted");
+        policy.digest = nq_protocol::semantic_digest(&policy.value).unwrap();
+        assert!(matches!(
+            AdmissionManager.candidate(&wrong_subject, candidate_evidence(&wrong_subject)),
+            Err(AdmissionError::ProfileDrift { .. })
+        ));
+
+        let mut http = watcher(helper, dir.path().to_path_buf());
+        http.instance_id = "operator-beta-http".into();
+        http.profile = ProfileSelection {
+            id: nq_profiles::http_endpoint::PROFILE_ID.into(),
+            version: nq_profiles::http_endpoint::PROFILE_VERSION,
+        };
+        http.subject.clone_from(&subject);
+        http.scope = ScopeConfig {
+            kind: "http_endpoint".into(),
+            value: serde_json::json!({
+                "schema": "nq.operator_beta.http_endpoint_scope.v1",
+                "subject_identity": subject,
+                "controller_vantage_identity": "controller:fixture-001",
+                "endpoint": "http://192.0.2.10:18080/healthz",
+                "method": "GET",
+                "redirect_policy": "refuse",
+                "max_response_bytes": 1024,
+            }),
+        };
+        http.vantage = VantageConfig {
+            kind: "controller_http".into(),
+            value: serde_json::json!({
+                "controller_vantage_identity": "controller:fixture-001"
+            }),
+        };
+        http.capability_ceiling = BTreeSet::from(["read_http_endpoint".into()]);
+        let descriptor = nq_profiles::http_endpoint::MODULE.descriptor();
+        let http_scope = serde_json::json!({
+            "id": "nq.scope.http_endpoint",
+            "version": descriptor.profile.version.to_string(),
+            "digest": nq_protocol::semantic_digest(&serde_json::json!({
+                "schema": "nq.diagnostic_scope.v1",
+                "subject": http.subject,
+                "scope": {"kind": http.scope.kind, "value": http.scope.value},
+                "profile": {
+                    "id": descriptor.profile.id,
+                    "version": descriptor.profile.version.to_string(),
+                    "digest": descriptor.digest().unwrap().as_str(),
+                },
+            })).unwrap(),
+        });
+        let value = serde_json::json!({
+            "schema": nq_profiles::http_endpoint::THRESHOLD_POLICY_SCHEMA,
+            "fixture_run_id": "fixture-001",
+            "service_subject": service_subject,
+            "subject_identity": http.subject,
+            "request_scope": http_scope,
+            "expected_status": 200,
+            "expected_body_sha256": format!("sha256:{}", "d".repeat(64)),
+        });
+        http.threshold_policy = Some(nq_profiles::ThresholdPolicyInput {
+            id: nq_profiles::http_endpoint::THRESHOLD_POLICY_ID.into(),
+            version: "fixture-001".into(),
+            digest: nq_protocol::semantic_digest(&value).unwrap(),
+            value,
+        });
+        let http_lock = AdmissionManager
+            .candidate(&http, candidate_evidence(&http))
+            .unwrap();
+        assert_eq!(http_lock.threshold_policy, http.threshold_policy);
     }
 
     #[test]
@@ -845,7 +1087,7 @@ mod tests {
             manager.verify(
                 &watcher,
                 &lock,
-                &format!("sha256:{}", "a".repeat(64)),
+                &profile_digest(),
                 nq_protocol::HELPER_PROTOCOL_VERSION
             ),
             Err(AdmissionError::ConformanceDrift { .. })

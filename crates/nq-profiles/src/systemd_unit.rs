@@ -15,6 +15,7 @@ use crate::{
     SemanticReportStatus, SubjectRules, ValidatedReport, ValidationContext, ValidationResult,
     VocabularyTerm,
     descriptor::PROFILE_DESCRIPTOR_SCHEMA,
+    operator_beta_subject::ServiceSubject,
     validation::{ReportInput, ScopeGrant, validate_basis, validate_common},
 };
 
@@ -133,6 +134,7 @@ struct SemanticIdentityValue {
 struct SystemdThresholdPolicy {
     schema: String,
     fixture_run_id: String,
+    service_subject: Value,
     subject_identity: String,
     request_scope: SemanticIdentityValue,
     expected_load_state: String,
@@ -355,6 +357,7 @@ fn validate_binding(
     Ok(scope)
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_threshold_policy_binding(
     context: &ValidationContext,
     input: Option<&crate::ThresholdPolicyInput>,
@@ -389,6 +392,26 @@ fn validate_threshold_policy_binding(
                 format!("invalid systemd threshold policy: {error}"),
             )
         })?;
+    let service_subject = ServiceSubject::parse(&policy.service_subject).map_err(|error| {
+        ProfileRefusal::new(
+            context,
+            descriptor,
+            RefusalBoundary::Profile,
+            ProfileRefusalCode::InvalidPayload,
+            error,
+        )
+    })?;
+    let subject_identity = service_subject.identity().map_err(|error| {
+        ProfileRefusal::new(
+            context,
+            descriptor,
+            RefusalBoundary::Profile,
+            ProfileRefusalCode::InvalidPayload,
+            error,
+        )
+    })?;
+    let scope: SystemdScope = serde_json::from_value(context.scope.value.clone())
+        .map_err(|_| scope_refusal(context, descriptor, "invalid systemd scope"))?;
     let profile = json!({
         "id": descriptor.profile.id,
         "version": descriptor.profile.version.to_string(),
@@ -430,6 +453,11 @@ fn validate_threshold_policy_binding(
         || input.version.is_empty()
         || input.version.len() > 255
         || policy.schema != THRESHOLD_POLICY_SCHEMA
+        || service_subject.fixture_run_id != policy.fixture_run_id
+        || service_subject.target_machine_identity != scope.target_machine_identity
+        || service_subject.unit_name != scope.unit_name
+        || service_subject.unit_file_sha256 != scope.unit_file_sha256
+        || subject_identity != context.request_subject
         || policy.subject_identity != context.request_subject
         || policy.request_scope != request_scope
         || expected_values
@@ -555,6 +583,7 @@ impl Detector for SystemdPostconditionDetector {
         &DETECTOR_DESCRIPTOR
     }
 
+    #[allow(clippy::too_many_lines)]
     fn evaluate(&self, input: &DetectorInput<'_>) -> DetectorResult {
         let descriptor = self.descriptor();
         let Some(policy_input) = input.threshold_policy else {
@@ -617,6 +646,27 @@ impl Detector for SystemdPostconditionDetector {
                 "projection_failure",
             );
         };
+        let Ok(service_subject) = ServiceSubject::parse(&policy.service_subject) else {
+            return cannot_evaluate(
+                input,
+                descriptor,
+                "the retained service-subject preimage has the wrong closed shape",
+                "service_subject_invalid",
+            );
+        };
+        if service_subject.fixture_run_id != policy.fixture_run_id
+            || service_subject.identity().ok().as_deref() != Some(&observation.subject)
+            || service_subject.target_machine_identity != payload.target_machine_identity
+            || service_subject.unit_name != payload.unit_name
+            || service_subject.unit_file_sha256 != payload.unit_file_sha256
+        {
+            return cannot_evaluate(
+                input,
+                descriptor,
+                "the retained service-subject preimage does not bind the admitted testimony",
+                "service_subject_identity_mismatch",
+            );
+        }
         let Ok(scope_identity) = diagnostic_scope_identity(
             &occurrence.report,
             &observation.subject,
@@ -663,7 +713,11 @@ fn newest_current_report<'a>(
     profile: &ProfileDescriptor,
     coverage: &str,
 ) -> Option<&'a DetectorReport> {
-    let occurrence = input.reports.iter().max_by_key(|row| row.report_sequence)?;
+    let occurrence = input
+        .reports
+        .iter()
+        .filter(|row| row.report.instance_id == input.instance_id)
+        .max_by_key(|row| row.report_sequence)?;
     let report = &occurrence.report;
     if report.profile != profile.profile
         || report.profile_digest != descriptor.profile_digest

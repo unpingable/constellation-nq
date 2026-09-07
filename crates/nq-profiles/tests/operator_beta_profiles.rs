@@ -10,6 +10,7 @@ use nq_profiles::{
 };
 use nq_protocol::Sha256Digest;
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 
 fn now() -> chrono::DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 9, 7, 12, 0, 0)
@@ -17,8 +18,36 @@ fn now() -> chrono::DateTime<Utc> {
         .expect("fixed qualification time")
 }
 
+fn service_subject() -> Value {
+    json!({
+        "schema": "constellation.operator_beta.service_subject.v1",
+        "campaign_id": "constellation-operator-beta-2026",
+        "fixture_run_id": "fixture-001",
+        "target_machine_identity": "machine:fixture-001",
+        "unit_name": "constellation-beta-http-fixture.service",
+        "unit_file_sha256": format!("sha256:{}", "c".repeat(64)),
+    })
+}
+
+fn service_subject_identity(value: &Value) -> String {
+    let bytes = nq_protocol::canonical_json_bytes(value).expect("canonical service subject");
+    let domain = "constellation/operator-beta/service-subject/v1";
+    let mut hasher = Sha256::new();
+    hasher.update(b"ag-ng\0digest\0v1\0");
+    hasher.update((domain.len() as u128).to_be_bytes());
+    hasher.update(domain.as_bytes());
+    hasher.update((bytes.len() as u128).to_be_bytes());
+    hasher.update(bytes);
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
 fn subject() -> String {
-    format!("sha256:{}", "a".repeat(64))
+    let identity = service_subject_identity(&service_subject());
+    assert_eq!(
+        identity,
+        "sha256:240b8636e5d2cd5bcbe2d410bd34125c72474b2c354564a3fa0bd797e6140c87"
+    );
+    identity
 }
 
 fn digest_value(value: &Value) -> Sha256Digest {
@@ -139,6 +168,7 @@ fn systemd_policy(context: &ValidationContext) -> ThresholdPolicyInput {
     let value = json!({
         "schema": systemd_unit::THRESHOLD_POLICY_SCHEMA,
         "fixture_run_id": "fixture-001",
+        "service_subject": service_subject(),
         "subject_identity": context.request_subject,
         "request_scope": scope_identity(&systemd_unit::MODULE, &context.request_subject, &context.scope),
         "expected_load_state": "loaded",
@@ -206,6 +236,7 @@ fn http_policy(context: &ValidationContext) -> ThresholdPolicyInput {
     let value = json!({
         "schema": http_endpoint::THRESHOLD_POLICY_SCHEMA,
         "fixture_run_id": "fixture-001",
+        "service_subject": service_subject(),
         "subject_identity": context.request_subject,
         "request_scope": scope_identity(&http_endpoint::MODULE, &context.request_subject, &context.scope),
         "expected_status": 200,
@@ -216,6 +247,43 @@ fn http_policy(context: &ValidationContext) -> ThresholdPolicyInput {
         version: "fixture-001".to_owned(),
         digest: digest_value(&value),
         value,
+    }
+}
+
+fn assert_service_subject_substitutions_refuse(
+    detector: &dyn nq_profiles::Detector,
+    input: &DetectorInput<'_>,
+    policy: &ThresholdPolicyInput,
+) {
+    for (pointer, replacement) in [
+        ("/service_subject/schema", json!("wrong.schema/v1")),
+        ("/service_subject/campaign_id", json!("other-campaign")),
+        ("/service_subject/fixture_run_id", json!("fixture-002")),
+        (
+            "/service_subject/target_machine_identity",
+            json!("machine:substituted"),
+        ),
+        ("/service_subject/unit_name", json!("other.service")),
+        (
+            "/service_subject/unit_file_sha256",
+            json!(format!("sha256:{}", "e".repeat(64))),
+        ),
+    ] {
+        let mut wrong_preimage = policy.clone();
+        *wrong_preimage
+            .value
+            .pointer_mut(pointer)
+            .expect("service subject field") = replacement;
+        wrong_preimage.digest = digest_value(&wrong_preimage.value);
+        let wrong_preimage_input = DetectorInput {
+            threshold_policy: Some(&wrong_preimage),
+            ..input.clone()
+        };
+        assert_eq!(
+            detector.evaluate(&wrong_preimage_input).state,
+            DetectorState::CannotEvaluate,
+            "substituted {pointer} must refuse"
+        );
     }
 }
 
@@ -240,6 +308,7 @@ fn registry_contains_the_two_generic_operator_beta_profiles() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn systemd_policy_is_external_bound_and_time_limited() {
     let context = systemd_context();
     let validated = systemd_unit::MODULE
@@ -296,6 +365,38 @@ fn systemd_policy_is_external_bound_and_time_limited() {
         DetectorState::Present
     );
 
+    let mut other_context = context.clone();
+    other_context.instance_id = "other-systemd-instance".to_owned();
+    let mut other_payload = systemd_payload(&other_context);
+    other_payload["active_state"] = json!("inactive");
+    let other_instance = DetectorReport {
+        report_id: "report:other-systemd".to_owned(),
+        report_sequence: 2,
+        report: systemd_unit::MODULE
+            .validate(
+                &other_context,
+                &report(
+                    &systemd_unit::MODULE,
+                    now(),
+                    "systemd_unit_state",
+                    "systemd_unit_snapshot",
+                    &other_context.request_subject,
+                    other_payload,
+                    BTreeSet::from(["read_systemd_unit".to_owned()]),
+                ),
+            )
+            .expect("coherent testimony from another instance"),
+    };
+    let reports = [occurrence.clone(), other_instance];
+    let cross_instance = DetectorInput {
+        reports: &reports,
+        ..input.clone()
+    };
+    assert_eq!(
+        detector.evaluate(&cross_instance).state,
+        DetectorState::ExplicitlyAbsent
+    );
+
     let mut wrong_subject = policy.clone();
     wrong_subject.value["subject_identity"] = json!(format!("sha256:{}", "e".repeat(64)));
     wrong_subject.digest = digest_value(&wrong_subject.value);
@@ -308,6 +409,8 @@ fn systemd_policy_is_external_bound_and_time_limited() {
         DetectorState::CannotEvaluate
     );
 
+    assert_service_subject_substitutions_refuse(detector, &input, &policy);
+
     let missing_policy = DetectorInput {
         threshold_policy: None,
         ..input
@@ -319,6 +422,7 @@ fn systemd_policy_is_external_bound_and_time_limited() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn http_policy_is_external_bound_and_substitution_safe() {
     let context = http_context();
     let validated = http_endpoint::MODULE
@@ -366,6 +470,38 @@ fn http_policy_is_external_bound_and_substitution_safe() {
         DetectorState::Present
     );
 
+    let mut other_context = context.clone();
+    other_context.instance_id = "other-http-instance".to_owned();
+    let mut other_payload = http_payload(&other_context);
+    other_payload["body_sha256"] = json!(format!("sha256:{}", "f".repeat(64)));
+    let other_instance = DetectorReport {
+        report_id: "report:other-http".to_owned(),
+        report_sequence: 2,
+        report: http_endpoint::MODULE
+            .validate(
+                &other_context,
+                &report(
+                    &http_endpoint::MODULE,
+                    now(),
+                    "http_endpoint_response",
+                    "http_response",
+                    &other_context.request_subject,
+                    other_payload,
+                    BTreeSet::from(["read_http_endpoint".to_owned()]),
+                ),
+            )
+            .expect("coherent testimony from another instance"),
+    };
+    let reports = [occurrence.clone(), other_instance];
+    let cross_instance = DetectorInput {
+        reports: &reports,
+        ..input.clone()
+    };
+    assert_eq!(
+        detector.evaluate(&cross_instance).state,
+        DetectorState::ExplicitlyAbsent
+    );
+
     let mut changed_without_reseal = policy.clone();
     changed_without_reseal.value["expected_status"] = json!(503);
     let changed_input = DetectorInput {
@@ -376,6 +512,8 @@ fn http_policy_is_external_bound_and_substitution_safe() {
         detector.evaluate(&changed_input).state,
         DetectorState::CannotEvaluate
     );
+
+    assert_service_subject_substitutions_refuse(detector, &input, &policy);
 
     let mut wrong_scope = context.clone();
     wrong_scope.scope.value["endpoint"] = json!("http://192.0.2.11:18080/healthz");
