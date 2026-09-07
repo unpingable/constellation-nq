@@ -1,7 +1,7 @@
 # Operator-beta systemd and HTTP observation contract v1
 
 **Recorded:** 2026-09-07
-**Status:** `M1B_NQ_NG_IMPLEMENTATION_REVOCATION_CORRECTION_READY_FOR_REAUDIT`
+**Status:** `M1B_NQ_NG_IMPLEMENTATION_FOUNDATION_ACCEPTED_PROCEED`
 
 **Review history:** subjects
 `a0b166eb5e7ff0d2d0a5074c2a284dc4c831d6f6` and
@@ -21,11 +21,12 @@ consume caller-supplied policy bytes without proving equality to the active
 admission. Correction `8c44da926300a4f5e1188be94881f15dc34aadbb` closes that
 freshness custody path but returned `NOT_ACCEPTED / CORRECTION_REQUIRED` because
 the normal CLI engine opener evaluated current policy semantics before authority
-revocation, so an invalid policy could make revocation unreachable. The current
-non-rewriting correction adds a one-shot revocation custody path that validates
-exact configuration membership, store history, and authoritative binding without
-consuming policy semantics. Acquisition, package, VM, and Docket composition
-remain held pending re-audit.
+revocation, so an invalid policy could make revocation unreachable. Correction `28adb4deef034baf3ecc4207cee1482d21b3edcb` adds the one-shot
+revocation custody path and returned `ACCEPTED / PROCEED`. It validates exact
+configuration membership, store history, and authoritative binding without
+consuming policy semantics. Acquisition and diagnostic production may proceed
+under this accepted foundation; package, VM, and Docket composition remain held
+for their separate gates.
 
 **NQ-ng successor base:**
 `d9c9f419283ec690014f706c5a6738451918f0f7`
