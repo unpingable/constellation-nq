@@ -95,7 +95,7 @@ class CatalogVerifierTest(unittest.TestCase):
     def test_checked_catalog_is_strict_and_exact(self) -> None:
         with tempfile.TemporaryDirectory(prefix="nq-catalog-test-") as directory:
             destination = self.copy_catalog(Path(directory))
-            self.assertEqual(len(catalog.load_manifest(destination)), 2)
+            self.assertEqual(len(catalog.load_manifest(destination)), 4)
             (destination / "extra.v1.json").write_text("{}\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "inventory differs"):
                 catalog.load_manifest(destination)

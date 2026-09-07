@@ -21,6 +21,49 @@ trap cleanup EXIT HUP INT TERM
 
 base_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
+# The fourth package-owned binary is mandatory and its build-info component
+# identity must match its installed name. Missing or substituted bytes refuse
+# before any output artifact is created.
+invalid_bin_dir=$work/invalid-binaries
+missing_out=$work/missing-helper-out
+substituted_out=$work/substituted-helper-out
+mkdir -p -- "$invalid_bin_dir" "$missing_out" "$substituted_out"
+for binary in nq nqd nq-host-helper; do
+    cp -- "$bin_dir/$binary" "$invalid_bin_dir/$binary"
+done
+set +e
+PATH="$base_path" "$root/scripts/build-release-bundle.sh" \
+    "$version" "$arch" "$invalid_bin_dir" "$profile_dir" "$missing_out" \
+    >"$work/missing-helper.stdout" 2>"$work/missing-helper.stderr"
+missing_helper_status=$?
+set -e
+[[ $missing_helper_status -ne 0 ]] || {
+    echo "release assembly accepted a missing operator-beta helper" >&2
+    exit 1
+}
+grep -Fq 'missing executable' "$work/missing-helper.stderr"
+if find "$missing_out" -mindepth 1 -print -quit | grep -q .; then
+    echo "missing operator-beta helper created a release output" >&2
+    exit 1
+fi
+
+cp -- "$bin_dir/nq-host-helper" "$invalid_bin_dir/nq-operator-beta-helper"
+set +e
+PATH="$base_path" "$root/scripts/build-release-bundle.sh" \
+    "$version" "$arch" "$invalid_bin_dir" "$profile_dir" "$substituted_out" \
+    >"$work/substituted-helper.stdout" 2>"$work/substituted-helper.stderr"
+substituted_helper_status=$?
+set -e
+[[ $substituted_helper_status -ne 0 ]] || {
+    echo "release assembly accepted substituted operator-beta helper bytes" >&2
+    exit 1
+}
+grep -Fq "expected 'nq-operator-beta-helper'" "$work/substituted-helper.stderr"
+if find "$substituted_out" -mindepth 1 -print -quit | grep -q .; then
+    echo "substituted operator-beta helper created a release output" >&2
+    exit 1
+fi
+
 # Concurrent assemblers must fail before constructing anything. The lock is on
 # the output-directory inode and therefore cannot become stale after a crash.
 lock_out=$work/lock-out
@@ -217,5 +260,6 @@ package="nq-ng-${version}-linux-${arch}.tar.gz"
     sha256sum --check "$package.sha256" >/dev/null
 )
 
-printf 'release failure atomicity passed (lock=%s, failure=%s, killed=%s)\n' \
-    "$lock_status" "$failure_status" "$kill_status"
+printf 'release failure atomicity passed (missing=%s, substituted=%s, lock=%s, failure=%s, killed=%s)\n' \
+    "$missing_helper_status" "$substituted_helper_status" "$lock_status" \
+    "$failure_status" "$kill_status"

@@ -640,7 +640,8 @@ the off-host backup and release checksums if later custody or audit is needed.
 
 ## Build offline release artifacts
 
-Build or obtain `nq`, `nqd`, and `nq-host-helper` for each target without
+Build or obtain `nq`, `nqd`, `nq-host-helper`, and
+`nq-operator-beta-helper` for each target without
 allowing network access. They must be `--release` builds from one reviewed
 source cohort. Verify the checked-in descriptor catalog against that exact
 `nq` binary, then pass those inputs to the assembler:

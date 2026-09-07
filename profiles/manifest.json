@@ -14,6 +14,18 @@
       "version": 1,
       "descriptor": "nq.host.v1.json",
       "semantic_digest": "sha256:c8c10fed1cc5598d953b4defbc98e8c106fc59e035c249d43681698a5c7b4ff9"
+    },
+    {
+      "id": "nq.systemd_unit",
+      "version": 1,
+      "descriptor": "nq.systemd_unit.v1.json",
+      "semantic_digest": "sha256:85beec374d8c3a19dca3aafe892792237c7ed2a886a3ecbd6fce6245578c0d8d"
+    },
+    {
+      "id": "nq.http_endpoint",
+      "version": 1,
+      "descriptor": "nq.http_endpoint.v1.json",
+      "semantic_digest": "sha256:d277728a076d75d8bf5a5294635905b74f6b15b7a9d7a5274ea42a888eb68fae"
     }
   ]
 }
