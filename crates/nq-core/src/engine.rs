@@ -2606,6 +2606,7 @@ impl CollectionEngine {
         watcher: &WatcherConfig,
         emit_diagnostic: bool,
     ) -> Result<CollectionExecution, EngineError> {
+        validate_compiled_watcher(watcher)?;
         let _guard =
             InstanceGuard::acquire(&self.config.database_path, &watcher.instance_id, "collect")?;
         // Fail closed before any persistence: a collection stamps evaluator
@@ -3229,6 +3230,7 @@ impl CollectionEngine {
     /// Returns when the profile is unavailable, admitted evidence cannot be
     /// reconstructed, or the evaluation cannot be committed atomically.
     pub fn freshness_sweep(&mut self, watcher: &WatcherConfig) -> Result<usize, EngineError> {
+        validate_compiled_watcher(watcher)?;
         let _guard = InstanceGuard::acquire(
             &self.config.database_path,
             &watcher.instance_id,
@@ -3236,6 +3238,22 @@ impl CollectionEngine {
         )?;
         self.reconcile_pending_binding(watcher)?;
         let profile = resolve(watcher)?;
+        let lock = self.authoritative_active_lock(watcher)?.ok_or_else(|| {
+            EngineError::Invariant(format!(
+                "instance {} has no active authoritative admission for freshness evaluation",
+                watcher.instance_id
+            ))
+        })?;
+        self.admission.verify(
+            watcher,
+            &lock,
+            profile
+                .descriptor()
+                .digest()
+                .map_err(|error| EngineError::Canonical(error.to_string()))?
+                .as_str(),
+            nq_protocol::HELPER_PROTOCOL_VERSION,
+        )?;
         self.evaluate_instance(watcher, profile, None)
             .map(|evaluations| evaluations.len())
     }
@@ -3253,6 +3271,7 @@ impl CollectionEngine {
         watcher: &WatcherConfig,
         historical: &Path,
     ) -> Result<BindingActionOutcome, EngineError> {
+        validate_compiled_watcher(watcher)?;
         let _guard = InstanceGuard::acquire(
             &self.config.database_path,
             &watcher.instance_id,
@@ -11660,6 +11679,187 @@ sys.stdout.write("\n")
         )
     }
 
+    #[allow(clippy::too_many_lines)]
+    fn admitted_operator_beta_systemd_freshness_fixture(
+        root: &Path,
+    ) -> (CollectionEngine, WatcherConfig) {
+        fs::create_dir(root.join("admissions")).expect("fixture admissions root");
+        let helper = root.join("helper.sh");
+        fs::write(&helper, b"#!/bin/sh\nexit 0\n").expect("fixture helper");
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755))
+            .expect("fixture helper mode");
+
+        let service_subject = json!({
+            "schema": "constellation.operator_beta.service_subject.v1",
+            "campaign_id": "constellation-operator-beta-2026",
+            "fixture_run_id": "fixture-freshness",
+            "target_machine_identity": "machine:fixture-freshness",
+            "unit_name": "constellation-beta-http-fixture.service",
+            "unit_file_sha256": format!("sha256:{}", "c".repeat(64)),
+        });
+        let service_subject_bytes =
+            nq_protocol::canonical_json_bytes(&service_subject).expect("canonical service subject");
+        let domain = "constellation/operator-beta/service-subject/v1";
+        let mut framed_subject = b"ag-ng\0digest\0v1\0".to_vec();
+        framed_subject.extend_from_slice(&(domain.len() as u128).to_be_bytes());
+        framed_subject.extend_from_slice(domain.as_bytes());
+        framed_subject.extend_from_slice(&(service_subject_bytes.len() as u128).to_be_bytes());
+        framed_subject.extend_from_slice(&service_subject_bytes);
+        let subject = nq_protocol::sha256_bytes(&framed_subject).into_string();
+
+        let profile: &'static dyn ProfileModule = &nq_profiles::systemd_unit::MODULE;
+        let descriptor = profile.descriptor();
+        let scope = ScopeConfig {
+            kind: "systemd_unit".into(),
+            value: json!({
+                "schema": "nq.operator_beta.systemd_unit_scope.v1",
+                "subject_identity": subject,
+                "target_machine_identity": "machine:fixture-freshness",
+                "unit_name": "constellation-beta-http-fixture.service",
+                "unit_file_sha256": format!("sha256:{}", "c".repeat(64)),
+                "manager_interface": "org.freedesktop.systemd1",
+                "properties": ["LoadState", "ActiveState", "SubState", "UnitFileState"],
+            }),
+        };
+        let diagnostic_scope = json!({
+            "schema": "nq.diagnostic_scope.v1",
+            "subject": subject,
+            "scope": {"kind": scope.kind, "value": scope.value},
+            "profile": {
+                "id": descriptor.profile.id,
+                "version": descriptor.profile.version.to_string(),
+                "digest": descriptor.digest().expect("profile digest").as_str(),
+            },
+        });
+        let request_scope = json!({
+            "id": "nq.scope.systemd_unit",
+            "version": descriptor.profile.version.to_string(),
+            "digest": nq_protocol::semantic_digest(&diagnostic_scope)
+                .expect("diagnostic scope digest"),
+        });
+        let policy_value = json!({
+            "schema": nq_profiles::systemd_unit::THRESHOLD_POLICY_SCHEMA,
+            "fixture_run_id": "fixture-freshness",
+            "service_subject": service_subject,
+            "subject_identity": subject,
+            "request_scope": request_scope,
+            "expected_load_state": "loaded",
+            "expected_active_state": "active",
+            "expected_sub_state": "running",
+            "expected_unit_file_state": "disabled",
+        });
+        let watcher = WatcherConfig {
+            instance_id: "operator-beta-systemd-freshness".into(),
+            command: CommandConfig {
+                executable: helper,
+                args: Vec::new(),
+                env: BTreeMap::new(),
+                execution_account: nix::unistd::geteuid().as_raw().to_string(),
+                allow_same_identity_in_debug: true,
+                working_directory: root.to_path_buf(),
+            },
+            carrier: Carrier::Stdio,
+            profile: ProfileSelection {
+                id: nq_profiles::systemd_unit::PROFILE_ID.into(),
+                version: nq_profiles::systemd_unit::PROFILE_VERSION,
+            },
+            threshold_policy: Some(nq_profiles::ThresholdPolicyInput {
+                id: nq_profiles::systemd_unit::THRESHOLD_POLICY_ID.into(),
+                version: "fixture-freshness".into(),
+                digest: nq_protocol::semantic_digest(&policy_value).expect("policy digest"),
+                value: policy_value,
+            }),
+            subject,
+            scope,
+            vantage: VantageConfig {
+                kind: "target_local".into(),
+                value: json!({}),
+            },
+            capability_ceiling: BTreeSet::from(["read_systemd_unit".into()]),
+            schedule: ScheduleConfig::default(),
+            resources: ResourceLimits::default(),
+            checkpoint_policy: CheckpointPolicy::Disabled,
+        };
+        validate_compiled_watcher(&watcher).expect("owner-valid watcher");
+        let config = NqConfig {
+            schema: crate::config::CONFIG_SCHEMA.to_owned(),
+            database_path: root.join("nq.db"),
+            socket_path: root.join("nqd.sock"),
+            admissions_dir: root.join("admissions"),
+            helper_runtime_dir: root.join("helpers"),
+            watchers: vec![watcher.clone()],
+        };
+
+        let mut store = Store::initialize(&config.database_path).expect("initialize store");
+        append_profile_descriptor(&mut store, profile).expect("profile descriptor");
+        store
+            .append_genesis(&GenesisInput {
+                genesis_id: "genesis-operator-beta-freshness".into(),
+                legacy_manifest_digest: None,
+                created_at: "2026-09-07T12:00:00.000Z".into(),
+                detail: canonical(&json!({"fixture": "operator-beta-freshness"}))
+                    .expect("genesis detail"),
+            })
+            .expect("append genesis");
+        drop(store);
+
+        let evaluator = EvaluatorRuntimeIdentity::for_test(nq_protocol::sha256_bytes(
+            b"operator-beta-freshness-evaluator",
+        ));
+        let mut engine = CollectionEngine::open_with_evaluator_identity(&config, Ok(evaluator))
+            .expect("open engine");
+        let corpus = nq_protocol::verify_embedded_conformance_corpus().expect("corpus");
+        let lock = AdmissionManager
+            .candidate(
+                &watcher,
+                CandidateEvidence {
+                    profile_digest: descriptor
+                        .digest()
+                        .expect("profile digest")
+                        .as_str()
+                        .to_owned(),
+                    protocol_version: nq_protocol::HELPER_PROTOCOL_VERSION.to_owned(),
+                    declared_capabilities: watcher.capability_ceiling.clone(),
+                    conformance: ConformanceReceipt {
+                        tool_version: corpus.version.verifier_version,
+                        protocol_passed: true,
+                        protocol_corpus_digest: corpus.version.corpus_digest.to_string(),
+                        protocol_fixtures_checked: corpus.fixtures_checked,
+                        dry_collection_passed: true,
+                        dry_report_digest: Some(
+                            nq_protocol::sha256_bytes(b"operator-beta-freshness-dry-report")
+                                .into_string(),
+                        ),
+                    },
+                },
+            )
+            .expect("candidate admission");
+        let identity = engine
+            .admission_identity(profile, &lock)
+            .expect("admission identity");
+        engine
+            .store
+            .append_admission(&AdmissionInput {
+                admission_id: lock.admission_id.clone(),
+                instance_id: lock.instance_id.clone(),
+                identity,
+                execution_chain: canonical(&lock.execution).expect("execution identity"),
+                profile_id: lock.profile.id.clone(),
+                profile_version: lock.profile.version.to_string(),
+                profile_digest: lock.profile.digest.clone(),
+                capability_grant: canonical(&lock.granted_capabilities).expect("capability grant"),
+                conformance: canonical(&lock.conformance).expect("conformance"),
+                lock: canonical(&lock).expect("admission lock"),
+                admitted_at: timestamp(lock.admitted_at),
+                operator_identity: canonical(&lock.operator).expect("operator identity"),
+            })
+            .expect("retain admission");
+        engine
+            .transition_binding(&watcher, "activate", Some(&lock), None, "test_fixture")
+            .expect("activate admission");
+        (engine, watcher)
+    }
+
     fn host_cannot_evaluate_envelope() -> EvaluationEnvelopeV2 {
         let config = NqConfig::from_toml(&host_example_text()).expect("valid host config");
         let watcher = &config.watchers[0];
@@ -12066,6 +12266,125 @@ sys.stdout.write("\n")
         assert!(
             !database_path.exists(),
             "profile refusal must precede SQLite creation"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn freshness_requires_exact_active_admitted_policy_before_mutation() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (mut engine, watcher) =
+            admitted_operator_beta_systemd_freshness_fixture(directory.path());
+        let baseline_evaluation = engine
+            .store
+            .latest_evaluation_sequence()
+            .expect("evaluation sequence");
+        let baseline_findings = engine.store.finding_snapshots().expect("finding snapshots");
+
+        let mut invalid = watcher.clone();
+        let invalid_policy = invalid
+            .threshold_policy
+            .as_mut()
+            .expect("fixture threshold policy");
+        invalid_policy.value["service_subject"]["target_machine_identity"] =
+            json!("machine:substituted");
+        invalid_policy.digest =
+            nq_protocol::semantic_digest(&invalid_policy.value).expect("resealed invalid policy");
+        let invalid_error = engine
+            .freshness_sweep(&invalid)
+            .expect_err("invalid policy must refuse freshness evaluation");
+        assert!(
+            matches!(invalid_error, EngineError::Profile(_)),
+            "unexpected invalid-policy error: {invalid_error:?}"
+        );
+        assert!(matches!(
+            engine.collect(&invalid),
+            Err(EngineError::Profile(_))
+        ));
+        assert!(
+            engine
+                .store
+                .provider_intakes_bounded(10, None)
+                .expect("provider intakes after invalid policy")
+                .is_empty()
+        );
+        assert!(
+            engine
+                .store
+                .watcher_run_outcomes_bounded(10, None)
+                .expect("watcher runs after invalid policy")
+                .is_empty()
+        );
+        assert!(
+            engine
+                .store
+                .status_snapshots()
+                .expect("status snapshots after invalid policy")
+                .is_empty()
+        );
+        assert_eq!(
+            engine
+                .store
+                .latest_evaluation_sequence()
+                .expect("evaluation sequence after invalid policy"),
+            baseline_evaluation
+        );
+        assert_eq!(
+            engine
+                .store
+                .finding_snapshots()
+                .expect("findings after invalid policy"),
+            baseline_findings
+        );
+
+        let mut changed = watcher.clone();
+        let changed_policy = changed
+            .threshold_policy
+            .as_mut()
+            .expect("fixture threshold policy");
+        changed_policy.value["expected_active_state"] = json!("inactive");
+        changed_policy.digest =
+            nq_protocol::semantic_digest(&changed_policy.value).expect("resealed changed policy");
+        validate_compiled_watcher(&changed).expect("changed policy remains owner-valid");
+        assert!(matches!(
+            engine.freshness_sweep(&changed),
+            Err(EngineError::Admission(AdmissionError::ConfigDrift { .. }))
+        ));
+        assert_eq!(
+            engine
+                .store
+                .latest_evaluation_sequence()
+                .expect("evaluation sequence after changed policy"),
+            baseline_evaluation
+        );
+        assert_eq!(
+            engine
+                .store
+                .finding_snapshots()
+                .expect("findings after changed policy"),
+            baseline_findings
+        );
+
+        assert_eq!(
+            engine
+                .freshness_sweep(&watcher)
+                .expect("exact admitted policy permits freshness evaluation"),
+            1
+        );
+        assert_eq!(
+            engine
+                .store
+                .latest_evaluation_sequence()
+                .expect("evaluation sequence after exact policy"),
+            baseline_evaluation + 1
+        );
+        assert_eq!(
+            engine
+                .store
+                .finding_snapshots()
+                .expect("findings after exact policy")
+                .len(),
+            baseline_findings.len()
         );
     }
 

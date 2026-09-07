@@ -1,7 +1,7 @@
 # Operator-beta systemd and HTTP observation contract v1
 
 **Recorded:** 2026-09-07
-**Status:** `M1B_NQ_NG_IMPLEMENTATION_CORRECTION_READY_FOR_REAUDIT`
+**Status:** `M1B_NQ_NG_IMPLEMENTATION_FRESHNESS_CORRECTION_READY_FOR_REAUDIT`
 
 **Review history:** subjects
 `a0b166eb5e7ff0d2d0a5074c2a284dc4c831d6f6` and
@@ -14,9 +14,12 @@ runtime, package, VM, Docket-composition, or complete-M1 qualification.
 Implementation subject `49486577b35f49c8227adf4693686a4ab4dc300b` returned
 `NOT_ACCEPTED / CORRECTION_REQUIRED`: detector report selection lacked exact
 instance filtering, public admission could bypass profile-owned policy validation,
-and NQ could not reopen the fixture-owned service-subject preimage. The current
-non-rewriting correction closes those three bounded findings; acquisition, package,
-VM, and Docket composition remain held pending independent re-audit.
+and NQ could not reopen the fixture-owned service-subject preimage. Correction
+`012c1898793f1f2755bb6f63c59a613b3c10f044` closed those findings but returned
+`NOT_ACCEPTED / CORRECTION_REQUIRED` because public freshness evaluation could
+consume caller-supplied policy bytes without proving equality to the active
+admission. The current non-rewriting correction closes that bounded custody path;
+acquisition, package, VM, and Docket composition remain held pending re-audit.
 
 **NQ-ng successor base:**
 `d9c9f419283ec690014f706c5a6738451918f0f7`
@@ -310,7 +313,11 @@ Before M1B can close, retain and independently qualify:
    digest, and recomputation by each consumer; substitute schema, domain,
    canonical bytes, fixture occurrence, machine, unit, and unit-file digest;
 4. exact immutable threshold-policy bytes, identity, admission, subject/scope
-   binding, reopen, and disposition/artifact binding for each profile;
+   binding, reopen, and disposition/artifact binding for each profile; every
+   public collection/evaluation path validates the compiled watcher, while a
+   freshness evaluation additionally reopens the exact active admission and
+   proves policy equality before mutation; invalid and different-valid policy
+   substitutions add no provider-intake, run, status, evaluation, or finding row;
 5. deterministic `present`, `explicitly_absent`, `cannot_evaluate`,
    missing, malformed, stale, no-response, timeout, and
    wrong-subject/scope/vantage/policy fixtures for each exact condition;
