@@ -455,10 +455,20 @@ gate.
 ## Current gate
 
 Acquisition-contract subject `ff8fc80ab0dfc4cda10c6f525b2313c07125f482`
-returned `NOT_ACCEPTED / CORRECTION_REQUIRED`. This non-rewriting documentation
-child closes its three bounded findings and awaits exact independent re-audit.
-The older profile/foundation contract and runtime remain accepted through
-`28adb4deef034baf3ecc4207cee1482d21b3edcb`. Helper runtime, package, and local-VM
-results remain `NOT_QUALIFIED`; Docket composition remains a separate later
-gate. Classic NQ remains preserved but `SUPERSEDED_FOR_OPERATOR_BETA`. This
-contract authorizes no general NQ-ng authority switch or production cutover.
+returned `NOT_ACCEPTED / CORRECTION_REQUIRED`. Its non-rewriting child
+`e45c7b4bfb18ea740576a65f692b29f4390fbaff` returned
+`ACCEPTED / PROCEED`.
+
+Helper implementation subject `333d0bcc911245a1a137e9a124a61113b765e9bb`
+is a direct non-rewriting child of that accepted contract. It passed the focused helper
+suite, full locked workspace, warnings-denied workspace Clippy, formatting, owner boundary
+gate, and deterministic negative control. Its separate qualification record is ready for
+independent audit; no helper package, live system-bus, VM, provider-intake, Docket join, or
+postcondition result is yet qualified.
+
+The older profile/foundation runtime remains accepted through
+`28adb4deef034baf3ecc4207cee1482d21b3edcb`. Docket composition remains a
+separate later gate, now pinned through the main-loop accepted AG adoption reconciliation
+without importing Docket or AG authority into NQ-ng. Classic NQ remains preserved but
+`SUPERSEDED_FOR_OPERATOR_BETA`. This contract authorizes no general NQ-ng authority
+switch or production cutover.
