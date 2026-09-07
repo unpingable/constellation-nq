@@ -1856,8 +1856,7 @@ async fn revoke(config_path: &Path, instance_id: &str, json_output: bool) -> Res
         .with_context(|| format!("unknown instance {instance_id}"))?
         .clone();
     let outcome = tokio::task::spawn_blocking(move || {
-        let mut engine = nq_core::CollectionEngine::open(&config)?;
-        engine.revoke_binding(&watcher)
+        nq_core::CollectionEngine::revoke_configured_binding(&config, &watcher)
     })
     .await??;
     print_value(&outcome, json_output)

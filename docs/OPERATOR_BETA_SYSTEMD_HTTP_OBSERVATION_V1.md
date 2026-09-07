@@ -1,7 +1,7 @@
 # Operator-beta systemd and HTTP observation contract v1
 
 **Recorded:** 2026-09-07
-**Status:** `M1B_NQ_NG_IMPLEMENTATION_FRESHNESS_CORRECTION_READY_FOR_REAUDIT`
+**Status:** `M1B_NQ_NG_IMPLEMENTATION_REVOCATION_CORRECTION_READY_FOR_REAUDIT`
 
 **Review history:** subjects
 `a0b166eb5e7ff0d2d0a5074c2a284dc4c831d6f6` and
@@ -18,8 +18,14 @@ and NQ could not reopen the fixture-owned service-subject preimage. Correction
 `012c1898793f1f2755bb6f63c59a613b3c10f044` closed those findings but returned
 `NOT_ACCEPTED / CORRECTION_REQUIRED` because public freshness evaluation could
 consume caller-supplied policy bytes without proving equality to the active
-admission. The current non-rewriting correction closes that bounded custody path;
-acquisition, package, VM, and Docket composition remain held pending re-audit.
+admission. Correction `8c44da926300a4f5e1188be94881f15dc34aadbb` closes that
+freshness custody path but returned `NOT_ACCEPTED / CORRECTION_REQUIRED` because
+the normal CLI engine opener evaluated current policy semantics before authority
+revocation, so an invalid policy could make revocation unreachable. The current
+non-rewriting correction adds a one-shot revocation custody path that validates
+exact configuration membership, store history, and authoritative binding without
+consuming policy semantics. Acquisition, package, VM, and Docket composition
+remain held pending re-audit.
 
 **NQ-ng successor base:**
 `d9c9f419283ec690014f706c5a6738451918f0f7`
@@ -318,6 +324,10 @@ Before M1B can close, retain and independently qualify:
    freshness evaluation additionally reopens the exact active admission and
    proves policy equality before mutation; invalid and different-valid policy
    substitutions add no provider-intake, run, status, evaluation, or finding row;
+   the CLI revocation path separately preserves exact config membership and
+   binding/store custody without evaluating current policy, so an invalid policy
+   cannot preserve active authority and revocation adds no provider, execution,
+   evaluation, or finding testimony;
 5. deterministic `present`, `explicitly_absent`, `cannot_evaluate`,
    missing, malformed, stale, no-response, timeout, and
    wrong-subject/scope/vantage/policy fixtures for each exact condition;

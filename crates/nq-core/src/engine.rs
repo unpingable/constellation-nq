@@ -2252,6 +2252,55 @@ impl CollectionEngine {
         })
     }
 
+    /// Revoke one exact configured binding without evaluating current profile
+    /// or policy semantics.
+    ///
+    /// This one-shot path exists so invalid, unavailable, or no-longer-reopenable
+    /// policy semantics cannot prevent removal of already-active authority. It
+    /// still validates structural configuration, exact config membership, store
+    /// integrity, authoritative binding custody, and serialized materialization.
+    /// It returns no reusable engine, never resolves an evaluator identity, and
+    /// cannot collect, evaluate, activate, or execute a helper.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the watcher is not the exact configured instance, store or
+    /// binding custody fails, or the serialized revocation cannot be retained.
+    pub fn revoke_configured_binding(
+        config: &NqConfig,
+        watcher: &WatcherConfig,
+    ) -> Result<BindingActionOutcome, EngineError> {
+        config.validate().map_err(|error| {
+            EngineError::Invariant(format!("invalid revocation configuration: {error}"))
+        })?;
+        let configured = config.watcher(&watcher.instance_id).ok_or_else(|| {
+            EngineError::Invariant(format!(
+                "instance {} is absent from the revocation configuration",
+                watcher.instance_id
+            ))
+        })?;
+        if configured != watcher {
+            return Err(EngineError::Invariant(format!(
+                "instance {} differs from its exact revocation configuration",
+                watcher.instance_id
+            )));
+        }
+        let store = Store::open(&config.database_path)?;
+        validate_provider_intake_history(&store)?;
+        validate_diagnostic_artifact_history(&store)?;
+        let mut engine = Self {
+            config: config.clone(),
+            store,
+            admission: AdmissionManager,
+            runner: StdioRunner,
+            unix_runners: BTreeMap::new(),
+            evaluator_identity: Err(
+                "evaluator identity is not consulted by revocation-only custody".to_owned(),
+            ),
+        };
+        engine.revoke_binding(watcher)
+    }
+
     /// Test-only constructor that installs a specific evaluator identity (or a
     /// refusal) without consulting the platform provider. Gated on `cfg(test)`
     /// so no shipping binary and no downstream crate can reach it.
@@ -12385,6 +12434,75 @@ sys.stdout.write("\n")
                 .expect("findings after exact policy")
                 .len(),
             baseline_findings.len()
+        );
+    }
+
+    #[test]
+    fn invalid_current_policy_cannot_prevent_exact_authority_revocation() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (engine, watcher) = admitted_operator_beta_systemd_freshness_fixture(directory.path());
+        let mut config = engine.config.clone();
+        drop(engine);
+
+        let mut invalid = watcher.clone();
+        let policy = invalid
+            .threshold_policy
+            .as_mut()
+            .expect("fixture threshold policy");
+        policy.value["service_subject"]["target_machine_identity"] = json!("machine:substituted");
+        policy.digest =
+            nq_protocol::semantic_digest(&policy.value).expect("resealed invalid policy");
+        config.watchers = vec![invalid.clone()];
+        assert!(matches!(
+            validate_compiled_config(&config),
+            Err(EngineError::Profile(_))
+        ));
+
+        let outcome = CollectionEngine::revoke_configured_binding(&config, &invalid)
+            .expect("invalid current policy cannot prevent authority removal");
+        assert!(matches!(outcome, BindingActionOutcome::Revoked { .. }));
+        assert!(
+            !config
+                .admissions_dir
+                .join(format!("{}.json", invalid.instance_id))
+                .exists()
+        );
+
+        let store = Store::open(&config.database_path).expect("reopen revoked store");
+        let binding = store
+            .latest_binding(&invalid.instance_id)
+            .expect("latest binding")
+            .expect("revocation binding");
+        assert_eq!(binding.event_kind, "revoke");
+        assert!(
+            store
+                .provider_intakes_bounded(10, None)
+                .expect("provider intakes after revocation")
+                .is_empty()
+        );
+        assert!(
+            store
+                .watcher_run_outcomes_bounded(10, None)
+                .expect("watcher runs after revocation")
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .latest_evaluation_sequence()
+                .expect("evaluation sequence after revocation"),
+            0
+        );
+        assert!(
+            store
+                .finding_snapshots()
+                .expect("findings after revocation")
+                .is_empty()
+        );
+        assert!(
+            store
+                .status_snapshots()
+                .expect("status after revocation")
+                .is_empty()
         );
     }
 
