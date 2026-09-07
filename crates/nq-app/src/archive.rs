@@ -737,6 +737,7 @@ mod tests {
                 version: 1,
                 digest: profile_digest.clone(),
             },
+            threshold_policy: None,
             protocol_version: nq_protocol::HELPER_PROTOCOL_VERSION.to_owned(),
             granted_capabilities: std::collections::BTreeSet::new(),
             conformance: conformance.clone(),

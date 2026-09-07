@@ -111,6 +111,7 @@ pub fn append_typed_admission(
             version: profile_version,
             digest: profile_digest.to_owned(),
         },
+        threshold_policy: None,
         protocol_version: nq_protocol::HELPER_PROTOCOL_VERSION.to_owned(),
         granted_capabilities: fixture_capability_grant(profile_id),
         conformance,

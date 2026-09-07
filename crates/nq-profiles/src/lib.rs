@@ -17,6 +17,10 @@ mod validation;
 pub mod conformance;
 /// Local host operational profile.
 pub mod host;
+/// Controller-vantage bounded HTTP endpoint profile.
+pub mod http_endpoint;
+/// Target-local systemd unit profile.
+pub mod systemd_unit;
 
 pub use descriptor::{
     CardinalityLimits, DescriptorError, FreshnessPolicy, PROFILE_DESCRIPTOR_SCHEMA,
@@ -25,6 +29,7 @@ pub use descriptor::{
 pub use detector::{
     DETECTOR_DESCRIPTOR_SCHEMA, Detector, DetectorDescriptor, DetectorEvidence, DetectorInput,
     DetectorReport, DetectorResult, DetectorRuleParameters, DetectorState, EvidenceWatermark,
+    ThresholdPolicyInput,
 };
 pub use identity::{
     EVALUATOR_SOURCE_DIGEST, PROFILE_SEMANTIC_ID_SCHEMA, ProfileSemanticId, profile_semantic_id,
@@ -54,6 +59,31 @@ pub trait ProfileModule: Send + Sync {
     /// Returns a typed [`ProfileRefusal`] from the compiled profile boundary
     /// when the configured binding is not one the profile can represent.
     fn validate_binding(&self, context: &ValidationContext) -> Result<(), ProfileRefusal>;
+
+    /// Validates an optional immutable external verdict policy against this exact
+    /// profile binding before admission or evaluation.
+    ///
+    /// Profiles without an external policy surface accept only absence.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed refusal when the policy is missing, unexpected, or invalid.
+    fn validate_threshold_policy(
+        &self,
+        context: &ValidationContext,
+        policy: Option<&ThresholdPolicyInput>,
+    ) -> Result<(), ProfileRefusal> {
+        if policy.is_none() {
+            return Ok(());
+        }
+        Err(ProfileRefusal::new(
+            context,
+            self.descriptor(),
+            RefusalBoundary::Profile,
+            ProfileRefusalCode::InvalidPayload,
+            "this compiled profile does not accept an external threshold policy",
+        ))
+    }
 
     /// Strictly validates a protocol-normalized report against an NQ binding.
     ///

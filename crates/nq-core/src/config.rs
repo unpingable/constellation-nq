@@ -84,6 +84,9 @@ pub struct WatcherConfig {
     pub carrier: Carrier,
     /// Requested compiled profile.
     pub profile: ProfileSelection,
+    /// Optional immutable profile-owned verdict policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold_policy: Option<nq_profiles::ThresholdPolicyInput>,
     /// Profile-specific root subject token.
     pub subject: String,
     /// Maximum scope the instance may observe.
@@ -462,6 +465,26 @@ impl NqConfig {
                     format!("{base}.scope/vantage"),
                     "binding JSON exceeds 65536 bytes",
                 ));
+            }
+            if let Some(policy) = &watcher.threshold_policy {
+                validate_binding_token(&format!("{base}.threshold_policy.id"), &policy.id)?;
+                validate_binding_token(
+                    &format!("{base}.threshold_policy.version"),
+                    &policy.version,
+                )?;
+                let policy_bytes =
+                    nq_protocol::canonical_json_bytes(&policy.value).map_err(|error| {
+                        invalid(format!("{base}.threshold_policy.value"), error.to_string())
+                    })?;
+                if policy_bytes.len() > 65_536 {
+                    return Err(invalid(
+                        format!("{base}.threshold_policy.value"),
+                        "canonical policy exceeds 65536 bytes",
+                    ));
+                }
+                policy
+                    .verify_digest()
+                    .map_err(|error| invalid(format!("{base}.threshold_policy.digest"), error))?;
             }
             if watcher.schedule.interval_seconds == 0 {
                 return Err(invalid(

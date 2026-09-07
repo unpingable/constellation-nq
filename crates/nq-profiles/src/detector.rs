@@ -27,6 +27,16 @@ pub enum DetectorRuleParameters {
         /// CPU (e.g. `2000` = load at least twice the logical CPU count).
         normalized_load_threshold_millis: u32,
     },
+    /// Generic exact systemd-unit comparison under an admitted external policy.
+    SystemdUnitPostcondition {
+        /// Only this immutable policy schema may provide expected values.
+        threshold_policy_schema: String,
+    },
+    /// Generic bounded HTTP status/body comparison under an admitted policy.
+    HttpEndpointPostcondition {
+        /// Only this immutable policy schema may provide expected values.
+        threshold_policy_schema: String,
+    },
 }
 
 /// Canonical identity and operator metadata for one detector revision.
@@ -79,11 +89,52 @@ pub struct DetectorInput<'a> {
     pub evaluated_at: DateTime<Utc>,
     /// Consistent database watermark selected by the evaluation engine.
     pub watermark: EvidenceWatermark,
+    /// Exact immutable external verdict policy, when the compiled detector
+    /// declares that policy surface.
+    pub threshold_policy: Option<&'a ThresholdPolicyInput>,
     /// Admitted report occurrences visible at the watermark.
     ///
     /// Slice order and report timestamps carry no ordering authority. Detectors
     /// select recency only through [`DetectorReport::report_sequence`].
     pub reports: &'a [DetectorReport],
+}
+
+/// Exact immutable external policy presented to a compiled detector.
+///
+/// The compiled profile remains the semantic owner: it validates the closed
+/// policy schema, recomputes `digest` over `value`, and binds the policy to the
+/// exact subject and request scope before using any verdict-changing value.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThresholdPolicyInput {
+    /// Stable policy family.
+    pub id: String,
+    /// Exact policy generation.
+    pub version: String,
+    /// SHA-256 of the canonical policy value.
+    pub digest: nq_protocol::Sha256Digest,
+    /// Closed profile-owned policy document.
+    pub value: serde_json::Value,
+}
+
+impl ThresholdPolicyInput {
+    /// Verifies that the retained identity commits to the exact policy value.
+    ///
+    /// # Errors
+    ///
+    /// Returns canonicalization or mismatch detail without interpreting policy.
+    pub fn verify_digest(&self) -> Result<(), String> {
+        let actual =
+            nq_protocol::semantic_digest(&self.value).map_err(|error| error.to_string())?;
+        if actual == self.digest {
+            Ok(())
+        } else {
+            Err(format!(
+                "threshold policy digest mismatch: expected {}, observed {}",
+                self.digest, actual
+            ))
+        }
+    }
 }
 
 /// One exact admitted report occurrence presented to compiled detectors.

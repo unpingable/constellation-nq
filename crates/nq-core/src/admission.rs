@@ -38,6 +38,9 @@ pub struct AdmissionLock {
     pub execution: ExecutionIdentity,
     /// Independently resolved profile identity.
     pub profile: AdmittedProfile,
+    /// Exact profile-owned verdict policy admitted with this binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold_policy: Option<nq_profiles::ThresholdPolicyInput>,
     /// Exact helper protocol version.
     pub protocol_version: String,
     /// Capabilities actually granted after intersection with the ceiling.
@@ -238,6 +241,7 @@ impl AdmissionManager {
                 version: watcher.profile.version,
                 digest: evidence.profile_digest,
             },
+            threshold_policy: watcher.threshold_policy.clone(),
             protocol_version: evidence.protocol_version,
             granted_capabilities,
             conformance: evidence.conformance,
@@ -390,6 +394,7 @@ impl AdmissionManager {
         if lock.profile.id != watcher.profile.id
             || lock.profile.version != watcher.profile.version
             || lock.profile.digest != compiled_profile_digest
+            || lock.threshold_policy != watcher.threshold_policy
         {
             return Err(AdmissionError::ProfileDrift {
                 instance_id: watcher.instance_id.clone(),
@@ -474,6 +479,24 @@ impl AdmissionLock {
             || self.conformance.tool_version.len() > 128
         {
             return Err(malformed(self, "invalid required identity"));
+        }
+        if let Some(policy) = &self.threshold_policy {
+            policy
+                .verify_digest()
+                .map_err(|error| malformed(self, error))?;
+            let policy_bytes = nq_protocol::canonical_json_bytes(&policy.value)
+                .map_err(|error| malformed(self, error.to_string()))?;
+            if policy.id.is_empty()
+                || policy.id.len() > 255
+                || policy.version.is_empty()
+                || policy.version.len() > 255
+                || policy_bytes.len() > 65_536
+            {
+                return Err(malformed(
+                    self,
+                    "threshold policy identity or canonical bytes exceed admission bounds",
+                ));
+            }
         }
         if !self.conformance.protocol_passed || !self.conformance.dry_collection_passed {
             return Err(malformed(
@@ -593,6 +616,7 @@ mod tests {
                 id: "nq.conformance".into(),
                 version: 1,
             },
+            threshold_policy: None,
             subject: "conformance:local".into(),
             scope: ScopeConfig {
                 kind: "fixture".into(),
@@ -757,6 +781,53 @@ mod tests {
                 nq_protocol::HELPER_PROTOCOL_VERSION
             ),
             Err(AdmissionError::Binary(_))
+        ));
+    }
+
+    #[test]
+    fn threshold_policy_is_retained_exactly_and_cannot_be_substituted() {
+        let dir = tempfile::tempdir().unwrap();
+        let helper = dir.path().join("helper");
+        fs::write(&helper, b"executable").unwrap();
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut watcher = watcher(helper, dir.path().to_path_buf());
+        let value = serde_json::json!({
+            "schema": "nq.fixture_threshold_policy.v1",
+            "subject": "conformance:local",
+            "expected": "ready",
+        });
+        watcher.threshold_policy = Some(nq_profiles::ThresholdPolicyInput {
+            id: "nq.fixture.threshold_policy".to_owned(),
+            version: "fixture-001".to_owned(),
+            digest: nq_protocol::semantic_digest(&value).unwrap(),
+            value,
+        });
+        let manager = AdmissionManager;
+        let lock = candidate(manager, &watcher);
+        assert_eq!(lock.threshold_policy, watcher.threshold_policy);
+        lock.validate_shape().expect("policy-bearing lock shape");
+
+        let canonical = nq_protocol::canonical_json_bytes(&lock).unwrap();
+        let reopened: AdmissionLock = serde_json::from_slice(&canonical).unwrap();
+        assert_eq!(reopened, lock);
+        manager
+            .verify(
+                &watcher,
+                &reopened,
+                &format!("sha256:{}", "a".repeat(64)),
+                nq_protocol::HELPER_PROTOCOL_VERSION,
+            )
+            .expect("exact policy-bearing lock reopens");
+
+        watcher.threshold_policy.as_mut().unwrap().version = "fixture-002".to_owned();
+        assert!(matches!(
+            manager.verify(
+                &watcher,
+                &reopened,
+                &format!("sha256:{}", "a".repeat(64)),
+                nq_protocol::HELPER_PROTOCOL_VERSION
+            ),
+            Err(AdmissionError::ConfigDrift { .. } | AdmissionError::ProfileDrift { .. })
         ));
     }
 

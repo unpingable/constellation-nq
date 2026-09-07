@@ -359,6 +359,9 @@ pub struct EvaluationEnvelopeV2 {
     pub context: EvaluationContextV1,
     /// Exact compiled detector evaluated.
     pub detector: EvaluationDetectorIdentity,
+    /// Exact external threshold-policy identity used by this evaluation, when any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold_policy: Option<SemanticIdentityV1>,
     /// Running evaluator artifact identity.
     pub evaluator_artifact_digest: Sha256Digest,
     /// Exact compiled profile identity.
@@ -381,6 +384,10 @@ impl EvaluationEnvelopeV2 {
             || Sha256Digest::parse(self.detector.digest.clone()).is_err()
             || self.context.instance_id.is_empty()
             || self.context.subject.is_empty()
+            || self
+                .threshold_policy
+                .as_ref()
+                .is_some_and(|policy| policy.id.is_empty() || policy.version.is_empty())
             || self.profile != self.result.profile
             || self.watermark.instance_id != self.context.instance_id
             || self.result.watermark.0 != self.watermark.max_report_sequence
@@ -1855,6 +1862,7 @@ struct DiagnosticEmissionContext {
     state_model: SemanticIdentityV1,
     evaluator: SemanticIdentityV1,
     threshold_policy: SemanticIdentityV1,
+    evaluation_threshold_policy: Option<SemanticIdentityV1>,
     projection: DiagnosticProjectionV1,
     execution_clock: SemanticIdentityV1,
     started_at: DateTime<Utc>,
@@ -1883,6 +1891,7 @@ impl DiagnosticEmissionContext {
             || evaluation.detector.version != self.question.version
             || evaluation.detector.digest != self.question.digest.as_str()
             || evaluation.evaluator_artifact_digest != self.expected_evaluator_artifact_digest
+            || evaluation.threshold_policy != self.evaluation_threshold_policy
             || evaluation.profile.profile.id != self.profile.id
             || evaluation.profile.profile.version.to_string() != self.profile.version
             || evaluation.profile.profile_digest.as_str() != self.profile.digest.as_str()
@@ -4158,6 +4167,7 @@ struct LocalV2HistoryContext {
     admission_rule: SemanticIdentityV1,
     normalization_rule: SemanticIdentityV1,
     question: SemanticIdentityV1,
+    evaluation_threshold_policy: Option<SemanticIdentityV1>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -4272,7 +4282,12 @@ fn validate_local_v2_provider_correspondence(
         version: request.profile.version.to_string(),
         digest: request.profile.digest.clone(),
     };
-    let expected_question = initial_local_v2_question(&admission.detector_identity_digest)?;
+    let expected_question = local_v2_question(
+        &admission.profile_id,
+        &admission.profile_version,
+        &admission.profile_digest,
+        &admission.detector_identity_digest,
+    )?;
     let historical_surface = local_v2_historical_surface(
         &profile_identity,
         &expected_question,
@@ -4332,16 +4347,46 @@ fn validate_local_v2_provider_correspondence(
             artifact.artifact_id.0
         ))
     })?;
-    let expected_threshold_policy = semantic_identity(
-        format!("{}.threshold_policy", expected_question.id),
-        expected_question.version.clone(),
-        &json!({
-            "schema": "nq.detector_threshold_policy.v2",
-            "detector_id": expected_question.id,
-            "detector_version": question_version,
-            "detector_digest": expected_question.digest,
-        }),
-    )?;
+    let admitted_lock: AdmissionLock =
+        serde_json::from_slice(&admission.lock_json).map_err(|error| {
+            EngineError::Invariant(format!(
+                "local v2 diagnostic artifact {} cannot reopen its admission lock: {error}",
+                artifact.artifact_id.0
+            ))
+        })?;
+    if canonical(&admitted_lock)?.as_bytes() != admission.lock_json
+        || admitted_lock.admission_id != admission_id
+        || admitted_lock.instance_id != run.instance_id
+    {
+        return Err(EngineError::Invariant(format!(
+            "local v2 diagnostic artifact {} has substituted admission-lock custody",
+            artifact.artifact_id.0
+        )));
+    }
+    let policy_context =
+        ValidationContext::from_request(request, artifact.started_at, Duration::seconds(60));
+    let compiled_profile = nq_profiles::resolve_profile(
+        &admission.profile_id,
+        admission.profile_version.parse::<u32>().map_err(|error| {
+            EngineError::Invariant(format!("invalid admitted profile version: {error}"))
+        })?,
+    )
+    .ok_or_else(|| {
+        EngineError::DiagnosticUnsupported(format!(
+            "no compiled profile maps admission {}",
+            admission.admission_id
+        ))
+    })?;
+    compiled_profile
+        .validate_threshold_policy(&policy_context, admitted_lock.threshold_policy.as_ref())
+        .map_err(|refusal| {
+            EngineError::Invariant(format!(
+                "local v2 diagnostic artifact {} reopens an invalid threshold policy: {}",
+                artifact.artifact_id.0, refusal.message
+            ))
+        })?;
+    let expected_threshold_policy =
+        local_v2_threshold_policy(&expected_question, admitted_lock.threshold_policy.as_ref())?;
     let expected_projection = DiagnosticProjectionV1 {
         identity: semantic_identity(
             "nq.detector_input_projection",
@@ -4546,6 +4591,10 @@ fn validate_local_v2_provider_correspondence(
         admission_rule,
         normalization_rule: historical_surface.normalization_rule,
         question: expected_question,
+        evaluation_threshold_policy: admitted_lock
+            .threshold_policy
+            .as_ref()
+            .map(|_| expected_threshold_policy.clone()),
     })
 }
 
@@ -4622,6 +4671,7 @@ fn validate_evaluated_diagnostic_correspondence(
         || evaluation.detector.id != artifact.question.id
         || evaluation.detector.version != artifact.question.version
         || evaluation.detector.digest != artifact.question.digest.as_str()
+        || evaluation.threshold_policy != context.evaluation_threshold_policy
         || evaluation.evaluator_artifact_digest
             != context.provider_intake.provider.evaluator_artifact_digest
     {
@@ -5161,6 +5211,7 @@ fn prepare_instance_evaluations(
                 u64::try_from(evaluation_watermark.max_report_sequence).unwrap_or(u64::MAX),
             ),
             reports: &reports,
+            threshold_policy: watcher.threshold_policy.as_ref(),
         };
         let mut result = detector.evaluate(&detector_input);
         // Evidence timestamps are persisted at the schema's millisecond
@@ -5210,6 +5261,14 @@ fn prepare_instance_evaluations(
                 version: descriptor.version.to_string(),
                 digest: detector_digest.clone(),
             },
+            threshold_policy: watcher
+                .threshold_policy
+                .as_ref()
+                .map(|policy| SemanticIdentityV1 {
+                    id: policy.id.clone(),
+                    version: policy.version.clone(),
+                    digest: policy.digest.clone(),
+                }),
             evaluator_artifact_digest: parse_identity_digest(
                 "evaluator_artifact_digest",
                 evaluator_artifact_digest,
@@ -5389,15 +5448,28 @@ fn require_initial_diagnostic_profile(
     let detector_digest = detector_descriptor
         .digest()
         .map_err(EngineError::Canonical)?;
-    if descriptor.profile.id != nq_profiles::host::PROFILE_ID
-        || descriptor.profile.version != nq_profiles::host::PROFILE_VERSION
-        || profile_digest != INITIAL_DIAGNOSTIC_PROFILE_DIGEST
-        || detector_descriptor.id != INITIAL_DIAGNOSTIC_DETECTOR_ID
-        || detector_descriptor.version != INITIAL_DIAGNOSTIC_DETECTOR_VERSION
-        || detector_digest != INITIAL_DIAGNOSTIC_DETECTOR_DIGEST
-    {
+    let compiled_profile_digest = descriptor
+        .digest()
+        .map_err(|error| EngineError::Canonical(error.to_string()))?;
+    let host = descriptor.profile.id == nq_profiles::host::PROFILE_ID
+        && descriptor.profile.version == nq_profiles::host::PROFILE_VERSION
+        && profile_digest == INITIAL_DIAGNOSTIC_PROFILE_DIGEST
+        && detector_descriptor.id == INITIAL_DIAGNOSTIC_DETECTOR_ID
+        && detector_descriptor.version == INITIAL_DIAGNOSTIC_DETECTOR_VERSION
+        && detector_digest == INITIAL_DIAGNOSTIC_DETECTOR_DIGEST;
+    let systemd = descriptor.profile.id == nq_profiles::systemd_unit::PROFILE_ID
+        && descriptor.profile.version == nq_profiles::systemd_unit::PROFILE_VERSION
+        && profile_digest == compiled_profile_digest.as_str()
+        && detector_descriptor.id == nq_profiles::systemd_unit::DETECTOR_ID
+        && detector_descriptor.version == 1;
+    let http = descriptor.profile.id == nq_profiles::http_endpoint::PROFILE_ID
+        && descriptor.profile.version == nq_profiles::http_endpoint::PROFILE_VERSION
+        && profile_digest == compiled_profile_digest.as_str()
+        && detector_descriptor.id == nq_profiles::http_endpoint::DETECTOR_ID
+        && detector_descriptor.version == 1;
+    if !(host || systemd || http) {
         return Err(EngineError::DiagnosticUnsupported(format!(
-            "initial diagnostic execution is sealed to nq.host/v1 load-pressure semantics; received {} v{} / {} v{}",
+            "live diagnostic execution has no admitted one-detector correspondence for {} v{} / {} v{}",
             descriptor.profile.id,
             descriptor.profile.version,
             detector_descriptor.id,
@@ -5670,6 +5742,14 @@ pub fn validate_compiled_config(config: &NqConfig) -> Result<(), EngineError> {
                 watcher.instance_id, refusal.boundary, refusal.code, refusal.message
             ))
         })?;
+        profile
+            .validate_threshold_policy(&context, watcher.threshold_policy.as_ref())
+            .map_err(|refusal| {
+                EngineError::Profile(format!(
+                    "instance {} threshold policy refused at {:?}/{:?}: {}",
+                    watcher.instance_id, refusal.boundary, refusal.code, refusal.message
+                ))
+            })?;
     }
     Ok(())
 }
@@ -5880,23 +5960,87 @@ fn local_v2_historical_surface(
     })
 }
 
-fn initial_local_v2_question(
+fn local_v2_question(
+    profile_id: &str,
+    profile_version: &str,
+    profile_digest: &str,
     detector_identity_digest: &str,
 ) -> Result<SemanticIdentityV1, EngineError> {
-    let digest = Sha256Digest::parse(INITIAL_DIAGNOSTIC_DETECTOR_DIGEST.to_owned())
-        .map_err(|error| EngineError::Invariant(error.to_string()))?;
+    let version = profile_version.parse::<u32>().map_err(|error| {
+        EngineError::Invariant(format!(
+            "invalid admitted profile version {profile_version}: {error}"
+        ))
+    })?;
+    let profile = nq_profiles::resolve_profile(profile_id, version).ok_or_else(|| {
+        EngineError::DiagnosticUnsupported(format!(
+            "no compiled profile maps admitted {profile_id} v{profile_version}"
+        ))
+    })?;
+    let descriptor = profile.descriptor();
+    if descriptor
+        .digest()
+        .map_err(|error| EngineError::Canonical(error.to_string()))?
+        .as_str()
+        != profile_digest
+    {
+        return Err(EngineError::DiagnosticUnsupported(format!(
+            "compiled profile differs from admitted {profile_id} v{profile_version}"
+        )));
+    }
+    let [detector] = profile.detectors() else {
+        return Err(EngineError::DiagnosticUnsupported(format!(
+            "diagnostic correspondence requires exactly one detector for {profile_id} v{profile_version}"
+        )));
+    };
+    let detector_descriptor = detector.descriptor();
+    let digest = Sha256Digest::parse(
+        detector_descriptor
+            .digest()
+            .map_err(EngineError::Canonical)?,
+    )
+    .map_err(|error| EngineError::Invariant(error.to_string()))?;
     let expected_suite =
         nq_store::detector_suite_identity_digest(vec![digest.as_str().to_owned()])?;
     if detector_identity_digest != expected_suite.as_str() {
         return Err(EngineError::DiagnosticUnsupported(format!(
-            "no frozen v2 detector descriptor maps admitted suite {detector_identity_digest}"
+            "no compiled v2 detector descriptor maps admitted suite {detector_identity_digest}"
         )));
     }
     Ok(SemanticIdentityV1 {
-        id: INITIAL_DIAGNOSTIC_DETECTOR_ID.to_owned(),
-        version: INITIAL_DIAGNOSTIC_DETECTOR_VERSION.to_string(),
+        id: detector_descriptor.id.clone(),
+        version: detector_descriptor.version.to_string(),
         digest,
     })
+}
+
+fn local_v2_threshold_policy(
+    question: &SemanticIdentityV1,
+    policy: Option<&nq_profiles::ThresholdPolicyInput>,
+) -> Result<SemanticIdentityV1, EngineError> {
+    if let Some(policy) = policy {
+        policy.verify_digest().map_err(EngineError::Invariant)?;
+        return Ok(SemanticIdentityV1 {
+            id: policy.id.clone(),
+            version: policy.version.clone(),
+            digest: policy.digest.clone(),
+        });
+    }
+    let question_version: u32 = question.version.parse().map_err(|error| {
+        EngineError::Invariant(format!(
+            "local v2 diagnostic question {} has invalid version: {error}",
+            question.id
+        ))
+    })?;
+    semantic_identity(
+        format!("{}.threshold_policy", question.id),
+        question.version.clone(),
+        &json!({
+            "schema": "nq.detector_threshold_policy.v2",
+            "detector_id": question.id,
+            "detector_version": question_version,
+            "detector_digest": question.digest,
+        }),
+    )
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -5938,7 +6082,12 @@ fn prepare_diagnostic_emission_base(
     };
     let detector_suite =
         nq_store::detector_suite_identity_digest(vec![question.digest.as_str().to_owned()])?;
-    let frozen_question = initial_local_v2_question(detector_suite.as_str())?;
+    let frozen_question = local_v2_question(
+        &profile_descriptor.profile.id,
+        &profile_descriptor.profile.version.to_string(),
+        profile_digest.as_str(),
+        detector_suite.as_str(),
+    )?;
     if question != frozen_question {
         return Err(EngineError::DiagnosticUnsupported(
             "the live detector descriptor has no frozen v2 historical correspondence mapping"
@@ -5998,16 +6147,7 @@ fn prepare_diagnostic_emission_base(
             "detector_digest": detector_digest,
         }),
     )?;
-    let threshold_policy = semantic_identity(
-        format!("{}.threshold_policy", detector_descriptor.id),
-        detector_descriptor.version.to_string(),
-        &json!({
-            "schema": "nq.detector_threshold_policy.v2",
-            "detector_id": detector_descriptor.id,
-            "detector_version": detector_descriptor.version,
-            "detector_digest": detector_digest,
-        }),
-    )?;
+    let threshold_policy = local_v2_threshold_policy(&question, watcher.threshold_policy.as_ref())?;
     let projection_identity = semantic_identity(
         "nq.detector_input_projection",
         "1",
@@ -6363,6 +6503,13 @@ fn prepare_diagnostic_emission(
         state_model: base.state_model,
         evaluator: base.evaluator,
         threshold_policy: base.threshold_policy,
+        evaluation_threshold_policy: watcher.threshold_policy.as_ref().map(|policy| {
+            SemanticIdentityV1 {
+                id: policy.id.clone(),
+                version: policy.version.clone(),
+                digest: policy.digest.clone(),
+            }
+        }),
         projection: base.projection,
         execution_clock: base.execution_clock,
         started_at: base.started_at,
@@ -10310,6 +10457,7 @@ sys.stdout.write("\n")
                     .as_str()
                     .to_owned(),
             },
+            threshold_policy: None,
             protocol_version: nq_protocol::HELPER_PROTOCOL_VERSION.to_owned(),
             granted_capabilities: fixture_capability_grant(&descriptor.profile.id),
             conformance: fixture_conformance(),
@@ -10822,6 +10970,7 @@ sys.stdout.write("\n")
                     version: detector.version.to_string(),
                     digest: detector.digest().expect("detector digest"),
                 },
+                threshold_policy: None,
                 evaluator_artifact_digest: nq_protocol::sha256_bytes(b"coarse-health-evaluator"),
                 profile: profile_identity.clone(),
                 started_at: parse_timestamp("2026-07-20T12:00:00.000Z").expect("evaluation start"),
@@ -11516,6 +11665,7 @@ sys.stdout.write("\n")
             evaluated_at,
             watermark: EvidenceWatermark(0),
             reports: &[],
+            threshold_policy: None,
         });
         assert_eq!(source.state, DetectorState::CannotEvaluate);
         let profile_identity = EvaluationProfileIdentity {
@@ -11549,6 +11699,7 @@ sys.stdout.write("\n")
                 version: detector_descriptor.version.to_string(),
                 digest: detector_descriptor.digest().expect("detector digest"),
             },
+            threshold_policy: None,
             evaluator_artifact_digest: nq_protocol::sha256_bytes(b"producer-invariant-evaluator"),
             profile: profile_identity,
             started_at: evaluated_at,
@@ -11604,6 +11755,7 @@ sys.stdout.write("\n")
                 id: "nq.conformance".to_owned(),
                 version: 1,
             },
+            threshold_policy: None,
             subject: "conformance:recovery".to_owned(),
             scope: ScopeConfig {
                 kind: "fixture".to_owned(),
@@ -11678,6 +11830,7 @@ sys.stdout.write("\n")
                 id: nq_profiles::host::PROFILE_ID.to_owned(),
                 version: nq_profiles::host::PROFILE_VERSION,
             },
+            threshold_policy: None,
             subject: "host:diagnostic-fixture".to_owned(),
             scope: ScopeConfig {
                 kind: "host".to_owned(),
@@ -12232,6 +12385,7 @@ sys.stdout.write("\n")
             evaluated_at: fixture.observed_at,
             watermark: EvidenceWatermark(1),
             reports: &[],
+            threshold_policy: None,
         };
         let cannot_evaluate = nq_profiles::DetectorResult::cannot_evaluate(
             &detector_input,
@@ -12393,6 +12547,7 @@ sys.stdout.write("\n")
             evaluated_at: fixture.observed_at,
             watermark: EvidenceWatermark(1),
             reports: &[],
+            threshold_policy: None,
         };
         let result = nq_profiles::DetectorResult::cannot_evaluate(
             &detector_input,
@@ -13303,6 +13458,7 @@ sys.stdout.write("\n")
                 version: 1,
                 digest: profile_digest.clone(),
             },
+            threshold_policy: None,
             protocol_version: nq_protocol::HELPER_PROTOCOL_VERSION.to_owned(),
             granted_capabilities: BTreeSet::new(),
             conformance,
@@ -13938,6 +14094,7 @@ sys.stdout.write("\n")
                     version: detector_descriptor.version.to_string(),
                     digest: detector_digest.clone(),
                 },
+                threshold_policy: None,
                 evaluator_artifact_digest: evaluator_artifact.clone(),
                 profile: evaluation_profile,
                 started_at: evaluated_at,
@@ -13997,6 +14154,7 @@ sys.stdout.write("\n")
             evaluated_at,
             watermark: EvidenceWatermark(0),
             reports: &[],
+            threshold_policy: None,
         });
         let missing_envelope = commit_result(
             &mut store,
@@ -14022,6 +14180,7 @@ sys.stdout.write("\n")
             evaluated_at,
             watermark: EvidenceWatermark(report_sequence),
             reports: std::slice::from_ref(&stale_report),
+            threshold_policy: None,
         });
         let stale_envelope = commit_result(
             &mut store,
@@ -14141,6 +14300,7 @@ sys.stdout.write("\n")
                     version: detector.version.to_string(),
                     digest: detector_digest.clone(),
                 },
+                threshold_policy: None,
                 evaluator_artifact_digest: evaluator_artifact.clone(),
                 profile: profile_identity,
                 started_at: parse_timestamp("2026-07-20T12:00:00.000Z").expect("start"),
@@ -14363,6 +14523,7 @@ sys.stdout.write("\n")
                     version: detector.version.to_string(),
                     digest: detector_digest.clone(),
                 },
+                threshold_policy: None,
                 evaluator_artifact_digest: evaluator_artifact.clone(),
                 profile: evaluation_profile.clone(),
                 started_at: parse_timestamp("2026-07-20T12:00:00.000Z").expect("start"),

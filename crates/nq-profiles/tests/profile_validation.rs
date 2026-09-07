@@ -7,7 +7,7 @@ use nq_profiles::{
     DetectorInput, DetectorReport, DetectorResult, DetectorRuleParameters, DetectorState,
     EvidenceWatermark, ProfileModule, ProfileRefusalCode, ReportInput, ScopeGrant,
     SemanticCoverageState, SemanticReportStatus, ValidatedReport, ValidationContext, VantageGrant,
-    all_profiles, conformance, host, resolve_profile,
+    all_profiles, conformance, host, http_endpoint, resolve_profile, systemd_unit,
 };
 use serde_json::{Value, json};
 
@@ -253,9 +253,11 @@ fn detector_report(
 
 #[test]
 fn registry_is_explicit_and_exact() {
-    assert_eq!(all_profiles().len(), 2);
+    assert_eq!(all_profiles().len(), 4);
     assert!(resolve_profile("nq.conformance", 1).is_some());
     assert!(resolve_profile("nq.host", 1).is_some());
+    assert!(resolve_profile(systemd_unit::PROFILE_ID, systemd_unit::PROFILE_VERSION).is_some());
+    assert!(resolve_profile(http_endpoint::PROFILE_ID, http_endpoint::PROFILE_VERSION).is_some());
     assert!(resolve_profile("nq.host", 2).is_none());
     assert_ne!(
         conformance::MODULE.descriptor().digest().unwrap(),
@@ -457,6 +459,7 @@ fn detector_requires_newest_current_complete_coverage_to_resolve() {
         evaluated_at: now(),
         watermark: EvidenceWatermark(9),
         reports: &[],
+        threshold_policy: None,
     };
     assert_eq!(
         detector.evaluate(&empty_input).state,
@@ -467,6 +470,7 @@ fn detector_requires_newest_current_complete_coverage_to_resolve() {
         evaluated_at: now() + Duration::seconds(30),
         watermark: EvidenceWatermark(10),
         reports: std::slice::from_ref(&current),
+        threshold_policy: None,
     };
     let result = detector.evaluate(&input);
     assert_eq!(result.state, DetectorState::ExplicitlyAbsent);
@@ -482,6 +486,7 @@ fn detector_requires_newest_current_complete_coverage_to_resolve() {
     );
     let input = DetectorInput {
         reports: std::slice::from_ref(&pressured),
+        threshold_policy: None,
         ..input
     };
     assert_eq!(detector.evaluate(&input).state, DetectorState::Present);
@@ -489,6 +494,7 @@ fn detector_requires_newest_current_complete_coverage_to_resolve() {
     let stale_input = DetectorInput {
         evaluated_at: now() + Duration::seconds(301),
         reports: std::slice::from_ref(&current),
+        threshold_policy: None,
         ..input
     };
     assert_eq!(
@@ -513,6 +519,7 @@ fn detector_requires_newest_current_complete_coverage_to_resolve() {
     let unrelated_input = DetectorInput {
         evaluated_at: now() + Duration::seconds(70),
         reports: &unrelated_reports,
+        threshold_policy: None,
         ..input
     };
     assert_eq!(
@@ -524,6 +531,7 @@ fn detector_requires_newest_current_complete_coverage_to_resolve() {
     let newer_failure_input = DetectorInput {
         evaluated_at: now() + Duration::seconds(70),
         reports: &reports,
+        threshold_policy: None,
         ..input
     };
     let result = detector.evaluate(&newer_failure_input);
@@ -539,6 +547,7 @@ fn host_detector_same_code_refusals_preserve_distinct_structured_details() {
         evaluated_at: now(),
         watermark: EvidenceWatermark(9),
         reports: &[],
+        threshold_policy: None,
     });
     let current = detector_report(
         "report:current",
@@ -552,6 +561,7 @@ fn host_detector_same_code_refusals_preserve_distinct_structured_details() {
         evaluated_at: now() + Duration::seconds(301),
         watermark: EvidenceWatermark(10),
         reports: std::slice::from_ref(&current),
+        threshold_policy: None,
     });
 
     let empty_refusal = empty.refusal.as_ref().expect("typed missing refusal");
@@ -623,6 +633,7 @@ fn detector_recency_uses_only_durable_report_sequence() {
         evaluated_at: now() + Duration::seconds(30),
         watermark: EvidenceWatermark(41),
         reports: &reversed,
+        threshold_policy: None,
     });
     assert_eq!(
         result.state,
@@ -654,6 +665,7 @@ fn detector_recency_uses_only_durable_report_sequence() {
         evaluated_at: now() + Duration::seconds(30),
         watermark: EvidenceWatermark(51),
         reports: &equal_clocks,
+        threshold_policy: None,
     });
     assert_eq!(
         result.state,

@@ -415,6 +415,10 @@ impl Detector for HostLoadPressureDetector {
             DetectorRuleParameters::LoadPressure {
                 normalized_load_threshold_millis,
             } => normalized_load_threshold_millis,
+            DetectorRuleParameters::SystemdUnitPostcondition { .. }
+            | DetectorRuleParameters::HttpEndpointPostcondition { .. } => {
+                unreachable!("host detector descriptor uses only load-pressure parameters")
+            }
         };
         let threshold = f64::from(threshold_millis) / 1000.0;
         let state = load_pressure_state(normalized_load, threshold_millis);
