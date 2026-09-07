@@ -3,10 +3,11 @@
 **Recorded:** 2026-09-07
 **Status:** `M1B_NQ_NG_CONTRACT_REAUDIT_REQUIRED__IMPLEMENTATION_NOT_STARTED`
 
-**Prior review:** NQ-ng subject
-`a0b166eb5e7ff0d2d0a5074c2a284dc4c831d6f6` was
-`NOT_ACCEPTED / CORRECTION_REQUIRED`; this non-rewriting child closes only
-the bounded contract findings and carries no implementation acceptance.
+**Review history:** subjects
+`a0b166eb5e7ff0d2d0a5074c2a284dc4c831d6f6` and
+`34d49dc1bdc42dc5f67c8a5c60eea11cd247f0bf` each returned
+`NOT_ACCEPTED / CORRECTION_REQUIRED`. This non-rewriting child closes only
+their bounded contract findings and carries no implementation acceptance.
 
 **NQ-ng successor base:**
 `d9c9f419283ec690014f706c5a6738451918f0f7`
@@ -77,25 +78,31 @@ creates a different subject. The campaign fixture owner owns these descriptor
 bytes; NQ, AG, and Docket consume the identity without acquiring one another's
 semantics.
 
-The target-local systemd scope is a retained JCS descriptor with schema
-`nq.operator_beta.systemd_unit_scope.v1`. It binds the common subject identity,
-target machine identity, exact unit name and unit-file digest, systemd manager
-interface `org.freedesktop.systemd1`, and the four observed properties
-`LoadState`, `ActiveState`, `SubState`, and `UnitFileState`. The controller HTTP
-scope is a separately retained JCS descriptor with schema
-`nq.operator_beta.http_endpoint_scope.v1`. It binds the same subject identity,
-the exact controller-vantage identity, literal `http://<fixture-address>:18080/healthz`
-locator admitted by the fixture manifest, method `GET`, redirect policy
-`refuse`, maximum response bytes, expected status `200`, and exact expected body
-SHA-256. The literal address remains locator evidence, not the stable subject.
+The systemd request `ScopeBinding` has kind `systemd_unit`; its exact
+`value` is a retained JCS object with schema
+`nq.operator_beta.systemd_unit_scope.v1`, the common subject identity, target
+machine identity, unit name and unit-file digest, manager interface
+`org.freedesktop.systemd1`, and the requested properties `LoadState`,
+`ActiveState`, `SubState`, and `UnitFileState`. The HTTP request
+`ScopeBinding` has kind `http_endpoint`; its exact `value` is a separately
+retained JCS object with schema `nq.operator_beta.http_endpoint_scope.v1`, the
+common subject identity, controller-vantage identity, literal
+`http://<fixture-address>:18080/healthz` locator admitted by the fixture
+manifest, method `GET`, redirect policy `refuse`, and maximum response bytes.
+The literal address remains locator evidence, not the stable subject. Expected
+state, status, and body values are verdict policy and do not enter either scope.
 
-Each scope's NQ `SemanticIdentityV1` uses the schema string as `id`, `v1` as
-`version`, and `nq_protocol::semantic_digest` over its retained JCS descriptor
-as `digest`. Scope and vantage descriptor bytes, lengths, and digests are
-fixture artifacts and must reopen before production or integration use.
-Substitution of descriptor schema/domain, canonical bytes, machine, unit,
-unit-file digest, fixture occurrence, controller vantage, endpoint, redirect
-policy, bounds, expected status, or body digest must fail closed.
+NQ retains those objects as the exact request `scope.value`. The artifact's
+`DiagnosticSubjectV1.scope` remains NQ's existing
+`nq.diagnostic_scope.v1` semantic identity over the exact subject, complete
+request scope binding, and profile identity. It must not be replaced by the
+inner campaign scope digest. Vantage likewise remains NQ's existing
+`nq.diagnostic_vantage.v1` identity over node, instance, declared vantage, and
+provider. The fixture manifest retains the request scope/vantage configurations
+and their canonical bytes; NQ recomputes its outer identities on reopen.
+Substitution of inner schema/bytes, subject, machine, unit, unit-file digest,
+fixture occurrence, controller vantage, endpoint, redirect policy, or response
+bound must fail closed.
 
 The later Nightshift-owned integration artifact records two independent
 post-effect association edges:
@@ -117,38 +124,56 @@ an unrecorded edge.
 ## Exact questions, detectors, and freshness
 
 The systemd profile key is exactly `{ id: "nq.systemd_unit", version: 1 }`.
-Its question identity has id
-`nq.operator_beta.systemd_unit_postcondition` and version `v1`; its detector
-has id `nq.systemd_unit.postcondition` and version `1`; its stable condition
-is `systemd_unit_postcondition_not_met`; and its primary claim is
-`claim:systemd_unit_postcondition_not_met`. Its typed detector parameters are
-the expected tuple `loaded`, `active`, `running`, `disabled`, plus the
-subject and systemd-scope identities. With complete current typed evidence, any
-tuple mismatch yields `present`; exact tuple equality yields
-`explicitly_absent`. Missing, partial, stale, refused, or unprojectable evidence
-yields `cannot_evaluate` and never absence.
+Its detector has id `nq.systemd_unit.postcondition`, version `1`, stable
+condition `systemd_unit_postcondition_not_met`, and primary claim
+`claim:systemd_unit_postcondition_not_met`. Its compiled typed parameters name
+only the generic exact-four-field comparison law and the accepted external
+policy schema; they contain no fixture, subject, scope, machine, unit, or
+expected state.
 
 The HTTP profile key is exactly `{ id: "nq.http_endpoint", version: 1 }`. Its
-question identity has id `nq.operator_beta.http_endpoint_postcondition` and
-version `v1`; its detector has id `nq.http_endpoint.postcondition` and
-version `1`; its stable condition is
-`http_endpoint_postcondition_not_met`; and its primary claim is
-`claim:http_endpoint_postcondition_not_met`. Its typed detector parameters bind
-the HTTP scope, status `200`, and the scope's exact expected body digest. A
-complete bounded HTTP response with a status or body mismatch yields `present`;
-exact status and body equality yields `explicitly_absent`. DNS, connect,
-protocol, timeout, truncation, missing-body, stale, refused, or unprojectable
-evidence yields `cannot_evaluate`, not a fabricated mismatch or absence.
+detector has id `nq.http_endpoint.postcondition`, version `1`, stable
+condition `http_endpoint_postcondition_not_met`, and primary claim
+`claim:http_endpoint_postcondition_not_met`. Its compiled typed parameters
+name only the generic bounded status/body comparison law and the accepted
+external policy schema; they contain no fixture, subject, scope, vantage,
+locator, expected status, or body digest.
 
-Each question is a closed retained JCS descriptor with schema
-`nq.operator_beta.diagnostic_question.v1`, its exact id/version, profile key,
-profile digest, detector id/version/digest, condition, and scope identity. The
-question's `SemanticIdentityV1.digest` is
-`nq_protocol::semantic_digest` of those bytes. The ordinary compiled profile
-and detector descriptors remain the existing
-`nq.profile_descriptor.v1` and `nq.detector_descriptor.v1` contracts; their
-digests are recomputed from canonical bytes. A question, detector, or profile
-id without its matching retained descriptor digest grants no equivalence.
+For each profile, the V2 `question` is exactly the detector descriptor
+identity: detector id, decimal version, and canonical
+`nq.detector_descriptor.v1` digest. There is no separate campaign question
+descriptor and no scope-bearing question identity. Profile and detector
+digests are recomputed from their existing canonical descriptors. Per-run data
+must not rotate the compiled detector, question, cohort, or build identity.
+
+Fixture-specific verdict inputs use the existing V2 `threshold_policy` field.
+The fixture owner retains one immutable JCS policy per profile. The systemd
+policy schema is `nq.operator_beta.systemd_unit_threshold_policy.v1`; it binds
+fixture run, common subject, complete request-scope identity, and expected
+`LoadState=loaded`, `ActiveState=active`, `SubState=running`, and
+`UnitFileState=disabled`. The HTTP policy schema is
+`nq.operator_beta.http_endpoint_threshold_policy.v1`; it binds fixture run,
+common subject, complete request-scope identity, expected status `200`, and
+the exact expected body SHA-256 from the fixture manifest.
+
+Each policy identity has stable id
+`nq.systemd_unit.postcondition.threshold_policy` or
+`nq.http_endpoint.postcondition.threshold_policy`, version equal to the exact
+`fixture_run_id`, and digest equal to `nq_protocol::semantic_digest` over the
+retained policy JCS bytes. Before evaluation, NQ must admit and reopen those
+bytes, recompute the policy identity, require subject and request-scope
+equality, and place that identity in `DiagnosticExecutionV2.threshold_policy`.
+The detector disposition and artifact identity bind the policy. No evaluator
+API accepts unbound expected values, and a policy substitution produces a
+different result identity or fails closed. The base host-load producer's
+detector-only threshold policy remains unchanged.
+
+With complete current typed systemd evidence, any policy-tuple mismatch yields
+`present`; exact tuple equality yields `explicitly_absent`. With a complete
+bounded HTTP response, a policy status/body mismatch yields `present`; exact
+status and body equality yields `explicitly_absent`. For either detector,
+missing, partial, stale, refused, unprojectable, transport-incomplete, or
+policy-unavailable evidence yields `cannot_evaluate` and never absence.
 
 Both compiled profile descriptors fix `reliance_seconds = 60` and
 `alignment_seconds = 0`. The zero alignment value means each detector consumes
@@ -158,8 +183,8 @@ or before it, yields `cannot_evaluate`; the exact 60-second boundary remains
 inside the current NQ reliance window. Nightshift may impose a stricter
 composition/current-support window over the two artifacts, but it may not
 refresh their acquisition times or rewrite their historical NQ claims.
-Profile, detector, question, scope, vantage, parameter, and freshness descriptor
-bytes all participate in their existing NQ semantic identities.
+Profile, detector, question, scope, vantage, policy, parameter, and freshness
+identities remain independently visible in the V2 artifact.
 
 ## Required observations and bounded claims
 
@@ -234,8 +259,10 @@ At `d9c9f419...`:
 4. no compiled generic systemd-unit or controller-vantage HTTP profile exists;
 5. no package-qualified helper/provider path emits either required testimony;
 6. FIELD-CLOCK operational qualification is a library/test/example surface,
-   not a daemon/CLI-backed durable M1B execution path; and
-7. no exact recorded NQ-ng postcondition edge is yet joined to the accepted
+   not a daemon/CLI-backed durable M1B execution path;
+7. current live V2 production derives `threshold_policy` only from the
+   compiled detector and has no admitted external typed-policy input; and
+8. no exact recorded NQ-ng postcondition edge is yet joined to the accepted
    Docket composition history.
 
 The existing store, admission, refusal, inspection, export, and exact identity
@@ -264,35 +291,39 @@ Before M1B can close, retain and independently qualify:
 
 1. exact result-head ancestry from `d9c9f419...` and unchanged reopening of its
    inherited FIELD-CLOCK/SILICON artifacts;
-2. exact compiled profile, detector, question, parameter, freshness, scope, and
-   vantage descriptors and identities, plus helper/provider and package/binary
-   identities;
+2. exact compiled profile/detector parameters and identities, V2 question
+   equality to detector identity, profile freshness, NQ-derived outer scope and
+   vantage identities, plus helper/provider and package/binary identities;
 3. fixture-owned service-subject bytes, length, plain digest, AG domain-separated
    digest, and recomputation by each consumer; substitute schema, domain,
    canonical bytes, fixture occurrence, machine, unit, and unit-file digest;
-4. deterministic `present`, `explicitly_absent`, `cannot_evaluate`,
+4. exact immutable threshold-policy bytes, identity, admission, subject/scope
+   binding, reopen, and disposition/artifact binding for each profile;
+5. deterministic `present`, `explicitly_absent`, `cannot_evaluate`,
    missing, malformed, stale, no-response, timeout, and
-   wrong-subject/scope/vantage fixtures for each exact condition;
-5. direct substitutions of endpoint, redirect policy, response bound, expected
-   status/body, profile, detector, question, parameter, freshness, provider,
-   raw bytes, observation time, and clock qualification;
-6. target-local systemd and controller-vantage HTTP observations on the exact
+   wrong-subject/scope/vantage/policy fixtures for each exact condition;
+6. direct substitutions of endpoint, redirect policy, response bound, expected
+   tuple/status/body, policy id/version/digest/bytes, profile, detector,
+   question, compiled parameter, freshness, provider, raw bytes, observation
+   time, and clock qualification;
+7. target-local systemd and controller-vantage HTTP observations on the exact
    disposable Debian 12 two-VM fixture, before and after one fresh governed
    effect occurrence;
-7. the independent cross-profile matrix: systemd condition
+8. the independent cross-profile matrix: systemd condition
    `explicitly_absent` while HTTP is `present` or `cannot_evaluate`; HTTP
    condition `explicitly_absent` while systemd is `present` or
    `cannot_evaluate`; both `present`; either stale; and both
    `explicitly_absent`, without an NQ aggregate verdict;
-8. exact, independently recorded Docket-to-systemd and Docket-to-HTTP
+9. exact, independently recorded Docket-to-systemd and Docket-to-HTTP
    association edges, plus refusal to infer an absent edge or serialize one NQ
    artifact as the other's predecessor;
-9. atomic diagnostic-artifact custody, restart-safe inspection/export, exact
-   byte replay, and query-only reopening with no helper execution;
-10. package install/remove/reinstall, store preservation, reset, and complete
+10. atomic diagnostic-artifact and policy custody, restart-safe
+    inspection/export, exact byte replay, and query-only reopening with no
+    helper execution or policy reevaluation;
+11. package install/remove/reinstall, store preservation, reset, and complete
     fixture teardown evidence;
-11. explicit proof that no classic-NQ record or acceptance was imported; and
-12. a terminal machine receipt that leaves whole-estate health, effect
+12. explicit proof that no classic-NQ record or acceptance was imported; and
+13. a terminal machine receipt that leaves whole-estate health, effect
     causation, authority, global reachability, Nightshift currentness, and
     production deployment unqualified.
 
