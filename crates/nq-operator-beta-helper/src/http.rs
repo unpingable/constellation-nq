@@ -213,11 +213,55 @@ fn read_response(
         }
         body.extend_from_slice(&chunk[..count]);
     }
+    configure_timeout(stream, request, clock)?;
+    let mut trailing = [0_u8; 1];
+    match stream.read(&mut trailing) {
+        Ok(0) => {}
+        Ok(_) => {
+            return Err(CollectionFailure::new(
+                "http_body_length",
+                "HTTP response carried bytes beyond Content-Length",
+                false,
+            ));
+        }
+        Err(_) => {
+            return Err(CollectionFailure::new(
+                "http_completion_unconfirmed",
+                "HTTP connection did not close after the exact Content-Length body",
+                true,
+            ));
+        }
+    }
     Ok(HttpResponse { status, body })
 }
 
 fn find_header_end(bytes: &[u8]) -> Option<usize> {
     bytes.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn valid_header_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
+}
+
+fn validate_header_syntax(name: &str, value: &str) -> Result<(), CollectionFailure> {
+    if name.is_empty() || !name.bytes().all(valid_header_name_byte) {
+        return Err(CollectionFailure::new(
+            "http_header_name",
+            "HTTP header name is outside the bounded token syntax",
+            false,
+        ));
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte == b'\t' || (0x20..=0x7e).contains(&byte))
+    {
+        return Err(CollectionFailure::new(
+            "http_header_value",
+            "HTTP header value contains a disallowed byte",
+            false,
+        ));
+    }
+    Ok(())
 }
 
 fn parse_headers(bytes: &[u8]) -> Result<(u16, usize), CollectionFailure> {
@@ -273,6 +317,7 @@ fn parse_headers(bytes: &[u8]) -> Result<(u16, usize), CollectionFailure> {
         let (name, value) = line.split_once(':').ok_or_else(|| {
             CollectionFailure::new("http_header_invalid", "HTTP header lacks a colon", false)
         })?;
+        validate_header_syntax(name, value)?;
         if name.eq_ignore_ascii_case("transfer-encoding") {
             return Err(CollectionFailure::new(
                 "http_transfer_encoding",
@@ -334,6 +379,8 @@ mod tests {
             &b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\n"[..],
             &b"HTTP/1.1 200 OK\r\nContent-Length: 01\r\n\r\n"[..],
             &b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n"[..],
+            &b"HTTP/1.1 200 OK\r\nBad Header: value\r\nContent-Length: 0\r\n\r\n"[..],
+            &b"HTTP/1.1 200 OK\r\nX-Test: good\x01bad\r\nContent-Length: 0\r\n\r\n"[..],
         ] {
             assert!(parse_headers(bytes).is_err());
         }
@@ -353,6 +400,22 @@ mod tests {
         let writer = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             stream.write_all(&bytes).unwrap();
+        });
+        (TcpStream::connect(address).unwrap(), writer)
+    }
+
+    fn split_response_stream(
+        first: Vec<u8>,
+        trailing: Vec<u8>,
+    ) -> (TcpStream, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let writer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.write_all(&first).unwrap();
+            stream.flush().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            stream.write_all(&trailing).unwrap();
         });
         (TcpStream::connect(address).unwrap(), writer)
     }
@@ -417,6 +480,13 @@ mod tests {
         let (mut long, writer) =
             response_stream(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nabc".to_vec());
         assert!(read_response(&mut long, 3, &request, &FixedClock).is_err());
+        writer.join().unwrap();
+
+        let (mut split, writer) = split_response_stream(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nab".to_vec(),
+            b"c".to_vec(),
+        );
+        assert!(read_response(&mut split, 3, &request, &FixedClock).is_err());
         writer.join().unwrap();
     }
 

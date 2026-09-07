@@ -1,6 +1,6 @@
 //! `nq.http_endpoint/v1`: controller-vantage bounded HTTP testimony.
 
-use std::{any::Any, collections::BTreeMap, sync::LazyLock};
+use std::{any::Any, collections::BTreeMap, net::SocketAddr, str::FromStr, sync::LazyLock};
 
 use chrono::Duration;
 use nq_protocol::Sha256Digest;
@@ -64,7 +64,7 @@ static DESCRIPTOR: LazyLock<ProfileDescriptor> = LazyLock::new(|| ProfileDescrip
     )],
     access_paths: vec![VocabularyTerm::new(
         "http_tcp",
-        "Bounded DNS, TCP, and HTTP acquisition",
+        "Bounded numeric-address TCP and HTTP acquisition",
     )],
     bases: vec![VocabularyTerm::new(
         "http_response",
@@ -454,13 +454,20 @@ fn validate_threshold_policy_binding(
     Ok(policy)
 }
 fn valid_endpoint(value: &str) -> bool {
-    value.len() <= 2_048
-        && value.starts_with("http://")
-        && !value.contains('@')
-        && !value.contains('#')
-        && value.ends_with("/healthz")
+    if value.len() > 2_048 {
+        return false;
+    }
+    let Some(authority) = value
+        .strip_prefix("http://")
+        .and_then(|remainder| remainder.strip_suffix("/healthz"))
+    else {
+        return false;
+    };
+    if authority.is_empty() || authority.contains(['@', '/', '?', '#']) {
+        return false;
+    }
+    SocketAddr::from_str(authority).is_ok_and(|address| address.port() == 18_080)
 }
-
 fn validate_cardinality(
     context: &ValidationContext,
     descriptor: &ProfileDescriptor,

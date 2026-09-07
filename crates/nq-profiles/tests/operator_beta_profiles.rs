@@ -534,4 +534,16 @@ fn http_policy_is_external_bound_and_substitution_safe() {
             .is_err(),
         "subject-equal but scope-substituted evidence must refuse"
     );
+
+    for endpoint in [
+        "http://fixture:18080/healthz",
+        "http://192.0.2.10:80/healthz",
+    ] {
+        let mut invalid = context.clone();
+        invalid.scope.value["endpoint"] = json!(endpoint);
+        assert!(
+            http_endpoint::MODULE.validate_binding(&invalid).is_err(),
+            "endpoint outside the numeric port-18080 beta scope must refuse at binding"
+        );
+    }
 }

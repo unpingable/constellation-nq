@@ -341,17 +341,23 @@ redirect. The response must be one final HTTP/1.0 or HTTP/1.1 response with a
 three-digit status, no interim response, no `Transfer-Encoding` header of any
 value, and exactly one valid canonical-decimal `Content-Length` header. An
 absent, duplicate, conflicting, signed, nondecimal, or noncanonical length is
-invalid. EOF framing and chunked framing are not admitted in this beta.
+invalid. EOF framing and chunked framing are not admitted in this beta. Every
+header name must use the bounded ASCII field-name token syntax, and every
+header value must contain only horizontal tab or visible ASCII bytes; malformed
+unknown fields refuse just as malformed recognized fields do.
 
 The complete header section including its terminator is limited to 16384 bytes.
-The declared body length must not exceed the scope's `max_response_bytes`, the
-helper reads exactly that many bytes, and premature EOF refuses testimony. A
-complete response of any status, including a redirect status, yields exactly
-one observation with status, exact body byte count, and body SHA-256; detector
-policy, not the helper, decides whether that observation meets the requested
-postcondition. Malformed framing, bound excess, connect/write/read failure, or
-deadline expiry produces no observation. DNS is not consulted in this beta and
-no current address is substituted for the retained locator.
+The declared body length must not exceed the scope's `max_response_bytes`. The
+helper reads exactly that many bytes and then requires connection EOF within
+the existing request deadline. Premature EOF, a byte beyond `Content-Length`
+regardless of TCP segmentation, or failure to establish bounded connection
+closure refuses testimony. A complete response of any status, including a
+redirect status, yields exactly one observation with status, exact body byte
+count, and body SHA-256; detector policy, not the helper, decides whether that
+observation meets the requested postcondition. Malformed framing, bound excess,
+connect/write/read failure, or deadline expiry produces no observation. DNS is
+not consulted in this beta and no current address is substituted for the
+retained locator.
 
 Every external operation is bounded by the request's existing Linux-boottime
 deadline; no helper-local deadline may extend it. Direct library calls are

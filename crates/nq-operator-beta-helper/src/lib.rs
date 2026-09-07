@@ -710,6 +710,24 @@ mod tests {
     }
 
     #[test]
+    fn hostname_and_wrong_port_refuse_before_acquisition() {
+        for endpoint in [
+            "http://fixture:18080/healthz",
+            "http://192.0.2.10:80/healthz",
+        ] {
+            let mut request = request(Branch::Http);
+            request.binding.scope.value["endpoint"] = json!(endpoint);
+            let source = FakeSource {
+                calls: Cell::new(0),
+                fail: false,
+            };
+            let response = handle_request(&request, &source, &FixedClock(1));
+            assert!(matches!(response.outcome, ResponseOutcome::Refusal { .. }));
+            assert_eq!(source.calls.get(), 0);
+        }
+    }
+
+    #[test]
     fn collection_failure_is_explicit_unavailable_testimony() {
         let request = request(Branch::Systemd);
         let source = FakeSource {
