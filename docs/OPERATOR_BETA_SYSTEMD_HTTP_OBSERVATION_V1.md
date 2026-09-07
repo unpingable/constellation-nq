@@ -269,6 +269,67 @@ existing witness owner and NQ-ng consumes the canonical helper protocol. The
 contract does not authorize a new daemon, generic probe framework, dynamic
 profile loader, or second evidence store.
 
+### Frozen beta acquisition placement and law
+
+The smallest package-correct first-party path is one new, one-shot NQ-ng
+binary named `nq-operator-beta-helper`. It implements only
+`nq.systemd_unit/v1` and `nq.http_endpoint/v1` over the existing canonical
+helper request/response protocol. It owns bounded acquisition testimony only:
+it does not schedule, admit, evaluate, persist, retry, compose the two
+profiles, or answer whether an effect occurred. It is installed as the same
+exact package-owned bytes on both fixture VMs; the admitted watcher identity,
+execution account, scope, vantage, and capability grant determine which one
+of its two closed branches may run. `nq-host-helper` and `nq.host/v1` remain
+unchanged.
+
+For either branch the helper accepts exactly one request frame, emits exactly
+one bounded response frame, accepts no checkpoint, requires the exact compiled
+profile descriptor digest and request binding, and refuses any capability
+other than the branch's one required capability. Bounds must accommodate one
+coverage declaration, at most one observation, and one or more structured
+collection errors. Request/binding/capability/deadline/bound failures are typed
+protocol refusals. A valid request whose external read fails emits a `failed`
+report with `unavailable` coverage, no observation, and a bounded structured
+collection error. It never converts absent testimony into a negative
+postcondition observation. Provider intake retains the exact raw helper stdout
+separately from the validated normalized report.
+
+The systemd branch uses one direct zbus system-bus connection and the exact
+`org.freedesktop.systemd1` interfaces named by the scope. Within the request's
+monotonic deadline it reads the live D-Bus machine identity, resolves the exact
+unit with `GetUnit`, and reads `LoadState`, `ActiveState`, `SubState`,
+`UnitFileState`, and `FragmentPath`. It opens the returned unit file as a
+bounded regular file without following a final-component symbolic link,
+computes its SHA-256, and requires both live machine identity and unit-file
+digest to equal the request scope before emitting one complete observation.
+The normalized observation retains the fixed manager object path, returned
+unit object path, exact four state values, live machine identity, unit name,
+and observed unit-file digest. Any lookup, property, file-open, file-bound,
+digest, identity, or deadline failure yields typed absence of testimony; the
+helper performs no unit mutation and invokes no systemctl command.
+
+The HTTP branch accepts only the exact beta shape already admitted by the
+scope: plain `http`, method `GET`, redirect policy `refuse`, path `/healthz`,
+port `18080`, no user information, fragment, or query, and a numeric fixture
+address. It makes one bounded TCP connection from the declared controller
+vantage, writes one HTTP/1.1 request with `Connection: close`, follows no
+redirect, bounds response headers independently, and reads no more than the
+scope's `max_response_bytes`. A response exceeding either bound, malformed
+status/header framing, unsupported transfer coding, incomplete declared body,
+connect/write/read failure, or deadline expiry produces no observation. A
+complete response of any status, including a redirect status, yields exactly
+one observation with status, exact body byte count, and body SHA-256; detector
+policy, not the helper, decides whether that observation meets the requested
+postcondition. DNS is not consulted in this beta and no current address is
+substituted for the retained locator.
+
+Every external operation is bounded by the request's existing Linux-boottime
+deadline; no helper-local deadline may extend it. Direct library calls are
+recorded as the package-owned helper implementation rather than inventing a
+backend executable identity. The package/release manifests must name the exact
+new binary before package qualification, but this contract checkpoint does
+not itself build, install, activate, or qualify a package.
+
 ## Concrete gaps at the admitted base
 
 At `d9c9f419...`:
