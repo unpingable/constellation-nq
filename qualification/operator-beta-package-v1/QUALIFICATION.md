@@ -1,6 +1,7 @@
 # Operator-beta NQ-ng package checkpoint
 
-**Status:** `PACKAGE_CHECKPOINT_READY_FOR_INDEPENDENT_AUDIT`
+**Status:** `CORRECTION_CANDIDATE_READY_FOR_INDEPENDENT_REAUDIT`
+**Rejected checkpoint:** `35b76888a541096dc3768495ca46c0442b0ce534`
 **Package source subject:** `5c064f06d8bcae2fce9dfdb9598167c2343ff706`
 **Package source tree:** `c820ea0fc19b065289d9e966926b2ab7a8374b5f`
 **Accepted helper result parent:** `9d8624a2d13cb1562b55a81de6f6cea07fb65dcc`

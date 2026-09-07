@@ -24,8 +24,9 @@ sha256sum --check share/nq/MANIFEST.sha256
 
 The release directory also contains `SHA256SUMS` plus one checksum file per
 tarball and Debian package. The builder neither downloads dependencies nor
-invokes Cargo: it assembles already-built `nq`, `nqd`, and `nq-host-helper`
-binaries plus a profile catalog verified against the supplied `nq`. The
+invokes Cargo: it assembles already-built `nq`, `nqd`, `nq-host-helper`, and
+`nq-operator-beta-helper` binaries plus a profile catalog verified against the
+supplied `nq`. The
 assembler checks architecture, executes each binary's strict `--build-info`
 probe before reading any NQ configuration, rejects debug/test-isolation
 builds, and requires every embedded version to equal the requested package
@@ -36,5 +37,5 @@ system-contract assets and requires their compiled-profile fixture to match the
 exact catalog being packaged. It separately verifies the exact v1 and v2
 language-neutral diagnostic contract manifests, schemas, canonical fixtures,
 artifact self-identities, and hostile-vector dispositions before and after
-staging. Release automation must still supply the three binaries as one
+staging. Release automation must still supply the four binaries as one
 reviewed source-revision cohort; a version string is not a source identity.
