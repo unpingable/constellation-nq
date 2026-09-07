@@ -1,0 +1,29 @@
+[package]
+name = "nq-operator-beta-helper"
+description = "Bounded systemd and HTTP testimony for the 2026 operator beta"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+async-io.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+libc.workspace = true
+nix = { workspace = true, features = ["time"] }
+nq-build-info = { path = "../nq-build-info" }
+nq-profiles = { path = "../nq-profiles" }
+nq-protocol = { path = "../nq-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+zbus.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
