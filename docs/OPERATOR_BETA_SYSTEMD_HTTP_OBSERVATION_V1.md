@@ -1,13 +1,15 @@
 # Operator-beta systemd and HTTP observation contract v1
 
 **Recorded:** 2026-09-07
-**Status:** `M1B_NQ_NG_CONTRACT_REAUDIT_REQUIRED__IMPLEMENTATION_NOT_STARTED`
+**Status:** `M1B_NQ_NG_CONTRACT_ACCEPTED__IMPLEMENTATION_READY`
 
 **Review history:** subjects
 `a0b166eb5e7ff0d2d0a5074c2a284dc4c831d6f6` and
 `34d49dc1bdc42dc5f67c8a5c60eea11cd247f0bf` each returned
-`NOT_ACCEPTED / CORRECTION_REQUIRED`. This non-rewriting child closes only
-their bounded contract findings and carries no implementation acceptance.
+`NOT_ACCEPTED / CORRECTION_REQUIRED`. Subject
+`8d6dca69e9171e6acdde3d3108d50a6a0f5db886` then returned
+`ACCEPTED / PROCEED`. Acceptance covers this contract only; it carries no
+runtime, package, VM, Docket-composition, or complete-M1 qualification.
 
 **NQ-ng successor base:**
 `d9c9f419283ec690014f706c5a6738451918f0f7`
@@ -333,10 +335,10 @@ gate.
 
 ## Current gate
 
-This checkpoint is a contract-only correction. Runtime, schema, helper,
-package, VM, service, and Docket changes remain `NOT_STARTED`. The next lawful
-transition is independent re-audit of the exact non-rewriting contract child.
-Acceptance may open bounded NQ-ng owner implementation; it does not qualify any
-implementation or the composed M1 path. Classic NQ remains preserved but is
-`SUPERSEDED_FOR_OPERATOR_BETA`; this contract authorizes no general NQ-ng
+Exact contract subject `8d6dca69e9171e6acdde3d3108d50a6a0f5db886`
+is `ACCEPTED / PROCEED`. Bounded NQ-ng owner implementation may begin in this
+isolated worktree. Runtime, schema, helper, package, and local-VM results remain
+`NOT_QUALIFIED` until their own checkpoints and reviews; Docket composition
+remains a separate later gate. Classic NQ is preserved but
+`SUPERSEDED_FOR_OPERATOR_BETA`. This contract authorizes no general NQ-ng
 authority switch or production cutover.
