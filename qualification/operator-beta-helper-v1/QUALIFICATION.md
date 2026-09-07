@@ -1,7 +1,8 @@
 # Operator-beta NQ-ng observation helper checkpoint
 
-**Status:** `CORRECTION_CANDIDATE_READY_FOR_INDEPENDENT_REAUDIT`
+**Status:** `ACCEPTED_PROCEED`
 **Implementation candidate subject:** `386358190e974c532d5237d36231fe7e806d100e`
+**Accepted qualification result:** `9d8624a2d13cb1562b55a81de6f6cea07fb65dcc`
 **Tree:** `0432d9846d78938181e43f47b10f72f5cf90e027`
 **Rejected qualification parent:** `0fe03f50ff971d910ff61f3ed2dd5d6534e67ab7`
 **Accepted contract ancestor:** `e45c7b4bfb18ea740576a65f692b29f4390fbaff`
@@ -65,6 +66,7 @@ association, post-effect observation, service activation, production deployment,
 general NQ-ng cutover was performed. Those remain later M1B qualification gates.
 
 Classic NQ remains preserved and `SUPERSEDED_FOR_OPERATOR_BETA`; no classic code, result,
-or acceptance was imported. This checkpoint qualifies nothing until independent audit
-accepts the exact subject. Even if accepted, it establishes only the bounded one-shot helper
-implementation, not the complete M1B profile/package/VM result.
+or acceptance was imported. Independent audit accepted exact qualification result
+`9d8624a2d13cb1562b55a81de6f6cea07fb65dcc` for implementation
+`386358190e974c532d5237d36231fe7e806d100e`. That result establishes only the bounded
+one-shot helper implementation, not the complete M1B profile/package/VM result.
