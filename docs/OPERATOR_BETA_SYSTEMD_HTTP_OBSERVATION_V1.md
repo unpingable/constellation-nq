@@ -282,53 +282,83 @@ execution account, scope, vantage, and capability grant determine which one
 of its two closed branches may run. `nq-host-helper` and `nq.host/v1` remain
 unchanged.
 
-For either branch the helper accepts exactly one request frame, emits exactly
-one bounded response frame, accepts no checkpoint, requires the exact compiled
-profile descriptor digest and request binding, and refuses any capability
-other than the branch's one required capability. Bounds must accommodate one
-coverage declaration, at most one observation, and one or more structured
-collection errors. Request/binding/capability/deadline/bound failures are typed
-protocol refusals. A valid request whose external read fails emits a `failed`
-report with `unavailable` coverage, no observation, and a bounded structured
-collection error. It never converts absent testimony into a negative
-postcondition observation. Provider intake retains the exact raw helper stdout
-separately from the validated normalized report.
+For either branch the helper reads at most one request frame and accepts no
+checkpoint. Strict framing, JSON, schema, protocol, deadline, and common-bound
+validation occurs in canonical `nq_protocol::parse_request` before a request
+exists that can safely be echoed. A malformed or common-invalid frame therefore
+produces bounded stderr, no stdout response, and a nonzero process result, as
+`nq-host-helper` already does. After strict parsing, the helper requires the
+exact compiled profile descriptor digest and request binding and refuses any
+capability other than the branch's one required capability. It emits exactly
+one bounded report or refusal only when the negotiated response bound can
+represent that exact echo and outcome. An otherwise valid request whose bound
+cannot encode even the bounded fallback refusal instead produces no stdout and
+a nonzero `UnrepresentableResponse` process result.
 
-The systemd branch uses one direct zbus system-bus connection and the exact
-`org.freedesktop.systemd1` interfaces named by the scope. Within the request's
-monotonic deadline it reads the live D-Bus machine identity, resolves the exact
-unit with `GetUnit`, and reads `LoadState`, `ActiveState`, `SubState`,
-`UnitFileState`, and `FragmentPath`. It opens the returned unit file as a
-bounded regular file without following a final-component symbolic link,
-computes its SHA-256, and requires both live machine identity and unit-file
-digest to equal the request scope before emitting one complete observation.
-The normalized observation retains the fixed manager object path, returned
-unit object path, exact four state values, live machine identity, unit name,
-and observed unit-file digest. Any lookup, property, file-open, file-bound,
-digest, identity, or deadline failure yields typed absence of testimony; the
-helper performs no unit mutation and invokes no systemctl command.
+Both branches require `max_observations >= 1`, `max_coverage_entries >= 1`,
+`max_payload_bytes >= 16384`, `max_report_errors >= 1`, and
+`max_response_bytes >= 32768`. The helper emits exactly one coverage entry, at
+most one observation, and at most one terminal structured collection error.
+A valid request whose external read fails emits a `failed` report with
+`unavailable` coverage, no observation, and that one bounded error. It never
+converts absent testimony into a negative postcondition observation. Provider
+intake retains the exact raw helper stdout separately from the validated
+normalized report. Qualification fixes each accepted bound at its minimum and
+exercises one-below-minimum refusal plus an unrepresentable-response case.
+
+The systemd branch uses one direct zbus system-bus connection. On that same
+connection and within the request's monotonic deadline it calls
+`org.freedesktop.DBus.Peer.GetMachineId` on the systemd service and manager
+object, then `org.freedesktop.systemd1.Manager.RefUnit`, `GetUnit`, and
+`GetUnitFileState`. The retained reference permits an installed inactive unit
+to become addressable before `GetUnit`; closing the one-shot connection releases
+it. The branch reads `LoadState`, `ActiveState`, `SubState`, and `FragmentPath`
+through `org.freedesktop.DBus.Properties.Get` on the returned
+`org.freedesktop.systemd1.Unit` object. Those exact service, object, and
+interface identities are compiled helper constants; the scope's historical
+`manager_interface` value is an independently validated binding value and is
+not misrepresented as the complete interface catalog.
+
+The returned `FragmentPath` is opened as a regular file without following a
+final-component symbolic link and read through the opened descriptor with an
+exact 1048576-byte maximum. The helper computes its SHA-256 and requires both
+the live machine identity and observed unit-file digest to equal the request
+scope before emitting one complete observation. The normalized observation
+retains the fixed manager object path, returned unit object path, exact four
+state values, live machine identity, unit name, and observed unit-file digest.
+Reference and lookup failures are distinct; installed-but-inactive and not
+initially loaded is a positive qualification case. Any connection, machine,
+reference, lookup, property, file-open, file-type, file-bound, digest, identity,
+or deadline failure yields typed absence of testimony. The helper performs no
+unit mutation and invokes no systemctl command.
 
 The HTTP branch accepts only the exact beta shape already admitted by the
 scope: plain `http`, method `GET`, redirect policy `refuse`, path `/healthz`,
 port `18080`, no user information, fragment, or query, and a numeric fixture
 address. It makes one bounded TCP connection from the declared controller
-vantage, writes one HTTP/1.1 request with `Connection: close`, follows no
-redirect, bounds response headers independently, and reads no more than the
-scope's `max_response_bytes`. A response exceeding either bound, malformed
-status/header framing, unsupported transfer coding, incomplete declared body,
-connect/write/read failure, or deadline expiry produces no observation. A
+vantage, writes one HTTP/1.1 request with `Connection: close`, and follows no
+redirect. The response must be one final HTTP/1.0 or HTTP/1.1 response with a
+three-digit status, no interim response, no `Transfer-Encoding` header of any
+value, and exactly one valid canonical-decimal `Content-Length` header. An
+absent, duplicate, conflicting, signed, nondecimal, or noncanonical length is
+invalid. EOF framing and chunked framing are not admitted in this beta.
+
+The complete header section including its terminator is limited to 16384 bytes.
+The declared body length must not exceed the scope's `max_response_bytes`, the
+helper reads exactly that many bytes, and premature EOF refuses testimony. A
 complete response of any status, including a redirect status, yields exactly
 one observation with status, exact body byte count, and body SHA-256; detector
 policy, not the helper, decides whether that observation meets the requested
-postcondition. DNS is not consulted in this beta and no current address is
-substituted for the retained locator.
+postcondition. Malformed framing, bound excess, connect/write/read failure, or
+deadline expiry produces no observation. DNS is not consulted in this beta and
+no current address is substituted for the retained locator.
 
 Every external operation is bounded by the request's existing Linux-boottime
 deadline; no helper-local deadline may extend it. Direct library calls are
 recorded as the package-owned helper implementation rather than inventing a
 backend executable identity. The package/release manifests must name the exact
-new binary before package qualification, but this contract checkpoint does
-not itself build, install, activate, or qualify a package.
+new binary before package qualification, but this contract checkpoint does not
+itself build, install, activate, or qualify a package.
 
 ## Concrete gaps at the admitted base
 
@@ -424,10 +454,11 @@ gate.
 
 ## Current gate
 
-Exact contract subject `8d6dca69e9171e6acdde3d3108d50a6a0f5db886`
-is `ACCEPTED / PROCEED`. Bounded NQ-ng owner implementation may begin in this
-isolated worktree. Runtime, schema, helper, package, and local-VM results remain
-`NOT_QUALIFIED` until their own checkpoints and reviews; Docket composition
-remains a separate later gate. Classic NQ is preserved but
-`SUPERSEDED_FOR_OPERATOR_BETA`. This contract authorizes no general NQ-ng
-authority switch or production cutover.
+Acquisition-contract subject `ff8fc80ab0dfc4cda10c6f525b2313c07125f482`
+returned `NOT_ACCEPTED / CORRECTION_REQUIRED`. This non-rewriting documentation
+child closes its three bounded findings and awaits exact independent re-audit.
+The older profile/foundation contract and runtime remain accepted through
+`28adb4deef034baf3ecc4207cee1482d21b3edcb`. Helper runtime, package, and local-VM
+results remain `NOT_QUALIFIED`; Docket composition remains a separate later
+gate. Classic NQ remains preserved but `SUPERSEDED_FOR_OPERATOR_BETA`. This
+contract authorizes no general NQ-ng authority switch or production cutover.
