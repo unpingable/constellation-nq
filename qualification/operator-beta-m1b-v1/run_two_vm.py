@@ -11,6 +11,7 @@ import os
 import pathlib
 import re
 import shutil
+import sqlite3
 import signal
 import socket
 import stat
@@ -41,6 +42,53 @@ PROFILE_DIGESTS = {
     "nq.systemd_unit": "sha256:85beec374d8c3a19dca3aafe892792237c7ed2a886a3ecbd6fce6245578c0d8d",
     "nq.http_endpoint": "sha256:d277728a076d75d8bf5a5294635905b74f6b15b7a9d7a5274ea42a888eb68fae",
 }
+QUESTION_DIGESTS = {
+    "nq.systemd_unit": "sha256:b3f34fc485a8d3db4e05282f5b1c0d11f96b439f538e2079bce2ca1242140b4c",
+    "nq.http_endpoint": "sha256:e35597a98cf37be6310766c783f7f9aeb22192e520a69916bec5b758f3a175d1",
+}
+REQUIRED_TERMINAL_PATHS = {
+    "RECOVERY.json",
+    "host.log",
+    "input/SHA512SUMS",
+    f"input/{IMAGE_NAME}",
+    "input/nq-ng_amd64.deb",
+    "input/agent-governor-ng-systemd-executor_amd64.deb",
+    "runtime/id_ed25519.pub",
+    "evidence/input-receipt.json",
+    "evidence/guest-identities.json",
+    "evidence/constellation-beta-http-fixture.service",
+    "evidence/healthz",
+    "evidence/service-subject.json",
+    "evidence/bindings.json",
+    "evidence/target-nq.toml",
+    "evidence/control-nq.toml",
+    "evidence/target-prestate.txt",
+    "evidence/controller-http-prestate.txt",
+    "evidence/systemd-pre-artifact.json",
+    "evidence/http-pre-artifact.json",
+    "evidence/systemd-plan-v2.json",
+    "evidence/docket-shaped-dispatch-v1.json",
+    "evidence/executor-outcome-v1.json",
+    "evidence/effect-occurrence.json",
+    "evidence/systemd-post-artifact.json",
+    "evidence/http-post-artifact.json",
+    "evidence/target-poststate.txt",
+    "evidence/control-package-continuity.txt",
+    "evidence/target-package-continuity.txt",
+    "evidence/control-boot-before.txt",
+    "evidence/control-boot-after.txt",
+    "evidence/target-boot-before.txt",
+    "evidence/target-boot-after.txt",
+    "evidence/systemd-restart-artifact.json",
+    "evidence/http-restart-artifact.json",
+    "evidence/current-support-after-restart.json",
+    "evidence/control-nq-backup.sqlite",
+    "evidence/target-nq-backup.sqlite",
+    "evidence/control-revocations.json",
+    "evidence/target-revocations.json",
+    "evidence/host-final-observation.json",
+}
+
 
 
 class Refusal(RuntimeError):
@@ -60,6 +108,17 @@ def canonical(value: Any) -> bytes:
 
 def sha256_bytes(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
+
+
+def ag_domain_digest(domain: str, value: bytes) -> str:
+    framed = (
+        b"ag-ng\0digest\0v1\0"
+        + len(domain.encode()).to_bytes(16, "big")
+        + domain.encode()
+        + len(value).to_bytes(16, "big")
+        + value
+    )
+    return sha256_bytes(framed)
 
 
 def digest_file(path: pathlib.Path, algorithm: str) -> str:
@@ -148,6 +207,18 @@ def run(
         raise Refusal(f"command {command[0]} exited {completed.returncode}: {diagnostic}")
     return completed
 
+def effect_outcome_state(outcome: str) -> str:
+    mapping = {
+        "success": "KNOWN_EFFECT_OWNER_SUCCESS",
+        "failure": "KNOWN_NO_EFFECT_OWNER_FAILURE",
+        "indeterminate": "OUTCOME_UNKNOWN_REQUIRES_AG_RECONCILE",
+    }
+    try:
+        return mapping[outcome]
+    except KeyError as error:
+        raise Refusal("AG owner emitted an unknown outcome class") from error
+
+
 def exact_physical_parent(path: pathlib.Path) -> pathlib.Path:
     if not path.is_absolute():
         raise Refusal("output must be an absolute path")
@@ -187,6 +258,35 @@ def process_has_token(token: str) -> bool:
         if any(argument == encoded or argument.startswith(encoded + b",") for argument in arguments):
             return True
     return False
+
+def process_start_ticks(pid: int) -> int:
+    try:
+        stat_fields = (pathlib.Path("/proc") / str(pid) / "stat").read_text().rsplit(")", 1)[1].split()
+        return int(stat_fields[19])
+    except (OSError, IndexError, ValueError) as error:
+        raise Refusal(f"process {pid} cannot be reopened: {error}") from error
+
+
+def process_identity(pid: int, token: str) -> int:
+    try:
+        arguments = (pathlib.Path("/proc") / str(pid) / "cmdline").read_bytes().split(b"\0")
+    except OSError as error:
+        raise Refusal(f"process {pid} cannot be reopened: {error}") from error
+    if not any(
+        argument == token.encode() or argument.startswith(token.encode() + b",")
+        for argument in arguments
+    ):
+        raise Refusal(f"process {pid} does not match exact token {token}")
+    return process_start_ticks(pid)
+
+
+def read_pid_file(path: pathlib.Path) -> int:
+    regular_file(path, "QEMU PID file")
+    text = path.read_text(encoding="ascii").strip()
+    if not re.fullmatch(r"[1-9][0-9]{0,9}", text):
+        raise Refusal("QEMU PID file is not one bounded process identity")
+    return int(text)
+
 
 def package_field(path: pathlib.Path, field: str) -> str:
     return run(["dpkg-deb", "-f", str(path), field]).stdout.decode().strip()
@@ -231,6 +331,7 @@ class Guest:
     fixture_address: str
     root: pathlib.Path
     process: subprocess.Popen[bytes] | None = None
+    start_ticks: int | None = None
 
     @property
     def name(self) -> str:
@@ -275,6 +376,8 @@ class Producer:
         self.run_id = args.run_id
         self.last_completed = "none"
         self.next_action = "preflight"
+        self.producer_start_ticks: int | None = None
+        self.effect_outcome = "NO_EFFECT_ATTEMPTED"
         self.guests: list[Guest] = []
         self.created = False
         self.input_facts: dict[str, Any] = {}
@@ -310,6 +413,7 @@ class Producer:
             raise Refusal("producer unit invocation differs from the current process")
         if properties.get("MainPID") != str(os.getpid()):
             raise Refusal("producer unit main PID differs from the current process")
+        self.producer_start_ticks = process_start_ticks(os.getpid())
 
     def state(self, phase: str, next_action: str, **facts: Any) -> None:
         self.next_action = next_action
@@ -332,11 +436,13 @@ class Producer:
             "phase": phase,
             "last_completed_phase": self.last_completed,
             "next_lawful_action": next_action,
+            "effect_outcome": self.effect_outcome,
             "updated_at": utc_now(),
             "producer": {
                 "systemd_unit": self.args.producer_unit,
                 "invocation_id": os.environ.get("INVOCATION_ID", "NOT_OBSERVABLE"),
                 "main_pid": os.getpid(),
+                "start_ticks": self.producer_start_ticks,
             },
             "expected_terminal_records": [
                 "RESULT.json + ARTIFACTS.sha256",
@@ -354,6 +460,8 @@ class Producer:
                     "ssh_port": guest.ssh_port,
                     "pid_file": str(guest.root / "qemu.pid"),
                     "serial_log": str(guest.root / "serial.log"),
+                    "pid": guest.process.pid if guest.process is not None else None,
+                    "start_ticks": guest.start_ticks,
                 }
                 for guest in self.guests
             ],
@@ -651,6 +759,16 @@ ethernets:
             start_new_session=True,
         )
         atomic_write(guest.root / "producer-pid", f"{guest.process.pid}\n".encode())
+        deadline = time.monotonic() + 10
+        pid_file = guest.root / "qemu.pid"
+        while not pid_file.exists() and time.monotonic() < deadline:
+            if guest.process.poll() is not None:
+                raise Refusal(f"{guest.name} exited before retaining its PID identity")
+            time.sleep(0.05)
+        pid = read_pid_file(pid_file)
+        if pid != guest.process.pid:
+            raise Refusal(f"{guest.name} PID file disagrees with the launched process")
+        guest.start_ticks = process_identity(pid, guest.name)
 
     def wait_ssh(self, guest: Guest, expected_up: bool, limit: int) -> None:
         deadline = time.monotonic() + limit
@@ -714,17 +832,18 @@ ethernets:
         nq_deb = self.output / "input" / "nq-ng_amd64.deb"
         ag_deb = self.output / "input" / "agent-governor-ng-systemd-executor_amd64.deb"
         self.scp_to(control, [nq_deb], "/home/betaoperator/nq-ng.deb")
-        self.scp_to(target, [nq_deb, ag_deb], "/home/betaoperator/")
+        self.scp_to(target, [nq_deb], "/home/betaoperator/nq-ng.deb")
+        self.scp_to(target, [ag_deb], "/home/betaoperator/")
         self.ssh(
             control,
-            "sha256sum /home/betaoperator/nq-ng.deb; "
+            f"printf '{NQ_DEB_SHA256}  /home/betaoperator/nq-ng.deb\n' | sha256sum -c -; "
             "sudo dpkg -i /home/betaoperator/nq-ng.deb; "
             "test \"$(systemctl is-active nqd.service || true)\" = inactive",
         )
         self.ssh(
             target,
-            "sha256sum /home/betaoperator/nq-ng.deb "
-            "/home/betaoperator/agent-governor-ng-systemd-executor_amd64.deb; "
+            f"printf '{NQ_DEB_SHA256}  /home/betaoperator/nq-ng.deb\n' | sha256sum -c -; "
+            f"printf '{AG_DEB_SHA256}  /home/betaoperator/agent-governor-ng-systemd-executor_amd64.deb\n' | sha256sum -c -; "
             "sudo dpkg -i /home/betaoperator/nq-ng.deb "
             "/home/betaoperator/agent-governor-ng-systemd-executor_amd64.deb; "
             "test \"$(systemctl is-active nqd.service || true)\" = inactive; "
@@ -1025,16 +1144,65 @@ helper_runtime_dir = "/run/nq/operator-beta-helpers"
             artifact = json.loads(result.stdout)
         except json.JSONDecodeError as error:
             raise Refusal(f"{instance} did not emit one JSON diagnostic artifact") from error
+        bindings = json.loads((self.output / "evidence" / "bindings.json").read_bytes())
+        family = "systemd" if expected_profile == "nq.systemd_unit" else "http"
+        policy = bindings[f"{family}_policy"]
+        expected_policy = {
+            "id": f"{expected_profile}.postcondition.threshold_policy",
+            "version": self.run_id,
+            "digest": sha256_bytes(canonical(policy)),
+        }
+        expected_question = {
+            "id": f"{expected_profile}.postcondition",
+            "version": "1",
+            "digest": QUESTION_DIGESTS[expected_profile],
+        }
         if artifact.get("schema") != "nq.diagnostic_execution.v2":
             raise Refusal(f"{instance} emitted an unexpected diagnostic schema")
-        if artifact.get("profile", {}).get("id") != expected_profile:
+        if artifact.get("profile") != {
+            "id": expected_profile,
+            "version": "1",
+            "digest": PROFILE_DIGESTS[expected_profile],
+        }:
             raise Refusal(f"{instance} emitted the wrong profile identity")
-        if artifact.get("threshold_policy", {}).get("version") != self.run_id:
+        if artifact.get("question") != expected_question:
+            raise Refusal(f"{instance} emitted the wrong compiled question identity")
+        if artifact.get("threshold_policy") != expected_policy:
             raise Refusal(f"{instance} emitted the wrong decision-cut policy identity")
+        if artifact.get("subject") != {
+            "id": bindings["subject_identity"],
+            "scope": policy["request_scope"],
+        }:
+            raise Refusal(f"{instance} emitted the wrong subject or scope identity")
+        vantage = artifact.get("vantage", {})
+        if (
+            not isinstance(vantage, dict)
+            or not vantage.get("id", "").endswith(f".{instance}")
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", vantage.get("digest", ""))
+        ):
+            raise Refusal(f"{instance} emitted the wrong concrete vantage identity")
+        preimage = dict(artifact)
+        observed_artifact_id = preimage.pop("artifact_id", None)
+        if observed_artifact_id != sha256_bytes(canonical(preimage)):
+            raise Refusal(f"{instance} emitted an invalid artifact self-identity")
+        try:
+            started = dt.datetime.fromisoformat(artifact["started_at"].replace("Z", "+00:00"))
+            completed = dt.datetime.fromisoformat(artifact["completed_at"].replace("Z", "+00:00"))
+        except (KeyError, TypeError, ValueError) as error:
+            raise Refusal(f"{instance} emitted invalid decision-cut times") from error
+        if completed < started or (completed - started).total_seconds() > 60:
+            raise Refusal(f"{instance} exceeded the admitted freshness interval")
         if artifact.get("outcome", {}).get("condition") != expected_condition:
             raise Refusal(f"{instance} emitted an unexpected warranted condition")
+        bindings = json.loads((self.output / "evidence" / "bindings.json").read_bytes())
+        verify_diagnostic_artifact(
+            artifact,
+            profile=expected_profile,
+            condition=expected_condition,
+            instance=instance,
+            bindings=bindings,
+        )
         return artifact
-
     def pre_effect(self, control: Guest, target: Guest) -> dict[str, Any]:
         target_state = self.ssh(
             target,
@@ -1112,6 +1280,14 @@ helper_runtime_dir = "/run/nq/operator-beta-helpers"
         dispatch_path = self.output / "evidence" / "docket-shaped-dispatch-v1.json"
         atomic_write(dispatch_path, canonical(dispatch) + b"\n", 0o400)
         self.scp_to(target, [dispatch_path], "/home/betaoperator/")
+        self.effect_outcome = "OUTCOME_UNKNOWN_REQUIRES_AG_RECONCILE"
+        self.state(
+            "effect_dispatch_prepared",
+            "invoke the exact AG attempt; reconcile the same attempt after ambiguous loss",
+            effect_attempt=attempt,
+            effect_marker=marker,
+            effect_work=work,
+        )
         result = self.ssh(
             target,
             "sudo /usr/libexec/agent-governor-ng/ag-effectd "
@@ -1120,8 +1296,10 @@ helper_runtime_dir = "/run/nq/operator-beta-helpers"
         )
         atomic_write(self.output / "evidence" / "executor-outcome-v1.json", result.stdout, 0o400)
         outcome = json.loads(result.stdout)
-        if outcome.get("outcome") != "success":
-            raise Refusal("fresh AG M1A occurrence did not return exact success")
+        outcome_class = outcome.get("outcome")
+        self.effect_outcome = effect_outcome_state(outcome_class)
+        if outcome_class != "success":
+            raise Refusal(f"fresh AG M1A occurrence returned {outcome_class}")
         record = {
             "schema": "constellation.operator_beta.m1b_effect_occurrence.v1",
             "run_id": self.run_id,
@@ -1216,14 +1394,14 @@ helper_runtime_dir = "/run/nq/operator-beta-helpers"
             "systemd-restart",
             "systemd-restart-artifact.json",
             "nq.systemd_unit",
-            "explicitly_absent",
+            "present",
         )
         http = self.execute_diagnostic(
             control,
             "http-restart",
             "http-restart-artifact.json",
             "nq.http_endpoint",
-            "explicitly_absent",
+            "unresolved",
         )
         atomic_write(
             self.output / "evidence" / "current-support-after-restart.json",
@@ -1232,7 +1410,9 @@ helper_runtime_dir = "/run/nq/operator-beta-helpers"
                     "schema": "constellation.operator_beta.current_support.v1",
                     "historical_effect": "AG_OWNER_RECEIPT_RETAINED",
                     "systemd_artifact": systemd["artifact_id"],
+                    "systemd_current_condition": "present",
                     "http_artifact": http["artifact_id"],
+                    "http_current_condition": "unresolved",
                     "aggregate_postcondition": "NOT_RECORDED",
                 }
             )
@@ -1245,13 +1425,29 @@ helper_runtime_dir = "/run/nq/operator-beta-helpers"
             (control, ("http-pre", "http-post", "http-restart")),
             (target, ("systemd-pre", "systemd-post", "systemd-restart")),
         ):
+            revocations = []
             for instance in instances:
-                self.ssh(
+                result = self.ssh(
                     guest,
                     "sudo -u nq /usr/bin/nq --config /etc/nq/operator-beta.toml "
                     f"watcher revoke {instance}",
-                    check=False,
                 )
+                revocations.append({
+                    "instance_id": instance,
+                    "stdout_sha256": sha256_bytes(result.stdout),
+                    "stderr_sha256": sha256_bytes(result.stderr),
+                })
+            atomic_write(
+                self.output / "evidence" / f"{guest.role}-revocations.json",
+                canonical({
+                    "schema": "constellation.operator_beta.m1b_revocations.v1",
+                    "run_id": self.run_id,
+                    "role": guest.role,
+                    "disposition": "REVOKED",
+                    "instances": revocations,
+                }) + b"\n",
+                0o400,
+            )
             self.ssh(
                 guest,
                 "sudo -u nq /usr/bin/nq --config /etc/nq/operator-beta.toml "
@@ -1436,16 +1632,378 @@ helper_runtime_dir = "/run/nq/operator-beta-helpers"
                     "occurred_at": utc_now(),
                     "phase": self.last_completed,
                     "reason": str(error)[:4096],
-                    "effect_outcome": (
-                        "OUTCOME_UNKNOWN_REQUIRES_EVIDENCE_REOPEN"
-                        if self.last_completed == "pre_effect_recorded"
-                        else "NO_NEW_CLAIM"
-                    ),
+                    "effect_outcome": self.effect_outcome,
                 }
                 atomic_write(self.output / "REFUSAL.json", canonical(refusal) + b"\n")
                 self.state("refused", "reopen evidence; do not restart producer", refusal=refusal)
-            self.terminate_guests()
+            if self.effect_outcome in {
+                "NO_EFFECT_ATTEMPTED",
+                "KNOWN_NO_EFFECT_OWNER_FAILURE",
+            }:
+                self.terminate_guests()
             raise
+
+
+def load_recovery(path: pathlib.Path) -> dict[str, Any]:
+    if path.resolve(strict=True) != path or not path.is_dir() or path.is_symlink():
+        raise Refusal("run path is not one exact physical directory")
+    recovery_path = path / "RECOVERY.json"
+    regular_file(recovery_path, "recovery record")
+    raw = recovery_path.read_bytes()
+    try:
+        recovery = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise Refusal("recovery record is not JSON") from error
+    if raw != canonical(recovery) + b"\n":
+        raise Refusal("recovery record is not canonical JSON")
+    if (
+        not isinstance(recovery, dict)
+        or recovery.get("schema") != "constellation.operator_beta.m1b_recovery.v1"
+        or recovery.get("campaign") != CAMPAIGN
+        or recovery.get("paths", {}).get("run_root") != str(path)
+        or not isinstance(recovery.get("guests"), list)
+    ):
+        raise Refusal("recovery record does not bind this exact run")
+    return recovery
+
+
+def inspect_run(path: pathlib.Path) -> dict[str, Any]:
+    recovery = load_recovery(path)
+    guest_states = []
+    for guest in recovery["guests"]:
+        role = guest.get("role")
+        pid = guest.get("pid")
+        start_ticks = guest.get("start_ticks")
+        token = f"constellation-beta-{role}-m1b"
+        if not isinstance(pid, int) or not isinstance(start_ticks, int):
+            state = "NOT_RECORDED"
+        else:
+            try:
+                observed_ticks = process_identity(pid, token)
+            except Refusal:
+                state = "EXITED"
+            else:
+                state = "ACTIVE" if observed_ticks == start_ticks else "DISAGREEMENT"
+        guest_states.append({"role": role, "pid": pid, "state": state})
+    producer = recovery.get("producer", {})
+    producer_pid = producer.get("main_pid")
+    producer_ticks = producer.get("start_ticks")
+    try:
+        arguments = (pathlib.Path("/proc") / str(producer_pid) / "cmdline").read_bytes()
+        observed_ticks = process_start_ticks(producer_pid)
+    except Refusal:
+        producer_state = "EXITED"
+    except OSError:
+        producer_state = "EXITED"
+    else:
+        if not isinstance(producer_ticks, int):
+            producer_state = "NOT_RECORDED"
+        elif b"run_two_vm.py" not in arguments or observed_ticks != producer_ticks:
+            producer_state = "DISAGREEMENT"
+        else:
+            producer_state = "ACTIVE"
+    result = {
+        "schema": "constellation.operator_beta.m1b_inspection.v1",
+        "campaign": CAMPAIGN,
+        "run_id": recovery.get("run_id"),
+        "phase": recovery.get("phase"),
+        "effect_outcome": recovery.get("effect_outcome", "NOT_RECORDED"),
+        "producer_state": producer_state,
+        "guests": guest_states,
+        "next_lawful_action": recovery.get("next_lawful_action"),
+    }
+    print(json.dumps(result, sort_keys=True))
+    return result
+
+
+def reconcile_effect(path: pathlib.Path) -> None:
+    recovery = load_recovery(path)
+    if recovery.get("effect_outcome") != "OUTCOME_UNKNOWN_REQUIRES_AG_RECONCILE":
+        raise Refusal("effect reconciliation is allowed only for the retained unknown outcome")
+    inspection = inspect_run(path)
+    if inspection["producer_state"] == "ACTIVE":
+        raise Refusal("original producer remains active; do not race its effect custody")
+    target = next((guest for guest in recovery["guests"] if guest.get("role") == "target"), None)
+    target_state = next((guest for guest in inspection["guests"] if guest.get("role") == "target"), None)
+    if target is None or target_state is None or target_state.get("state") != "ACTIVE":
+        raise Refusal("exact target guest is not active; outcome remains unknown")
+    plan = path / "evidence" / "systemd-plan-v2.json"
+    dispatch = path / "evidence" / "docket-shaped-dispatch-v1.json"
+    key = path / "runtime" / "id_ed25519"
+    known_hosts = path / "target" / "known_hosts"
+    for artifact, label in (
+        (plan, "retained AG plan"),
+        (dispatch, "retained dispatch"),
+        (key, "retained SSH key"),
+        (known_hosts, "retained target host key"),
+    ):
+        regular_file(artifact, label)
+    port = target.get("ssh_port")
+    if not isinstance(port, int):
+        raise Refusal("target SSH port is not retained")
+    ssh = [
+        "ssh", "-i", str(key), "-p", str(port), "-o", "IdentitiesOnly=yes",
+        "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={known_hosts}",
+        "betaoperator@127.0.0.1",
+    ]
+    remote_check = (
+        f"test $(sudo sha256sum /var/lib/ag-effectd-m1b/input/plan.json | cut -d\x27 \x27 -f1) = {digest_file(plan, 'sha256')}; "
+        f"test $(sha256sum /home/betaoperator/docket-shaped-dispatch-v1.json | cut -d\x27 \x27 -f1) = {digest_file(dispatch, 'sha256')}"
+    )
+    run(ssh + [remote_check])
+    completed = run(
+        ssh
+        + [
+            "sudo /usr/libexec/agent-governor-ng/ag-effectd reconcile "
+            "/var/lib/ag-effectd-m1b/input/plan.json "
+            "< /home/betaoperator/docket-shaped-dispatch-v1.json"
+        ]
+    )
+    try:
+        outcome = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise Refusal("AG reconcile did not emit one JSON outcome") from error
+    outcome_class = outcome.get("outcome")
+    reconciled_state = effect_outcome_state(outcome_class)
+    evidence_path = path / "evidence" / "reconciliation-outcome-v1.json"
+    if evidence_path.exists():
+        if evidence_path.read_bytes() != completed.stdout:
+            raise Refusal("retained reconciliation outcome disagrees")
+    else:
+        atomic_write(evidence_path, completed.stdout, 0o400)
+    recovery["effect_outcome"] = reconciled_state
+    recovery["phase"] = "effect_reconciled"
+    recovery["next_lawful_action"] = (
+        "inspect retained state; do not resume automatically"
+        if outcome_class != "indeterminate"
+        else "outcome remains unknown; preserve guest and owner evidence"
+    )
+    recovery["updated_at"] = utc_now()
+    recovery["reconciliation_evidence"] = str(evidence_path)
+    atomic_write(path / "RECOVERY.json", canonical(recovery) + b"\n")
+    print(json.dumps({"result": "EFFECT_RECONCILED", "outcome": outcome_class}, sort_keys=True))
+
+
+def load_json_artifact(path: pathlib.Path, label: str) -> dict[str, Any]:
+    regular_file(path, label)
+    raw = path.read_bytes()
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise Refusal(f"{label} is not JSON") from error
+    if not isinstance(value, dict):
+        raise Refusal(f"{label} is not one object")
+    if raw not in {canonical(value), canonical(value) + b"\n"}:
+        raise Refusal(f"{label} is not canonical JSON")
+    return value
+
+
+def verify_diagnostic_artifact(
+    artifact: dict[str, Any],
+    *,
+    profile: str,
+    condition: str,
+    instance: str,
+    bindings: dict[str, Any],
+) -> None:
+    family = "systemd" if profile == "nq.systemd_unit" else "http"
+    policy = bindings[f"{family}_policy"]
+    expected_policy = {
+        "id": f"{profile}.postcondition.threshold_policy",
+        "version": bindings["run_id"],
+        "digest": sha256_bytes(canonical(policy)),
+    }
+    if artifact.get("schema") != "nq.diagnostic_execution.v2":
+        raise Refusal(f"{instance} has the wrong artifact schema")
+    if artifact.get("profile") != {
+        "id": profile,
+        "version": "1",
+        "digest": PROFILE_DIGESTS[profile],
+    }:
+        raise Refusal(f"{instance} has the wrong profile identity")
+    if artifact.get("question") != {
+        "id": f"{profile}.postcondition",
+        "version": "1",
+        "digest": QUESTION_DIGESTS[profile],
+    }:
+        raise Refusal(f"{instance} has the wrong question identity")
+    if artifact.get("threshold_policy") != expected_policy:
+        raise Refusal(f"{instance} has the wrong historical policy identity")
+    if artifact.get("subject") != {
+        "id": bindings["subject_identity"],
+        "scope": policy["request_scope"],
+    }:
+        raise Refusal(f"{instance} has the wrong subject or scope")
+    vantage = artifact.get("vantage", {})
+    if (
+        not isinstance(vantage, dict)
+        or not vantage.get("id", "").endswith(f".{instance}")
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", vantage.get("digest", ""))
+    ):
+        raise Refusal(f"{instance} has the wrong vantage identity")
+    preimage = dict(artifact)
+    observed_id = preimage.pop("artifact_id", None)
+    if observed_id != sha256_bytes(canonical(preimage)):
+        raise Refusal(f"{instance} has an invalid artifact self-identity")
+    try:
+        started = dt.datetime.fromisoformat(artifact["started_at"].replace("Z", "+00:00"))
+        completed = dt.datetime.fromisoformat(artifact["completed_at"].replace("Z", "+00:00"))
+    except (KeyError, TypeError, ValueError) as error:
+        raise Refusal(f"{instance} has invalid decision-cut times") from error
+    if completed < started or (completed - started).total_seconds() > 60:
+        raise Refusal(f"{instance} exceeded the admitted freshness interval")
+    if artifact.get("outcome", {}).get("condition") != condition:
+        raise Refusal(f"{instance} has the wrong warranted condition")
+
+
+def verify_terminal_evidence(path: pathlib.Path, result: dict[str, Any], inventory: set[str]) -> None:
+    missing = sorted(REQUIRED_TERMINAL_PATHS - inventory)
+    if missing:
+        raise Refusal(f"terminal evidence inventory is incomplete: {missing[0]}")
+    run_id = result.get("run_id")
+    input_receipt = load_json_artifact(path / "evidence" / "input-receipt.json", "input receipt")
+    identities = load_json_artifact(path / "evidence" / "guest-identities.json", "guest identities")
+    service_subject = load_json_artifact(path / "evidence" / "service-subject.json", "service subject")
+    bindings = load_json_artifact(path / "evidence" / "bindings.json", "bindings")
+    if any(record.get("run_id") != run_id for record in (input_receipt, identities, bindings)):
+        raise Refusal("terminal evidence names another run occurrence")
+    if input_receipt.get("harness_subject") != result.get("harness_subject"):
+        raise Refusal("input receipt names another harness subject")
+    if input_receipt.get("nq_package_sha256") != NQ_DEB_SHA256 or input_receipt.get("ag_package_sha256") != AG_DEB_SHA256:
+        raise Refusal("input receipt names different package bytes")
+    if bindings.get("service_subject") != service_subject:
+        raise Refusal("bindings disagree with retained service-subject bytes")
+    subject_identity = ag_domain_digest(
+        "constellation/operator-beta/service-subject/v1", canonical(service_subject)
+    )
+    if bindings.get("subject_identity") != subject_identity:
+        raise Refusal("service-subject identity does not recompute")
+    if (
+        service_subject.get("fixture_run_id") != run_id
+        or service_subject.get("target_machine_identity") != identities.get("target_machine_identity")
+        or service_subject.get("unit_name") != UNIT
+        or service_subject.get("unit_file_sha256") != identities.get("unit_file_sha256")
+    ):
+        raise Refusal("service subject does not bind the exact fixture occurrence")
+    for family, profile in (("systemd", "nq.systemd_unit"), ("http", "nq.http_endpoint")):
+        scope = bindings.get(f"{family}_scope")
+        policy = bindings.get(f"{family}_policy")
+        if not isinstance(scope, dict) or not isinstance(policy, dict):
+            raise Refusal(f"{family} scope or policy is absent")
+        expected_scope = {
+            "id": f"nq.scope.{scope.get('kind')}",
+            "version": "1",
+            "digest": sha256_bytes(canonical({
+                "schema": "nq.diagnostic_scope.v1",
+                "subject": subject_identity,
+                "scope": scope,
+                "profile": {"id": profile, "version": "1", "digest": PROFILE_DIGESTS[profile]},
+            })),
+        }
+        if policy.get("request_scope") != expected_scope or policy.get("subject_identity") != subject_identity:
+            raise Refusal(f"{family} policy does not bind its exact subject and scope")
+    artifact_cases = (
+        ("systemd-pre-artifact.json", "nq.systemd_unit", "present", "systemd-pre"),
+        ("http-pre-artifact.json", "nq.http_endpoint", "unresolved", "http-pre"),
+        ("systemd-post-artifact.json", "nq.systemd_unit", "explicitly_absent", "systemd-post"),
+        ("http-post-artifact.json", "nq.http_endpoint", "explicitly_absent", "http-post"),
+        ("systemd-restart-artifact.json", "nq.systemd_unit", "present", "systemd-restart"),
+        ("http-restart-artifact.json", "nq.http_endpoint", "unresolved", "http-restart"),
+    )
+    observed_artifacts = {}
+    for name, profile, condition, instance in artifact_cases:
+        artifact = load_json_artifact(path / "evidence" / name, name)
+        observed_artifacts[name] = artifact
+        verify_diagnostic_artifact(
+            artifact,
+            profile=profile,
+            condition=condition,
+            instance=instance,
+            bindings=bindings,
+        )
+    plan = load_json_artifact(path / "evidence" / "systemd-plan-v2.json", "AG plan")
+    dispatch = load_json_artifact(path / "evidence" / "docket-shaped-dispatch-v1.json", "dispatch")
+    outcome = load_json_artifact(path / "evidence" / "executor-outcome-v1.json", "AG outcome")
+    occurrence = load_json_artifact(path / "evidence" / "effect-occurrence.json", "effect occurrence")
+    work = ag_domain_digest("ag-effectd.docket-executor-systemd-plan/v2", canonical(plan))
+    expected_attempt = sha256_bytes((run_id + "\0attempt\0" + work).encode())
+    expected_marker = sha256_bytes((run_id + "\0marker\0" + work).encode())
+    if (
+        plan.get("schema") != "ag-effectd.docket-executor-systemd-plan/v2"
+        or plan.get("subject") != subject_identity
+        or plan.get("systemd_machine_identity") != identities.get("target_machine_identity")
+        or dispatch.get("subject") != subject_identity
+        or dispatch.get("scope") != plan.get("scope")
+        or dispatch.get("work") != work
+        or dispatch.get("attempt") != expected_attempt
+        or dispatch.get("marker") != expected_marker
+        or dispatch.get("work_schema") != "ag-effectd.docket-executor-systemd-work/v2"
+        or outcome.get("attempt") != expected_attempt
+        or outcome.get("marker") != expected_marker
+        or occurrence.get("run_id") != run_id
+        or occurrence.get("owner") != "AG-ng M1A adapter"
+        or occurrence.get("docket_database_occurrence") != "NOT_RECORDED"
+        or occurrence.get("authorization_consumption") != "NOT_RECORDED"
+        or occurrence.get("plan") != plan
+        or occurrence.get("dispatch") != dispatch
+        or occurrence.get("outcome") != outcome
+    ):
+        raise Refusal("AG plan, dispatch, outcome, or occurrence binding disagrees")
+    if outcome.get("outcome") != "success":
+        raise Refusal("terminal golden evidence does not retain AG owner success")
+    current = load_json_artifact(
+        path / "evidence" / "current-support-after-restart.json", "current support"
+    )
+    if (
+        current.get("historical_effect") != "AG_OWNER_RECEIPT_RETAINED"
+        or current.get("systemd_artifact")
+        != observed_artifacts["systemd-restart-artifact.json"].get("artifact_id")
+        or current.get("http_artifact")
+        != observed_artifacts["http-restart-artifact.json"].get("artifact_id")
+        or current.get("systemd_current_condition") != "present"
+        or current.get("http_current_condition") != "unresolved"
+        or current.get("aggregate_postcondition") != "NOT_RECORDED"
+    ):
+        raise Refusal("current-support record collapses historical effect or restart evidence")
+    recovery = load_recovery(path)
+    if recovery.get("run_id") != run_id or recovery.get("effect_outcome") != "KNOWN_EFFECT_OWNER_SUCCESS":
+        raise Refusal("terminal recovery record disagrees with exact effect custody")
+    for role in ("control", "target"):
+        revocations = load_json_artifact(
+            path / "evidence" / f"{role}-revocations.json", f"{role} revocations"
+        )
+        expected_instances = [f"{prefix}-{suffix}" for prefix in (("http",) if role == "control" else ("systemd",)) for suffix in ("pre", "post", "restart")]
+        if (
+            revocations.get("schema") != "constellation.operator_beta.m1b_revocations.v1"
+            or revocations.get("run_id") != run_id
+            or revocations.get("role") != role
+            or revocations.get("disposition") != "REVOKED"
+            or [item.get("instance_id") for item in revocations.get("instances", [])]
+            != expected_instances
+        ):
+            raise Refusal(f"{role} watcher revocation evidence disagrees")
+        continuity = (path / "evidence" / f"{role}-package-continuity.txt").read_text()
+        if not re.search(r"store_sha256=[0-9a-f]{64}", continuity):
+            raise Refusal(f"{role} package continuity evidence is incomplete")
+        before = (path / "evidence" / f"{role}-boot-before.txt").read_bytes()
+        after = (path / "evidence" / f"{role}-boot-after.txt").read_bytes()
+        if not before.strip() or not after.strip() or before == after:
+            raise Refusal(f"{role} restart identity did not change")
+        backup = path / "evidence" / f"{role}-nq-backup.sqlite"
+        try:
+            connection = sqlite3.connect(f"file:{backup}?mode=ro&immutable=1", uri=True)
+            integrity = connection.execute("PRAGMA integrity_check").fetchone()
+            connection.close()
+        except sqlite3.Error as error:
+            raise Refusal(f"{role} NQ backup cannot reopen: {error}") from error
+        if integrity != ("ok",):
+            raise Refusal(f"{role} NQ backup fails integrity_check")
+    final_host = load_json_artifact(
+        path / "evidence" / "host-final-observation.json", "host teardown observation"
+    )
+    absent_fields = [value for key, value in final_host.items() if key.endswith("_absent")]
+    if not absent_fields or not all(value is True for value in absent_fields):
+        raise Refusal("host teardown observation does not establish bounded absence")
 
 
 def check_run(path: pathlib.Path) -> None:
@@ -1455,8 +2013,12 @@ def check_run(path: pathlib.Path) -> None:
     result_path = path / "RESULT.json"
     regular_file(manifest_path, "artifact manifest")
     regular_file(result_path, "result")
-    manifest = json.loads(manifest_path.read_bytes())
-    result = json.loads(result_path.read_bytes())
+    manifest_raw = manifest_path.read_bytes()
+    result_raw = result_path.read_bytes()
+    manifest = json.loads(manifest_raw)
+    result = json.loads(result_raw)
+    if manifest_raw != canonical(manifest) + b"\n" or result_raw != canonical(result) + b"\n":
+        raise Refusal("manifest or result is not canonical JSON")
     if set(manifest) != {"schema", "files"}:
         raise Refusal("artifact manifest root is not closed")
     if manifest.get("schema") != "constellation.operator_beta.m1b_artifact_manifest.v1":
@@ -1522,6 +2084,7 @@ def check_run(path: pathlib.Path) -> None:
         raise Refusal("result does not bind the exact artifact manifest")
     if result.get("disposition") != "MECHANISM_CASES_COMPLETED_WITH_DECLARED_LIMITATIONS":
         raise Refusal("run has no admitted terminal disposition")
+    verify_terminal_evidence(path, result, expected)
     print(json.dumps({"result": "RUN_REOPENED", "run_id": result.get("run_id")}, sort_keys=True))
 
 def parser() -> argparse.ArgumentParser:
@@ -1542,6 +2105,10 @@ def parser() -> argparse.ArgumentParser:
     execute.add_argument("--preflight-only", action="store_true")
     check = sub.add_parser("check-run")
     check.add_argument("path", type=pathlib.Path)
+    inspect = sub.add_parser("inspect-run")
+    inspect.add_argument("path", type=pathlib.Path)
+    reconcile = sub.add_parser("reconcile-effect")
+    reconcile.add_argument("path", type=pathlib.Path)
     return root
 
 
@@ -1550,6 +2117,10 @@ def main() -> int:
     try:
         if args.command == "check-run":
             check_run(args.path)
+        elif args.command == "inspect-run":
+            inspect_run(args.path)
+        elif args.command == "reconcile-effect":
+            reconcile_effect(args.path)
         else:
             Producer(args).execute()
     except Refusal as error:

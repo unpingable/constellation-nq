@@ -16,13 +16,18 @@ python3 "$runner" --help >/dev/null
 required=(
   'UPSTREAM_DETACHED_SIGNATURE_NOT_PUBLISHED'
   'MECHANISM_CASES_COMPLETED_WITH_DECLARED_LIMITATIONS'
-  'OUTCOME_UNKNOWN_REQUIRES_EVIDENCE_REOPEN'
+  'OUTCOME_UNKNOWN_REQUIRES_AG_RECONCILE'
   'gwr.executor-transport/v1-shaped testimony only'
   'signed_upstream_checksum": "NOT_QUALIFIED"'
   'docket_database_occurrence": "NOT_RUN"'
   'authorization_consumption": "NOT_RUN"'
   'production": "NOT_RUN"'
   'self.verify_producer()'
+  'inspect-run'
+  'reconcile-effect'
+  'REQUIRED_TERMINAL_PATHS'
+  'systemd_current_condition'
+  'http_current_condition'
   'self.check_runtime()'
 )
 if [[ ${NQ_M1B_INJECT_BOUNDARY_FAILURE:-0} == 1 ]]; then

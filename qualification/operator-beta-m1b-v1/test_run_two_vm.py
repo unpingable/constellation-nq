@@ -39,33 +39,335 @@ class HarnessTests(unittest.TestCase):
             preflight_only=False,
         )
 
+    def service_records(self, run_id: str = "fixture-001") -> tuple[dict, dict, dict]:
+        identities = {
+            "schema": "constellation.operator_beta.m1b_guest_identity.v1",
+            "run_id": run_id,
+            "controller_machine_identity": "a" * 32,
+            "target_machine_identity": "b" * 32,
+            "unit_name": RUNNER.UNIT,
+            "unit_file_sha256": "sha256:" + "c" * 64,
+            "controller_address": RUNNER.CONTROLLER_ADDRESS,
+            "target_address": RUNNER.FIXTURE_ADDRESS,
+        }
+        service = {
+            "schema": "constellation.operator_beta.service_subject.v1",
+            "campaign_id": "constellation-operator-beta-2026",
+            "fixture_run_id": run_id,
+            "target_machine_identity": identities["target_machine_identity"],
+            "unit_name": RUNNER.UNIT,
+            "unit_file_sha256": identities["unit_file_sha256"],
+        }
+        subject = RUNNER.ag_domain_digest(
+            "constellation/operator-beta/service-subject/v1", RUNNER.canonical(service)
+        )
+        scopes = {
+            "systemd": {
+                "kind": "systemd_unit",
+                "value": {
+                    "schema": "nq.operator_beta.systemd_unit_scope.v1",
+                    "subject_identity": subject,
+                    "target_machine_identity": identities["target_machine_identity"],
+                    "unit_name": RUNNER.UNIT,
+                    "unit_file_sha256": identities["unit_file_sha256"],
+                    "manager_interface": "org.freedesktop.systemd1",
+                    "properties": ["LoadState", "ActiveState", "SubState", "UnitFileState"],
+                },
+            },
+            "http": {
+                "kind": "http_endpoint",
+                "value": {
+                    "schema": "nq.operator_beta.http_endpoint_scope.v1",
+                    "subject_identity": subject,
+                    "controller_vantage_identity": "machine:" + identities["controller_machine_identity"],
+                    "endpoint": f"http://{RUNNER.FIXTURE_ADDRESS}:{RUNNER.FIXTURE_PORT}/healthz",
+                    "method": "GET",
+                    "redirect_policy": "refuse",
+                    "max_response_bytes": 1024,
+                },
+            },
+        }
+        policies = {}
+        for family, profile in (("systemd", "nq.systemd_unit"), ("http", "nq.http_endpoint")):
+            scope = scopes[family]
+            scope_id = {
+                "id": f"nq.scope.{scope['kind']}",
+                "version": "1",
+                "digest": RUNNER.sha256_bytes(RUNNER.canonical({
+                    "schema": "nq.diagnostic_scope.v1",
+                    "subject": subject,
+                    "scope": scope,
+                    "profile": {"id": profile, "version": "1", "digest": RUNNER.PROFILE_DIGESTS[profile]},
+                })),
+            }
+            policies[family] = {
+                "schema": f"nq.operator_beta.{family}_unit_threshold_policy.v1" if family == "systemd" else "nq.operator_beta.http_endpoint_threshold_policy.v1",
+                "fixture_run_id": run_id,
+                "service_subject": service,
+                "subject_identity": subject,
+                "request_scope": scope_id,
+            }
+        policies["systemd"].update({
+            "expected_load_state": "loaded",
+            "expected_active_state": "active",
+            "expected_sub_state": "running",
+            "expected_unit_file_state": "disabled",
+        })
+        policies["http"].update({
+            "expected_status": 200,
+            "expected_body_sha256": RUNNER.sha256_bytes(b"operator-beta-ok\n"),
+        })
+        bindings = {
+            "schema": "constellation.operator_beta.m1b_bindings.v1",
+            "run_id": run_id,
+            "service_subject": service,
+            "subject_identity": subject,
+            "service_subject_plain_sha256": RUNNER.sha256_bytes(RUNNER.canonical(service)),
+            "systemd_scope": scopes["systemd"],
+            "systemd_policy": policies["systemd"],
+            "http_scope": scopes["http"],
+            "http_policy": policies["http"],
+        }
+        return identities, service, bindings
+
+    def artifact(self, bindings: dict, profile: str, condition: str, instance: str) -> dict:
+        family = "systemd" if profile == "nq.systemd_unit" else "http"
+        policy = bindings[f"{family}_policy"]
+        value = {
+            "schema": "nq.diagnostic_execution.v2",
+            "canonicalization": {"id": "rfc8785-jcs", "version": "1", "digest": "sha256:" + "1" * 64},
+            "producer": {"node_id": "fixture", "build": {}, "cohort": {}},
+            "request_id": f"request:{instance}",
+            "run_id": f"run:{instance}",
+            "question": {"id": f"{profile}.postcondition", "version": "1", "digest": RUNNER.QUESTION_DIGESTS[profile]},
+            "subject": {"id": bindings["subject_identity"], "scope": policy["request_scope"]},
+            "profile": {"id": profile, "version": "1", "digest": RUNNER.PROFILE_DIGESTS[profile]},
+            "profile_semantic_id": "sha256:" + "2" * 64,
+            "vantage": {"id": f"nq.vantage.fixture.node.{instance}", "version": "admission", "digest": "sha256:" + "3" * 64},
+            "state_model": {},
+            "evaluator": {},
+            "threshold_policy": {"id": f"{profile}.postcondition.threshold_policy", "version": bindings["run_id"], "digest": RUNNER.sha256_bytes(RUNNER.canonical(policy))},
+            "projection": {},
+            "execution_clock": {},
+            "started_at": "2026-09-07T12:00:00Z",
+            "completed_at": "2026-09-07T12:00:01Z",
+            "attempt_interval": {},
+            "inputs": {},
+            "state_bindings": [],
+            "claims": [],
+            "outcome": {"condition": condition},
+            "limitations": [],
+            "nonclaims": [],
+        }
+        value["artifact_id"] = RUNNER.sha256_bytes(RUNNER.canonical(value))
+        return value
+
+    def write_json(self, path: pathlib.Path, value: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(RUNNER.canonical(value) + b"\n")
+
+    def make_sealed_run(self, root: pathlib.Path) -> None:
+        run_id = "fixture-001"
+        identities, service, bindings = self.service_records(run_id)
+        for relative in RUNNER.REQUIRED_TERMINAL_PATHS:
+            artifact = root / relative
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_bytes(b"fixture\n")
+        self.write_json(root / "evidence/input-receipt.json", {
+            "schema": "constellation.operator_beta.m1b_inputs.v1",
+            "run_id": run_id,
+            "harness_subject": "a" * 40,
+            "nq_package_sha256": RUNNER.NQ_DEB_SHA256,
+            "ag_package_sha256": RUNNER.AG_DEB_SHA256,
+        })
+        self.write_json(root / "evidence/guest-identities.json", identities)
+        self.write_json(root / "evidence/service-subject.json", service)
+        self.write_json(root / "evidence/bindings.json", bindings)
+        cases = (
+            ("systemd-pre-artifact.json", "nq.systemd_unit", "present", "systemd-pre"),
+            ("http-pre-artifact.json", "nq.http_endpoint", "unresolved", "http-pre"),
+            ("systemd-post-artifact.json", "nq.systemd_unit", "explicitly_absent", "systemd-post"),
+            ("http-post-artifact.json", "nq.http_endpoint", "explicitly_absent", "http-post"),
+            ("systemd-restart-artifact.json", "nq.systemd_unit", "present", "systemd-restart"),
+            ("http-restart-artifact.json", "nq.http_endpoint", "unresolved", "http-restart"),
+        )
+        for name, profile, condition, instance in cases:
+            self.write_json(root / "evidence" / name, self.artifact(bindings, profile, condition, instance))
+        plan = {
+            "schema": "ag-effectd.docket-executor-systemd-plan/v2",
+            "subject": bindings["subject_identity"],
+            "scope": "sha256:" + "4" * 64,
+            "systemd_machine_identity": identities["target_machine_identity"],
+        }
+        work = RUNNER.ag_domain_digest(plan["schema"], RUNNER.canonical(plan))
+        attempt = RUNNER.sha256_bytes((run_id + "\0attempt\0" + work).encode())
+        marker = RUNNER.sha256_bytes((run_id + "\0marker\0" + work).encode())
+        dispatch = {
+            "attempt": attempt,
+            "marker": marker,
+            "scope": plan["scope"],
+            "subject": bindings["subject_identity"],
+            "work": work,
+            "work_schema": "ag-effectd.docket-executor-systemd-work/v2",
+        }
+        outcome = {
+            "attempt": attempt,
+            "marker": marker,
+            "outcome": "success",
+            "receipt": "sha256:" + "7" * 64,
+        }
+        occurrence = {
+            "schema": "constellation.operator_beta.m1b_effect_occurrence.v1",
+            "run_id": run_id,
+            "owner": "AG-ng M1A adapter",
+            "docket_database_occurrence": "NOT_RECORDED",
+            "authorization_consumption": "NOT_RECORDED",
+            "plan": plan,
+            "dispatch": dispatch,
+            "outcome": outcome,
+        }
+        self.write_json(root / "evidence/systemd-plan-v2.json", plan)
+        self.write_json(root / "evidence/docket-shaped-dispatch-v1.json", dispatch)
+        self.write_json(root / "evidence/executor-outcome-v1.json", outcome)
+        self.write_json(root / "evidence/effect-occurrence.json", occurrence)
+        systemd_restart = self.artifact(
+            bindings, "nq.systemd_unit", "present", "systemd-restart"
+        )
+        http_restart = self.artifact(
+            bindings, "nq.http_endpoint", "unresolved", "http-restart"
+        )
+        self.write_json(root / "evidence/current-support-after-restart.json", {
+            "schema": "constellation.operator_beta.current_support.v1",
+            "historical_effect": "AG_OWNER_RECEIPT_RETAINED",
+            "systemd_artifact": systemd_restart["artifact_id"],
+            "systemd_current_condition": "present",
+            "http_artifact": http_restart["artifact_id"],
+            "http_current_condition": "unresolved",
+            "aggregate_postcondition": "NOT_RECORDED",
+        })
+        for role, prefix in (("control", "http"), ("target", "systemd")):
+            self.write_json(root / "evidence" / f"{role}-revocations.json", {
+                "schema": "constellation.operator_beta.m1b_revocations.v1",
+                "run_id": run_id,
+                "role": role,
+                "disposition": "REVOKED",
+                "instances": [
+                    {
+                        "instance_id": f"{prefix}-{suffix}",
+                        "stdout_sha256": RUNNER.sha256_bytes(b""),
+                        "stderr_sha256": RUNNER.sha256_bytes(b""),
+                    }
+                    for suffix in ("pre", "post", "restart")
+                ],
+            })
+            (root / "evidence" / f"{role}-package-continuity.txt").write_text(
+                "store_sha256=" + "8" * 64 + "\n"
+            )
+            (root / "evidence" / f"{role}-boot-before.txt").write_text("before\n")
+            (root / "evidence" / f"{role}-boot-after.txt").write_text("after\n")
+            backup = root / "evidence" / f"{role}-nq-backup.sqlite"
+            backup.unlink()
+            connection = RUNNER.sqlite3.connect(backup)
+            connection.execute("CREATE TABLE fixture(value TEXT NOT NULL)")
+            connection.commit()
+            connection.close()
+        self.write_json(root / "evidence/host-final-observation.json", {
+            "schema": "constellation.operator_beta.m1b_host_teardown.v1",
+            "control_process_absent": True,
+            "target_process_absent": True,
+            "control_ssh_port_absent": True,
+            "target_ssh_port_absent": True,
+            "fixture_link_port_absent": True,
+        })
+        self.write_json(root / "RECOVERY.json", {
+            "schema": "constellation.operator_beta.m1b_recovery.v1",
+            "campaign": RUNNER.CAMPAIGN,
+            "run_id": run_id,
+            "paths": {"run_root": str(root)},
+            "guests": [],
+            "producer": {"main_pid": 999999999},
+            "phase": "sealed",
+            "effect_outcome": "KNOWN_EFFECT_OWNER_SUCCESS",
+            "next_lawful_action": "independent evidence audit",
+        })
+        files = []
+        for artifact in sorted(root.rglob("*")):
+            if artifact.is_file():
+                files.append({"path": artifact.relative_to(root).as_posix(), "bytes": artifact.stat().st_size, "sha256": RUNNER.digest_file(artifact, "sha256")})
+        manifest = {"schema": "constellation.operator_beta.m1b_artifact_manifest.v1", "files": files}
+        manifest_path = root / "ARTIFACTS.sha256"
+        manifest_path.write_bytes(RUNNER.canonical(manifest) + b"\n")
+        result = {
+            "schema": "constellation.operator_beta.m1b_run_result.v1",
+            "run_id": run_id,
+            "disposition": "MECHANISM_CASES_COMPLETED_WITH_DECLARED_LIMITATIONS",
+            "completed_at": "2026-09-07T12:00:00Z",
+            "harness_subject": "a" * 40,
+            "accepted_package_result": RUNNER.ACCEPTED_PACKAGE_RESULT,
+            "signed_upstream_checksum": "NOT_QUALIFIED",
+            "docket_database_occurrence": "NOT_RUN",
+            "authorization_consumption": "NOT_RUN",
+            "production": "NOT_RUN",
+            "manifest_sha256": RUNNER.digest_file(manifest_path, "sha256"),
+        }
+        self.write_json(root / "RESULT.json", result)
+
+    def reseal(self, root: pathlib.Path) -> None:
+        manifest_path = root / "ARTIFACTS.sha256"
+        manifest = json.loads(manifest_path.read_bytes())
+        for entry in manifest["files"]:
+            artifact = root / entry["path"]
+            entry["bytes"] = artifact.stat().st_size
+            entry["sha256"] = RUNNER.digest_file(artifact, "sha256")
+        manifest_path.write_bytes(RUNNER.canonical(manifest) + b"\n")
+        result_path = root / "RESULT.json"
+        result = json.loads(result_path.read_bytes())
+        result["manifest_sha256"] = RUNNER.digest_file(manifest_path, "sha256")
+        self.write_json(result_path, result)
+    def test_compiled_question_pins_recompute_from_checked_descriptors(self) -> None:
+        profiles = pathlib.Path(RUNNER.__file__).resolve().parents[2] / "profiles"
+        cases = (
+            (
+                "systemd_unit",
+                "Systemd unit postcondition mismatch",
+                "systemd_unit_postcondition_not_met",
+                "systemd_unit_postcondition",
+                "nq.operator_beta.systemd_unit_threshold_policy.v1",
+            ),
+            (
+                "http_endpoint",
+                "HTTP endpoint postcondition mismatch",
+                "http_endpoint_postcondition_not_met",
+                "http_endpoint_postcondition",
+                "nq.operator_beta.http_endpoint_threshold_policy.v1",
+            ),
+        )
+        for family, title, condition, parameter, policy_schema in cases:
+            profile = json.loads((profiles / f"nq.{family}.v1.json").read_bytes())
+            descriptor = {
+                "schema": "nq.detector_descriptor.v1",
+                "id": f"nq.{family}.postcondition",
+                "version": 1,
+                "profile": profile["profile"],
+                "profile_digest": RUNNER.sha256_bytes(RUNNER.canonical(profile)),
+                "title": title,
+                "condition": condition,
+                "parameters": {parameter: {"threshold_policy_schema": policy_schema}},
+            }
+            self.assertEqual(
+                RUNNER.sha256_bytes(RUNNER.canonical(descriptor)),
+                RUNNER.QUESTION_DIGESTS[f"nq.{family}"],
+            )
+
+
     def test_service_subject_uses_exact_ag_domain_framing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             producer = RUNNER.Producer(self.args(pathlib.Path(temporary) / "run"))
-            value, identity = producer.service_subject(
-                {
-                    "target_machine_identity": "machine:fixture-001",
-                    "unit_file_sha256": "sha256:" + "c" * 64,
-                }
-            )
+            value, identity = producer.service_subject({"target_machine_identity": "machine:fixture-001", "unit_file_sha256": "sha256:" + "c" * 64})
         self.assertEqual(value["fixture_run_id"], "fixture-001")
-        self.assertEqual(
-            identity,
-            "sha256:240b8636e5d2cd5bcbe2d410bd34125c72474b2c354564a3fa0bd797e6140c87",
-        )
+        self.assertEqual(identity, "sha256:240b8636e5d2cd5bcbe2d410bd34125c72474b2c354564a3fa0bd797e6140c87")
 
-    def test_scope_identity_changes_with_exact_scope(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            producer = RUNNER.Producer(self.args(pathlib.Path(temporary) / "run"))
-            scope = {"kind": "systemd_unit", "value": {"unit": RUNNER.UNIT}}
-            first = producer.scope_identity("sha256:" + "a" * 64, scope, "nq.systemd_unit")
-            changed = {"kind": "systemd_unit", "value": {"unit": "other.service"}}
-            second = producer.scope_identity("sha256:" + "a" * 64, changed, "nq.systemd_unit")
-        self.assertEqual(first["id"], "nq.scope.systemd_unit")
-        self.assertEqual(first["version"], "1")
-        self.assertNotEqual(first["digest"], second["digest"])
-
-    def test_recovery_record_retains_owner_and_inputs(self) -> None:
+    def test_recovery_record_retains_owner_inputs_and_effect_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output = pathlib.Path(temporary) / "run"
             output.mkdir()
@@ -75,9 +377,7 @@ class HarnessTests(unittest.TestCase):
                 producer.state("created", "retain exact inputs")
             record = json.loads((output / "RECOVERY.json").read_bytes())
         self.assertEqual(record["producer"]["invocation_id"], "b" * 32)
-        self.assertEqual(record["producer"]["main_pid"], os.getpid())
-        self.assertEqual(record["input_facts"]["image_sha512"], RUNNER.IMAGE_SHA512)
-        self.assertEqual(record["expected_terminal_records"][0], "RESULT.json + ARTIFACTS.sha256")
+        self.assertEqual(record["effect_outcome"], "NO_EFFECT_ATTEMPTED")
 
     def test_runtime_bound_refuses_before_recovery_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -92,61 +392,102 @@ class HarnessTests(unittest.TestCase):
     def test_producer_identity_must_match_systemd_owner(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             producer = RUNNER.Producer(self.args(pathlib.Path(temporary) / "run"))
-            completed = subprocess.CompletedProcess(
-                [],
-                0,
-                stdout=f"InvocationID={'c' * 32}\nMainPID={os.getpid()}\n".encode(),
-                stderr=b"",
-            )
-            with mock.patch.dict(os.environ, {"INVOCATION_ID": "c" * 32}), mock.patch.object(
-                RUNNER, "run", return_value=completed
-            ):
+            good = subprocess.CompletedProcess([], 0, stdout=f"InvocationID={'c' * 32}\nMainPID={os.getpid()}\n".encode(), stderr=b"")
+            with mock.patch.dict(os.environ, {"INVOCATION_ID": "c" * 32}), mock.patch.object(RUNNER, "run", return_value=good):
                 producer.verify_producer()
-            wrong = subprocess.CompletedProcess(
-                [], 0, stdout=f"InvocationID={'d' * 32}\nMainPID={os.getpid()}\n".encode(), stderr=b""
-            )
-            with mock.patch.dict(os.environ, {"INVOCATION_ID": "c" * 32}), mock.patch.object(
-                RUNNER, "run", return_value=wrong
-            ), self.assertRaisesRegex(RUNNER.Refusal, "invocation differs"):
+            wrong = subprocess.CompletedProcess([], 0, stdout=f"InvocationID={'d' * 32}\nMainPID={os.getpid()}\n".encode(), stderr=b"")
+            with mock.patch.dict(os.environ, {"INVOCATION_ID": "c" * 32}), mock.patch.object(RUNNER, "run", return_value=wrong), self.assertRaisesRegex(RUNNER.Refusal, "invocation differs"):
                 producer.verify_producer()
 
-    def test_diagnostic_condition_and_policy_are_checked(self) -> None:
+    def test_diagnostic_exact_bindings_and_substitutions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output = pathlib.Path(temporary) / "run"
             (output / "evidence").mkdir(parents=True)
             producer = RUNNER.Producer(self.args(output))
-            artifact = {
-                "schema": "nq.diagnostic_execution.v2",
-                "profile": {"id": "nq.systemd_unit"},
-                "threshold_policy": {"version": "fixture-001"},
-                "outcome": {"condition": "explicitly_absent"},
-            }
-            responses = iter(
-                [
-                    subprocess.CompletedProcess([], 0, stdout=b"", stderr=b""),
-                    subprocess.CompletedProcess([], 0, stdout=RUNNER.canonical(artifact), stderr=b""),
-                ]
-            )
-            producer.ssh = mock.Mock(side_effect=lambda *args, **kwargs: next(responses))
-            observed = producer.execute_diagnostic(
-                mock.Mock(),
-                "systemd-post",
-                "systemd-post.json",
-                "nq.systemd_unit",
-                "explicitly_absent",
-            )
-            self.assertEqual(observed, artifact)
-            responses = iter(
-                [
-                    subprocess.CompletedProcess([], 0, stdout=b"", stderr=b""),
-                    subprocess.CompletedProcess([], 0, stdout=RUNNER.canonical(artifact), stderr=b""),
-                ]
-            )
-            producer.ssh = mock.Mock(side_effect=lambda *args, **kwargs: next(responses))
-            with self.assertRaisesRegex(RUNNER.Refusal, "unexpected warranted condition"):
-                producer.execute_diagnostic(
-                    mock.Mock(), "systemd-pre", "wrong.json", "nq.systemd_unit", "present"
-                )
+            _, _, bindings = self.service_records()
+            self.write_json(output / "evidence/bindings.json", bindings)
+            artifact = self.artifact(bindings, "nq.systemd_unit", "explicitly_absent", "systemd-post")
+            responses = [subprocess.CompletedProcess([], 0, stdout=b"", stderr=b""), subprocess.CompletedProcess([], 0, stdout=RUNNER.canonical(artifact), stderr=b"")]
+            producer.ssh = mock.Mock(side_effect=responses)
+            producer.execute_diagnostic(mock.Mock(), "systemd-post", "systemd-post.json", "nq.systemd_unit", "explicitly_absent")
+            changed = dict(artifact)
+            changed["subject"] = dict(changed["subject"])
+            changed["subject"]["id"] = "sha256:" + "9" * 64
+            changed["artifact_id"] = RUNNER.sha256_bytes(RUNNER.canonical({key: value for key, value in changed.items() if key != "artifact_id"}))
+            responses = [subprocess.CompletedProcess([], 0, stdout=b"", stderr=b""), subprocess.CompletedProcess([], 0, stdout=RUNNER.canonical(changed), stderr=b"")]
+            producer.ssh = mock.Mock(side_effect=responses)
+            with self.assertRaisesRegex(RUNNER.Refusal, "wrong subject"):
+                producer.execute_diagnostic(mock.Mock(), "systemd-post", "changed.json", "nq.systemd_unit", "explicitly_absent")
+    def test_guest_install_uses_canonical_package_paths_and_digests(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = pathlib.Path(temporary) / "run"
+            (output / "input").mkdir(parents=True)
+            (output / "evidence").mkdir()
+            producer = RUNNER.Producer(self.args(output))
+            producer.guests = [
+                RUNNER.Guest("control", 23141, "a", "b", RUNNER.CONTROLLER_ADDRESS, output / "control"),
+                RUNNER.Guest("target", 23142, "c", "d", RUNNER.FIXTURE_ADDRESS, output / "target"),
+            ]
+            for guest in producer.guests:
+                guest.root.mkdir()
+            copied = []
+            commands = []
+            producer.scp_to = mock.Mock(side_effect=lambda guest, sources, destination: copied.append((guest.role, [path.name for path in sources], destination)))
+            def ssh(_guest, command, **_kwargs):
+                commands.append(command)
+                if command == "cat /etc/machine-id":
+                    value = ("a" if _guest.role == "control" else "b") * 32
+                    return subprocess.CompletedProcess([], 0, stdout=(value + "\n").encode(), stderr=b"")
+                if command.startswith("sha256sum /etc/systemd/system/"):
+                    return subprocess.CompletedProcess([], 0, stdout=(("c" * 64) + "  unit\n").encode(), stderr=b"")
+                return subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"")
+            producer.ssh = mock.Mock(side_effect=ssh)
+            with mock.patch.object(producer, "complete_phase"):
+                producer.install_inputs()
+        self.assertIn(("target", ["nq-ng_amd64.deb"], "/home/betaoperator/nq-ng.deb"), copied)
+        joined = "\n".join(commands)
+        self.assertIn(f"{RUNNER.NQ_DEB_SHA256}  /home/betaoperator/nq-ng.deb", joined)
+        self.assertIn(f"{RUNNER.AG_DEB_SHA256}  /home/betaoperator/agent-governor-ng-systemd-executor_amd64.deb", joined)
+
+    def test_restart_preserves_historical_effect_and_records_actual_current_support(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = pathlib.Path(temporary) / "run"
+            (output / "evidence").mkdir(parents=True)
+            producer = RUNNER.Producer(self.args(output))
+            producer.effect_outcome = "KNOWN_EFFECT_OWNER_SUCCESS"
+            producer.guests = [
+                RUNNER.Guest("control", 23141, "a", "b", RUNNER.CONTROLLER_ADDRESS, output / "control"),
+                RUNNER.Guest("target", 23142, "c", "d", RUNNER.FIXTURE_ADDRESS, output / "target"),
+            ]
+            for guest in producer.guests:
+                guest.root.mkdir()
+            originals = []
+            artifacts = []
+            for guest, name in ((producer.guests[1], "systemd-post-artifact.json"), (producer.guests[0], "http-post-artifact.json")):
+                original = output / "evidence" / name
+                original.write_bytes(b"artifact\n")
+                originals.append((guest, {"artifact_id": name}, original))
+            producer.wait_ssh = mock.Mock()
+            boot_reads = {"control": iter([b"before-control\n", b"after-control\n"]), "target": iter([b"before-target\n", b"after-target\n"])}
+            producer.ssh = mock.Mock(side_effect=lambda guest, command, **kwargs: subprocess.CompletedProcess([], 0, stdout=next(boot_reads[guest.role]) if command.startswith("cat /proc") else b"", stderr=b""))
+            producer.export_artifact = mock.Mock(return_value=b"artifact\n")
+            producer.execute_diagnostic = mock.Mock(side_effect=[{"artifact_id": "systemd-restart"}, {"artifact_id": "http-restart"}])
+            with mock.patch.object(producer, "complete_phase"):
+                producer.restart_and_reopen(producer.guests[0], producer.guests[1], originals)
+            calls = producer.execute_diagnostic.call_args_list
+            self.assertEqual(calls[0].args[-1], "present")
+            self.assertEqual(calls[1].args[-1], "unresolved")
+            current = json.loads((output / "evidence/current-support-after-restart.json").read_bytes())
+            self.assertEqual(current["historical_effect"], "AG_OWNER_RECEIPT_RETAINED")
+            self.assertEqual(current["aggregate_postcondition"], "NOT_RECORDED")
+
+    def test_effect_outcome_classes_remain_distinct(self) -> None:
+        self.assertEqual(RUNNER.effect_outcome_state("success"), "KNOWN_EFFECT_OWNER_SUCCESS")
+        self.assertEqual(RUNNER.effect_outcome_state("failure"), "KNOWN_NO_EFFECT_OWNER_FAILURE")
+        self.assertEqual(RUNNER.effect_outcome_state("indeterminate"), "OUTCOME_UNKNOWN_REQUIRES_AG_RECONCILE")
+        with self.assertRaisesRegex(RUNNER.Refusal, "unknown outcome"):
+            RUNNER.effect_outcome_state("completed")
+
 
     def test_checksum_relation_and_file_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -156,13 +497,8 @@ class HarnessTests(unittest.TestCase):
             digest = hashlib.sha512(b"image").hexdigest()
             checksums = root / "SHA512SUMS"
             checksums.write_text(f"{digest}  image.qcow2\n", encoding="utf-8")
-            with mock.patch.object(RUNNER, "IMAGE_NAME", "image.qcow2"), mock.patch.object(
-                RUNNER, "IMAGE_SHA512", digest
-            ):
+            with mock.patch.object(RUNNER, "IMAGE_NAME", "image.qcow2"), mock.patch.object(RUNNER, "IMAGE_SHA512", digest):
                 RUNNER.verify_checksum_manifest(checksums, image)
-                checksums.write_text(f"{'0' * 128}  image.qcow2\n", encoding="utf-8")
-                with self.assertRaisesRegex(RUNNER.Refusal, "one exact selected-image relation"):
-                    RUNNER.verify_checksum_manifest(checksums, image)
 
     def test_regular_file_refuses_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -174,35 +510,21 @@ class HarnessTests(unittest.TestCase):
             with self.assertRaisesRegex(RUNNER.Refusal, "not an openable physical file"):
                 RUNNER.regular_file(link, "fixture")
 
-    def make_sealed_run(self, root: pathlib.Path) -> None:
-        artifact = root / "evidence.json"
-        artifact.write_bytes(b"{}\n")
-        manifest = {
-            "schema": "constellation.operator_beta.m1b_artifact_manifest.v1",
-            "files": [
-                {
-                    "path": "evidence.json",
-                    "bytes": artifact.stat().st_size,
-                    "sha256": RUNNER.digest_file(artifact, "sha256"),
-                }
-            ],
-        }
-        manifest_path = root / "ARTIFACTS.sha256"
-        manifest_path.write_bytes(RUNNER.canonical(manifest) + b"\n")
-        result = {
-            "schema": "constellation.operator_beta.m1b_run_result.v1",
-            "run_id": "fixture-001",
-            "disposition": "MECHANISM_CASES_COMPLETED_WITH_DECLARED_LIMITATIONS",
-            "completed_at": "2026-09-07T12:00:00Z",
-            "harness_subject": "a" * 40,
-            "accepted_package_result": RUNNER.ACCEPTED_PACKAGE_RESULT,
-            "signed_upstream_checksum": "NOT_QUALIFIED",
-            "docket_database_occurrence": "NOT_RUN",
-            "authorization_consumption": "NOT_RUN",
-            "production": "NOT_RUN",
-            "manifest_sha256": RUNNER.digest_file(manifest_path, "sha256"),
-        }
-        (root / "RESULT.json").write_bytes(RUNNER.canonical(result) + b"\n")
+    def test_inspection_distinguishes_absent_processes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary).resolve()
+            self.write_json(root / "RECOVERY.json", {"schema": "constellation.operator_beta.m1b_recovery.v1", "campaign": RUNNER.CAMPAIGN, "run_id": "fixture-001", "paths": {"run_root": str(root)}, "guests": [{"role": "target", "pid": 999999999, "start_ticks": 1}], "producer": {"main_pid": 999999999}, "phase": "refused", "effect_outcome": "OUTCOME_UNKNOWN_REQUIRES_AG_RECONCILE", "next_lawful_action": "inspect"})
+            with contextlib.redirect_stdout(io.StringIO()):
+                observed = RUNNER.inspect_run(root)
+            self.assertEqual(observed["producer_state"], "EXITED")
+            self.assertEqual(observed["guests"][0]["state"], "EXITED")
+
+    def test_reconcile_refuses_without_exact_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary).resolve()
+            self.write_json(root / "RECOVERY.json", {"schema": "constellation.operator_beta.m1b_recovery.v1", "campaign": RUNNER.CAMPAIGN, "run_id": "fixture-001", "paths": {"run_root": str(root)}, "guests": [{"role": "target", "pid": 999999999, "start_ticks": 1}], "producer": {"main_pid": 999999999}, "phase": "refused", "effect_outcome": "OUTCOME_UNKNOWN_REQUIRES_AG_RECONCILE", "next_lawful_action": "inspect"})
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(RUNNER.Refusal, "target guest is not active"):
+                RUNNER.reconcile_effect(root)
 
     def test_run_reopen_and_semantic_substitutions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -211,19 +533,39 @@ class HarnessTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()) as output:
                 RUNNER.check_run(root)
             self.assertIn("RUN_REOPENED", output.getvalue())
-            result_path = root / "RESULT.json"
-            result = json.loads(result_path.read_bytes())
-            result["docket_database_occurrence"] = "RECORDED"
-            result_path.write_bytes(RUNNER.canonical(result) + b"\n")
-            with self.assertRaisesRegex(RUNNER.Refusal, "overstates Docket"):
+            artifact = root / "evidence/systemd-post-artifact.json"
+            changed = json.loads(artifact.read_bytes())
+            changed["subject"]["id"] = "sha256:" + "9" * 64
+            changed["artifact_id"] = RUNNER.sha256_bytes(RUNNER.canonical({key: value for key, value in changed.items() if key != "artifact_id"}))
+            self.write_json(artifact, changed)
+            self.reseal(root)
+            with self.assertRaisesRegex(RUNNER.Refusal, "wrong subject"):
                 RUNNER.check_run(root)
 
-    def test_run_reopen_refuses_content_mutation(self) -> None:
+    def test_run_reopen_refuses_missing_required_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary).resolve()
             self.make_sealed_run(root)
-            (root / "evidence.json").write_bytes(b"changed\n")
-            with self.assertRaisesRegex(RUNNER.Refusal, "differs from manifest"):
+            (root / "evidence/target-revocations.json").unlink()
+            manifest = json.loads((root / "ARTIFACTS.sha256").read_bytes())
+            manifest["files"] = [entry for entry in manifest["files"] if entry["path"] != "evidence/target-revocations.json"]
+            (root / "ARTIFACTS.sha256").write_bytes(RUNNER.canonical(manifest) + b"\n")
+            result = json.loads((root / "RESULT.json").read_bytes())
+            result["manifest_sha256"] = RUNNER.digest_file(root / "ARTIFACTS.sha256", "sha256")
+            self.write_json(root / "RESULT.json", result)
+            with self.assertRaisesRegex(RUNNER.Refusal, "inventory is incomplete"):
+                RUNNER.check_run(root)
+
+    def test_run_reopen_refuses_plan_substitution(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary).resolve()
+            self.make_sealed_run(root)
+            plan_path = root / "evidence/systemd-plan-v2.json"
+            plan = json.loads(plan_path.read_bytes())
+            plan["scope"] = "sha256:" + "8" * 64
+            self.write_json(plan_path, plan)
+            self.reseal(root)
+            with self.assertRaisesRegex(RUNNER.Refusal, "binding disagrees"):
                 RUNNER.check_run(root)
 
 

@@ -1,6 +1,5 @@
 # Operator-beta NQ-ng M1B two-VM qualification harness
-**Status:** `HARNESS_CANDIDATE_READY_FOR_INDEPENDENT_AUDIT__LIVE_RUN_NOT_STARTED`
-**Status:** `DESIGN_AND_HARNESS_IMPLEMENTATION_IN_PROGRESS__NOT_RUN`
+**Status:** `CORRECTION_CANDIDATE_READY_FOR_INDEPENDENT_REAUDIT__LIVE_RUN_NOT_STARTED`
 **Accepted package checkpoint:** `8865dcad23f17a1f26716161554530237e04bb9e`
 **Authority effect:** qualification-only local fixtures; no production, provider, default-branch, or deployment authority.
 
@@ -51,12 +50,14 @@ source subject, input digests, guest names, PID files, log/evidence paths,
 current phase, last completed phase, and next lawful action. Each QEMU process
 has a distinct campaign name, PID file, serial log, fresh overlay, and NoCloud
 seed. The harness is launched through a named user-systemd unit so supervising
-agent loss does not terminate it. A fresh supervisor inspects the unit,
-`RECOVERY.json`, PID identities, and retained logs; it does not restart the
-producer merely because the prior supervisor disappeared.
+agent loss does not terminate it. A fresh supervisor uses the query-only `inspect-run` command to reopen the producer and exact QEMU PID, command-line token, and process-start identities recorded in `RECOVERY.json`; it does not restart the producer merely because the prior supervisor disappeared. If and only if the retained effect state is outcome-unknown, `reconcile-effect` may query the same AG attempt after the original producer is absent. It performs no mechanics and never resumes the campaign automatically.
 
-An interrupted or failed run writes a refusal/indeterminate phase record and
-preserves the run directory. It never converts missing output into success.
+An interrupted or failed run writes a refusal record that separately preserves
+known-no-effect, known-effect, or outcome-unknown custody. It preserves the run
+and exact guests whenever an effect may have started or succeeded; only a
+known-no-effect state permits automatic guest termination. It never converts
+missing output into success.
+
 Teardown targets only the two exact PID identities and loopback forwards named
 by the run. Overlay deletion is not part of automatic teardown; sealed evidence
 and overlays remain until an audited cleanup decision.
@@ -70,8 +71,8 @@ The fixed path is:
 2. retain exact inputs and create two fresh overlays/seeds/identities;
 3. boot controller and target with separate machine IDs, host keys, SSH ports,
    and a private fixture link;
-4. install the exact NQ package on both guests and the exact inert AG adapter
-   package on the target; installation must not admit a watcher or start the
+4. install and guest-digest-check the exact NQ package on both guests and the
+   exact inert AG adapter package on the target; installation must not admit a watcher or start the
    fixture;
 5. install the exact disabled fixture unit/content and retain the initial
    systemd/HTTP absence evidence;
@@ -81,9 +82,11 @@ The fixed path is:
 8. admit fresh post-effect NQ instances and retain the two exact artifacts;
 9. inspect/export those artifacts from new processes, remove/reinstall NQ on
    both guests, and prove store/artifact continuity;
-10. restart both guests, distinguish historical artifacts from current support,
-    and prove query-only reopening performs no helper execution;
-11. stop the fixture, revoke local watcher bindings, remove packages and
+10. restart both guests, preserve historical AG success while separately
+    recording the expected disabled-unit current state (`present` systemd mismatch
+    and `unresolved` HTTP), and prove query-only reopening performs no helper execution;
+11. stop the fixture, require and retain successful local watcher revocations,
+    remove packages and
     campaign-owned guest files, power off only the two named guests, retain host
     process/listener observations, and seal the complete artifact inventory.
 
@@ -97,11 +100,10 @@ qualification outcomes.
 
 The checked producer is `run_two_vm.py`; its pure-local qualification is
 `test_run_two_vm.py`, and `scripts/check-operator-beta-m1b-v1.sh` is the
-structural gate. The current candidate passes 10 qualification cases covering
-AG-compatible subject framing, scope sensitivity, durable recovery custody,
+structural gate. The correction candidate passes 16 qualification cases covering
+AG-compatible subject framing, durable recovery custody, exact diagnostic subject/scope/profile/question/policy/vantage/self-identity binding,
 producer-unit identity, runtime bounds, exact diagnostic policy/condition
-checks, checksum binding, symlink refusal, terminal reopen, content mutation,
-and semantic overclaim substitution. The gate's injected missing-boundary
+checks, checksum binding, symlink refusal, terminal complete-inventory reopen, AG/NQ cross-binding, content mutation, missing-evidence refusal, process inspection, same-attempt reconcile refusal, and coherent substitutions. The gate's injected missing-boundary
 control refuses deterministically. These are harness results only: no VM,
 package install, system bus, fixture service, or effect has run.
 
@@ -129,11 +131,13 @@ systemd-run --user \
 ```
 
 The exact package and image paths are supplied only after preflight custody is
-established; they are not implicit defaults. A resumed supervisor first reads
-`systemctl --user show` for the named unit and the run's `RECOVERY.json`, PID
-files, serial logs, and host log. It never launches a replacement run from
-absence of terminal output. `RESULT.json` plus `ARTIFACTS.sha256`, or
-`REFUSAL.json` plus `RECOVERY.json`, are the only expected terminal families.
+established; they are not implicit defaults. A resumed supervisor first runs
+`inspect-run` against the exact physical run directory and then consults the
+named user unit, serial logs, and host log. If the retained effect outcome is
+unknown and the original producer is absent, it may invoke query-only
+`reconcile-effect`; it never launches a replacement run from missing terminal
+output. `RESULT.json` plus `ARTIFACTS.sha256`, or `REFUSAL.json` plus
+`RECOVERY.json`, are the only expected terminal families.
 
 ## Still unqualified
 
