@@ -185,6 +185,97 @@ def sha256_bytes(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
 
 
+def ag_store_cut_command(
+    source_store: str,
+    destination: str,
+    *,
+    owner: str = "betaoperator",
+    privileged: bool = True,
+) -> str:
+    script = """import hashlib
+import os
+import pwd
+import sqlite3
+import stat
+import sys
+
+source, destination, owner, maximum = sys.argv[1:]
+maximum_bytes = int(maximum)
+connection = sqlite3.connect(source)
+connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+connection.close()
+wal_path = source + "-wal"
+try:
+    wal = os.lstat(wal_path)
+except FileNotFoundError:
+    wal = None
+if wal is not None and (not stat.S_ISREG(wal.st_mode) or wal.st_size != 0):
+    raise SystemExit("AG attempt-store WAL is not absent or zero length")
+source_fd = os.open(source, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+try:
+    before = os.fstat(source_fd)
+    if not stat.S_ISREG(before.st_mode) or before.st_size <= 0 or before.st_size > maximum_bytes:
+        raise SystemExit("AG attempt-store source exceeds the bounded regular-file law")
+    source_bytes = bytearray()
+    while block := os.read(source_fd, min(1024 * 1024, maximum_bytes + 1 - len(source_bytes))):
+        source_bytes.extend(block)
+        if len(source_bytes) > maximum_bytes:
+            raise SystemExit("AG attempt-store source exceeds the byte bound")
+    after = os.fstat(source_fd)
+    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+        after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns
+    ):
+        raise SystemExit("AG attempt-store source changed during the locked copy")
+finally:
+    os.close(source_fd)
+account = pwd.getpwnam(owner)
+destination_fd = os.open(
+    destination,
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+    0o400,
+)
+try:
+    os.fchown(destination_fd, account.pw_uid, account.pw_gid)
+    view = memoryview(source_bytes)
+    while view:
+        written = os.write(destination_fd, view)
+        view = view[written:]
+    os.fsync(destination_fd)
+finally:
+    os.close(destination_fd)
+with open(destination, "rb") as copied:
+    copied_bytes = copied.read(maximum_bytes + 1)
+if copied_bytes != source_bytes:
+    raise SystemExit("copied AG attempt-store bytes disagree with the locked source")
+print(f"source_sha256={hashlib.sha256(source_bytes).hexdigest()}")
+print(f"source_bytes={len(source_bytes)}")
+print("wal=ABSENT_OR_ZERO_LENGTH")
+"""
+    command = [] if not privileged else ["sudo"]
+    command.extend(
+        [
+            "flock",
+            "--exclusive",
+            "--timeout",
+            "5",
+            source_store + ".systemd-execution-lock",
+            "flock",
+            "--exclusive",
+            "--timeout",
+            "5",
+            source_store,
+            "python3",
+            "-c",
+            script,
+            source_store,
+            destination,
+            owner,
+            str(AG_AUDIT_STORE_MAX_BYTES),
+        ]
+    )
+    return shlex.join(command)
+
+
 def ag_domain_digest(domain: str, value: bytes) -> str:
     framed = (
         b"ag-ng\0digest\0v1\0"
@@ -1646,22 +1737,7 @@ while True:
         guest_cut = "/home/betaoperator/ag-attempt-store-cut.sqlite"
         stable = self.ssh(
             target,
-            "sudo flock --exclusive --timeout 5 "
-            f"{source_store}.systemd-execution-lock "
-            "flock --exclusive --timeout 5 "
-            f"{source_store} sh -c '"
-            "python3 -c \"import sqlite3,sys; "
-            "c=sqlite3.connect(sys.argv[1]); "
-            "c.execute(\\\"PRAGMA wal_checkpoint(TRUNCATE)\\\"); c.close()\" "
-            f"{source_store}; "
-            f"test ! -s {source_store}-wal; "
-            f"source_sha=$(sha256sum {source_store} | cut -d \\\" \\\" -f1); "
-            f"source_bytes=$(stat -c %s {source_store}); "
-            f"cp --reflink=never {source_store} {guest_cut}; "
-            f"chown betaoperator:betaoperator {guest_cut}; chmod 0400 {guest_cut}; "
-            f"test $(sha256sum {guest_cut} | cut -d \\\" \\\" -f1) = $source_sha; "
-            "printf \\\"source_sha256=%s\\nsource_bytes=%s\\nwal=ABSENT_OR_ZERO_LENGTH\\n\\\" "
-            "$source_sha $source_bytes'",
+            ag_store_cut_command(source_store, guest_cut),
         )
         stable_facts = dict(
             line.split("=", 1)

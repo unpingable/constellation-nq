@@ -1,5 +1,5 @@
 # Operator-beta NQ-ng M1B two-VM qualification harness
-**Status:** `RUNS_001_002_003_004_005_REFUSED_NO_EFFECT__RUNS_006_007_008_REFUSED_AFTER_KNOWN_EFFECT_OWNER_SUCCESS__POST_EFFECT_STATE_CORRECTION_ACCEPTED_PUBLISHED__FRESH_RUN_READY`
+**Status:** `RUNS_001_002_003_004_005_REFUSED_NO_EFFECT__RUNS_006_007_008_009_REFUSED_AFTER_KNOWN_EFFECT_OWNER_SUCCESS__STORE_CUT_COMMAND_CORRECTION_READY_FOR_INDEPENDENT_AUDIT`
 **Accepted post-effect state correction:** `0373da604abb29283b88b3ed7636a69849e52737`
 **Accepted HTTP fixture-readiness correction:** `d00d6640dd5917cd72d932802fe913a827ea14c6`
 **Accepted protected-store correction:** `7750f3185a7fbf3c90c4fc2c8cf3e001e034dc41`
@@ -161,6 +161,27 @@ output, then requires the complete direct-state bytes to equal the exact
 Any other output refuses. It changes no NQ, AG, effect, retry, or authority
 semantics.
 
+Fresh `operator-beta-m1b-run-009` used exact accepted and published harness
+subject `db1a75b9ccb2788df1cd81996022bd4eebdb1925`. It retained the exact AG
+owner success, both expected post-effect NQ artifacts, the exact direct target
+state, package continuity, changed boot identities, exact artifact reopening,
+and separate current support after restart. The run then refused before owner
+store-cut audit because nested remote-shell quoting corrupted the locked
+source-cut fact output. The 32,768-byte copied SQLite file was retained with
+SHA-256 `ebff72635097e8501bbb157634fd7ddba63fca6e2a7d9fb475e055b29c2a66f3`,
+but the malformed fact output could not bind those bytes to the locked source.
+Run-009 is terminal with exact effect custody; owner audit, teardown, and the
+terminal M1B result did not run. It must not be resumed or relabeled.
+
+The bounded correction replaces the nested shell substitutions with one
+shell-quoted argument vector invoking a fixed Python cut operation beneath the
+same two exclusive locks. That operation checkpoints SQLite, refuses a
+nonempty or non-regular WAL, bounds and reads one physical source file,
+requires unchanged source identity during the read, writes one exclusive
+read-only copy, verifies exact copied bytes, and emits the three exact cut
+facts. A direct local SQLite qualification case executes the constructed shell
+command and requires exact source/copy bytes and fact output.
+
 ## Inputs and retained identity
 
 The runner requires physical regular non-symlink inputs and exact digests for:
@@ -259,7 +280,7 @@ qualification outcomes.
 
 The checked producer is `run_two_vm.py`; its pure-local qualification is
 `test_run_two_vm.py`, and `scripts/check-operator-beta-m1b-v1.sh` is the
-structural gate. The post-effect state correction passes 33 qualification cases
+structural gate. The store-cut command correction passes 34 qualification cases
 covering AG-compatible subject framing, durable recovery custody, exact
 diagnostic subject/scope/profile/question/policy/vantage/self-identity binding,
 producer-unit identity, runtime bounds, exact diagnostic policy/condition
@@ -322,12 +343,12 @@ output. `RESULT.json` plus `ARTIFACTS.sha256`, or `REFUSAL.json` plus
 
 ## Still unqualified
 
-The harness candidate is not the M1B result. Runs 006, 007, and 008 each retain
+The harness candidate is not the M1B result. Runs 006, 007, 008, and 009 each retain
 one AG-owned successful effect occurrence. Run-008 additionally retains both
-successful post-effect NQ artifacts, but no run establishes complete package
-continuity, restart/reopen, AG store-cut audit, teardown, or a terminal M1B
-result. Runs 001--005 remain their separate pre-effect refusals; runs 006--008
-are not resumed or relabeled.
+successful post-effect NQ artifacts. Run-009 additionally establishes package
+continuity and restart/reopen, but no run establishes AG store-cut audit,
+teardown, or a terminal M1B result. Runs 001--005 remain their separate
+pre-effect refusals; runs 006--009 are not resumed or relabeled.
 The upstream Debian
 cloud checksum relation remains
 unsigned at the selected versioned directory and therefore cannot satisfy the
@@ -342,9 +363,9 @@ store correction is accepted and published at
 correction is accepted and published at
 `d00d6640dd5917cd72d932802fe913a827ea14c6`; and the post-effect state
 correction is accepted and published at
-`0373da604abb29283b88b3ed7636a69849e52737`. Another fresh occurrence may start
-from the resulting clean subject; runs 006--008 remain terminal and must not be
-resumed or relabeled.
+`0373da604abb29283b88b3ed7636a69849e52737`. The store-cut command correction
+requires independent audit before another fresh occurrence may start; runs
+006--009 remain terminal and must not be resumed or relabeled.
 
 The accepted AG package supplies the query-only terminal receipt/evidence
 reopener. This candidate retains an exact WAL-zero owner store cut under the

@@ -10,7 +10,9 @@ import io
 import json
 import os
 import pathlib
+import pwd
 import shlex
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -996,7 +998,8 @@ sys.stdout.buffer.write(
             self.assertEqual(syntax.returncode, 0, syntax.stderr.decode())
             self.assertIn("flock --exclusive --timeout 5", stable_cut)
             self.assertIn("PRAGMA wal_checkpoint(TRUNCATE)", stable_cut)
-            self.assertIn("test ! -s /var/lib/ag-effectd-m1b/attempts.sqlite-wal", stable_cut)
+            self.assertIn('wal_path = source + "-wal"', stable_cut)
+            self.assertIn("wal.st_size != 0", stable_cut)
             record = json.loads((output / "evidence/ag-store-cut.json").read_bytes())
             self.assertEqual(record["store_sha256"], "sha256:" + cut_sha256)
             self.assertEqual(record["owner_package_result"], RUNNER.AG_STORE_AUDIT_RESULT)
@@ -1010,6 +1013,44 @@ sys.stdout.buffer.write(
             completed.assert_called_once_with(
                 "ag_store_cut_audited", "perform bounded teardown"
             )
+
+    def test_store_cut_command_round_trips_exact_sqlite_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            source = root / "attempts.sqlite"
+            destination = root / "attempts-cut.sqlite"
+            connection = sqlite3.connect(source)
+            connection.execute("CREATE TABLE receipts (identity TEXT PRIMARY KEY)")
+            connection.execute("INSERT INTO receipts VALUES ('exact-owner-receipt')")
+            connection.commit()
+            connection.close()
+
+            command = RUNNER.ag_store_cut_command(
+                str(source),
+                str(destination),
+                owner=pwd.getpwuid(os.getuid()).pw_name,
+                privileged=False,
+            )
+            completed = subprocess.run(
+                ["sh", "-c", command],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+            self.assertEqual(completed.stderr, b"")
+            self.assertEqual(destination.read_bytes(), source.read_bytes())
+            self.assertEqual(
+                completed.stdout,
+                (
+                    f"source_sha256={RUNNER.digest_file(source, 'sha256')}\n"
+                    f"source_bytes={source.stat().st_size}\n"
+                    "wal=ABSENT_OR_ZERO_LENGTH\n"
+                ).encode(),
+            )
+            self.assertIn("flock --exclusive --timeout 5", command)
+            self.assertIn("PRAGMA wal_checkpoint(TRUNCATE)", command)
 
     def test_effect_outcome_classes_remain_distinct(self) -> None:
         self.assertEqual(RUNNER.effect_outcome_state("success"), "KNOWN_EFFECT_OWNER_SUCCESS")

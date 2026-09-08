@@ -60,6 +60,7 @@ for token in "${required[@]}"; do
 done
 rg -F --quiet 'test_reconcile_refuses_fresh_run_attempt_for_same_semantic_work' "$tests"
 rg -F --quiet 'test_producer_retains_locked_store_cut_and_uses_owner_audit' "$tests"
+rg -F --quiet 'test_store_cut_command_round_trips_exact_sqlite_bytes' "$tests"
 rg -F --quiet 'test_terminal_reopen_refuses_coherently_substituted_owner_outcome' "$tests"
 rg -F --quiet 'test_terminal_reopen_refuses_coherently_substituted_store_cut' "$tests"
 rg -F --quiet 'test_terminal_reopen_refuses_substituted_owner_executable' "$tests"
@@ -76,6 +77,7 @@ rg -F --quiet 'FIXTURE_READINESS_SECONDS = 30' "$runner"
 rg -F --quiet 'fixture_tcp_ready=true' "$runner"
 rg -F --quiet 'systemctl is-enabled {UNIT} || true' "$runner"
 rg -F --quiet 'target direct post-effect state differs from the exact expected tuple' "$runner"
+rg -F --quiet 'ag_store_cut_command(source_store, guest_cut)' "$runner"
 rg -F --quiet 'CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_KILL' "$runner"
 rg -F --quiet 'AmbientCapabilities=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_KILL' "$runner"
 for token in \
