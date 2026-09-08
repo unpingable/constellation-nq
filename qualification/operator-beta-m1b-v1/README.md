@@ -1,5 +1,7 @@
 # Operator-beta NQ-ng M1B two-VM qualification harness
-**Status:** `RUNS_001_002_003_004_005_REFUSED_NO_EFFECT__RUNS_006_TO_011_REFUSED_AFTER_KNOWN_EFFECT_OWNER_SUCCESS__TEARDOWN_PACKAGE_STATE_CORRECTION_ACCEPTED_PUBLISHED__FRESH_RUN_READY`
+**Status:** `RUN_012_MECHANISM_CASES_ACCEPTED__QUALIFICATION_CLOSEOUT_READY_FOR_INDEPENDENT_AUDIT`
+**Accepted live run:** `operator-beta-m1b-run-012`
+**Accepted run harness:** `dc5d602484a4556c465df6947e98d81dba0d314a`
 **Accepted teardown package-state correction:** `4477d30ea3357b421d1cec1b00ada85fee1428ce`
 **Accepted restart boot-identity correction:** `274494b72216d51b9ab7f8316d581f57600054e5`
 **Accepted store-cut command correction:** `8979bee76924701061770327de220b2cd4c9b9a7`
@@ -388,7 +390,8 @@ output. `RESULT.json` plus `ARTIFACTS.sha256`, or `REFUSAL.json` plus
 
 ## Still unqualified
 
-The harness candidate is not the M1B result. Runs 006--011 each retain one
+Run-012 is the independently accepted bounded M1B mechanism result recorded by
+`QUALIFICATION.md` and the closed qualification receipt. Runs 006--011 each retain one
 AG-owned successful effect occurrence. Run-008 additionally retains both
 successful post-effect NQ artifacts. Run-009 additionally establishes package
 continuity and restart/reopen; run-010 establishes package continuity but

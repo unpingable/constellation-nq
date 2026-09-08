@@ -1,0 +1,86 @@
+{
+  "schema": "constellation.operator_beta.m1b_qualification/v1",
+  "campaign": "constellation-operator-beta-nq-ng-m1b-v1",
+  "milestone": "M1B",
+  "run_id": "operator-beta-m1b-run-012",
+  "disposition": "MECHANISM_CASES_COMPLETED_WITH_DECLARED_LIMITATIONS",
+  "harness": {
+    "branch": "campaign/constellation-operator-beta-nq-ng-profile-v1-20260907",
+    "subject": "dc5d602484a4556c465df6947e98d81dba0d314a",
+    "tree": "1980861141a8834dbfc0eb1f9a47eef9bceee902",
+    "runtime_correction": "4477d30ea3357b421d1cec1b00ada85fee1428ce",
+    "published": true
+  },
+  "archive": {
+    "authoritative_path": "/var/tmp/constellation-operator-beta-m1b-run-012",
+    "preservation_copy_path": "/data/git/.campaign-artifacts/nq-ng-operator-beta-m1b-20260908/operator-beta-m1b-v1/run-012",
+    "preservation_copy_role": "BYTE_IDENTICAL_NON_AUTHORITATIVE_COPY",
+    "manifest_bytes": 8441,
+    "manifest_entries": 65,
+    "manifest_sha256": "8fe325ff397e759d96362918efc9724a3d1d3ac06765483965fa73c4cda1cd92",
+    "result_bytes": 560,
+    "result_sha256": "a1f3b52210d04aad56cc42b50bc1ffc3576cdf862317f29562d640a00c3de0fe"
+  },
+  "inputs": {
+    "image_sha512": "490f38e2665bc4c31f1bd4cd66dfab3c7695f652a62862a7034d95f8f05ede4146d6dd55c70cc8b0ac9d9b4f54e18f8860bd5ad5ebfb7a8d5e934f3d12cf3817",
+    "nq_package_sha256": "0fd1ce9e1be48b56ba5e526993a94c4682499bb9dbd9304dffd4500c01603636",
+    "ag_package_sha256": "98a4f31f0b6c13653ae95ce55586dbac6d0826b649cd7612882f3716b80e2279",
+    "ag_executable_sha256": "668bdd26646ef6a5ba5502b64984844b84c1f70024a76eb5236af2b17702d068"
+  },
+  "owner_effect": {
+    "outcome": "success",
+    "attempt": "sha256:b5bb98d59edf519fa40007d09f7177e9ef5087939328911605ece5e997614e38",
+    "marker": "sha256:7de1dad33334f5000e51c6c6c63f3e03aa353e1c5cc3d4b4af739b181b8d282d",
+    "work": "sha256:e7a42b9b3a13f2d9d1bdb961368baf30d3381308a56a20bc97965d5251a4e041",
+    "subject": "sha256:d06f0bb1616d993f10c4ac5cbd5b9ff9aea11604b21e66673509cc86db8ad940",
+    "scope": "sha256:db65dc3e3219ce9cef9c88aa2789a0811f758829ccfeb4a3ff44c3953e9f7d37",
+    "receipt": "sha256:8c792e0919aa13e43a81c856a852dc609ee071a3572b46406ad8c4106d85943a",
+    "store_cut_bytes": 32768,
+    "store_cut_sha256": "sha256:370fd2d7cdf2f114ecfb3fe79456df891b53321697e719e41ed67d59b43b00d5",
+    "store_attempt_rows": 1,
+    "store_evidence_rows": 1,
+    "owner_query_replay_equal": true
+  },
+  "observation_history": {
+    "pre_systemd_condition": "present",
+    "pre_http_condition": "unresolved",
+    "post_systemd_condition": "explicitly_absent",
+    "post_http_condition": "explicitly_absent",
+    "restart_systemd_condition": "present",
+    "restart_http_condition": "unresolved",
+    "historical_effect": "AG_OWNER_RECEIPT_RETAINED",
+    "aggregate_postcondition": "NOT_RECORDED"
+  },
+  "teardown": {
+    "revoked_instances": 6,
+    "control_backup_sha256": "7f6ac7f6b1f350abedf2e6009681af3d9c1f3a980684ba1a7cd12bec72636452",
+    "target_backup_sha256": "9937cc5ba7e32e6ede59d644dfd6ba2176d6cf69936ab3ca414b2baa5ae48a3d",
+    "backup_sqlite_integrity": "ok",
+    "general_restore_qualified": false,
+    "host_final_observation_sha256": "30e7057c83e5672cc80a42396e81027022700eb123b1779e59647cc5da536295",
+    "producer_absent": true,
+    "guests_absent": true,
+    "listeners_absent": true
+  },
+  "independent_audit": {
+    "reviewer": "Rawls:/root/second_watch_reaudit",
+    "disposition": "ACCEPTED_PROCEED",
+    "subject": "operator-beta-m1b-run-012",
+    "scope": "BOUNDED_M1B_MECHANISM_EVIDENCE"
+  },
+  "limitations": {
+    "signed_upstream_checksum": "NOT_QUALIFIED",
+    "docket_database_occurrence": "NOT_RUN",
+    "authorization_consumption": "NOT_RUN",
+    "production": "NOT_RUN",
+    "deployment": "NOT_RUN",
+    "aggregate_postcondition": "NOT_RECORDED",
+    "literal_distributed_exactly_once": "NOT_CLAIMED"
+  },
+  "authority": {
+    "grants_workflow_authority": false,
+    "grants_deployment_authority": false,
+    "grants_production_authority": false,
+    "authorizes_retry_or_resume": false
+  }
+}
