@@ -1,8 +1,9 @@
 # Operator-beta NQ-ng M1B two-VM qualification harness
-**Status:** `PRE_EFFECT_RUNS_001_002_003_004_005_REFUSED__HELPER_ACCEPTED_PUBLISHED__PACKAGE_004_READY_FOR_INDEPENDENT_AUDIT`
+**Status:** `PRE_EFFECT_RUNS_001_002_003_004_005_REFUSED__PACKAGE_004_ACCEPTED_PUBLISHED__FRESH_RUN_READY`
 **Helper correction implementation:** `860452c53d63b6162c18a2e0b4aba4acb736baea`
 **Accepted helper correction result:** `c62eb7130c813896903e0156bd0593e22befe4a5`
-**Accepted package checkpoint:** `8865dcad23f17a1f26716161554530237e04bb9e`
+**Accepted package-layout checkpoint:** `8865dcad23f17a1f26716161554530237e04bb9e`
+**Accepted Bookworm package-004 result:** `e644390b4b761388569d9dbee5b374294f40ae17`
 **Accepted AG store-audit owner:** `837de287497942c79966aa05c083acee9c312261`
 **Accepted AG package qualification:** `db4bad1fba2b5ab512cc58356314228167b2f48e`
 **Authority effect:** qualification-only local fixtures; no production, provider, default-branch, or deployment authority.

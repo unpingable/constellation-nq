@@ -1,6 +1,7 @@
 # Debian 12 package compatibility and reproducibility evidence
 
-**Status:** `PACKAGE_004_REPRODUCIBLE / INDEPENDENT REVIEW REQUIRED`
+**Status:** `PACKAGE_004_ACCEPTED_PUBLISHED / LIVE_M1B NOT_RUN`
+**Accepted package-004 result:** `e644390b4b761388569d9dbee5b374294f40ae17`
 **Rejected package-evidence checkpoint:** `9aa09b35d08b3f52602a30f3079efb9194b8fcc1`
 **Prior accepted reproducible-package checkpoint:** `b758f47b8a03bf9314520f51d707480babf55e82`
 **Source subject:** `c62eb7130c813896903e0156bd0593e22befe4a5`
@@ -100,3 +101,8 @@ glibc 2.36. `build` completed two clean source-to-artifact paths and `verify`
 reopened the retained receipt successfully. This qualifies only these exact
 package bytes and their provenance/compatibility; the live M1B exercise remains
 unqualified until a fresh occurrence completes and is independently reviewed.
+
+Independent audit accepted exact package checkpoint
+`e644390b4b761388569d9dbee5b374294f40ae17`; local, tracking, and remote branch
+refs were then verified equal to that subject. Publication does not transfer
+the package result to a future live occurrence.
