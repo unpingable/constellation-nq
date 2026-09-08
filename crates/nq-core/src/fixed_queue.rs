@@ -3,7 +3,68 @@
 //! compiled forms below are admitted. This is factual testimony, not authority.
 use chrono::DateTime;
 use nq_protocol::{Sha256Digest, semantic_digest};
+use serde::Deserialize;
 use serde_json::{Value, json};
+
+// The existing Monitor inventory wire remains a closed typed input. These DTOs
+// validate all rows, including unselected ones; they do not interpret facts.
+#[allow(dead_code)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InventoryShape {
+    schema: String,
+    project: String,
+    repository: String,
+    acquisition: AcquisitionShape,
+    validation_issues: Vec<String>,
+    concerns: Vec<ConcernShape>,
+}
+#[allow(dead_code)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AcquisitionShape {
+    disposition: String,
+    acquired_at_unix_ms: u128,
+    producer: String,
+    binding_schema: String,
+    manifest_digest: String,
+    status_digest: Option<String>,
+    exit_code: Option<i32>,
+    stdout_bytes: u64,
+    stderr_bytes: u64,
+    repository_revision_context: Option<String>,
+    repository_revision_is_deployment_provenance: bool,
+}
+#[allow(dead_code)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConcernShape {
+    declaration: DeclarationShape,
+    monitor_state: String,
+    observation: Option<ObservationShape>,
+}
+#[allow(dead_code)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeclarationShape {
+    id: String,
+    question: String,
+    profile: String,
+    required: bool,
+    description: String,
+}
+#[allow(dead_code)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ObservationShape {
+    observation_present: bool,
+    local_state: String,
+    domain_state: Option<String>,
+    observed_at: Option<String>,
+    valid_for_seconds: Option<u64>,
+    reason: String,
+    facts: Value,
+}
 
 pub fn digest(value: &Value) -> Result<String, String> {
     semantic_digest(value)
@@ -104,6 +165,8 @@ pub fn admit(
     concern: &str,
     at: &str,
 ) -> Result<Value, String> {
+    let _: InventoryShape = serde_json::from_value(inventory.clone())
+        .map_err(|error| format!("malformed Monitor inventory: {error}"))?;
     if digest(catalog)? != catalog_digest {
         return Err("catalog digest mismatch".into());
     }

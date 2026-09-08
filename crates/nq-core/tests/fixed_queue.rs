@@ -10,6 +10,12 @@ fn fixture() -> (Value, Value) {
     let inventory = json!({"schema":"monitor.project-observation.inventory/v1","project":p["subject"]["project"],"acquisition":{"disposition":"ACQUIRED_AND_VALIDATED","exit_code":0,"stdout_bytes":1,"binding_schema":"project.observation-binding/v1","repository_revision_is_deployment_provenance":false,"producer":p["accepted_producers"][0],"manifest_digest":p["accepted_manifest_digests"][0],"status_digest":format!("sha256:{}","a".repeat(64))},"validation_issues":[],"concerns":[{"declaration":{"id":p["subject"]["concern"],"question":p["question"],"profile":p["declaration_profile"]},"monitor_state":"OBSERVED","observation":{"observation_present":true,"observed_at":"2026-09-08T12:00:00Z","valid_for_seconds":300,"facts":{"queue":{"depth":12}}}}]});
     let mut inventory = inventory;
     inventory["repository"] = json!("/fixture/sprocket");
+    inventory["acquisition"]["acquired_at_unix_ms"] = json!(1788868800000_u64);
+    inventory["acquisition"]["stderr_bytes"] = json!(0);
+    inventory["concerns"][0]["declaration"]["required"] = json!(true);
+    inventory["concerns"][0]["declaration"]["description"] = json!("bounded queue");
+    inventory["concerns"][0]["observation"]["local_state"] = json!("PRESENT");
+    inventory["concerns"][0]["observation"]["reason"] = json!("fixture");
     (inventory, cat)
 }
 
@@ -95,6 +101,8 @@ fn fixed_queue_all_preserved_cohort_forms() {
         i["acquisition"]["producer"] = p["accepted_producers"][0].clone();
         i["acquisition"]["manifest_digest"] = p["accepted_manifest_digests"][0].clone();
         i["concerns"][0]["declaration"] = json!({"id":p["subject"]["concern"],"question":p["question"],"profile":p["declaration_profile"]});
+        i["concerns"][0]["declaration"]["required"] = json!(true);
+        i["concerns"][0]["declaration"]["description"] = json!("bounded cohort");
         i["concerns"][0]["observation"]["facts"] = json!({"exists":true,"readable":true,"write_transaction_available":true,"quick_check":"ok","write_transaction_acquired":true,"free_bytes":15032385536_u64,"freelist_count":5000000});
         let r = admit(
             &i,
@@ -153,4 +161,17 @@ fn entire_inventory_must_remain_well_formed() {
         "declaration":{"id":"unselected"},"monitor_state":"MISSING_REQUIRED_OBSERVATION","observation":{}
     }));
     rejects(&inconsistent);
+    for observation in [
+        json!(false),
+        json!("not an observation"),
+        json!({}),
+        json!({"observation_present":"true"}),
+    ] {
+        let mut malformed = i.clone();
+        let mut row = i["concerns"][0].clone();
+        row["declaration"]["id"] = json!("unselected");
+        row["observation"] = observation;
+        malformed["concerns"].as_array_mut().unwrap().push(row);
+        rejects(&malformed);
+    }
 }
