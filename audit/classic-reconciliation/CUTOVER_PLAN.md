@@ -1,5 +1,14 @@
 # Evidence-derived NQ-NG successor and cutover plan
 
+## Active consumer-retirement prerequisite, 2026-09-08
+
+The newly authorized bounded consumer migrations are distinct from this
+historical host-cutover survey. Track the Codex repository-state prerequisite
+and acceptance order in [REPOSITORY_STATE_PREREQUISITE.md](REPOSITORY_STATE_PREREQUISITE.md).
+It does not reopen M2, switch fleet authority, or authorize a classic port.
+Consumer retirement is incomplete while classic executable/build/test/fixture
+generation remains required; named historical archives may remain.
+
 ## Selected model
 
 Use **isolated parallel observation as qualification**, ending in a **clean

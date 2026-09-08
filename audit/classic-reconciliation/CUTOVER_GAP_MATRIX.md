@@ -1,5 +1,22 @@
 # NQ-NG successor cutover gap matrix
 
+## 2026-09-08 active consumer-retirement amendment
+
+The historical deployment census below remains dated evidence, not today's
+universal inventory. The current authorized classic-retirement campaign adds
+the exact Codex dependency in [REPOSITORY_STATE_PREREQUISITE.md](REPOSITORY_STATE_PREREQUISITE.md).
+This is an active implementation prerequisite, not an indefinite deferral.
+
+| Consumer | Missing native capability | Owner / order | Blocked milestone |
+|---|---|---|---|
+| Codex candidate `nq_adapter.rs`, two classic receipt fixture directories and their regeneration instructions | Bounded repository-state witness/profile and checked modern evidence mapping; no existing compiled repository profile located | NQ-ng profile semantics + bounded Git witness, then Codex adapter and registered integration tests, then integration-owner qualification | Modern Codex admissibility integration and full dependency retirement; not accepted M2 |
+
+Historical receipts may remain immutable history or explicit unsupported-input
+specimens. Active fixture generation, builds, tests and executable adapters
+must use qualified modern contracts before retirement completion. Renaming a
+binary, mapping every classic use to Docket, or obtaining zero scanner matches
+does not satisfy this gate. No silent classic fallback is permitted.
+
 ## Three states that must not be conflated
 
 | State | Identity known locally | Deployment status |
