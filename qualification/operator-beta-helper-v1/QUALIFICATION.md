@@ -1,6 +1,6 @@
 # Operator-beta NQ-ng observation helper checkpoint
 
-**Status:** `ACCEPTED_PROCEED`
+**Status:** `LIVE_RUN_005_REFUSED__BOUNDED_CORRECTION_READY_FOR_INDEPENDENT_AUDIT`
 **Implementation candidate subject:** `386358190e974c532d5237d36231fe7e806d100e`
 **Accepted qualification result:** `9d8624a2d13cb1562b55a81de6f6cea07fb65dcc`
 **Tree:** `0432d9846d78938181e43f47b10f72f5cf90e027`
@@ -15,10 +15,20 @@ strict NQ helper protocol. It has no dependency on `nq-core`, `nq-store`, or `nq
 and owns no scheduling, admission, policy evaluation, persistence, retry, composition,
 authority, or effect semantics.
 
-The systemd branch uses one zbus system-bus connection and, within the request's Linux
-boottime deadline, orders `GetMachineId -> RefUnit -> GetUnit -> GetUnitFileState` before
-the four exact unit-property reads. It requires the live machine identity and bounded
-no-follow regular-file SHA-256 to equal the exact request scope before emitting testimony.
+The accepted helper used one zbus system-bus connection and ordered
+`GetMachineId -> RefUnit -> GetUnit -> GetUnitFileState`. Fresh M1B run-005
+mechanically demonstrated that unprivileged `nq-helper` receives
+`Interactive authentication required` for `RefUnit`; the retained exact helper
+response therefore correctly reported `systemd_unit_reference_failed`, and NQ
+correctly refused to infer complete testimony. No effect was attempted.
+
+The bounded correction replaces that authorization-bearing call sequence with
+`GetMachineId -> ListUnitsByNames -> ListUnitFilesByPatterns`. The two latter
+read-only manager calls return one exact stable runtime-state row and one exact
+unit-file path/state row for the same unit name. Cardinality, unit identity,
+alias/following, and in-progress-job disagreement refuse. The helper still
+requires the live machine identity and bounded no-follow regular-file SHA-256
+to equal the exact request scope before emitting testimony.
 
 The HTTP owner profile and helper accept one numeric-address plain-HTTP
 `GET /healthz` on port 18080 and refuse hostname or wrong-port bindings before
@@ -44,8 +54,23 @@ does not convert absence of testimony into a negative postcondition.
 - All-target/all-feature workspace Clippy with `-D warnings`: passed.
 - Workspace formatting: passed.
 - `scripts/check_operator_beta_helper_boundary.sh`: passed.
-- Its deterministic missing-`RefUnit` control exited nonzero with the expected boundary
+- Its deterministic missing-manager-list control exited nonzero with the expected boundary
   message.
+
+For the bounded correction, 15 helper library cases and three binary cases
+passed; the full locked workspace passed with the one documented maintainer
+fixture emitter ignored; all-target/all-feature workspace Clippy with
+`-D warnings`, formatting, and the corrected boundary gate passed. The gate's
+missing-`ListUnitsByNames` control refused deterministically.
+
+A disposable snapshot-only local VM reopened the stopped run-005 target disk
+without modifying the terminal occurrence. Under the real unprivileged
+`nq-helper` UID, the corrected binary consumed the exact retained helper
+request binding with only a fresh request identity and boottime deadline. It
+emitted one complete report with complete coverage, no errors, and the exact
+inactive/dead/disabled state, object path, machine identity, and unit-file
+digest. The VM was then powered off. This checks the corrected permission
+boundary; it does not relabel run-005 or qualify the full M1B journey.
 
 The independent audit of `0fe03f50ff971d910ff61f3ed2dd5d6534e67ab7`
 returned `NOT_ACCEPTED / CORRECTION_REQUIRED`: the owner binding accepted hostname
@@ -53,17 +78,19 @@ and wrong-port locators, and exact response closure depended on TCP segmentation
 while generic header syntax was unchecked. Subject `386358190e974c532d5237d36231fe7e806d100e`
 closes those two bounded findings without adding storage, evaluation, or authority.
 
-The structural gate enforces the accepted call sequence, file bound/no-follow law, forbidden
-mutation/subprocess vocabulary, HTTP framing constants, and absence of NQ scheduling/store
-dependencies. Runtime and gate were corrected together when pre-freeze review found the
-initial `GetUnitFileState` ordering mismatch.
+The structural gate enforces the read-only manager call sequence, explicitly
+forbids `RefUnit`, `LoadUnit`, and `StartUnit`, preserves the file
+bound/no-follow law and HTTP framing constants, and checks the absence of NQ
+scheduling/store dependencies.
 
 ## Unqualified dimensions
 
-No live system-bus acquisition, package build/install/remove/reinstall, Debian 12 VM run,
-two-VM HTTP acquisition, provider-intake persistence, diagnostic-artifact emission, Docket
-association, post-effect observation, service activation, production deployment, or
-general NQ-ng cutover was performed. Those remain later M1B qualification gates.
+The accepted predecessor performed no live system-bus acquisition. The bounded
+correction used only the disposable snapshot check described above. No corrected
+package build/install/remove/reinstall, fresh two-VM M1B run, HTTP acquisition,
+provider-intake persistence, diagnostic-artifact emission, Docket association,
+post-effect observation, service activation, production deployment, or general
+NQ-ng cutover was performed. Those remain later M1B qualification gates.
 
 Classic NQ remains preserved and `SUPERSEDED_FOR_OPERATOR_BETA`; no classic code, result,
 or acceptance was imported. Independent audit accepted exact qualification result

@@ -309,15 +309,17 @@ exercises one-below-minimum refusal plus an unrepresentable-response case.
 The systemd branch uses one direct zbus system-bus connection. On that same
 connection and within the request's monotonic deadline it calls
 `org.freedesktop.DBus.Peer.GetMachineId` on the systemd service and manager
-object, then `org.freedesktop.systemd1.Manager.RefUnit`, `GetUnit`, and
-`GetUnitFileState`. The retained reference permits an installed inactive unit
-to become addressable before `GetUnit`; closing the one-shot connection releases
-it. The branch reads `LoadState`, `ActiveState`, `SubState`, and `FragmentPath`
-through `org.freedesktop.DBus.Properties.Get` on the returned
-`org.freedesktop.systemd1.Unit` object. Those exact service, object, and
-interface identities are compiled helper constants; the scope's historical
-`manager_interface` value is an independently validated binding value and is
-not misrepresented as the complete interface catalog.
+object, then the read-only manager methods `ListUnitsByNames` for the one exact
+unit name and `ListUnitFilesByPatterns` for that same exact name. The former
+returns the exact unit object path plus `LoadState`, `ActiveState`, and
+`SubState`; the latter returns the exact fragment path and `UnitFileState`.
+Both replies must contain exactly one matching row. An alias/followed unit,
+different unit name, or in-progress job refuses the stable observation cut.
+This permits an installed inactive unit to be observed without calling the
+authorization-bearing `RefUnit`, `LoadUnit`, or any mutation method. Those
+exact service, object, and interface identities are compiled helper constants;
+the scope's historical `manager_interface` value is an independently validated
+binding value and is not misrepresented as the complete interface catalog.
 
 The returned `FragmentPath` is opened as a regular file without following a
 final-component symbolic link and read through the opened descriptor with an
@@ -326,11 +328,11 @@ the live machine identity and observed unit-file digest to equal the request
 scope before emitting one complete observation. The normalized observation
 retains the fixed manager object path, returned unit object path, exact four
 state values, live machine identity, unit name, and observed unit-file digest.
-Reference and lookup failures are distinct; installed-but-inactive and not
-initially loaded is a positive qualification case. Any connection, machine,
-reference, lookup, property, file-open, file-type, file-bound, digest, identity,
-or deadline failure yields typed absence of testimony. The helper performs no
-unit mutation and invokes no systemctl command.
+Unit-list and unit-file-list failures are distinct; installed-but-inactive and
+not initially loaded is a positive qualification case. Any connection,
+machine, cardinality, identity, transition-state, list, file-open, file-type,
+file-bound, digest, or deadline failure yields typed absence of testimony. The
+helper performs no unit mutation and invokes no systemctl command.
 
 The HTTP branch accepts only the exact beta shape already admitted by the
 scope: plain `http`, method `GET`, redirect policy `refuse`, path `/healthz`,

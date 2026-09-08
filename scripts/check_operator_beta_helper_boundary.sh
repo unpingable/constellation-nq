@@ -15,25 +15,24 @@ if rg -n 'nq-core|nq-store|nq-app' "$manifest" >/dev/null; then
     echo "helper acquired scheduling, store, or application authority" >&2
     exit 1
 fi
-if rg -n 'StartUnit|systemctl|Command::new|std::process::Command' "$crate/src" >/dev/null; then
+if rg -n 'StartUnit|RefUnit|LoadUnit|systemctl|Command::new|std::process::Command' "$crate/src" >/dev/null; then
     echo "helper boundary contains mutation or subprocess mechanics" >&2
     exit 1
 fi
 
 required=(
     '"GetMachineId"'
-    '"RefUnit"'
-    '"GetUnit"'
-    '"GetUnitFileState"'
-    '"LoadState"'
-    '"ActiveState"'
-    '"SubState"'
-    '"FragmentPath"'
+    '"ListUnitsByNames"'
+    '"ListUnitFilesByPatterns"'
+    '"load_state"'
+    '"active_state"'
+    '"sub_state"'
+    '"unit_file_state"'
     'MAX_UNIT_FILE_BYTES: usize = 1_048_576'
     'libc::O_CLOEXEC | libc::O_NOFOLLOW'
 )
 if [[ "${NQ_OPERATOR_BETA_HELPER_INJECT_CONTROL:-0}" == 1 ]]; then
-    required[1]='"RefUnit__deterministic_missing_control"'
+    required[1]='"ListUnitsByNames__deterministic_missing_control"'
 fi
 for needle in "${required[@]}"; do
     rg -Fq "$needle" "$systemd_source" || {
@@ -46,9 +45,9 @@ python3 - "$systemd_source" <<'PY'
 from pathlib import Path
 import sys
 text = Path(sys.argv[1]).read_text()
-positions = [text.index(token) for token in ('"GetMachineId"', '"RefUnit"', '"GetUnit"', '"GetUnitFileState"', '"LoadState"', '"ActiveState"', '"SubState"', '"FragmentPath"')]
+positions = [text.index(token) for token in ('"GetMachineId"', '"ListUnitsByNames"', '"ListUnitFilesByPatterns"')]
 if positions != sorted(positions) or len(set(positions)) != len(positions):
-    raise SystemExit("systemd calls/properties are not in the frozen acquisition order")
+    raise SystemExit("systemd read-only manager calls are not in the frozen acquisition order")
 PY
 
 for needle in \

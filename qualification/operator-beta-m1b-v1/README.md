@@ -1,5 +1,5 @@
 # Operator-beta NQ-ng M1B two-VM qualification harness
-**Status:** `PRE_EFFECT_RUNS_001_002_003_004_REFUSED__TRANSIENT_UNIT_CORRECTION_CANDIDATE__INDEPENDENT_REVIEW_REQUIRED`
+**Status:** `PRE_EFFECT_RUNS_001_002_003_004_005_REFUSED__HELPER_OBSERVATION_CORRECTION_READY_FOR_INDEPENDENT_AUDIT`
 **Accepted package checkpoint:** `8865dcad23f17a1f26716161554530237e04bb9e`
 **Accepted AG store-audit owner:** `837de287497942c79966aa05c083acee9c312261`
 **Accepted AG package qualification:** `db4bad1fba2b5ab512cc58356314228167b2f48e`
@@ -50,7 +50,7 @@ before retaining a result. The resulting exact campaign-owned package has
 SHA-256 `0e3ab6307b41e9d80a6bdd503324895b5c46d49aef57e9421abb0e294dbc9fca`;
 all four packaged binaries execute their build-info probes in that Bookworm
 image and require no glibc symbol newer than `GLIBC_2.34`. Exact evidence is in
-`BOOKWORM-PACKAGE.md`. Runs 001, 002, and 003 are never retried or relabeled;
+`BOOKWORM-PACKAGE.md`. Runs 001, 002, 003, 004, and 005 are never retried or relabeled;
 any later exercise is a fresh run occurrence after independent acceptance.
 
 Fresh `operator-beta-m1b-run-004` used the independently accepted and
@@ -69,6 +69,23 @@ same four-capability ceiling and service restrictions as `nqd`. The helper
 child still clears all capabilities before execution. Configuration,
 initialization, export, revocation, backup, and other capability-free commands
 retain their existing direct `nq` invocation.
+
+Fresh run-005 used that accepted and published transient-unit boundary. Watcher
+admission succeeded and the helper emitted one exact response, but the response
+was a valid failed report with unavailable coverage and
+`systemd_unit_reference_failed`. The retained provider response and admitted
+report show that `RefUnit` required interactive authorization for the
+unprivileged `nq-helper` identity. NQ therefore refused the pre-effect
+diagnostic as `missing_or_stale_testimony`; it did not launder the failed
+observation into the expected mismatch. Run-005 is terminal `REFUSED` at
+`nq_configured`, with `NO_EFFECT_ATTEMPTED` and null effect custody. Its guests
+and producer are exited, and it is not resumed or relabeled.
+
+The next correction remains inside the helper's observation boundary:
+`ListUnitsByNames` supplies the exact stable unit runtime row and
+`ListUnitFilesByPatterns` supplies the exact fragment path and unit-file state.
+Both are available to `nq-helper` without unit-management authorization. No
+D-Bus policy, privilege, service, scheduling, or effect authority is added.
 
 The target begins with the exact fixture unit installed, disabled, and
 inactive. The controller cannot reach the fixed HTTP response. One fresh
@@ -199,8 +216,11 @@ package, use the system bus, or perform an effect. The separately retained
 run-003 installed the exact prior package and fixture, then refused at its first
 NQ invocation. Run-004 installed the accepted Bookworm package and reached NQ
 configuration, then refused at its first helper-executing admission because the
-harness omitted the documented transient-unit capabilities. Neither produced
-an NQ artifact or attempted an effect.
+harness omitted the documented transient-unit capabilities. Run-005 proved
+that transient-unit boundary, admitted one failed systemd report, and refused
+before effect because the accepted helper's `RefUnit` call required
+authorization unavailable to `nq-helper`. None of runs 001--005 attempted an
+effect.
 
 A live run must use a clean, accepted harness commit and a named user-systemd
 unit whose `InvocationID` and `MainPID` match the producer. The intended local

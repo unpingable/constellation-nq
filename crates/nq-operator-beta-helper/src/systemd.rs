@@ -13,10 +13,22 @@ use crate::{CollectionFailure, DeadlineClock, evidence_basis, remaining};
 const SYSTEMD_SERVICE: &str = "org.freedesktop.systemd1";
 const MANAGER_PATH: &str = "/org/freedesktop/systemd1";
 const MANAGER_INTERFACE: &str = "org.freedesktop.systemd1.Manager";
-const UNIT_INTERFACE: &str = "org.freedesktop.systemd1.Unit";
-const PROPERTIES_INTERFACE: &str = "org.freedesktop.DBus.Properties";
 const PEER_INTERFACE: &str = "org.freedesktop.DBus.Peer";
 const MAX_UNIT_FILE_BYTES: usize = 1_048_576;
+
+type UnitListEntry = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    OwnedObjectPath,
+    u32,
+    String,
+    OwnedObjectPath,
+);
+type UnitFileListEntry = (String, String);
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -67,6 +79,15 @@ struct DbusObservation {
     machine_identity: String,
     unit_path: String,
     unit_file_sha256: Sha256Digest,
+    load_state: String,
+    active_state: String,
+    sub_state: String,
+    unit_file_state: String,
+}
+
+struct UnitStateObservation {
+    unit_path: OwnedObjectPath,
+    fragment_path: String,
     load_state: String,
     active_state: String,
     sub_state: String,
@@ -137,77 +158,42 @@ async fn acquire_dbus(
         )
     })?;
 
-    call(
-        request,
-        clock,
-        manager.call_method("RefUnit", &(&scope.unit_name,)),
-        "systemd_unit_reference_timeout",
-        "systemd unit reference exceeded the request deadline",
-        "systemd_unit_reference_failed",
-        "systemd unit reference failed",
-    )
-    .await?
-    .body()
-    .deserialize::<()>()
-    .map_err(|_| {
-        CollectionFailure::new(
-            "systemd_unit_reference_malformed",
-            "RefUnit reply was malformed",
-            false,
-        )
-    })?;
-
     let unit_reply = call(
         request,
         clock,
-        manager.call_method("GetUnit", &(&scope.unit_name,)),
-        "systemd_unit_lookup_timeout",
-        "systemd unit lookup exceeded the request deadline",
-        "systemd_unit_lookup_failed",
-        "systemd unit lookup failed",
+        manager.call_method("ListUnitsByNames", &(vec![scope.unit_name.as_str()],)),
+        "systemd_unit_list_timeout",
+        "systemd unit-state list exceeded the request deadline",
+        "systemd_unit_list_failed",
+        "systemd unit-state list failed",
     )
     .await?;
-    let unit_path: OwnedObjectPath = decode_body(
+    let unit_rows: Vec<UnitListEntry> = decode_body(
         &unit_reply,
-        "systemd_unit_lookup_malformed",
-        "GetUnit reply was malformed",
+        "systemd_unit_list_malformed",
+        "ListUnitsByNames reply was malformed",
     )?;
 
-    let file_state_reply = call(
+    let unit_file_reply = call(
         request,
         clock,
-        manager.call_method("GetUnitFileState", &(&scope.unit_name,)),
-        "systemd_unit_file_state_timeout",
-        "systemd unit-file state read exceeded the request deadline",
-        "systemd_unit_file_state_failed",
-        "systemd unit-file state read failed",
+        manager.call_method(
+            "ListUnitFilesByPatterns",
+            &(Vec::<&str>::new(), vec![scope.unit_name.as_str()]),
+        ),
+        "systemd_unit_file_list_timeout",
+        "systemd unit-file list exceeded the request deadline",
+        "systemd_unit_file_list_failed",
+        "systemd unit-file list failed",
     )
     .await?;
-    let unit_file_state: String = decode_body(
-        &file_state_reply,
-        "systemd_unit_file_state_malformed",
-        "GetUnitFileState reply was malformed",
+    let unit_file_rows: Vec<UnitFileListEntry> = decode_body(
+        &unit_file_reply,
+        "systemd_unit_file_list_malformed",
+        "ListUnitFilesByPatterns reply was malformed",
     )?;
-    let load_state = property(request, clock, &connection, unit_path.as_str(), "LoadState").await?;
-    let active_state = property(
-        request,
-        clock,
-        &connection,
-        unit_path.as_str(),
-        "ActiveState",
-    )
-    .await?;
-    let sub_state = property(request, clock, &connection, unit_path.as_str(), "SubState").await?;
-    let fragment_path = property(
-        request,
-        clock,
-        &connection,
-        unit_path.as_str(),
-        "FragmentPath",
-    )
-    .await?;
-
-    let unit_file_sha256 = read_unit_file_digest(&fragment_path)?;
+    let state = exact_unit_state(scope, unit_rows, unit_file_rows)?;
+    let unit_file_sha256 = read_unit_file_digest(&state.fragment_path)?;
     if unit_file_sha256 != scope.unit_file_sha256 {
         return Err(CollectionFailure::new(
             "systemd_unit_file_digest_mismatch",
@@ -219,50 +205,63 @@ async fn acquire_dbus(
 
     Ok(DbusObservation {
         machine_identity,
-        unit_path: unit_path.to_string(),
+        unit_path: state.unit_path.to_string(),
         unit_file_sha256,
-        load_state,
-        active_state,
-        sub_state,
-        unit_file_state,
+        load_state: state.load_state,
+        active_state: state.active_state,
+        sub_state: state.sub_state,
+        unit_file_state: state.unit_file_state,
     })
 }
 
-async fn property(
-    request: &HelperRequest,
-    clock: &impl DeadlineClock,
-    connection: &Connection,
-    path: &str,
-    property: &str,
-) -> Result<String, CollectionFailure> {
-    let reply = call(
-        request,
-        clock,
-        connection.call_method(
-            Some(SYSTEMD_SERVICE),
-            path,
-            Some(PROPERTIES_INTERFACE),
-            "Get",
-            &(UNIT_INTERFACE, property),
-        ),
-        "systemd_property_timeout",
-        "systemd property read exceeded the request deadline",
-        "systemd_property_failed",
-        "systemd property read failed",
-    )
-    .await?;
-    let value: zbus::zvariant::OwnedValue = decode_body(
-        &reply,
-        "systemd_property_malformed",
-        "systemd property reply was malformed",
-    )?;
-    String::try_from(value).map_err(|_| {
-        CollectionFailure::new(
-            "systemd_property_not_string",
-            "systemd property reply was not a string",
+fn exact_unit_state(
+    scope: &SystemdScope,
+    mut unit_rows: Vec<UnitListEntry>,
+    mut unit_file_rows: Vec<UnitFileListEntry>,
+) -> Result<UnitStateObservation, CollectionFailure> {
+    if unit_rows.len() != 1 || unit_file_rows.len() != 1 {
+        return Err(CollectionFailure::new(
+            "systemd_unit_cardinality",
+            "systemd did not return one exact unit and unit-file row",
             false,
-        )
-    })
+        ));
+    }
+    let (
+        unit_name,
+        _description,
+        load_state,
+        active_state,
+        sub_state,
+        following,
+        unit_path,
+        job_id,
+        job_type,
+        job_path,
+    ) = unit_rows.pop().expect("one unit row was checked");
+    let (fragment_path, unit_file_state) =
+        unit_file_rows.pop().expect("one unit-file row was checked");
+    if unit_name != scope.unit_name || !following.is_empty() {
+        Err(CollectionFailure::new(
+            "systemd_unit_identity_mismatch",
+            "systemd returned a different or followed unit identity",
+            false,
+        ))
+    } else if job_id != 0 || !job_type.is_empty() || job_path.as_str() != "/" {
+        Err(CollectionFailure::new(
+            "systemd_unit_transition_in_progress",
+            "systemd reported an in-progress unit job instead of one stable state cut",
+            true,
+        ))
+    } else {
+        Ok(UnitStateObservation {
+            unit_path,
+            fragment_path,
+            load_state,
+            active_state,
+            sub_state,
+            unit_file_state,
+        })
+    }
 }
 
 async fn call<F>(
@@ -385,6 +384,88 @@ mod tests {
     use std::{fs, os::unix::fs::symlink};
 
     use super::*;
+
+    fn unit_row(name: &str, job_id: u32) -> UnitListEntry {
+        (
+            name.to_owned(),
+            "fixture".to_owned(),
+            "loaded".to_owned(),
+            "inactive".to_owned(),
+            "dead".to_owned(),
+            String::new(),
+            OwnedObjectPath::try_from("/org/freedesktop/systemd1/unit/fixture").unwrap(),
+            job_id,
+            if job_id == 0 { "" } else { "start" }.to_owned(),
+            OwnedObjectPath::try_from(if job_id == 0 {
+                "/"
+            } else {
+                "/org/freedesktop/systemd1/job/1"
+            })
+            .unwrap(),
+        )
+    }
+
+    fn scope() -> SystemdScope {
+        SystemdScope {
+            schema: "nq.operator_beta.systemd_unit_scope.v1".to_owned(),
+            subject_identity: "sha256:fixture".to_owned(),
+            target_machine_identity: "machine:fixture".to_owned(),
+            unit_name: "fixture.service".to_owned(),
+            unit_file_sha256: Sha256Digest::parse(format!("sha256:{}", "a".repeat(64))).unwrap(),
+            manager_interface: MANAGER_INTERFACE.to_owned(),
+            properties: vec![
+                "LoadState".to_owned(),
+                "ActiveState".to_owned(),
+                "SubState".to_owned(),
+                "UnitFileState".to_owned(),
+            ],
+        }
+    }
+
+    #[test]
+    fn exact_read_only_unit_rows_project_one_stable_state() {
+        let state = exact_unit_state(
+            &scope(),
+            vec![unit_row("fixture.service", 0)],
+            vec![(
+                "/etc/systemd/system/fixture.service".to_owned(),
+                "disabled".to_owned(),
+            )],
+        )
+        .unwrap();
+        assert_eq!(state.load_state, "loaded");
+        assert_eq!(state.active_state, "inactive");
+        assert_eq!(state.sub_state, "dead");
+        assert_eq!(state.unit_file_state, "disabled");
+        assert_eq!(state.fragment_path, "/etc/systemd/system/fixture.service");
+    }
+
+    #[test]
+    fn substituted_or_transitioning_unit_rows_fail_closed() {
+        assert!(
+            exact_unit_state(
+                &scope(),
+                vec![unit_row("other.service", 0)],
+                vec![(
+                    "/etc/systemd/system/fixture.service".to_owned(),
+                    "disabled".to_owned()
+                )],
+            )
+            .is_err()
+        );
+        assert!(
+            exact_unit_state(
+                &scope(),
+                vec![unit_row("fixture.service", 1)],
+                vec![(
+                    "/etc/systemd/system/fixture.service".to_owned(),
+                    "disabled".to_owned()
+                )],
+            )
+            .is_err()
+        );
+        assert!(exact_unit_state(&scope(), Vec::new(), Vec::new()).is_err());
+    }
 
     #[test]
     fn unit_file_digest_is_exact_and_regular() {
