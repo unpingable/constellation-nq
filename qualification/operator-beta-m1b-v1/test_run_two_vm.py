@@ -27,6 +27,10 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class HarnessTests(unittest.TestCase):
+    FIXTURE_IMAGE_BYTES = b"fixture-image\n"
+    FIXTURE_NQ_PACKAGE_BYTES = b"fixture-nq-package\n"
+    FIXTURE_AG_PACKAGE_BYTES = b"fixture-ag-package\n"
+
     def args(self, output: pathlib.Path, run_id: str = "fixture-001") -> types.SimpleNamespace:
         return types.SimpleNamespace(
             output=output,
@@ -46,7 +50,7 @@ class HarnessTests(unittest.TestCase):
             "controller_machine_identity": "a" * 32,
             "target_machine_identity": "b" * 32,
             "unit_name": RUNNER.UNIT,
-            "unit_file_sha256": "sha256:" + "c" * 64,
+            "unit_file_sha256": RUNNER.sha256_bytes(RUNNER.FIXTURE_UNIT_BYTES),
             "controller_address": RUNNER.CONTROLLER_ADDRESS,
             "target_address": RUNNER.FIXTURE_ADDRESS,
         }
@@ -166,6 +170,32 @@ class HarnessTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(RUNNER.canonical(value) + b"\n")
 
+    @contextlib.contextmanager
+    def fixture_input_identities(self):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.object(
+                    RUNNER,
+                    "IMAGE_SHA512",
+                    hashlib.sha512(self.FIXTURE_IMAGE_BYTES).hexdigest(),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    RUNNER,
+                    "NQ_DEB_SHA256",
+                    hashlib.sha256(self.FIXTURE_NQ_PACKAGE_BYTES).hexdigest(),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    RUNNER,
+                    "AG_DEB_SHA256",
+                    hashlib.sha256(self.FIXTURE_AG_PACKAGE_BYTES).hexdigest(),
+                )
+            )
+            yield
+
     def make_sealed_run(self, root: pathlib.Path) -> None:
         run_id = "fixture-001"
         identities, service, bindings = self.service_records(run_id)
@@ -173,16 +203,49 @@ class HarnessTests(unittest.TestCase):
             artifact = root / relative
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_bytes(b"fixture\n")
+        (root / "input" / RUNNER.IMAGE_NAME).write_bytes(self.FIXTURE_IMAGE_BYTES)
+        (root / "input/SHA512SUMS").write_text(
+            f"{RUNNER.IMAGE_SHA512}  {RUNNER.IMAGE_NAME}\n"
+        )
+        (root / "input/nq-ng_amd64.deb").write_bytes(
+            self.FIXTURE_NQ_PACKAGE_BYTES
+        )
+        (
+            root / "input/agent-governor-ng-systemd-executor_amd64.deb"
+        ).write_bytes(self.FIXTURE_AG_PACKAGE_BYTES)
         self.write_json(root / "evidence/input-receipt.json", {
             "schema": "constellation.operator_beta.m1b_inputs.v1",
             "run_id": run_id,
+            "recorded_at": "2026-09-07T12:00:00Z",
             "harness_subject": "a" * 40,
+            "accepted_package_result": RUNNER.ACCEPTED_PACKAGE_RESULT,
+            "image": {
+                "name": RUNNER.IMAGE_NAME,
+                "sha512": RUNNER.IMAGE_SHA512,
+                "checksum_manifest_sha256": RUNNER.digest_file(
+                    root / "input/SHA512SUMS", "sha256"
+                ),
+                "detached_signature": "UPSTREAM_DETACHED_SIGNATURE_NOT_PUBLISHED",
+            },
             "nq_package_sha256": RUNNER.NQ_DEB_SHA256,
             "ag_package_sha256": RUNNER.AG_DEB_SHA256,
+            "ports": {
+                "control_ssh": 23141,
+                "target_ssh": 23142,
+                "fixture_link_udp": 24567,
+            },
         })
         self.write_json(root / "evidence/guest-identities.json", identities)
         self.write_json(root / "evidence/service-subject.json", service)
         self.write_json(root / "evidence/bindings.json", bindings)
+        (root / "evidence" / RUNNER.UNIT).write_bytes(RUNNER.FIXTURE_UNIT_BYTES)
+        (root / "evidence/healthz").write_bytes(RUNNER.FIXTURE_HEALTH_BYTES)
+        (root / "evidence/target-nq.toml").write_bytes(
+            RUNNER.expected_nq_config(bindings, "target")
+        )
+        (root / "evidence/control-nq.toml").write_bytes(
+            RUNNER.expected_nq_config(bindings, "control")
+        )
         cases = (
             ("systemd-pre-artifact.json", "nq.systemd_unit", "present", "systemd-pre"),
             ("http-pre-artifact.json", "nq.http_endpoint", "unresolved", "http-pre"),
@@ -193,23 +256,10 @@ class HarnessTests(unittest.TestCase):
         )
         for name, profile, condition, instance in cases:
             self.write_json(root / "evidence" / name, self.artifact(bindings, profile, condition, instance))
-        plan = {
-            "schema": "ag-effectd.docket-executor-systemd-plan/v2",
-            "subject": bindings["subject_identity"],
-            "scope": "sha256:" + "4" * 64,
-            "systemd_machine_identity": identities["target_machine_identity"],
-        }
-        work = RUNNER.ag_domain_digest(plan["schema"], RUNNER.canonical(plan))
-        attempt = RUNNER.sha256_bytes((run_id + "\0attempt\0" + work).encode())
-        marker = RUNNER.sha256_bytes((run_id + "\0marker\0" + work).encode())
-        dispatch = {
-            "attempt": attempt,
-            "marker": marker,
-            "scope": plan["scope"],
-            "subject": bindings["subject_identity"],
-            "work": work,
-            "work_schema": "ag-effectd.docket-executor-systemd-work/v2",
-        }
+        plan = RUNNER.expected_effect_plan(bindings, identities)
+        dispatch, work = RUNNER.expected_effect_dispatch(run_id, plan)
+        attempt = dispatch["attempt"]
+        marker = dispatch["marker"]
         outcome = {
             "attempt": attempt,
             "marker": marker,
@@ -279,6 +329,23 @@ class HarnessTests(unittest.TestCase):
             "target_ssh_port_absent": True,
             "fixture_link_port_absent": True,
         })
+        effect_custody = {
+            "plan_sha256": RUNNER.digest_file(
+                root / "evidence/systemd-plan-v2.json", "sha256"
+            ),
+            "dispatch_sha256": RUNNER.digest_file(
+                root / "evidence/docket-shaped-dispatch-v1.json", "sha256"
+            ),
+            "outcome_sha256": RUNNER.digest_file(
+                root / "evidence/executor-outcome-v1.json", "sha256"
+            ),
+            "attempt": attempt,
+            "marker": marker,
+            "work": work,
+            "subject": dispatch["subject"],
+            "scope": dispatch["scope"],
+            "receipt": outcome["receipt"],
+        }
         self.write_json(root / "RECOVERY.json", {
             "schema": "constellation.operator_beta.m1b_recovery.v1",
             "campaign": RUNNER.CAMPAIGN,
@@ -288,6 +355,7 @@ class HarnessTests(unittest.TestCase):
             "producer": {"main_pid": 999999999},
             "phase": "sealed",
             "effect_outcome": "KNOWN_EFFECT_OWNER_SUCCESS",
+            "effect_custody": effect_custody,
             "next_lawful_action": "independent evidence audit",
         })
         files = []
@@ -373,11 +441,21 @@ class HarnessTests(unittest.TestCase):
             output.mkdir()
             producer = RUNNER.Producer(self.args(output))
             producer.input_facts = {"image_sha512": RUNNER.IMAGE_SHA512}
+            producer.effect_custody = {
+                "attempt": "sha256:" + "1" * 64,
+                "marker": "sha256:" + "2" * 64,
+                "work": "sha256:" + "3" * 64,
+            }
+            producer.effect_outcome = "OUTCOME_UNKNOWN_REQUIRES_AG_RECONCILE"
             with mock.patch.dict(os.environ, {"INVOCATION_ID": "b" * 32}):
-                producer.state("created", "retain exact inputs")
+                producer.state("effect_dispatch_prepared", "invoke owner")
+                producer.state("refused", "reopen retained state")
             record = json.loads((output / "RECOVERY.json").read_bytes())
         self.assertEqual(record["producer"]["invocation_id"], "b" * 32)
-        self.assertEqual(record["effect_outcome"], "NO_EFFECT_ATTEMPTED")
+        self.assertEqual(
+            record["effect_outcome"], "OUTCOME_UNKNOWN_REQUIRES_AG_RECONCILE"
+        )
+        self.assertEqual(record["effect_custody"], producer.effect_custody)
 
     def test_runtime_bound_refuses_before_recovery_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -526,8 +604,86 @@ class HarnessTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(RUNNER.Refusal, "target guest is not active"):
                 RUNNER.reconcile_effect(root)
 
-    def test_run_reopen_and_semantic_substitutions(self) -> None:
+    def test_reconcile_refuses_substituted_owner_outcome_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary).resolve()
+            (root / "evidence").mkdir(parents=True)
+            (root / "runtime").mkdir()
+            (root / "target").mkdir()
+            identities, _, bindings = self.service_records()
+            plan = RUNNER.expected_effect_plan(bindings, identities)
+            dispatch, work = RUNNER.expected_effect_dispatch("fixture-001", plan)
+            self.write_json(root / "evidence/bindings.json", bindings)
+            self.write_json(root / "evidence/guest-identities.json", identities)
+            self.write_json(root / "evidence/systemd-plan-v2.json", plan)
+            self.write_json(
+                root / "evidence/docket-shaped-dispatch-v1.json", dispatch
+            )
+            (root / "runtime/id_ed25519").write_bytes(b"key\n")
+            (root / "target/known_hosts").write_bytes(b"host\n")
+            custody = {
+                "plan_sha256": RUNNER.digest_file(
+                    root / "evidence/systemd-plan-v2.json", "sha256"
+                ),
+                "dispatch_sha256": RUNNER.digest_file(
+                    root / "evidence/docket-shaped-dispatch-v1.json", "sha256"
+                ),
+                "attempt": dispatch["attempt"],
+                "marker": dispatch["marker"],
+                "work": work,
+                "subject": dispatch["subject"],
+                "scope": dispatch["scope"],
+            }
+            self.write_json(
+                root / "RECOVERY.json",
+                {
+                    "schema": "constellation.operator_beta.m1b_recovery.v1",
+                    "campaign": RUNNER.CAMPAIGN,
+                    "run_id": "fixture-001",
+                    "paths": {"run_root": str(root)},
+                    "guests": [
+                        {
+                            "role": "target",
+                            "pid": 1234,
+                            "start_ticks": 10,
+                            "ssh_port": 23142,
+                        }
+                    ],
+                    "producer": {"main_pid": 999999999},
+                    "phase": "refused",
+                    "effect_outcome": "OUTCOME_UNKNOWN_REQUIRES_AG_RECONCILE",
+                    "effect_custody": custody,
+                    "next_lawful_action": "reconcile",
+                },
+            )
+            wrong = {
+                "attempt": "sha256:" + "9" * 64,
+                "marker": "sha256:" + "8" * 64,
+                "outcome": "success",
+                "receipt": "sha256:" + "7" * 64,
+            }
+            completed = [
+                subprocess.CompletedProcess([], 0, stdout=b"", stderr=b""),
+                subprocess.CompletedProcess(
+                    [], 0, stdout=RUNNER.canonical(wrong) + b"\n", stderr=b""
+                ),
+            ]
+            inspection = {
+                "producer_state": "EXITED",
+                "guests": [{"role": "target", "state": "ACTIVE"}],
+            }
+            with (
+                mock.patch.object(RUNNER, "inspect_run", return_value=inspection),
+                mock.patch.object(RUNNER, "run", side_effect=completed),
+                self.assertRaisesRegex(RUNNER.Refusal, "exact retained attempt"),
+            ):
+                RUNNER.reconcile_effect(root)
+            self.assertFalse(
+                (root / "evidence/reconciliation-outcome-v1.json").exists()
+            )
+
+    def test_run_reopen_and_semantic_substitutions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, self.fixture_input_identities():
             root = pathlib.Path(temporary).resolve()
             self.make_sealed_run(root)
             with contextlib.redirect_stdout(io.StringIO()) as output:
@@ -543,7 +699,7 @@ class HarnessTests(unittest.TestCase):
                 RUNNER.check_run(root)
 
     def test_run_reopen_refuses_missing_required_evidence(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory() as temporary, self.fixture_input_identities():
             root = pathlib.Path(temporary).resolve()
             self.make_sealed_run(root)
             (root / "evidence/target-revocations.json").unlink()
@@ -557,7 +713,7 @@ class HarnessTests(unittest.TestCase):
                 RUNNER.check_run(root)
 
     def test_run_reopen_refuses_plan_substitution(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory() as temporary, self.fixture_input_identities():
             root = pathlib.Path(temporary).resolve()
             self.make_sealed_run(root)
             plan_path = root / "evidence/systemd-plan-v2.json"
@@ -566,6 +722,80 @@ class HarnessTests(unittest.TestCase):
             self.write_json(plan_path, plan)
             self.reseal(root)
             with self.assertRaisesRegex(RUNNER.Refusal, "binding disagrees"):
+                RUNNER.check_run(root)
+
+    def test_run_reopen_refuses_resealed_package_content_substitution(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, self.fixture_input_identities():
+            root = pathlib.Path(temporary).resolve()
+            self.make_sealed_run(root)
+            (root / "input/nq-ng_amd64.deb").write_bytes(b"other-package\n")
+            self.reseal(root)
+            with self.assertRaisesRegex(RUNNER.Refusal, "retained package bytes"):
+                RUNNER.check_run(root)
+
+    def test_run_reopen_refuses_coherent_effect_semantic_substitution(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, self.fixture_input_identities():
+            root = pathlib.Path(temporary).resolve()
+            self.make_sealed_run(root)
+            plan_path = root / "evidence/systemd-plan-v2.json"
+            plan = json.loads(plan_path.read_bytes())
+            plan["effect"]["action"] = "stop"
+            plan["effect"]["unit"] = "different.service"
+            dispatch, _ = RUNNER.expected_effect_dispatch("fixture-001", plan)
+            outcome = {
+                "attempt": dispatch["attempt"],
+                "marker": dispatch["marker"],
+                "outcome": "success",
+                "receipt": "sha256:" + "7" * 64,
+            }
+            occurrence_path = root / "evidence/effect-occurrence.json"
+            occurrence = json.loads(occurrence_path.read_bytes())
+            occurrence["plan"] = plan
+            occurrence["dispatch"] = dispatch
+            occurrence["outcome"] = outcome
+            self.write_json(plan_path, plan)
+            self.write_json(
+                root / "evidence/docket-shaped-dispatch-v1.json", dispatch
+            )
+            self.write_json(root / "evidence/executor-outcome-v1.json", outcome)
+            self.write_json(occurrence_path, occurrence)
+            self.reseal(root)
+            with self.assertRaisesRegex(RUNNER.Refusal, "binding disagrees"):
+                RUNNER.check_run(root)
+
+    def test_run_reopen_refuses_coherent_attempt_identity_substitution(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, self.fixture_input_identities():
+            root = pathlib.Path(temporary).resolve()
+            self.make_sealed_run(root)
+            dispatch_path = root / "evidence/docket-shaped-dispatch-v1.json"
+            dispatch = json.loads(dispatch_path.read_bytes())
+            dispatch["attempt"] = "sha256:" + "9" * 64
+            outcome_path = root / "evidence/executor-outcome-v1.json"
+            outcome = json.loads(outcome_path.read_bytes())
+            outcome["attempt"] = dispatch["attempt"]
+            occurrence_path = root / "evidence/effect-occurrence.json"
+            occurrence = json.loads(occurrence_path.read_bytes())
+            occurrence["dispatch"] = dispatch
+            occurrence["outcome"] = outcome
+            recovery_path = root / "RECOVERY.json"
+            recovery = json.loads(recovery_path.read_bytes())
+            recovery["effect_custody"]["attempt"] = dispatch["attempt"]
+            self.write_json(dispatch_path, dispatch)
+            self.write_json(outcome_path, outcome)
+            self.write_json(occurrence_path, occurrence)
+            self.write_json(recovery_path, recovery)
+            self.reseal(root)
+            with self.assertRaisesRegex(RUNNER.Refusal, "binding disagrees"):
+                RUNNER.check_run(root)
+
+    def test_run_reopen_refuses_resealed_config_substitution(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, self.fixture_input_identities():
+            root = pathlib.Path(temporary).resolve()
+            self.make_sealed_run(root)
+            config = root / "evidence/target-nq.toml"
+            config.write_bytes(config.read_bytes() + b"\n# substituted\n")
+            self.reseal(root)
+            with self.assertRaisesRegex(RUNNER.Refusal, "configuration differs"):
                 RUNNER.check_run(root)
 
 

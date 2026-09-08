@@ -47,10 +47,20 @@ case passes.
 The runner writes `RECOVERY.json` before QEMU starts and atomically replaces it
 at every phase transition. It records exact run ID, host, working directory,
 source subject, input digests, guest names, PID files, log/evidence paths,
-current phase, last completed phase, and next lawful action. Each QEMU process
+current phase, last completed phase, immutable plan/dispatch digests,
+attempt/marker/work identities, effect outcome, and next lawful action. Each QEMU process
 has a distinct campaign name, PID file, serial log, fresh overlay, and NoCloud
 seed. The harness is launched through a named user-systemd unit so supervising
-agent loss does not terminate it. A fresh supervisor uses the query-only `inspect-run` command to reopen the producer and exact QEMU PID, command-line token, and process-start identities recorded in `RECOVERY.json`; it does not restart the producer merely because the prior supervisor disappeared. If and only if the retained effect state is outcome-unknown, `reconcile-effect` may query the same AG attempt after the original producer is absent. It performs no mechanics and never resumes the campaign automatically.
+agent loss does not terminate it. A fresh supervisor uses the query-only
+`inspect-run` command to reopen the producer and exact QEMU PID, command-line
+token, and process-start identities recorded in `RECOVERY.json`; it does not
+restart the producer merely because the prior supervisor disappeared. If and
+only if the retained effect state is outcome-unknown, `reconcile-effect` may
+query the same AG attempt after the original producer is absent. It first
+recomputes the fixed plan and dispatch from retained subject, scope, machine,
+and run identities; the AG outcome must bind that attempt and marker before
+custody changes. It performs no mechanics and never resumes the campaign
+automatically.
 
 An interrupted or failed run writes a refusal record that separately preserves
 known-no-effect, known-effect, or outcome-unknown custody. It preserves the run
@@ -100,10 +110,15 @@ qualification outcomes.
 
 The checked producer is `run_two_vm.py`; its pure-local qualification is
 `test_run_two_vm.py`, and `scripts/check-operator-beta-m1b-v1.sh` is the
-structural gate. The correction candidate passes 16 qualification cases covering
-AG-compatible subject framing, durable recovery custody, exact diagnostic subject/scope/profile/question/policy/vantage/self-identity binding,
+structural gate. The correction candidate passes 21 qualification cases
+covering AG-compatible subject framing, durable recovery custody, exact
+diagnostic subject/scope/profile/question/policy/vantage/self-identity binding,
 producer-unit identity, runtime bounds, exact diagnostic policy/condition
-checks, checksum binding, symlink refusal, terminal complete-inventory reopen, AG/NQ cross-binding, content mutation, missing-evidence refusal, process inspection, same-attempt reconcile refusal, and coherent substitutions. The gate's injected missing-boundary
+checks, retained image/checksum/package/fixture/config binding, symlink refusal,
+terminal complete-inventory reopen, fixed AG plan/effect/action/unit semantics,
+owner outcome and recovery binding, content mutation, missing-evidence refusal,
+process inspection, same-attempt reconcile refusal, and coherent package,
+config, effect, attempt, and reconciliation substitutions. The gate's injected missing-boundary
 control refuses deterministically. These are harness results only: no VM,
 package install, system bus, fixture service, or effect has run.
 

@@ -32,6 +32,22 @@ NQ_DEB_SHA256 = "979a4df81f32c5453e79eb15a87cf93c0058ef4d69cc7048eb6a1e67282d376
 AG_DEB_SHA256 = "2852dc8a516980c4a1936d64a3a3f472d95fccf5eb3935f01a1be277f6b24f26"
 AG_DEB_VERSION = "0.1.0-1+m1a3"
 UNIT = "constellation-beta-http-fixture.service"
+FIXTURE_UNIT_BYTES = b"""[Unit]
+Description=Constellation operator-beta HTTP fixture
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -m http.server 18080 --bind 192.168.76.2 --directory /var/lib/constellation-beta-http-fixture
+WorkingDirectory=/var/lib/constellation-beta-http-fixture
+User=nobody
+Group=nogroup
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+"""
+FIXTURE_HEALTH_BYTES = b"operator-beta-ok\n"
 FIXTURE_ADDRESS = "192.168.76.2"
 CONTROLLER_ADDRESS = "192.168.76.1"
 FIXTURE_PORT = 18080
@@ -219,6 +235,78 @@ def effect_outcome_state(outcome: str) -> str:
         raise Refusal("AG owner emitted an unknown outcome class") from error
 
 
+def expected_effect_plan(
+    bindings: dict[str, Any], identities: dict[str, Any]
+) -> dict[str, Any]:
+    subject = bindings["subject_identity"]
+    scope = sha256_bytes(
+        canonical(
+            {
+                "schema": "constellation.operator_beta.effect_scope.v1",
+                "subject": subject,
+            }
+        )
+    )
+    return {
+        "attempt_store": "/var/lib/ag-effectd-m1b/attempts.sqlite",
+        "effect": {
+            "action": "start",
+            "expected_active_state": "inactive",
+            "expected_unit_file_state": "disabled",
+            "kind": "systemd_unit",
+            "target": "constellation-beta-http-fixture",
+            "unit": UNIT,
+        },
+        "effect_index": 0,
+        "execution_lock_timeout_ms": 5000,
+        "file_policy": {
+            "max_content_bytes": 1024,
+            "require_private_parent_writes": True,
+            "trusted_ancestor_uid": 0,
+            "trusted_parent_uid": 0,
+        },
+        "job_timeout_ms": 30000,
+        "schema": "ag-effectd.docket-executor-systemd-plan/v2",
+        "scope": scope,
+        "subject": subject,
+        "systemd_machine_identity": identities["target_machine_identity"],
+    }
+
+
+def expected_effect_dispatch(
+    run_id: str, plan: dict[str, Any]
+) -> tuple[dict[str, Any], str]:
+    work = ag_domain_digest(
+        "ag-effectd.docket-executor-systemd-plan/v2", canonical(plan)
+    )
+    return (
+        {
+            "attempt": sha256_bytes((run_id + "\0attempt\0" + work).encode()),
+            "marker": sha256_bytes((run_id + "\0marker\0" + work).encode()),
+            "scope": plan["scope"],
+            "subject": plan["subject"],
+            "work": work,
+            "work_schema": "ag-effectd.docket-executor-systemd-work/v2",
+        },
+        work,
+    )
+
+
+def verify_effect_outcome(
+    outcome: dict[str, Any], dispatch: dict[str, Any]
+) -> str:
+    if (
+        set(outcome) != {"attempt", "marker", "receipt", "outcome"}
+        or outcome.get("attempt") != dispatch["attempt"]
+        or outcome.get("marker") != dispatch["marker"]
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", outcome.get("receipt", ""))
+    ):
+        raise Refusal("AG owner outcome does not bind the exact retained attempt")
+    outcome_class = outcome.get("outcome")
+    effect_outcome_state(outcome_class)
+    return outcome_class
+
+
 def exact_physical_parent(path: pathlib.Path) -> pathlib.Path:
     if not path.is_absolute():
         raise Refusal("output must be an absolute path")
@@ -381,6 +469,7 @@ class Producer:
         self.guests: list[Guest] = []
         self.created = False
         self.input_facts: dict[str, Any] = {}
+        self.effect_custody: dict[str, Any] | None = None
 
     def check_runtime(self) -> None:
         elapsed = time.monotonic() - self.started
@@ -437,6 +526,7 @@ class Producer:
             "last_completed_phase": self.last_completed,
             "next_lawful_action": next_action,
             "effect_outcome": self.effect_outcome,
+            "effect_custody": self.effect_custody,
             "updated_at": utc_now(),
             "producer": {
                 "systemd_unit": self.args.producer_unit,
@@ -849,24 +939,10 @@ ethernets:
             "test \"$(systemctl is-active nqd.service || true)\" = inactive; "
             f"test \"$(systemctl is-active {UNIT} || true)\" = inactive",
         )
-        unit_text = f"""[Unit]
-Description=Constellation operator-beta HTTP fixture
-After=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/python3 -m http.server {FIXTURE_PORT} --bind {FIXTURE_ADDRESS} --directory /var/lib/constellation-beta-http-fixture
-WorkingDirectory=/var/lib/constellation-beta-http-fixture
-User=nobody
-Group=nogroup
-NoNewPrivileges=true
-
-[Install]
-WantedBy=multi-user.target
-"""
-        health = b"operator-beta-ok\n"
-        atomic_write(self.output / "evidence" / UNIT, unit_text.encode(), 0o400)
-        atomic_write(self.output / "evidence" / "healthz", health, 0o400)
+        atomic_write(self.output / "evidence" / UNIT, FIXTURE_UNIT_BYTES, 0o400)
+        atomic_write(
+            self.output / "evidence" / "healthz", FIXTURE_HEALTH_BYTES, 0o400
+        )
         self.scp_to(
             target,
             [self.output / "evidence" / UNIT, self.output / "evidence" / "healthz"],
@@ -954,7 +1030,13 @@ WantedBy=multi-user.target
             if isinstance(value, list):
                 return "[" + ", ".join(toml(item) for item in value) + "]"
             if isinstance(value, dict):
-                return "{ " + ", ".join(f"{key} = {toml(item)}" for key, item in value.items()) + " }"
+                return (
+                    "{ "
+                    + ", ".join(
+                        f"{key} = {toml(value[key])}" for key in sorted(value)
+                    )
+                    + " }"
+                )
             raise TypeError(value)
         return f"""
 [[watchers]]
@@ -1057,7 +1139,7 @@ max_file_bytes = 67108864
             "subject_identity": subject,
             "request_scope": self.scope_identity(subject, http_scope, "nq.http_endpoint"),
             "expected_status": 200,
-            "expected_body_sha256": sha256_bytes(b"operator-beta-ok\n"),
+            "expected_body_sha256": sha256_bytes(FIXTURE_HEALTH_BYTES),
         }
         prefix_target = """schema = "nq.config.v1"
 database_path = "/var/lib/nq/operator-beta.sqlite"
@@ -1228,31 +1310,8 @@ helper_runtime_dir = "/run/nq/operator-beta-helpers"
 
     def enact(self, target: Guest, bindings: dict[str, Any]) -> dict[str, Any]:
         identities = json.loads((self.output / "evidence" / "guest-identities.json").read_text())
-        scope = sha256_bytes(canonical({"schema": "constellation.operator_beta.effect_scope.v1", "subject": bindings["subject_identity"]}))
-        plan = {
-            "attempt_store": "/var/lib/ag-effectd-m1b/attempts.sqlite",
-            "effect": {
-                "action": "start",
-                "expected_active_state": "inactive",
-                "expected_unit_file_state": "disabled",
-                "kind": "systemd_unit",
-                "target": "constellation-beta-http-fixture",
-                "unit": UNIT,
-            },
-            "effect_index": 0,
-            "execution_lock_timeout_ms": 5000,
-            "file_policy": {
-                "max_content_bytes": 1024,
-                "require_private_parent_writes": True,
-                "trusted_ancestor_uid": 0,
-                "trusted_parent_uid": 0,
-            },
-            "job_timeout_ms": 30000,
-            "schema": "ag-effectd.docket-executor-systemd-plan/v2",
-            "scope": scope,
-            "subject": bindings["subject_identity"],
-            "systemd_machine_identity": identities["target_machine_identity"],
-        }
+        plan = expected_effect_plan(bindings, identities)
+        scope = plan["scope"]
         plan_path = self.output / "evidence" / "systemd-plan-v2.json"
         atomic_write(plan_path, canonical(plan) + b"\n", 0o400)
         self.scp_to(target, [plan_path], "/home/betaoperator/")
@@ -1267,19 +1326,23 @@ helper_runtime_dir = "/run/nq/operator-beta-helpers"
             "sudo /usr/libexec/agent-governor-ng/ag-effectd "
             "plan-id /var/lib/ag-effectd-m1b/input/plan.json",
         ).stdout.decode().strip()
-        attempt = sha256_bytes((self.run_id + "\0attempt\0" + work).encode())
-        marker = sha256_bytes((self.run_id + "\0marker\0" + work).encode())
-        dispatch = {
-            "attempt": attempt,
-            "marker": marker,
-            "scope": scope,
-            "subject": bindings["subject_identity"],
-            "work": work,
-            "work_schema": "ag-effectd.docket-executor-systemd-work/v2",
-        }
+        dispatch, expected_work = expected_effect_dispatch(self.run_id, plan)
+        if work != expected_work:
+            raise Refusal("AG plan identity disagrees with the exact retained plan")
+        attempt = dispatch["attempt"]
+        marker = dispatch["marker"]
         dispatch_path = self.output / "evidence" / "docket-shaped-dispatch-v1.json"
         atomic_write(dispatch_path, canonical(dispatch) + b"\n", 0o400)
         self.scp_to(target, [dispatch_path], "/home/betaoperator/")
+        self.effect_custody = {
+            "plan_sha256": digest_file(plan_path, "sha256"),
+            "dispatch_sha256": digest_file(dispatch_path, "sha256"),
+            "attempt": attempt,
+            "marker": marker,
+            "work": work,
+            "subject": dispatch["subject"],
+            "scope": scope,
+        }
         self.effect_outcome = "OUTCOME_UNKNOWN_REQUIRES_AG_RECONCILE"
         self.state(
             "effect_dispatch_prepared",
@@ -1295,8 +1358,17 @@ helper_runtime_dir = "/run/nq/operator-beta-helpers"
             "< /home/betaoperator/docket-shaped-dispatch-v1.json",
         )
         atomic_write(self.output / "evidence" / "executor-outcome-v1.json", result.stdout, 0o400)
-        outcome = json.loads(result.stdout)
-        outcome_class = outcome.get("outcome")
+        try:
+            outcome = json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            raise Refusal("AG execute did not emit one JSON outcome") from error
+        if result.stdout != canonical(outcome) + b"\n":
+            raise Refusal("AG execute outcome is not canonical JSON")
+        outcome_class = verify_effect_outcome(outcome, dispatch)
+        self.effect_custody["outcome_sha256"] = digest_file(
+            self.output / "evidence" / "executor-outcome-v1.json", "sha256"
+        )
+        self.effect_custody["receipt"] = outcome["receipt"]
         self.effect_outcome = effect_outcome_state(outcome_class)
         if outcome_class != "success":
             raise Refusal(f"fresh AG M1A occurrence returned {outcome_class}")
@@ -1738,6 +1810,32 @@ def reconcile_effect(path: pathlib.Path) -> None:
         (known_hosts, "retained target host key"),
     ):
         regular_file(artifact, label)
+    bindings = load_json_artifact(path / "evidence" / "bindings.json", "bindings")
+    identities = load_json_artifact(
+        path / "evidence" / "guest-identities.json", "guest identities"
+    )
+    retained_plan = load_json_artifact(plan, "retained AG plan")
+    retained_dispatch = load_json_artifact(dispatch, "retained dispatch")
+    expected_plan = expected_effect_plan(bindings, identities)
+    expected_dispatch, expected_work = expected_effect_dispatch(
+        recovery["run_id"], expected_plan
+    )
+    if retained_plan != expected_plan or retained_dispatch != expected_dispatch:
+        raise Refusal("retained effect inputs differ from the exact original attempt")
+    custody = recovery.get("effect_custody")
+    expected_custody = {
+        "plan_sha256": digest_file(plan, "sha256"),
+        "dispatch_sha256": digest_file(dispatch, "sha256"),
+        "attempt": expected_dispatch["attempt"],
+        "marker": expected_dispatch["marker"],
+        "work": expected_work,
+        "subject": expected_dispatch["subject"],
+        "scope": expected_dispatch["scope"],
+    }
+    if not isinstance(custody, dict) or any(
+        custody.get(key) != value for key, value in expected_custody.items()
+    ):
+        raise Refusal("recovery custody does not bind the exact original attempt")
     port = target.get("ssh_port")
     if not isinstance(port, int):
         raise Refusal("target SSH port is not retained")
@@ -1763,7 +1861,9 @@ def reconcile_effect(path: pathlib.Path) -> None:
         outcome = json.loads(completed.stdout)
     except json.JSONDecodeError as error:
         raise Refusal("AG reconcile did not emit one JSON outcome") from error
-    outcome_class = outcome.get("outcome")
+    if completed.stdout != canonical(outcome) + b"\n":
+        raise Refusal("AG reconcile outcome is not canonical JSON")
+    outcome_class = verify_effect_outcome(outcome, expected_dispatch)
     reconciled_state = effect_outcome_state(outcome_class)
     evidence_path = path / "evidence" / "reconciliation-outcome-v1.json"
     if evidence_path.exists():
@@ -1771,7 +1871,13 @@ def reconcile_effect(path: pathlib.Path) -> None:
             raise Refusal("retained reconciliation outcome disagrees")
     else:
         atomic_write(evidence_path, completed.stdout, 0o400)
+    custody.update(expected_custody)
+    custody["reconciliation_outcome_sha256"] = digest_file(
+        evidence_path, "sha256"
+    )
+    custody["receipt"] = outcome["receipt"]
     recovery["effect_outcome"] = reconciled_state
+    recovery["effect_custody"] = custody
     recovery["phase"] = "effect_reconciled"
     recovery["next_lawful_action"] = (
         "inspect retained state; do not resume automatically"
@@ -1856,6 +1962,122 @@ def verify_diagnostic_artifact(
         raise Refusal(f"{instance} has the wrong warranted condition")
 
 
+def expected_m1b_bindings(
+    run_id: str, identities: dict[str, Any]
+) -> dict[str, Any]:
+    renderer = Producer.__new__(Producer)
+    renderer.run_id = run_id
+    service_subject, subject = renderer.service_subject(identities)
+    systemd_scope = {
+        "kind": "systemd_unit",
+        "value": {
+            "schema": "nq.operator_beta.systemd_unit_scope.v1",
+            "subject_identity": subject,
+            "target_machine_identity": identities["target_machine_identity"],
+            "unit_name": UNIT,
+            "unit_file_sha256": identities["unit_file_sha256"],
+            "manager_interface": "org.freedesktop.systemd1",
+            "properties": [
+                "LoadState",
+                "ActiveState",
+                "SubState",
+                "UnitFileState",
+            ],
+        },
+    }
+    http_scope = {
+        "kind": "http_endpoint",
+        "value": {
+            "schema": "nq.operator_beta.http_endpoint_scope.v1",
+            "subject_identity": subject,
+            "controller_vantage_identity": "machine:"
+            + identities["controller_machine_identity"],
+            "endpoint": f"http://{FIXTURE_ADDRESS}:{FIXTURE_PORT}/healthz",
+            "method": "GET",
+            "redirect_policy": "refuse",
+            "max_response_bytes": 1024,
+        },
+    }
+    systemd_policy = {
+        "schema": "nq.operator_beta.systemd_unit_threshold_policy.v1",
+        "fixture_run_id": run_id,
+        "service_subject": service_subject,
+        "subject_identity": subject,
+        "request_scope": renderer.scope_identity(
+            subject, systemd_scope, "nq.systemd_unit"
+        ),
+        "expected_load_state": "loaded",
+        "expected_active_state": "active",
+        "expected_sub_state": "running",
+        "expected_unit_file_state": "disabled",
+    }
+    http_policy = {
+        "schema": "nq.operator_beta.http_endpoint_threshold_policy.v1",
+        "fixture_run_id": run_id,
+        "service_subject": service_subject,
+        "subject_identity": subject,
+        "request_scope": renderer.scope_identity(
+            subject, http_scope, "nq.http_endpoint"
+        ),
+        "expected_status": 200,
+        "expected_body_sha256": sha256_bytes(FIXTURE_HEALTH_BYTES),
+    }
+    return {
+        "schema": "constellation.operator_beta.m1b_bindings.v1",
+        "run_id": run_id,
+        "service_subject": service_subject,
+        "subject_identity": subject,
+        "service_subject_plain_sha256": sha256_bytes(canonical(service_subject)),
+        "systemd_scope": systemd_scope,
+        "systemd_policy": systemd_policy,
+        "http_scope": http_scope,
+        "http_policy": http_policy,
+    }
+
+
+def expected_nq_config(bindings: dict[str, Any], role: str) -> bytes:
+    renderer = Producer.__new__(Producer)
+    renderer.run_id = bindings["run_id"]
+    prefix = (
+        'schema = "nq.config.v1"\n'
+        'database_path = "/var/lib/nq/operator-beta.sqlite"\n'
+        'socket_path = "/run/nq/operator-beta.sock"\n'
+        'admissions_dir = "/var/lib/nq/operator-beta-admissions"\n'
+        'helper_runtime_dir = "/run/nq/operator-beta-helpers"\n'
+    )
+    config = prefix
+    if role == "target":
+        family = "systemd"
+        profile = "nq.systemd_unit"
+        capability = "read_systemd_unit"
+        vantage = {"kind": "target_local", "value": {}}
+    elif role == "control":
+        family = "http"
+        profile = "nq.http_endpoint"
+        capability = "read_http_endpoint"
+        vantage = {
+            "kind": "controller_http",
+            "value": {
+                "controller_vantage_identity": bindings["http_scope"]["value"][
+                    "controller_vantage_identity"
+                ]
+            },
+        }
+    else:
+        raise Refusal("unknown NQ configuration role")
+    for suffix in ("pre", "post", "restart"):
+        config += renderer.watcher_block(
+            f"{family}-{suffix}",
+            profile,
+            bindings["subject_identity"],
+            bindings[f"{family}_scope"],
+            vantage,
+            capability,
+            bindings[f"{family}_policy"],
+        )
+    return config.encode()
+
+
 def verify_terminal_evidence(path: pathlib.Path, result: dict[str, Any], inventory: set[str]) -> None:
     missing = sorted(REQUIRED_TERMINAL_PATHS - inventory)
     if missing:
@@ -1867,12 +2089,92 @@ def verify_terminal_evidence(path: pathlib.Path, result: dict[str, Any], invento
     bindings = load_json_artifact(path / "evidence" / "bindings.json", "bindings")
     if any(record.get("run_id") != run_id for record in (input_receipt, identities, bindings)):
         raise Refusal("terminal evidence names another run occurrence")
-    if input_receipt.get("harness_subject") != result.get("harness_subject"):
+    machine_pattern = r"[0-9a-f]{32}"
+    if (
+        set(identities)
+        != {
+            "schema",
+            "run_id",
+            "controller_machine_identity",
+            "target_machine_identity",
+            "unit_name",
+            "unit_file_sha256",
+            "controller_address",
+            "target_address",
+        }
+        or identities.get("schema")
+        != "constellation.operator_beta.m1b_guest_identity.v1"
+        or not re.fullmatch(
+            machine_pattern, identities.get("controller_machine_identity", "")
+        )
+        or not re.fullmatch(
+            machine_pattern, identities.get("target_machine_identity", "")
+        )
+        or identities.get("controller_machine_identity")
+        == identities.get("target_machine_identity")
+        or identities.get("unit_name") != UNIT
+        or identities.get("controller_address") != CONTROLLER_ADDRESS
+        or identities.get("target_address") != FIXTURE_ADDRESS
+    ):
+        raise Refusal("guest identities do not describe the exact fixture pair")
+    input_fields = {
+        "schema",
+        "run_id",
+        "recorded_at",
+        "harness_subject",
+        "accepted_package_result",
+        "image",
+        "nq_package_sha256",
+        "ag_package_sha256",
+        "ports",
+    }
+    if set(input_receipt) != input_fields:
+        raise Refusal("input receipt is not one closed owner record")
+    if (
+        input_receipt.get("schema") != "constellation.operator_beta.m1b_inputs.v1"
+        or input_receipt.get("accepted_package_result") != ACCEPTED_PACKAGE_RESULT
+        or input_receipt.get("harness_subject") != result.get("harness_subject")
+    ):
         raise Refusal("input receipt names another harness subject")
     if input_receipt.get("nq_package_sha256") != NQ_DEB_SHA256 or input_receipt.get("ag_package_sha256") != AG_DEB_SHA256:
         raise Refusal("input receipt names different package bytes")
-    if bindings.get("service_subject") != service_subject:
-        raise Refusal("bindings disagree with retained service-subject bytes")
+    retained_image = path / "input" / IMAGE_NAME
+    retained_checksums = path / "input" / "SHA512SUMS"
+    retained_nq = path / "input" / "nq-ng_amd64.deb"
+    retained_ag = (
+        path / "input" / "agent-governor-ng-systemd-executor_amd64.deb"
+    )
+    verify_checksum_manifest(retained_checksums, retained_image)
+    image_record = input_receipt.get("image")
+    if image_record != {
+        "name": IMAGE_NAME,
+        "sha512": IMAGE_SHA512,
+        "checksum_manifest_sha256": digest_file(retained_checksums, "sha256"),
+        "detached_signature": "UPSTREAM_DETACHED_SIGNATURE_NOT_PUBLISHED",
+    }:
+        raise Refusal("input receipt does not bind the retained image relation")
+    if (
+        digest_file(retained_nq, "sha256") != NQ_DEB_SHA256
+        or digest_file(retained_ag, "sha256") != AG_DEB_SHA256
+    ):
+        raise Refusal("retained package bytes differ from the admitted inputs")
+    ports = input_receipt.get("ports")
+    if (
+        not isinstance(ports, dict)
+        or set(ports) != {"control_ssh", "target_ssh", "fixture_link_udp"}
+        or any(
+            not isinstance(value, int) or value < 1024 or value > 65535
+            for value in ports.values()
+        )
+        or len(set(ports.values())) != 3
+    ):
+        raise Refusal("input receipt has invalid qualification ports")
+    expected_bindings = expected_m1b_bindings(run_id, identities)
+    if (
+        service_subject != expected_bindings["service_subject"]
+        or bindings != expected_bindings
+    ):
+        raise Refusal("bindings disagree with exact retained fixture semantics")
     subject_identity = ag_domain_digest(
         "constellation/operator-beta/service-subject/v1", canonical(service_subject)
     )
@@ -1885,6 +2187,15 @@ def verify_terminal_evidence(path: pathlib.Path, result: dict[str, Any], invento
         or service_subject.get("unit_file_sha256") != identities.get("unit_file_sha256")
     ):
         raise Refusal("service subject does not bind the exact fixture occurrence")
+    unit_path = path / "evidence" / UNIT
+    health_path = path / "evidence" / "healthz"
+    if (
+        "sha256:" + digest_file(unit_path, "sha256")
+        != identities.get("unit_file_sha256")
+        or unit_path.read_bytes() != FIXTURE_UNIT_BYTES
+        or health_path.read_bytes() != FIXTURE_HEALTH_BYTES
+    ):
+        raise Refusal("fixture bytes differ from the retained service identity")
     for family, profile in (("systemd", "nq.systemd_unit"), ("http", "nq.http_endpoint")):
         scope = bindings.get(f"{family}_scope")
         policy = bindings.get(f"{family}_policy")
@@ -1902,6 +2213,16 @@ def verify_terminal_evidence(path: pathlib.Path, result: dict[str, Any], invento
         }
         if policy.get("request_scope") != expected_scope or policy.get("subject_identity") != subject_identity:
             raise Refusal(f"{family} policy does not bind its exact subject and scope")
+    if bindings.get("service_subject_plain_sha256") != sha256_bytes(
+        canonical(service_subject)
+    ):
+        raise Refusal("bindings do not retain the plain service-subject digest")
+    if (path / "evidence" / "target-nq.toml").read_bytes() != expected_nq_config(
+        bindings, "target"
+    ) or (path / "evidence" / "control-nq.toml").read_bytes() != expected_nq_config(
+        bindings, "control"
+    ):
+        raise Refusal("retained NQ configuration differs from exact bound semantics")
     artifact_cases = (
         ("systemd-pre-artifact.json", "nq.systemd_unit", "present", "systemd-pre"),
         ("http-pre-artifact.json", "nq.http_endpoint", "unresolved", "http-pre"),
@@ -1925,21 +2246,11 @@ def verify_terminal_evidence(path: pathlib.Path, result: dict[str, Any], invento
     dispatch = load_json_artifact(path / "evidence" / "docket-shaped-dispatch-v1.json", "dispatch")
     outcome = load_json_artifact(path / "evidence" / "executor-outcome-v1.json", "AG outcome")
     occurrence = load_json_artifact(path / "evidence" / "effect-occurrence.json", "effect occurrence")
-    work = ag_domain_digest("ag-effectd.docket-executor-systemd-plan/v2", canonical(plan))
-    expected_attempt = sha256_bytes((run_id + "\0attempt\0" + work).encode())
-    expected_marker = sha256_bytes((run_id + "\0marker\0" + work).encode())
+    expected_plan = expected_effect_plan(bindings, identities)
+    expected_dispatch, work = expected_effect_dispatch(run_id, expected_plan)
     if (
-        plan.get("schema") != "ag-effectd.docket-executor-systemd-plan/v2"
-        or plan.get("subject") != subject_identity
-        or plan.get("systemd_machine_identity") != identities.get("target_machine_identity")
-        or dispatch.get("subject") != subject_identity
-        or dispatch.get("scope") != plan.get("scope")
-        or dispatch.get("work") != work
-        or dispatch.get("attempt") != expected_attempt
-        or dispatch.get("marker") != expected_marker
-        or dispatch.get("work_schema") != "ag-effectd.docket-executor-systemd-work/v2"
-        or outcome.get("attempt") != expected_attempt
-        or outcome.get("marker") != expected_marker
+        plan != expected_plan
+        or dispatch != expected_dispatch
         or occurrence.get("run_id") != run_id
         or occurrence.get("owner") != "AG-ng M1A adapter"
         or occurrence.get("docket_database_occurrence") != "NOT_RECORDED"
@@ -1949,7 +2260,8 @@ def verify_terminal_evidence(path: pathlib.Path, result: dict[str, Any], invento
         or occurrence.get("outcome") != outcome
     ):
         raise Refusal("AG plan, dispatch, outcome, or occurrence binding disagrees")
-    if outcome.get("outcome") != "success":
+    outcome_class = verify_effect_outcome(outcome, expected_dispatch)
+    if outcome_class != "success":
         raise Refusal("terminal golden evidence does not retain AG owner success")
     current = load_json_artifact(
         path / "evidence" / "current-support-after-restart.json", "current support"
@@ -1966,7 +2278,28 @@ def verify_terminal_evidence(path: pathlib.Path, result: dict[str, Any], invento
     ):
         raise Refusal("current-support record collapses historical effect or restart evidence")
     recovery = load_recovery(path)
-    if recovery.get("run_id") != run_id or recovery.get("effect_outcome") != "KNOWN_EFFECT_OWNER_SUCCESS":
+    expected_custody = {
+        "plan_sha256": digest_file(path / "evidence" / "systemd-plan-v2.json", "sha256"),
+        "dispatch_sha256": digest_file(
+            path / "evidence" / "docket-shaped-dispatch-v1.json", "sha256"
+        ),
+        "outcome_sha256": digest_file(
+            path / "evidence" / "executor-outcome-v1.json", "sha256"
+        ),
+        "attempt": expected_dispatch["attempt"],
+        "marker": expected_dispatch["marker"],
+        "work": work,
+        "subject": expected_dispatch["subject"],
+        "scope": expected_dispatch["scope"],
+        "receipt": outcome["receipt"],
+    }
+    custody = recovery.get("effect_custody")
+    if (
+        recovery.get("run_id") != run_id
+        or recovery.get("effect_outcome") != "KNOWN_EFFECT_OWNER_SUCCESS"
+        or not isinstance(custody, dict)
+        or any(custody.get(key) != value for key, value in expected_custody.items())
+    ):
         raise Refusal("terminal recovery record disagrees with exact effect custody")
     for role in ("control", "target"):
         revocations = load_json_artifact(
