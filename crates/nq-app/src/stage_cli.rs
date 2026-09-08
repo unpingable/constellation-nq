@@ -145,7 +145,7 @@ fn read<T: DeserializeOwned>(path: &Path) -> Result<T> {
     if bytes.len() as u64 > LIMIT {
         bail!("stage document exceeds 4 MiB bound");
     }
-    nq_protocol::decode_json_document(&bytes, 2 * 1024 * 1024)
+    nq_protocol::decode_json_document(&bytes, LIMIT as usize)
         .with_context(|| format!("parsing {}", path.display()))
 }
 
