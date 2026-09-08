@@ -113,3 +113,45 @@ fn real_git_tracked_untracked_ignored_and_unborn_boundaries() {
         );
     }
 }
+
+#[test]
+fn repository_command_filter_cannot_execute_or_launder_equal_length_changes() {
+    let outer = tempfile::tempdir().unwrap();
+    let repo = outer.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    fs::write(repo.join("tracked"), "original").unwrap();
+    fs::write(repo.join(".gitattributes"), "tracked filter=fixed\n").unwrap();
+    git(&repo, &["add", "tracked", ".gitattributes"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+    );
+    let marker = outer.path().join("filter-ran");
+    git(
+        &repo,
+        &[
+            "config",
+            "filter.fixed.clean",
+            &format!("touch {}; printf original", marker.display()),
+        ],
+    );
+    fs::write(repo.join("tracked"), "modified").unwrap();
+    let result = nq_app::repository_cli::observe(&repo).unwrap();
+    assert!(matches!(
+        result.disposition,
+        RepositoryDisposition::ChangesPresent { .. }
+    ));
+    assert!(
+        !marker.exists(),
+        "collector must never execute repository command filters"
+    );
+}

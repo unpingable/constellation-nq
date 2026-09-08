@@ -16,6 +16,9 @@ fn evidence() -> RepositoryEvidence {
         ended_at: "2026-09-08T12:00:01Z".parse().unwrap(),
         git_executable: sha256_bytes(b"git"),
         collector_executable: sha256_bytes(b"collector"),
+        index_snapshot: None,
+        exclude_snapshot: None,
+        configuration: "nq.isolated_git_configuration.v1".into(),
         commands: OPERATIONS
             .into_iter()
             .zip([
@@ -26,6 +29,7 @@ fn evidence() -> RepositoryEvidence {
                 head.into_bytes(),
                 vec![],
                 b"/fixture/repo\n".to_vec(),
+                vec![],
             ])
             .map(|(operation, stdout)| CommandObservation {
                 operation: operation.into(),

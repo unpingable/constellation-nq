@@ -44,6 +44,9 @@ pub struct RepositoryEvidence {
     pub ended_at: DateTime<Utc>,
     pub git_executable: Sha256Digest,
     pub collector_executable: Sha256Digest,
+    pub index_snapshot: Option<Sha256Digest>,
+    pub exclude_snapshot: Option<Sha256Digest>,
+    pub configuration: String,
     pub commands: Vec<CommandObservation>,
 }
 
@@ -67,7 +70,7 @@ pub struct RepositoryExecution {
 }
 
 /// Closed operations: no arbitrary predicate or command is admitted.
-pub const OPERATIONS: [&str; 7] = [
+pub const OPERATIONS: [&str; 8] = [
     "bare",
     "head_before",
     "index",
@@ -75,10 +78,12 @@ pub const OPERATIONS: [&str; 7] = [
     "head_after",
     "index_flags",
     "worktree_root",
+    "index_flags_before",
 ];
 
 pub fn evaluate(evidence: &RepositoryEvidence) -> Result<RepositoryDisposition, String> {
-    if evidence.subject_identity != evidence.subject.identity()?
+    if evidence.configuration != "nq.isolated_git_configuration.v1"
+        || evidence.subject_identity != evidence.subject.identity()?
         || !evidence.subject.worktree.starts_with('/')
         || !evidence.subject.git_directory.starts_with('/')
         || evidence.started_at > evidence.ended_at
@@ -98,6 +103,9 @@ pub fn evaluate(evidence: &RepositoryEvidence) -> Result<RepositoryDisposition, 
         }
     }
     let outputs = &evidence.commands;
+    if outputs[5].stdout != outputs[7].stdout {
+        return Err("private index flags changed".into());
+    }
     if outputs[6].stdout != format!("{}\n", evidence.subject.worktree).as_bytes() {
         return Ok(RepositoryDisposition::NotEstablished {
             reason: "exact_worktree_root_required".into(),
