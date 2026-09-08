@@ -1,6 +1,7 @@
 # Operator-beta NQ-ng M1B qualification closeout
 
-**Status:** `QUALIFICATION_CLOSEOUT_READY_FOR_INDEPENDENT_AUDIT`
+**Status:** `QUALIFIED_PUBLISHED`
+**Accepted closeout:** `5ea0a4be9f7aed0fb7f31db730b2db834957129b`
 **Run:** `operator-beta-m1b-run-012`
 **Harness subject:** `dc5d602484a4556c465df6947e98d81dba0d314a`
 **Scoped disposition:** `MECHANISM_CASES_COMPLETED_WITH_DECLARED_LIMITATIONS`
@@ -58,3 +59,7 @@ closer because the NQ-ng/AG mechanism lane is now exercised. Defer production,
 generic UI, signed-input policy resolution, and cross-ledger authorization
 composition to their existing owners. Recommendation: **integrate/show** the
 accepted result, then continue only release-blocking composition.
+
+The next lawful transition is the main-loop branch-reconciliation checkpoint.
+This closeout authorizes no deployment, production activation, or transfer of
+its declared limitations.

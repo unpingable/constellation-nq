@@ -1,5 +1,6 @@
 # Operator-beta NQ-ng M1B two-VM qualification harness
-**Status:** `RUN_012_MECHANISM_CASES_ACCEPTED__QUALIFICATION_CLOSEOUT_READY_FOR_INDEPENDENT_AUDIT`
+**Status:** `RUN_012_MECHANISM_CASES_QUALIFIED_PUBLISHED__MAIN_LOOP_INTEGRATION_READY`
+**Accepted qualification closeout:** `5ea0a4be9f7aed0fb7f31db730b2db834957129b`
 **Accepted live run:** `operator-beta-m1b-run-012`
 **Accepted run harness:** `dc5d602484a4556c465df6947e98d81dba0d314a`
 **Accepted teardown package-state correction:** `4477d30ea3357b421d1cec1b00ada85fee1428ce`
