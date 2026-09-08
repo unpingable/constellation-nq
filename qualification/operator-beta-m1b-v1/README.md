@@ -1,5 +1,6 @@
 # Operator-beta NQ-ng M1B two-VM qualification harness
-**Status:** `RUNS_001_002_003_004_005_REFUSED_NO_EFFECT__RUNS_006_007_REFUSED_AFTER_KNOWN_EFFECT_OWNER_SUCCESS__HTTP_FIXTURE_READINESS_CORRECTION_READY_FOR_INDEPENDENT_AUDIT`
+**Status:** `RUNS_001_002_003_004_005_REFUSED_NO_EFFECT__RUNS_006_007_REFUSED_AFTER_KNOWN_EFFECT_OWNER_SUCCESS__HTTP_FIXTURE_READINESS_CORRECTION_ACCEPTED_PUBLISHED__FRESH_RUN_READY`
+**Accepted HTTP fixture-readiness correction:** `d00d6640dd5917cd72d932802fe913a827ea14c6`
 **Accepted protected-store correction:** `7750f3185a7fbf3c90c4fc2c8cf3e001e034dc41`
 **Helper correction implementation:** `860452c53d63b6162c18a2e0b4aba4acb736baea`
 **Accepted helper correction result:** `c62eb7130c813896903e0156bd0593e22befe4a5`
@@ -317,9 +318,11 @@ are accepted and published at
 `e644390b4b761388569d9dbee5b374294f40ae17`; the helper correction is accepted
 and published at `c62eb7130c813896903e0156bd0593e22befe4a5`; and the protected
 store correction is accepted and published at
-`7750f3185a7fbf3c90c4fc2c8cf3e001e034dc41`. The fixture-readiness correction
-requires independent audit before another fresh occurrence; runs 006 and 007
-remain terminal and must not be resumed or relabeled.
+`7750f3185a7fbf3c90c4fc2c8cf3e001e034dc41`; and the fixture-readiness
+correction is accepted and published at
+`d00d6640dd5917cd72d932802fe913a827ea14c6`. Another fresh occurrence may start
+from the resulting clean subject; runs 006 and 007 remain terminal and must not
+be resumed or relabeled.
 
 The accepted AG package supplies the query-only terminal receipt/evidence
 reopener. This candidate retains an exact WAL-zero owner store cut under the
