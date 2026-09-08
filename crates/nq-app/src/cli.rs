@@ -45,6 +45,13 @@ pub struct Nq {
 /// Operator workflows.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Acquire and qualify a bounded Docket committed-attempt factual record.
+    DocketPurposeSupport {
+        #[arg(long)] docket_binary: PathBuf,
+        #[arg(long)] docket_sha256: String,
+        #[arg(long)] state: PathBuf,
+        #[arg(long)] request: PathBuf,
+    },
     /// Qualify an exact external Continuity memory rely export, not action authority.
     ContinuitySupport {
         #[arg(long)] source_export: PathBuf,
@@ -397,6 +404,7 @@ pub struct QueryArgs {
 /// workflow's atomicity and custody rules.
 pub async fn run(options: Nq) -> Result<()> {
     match options.command {
+        Command::DocketPurposeSupport { docket_binary,docket_sha256,state,request } => crate::docket_cli::run(&docket_binary,&docket_sha256,&state,&request),
         Command::ContinuitySupport { source_export,binding } => crate::continuity_cli::run(&source_export,&binding),
         Command::BoundedPredicate { command } => crate::queue_cli::run(command),
         Command::CampaignStageQualification { command } => crate::stage_cli::run(command, false),
