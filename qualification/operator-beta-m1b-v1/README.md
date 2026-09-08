@@ -1,5 +1,5 @@
 # Operator-beta NQ-ng M1B two-VM qualification harness
-**Status:** `PRE_EFFECT_RUNS_001_002_REFUSED__VIRTIO_NOCLOUD_CORRECTION_CANDIDATE__INDEPENDENT_REVIEW_REQUIRED`
+**Status:** `PRE_EFFECT_RUNS_001_002_003_REFUSED__BOOKWORM_PACKAGE_CORRECTION_CANDIDATE__INDEPENDENT_REVIEW_REQUIRED`
 **Accepted package checkpoint:** `8865dcad23f17a1f26716161554530237e04bb9e`
 **Accepted AG store-audit owner:** `837de287497942c79966aa05c083acee9c312261`
 **Accepted AG package qualification:** `db4bad1fba2b5ab512cc58356314228167b2f48e`
@@ -28,12 +28,28 @@ and `run-002`. Both classify `NO_EFFECT_ATTEMPTED`; every named QEMU process
 and producer is exited. No package was installed and no NQ, AG, Docket,
 system-bus, or fixture-service operation ran.
 
-The next correction keeps `-nodefaults` and attaches the sealed NoCloud image
-as an explicit read-only virtio block drive. This is the exact attachment shape
-used by the accepted AG clean-host qualification rather than a new controller
-guess. A direct command-shape qualification case prevents regression to either
-IDE form. Runs 001 and 002 are never retried or relabeled; any later exercise
-is a fresh run occurrence after independent acceptance.
+The accepted virtio correction used by run-003 kept `-nodefaults` and attached
+the sealed NoCloud image as an explicit read-only virtio block drive. This is
+the exact attachment shape used by the accepted AG clean-host qualification,
+rather than a new controller guess. A direct command-shape qualification case
+prevents regression to either
+IDE form. Run-003 then reached `packages_fixture_installed`: both guests became
+ready, the exact packages were installed, and the disabled fixture unit and
+machine identities were retained. The first NQ invocation refused because the
+previous package required `GLIBC_2.39`, which Debian 12 does not supply. The
+exact terminal record remains under the adjacent `run-003` directory; it says
+`REFUSED`, `NO_EFFECT_ATTEMPTED`, and null effect custody. All producer and QEMU
+processes exited. No NQ artifact, AG attempt, Docket occurrence, system-bus
+effect, or fixture-service start occurred.
+
+The package correction rebuilds the unchanged accepted source `5c064f06...`
+inside the locally retained immutable `rust:1.94.0-bookworm` image with network
+access disabled. The resulting exact campaign-owned package has SHA-256
+`e49089844c2b0eb56226cb8abe7b8313dc24b8c9838eae7283733bbab78b609d`;
+all four packaged binaries execute their build-info probes in that Bookworm
+image and require no glibc symbol newer than `GLIBC_2.34`. Exact evidence is in
+`BOOKWORM-PACKAGE.md`. Runs 001, 002, and 003 are never retried or relabeled;
+any later exercise is a fresh run occurrence after independent acceptance.
 
 The target begins with the exact fixture unit installed, disabled, and
 inactive. The controller cannot reach the fixed HTTP response. One fresh
@@ -47,8 +63,10 @@ occurrence. Those composition edges remain a later main-loop gate.
 
 The runner requires physical regular non-symlink inputs and exact digests for:
 
-- accepted NQ-ng package bytes rebuilt from package source `5c064f06...` and
-  qualification result `8865dcad...`;
+- NQ-ng package bytes rebuilt from accepted package source `5c064f06...` and
+  qualification result `8865dcad...` in the immutable Bookworm build
+  environment recorded by `BOOKWORM-PACKAGE.md`, exact candidate SHA-256
+  `e49089844c2b0eb56226cb8abe7b8313dc24b8c9838eae7283733bbab78b609d`;
 - accepted AG M1A target adapter package `0.1.0-1+m1a4`, exact qualified SHA-256
   `98a4f31f0b6c13653ae95ce55586dbac6d0826b649cd7612882f3716b80e2279`;
 - its exact `/usr/libexec/agent-governor-ng/ag-effectd` executable, SHA-256
@@ -155,8 +173,10 @@ and retained cross-component identity record. A separate launch-envelope case
 requires the explicit read-only virtio NoCloud drive under `-nodefaults` and
 refuses either IDE form.
 The gate's injected missing-boundary
-control refuses deterministically. These are harness results only: no VM,
-package install, system bus, fixture service, or effect has run.
+control refuses deterministically. These cases do not start a VM, install a
+package, use the system bus, or perform an effect. The separately retained
+run-003 installed the exact prior package and fixture, then refused at its first
+NQ invocation before producing an NQ artifact or attempting an effect.
 
 A live run must use a clean, accepted harness commit and a named user-systemd
 unit whose `InvocationID` and `MainPID` match the producer. The intended local
@@ -192,13 +212,16 @@ output. `RESULT.json` plus `ARTIFACTS.sha256`, or `REFUSAL.json` plus
 
 ## Still unqualified
 
-The harness candidate is not the M1B result. The two-VM exercise, package
-lifecycle, AG effect occurrence, NQ artifacts, restart/reopen, and teardown are
-all still `NOT_RUN`. The upstream Debian cloud checksum relation remains
+The harness candidate is not the M1B result. A successful two-VM exercise,
+complete package lifecycle, AG effect occurrence, NQ artifacts, restart/reopen,
+and teardown are still `NOT_RUN`. Run-003 establishes only installation of the
+prior package before its incompatible executable refused. The upstream Debian
+cloud checksum relation remains
 unsigned at the selected versioned directory and therefore cannot satisfy the
 canonical signed-checksum item. Live Docket custody, AG authorization
 consumption, cross-profile aggregation, Nightshift currentness, deployment,
-and production also remain outside this lane.
+and production also remain outside this lane. The Bookworm package bytes are a
+candidate until this exact pin and build evidence receive independent review.
 
 The accepted AG package supplies the query-only terminal receipt/evidence
 reopener. This candidate retains an exact WAL-zero owner store cut under the

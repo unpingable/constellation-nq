@@ -5,10 +5,12 @@ repo=$(cd "$(dirname "$0")/.." && pwd -P)
 runner="$repo/qualification/operator-beta-m1b-v1/run_two_vm.py"
 tests="$repo/qualification/operator-beta-m1b-v1/test_run_two_vm.py"
 readme="$repo/qualification/operator-beta-m1b-v1/README.md"
+bookworm="$repo/qualification/operator-beta-m1b-v1/BOOKWORM-PACKAGE.md"
 
 test -f "$runner"
 test -f "$tests"
 test -f "$readme"
+test -f "$bookworm"
 python3 -m py_compile "$runner" "$tests"
 python3 -m unittest -v "$tests"
 python3 "$runner" --help >/dev/null
@@ -30,6 +32,7 @@ required=(
   'systemd_current_condition'
   'http_current_condition'
   'self.check_runtime()'
+  'e49089844c2b0eb56226cb8abe7b8313dc24b8c9838eae7283733bbab78b609d'
   'db4bad1fba2b5ab512cc58356314228167b2f48e'
   '98a4f31f0b6c13653ae95ce55586dbac6d0826b649cd7612882f3716b80e2279'
   '668bdd26646ef6a5ba5502b64984844b84c1f70024a76eb5236af2b17702d068'
@@ -53,6 +56,14 @@ rg -F --quiet 'test_terminal_reopen_refuses_coherently_substituted_owner_outcome
 rg -F --quiet 'test_terminal_reopen_refuses_coherently_substituted_store_cut' "$tests"
 rg -F --quiet 'test_terminal_reopen_refuses_substituted_owner_executable' "$tests"
 rg -F --quiet 'test_nodefaults_launch_uses_explicit_read_only_virtio_nocloud_drive' "$tests"
+for token in \
+  'REFUSED / NO_EFFECT_ATTEMPTED' \
+  'sha256:fb7a58d0482a24e269ba85636ce46cb06aaaef3aea0e868154ed0ae7c18fa379' \
+  'rust@sha256:365468470075493dc4583f47387001854321c5a8583ea9604b297e67f01c5a4f' \
+  'e49089844c2b0eb56226cb8abe7b8313dc24b8c9838eae7283733bbab78b609d' \
+  'GLIBC_2.34'; do
+  rg -F --quiet "$token" "$bookworm"
+done
 
 if rg -n 'shell[[:space:]]*=[[:space:]]*True' "$runner"; then
   echo "M1B runner must not use subprocess shell execution" >&2
