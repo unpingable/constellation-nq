@@ -122,6 +122,23 @@ pub fn admit(
         return Err("inventory not acquired and validated".into());
     }
     let project = text(inventory, "project")?;
+    text(inventory, "repository")?;
+    // A malformed unselected row must not be laundered by a favorable selection.
+    let mut concern_ids = std::collections::BTreeSet::new();
+    for item in inventory["concerns"].as_array().ok_or("concerns array")? {
+        let id = text(&item["declaration"], "id")?;
+        let state = text(item, "monitor_state")?;
+        let observed = item.get("observation").is_some_and(|v| !v.is_null());
+        if !concern_ids.insert(id)
+            || !matches!(
+                state,
+                "OBSERVED" | "MISSING_REQUIRED_OBSERVATION" | "MISSING_OPTIONAL_OBSERVATION"
+            )
+            || (state == "OBSERVED") != observed
+        {
+            return Err("duplicate concern or inconsistent inventory observation state".into());
+        }
+    }
     let p = profile(catalog, project, concern)?;
     let acquisition = &inventory["acquisition"];
     if acquisition["binding_schema"] != "project.observation-binding/v1"

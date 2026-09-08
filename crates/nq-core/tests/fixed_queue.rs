@@ -8,6 +8,8 @@ fn fixture() -> (Value, Value) {
     .unwrap();
     let p = &cat["profiles"][0];
     let inventory = json!({"schema":"monitor.project-observation.inventory/v1","project":p["subject"]["project"],"acquisition":{"disposition":"ACQUIRED_AND_VALIDATED","exit_code":0,"stdout_bytes":1,"binding_schema":"project.observation-binding/v1","repository_revision_is_deployment_provenance":false,"producer":p["accepted_producers"][0],"manifest_digest":p["accepted_manifest_digests"][0],"status_digest":format!("sha256:{}","a".repeat(64))},"validation_issues":[],"concerns":[{"declaration":{"id":p["subject"]["concern"],"question":p["question"],"profile":p["declaration_profile"]},"monitor_state":"OBSERVED","observation":{"observation_present":true,"observed_at":"2026-09-08T12:00:00Z","valid_for_seconds":300,"facts":{"queue":{"depth":12}}}}]});
+    let mut inventory = inventory;
+    inventory["repository"] = json!("/fixture/sprocket");
     (inventory, cat)
 }
 
@@ -105,4 +107,50 @@ fn fixed_queue_all_preserved_cohort_forms() {
         assert_eq!(r["semantic_conclusion"], true);
         assert!(replay(&r, &i, &catalog).unwrap());
     }
+}
+
+#[test]
+fn entire_inventory_must_remain_well_formed() {
+    let (i, c) = fixture();
+    let concern = c["profiles"][0]["subject"]["concern"].as_str().unwrap();
+    let rejects = |candidate: &Value| {
+        assert!(
+            admit(
+                candidate,
+                &c,
+                &digest(&c).unwrap(),
+                concern,
+                "2026-09-08T12:01:00Z"
+            )
+            .is_err()
+        );
+    };
+    let mut missing_repository = i.clone();
+    missing_repository
+        .as_object_mut()
+        .unwrap()
+        .remove("repository");
+    rejects(&missing_repository);
+    let mut empty_repository = i.clone();
+    empty_repository["repository"] = json!("");
+    rejects(&empty_repository);
+    for state in ["OBSERVED", "unrecognized-state"] {
+        let mut malformed = i.clone();
+        malformed["concerns"].as_array_mut().unwrap().push(json!({
+            "declaration":{"id":"unselected"},"monitor_state":state,"observation":null
+        }));
+        rejects(&malformed);
+    }
+    let mut duplicate = i.clone();
+    let extra = json!({"declaration":{"id":"unselected"},"monitor_state":"MISSING_OPTIONAL_OBSERVATION","observation":null});
+    duplicate["concerns"]
+        .as_array_mut()
+        .unwrap()
+        .extend([extra.clone(), extra]);
+    rejects(&duplicate);
+    let mut inconsistent = i.clone();
+    inconsistent["concerns"].as_array_mut().unwrap().push(json!({
+        "declaration":{"id":"unselected"},"monitor_state":"MISSING_REQUIRED_OBSERVATION","observation":{}
+    }));
+    rejects(&inconsistent);
 }
