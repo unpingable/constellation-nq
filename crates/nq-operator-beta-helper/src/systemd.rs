@@ -423,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_read_only_unit_rows_project_one_stable_state() {
+    fn exact_unprivileged_unit_rows_project_one_stable_state() {
         let state = exact_unit_state(
             &scope(),
             vec![unit_row("fixture.service", 0)],

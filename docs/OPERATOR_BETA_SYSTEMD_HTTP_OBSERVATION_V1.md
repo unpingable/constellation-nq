@@ -309,14 +309,22 @@ exercises one-below-minimum refusal plus an unrepresentable-response case.
 The systemd branch uses one direct zbus system-bus connection. On that same
 connection and within the request's monotonic deadline it calls
 `org.freedesktop.DBus.Peer.GetMachineId` on the systemd service and manager
-object, then the read-only manager methods `ListUnitsByNames` for the one exact
+object, then the unprivileged manager observation methods `ListUnitsByNames` for the one exact
 unit name and `ListUnitFilesByPatterns` for that same exact name. The former
 returns the exact unit object path plus `LoadState`, `ActiveState`, and
 `SubState`; the latter returns the exact fragment path and `UnitFileState`.
 Both replies must contain exactly one matching row. An alias/followed unit,
 different unit name, or in-progress job refuses the stable observation cut.
-This permits an installed inactive unit to be observed without calling the
-authorization-bearing `RefUnit`, `LoadUnit`, or any mutation method. Those
+In upstream systemd v252 at exact commit
+`e8dc52766e1fdb4f8c09c3ab654d1270e1090c8d`,
+`src/core/dbus-manager.c::method_list_units_by_names` calls
+`bus_load_unit_by_name`, which may internally instantiate or load unit
+metadata in PID 1 while answering the query. That bounded measurement-side
+manager-state change is explicit: it is not a unit job, start, stop, restart,
+reload, or evidence of enactment. The helper requests no `RefUnit` or
+`LoadUnit`, retains no explicit unit reference, and does not control the
+manager's cache or garbage-collection lifetime. It accepts only a job-free row
+(`job_id == 0`, empty job type, root job path). Those
 exact service, object, and interface identities are compiled helper constants;
 the scope's historical `manager_interface` value is an independently validated
 binding value and is not misrepresented as the complete interface catalog.
@@ -332,7 +340,9 @@ Unit-list and unit-file-list failures are distinct; installed-but-inactive and
 not initially loaded is a positive qualification case. Any connection,
 machine, cardinality, identity, transition-state, list, file-open, file-type,
 file-bound, digest, or deadline failure yields typed absence of testimony. The
-helper performs no unit mutation and invokes no systemctl command.
+helper requests no unit job or start/stop/restart/reload transition and invokes
+no systemctl command. The possible manager-owned metadata load described above
+is the only qualified measurement-side state change.
 
 The HTTP branch accepts only the exact beta shape already admitted by the
 scope: plain `http`, method `GET`, redirect policy `refuse`, path `/healthz`,

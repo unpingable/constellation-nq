@@ -15,8 +15,8 @@ if rg -n 'nq-core|nq-store|nq-app' "$manifest" >/dev/null; then
     echo "helper acquired scheduling, store, or application authority" >&2
     exit 1
 fi
-if rg -n 'StartUnit|RefUnit|LoadUnit|systemctl|Command::new|std::process::Command' "$crate/src" >/dev/null; then
-    echo "helper boundary contains mutation or subprocess mechanics" >&2
+if rg -n 'StartUnit|StopUnit|RestartUnit|ReloadUnit|RefUnit|LoadUnit|systemctl|Command::new|std::process::Command' "$crate/src" >/dev/null; then
+    echo "helper boundary contains explicit unit-job, retained-reference, or subprocess mechanics" >&2
     exit 1
 fi
 
@@ -28,6 +28,9 @@ required=(
     '"active_state"'
     '"sub_state"'
     '"unit_file_state"'
+    'job_id != 0'
+    '!job_type.is_empty()'
+    'job_path.as_str() != "/"'
     'MAX_UNIT_FILE_BYTES: usize = 1_048_576'
     'libc::O_CLOEXEC | libc::O_NOFOLLOW'
 )
@@ -47,7 +50,7 @@ import sys
 text = Path(sys.argv[1]).read_text()
 positions = [text.index(token) for token in ('"GetMachineId"', '"ListUnitsByNames"', '"ListUnitFilesByPatterns"')]
 if positions != sorted(positions) or len(set(positions)) != len(positions):
-    raise SystemExit("systemd read-only manager calls are not in the frozen acquisition order")
+    raise SystemExit("systemd bounded manager observation calls are not in the frozen acquisition order")
 PY
 
 for needle in \

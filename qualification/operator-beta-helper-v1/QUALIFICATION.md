@@ -1,6 +1,6 @@
 # Operator-beta NQ-ng observation helper checkpoint
 
-**Status:** `LIVE_RUN_005_REFUSED__BOUNDED_CORRECTION_READY_FOR_INDEPENDENT_AUDIT`
+**Status:** `LIVE_RUN_005_REFUSED__METADATA_LOAD_DISCLOSURE_READY_FOR_INDEPENDENT_REAUDIT`
 **Correction implementation candidate:** `860452c53d63b6162c18a2e0b4aba4acb736baea`
 **Correction tree:** `083a6a9c52ba49f1f2cd181c3793941f894b3212`
 **Correction parent:** `1cc635cc3dd8ac092d1ea9b1d772a06ee0d80cc5`
@@ -25,11 +25,20 @@ correctly refused to infer complete testimony. No effect was attempted.
 
 The bounded correction replaces that authorization-bearing call sequence with
 `GetMachineId -> ListUnitsByNames -> ListUnitFilesByPatterns`. The two latter
-read-only manager calls return one exact stable runtime-state row and one exact
+unprivileged manager observation calls return one exact stable runtime-state row and one exact
 unit-file path/state row for the same unit name. Cardinality, unit identity,
 alias/following, and in-progress-job disagreement refuse. The helper still
 requires the live machine identity and bounded no-follow regular-file SHA-256
 to equal the exact request scope before emitting testimony.
+
+Upstream systemd v252 commit
+`e8dc52766e1fdb4f8c09c3ab654d1270e1090c8d` shows
+`method_list_units_by_names -> bus_load_unit_by_name`; the latter may internally
+instantiate or load unit metadata while answering `ListUnitsByNames`. This
+bounded measurement-side manager-state change is part
+of the observed behavior, not a unit job or evidence of enactment. The helper
+requests and retains no explicit unit reference, accepts only a job-free row,
+and has no start, stop, restart, reload, or cache-lifetime authority.
 
 The HTTP owner profile and helper accept one numeric-address plain-HTTP
 `GET /healthz` on port 18080 and refuse hostname or wrong-port bindings before
@@ -79,10 +88,19 @@ and wrong-port locators, and exact response closure depended on TCP segmentation
 while generic header syntax was unchecked. Subject `386358190e974c532d5237d36231fe7e806d100e`
 closes those two bounded findings without adding storage, evaluation, or authority.
 
-The structural gate enforces the read-only manager call sequence, explicitly
-forbids `RefUnit`, `LoadUnit`, and `StartUnit`, preserves the file
+The structural gate enforces the bounded unprivileged manager observation
+sequence, explicitly forbids `RefUnit`, `LoadUnit`, unit-job methods, and
+subprocess mechanics, requires the job-free row checks, preserves the file
 bound/no-follow law and HTTP framing constants, and checks the absence of NQ
 scheduling/store dependencies.
+
+Independent audit rejected exact qualification-binding subject
+`a861875f6c9083d0ef25826a7a116ab84f5c49d6`: its runtime boundary was job-free
+and unprivileged, but the documents and gate incorrectly equated the absence of
+an explicit `LoadUnit` call with absence of any manager-state change. This
+non-rewriting correction preserves the implementation and records systemd
+v252's possible internal metadata load without promoting it into an effect or
+authority claim.
 
 ## Unqualified dimensions
 

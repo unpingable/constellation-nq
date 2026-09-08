@@ -87,6 +87,11 @@ The next correction remains inside the helper's observation boundary:
 `ListUnitFilesByPatterns` supplies the exact fragment path and unit-file state.
 Both are available to `nq-helper` without unit-management authorization. No
 D-Bus policy, privilege, service, scheduling, or effect authority is added.
+Systemd v252 may internally instantiate or load unit metadata while answering
+`ListUnitsByNames`; this bounded manager-owned measurement side effect is
+explicitly accepted for the helper correction. The helper requests no retained
+reference or unit job, requires the returned row to be job-free, and does not
+interpret metadata loading as start/stop mechanics, enactment, or authority.
 
 The target begins with the exact fixture unit installed, disabled, and
 inactive. The controller cannot reach the fixed HTTP response. One fresh
