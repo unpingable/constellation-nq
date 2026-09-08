@@ -1,5 +1,5 @@
 # Operator-beta NQ-ng M1B two-VM qualification harness
-**Status:** `RUNS_001_002_003_004_005_REFUSED_NO_EFFECT__RUNS_006_007_REFUSED_AFTER_KNOWN_EFFECT_OWNER_SUCCESS__HTTP_FIXTURE_READINESS_CORRECTION_ACCEPTED_PUBLISHED__FRESH_RUN_READY`
+**Status:** `RUNS_001_002_003_004_005_REFUSED_NO_EFFECT__RUNS_006_007_008_REFUSED_AFTER_KNOWN_EFFECT_OWNER_SUCCESS__POST_EFFECT_STATE_CORRECTION_READY_FOR_INDEPENDENT_AUDIT`
 **Accepted HTTP fixture-readiness correction:** `d00d6640dd5917cd72d932802fe913a827ea14c6`
 **Accepted protected-store correction:** `7750f3185a7fbf3c90c4fc2c8cf3e001e034dc41`
 **Helper correction implementation:** `860452c53d63b6162c18a2e0b4aba4acb736baea`
@@ -142,6 +142,24 @@ single post-effect NQ executions. It retains only
 `controller-http-readiness.txt`; that coordination observation is not NQ
 evidence, grants no authority, and causes no AG or NQ retry.
 
+Fresh `operator-beta-m1b-run-008` used exact accepted and published harness
+subject `ded6e9e1ba068a53b75fbff9691bdf01ddf865ad`. The AG owner retained one
+exact successful effect receipt, the bounded controller readiness observation
+succeeded, and both post-effect NQ artifacts established their expected
+conditions as explicitly absent. The target then returned the exact direct
+state tuple `loaded`, `active`, `running`, and `disabled`. The final
+`systemctl is-enabled` command printed the expected `disabled` value but exited
+nonzero, so the harness refused before retaining `target-poststate.txt` or
+entering package continuity. Run-008 is terminal with exact effect custody;
+package continuity, restart reopening, owner store-cut audit, teardown, and the
+terminal M1B result did not run. It must not be resumed or relabeled.
+
+The bounded correction admits that expected command status only to capture its
+output, then requires the complete direct-state bytes to equal the exact
+`loaded`/`active`/`running`/`disabled` tuple before custody or phase advancement.
+Any other output refuses. It changes no NQ, AG, effect, retry, or authority
+semantics.
+
 ## Inputs and retained identity
 
 The runner requires physical regular non-symlink inputs and exact digests for:
@@ -240,7 +258,7 @@ qualification outcomes.
 
 The checked producer is `run_two_vm.py`; its pure-local qualification is
 `test_run_two_vm.py`, and `scripts/check-operator-beta-m1b-v1.sh` is the
-structural gate. The readiness correction passes 32 qualification cases
+structural gate. The post-effect state correction passes 33 qualification cases
 covering AG-compatible subject framing, durable recovery custody, exact
 diagnostic subject/scope/profile/question/policy/vantage/self-identity binding,
 producer-unit identity, runtime bounds, exact diagnostic policy/condition
@@ -303,11 +321,12 @@ output. `RESULT.json` plus `ARTIFACTS.sha256`, or `REFUSAL.json` plus
 
 ## Still unqualified
 
-The harness candidate is not the M1B result. Runs 006 and 007 each retain one
-AG-owned successful effect occurrence, but neither establishes complete package
+The harness candidate is not the M1B result. Runs 006, 007, and 008 each retain
+one AG-owned successful effect occurrence. Run-008 additionally retains both
+successful post-effect NQ artifacts, but no run establishes complete package
 continuity, restart/reopen, AG store-cut audit, teardown, or a terminal M1B
-result. Runs 001--005 remain their separate pre-effect refusals; runs 006 and
-007 are not resumed or relabeled.
+result. Runs 001--005 remain their separate pre-effect refusals; runs 006--008
+are not resumed or relabeled.
 The upstream Debian
 cloud checksum relation remains
 unsigned at the selected versioned directory and therefore cannot satisfy the
@@ -320,9 +339,9 @@ and published at `c62eb7130c813896903e0156bd0593e22befe4a5`; and the protected
 store correction is accepted and published at
 `7750f3185a7fbf3c90c4fc2c8cf3e001e034dc41`; and the fixture-readiness
 correction is accepted and published at
-`d00d6640dd5917cd72d932802fe913a827ea14c6`. Another fresh occurrence may start
-from the resulting clean subject; runs 006 and 007 remain terminal and must not
-be resumed or relabeled.
+`d00d6640dd5917cd72d932802fe913a827ea14c6`. The post-effect state correction
+requires independent audit before another fresh occurrence may start; runs
+006--008 remain terminal and must not be resumed or relabeled.
 
 The accepted AG package supplies the query-only terminal receipt/evidence
 reopener. This candidate retains an exact WAL-zero owner store cut under the

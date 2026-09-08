@@ -68,11 +68,14 @@ rg -F --quiet 'test_nodefaults_launch_uses_explicit_read_only_virtio_nocloud_dri
 rg -F --quiet 'test_helper_execution_uses_documented_transient_unit_boundary' "$tests"
 rg -F --quiet 'test_package_continuity_checks_protected_store_as_owner' "$tests"
 rg -F --quiet 'test_http_fixture_readiness_is_bounded_and_nonsemantic' "$tests"
+rg -F --quiet 'test_post_effect_accepts_disabled_status_and_validates_exact_state' "$tests"
 rg -F --quiet 'test_teardown_checks_protected_store_absence_as_owner' "$tests"
 [[ $(rg -F -c 'sudo test ! -e /var/lib/nq/operator-beta.sqlite' "$runner") -eq 2 ]]
 rg -F --quiet 'self.wait_http_fixture_ready(control)' "$runner"
 rg -F --quiet 'FIXTURE_READINESS_SECONDS = 30' "$runner"
 rg -F --quiet 'fixture_tcp_ready=true' "$runner"
+rg -F --quiet 'systemctl is-enabled {UNIT} || true' "$runner"
+rg -F --quiet 'target direct post-effect state differs from the exact expected tuple' "$runner"
 rg -F --quiet 'CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_KILL' "$runner"
 rg -F --quiet 'AmbientCapabilities=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_KILL' "$runner"
 for token in \

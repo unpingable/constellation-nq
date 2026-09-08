@@ -739,6 +739,65 @@ sys.stdout.buffer.write(
             )
             complete_phase.assert_not_called()
 
+    def test_post_effect_accepts_disabled_status_and_validates_exact_state(self) -> None:
+        expected_state = (
+            b"LoadState=loaded\n"
+            b"ActiveState=active\n"
+            b"SubState=running\n"
+            b"disabled\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            output = pathlib.Path(temporary) / "run"
+            (output / "evidence").mkdir(parents=True)
+            producer = RUNNER.Producer(self.args(output))
+            control = RUNNER.Guest(
+                "control", 23141, "a", "b", RUNNER.CONTROLLER_ADDRESS, output / "control"
+            )
+            target = RUNNER.Guest(
+                "target", 23142, "c", "d", RUNNER.FIXTURE_ADDRESS, output / "target"
+            )
+            producer.execute_diagnostic = mock.Mock(
+                side_effect=[{"artifact_id": "systemd-post"}, {"artifact_id": "http-post"}]
+            )
+            producer.ssh = mock.Mock(
+                return_value=subprocess.CompletedProcess(
+                    [], 0, stdout=expected_state, stderr=b""
+                )
+            )
+            with mock.patch.object(producer, "complete_phase") as complete_phase:
+                producer.post_effect(control, target)
+
+            command = producer.ssh.call_args.args[1]
+            self.assertIn(f"systemctl is-enabled {RUNNER.UNIT} || true", command)
+            self.assertEqual(
+                (output / "evidence/target-poststate.txt").read_bytes(),
+                expected_state,
+            )
+            complete_phase.assert_called_once_with(
+                "post_effect_recorded",
+                "exercise package remove/reinstall continuity",
+            )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output = pathlib.Path(temporary) / "run"
+            (output / "evidence").mkdir(parents=True)
+            producer = RUNNER.Producer(self.args(output))
+            producer.execute_diagnostic = mock.Mock(
+                side_effect=[{"artifact_id": "systemd-post"}, {"artifact_id": "http-post"}]
+            )
+            producer.ssh = mock.Mock(
+                return_value=subprocess.CompletedProcess(
+                    [], 0, stdout=expected_state.replace(b"active", b"inactive"), stderr=b""
+                )
+            )
+            with (
+                mock.patch.object(producer, "complete_phase") as complete_phase,
+                self.assertRaisesRegex(RUNNER.Refusal, "exact expected tuple"),
+            ):
+                producer.post_effect(control, target)
+            self.assertFalse((output / "evidence/target-poststate.txt").exists())
+            complete_phase.assert_not_called()
+
     def test_teardown_checks_protected_store_absence_as_owner(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output = pathlib.Path(temporary) / "run"

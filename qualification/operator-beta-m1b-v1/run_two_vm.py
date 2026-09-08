@@ -1493,8 +1493,18 @@ helper_runtime_dir = "/run/nq/operator-beta-helpers"
         state = self.ssh(
             target,
             f"systemctl show {UNIT} -p LoadState -p ActiveState -p SubState; "
-            f"systemctl is-enabled {UNIT}",
+            f"systemctl is-enabled {UNIT} || true",
         ).stdout
+        expected_state = (
+            b"LoadState=loaded\n"
+            b"ActiveState=active\n"
+            b"SubState=running\n"
+            b"disabled\n"
+        )
+        if state != expected_state:
+            raise Refusal(
+                "target direct post-effect state differs from the exact expected tuple"
+            )
         atomic_write(self.output / "evidence" / "target-poststate.txt", state, 0o400)
         self.complete_phase("post_effect_recorded", "exercise package remove/reinstall continuity")
         return {"systemd": systemd, "http": http}
