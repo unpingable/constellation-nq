@@ -1,5 +1,5 @@
 # Operator-beta NQ-ng M1B two-VM qualification harness
-**Status:** `RUNS_001_002_003_004_005_REFUSED_NO_EFFECT__RUNS_006_007_008_009_REFUSED_AFTER_KNOWN_EFFECT_OWNER_SUCCESS__STORE_CUT_COMMAND_CORRECTION_ACCEPTED_PUBLISHED__FRESH_RUN_READY`
+**Status:** `RUNS_001_002_003_004_005_REFUSED_NO_EFFECT__RUNS_006_007_008_009_010_REFUSED_AFTER_KNOWN_EFFECT_OWNER_SUCCESS__RESTART_BOOT_IDENTITY_CORRECTION_READY_FOR_INDEPENDENT_AUDIT`
 **Accepted store-cut command correction:** `8979bee76924701061770327de220b2cd4c9b9a7`
 **Accepted post-effect state correction:** `0373da604abb29283b88b3ed7636a69849e52737`
 **Accepted HTTP fixture-readiness correction:** `d00d6640dd5917cd72d932802fe913a827ea14c6`
@@ -183,6 +183,26 @@ read-only copy, verifies exact copied bytes, and emits the three exact cut
 facts. A direct local SQLite qualification case executes the constructed shell
 command and requires exact source/copy bytes and fact output.
 
+Fresh `operator-beta-m1b-run-010` used exact accepted and published harness
+subject `3e4fc28504ec02822f73dd994516dab4a5edc3b5`. It retained exact AG owner
+success, both expected post-effect NQ artifacts, exact direct target state, and
+package continuity. Both reboot commands were issued. The control boot identity
+changed from `a48cdcd5-69e2-4764-bcec-159d25e39867` to
+`d912b940-4223-4ed9-b108-ced7c5fb66e5`; the sequential target down-state
+sampler then never observed target SSH unavailable and refused after its
+180-second bound. Because a reboot outage may complete before that later
+sampler begins, failure to sample downtime cannot establish that the target
+failed to reboot. Run-010 is terminal at `package_continuity_proved` with exact
+effect custody; restart artifact reopening, owner store-cut audit, teardown,
+and the terminal M1B result did not run. It must not be resumed or relabeled.
+
+The bounded correction no longer requires sampling a transient SSH-down state.
+For each guest it retains one exact pre-reboot boot identity, issues the same
+single reboot, and then tolerates bounded SSH unavailability or the unchanged
+old identity until one valid, different boot identity is observed. Malformed
+identities, guest-process exit, unchanged identity through the 900-second
+bound, and all later artifact disagreements still refuse.
+
 ## Inputs and retained identity
 
 The runner requires physical regular non-symlink inputs and exact digests for:
@@ -281,7 +301,7 @@ qualification outcomes.
 
 The checked producer is `run_two_vm.py`; its pure-local qualification is
 `test_run_two_vm.py`, and `scripts/check-operator-beta-m1b-v1.sh` is the
-structural gate. The store-cut command correction passes 34 qualification cases
+structural gate. The restart boot-identity correction passes 35 qualification cases
 covering AG-compatible subject framing, durable recovery custody, exact
 diagnostic subject/scope/profile/question/policy/vantage/self-identity binding,
 producer-unit identity, runtime bounds, exact diagnostic policy/condition
@@ -344,12 +364,13 @@ output. `RESULT.json` plus `ARTIFACTS.sha256`, or `REFUSAL.json` plus
 
 ## Still unqualified
 
-The harness candidate is not the M1B result. Runs 006, 007, 008, and 009 each retain
-one AG-owned successful effect occurrence. Run-008 additionally retains both
+The harness candidate is not the M1B result. Runs 006--010 each retain one
+AG-owned successful effect occurrence. Run-008 additionally retains both
 successful post-effect NQ artifacts. Run-009 additionally establishes package
-continuity and restart/reopen, but no run establishes AG store-cut audit,
+continuity and restart/reopen; run-010 establishes package continuity but
+refuses within restart observation. No run establishes AG store-cut audit,
 teardown, or a terminal M1B result. Runs 001--005 remain their separate
-pre-effect refusals; runs 006--009 are not resumed or relabeled.
+pre-effect refusals; runs 006--010 are not resumed or relabeled.
 The upstream Debian
 cloud checksum relation remains
 unsigned at the selected versioned directory and therefore cannot satisfy the
@@ -366,9 +387,9 @@ correction is accepted and published at
 correction is accepted and published at
 `0373da604abb29283b88b3ed7636a69849e52737`; and the store-cut command
 correction is accepted and published at
-`8979bee76924701061770327de220b2cd4c9b9a7`. Another fresh occurrence may start
-from the resulting clean subject; runs 006--009 remain terminal and must not be
-resumed or relabeled.
+`8979bee76924701061770327de220b2cd4c9b9a7`. The restart boot-identity
+correction requires independent audit before another fresh occurrence may
+start; runs 006--010 remain terminal and must not be resumed or relabeled.
 
 The accepted AG package supplies the query-only terminal receipt/evidence
 reopener. This candidate retains an exact WAL-zero owner store cut under the

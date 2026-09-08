@@ -898,9 +898,18 @@ sys.stdout.buffer.write(
                 original = output / "evidence" / name
                 original.write_bytes(b"artifact\n")
                 originals.append((guest, {"artifact_id": name}, original))
-            producer.wait_ssh = mock.Mock()
-            boot_reads = {"control": iter([b"before-control\n", b"after-control\n"]), "target": iter([b"before-target\n", b"after-target\n"])}
-            producer.ssh = mock.Mock(side_effect=lambda guest, command, **kwargs: subprocess.CompletedProcess([], 0, stdout=next(boot_reads[guest.role]) if command.startswith("cat /proc") else b"", stderr=b""))
+            boot_reads = {
+                "control": b"11111111-1111-1111-1111-111111111111\n",
+                "target": b"22222222-2222-2222-2222-222222222222\n",
+            }
+            boot_after = {
+                "control": b"33333333-3333-3333-3333-333333333333\n",
+                "target": b"44444444-4444-4444-4444-444444444444\n",
+            }
+            producer.ssh = mock.Mock(side_effect=lambda guest, command, **kwargs: subprocess.CompletedProcess([], 0, stdout=boot_reads[guest.role] if command.startswith("cat /proc") else b"", stderr=b""))
+            producer.wait_boot_identity_change = mock.Mock(
+                side_effect=lambda guest, _before, _limit: boot_after[guest.role]
+            )
             producer.export_artifact = mock.Mock(return_value=b"artifact\n")
             producer.execute_diagnostic = mock.Mock(side_effect=[{"artifact_id": "systemd-restart"}, {"artifact_id": "http-restart"}])
             with mock.patch.object(producer, "complete_phase"):
@@ -911,6 +920,35 @@ sys.stdout.buffer.write(
             current = json.loads((output / "evidence/current-support-after-restart.json").read_bytes())
             self.assertEqual(current["historical_effect"], "AG_OWNER_RECEIPT_RETAINED")
             self.assertEqual(current["aggregate_postcondition"], "NOT_RECORDED")
+
+    def test_restart_waits_for_changed_boot_identity_not_sampled_downtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = pathlib.Path(temporary) / "run"
+            output.mkdir()
+            producer = RUNNER.Producer(self.args(output))
+            guest = RUNNER.Guest(
+                "target", 23142, "c", "d", RUNNER.FIXTURE_ADDRESS, output / "target"
+            )
+            before = b"11111111-1111-1111-1111-111111111111\n"
+            after = b"22222222-2222-2222-2222-222222222222\n"
+            producer.check_runtime = mock.Mock()
+            responses = [
+                subprocess.CompletedProcess([], 255, stdout=b"", stderr=b"unavailable"),
+                subprocess.CompletedProcess([], 0, stdout=before, stderr=b""),
+                subprocess.CompletedProcess([], 0, stdout=after, stderr=b""),
+            ]
+            with (
+                mock.patch.object(RUNNER, "run", side_effect=responses) as run_command,
+                mock.patch.object(RUNNER.time, "sleep"),
+            ):
+                observed = producer.wait_boot_identity_change(guest, before, 30)
+
+            self.assertEqual(observed, after)
+            self.assertEqual(run_command.call_count, 3)
+            for call in run_command.call_args_list:
+                self.assertEqual(call.args[0][-1], "cat /proc/sys/kernel/random/boot_id")
+            with self.assertRaisesRegex(RUNNER.Refusal, "pre-restart boot identity is malformed"):
+                producer.wait_boot_identity_change(guest, b"not-a-boot-id\n", 30)
 
     def test_producer_retains_locked_store_cut_and_uses_owner_audit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary, self.fixture_input_identities():

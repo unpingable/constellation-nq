@@ -1045,6 +1045,29 @@ ethernets:
         state = "up" if expected_up else "down"
         raise Refusal(f"{guest.name} SSH did not become {state} within {limit} seconds")
 
+    def wait_boot_identity_change(self, guest: Guest, before: bytes, limit: int) -> bytes:
+        boot_identity = re.compile(
+            rb"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\n"
+        )
+        if boot_identity.fullmatch(before) is None:
+            raise Refusal(f"{guest.name} pre-restart boot identity is malformed")
+        deadline = time.monotonic() + limit
+        while time.monotonic() < deadline:
+            self.check_runtime()
+            if guest.process is not None and guest.process.poll() is not None:
+                raise Refusal(f"{guest.name} exited while waiting for a changed boot identity")
+            result = run(
+                guest.ssh_base() + ["cat /proc/sys/kernel/random/boot_id"],
+                check=False,
+            )
+            if result.returncode == 0:
+                if boot_identity.fullmatch(result.stdout) is None:
+                    raise Refusal(f"{guest.name} post-restart boot identity is malformed")
+                if result.stdout != before:
+                    return result.stdout
+            time.sleep(2)
+        raise Refusal(f"{guest.name} boot identity did not change within {limit} seconds")
+
     def ssh(self, guest: Guest, command: str, *, check: bool = True) -> subprocess.CompletedProcess[bytes]:
         completed = run(guest.ssh_base() + [command], check=False)
         self.check_runtime()
@@ -1686,17 +1709,15 @@ while True:
         target: Guest,
         artifacts: list[tuple[Guest, dict[str, Any], pathlib.Path]],
     ) -> None:
+        before_by_role = {}
         for guest in (control, target):
             before = self.ssh(guest, "cat /proc/sys/kernel/random/boot_id").stdout
+            before_by_role[guest.role] = before
             atomic_write(self.output / "evidence" / f"{guest.role}-boot-before.txt", before, 0o400)
             self.ssh(guest, "sudo systemctl reboot", check=False)
         for guest in (control, target):
-            self.wait_ssh(guest, False, 180)
-            self.wait_ssh(guest, True, 900)
-            after = self.ssh(guest, "cat /proc/sys/kernel/random/boot_id").stdout
+            after = self.wait_boot_identity_change(guest, before_by_role[guest.role], 900)
             atomic_write(self.output / "evidence" / f"{guest.role}-boot-after.txt", after, 0o400)
-            if after == (self.output / "evidence" / f"{guest.role}-boot-before.txt").read_bytes():
-                raise Refusal(f"{guest.name} boot identity did not change")
         for guest, artifact, original in artifacts:
             exported = self.export_artifact(guest, artifact["artifact_id"])
             if exported != original.read_bytes():
