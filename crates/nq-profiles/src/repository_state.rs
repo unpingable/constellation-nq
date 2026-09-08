@@ -67,13 +67,14 @@ pub struct RepositoryExecution {
 }
 
 /// Closed operations: no arbitrary predicate or command is admitted.
-pub const OPERATIONS: [&str; 6] = [
+pub const OPERATIONS: [&str; 7] = [
     "bare",
     "head_before",
     "index",
     "status",
     "head_after",
     "index_flags",
+    "worktree_root",
 ];
 
 pub fn evaluate(evidence: &RepositoryEvidence) -> Result<RepositoryDisposition, String> {
@@ -97,6 +98,11 @@ pub fn evaluate(evidence: &RepositoryEvidence) -> Result<RepositoryDisposition, 
         }
     }
     let outputs = &evidence.commands;
+    if outputs[6].stdout != format!("{}\n", evidence.subject.worktree).as_bytes() {
+        return Ok(RepositoryDisposition::NotEstablished {
+            reason: "exact_worktree_root_required".into(),
+        });
+    }
     let flags = &outputs[5].stdout;
     if !flags.is_empty() && !flags.ends_with(&[0]) {
         return Err("truncated index flags".into());

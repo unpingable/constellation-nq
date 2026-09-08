@@ -25,6 +25,7 @@ fn evidence() -> RepositoryEvidence {
                 vec![],
                 head.into_bytes(),
                 vec![],
+                b"/fixture/repo\n".to_vec(),
             ])
             .map(|(operation, stdout)| CommandObservation {
                 operation: operation.into(),

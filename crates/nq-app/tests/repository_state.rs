@@ -85,6 +85,14 @@ fn real_git_tracked_untracked_ignored_and_unborn_boundaries() {
     // Historical replay remains valid after a later worktree change, but does
     // not establish currentness or authorize that later execution.
     clean.replay(&clean.evidence.collector_executable).unwrap();
+    std::fs::create_dir(dir.path().join("nested")).unwrap();
+    let nested = nq_app::repository_cli::observe(&dir.path().join("nested")).unwrap();
+    assert_eq!(
+        nested.disposition,
+        RepositoryDisposition::NotEstablished {
+            reason: "exact_worktree_root_required".into()
+        }
+    );
     for flag in ["--assume-unchanged", "--skip-worktree"] {
         git(dir.path(), &["update-index", flag, "new"]);
         let result = nq_app::repository_cli::observe(dir.path()).unwrap();
