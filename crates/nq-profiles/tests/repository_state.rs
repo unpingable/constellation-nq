@@ -18,7 +18,7 @@ fn evidence() -> RepositoryEvidence {
         collector_executable: sha256_bytes(b"collector"),
         index_snapshot: None,
         exclude_snapshot: None,
-        configuration: "nq.isolated_git_configuration.v1".into(),
+        configuration: "nq.isolated_git_configuration.rebuilt_index.v2".into(),
         commands: OPERATIONS
             .into_iter()
             .zip([
@@ -29,6 +29,8 @@ fn evidence() -> RepositoryEvidence {
                 head.into_bytes(),
                 vec![],
                 b"/fixture/repo\n".to_vec(),
+                vec![],
+                vec![],
                 vec![],
             ])
             .map(|(operation, stdout)| CommandObservation {
@@ -78,6 +80,7 @@ fn failed_collection_submodules_and_changing_head_never_establish_clean() {
     }
     let mut e = evidence();
     e.commands[2].stdout = format!("160000 {} 0\tchild\0", "b".repeat(40)).into_bytes();
+    e.commands[9].stdout = e.commands[2].stdout.clone();
     assert_eq!(
         evaluate(&e).unwrap(),
         RepositoryDisposition::NotEstablished {
@@ -96,6 +99,9 @@ fn failed_collection_submodules_and_changing_head_never_establish_clean() {
 
 #[test]
 fn malformed_subject_time_status_and_replay_identity_are_rejected() {
+    let mut mismatched = evidence();
+    mismatched.commands[9].stdout = b"extra staged entry".to_vec();
+    assert!(evaluate(&mismatched).is_err());
     let mut e = evidence();
     e.subject.inode += 1;
     assert!(evaluate(&e).is_err());

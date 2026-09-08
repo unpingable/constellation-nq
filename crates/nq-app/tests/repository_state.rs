@@ -132,6 +132,12 @@ fn repository_command_filter_cannot_execute_or_launder_equal_length_changes() {
         ],
     );
     let marker = outer.path().join("filter-ran");
+    // Deliberately populate a stat cache matching the modified worktree while
+    // the staged blob remains "original". This deterministically reproduces
+    // the copied-index false-clean seam without depending on timestamp races.
+    git(&repo, &["config", "filter.fixed.clean", "printf original"]);
+    fs::write(repo.join("tracked"), "modified").unwrap();
+    git(&repo, &["add", "tracked"]);
     git(
         &repo,
         &[
@@ -140,7 +146,6 @@ fn repository_command_filter_cannot_execute_or_launder_equal_length_changes() {
             &format!("touch {}; printf original", marker.display()),
         ],
     );
-    fs::write(repo.join("tracked"), "modified").unwrap();
     let result = nq_app::repository_cli::observe(&repo).unwrap();
     assert!(matches!(
         result.disposition,

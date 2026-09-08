@@ -8,10 +8,20 @@ command), and sampling suppression flags only after status did not bind the
 index used during that status. Its passing test logs remain historical evidence,
 not acceptance of those gaps.
 
-The corrected collector copies one bounded, opened regular index into a private
-Git directory and uses that exact index for status and both suppression probes.
-Its digest is retained and the copy is checked unchanged before export. Source
-index changes/removal of flags after capture cannot alter the selected index.
+The 1eba27e correction still had an independently reproduced false-clean case:
+copying the index altered its filesystem timestamp while retaining cached stat
+data. That could suppress Git's racy-index content refresh. Earlier passes are
+retained and do not establish acceptance of that candidate.
+
+The current collector copies one bounded, opened regular index into a private
+Git directory and uses that exact index for staged-entry and suppression probes.
+Its digest is retained and the copy is checked unchanged before export. Status
+uses a NEW index reconstructed solely from captured mode/object/stage/path
+entries through fixed `update-index -z --index-info`, with no inherited stat
+cache. The rebuilt stage listing must exactly equal the captured listing.
+Reconstruction failure is not-established; mismatch is refused. Original
+suppression flags remain refusal evidence. Source index changes/removal of flags
+after capture cannot alter the selected entries or suppression testimony.
 The private config is fixed; no source/local/global/system filter command or
 hook configuration is consulted by status. The original object store is a
 read-only alternate. Submodule status recursion is disabled and submodules are
@@ -21,8 +31,8 @@ remain part of Git's observation semantics. Source config-driven ignore/attribut
 extensions are not silently imported. This remains Git-normalized status against
 an exact captured index, not byte-for-byte filesystem or future-state truth.
 
-New controls cover equal-length filtered content with a marker proving the filter
-was not executed, and clearing flags on the source index after capture while the
+New controls cover equal-length filtered content with deliberately matching
+cached stat data and a marker proving the filter was not executed, and clearing flags on the source index after capture while the
 copied index retains the original suppression state. Independent re-audit and
 new producer/consumer fixtures are required after this correction.
 

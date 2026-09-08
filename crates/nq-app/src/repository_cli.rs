@@ -92,6 +92,16 @@ fn git_in(
     operation: &str,
     arguments: &[&str],
 ) -> Result<CommandObservation> {
+    git_with_input(worktree, git_directory, operation, arguments, None)
+}
+
+fn git_with_input(
+    worktree: &Path,
+    git_directory: Option<&Path>,
+    operation: &str,
+    arguments: &[&str],
+    input: Option<&[u8]>,
+) -> Result<CommandObservation> {
     let output = tempfile::tempfile()?;
     let mut reader = output.try_clone()?;
     let mut command = Command::new("/usr/bin/git");
@@ -126,6 +136,12 @@ fn git_in(
         command
             .env("GIT_DIR", directory)
             .env("GIT_WORK_TREE", worktree);
+    }
+    if let Some(bytes) = input {
+        let mut input = tempfile::tempfile()?;
+        input.write_all(bytes)?;
+        input.rewind()?;
+        command.stdin(Stdio::from(input));
     }
     let started = Instant::now();
     let mut child = command.spawn().context("start fixed Git collector")?;
@@ -275,6 +291,38 @@ pub fn observe(worktree: &Path) -> Result<RepositoryExecution> {
         "index",
         &["ls-files", "--stage", "-z"],
     )?;
+    let after = git_in(
+        &worktree,
+        Some(snapshot.path()),
+        "index_flags",
+        &["ls-files", "-v", "-z"],
+    )?;
+    if let Some(expected) = &index_snapshot {
+        if sha256_bytes(&fs::read(snapshot.path().join("index"))?) != *expected {
+            bail!("private captured index changed during collection");
+        }
+        fs::rename(
+            snapshot.path().join("index"),
+            snapshot.path().join("captured-index"),
+        )?;
+    }
+    // Copying an index changes its filesystem timestamp and can turn racy
+    // cached stat data into a false clean result. Reconstruct from ONLY staged
+    // mode/object/stage/path entries, never cached worktree metadata. Original
+    // suppression flags above remain refusal evidence, not silently cleared.
+    let rebuild = git_with_input(
+        &worktree,
+        Some(snapshot.path()),
+        "index_rebuild",
+        &["update-index", "-z", "--index-info"],
+        Some(&index.stdout),
+    )?;
+    let rebuilt = git_in(
+        &worktree,
+        Some(snapshot.path()),
+        "rebuilt_index",
+        &["ls-files", "--stage", "-z"],
+    )?;
     let status = git_in(
         &worktree,
         Some(snapshot.path()),
@@ -287,19 +335,15 @@ pub fn observe(worktree: &Path) -> Result<RepositoryExecution> {
             "--ignore-submodules=all",
         ],
     )?;
-    let after = git_in(
-        &worktree,
-        Some(snapshot.path()),
-        "index_flags",
-        &["ls-files", "-v", "-z"],
-    )?;
     let head_after = git(&worktree, "head_after", &["rev-parse", "--verify", "HEAD"])?;
     if let Some(expected) = &index_snapshot {
-        if sha256_bytes(&fs::read(snapshot.path().join("index"))?) != *expected {
+        if sha256_bytes(&fs::read(snapshot.path().join("captured-index"))?) != *expected {
             bail!("private index changed during collection");
         }
     }
-    let commands = vec![bare, head, index, status, head_after, after, root, before];
+    let commands = vec![
+        bare, head, index, status, head_after, after, root, before, rebuild, rebuilt,
+    ];
     if sha256_bytes(&fs::read("/usr/bin/git")?) != git_identity
         || fs::metadata(&worktree)?.ino() != metadata.ino()
     {
@@ -314,7 +358,7 @@ pub fn observe(worktree: &Path) -> Result<RepositoryExecution> {
         collector_executable: sha256_bytes(&fs::read(std::env::current_exe()?)?),
         index_snapshot,
         exclude_snapshot,
-        configuration: "nq.isolated_git_configuration.v1".into(),
+        configuration: "nq.isolated_git_configuration.rebuilt_index.v2".into(),
         commands,
     })
     .map_err(anyhow::Error::msg)

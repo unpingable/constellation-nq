@@ -70,7 +70,7 @@ pub struct RepositoryExecution {
 }
 
 /// Closed operations: no arbitrary predicate or command is admitted.
-pub const OPERATIONS: [&str; 8] = [
+pub const OPERATIONS: [&str; 10] = [
     "bare",
     "head_before",
     "index",
@@ -79,10 +79,12 @@ pub const OPERATIONS: [&str; 8] = [
     "index_flags",
     "worktree_root",
     "index_flags_before",
+    "index_rebuild",
+    "rebuilt_index",
 ];
 
 pub fn evaluate(evidence: &RepositoryEvidence) -> Result<RepositoryDisposition, String> {
-    if evidence.configuration != "nq.isolated_git_configuration.v1"
+    if evidence.configuration != "nq.isolated_git_configuration.rebuilt_index.v2"
         || evidence.subject_identity != evidence.subject.identity()?
         || !evidence.subject.worktree.starts_with('/')
         || !evidence.subject.git_directory.starts_with('/')
@@ -103,6 +105,9 @@ pub fn evaluate(evidence: &RepositoryEvidence) -> Result<RepositoryDisposition, 
         }
     }
     let outputs = &evidence.commands;
+    if !outputs[8].stdout.is_empty() || outputs[9].stdout != outputs[2].stdout {
+        return Err("rebuilt status index does not preserve captured staged entries".into());
+    }
     if outputs[5].stdout != outputs[7].stdout {
         return Err("private index flags changed".into());
     }
