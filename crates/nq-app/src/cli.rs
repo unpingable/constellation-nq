@@ -50,6 +50,16 @@ pub enum Command {
         #[command(subcommand)]
         command: crate::queue_cli::QueueCommand,
     },
+    /// Read-only compiled repository-stage qualification.
+    CampaignStageQualification {
+        #[command(subcommand)]
+        command: crate::stage_cli::StageCommand,
+    },
+    /// Read-only compiled reservation-realization qualification.
+    CampaignStageRealization {
+        #[command(subcommand)]
+        command: crate::stage_cli::StageCommand,
+    },
     /// Explicitly initialize an empty nq-ng database and directory layout.
     Init(InitArgs),
     /// Validate, compare, and atomically activate human intent.
@@ -373,6 +383,8 @@ pub struct QueryArgs {
 pub async fn run(options: Nq) -> Result<()> {
     match options.command {
         Command::BoundedPredicate { command } => crate::queue_cli::run(command),
+        Command::CampaignStageQualification { command } => crate::stage_cli::run(command, false),
+        Command::CampaignStageRealization { command } => crate::stage_cli::run(command, true),
         Command::Init(arguments) => initialize(&options.config, arguments, options.json),
         Command::Config { command } => config_command(&options.config, command, options.json),
         Command::Profiles { command } => profiles_command(command, options.json),

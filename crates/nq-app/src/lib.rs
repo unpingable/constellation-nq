@@ -6,4 +6,5 @@ pub mod cli;
 pub mod queue_cli;
 pub mod daemon;
 mod ownership;
+pub mod stage_cli;
 mod transport;
