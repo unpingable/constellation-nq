@@ -14,10 +14,7 @@ use std::{
 };
 
 pub fn run(binary: &Path, expected: &str, state: &Path, request: &Path) -> Result<()> {
-    let mut request_bytes = Vec::new();
-    File::open(request)?
-        .take(4 * 1024 * 1024 + 1)
-        .read_to_end(&mut request_bytes)?;
+    let request_bytes = crate::bounded_input::read(request, 4 * 1024 * 1024)?;
     let mut r: Request = decode_json_document(&request_bytes, 4 * 1024 * 1024)?;
     let mut executable = File::open(binary)?;
     let mut bytes = Vec::new();
