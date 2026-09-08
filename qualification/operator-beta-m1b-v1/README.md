@@ -1,6 +1,6 @@
 # Operator-beta NQ-ng M1B two-VM qualification harness
-**Status:** `RUNS_001_002_003_004_005_REFUSED_NO_EFFECT__RUNS_006_TO_011_REFUSED_AFTER_KNOWN_EFFECT_OWNER_SUCCESS__TEARDOWN_PACKAGE_STATE_CORRECTION_READY_FOR_INDEPENDENT_AUDIT`
-**Correction parent:** `2d9912880df189fdc5101a094155f15105d50b4a`
+**Status:** `RUNS_001_002_003_004_005_REFUSED_NO_EFFECT__RUNS_006_TO_011_REFUSED_AFTER_KNOWN_EFFECT_OWNER_SUCCESS__TEARDOWN_PACKAGE_STATE_CORRECTION_ACCEPTED_PUBLISHED__FRESH_RUN_READY`
+**Accepted teardown package-state correction:** `4477d30ea3357b421d1cec1b00ada85fee1428ce`
 **Accepted restart boot-identity correction:** `274494b72216d51b9ab7f8316d581f57600054e5`
 **Accepted store-cut command correction:** `8979bee76924701061770327de220b2cd4c9b9a7`
 **Accepted post-effect state correction:** `0373da604abb29283b88b3ed7636a69849e52737`
@@ -415,8 +415,8 @@ correction is accepted and published at
 `8979bee76924701061770327de220b2cd4c9b9a7`; and the restart boot-identity
 correction is accepted and published at
 `274494b72216d51b9ab7f8316d581f57600054e5`. Another fresh occurrence may start
-only after this correction is independently accepted; runs 006--011 remain
-terminal and must not be resumed or relabeled.
+from exact accepted correction `4477d30ea3357b421d1cec1b00ada85fee1428ce`;
+runs 006--011 remain terminal and must not be resumed or relabeled.
 
 The accepted AG package supplies the query-only terminal receipt/evidence
 reopener. This candidate retains an exact WAL-zero owner store cut under the
