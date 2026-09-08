@@ -58,6 +58,7 @@ FIXTURE_PORT = 18080
 MIN_FREE_BYTES = 24 * 1024 * 1024 * 1024
 MAX_RUN_SECONDS = 7200
 MAX_INPUT_BYTES = 2 * 1024 * 1024 * 1024
+FIXTURE_READINESS_SECONDS = 30
 PROFILE_DIGESTS = {
     "nq.systemd_unit": "sha256:85beec374d8c3a19dca3aafe892792237c7ed2a886a3ecbd6fce6245578c0d8d",
     "nq.http_endpoint": "sha256:d277728a076d75d8bf5a5294635905b74f6b15b7a9d7a5274ea42a888eb68fae",
@@ -96,6 +97,7 @@ REQUIRED_TERMINAL_PATHS = {
     "evidence/ag-store-audit-outcome-v1.json",
     "evidence/systemd-post-artifact.json",
     "evidence/http-post-artifact.json",
+    "evidence/controller-http-readiness.txt",
     "evidence/target-poststate.txt",
     "evidence/control-package-continuity.txt",
     "evidence/target-package-continuity.txt",
@@ -1497,6 +1499,48 @@ helper_runtime_dir = "/run/nq/operator-beta-helpers"
         self.complete_phase("post_effect_recorded", "exercise package remove/reinstall continuity")
         return {"systemd": systemd, "http": http}
 
+    def wait_http_fixture_ready(self, control: Guest) -> None:
+        script = """import socket
+import sys
+import time
+
+address = sys.argv[1]
+port = int(sys.argv[2])
+deadline = time.monotonic() + int(sys.argv[3])
+while True:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise SystemExit("fixture TCP readiness was not observed")
+    with socket.socket() as stream:
+        stream.settimeout(min(1.0, remaining))
+        if stream.connect_ex((address, port)) == 0:
+            print("fixture_tcp_ready=true")
+            break
+    time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+"""
+        command = shlex.join(
+            [
+                "python3",
+                "-c",
+                script,
+                FIXTURE_ADDRESS,
+                str(FIXTURE_PORT),
+                str(FIXTURE_READINESS_SECONDS),
+            ]
+        )
+        result = self.ssh(control, command)
+        if result.stdout != b"fixture_tcp_ready=true\n" or result.stderr:
+            raise Refusal("fixture readiness did not emit its exact bounded result")
+        atomic_write(
+            self.output / "evidence" / "controller-http-readiness.txt",
+            result.stdout,
+            0o400,
+        )
+        self.complete_phase(
+            "fixture_readiness_observed",
+            "execute one fresh post-effect NQ observation per profile",
+        )
+
     def export_artifact(self, guest: Guest, artifact_id: str) -> bytes:
         result = self.ssh(
             guest,
@@ -1895,6 +1939,7 @@ helper_runtime_dir = "/run/nq/operator-beta-helpers"
             bindings = self.configure_nq(control, target)
             pre = self.pre_effect(control, target)
             self.enact(target, bindings)
+            self.wait_http_fixture_ready(control)
             post = self.post_effect(control, target)
             artifacts: list[tuple[Guest, dict[str, Any], pathlib.Path]] = [
                 (target, pre["systemd"], self.output / "evidence" / "systemd-pre-artifact.json"),
@@ -2443,6 +2488,8 @@ def verify_terminal_evidence(path: pathlib.Path, result: dict[str, Any], invento
     missing = sorted(REQUIRED_TERMINAL_PATHS - inventory)
     if missing:
         raise Refusal(f"terminal evidence inventory is incomplete: {missing[0]}")
+    if (path / "evidence/controller-http-readiness.txt").read_bytes() != b"fixture_tcp_ready=true\n":
+        raise Refusal("fixture readiness artifact differs from the bounded result")
     run_id = result.get("run_id")
     verify_effect_attempt_inputs(path, run_id, result.get("harness_subject"))
     input_receipt = load_json_artifact(path / "evidence" / "input-receipt.json", "input receipt")

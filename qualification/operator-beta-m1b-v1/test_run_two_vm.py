@@ -266,6 +266,9 @@ sys.stdout.buffer.write(
         self.write_json(root / "evidence/bindings.json", bindings)
         (root / "evidence" / RUNNER.UNIT).write_bytes(RUNNER.FIXTURE_UNIT_BYTES)
         (root / "evidence/healthz").write_bytes(RUNNER.FIXTURE_HEALTH_BYTES)
+        (root / "evidence/controller-http-readiness.txt").write_bytes(
+            b"fixture_tcp_ready=true\n"
+        )
         (root / "evidence/target-nq.toml").write_bytes(
             RUNNER.expected_nq_config(bindings, "target")
         )
@@ -681,6 +684,60 @@ sys.stdout.buffer.write(
             self.assertNotIn(
                 "; test -f /var/lib/nq/operator-beta.sqlite", command
             )
+
+    def test_http_fixture_readiness_is_bounded_and_nonsemantic(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = pathlib.Path(temporary) / "run"
+            (output / "evidence").mkdir(parents=True)
+            producer = RUNNER.Producer(self.args(output))
+            control = RUNNER.Guest(
+                "control", 23141, "a", "b", RUNNER.CONTROLLER_ADDRESS, output / "control"
+            )
+            producer.ssh = mock.Mock(
+                return_value=subprocess.CompletedProcess(
+                    [], 0, stdout=b"fixture_tcp_ready=true\n", stderr=b""
+                )
+            )
+            with mock.patch.object(producer, "complete_phase") as complete_phase:
+                producer.wait_http_fixture_ready(control)
+            readiness_bytes = (
+                output / "evidence/controller-http-readiness.txt"
+            ).read_bytes()
+
+        command = producer.ssh.call_args.args[1]
+        self.assertIn("time.monotonic()", command)
+        self.assertIn("connect_ex", command)
+        self.assertIn(RUNNER.FIXTURE_ADDRESS, command)
+        self.assertIn(str(RUNNER.FIXTURE_PORT), command)
+        self.assertIn(str(RUNNER.FIXTURE_READINESS_SECONDS), command)
+        self.assertNotIn("diagnostics execute", command)
+        self.assertEqual(
+            readiness_bytes,
+            b"fixture_tcp_ready=true\n",
+        )
+        complete_phase.assert_called_once_with(
+            "fixture_readiness_observed",
+            "execute one fresh post-effect NQ observation per profile",
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output = pathlib.Path(temporary) / "run"
+            (output / "evidence").mkdir(parents=True)
+            producer = RUNNER.Producer(self.args(output))
+            producer.ssh = mock.Mock(
+                return_value=subprocess.CompletedProcess(
+                    [], 0, stdout=b"other-result\n", stderr=b""
+                )
+            )
+            with (
+                mock.patch.object(producer, "complete_phase") as complete_phase,
+                self.assertRaisesRegex(RUNNER.Refusal, "exact bounded result"),
+            ):
+                producer.wait_http_fixture_ready(control)
+            self.assertFalse(
+                (output / "evidence/controller-http-readiness.txt").exists()
+            )
+            complete_phase.assert_not_called()
 
     def test_teardown_checks_protected_store_absence_as_owner(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1197,6 +1254,17 @@ sys.stdout.buffer.write(
             result["manifest_sha256"] = RUNNER.digest_file(root / "ARTIFACTS.sha256", "sha256")
             self.write_json(root / "RESULT.json", result)
             with self.assertRaisesRegex(RUNNER.Refusal, "inventory is incomplete"):
+                RUNNER.check_run(root)
+
+    def test_run_reopen_refuses_substituted_readiness_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, self.fixture_input_identities():
+            root = pathlib.Path(temporary).resolve()
+            self.make_sealed_run(root)
+            (root / "evidence/controller-http-readiness.txt").write_bytes(
+                b"fixture_tcp_ready=false\n"
+            )
+            self.reseal(root)
+            with self.assertRaisesRegex(RUNNER.Refusal, "readiness artifact"):
                 RUNNER.check_run(root)
 
     def test_run_reopen_refuses_plan_substitution(self) -> None:

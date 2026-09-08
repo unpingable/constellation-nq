@@ -1,5 +1,5 @@
 # Operator-beta NQ-ng M1B two-VM qualification harness
-**Status:** `RUNS_001_002_003_004_005_REFUSED_NO_EFFECT__RUN_006_REFUSED_AFTER_KNOWN_EFFECT_OWNER_SUCCESS__PROTECTED_STORE_CORRECTION_ACCEPTED_PUBLISHED__FRESH_RUN_READY`
+**Status:** `RUNS_001_002_003_004_005_REFUSED_NO_EFFECT__RUNS_006_007_REFUSED_AFTER_KNOWN_EFFECT_OWNER_SUCCESS__HTTP_FIXTURE_READINESS_CORRECTION_READY_FOR_INDEPENDENT_AUDIT`
 **Accepted protected-store correction:** `7750f3185a7fbf3c90c4fc2c8cf3e001e034dc41`
 **Helper correction implementation:** `860452c53d63b6162c18a2e0b4aba4acb736baea`
 **Accepted helper correction result:** `c62eb7130c813896903e0156bd0593e22befe4a5`
@@ -124,6 +124,23 @@ checkpointing, exact before/after hashes, package removal and reinstall, and
 every other phase remain unchanged. The diagnostic VM was powered off and did
 not alter run-006.
 
+Fresh `operator-beta-m1b-run-007` used exact accepted and published harness
+subject `04142d27b89ba2b5bcfc6c9433b3273c02bf6746`. The AG owner again retained an
+exact successful effect receipt, and the target-local systemd postcondition was
+established, but the controller HTTP provider reported `http_connect_failed`.
+The NQ detector correctly returned `unresolved`, and the harness refused before
+package continuity. Run-007 is terminal with exact effect custody and must not
+be resumed or relabeled. Its producer and both guests are exited.
+
+A snapshot-only two-guest diagnostic preserved the run and established that the
+private fixture link worked. It also observed `systemctl start` return an active
+Type=simple unit before the Python listener existed; the controller connected
+shortly afterward. The bounded correction therefore waits at most 30 seconds
+for one controller-vantage TCP accept after the single AG result and before the
+single post-effect NQ executions. It retains only
+`controller-http-readiness.txt`; that coordination observation is not NQ
+evidence, grants no authority, and causes no AG or NQ retry.
+
 ## Inputs and retained identity
 
 The runner requires physical regular non-symlink inputs and exact digests for:
@@ -222,7 +239,7 @@ qualification outcomes.
 
 The checked producer is `run_two_vm.py`; its pure-local qualification is
 `test_run_two_vm.py`, and `scripts/check-operator-beta-m1b-v1.sh` is the
-structural gate. The accepted correction passes 30 qualification cases
+structural gate. The readiness correction passes 32 qualification cases
 covering AG-compatible subject framing, durable recovery custody, exact
 diagnostic subject/scope/profile/question/policy/vantage/self-identity binding,
 producer-unit identity, runtime bounds, exact diagnostic policy/condition
@@ -285,11 +302,11 @@ output. `RESULT.json` plus `ARTIFACTS.sha256`, or `REFUSAL.json` plus
 
 ## Still unqualified
 
-The harness candidate is not the M1B result. Run-006 establishes exact pre/post
-NQ artifacts and one AG-owned successful effect occurrence, but it does not
-establish complete package continuity, restart/reopen, AG store-cut audit,
-teardown, or a terminal M1B result. Runs 001--005 remain their separate
-pre-effect refusals and run-006 is not resumed or relabeled.
+The harness candidate is not the M1B result. Runs 006 and 007 each retain one
+AG-owned successful effect occurrence, but neither establishes complete package
+continuity, restart/reopen, AG store-cut audit, teardown, or a terminal M1B
+result. Runs 001--005 remain their separate pre-effect refusals; runs 006 and
+007 are not resumed or relabeled.
 The upstream Debian
 cloud checksum relation remains
 unsigned at the selected versioned directory and therefore cannot satisfy the
@@ -300,9 +317,9 @@ are accepted and published at
 `e644390b4b761388569d9dbee5b374294f40ae17`; the helper correction is accepted
 and published at `c62eb7130c813896903e0156bd0593e22befe4a5`; and the protected
 store correction is accepted and published at
-`7750f3185a7fbf3c90c4fc2c8cf3e001e034dc41`. A fresh M1B occurrence may now
-start from the resulting clean subject; run-006 remains terminal and must not be
-resumed or relabeled.
+`7750f3185a7fbf3c90c4fc2c8cf3e001e034dc41`. The fixture-readiness correction
+requires independent audit before another fresh occurrence; runs 006 and 007
+remain terminal and must not be resumed or relabeled.
 
 The accepted AG package supplies the query-only terminal receipt/evidence
 reopener. This candidate retains an exact WAL-zero owner store cut under the
