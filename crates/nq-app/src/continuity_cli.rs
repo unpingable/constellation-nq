@@ -11,7 +11,7 @@ pub fn run(record: &Path, binding: &Path) -> Result<()> {
         .take(16385)
         .read_to_end(&mut policy)?;
     anyhow::ensure!(policy.len() <= 16384, "binding exceeds16KiB");
-    let binding = serde_json::from_slice(&policy)?;
+    let binding = nq_protocol::decode_json_document(&policy, 16384)?;
     let receipt =
         nq_core::continuity_support::qualify(&raw, &binding).map_err(anyhow::Error::msg)?;
     println!(

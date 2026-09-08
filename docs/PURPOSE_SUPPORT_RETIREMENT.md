@@ -21,17 +21,21 @@ Two explicitly different roles exist:
 
 The continuity-gated consumer additionally requires separately identified
 `continuity_rely_eligible` support for the exact same subject/scope. Mere
-nonempty support or a favorable unrelated claim cannot satisfy it. The current
-compiled registry has no such producer; missing support remains a residual
-blocker, not evidence that continuity holds. Thus this increment replaces the
-read-only modern adapter and establishes native historical consideration, but
-does NOT claim full equivalence for the old current/continuity role.
+nonempty support or a favorable unrelated claim cannot satisfy it. The native
+`continuity-support` producer now checks an exact externally acquired
+Continuity memory rely export and binds that named claim to subject, consumer
+and purpose. It does not authenticate external custody. Nightshift's existing
+PresentEvidencePort composition independently binds the diagnostic and memory
+support identities to a currentness query; NQ does not own this consumer clock
+policy. Earlier missing-producer/clock prerequisite statements are superseded
+by these implementations, not retroactively qualified.
 
-Remaining concrete prerequisite: a native source-clock comparison/reliance
-contract, then a compiled continuity qualification producing the exact named
-claim from admitted continuity evidence and independent supporting occurrence.
-Those must earn positive/refusal/unknown/stale/wrong-subject controls before the
-current-role retirement gate closes. Source and resolver honesty remain an
+Full current-role equivalence remains unqualified: the historical generic
+established-claim fixture does not demonstrate the donor's specific
+`docket_attempt_settled` allowlist or its enforceable-premise and unresolved-
+residual refusal policy. That bounded factual/policy mapping requires real
+positive and negative evidence, not promotion of an unrelated host claim.
+Source and resolver honesty remain an
 environmental assumption; receipts are integrity-addressed, not authentication
 of arbitrary caller-supplied data. AG authorization and Docket custody unchanged.
 

@@ -32,8 +32,10 @@ pub struct ContinuitySupport {
 
 fn fields(v: &Value, allowed: &[&str]) -> Result<(), String> {
     let object = v.as_object().ok_or("expected object")?;
-    if object.keys().any(|k| !allowed.contains(&k.as_str())) {
-        return Err("unknown field in closed source export".into());
+    if object.keys().any(|k| !allowed.contains(&k.as_str()))
+        || allowed.iter().any(|k| !object.contains_key(*k))
+    {
+        return Err("missing or unknown field in complete source export".into());
     }
     Ok(())
 }
@@ -65,7 +67,8 @@ pub fn qualify(raw: &[u8], binding: &ContinuityBinding) -> Result<ContinuitySupp
     {
         return Err("unsupported continuity consumer/purpose".into());
     }
-    let v: Value = serde_json::from_slice(raw).map_err(|e| e.to_string())?;
+    let v: Value =
+        nq_protocol::decode_json_document(raw, 2 * 1024 * 1024).map_err(|e| e.to_string())?;
     fields(
         &v,
         &[
@@ -129,6 +132,91 @@ pub fn qualify(raw: &[u8], binding: &ContinuityBinding) -> Result<ContinuitySupp
         ],
     )?;
     fields(&v["history"], &["event_count", "receipt_count"])?;
+    // This compiled profile accepts the complete emitted v0 wire form, not
+    // partially populated source model inputs. Nullable source facts remain null.
+    for (object, keys) in [
+        (&v, &["supersedes", "revoked_by"][..]),
+        (&v["source"], &["scope_kind"][..]),
+        (&v["source"]["exporter"], &["repo", "commit"][..]),
+        (
+            &v["lifecycle"],
+            &[
+                "observe_event_id",
+                "observe_receipt_hash",
+                "latest_commit_event_id",
+                "latest_commit_receipt_hash",
+            ][..],
+        ),
+    ] {
+        for key in keys {
+            if !object[key].is_null() {
+                text(object, key)?;
+            }
+        }
+    }
+    if !v["source"]["schema_version"].is_null() && v["source"]["schema_version"].as_u64().is_none()
+    {
+        return Err("invalid source schema version".into());
+    }
+    for key in ["tool", "version"] {
+        text(&v["source"]["exporter"], key)?;
+    }
+    for key in ["memory_id", "scope", "kind", "basis"] {
+        text(&v["subject"], key)?;
+    }
+    text(&v["rely"], "message")?;
+    for key in ["event_count", "receipt_count"] {
+        v["history"][key].as_u64().ok_or("invalid history count")?;
+    }
+    for key in ["exported_at", "evaluation_time"] {
+        chrono::DateTime::parse_from_rfc3339(text(&v, key)?).map_err(|e| e.to_string())?;
+    }
+    for key in [
+        "created_at",
+        "updated_at",
+        "source_observed_at",
+        "expires_at",
+    ] {
+        if ["created_at", "updated_at"].contains(&key) || !v["times"][key].is_null() {
+            chrono::DateTime::parse_from_rfc3339(text(&v["times"], key)?)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    for key in ["establishes", "does_not_establish"] {
+        let lines = v[key]
+            .as_array()
+            .ok_or("source claims must be string arrays")?;
+        if lines.is_empty()
+            || lines
+                .iter()
+                .any(|line| line.as_str().is_none_or(|s| s.trim().is_empty()))
+        {
+            return Err("source claim/limitation missing".into());
+        }
+    }
+    if !["observed", "committed", "revoked"].contains(&text(&v, "status")?) {
+        return Err("unknown source lifecycle status".into());
+    }
+    let classes = ["none", "retrieve_only", "advisory", "actionable"];
+    let declared = classes
+        .iter()
+        .position(|s| Some(*s) == v["reliance_class"].as_str())
+        .ok_or("unknown reliance class")?;
+    let effective = classes
+        .iter()
+        .position(|s| Some(*s) == v["effective_reliance"].as_str())
+        .ok_or("unknown effective reliance")?;
+    // Source-owned tier ceiling, pinned to Continuity aed09d3 api/models.py.
+    let cap = match text(&v, "authoring_tier")? {
+        "revoked" => 0,
+        "provenance_unknown" => 1,
+        "agent_authored" | "runtime_authored" => 2,
+        "custodian_signed" => 3,
+        _ => return Err("unknown authoring tier".into()),
+    };
+    if effective != declared.min(cap) {
+        return Err("source effective reliance contradicts declared tier ceiling".into());
+    }
     if !v["rely"]["details"].is_object() {
         return Err("source detail must be object".into());
     }

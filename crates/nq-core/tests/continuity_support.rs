@@ -47,5 +47,68 @@ fn real_continuity_positive_refusal_unknown_and_exact_replay() {
         wrong = binding.clone();
         wrong.raw_source_digest = nq_protocol::sha256_bytes(&bytes);
         assert!(qualify(&bytes, &wrong).is_err());
+        if name == "eligible" {
+            // Otherwise valid source and matching custody digest: parser, not
+            // an unrelated digest mismatch, must reject duplicate keys.
+            let json = serde_json::to_string(&source).unwrap();
+            let duplicate = json.replace("\"rely_ok\":true", "\"rely_ok\":false,\"rely_ok\":true");
+            assert_ne!(json, duplicate);
+            wrong.raw_source_digest = nq_protocol::sha256_bytes(duplicate.as_bytes());
+            assert!(
+                qualify(duplicate.as_bytes(), &wrong)
+                    .unwrap_err()
+                    .contains("duplicate")
+            );
+            let policy = serde_json::to_string(&binding).unwrap();
+            let duplicate_policy =
+                policy.replace("\"purpose\":", "\"purpose\":\"execute\",\"purpose\":");
+            assert!(
+                nq_protocol::decode_json_document::<ContinuityBinding>(
+                    duplicate_policy.as_bytes(),
+                    16384
+                )
+                .is_err()
+            );
+            for (pointer, replacement) in [
+                ("/source/schema_version", serde_json::json!("1")),
+                ("/source/exporter", serde_json::json!({})),
+                ("/source/exporter/version", serde_json::json!(3)),
+                ("/lifecycle", serde_json::json!({})),
+                ("/lifecycle/observe_event_id", serde_json::json!(3)),
+                ("/times", serde_json::json!({})),
+                ("/times/created_at", serde_json::json!("invalid")),
+                ("/history/event_count", serde_json::json!(-1)),
+                ("/effective_reliance", serde_json::json!("arbitrary")),
+                ("/effective_reliance", serde_json::json!("actionable")),
+                ("/authoring_tier", serde_json::json!("arbitrary")),
+                ("/status", serde_json::json!("arbitrary")),
+                ("/establishes", serde_json::json!([false])),
+                ("/does_not_establish", serde_json::json!([])),
+            ] {
+                let mut malformed = source.clone();
+                *malformed.pointer_mut(pointer).unwrap() = replacement;
+                let bytes = serde_json::to_vec(&malformed).unwrap();
+                wrong = binding.clone();
+                wrong.raw_source_digest = nq_protocol::sha256_bytes(&bytes);
+                assert!(
+                    qualify(&bytes, &wrong).is_err(),
+                    "accepted malformed {pointer}"
+                );
+            }
+            for pointer in ["/source", "/times", "/lifecycle"] {
+                let mut malformed = source.clone();
+                let map = malformed
+                    .pointer_mut(pointer)
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap();
+                let key = map.keys().next().unwrap().clone();
+                map.remove(&key);
+                let bytes = serde_json::to_vec(&malformed).unwrap();
+                wrong = binding.clone();
+                wrong.raw_source_digest = nq_protocol::sha256_bytes(&bytes);
+                assert!(qualify(&bytes, &wrong).is_err());
+            }
+        }
     }
 }
