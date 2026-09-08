@@ -66,6 +66,8 @@ rg -F --quiet 'test_terminal_reopen_refuses_substituted_owner_executable' "$test
 rg -F --quiet 'test_nodefaults_launch_uses_explicit_read_only_virtio_nocloud_drive' "$tests"
 rg -F --quiet 'test_helper_execution_uses_documented_transient_unit_boundary' "$tests"
 rg -F --quiet 'test_package_continuity_checks_protected_store_as_owner' "$tests"
+rg -F --quiet 'test_teardown_checks_protected_store_absence_as_owner' "$tests"
+[[ $(rg -F -c 'sudo test ! -e /var/lib/nq/operator-beta.sqlite' "$runner") -eq 2 ]]
 rg -F --quiet 'CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_KILL' "$runner"
 rg -F --quiet 'AmbientCapabilities=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_KILL' "$runner"
 for token in \

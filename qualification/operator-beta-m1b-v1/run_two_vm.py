@@ -1778,7 +1778,7 @@ helper_runtime_dir = "/run/nq/operator-beta-helpers"
             f"test ! -e /etc/systemd/system/{UNIT}; "
             "test ! -e /var/lib/constellation-beta-http-fixture; "
             "test ! -e /var/lib/ag-effectd-m1b; "
-            "test ! -e /var/lib/nq/operator-beta.sqlite; "
+            "sudo test ! -e /var/lib/nq/operator-beta.sqlite; "
             "test ! -e /usr/lib/nq/helpers/nq-operator-beta-helper; "
             "! dpkg-query -W nq-ng >/dev/null 2>&1; "
             "! dpkg-query -W agent-governor-ng-systemd-executor >/dev/null 2>&1",
@@ -1790,7 +1790,7 @@ helper_runtime_dir = "/run/nq/operator-beta-helpers"
             "/var/lib/nq/operator-beta.sqlite-shm /var/lib/nq/operator-beta.sqlite-wal "
             "/var/lib/nq/operator-beta-admissions /var/lib/nq/operator-beta-backup.sqlite; "
             "rm -f /home/betaoperator/nq-ng.deb /home/betaoperator/control-nq.toml; "
-            "test ! -e /var/lib/nq/operator-beta.sqlite; "
+            "sudo test ! -e /var/lib/nq/operator-beta.sqlite; "
             "test ! -e /usr/lib/nq/helpers/nq-operator-beta-helper; "
             "! dpkg-query -W nq-ng >/dev/null 2>&1",
         )

@@ -682,6 +682,49 @@ sys.stdout.buffer.write(
                 "; test -f /var/lib/nq/operator-beta.sqlite", command
             )
 
+    def test_teardown_checks_protected_store_absence_as_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = pathlib.Path(temporary) / "run"
+            (output / "evidence").mkdir(parents=True)
+            producer = RUNNER.Producer(self.args(output))
+            control = RUNNER.Guest(
+                "control", 23141, "a", "b", RUNNER.CONTROLLER_ADDRESS, output / "control"
+            )
+            target = RUNNER.Guest(
+                "target", 23142, "c", "d", RUNNER.FIXTURE_ADDRESS, output / "target"
+            )
+            for guest in (control, target):
+                guest.root.mkdir()
+                guest.process = mock.Mock()
+            commands: list[tuple[str, str]] = []
+            producer.ssh = mock.Mock(
+                side_effect=lambda guest, command, **_kwargs: (
+                    commands.append((guest.role, command))
+                    or subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"")
+                )
+            )
+            with (
+                mock.patch.object(RUNNER, "run"),
+                mock.patch.object(RUNNER, "process_has_token", return_value=False),
+                mock.patch.object(RUNNER, "port_absent", return_value=True),
+                mock.patch.object(producer, "complete_phase"),
+            ):
+                producer.teardown(control, target)
+
+        teardown_commands = [
+            command
+            for _role, command in commands
+            if "sudo dpkg -r" in command and "operator-beta.sqlite" in command
+        ]
+        self.assertEqual(len(teardown_commands), 2)
+        for command in teardown_commands:
+            self.assertIn(
+                "sudo test ! -e /var/lib/nq/operator-beta.sqlite", command
+            )
+            self.assertNotIn(
+                "; test ! -e /var/lib/nq/operator-beta.sqlite", command
+            )
+
     def test_nodefaults_launch_uses_explicit_read_only_virtio_nocloud_drive(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output = pathlib.Path(temporary).resolve()
