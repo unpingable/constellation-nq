@@ -29,8 +29,11 @@ IMAGE_SHA512 = (
     "6d6dd55c70cc8b0ac9d9b4f54e18f8860bd5ad5ebfb7a8d5e934f3d12cf3817"
 )
 NQ_DEB_SHA256 = "979a4df81f32c5453e79eb15a87cf93c0058ef4d69cc7048eb6a1e67282d3761"
-AG_DEB_SHA256 = "2852dc8a516980c4a1936d64a3a3f472d95fccf5eb3935f01a1be277f6b24f26"
-AG_DEB_VERSION = "0.1.0-1+m1a3"
+AG_DEB_SHA256 = "98a4f31f0b6c13653ae95ce55586dbac6d0826b649cd7612882f3716b80e2279"
+AG_DEB_VERSION = "0.1.0-1+m1a4"
+AG_STORE_AUDIT_RESULT = "db4bad1fba2b5ab512cc58356314228167b2f48e"
+AG_EXECUTABLE_SHA256 = "668bdd26646ef6a5ba5502b64984844b84c1f70024a76eb5236af2b17702d068"
+AG_AUDIT_STORE_MAX_BYTES = 64 * 1024 * 1024
 UNIT = "constellation-beta-http-fixture.service"
 FIXTURE_UNIT_BYTES = b"""[Unit]
 Description=Constellation operator-beta HTTP fixture
@@ -70,6 +73,7 @@ REQUIRED_TERMINAL_PATHS = {
     "input/nq-ng_amd64.deb",
     "input/agent-governor-ng-systemd-executor_amd64.deb",
     "runtime/id_ed25519.pub",
+    "runtime/ag-package/usr/libexec/agent-governor-ng/ag-effectd",
     "evidence/input-receipt.json",
     "evidence/guest-identities.json",
     "evidence/constellation-beta-http-fixture.service",
@@ -86,6 +90,9 @@ REQUIRED_TERMINAL_PATHS = {
     "evidence/docket-shaped-dispatch-v1.json",
     "evidence/executor-outcome-v1.json",
     "evidence/effect-occurrence.json",
+    "evidence/ag-attempt-store-cut.sqlite",
+    "evidence/ag-store-cut.json",
+    "evidence/ag-store-audit-outcome-v1.json",
     "evidence/systemd-post-artifact.json",
     "evidence/http-post-artifact.json",
     "evidence/target-poststate.txt",
@@ -634,6 +641,8 @@ class Producer:
             "image_checksum_signature": "UPSTREAM_DETACHED_SIGNATURE_NOT_PUBLISHED",
             "nq_deb_sha256": NQ_DEB_SHA256,
             "ag_deb_sha256": AG_DEB_SHA256,
+            "ag_store_audit_result": AG_STORE_AUDIT_RESULT,
+            "ag_executable_sha256": AG_EXECUTABLE_SHA256,
             "free_bytes": usage.free,
         }
 
@@ -687,6 +696,23 @@ class Producer:
             raise Refusal("retained NQ package metadata differs after copy")
         if package_field(retained_ag, "Version") != AG_DEB_VERSION:
             raise Refusal("retained AG package metadata differs after copy")
+        ag_package_root = self.output / "runtime" / "ag-package"
+        run(["dpkg-deb", "--extract", str(retained_ag), str(ag_package_root)])
+        ag_audit_binary = (
+            ag_package_root / "usr" / "libexec" / "agent-governor-ng" / "ag-effectd"
+        )
+        ag_audit_metadata = regular_file(ag_audit_binary, "retained AG audit executable")
+        if (
+            digest_file(ag_audit_binary, "sha256") != AG_EXECUTABLE_SHA256
+            or stat.S_IMODE(ag_audit_metadata.st_mode) != 0o755
+        ):
+            raise Refusal("retained AG audit executable differs from the accepted package")
+        audit_help = run([str(ag_audit_binary), "audit-store", "--help"])
+        if any(
+            required not in audit_help.stdout
+            for required in (b"--store-cut", b"--store-bytes", b"--store-sha256")
+        ):
+            raise Refusal("retained AG package lacks the accepted audit-store interface")
         run(["qemu-img", "check", str(retained_image)])
         input_receipt = {
             "schema": "constellation.operator_beta.m1b_inputs.v1",
@@ -704,6 +730,9 @@ class Producer:
             },
             "nq_package_sha256": NQ_DEB_SHA256,
             "ag_package_sha256": AG_DEB_SHA256,
+            "ag_package_version": AG_DEB_VERSION,
+            "ag_store_audit_result": AG_STORE_AUDIT_RESULT,
+            "ag_executable_sha256": AG_EXECUTABLE_SHA256,
             "ports": {
                 "control_ssh": self.args.controller_ssh_port,
                 "target_ssh": self.args.target_ssh_port,
@@ -901,6 +930,24 @@ ethernets:
             f"UserKnownHostsFile={guest.known_hosts}",
             *[str(path) for path in sources],
             f"betaoperator@127.0.0.1:{destination}",
+        ]
+        run(command)
+
+    def scp_from(self, guest: Guest, source: str, destination: pathlib.Path) -> None:
+        command = [
+            "scp",
+            "-i",
+            str(guest.private_key),
+            "-P",
+            str(guest.ssh_port),
+            "-o",
+            "IdentitiesOnly=yes",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            f"UserKnownHostsFile={guest.known_hosts}",
+            f"betaoperator@127.0.0.1:{source}",
+            str(destination),
         ]
         run(command)
 
@@ -1492,6 +1539,120 @@ helper_runtime_dir = "/run/nq/operator-beta-helpers"
         )
         self.complete_phase("restart_reopen_proved", "export stores and perform bounded teardown")
 
+    def retain_and_audit_ag_store_cut(self, target: Guest) -> None:
+        source_store = "/var/lib/ag-effectd-m1b/attempts.sqlite"
+        guest_cut = "/home/betaoperator/ag-attempt-store-cut.sqlite"
+        stable = self.ssh(
+            target,
+            "sudo flock --exclusive --timeout 5 "
+            f"{source_store}.systemd-execution-lock "
+            "flock --exclusive --timeout 5 "
+            f"{source_store} sh -c '"
+            "python3 -c \"import sqlite3,sys; "
+            "c=sqlite3.connect(sys.argv[1]); "
+            "c.execute(\\\"PRAGMA wal_checkpoint(TRUNCATE)\\\"); c.close()\" "
+            f"{source_store}; "
+            f"test ! -s {source_store}-wal; "
+            f"source_sha=$(sha256sum {source_store} | cut -d \\\" \\\" -f1); "
+            f"source_bytes=$(stat -c %s {source_store}); "
+            f"cp --reflink=never {source_store} {guest_cut}; "
+            f"chown betaoperator:betaoperator {guest_cut}; chmod 0400 {guest_cut}; "
+            f"test $(sha256sum {guest_cut} | cut -d \\\" \\\" -f1) = $source_sha; "
+            "printf \\\"source_sha256=%s\\nsource_bytes=%s\\nwal=ABSENT_OR_ZERO_LENGTH\\n\\\" "
+            "$source_sha $source_bytes'",
+        )
+        stable_facts = dict(
+            line.split("=", 1)
+            for line in stable.stdout.decode().splitlines()
+            if "=" in line
+        )
+        cut = self.output / "evidence" / "ag-attempt-store-cut.sqlite"
+        self.scp_from(target, guest_cut, cut)
+        os.chmod(cut, 0o400)
+        cut_metadata = regular_file(cut, "copied AG attempt-store cut")
+        if cut_metadata.st_size <= 0 or cut_metadata.st_size > AG_AUDIT_STORE_MAX_BYTES:
+            raise Refusal("copied AG attempt-store cut exceeds the owner audit bound")
+        cut_sha256 = digest_file(cut, "sha256")
+        if stable_facts != {
+            "source_sha256": cut_sha256,
+            "source_bytes": str(cut_metadata.st_size),
+            "wal": "ABSENT_OR_ZERO_LENGTH",
+        }:
+            raise Refusal("copied AG attempt-store cut disagrees with the locked source cut")
+
+        plan_path = self.output / "evidence" / "systemd-plan-v2.json"
+        dispatch_path = self.output / "evidence" / "docket-shaped-dispatch-v1.json"
+        expected_outcome_path = self.output / "evidence" / "executor-outcome-v1.json"
+        audit_binary = (
+            self.output
+            / "runtime"
+            / "ag-package"
+            / "usr"
+            / "libexec"
+            / "agent-governor-ng"
+            / "ag-effectd"
+        )
+        completed = run(
+            [
+                str(audit_binary),
+                "audit-store",
+                str(plan_path),
+                "--store-cut",
+                str(cut),
+                "--store-bytes",
+                str(cut_metadata.st_size),
+                "--store-sha256",
+                "sha256:" + cut_sha256,
+            ],
+            stdin=dispatch_path.read_bytes(),
+        )
+        if completed.stderr or completed.stdout != expected_outcome_path.read_bytes():
+            raise Refusal("AG owner store audit disagrees with the original terminal outcome")
+        audit_outcome_path = self.output / "evidence" / "ag-store-audit-outcome-v1.json"
+        atomic_write(audit_outcome_path, completed.stdout, 0o400)
+
+        custody = self.effect_custody
+        if not isinstance(custody, dict):
+            raise Refusal("effect custody is absent before AG store-cut audit")
+        store_cut_record = {
+            "schema": "constellation.operator_beta.m1b_ag_store_cut.v1",
+            "run_id": self.run_id,
+            "owner": "AG-ng",
+            "owner_package_result": AG_STORE_AUDIT_RESULT,
+            "ag_package_sha256": AG_DEB_SHA256,
+            "ag_executable_sha256": AG_EXECUTABLE_SHA256,
+            "source_store": source_store,
+            "wal": "ABSENT_OR_ZERO_LENGTH",
+            "store_bytes": cut_metadata.st_size,
+            "store_sha256": "sha256:" + cut_sha256,
+            "plan_sha256": custody["plan_sha256"],
+            "dispatch_sha256": custody["dispatch_sha256"],
+            "attempt": custody["attempt"],
+            "marker": custody["marker"],
+            "work": custody["work"],
+            "subject": custody["subject"],
+            "scope": custody["scope"],
+            "owner_outcome_sha256": digest_file(audit_outcome_path, "sha256"),
+            "receipt": custody["receipt"],
+        }
+        store_cut_record_path = self.output / "evidence" / "ag-store-cut.json"
+        atomic_write(store_cut_record_path, canonical(store_cut_record) + b"\n", 0o400)
+        custody.update(
+            {
+                "ag_store_cut_bytes": cut_metadata.st_size,
+                "ag_store_cut_sha256": cut_sha256,
+                "ag_store_cut_record_sha256": digest_file(
+                    store_cut_record_path, "sha256"
+                ),
+                "ag_store_audit_outcome_sha256": digest_file(
+                    audit_outcome_path, "sha256"
+                ),
+                "ag_store_audit_result": AG_STORE_AUDIT_RESULT,
+                "ag_executable_sha256": AG_EXECUTABLE_SHA256,
+            }
+        )
+        self.complete_phase("ag_store_cut_audited", "perform bounded teardown")
+
     def teardown(self, control: Guest, target: Guest) -> None:
         for guest, instances in (
             (control, ("http-pre", "http-post", "http-restart")),
@@ -1564,6 +1725,7 @@ helper_runtime_dir = "/run/nq/operator-beta-helpers"
             "/home/betaoperator/agent-governor-ng-systemd-executor_amd64.deb "
             "/home/betaoperator/target-nq.toml /home/betaoperator/systemd-plan-v2.json "
             "/home/betaoperator/docket-shaped-dispatch-v1.json "
+            "/home/betaoperator/ag-attempt-store-cut.sqlite "
             f"/home/betaoperator/{UNIT} /home/betaoperator/healthz; "
             f"test ! -e /etc/systemd/system/{UNIT}; "
             "test ! -e /var/lib/constellation-beta-http-fixture; "
@@ -1694,6 +1856,7 @@ helper_runtime_dir = "/run/nq/operator-beta-helpers"
             ]
             self.package_continuity(control, target, artifacts)
             self.restart_and_reopen(control, target, artifacts)
+            self.retain_and_audit_ag_store_cut(target)
             self.teardown(control, target)
             self.seal()
         except BaseException as error:
@@ -1901,6 +2064,109 @@ def load_json_artifact(path: pathlib.Path, label: str) -> dict[str, Any]:
     return value
 
 
+def verify_ag_store_cut(
+    path: pathlib.Path,
+    run_id: str,
+    base_custody: dict[str, Any],
+    expected_outcome: dict[str, Any],
+) -> dict[str, Any]:
+    input_receipt = load_json_artifact(
+        path / "evidence" / "input-receipt.json", "input receipt"
+    )
+    if (
+        input_receipt.get("ag_package_sha256") != AG_DEB_SHA256
+        or input_receipt.get("ag_package_version") != AG_DEB_VERSION
+        or input_receipt.get("ag_store_audit_result") != AG_STORE_AUDIT_RESULT
+        or input_receipt.get("ag_executable_sha256") != AG_EXECUTABLE_SHA256
+    ):
+        raise Refusal("input receipt does not bind the accepted AG owner package")
+    binary = (
+        path
+        / "runtime"
+        / "ag-package"
+        / "usr"
+        / "libexec"
+        / "agent-governor-ng"
+        / "ag-effectd"
+    )
+    binary_metadata = regular_file(binary, "retained AG audit executable")
+    if (
+        stat.S_IMODE(binary_metadata.st_mode) != 0o755
+        or digest_file(binary, "sha256") != AG_EXECUTABLE_SHA256
+    ):
+        raise Refusal("retained AG audit executable differs from the accepted package")
+
+    cut = path / "evidence" / "ag-attempt-store-cut.sqlite"
+    cut_metadata = regular_file(cut, "copied AG attempt-store cut")
+    if cut_metadata.st_size <= 0 or cut_metadata.st_size > AG_AUDIT_STORE_MAX_BYTES:
+        raise Refusal("copied AG attempt-store cut exceeds the owner audit bound")
+    if pathlib.Path(str(cut) + "-wal").exists():
+        raise Refusal("copied AG attempt-store cut has adjacent WAL state")
+    cut_sha256 = digest_file(cut, "sha256")
+    audit_outcome_path = path / "evidence" / "ag-store-audit-outcome-v1.json"
+    audit_outcome = load_json_artifact(audit_outcome_path, "AG store-audit outcome")
+    if audit_outcome != expected_outcome:
+        raise Refusal("retained AG store-audit outcome differs from the original outcome")
+    audit_outcome_bytes = audit_outcome_path.read_bytes()
+    if audit_outcome_bytes != canonical(audit_outcome) + b"\n":
+        raise Refusal("retained AG store-audit outcome lacks exact owner framing")
+
+    store_record_path = path / "evidence" / "ag-store-cut.json"
+    store_record = load_json_artifact(store_record_path, "AG store-cut record")
+    expected_record = {
+        "schema": "constellation.operator_beta.m1b_ag_store_cut.v1",
+        "run_id": run_id,
+        "owner": "AG-ng",
+        "owner_package_result": AG_STORE_AUDIT_RESULT,
+        "ag_package_sha256": AG_DEB_SHA256,
+        "ag_executable_sha256": AG_EXECUTABLE_SHA256,
+        "source_store": "/var/lib/ag-effectd-m1b/attempts.sqlite",
+        "wal": "ABSENT_OR_ZERO_LENGTH",
+        "store_bytes": cut_metadata.st_size,
+        "store_sha256": "sha256:" + cut_sha256,
+        "plan_sha256": base_custody["plan_sha256"],
+        "dispatch_sha256": base_custody["dispatch_sha256"],
+        "attempt": base_custody["attempt"],
+        "marker": base_custody["marker"],
+        "work": base_custody["work"],
+        "subject": base_custody["subject"],
+        "scope": base_custody["scope"],
+        "owner_outcome_sha256": digest_file(audit_outcome_path, "sha256"),
+        "receipt": expected_outcome["receipt"],
+    }
+    if store_record != expected_record:
+        raise Refusal("AG store-cut record disagrees with the exact effect occurrence")
+
+    plan = path / "evidence" / "systemd-plan-v2.json"
+    dispatch = path / "evidence" / "docket-shaped-dispatch-v1.json"
+    completed = run(
+        [
+            str(binary),
+            "audit-store",
+            str(plan),
+            "--store-cut",
+            str(cut),
+            "--store-bytes",
+            str(cut_metadata.st_size),
+            "--store-sha256",
+            "sha256:" + cut_sha256,
+        ],
+        stdin=dispatch.read_bytes(),
+    )
+    if completed.stderr or completed.stdout != audit_outcome_bytes:
+        raise Refusal("AG owner reopener disagrees with retained store-audit custody")
+    return {
+        "ag_store_cut_bytes": cut_metadata.st_size,
+        "ag_store_cut_sha256": cut_sha256,
+        "ag_store_cut_record_sha256": digest_file(store_record_path, "sha256"),
+        "ag_store_audit_outcome_sha256": digest_file(
+            audit_outcome_path, "sha256"
+        ),
+        "ag_store_audit_result": AG_STORE_AUDIT_RESULT,
+        "ag_executable_sha256": AG_EXECUTABLE_SHA256,
+    }
+
+
 def verify_diagnostic_artifact(
     artifact: dict[str, Any],
     *,
@@ -2097,6 +2363,9 @@ def verify_effect_attempt_inputs(
         or input_receipt.get("accepted_package_result") != ACCEPTED_PACKAGE_RESULT
         or input_receipt.get("nq_package_sha256") != NQ_DEB_SHA256
         or input_receipt.get("ag_package_sha256") != AG_DEB_SHA256
+        or input_receipt.get("ag_package_version") != AG_DEB_VERSION
+        or input_receipt.get("ag_store_audit_result") != AG_STORE_AUDIT_RESULT
+        or input_receipt.get("ag_executable_sha256") != AG_EXECUTABLE_SHA256
     ):
         raise Refusal("retained input receipt names another admitted execution")
     expected_bindings = expected_m1b_bindings(run_id, identities)
@@ -2171,6 +2440,9 @@ def verify_terminal_evidence(path: pathlib.Path, result: dict[str, Any], invento
         "image",
         "nq_package_sha256",
         "ag_package_sha256",
+        "ag_package_version",
+        "ag_store_audit_result",
+        "ag_executable_sha256",
         "ports",
     }
     if set(input_receipt) != input_fields:
@@ -2181,7 +2453,13 @@ def verify_terminal_evidence(path: pathlib.Path, result: dict[str, Any], invento
         or input_receipt.get("harness_subject") != result.get("harness_subject")
     ):
         raise Refusal("input receipt names another harness subject")
-    if input_receipt.get("nq_package_sha256") != NQ_DEB_SHA256 or input_receipt.get("ag_package_sha256") != AG_DEB_SHA256:
+    if (
+        input_receipt.get("nq_package_sha256") != NQ_DEB_SHA256
+        or input_receipt.get("ag_package_sha256") != AG_DEB_SHA256
+        or input_receipt.get("ag_package_version") != AG_DEB_VERSION
+        or input_receipt.get("ag_store_audit_result") != AG_STORE_AUDIT_RESULT
+        or input_receipt.get("ag_executable_sha256") != AG_EXECUTABLE_SHA256
+    ):
         raise Refusal("input receipt names different package bytes")
     retained_image = path / "input" / IMAGE_NAME
     retained_checksums = path / "input" / "SHA512SUMS"
@@ -2338,6 +2616,9 @@ def verify_terminal_evidence(path: pathlib.Path, result: dict[str, Any], invento
         "scope": expected_dispatch["scope"],
         "receipt": outcome["receipt"],
     }
+    expected_custody.update(
+        verify_ag_store_cut(path, run_id, expected_custody, outcome)
+    )
     custody = recovery.get("effect_custody")
     if (
         recovery.get("run_id") != run_id

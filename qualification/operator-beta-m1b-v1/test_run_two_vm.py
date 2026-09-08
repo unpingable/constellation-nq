@@ -30,6 +30,21 @@ class HarnessTests(unittest.TestCase):
     FIXTURE_IMAGE_BYTES = b"fixture-image\n"
     FIXTURE_NQ_PACKAGE_BYTES = b"fixture-nq-package\n"
     FIXTURE_AG_PACKAGE_BYTES = b"fixture-ag-package\n"
+    FIXTURE_AG_AUDIT_BINARY_BYTES = b"""#!/usr/bin/env python3
+import pathlib
+import sys
+
+arguments = sys.argv[1:]
+cut = pathlib.Path(arguments[arguments.index("--store-cut") + 1])
+if cut.read_bytes() != b"fixture owner store cut\\n":
+    print("fixture-owner-store-substitution", file=sys.stderr)
+    raise SystemExit(1)
+sys.stdin.buffer.read()
+root = pathlib.Path(__file__).resolve().parents[5]
+sys.stdout.buffer.write(
+    (root / "runtime" / "ag-package" / "owner-outcome.json").read_bytes()
+)
+"""
 
     def args(self, output: pathlib.Path, run_id: str = "fixture-001") -> types.SimpleNamespace:
         return types.SimpleNamespace(
@@ -194,6 +209,13 @@ class HarnessTests(unittest.TestCase):
                     hashlib.sha256(self.FIXTURE_AG_PACKAGE_BYTES).hexdigest(),
                 )
             )
+            stack.enter_context(
+                mock.patch.object(
+                    RUNNER,
+                    "AG_EXECUTABLE_SHA256",
+                    hashlib.sha256(self.FIXTURE_AG_AUDIT_BINARY_BYTES).hexdigest(),
+                )
+            )
             yield
 
     def make_sealed_run(self, root: pathlib.Path) -> None:
@@ -229,6 +251,9 @@ class HarnessTests(unittest.TestCase):
             },
             "nq_package_sha256": RUNNER.NQ_DEB_SHA256,
             "ag_package_sha256": RUNNER.AG_DEB_SHA256,
+            "ag_package_version": RUNNER.AG_DEB_VERSION,
+            "ag_store_audit_result": RUNNER.AG_STORE_AUDIT_RESULT,
+            "ag_executable_sha256": RUNNER.AG_EXECUTABLE_SHA256,
             "ports": {
                 "control_ssh": 23141,
                 "target_ssh": 23142,
@@ -280,6 +305,51 @@ class HarnessTests(unittest.TestCase):
         self.write_json(root / "evidence/docket-shaped-dispatch-v1.json", dispatch)
         self.write_json(root / "evidence/executor-outcome-v1.json", outcome)
         self.write_json(root / "evidence/effect-occurrence.json", occurrence)
+        audit_binary = (
+            root
+            / "runtime/ag-package/usr/libexec/agent-governor-ng/ag-effectd"
+        )
+        audit_binary.write_bytes(self.FIXTURE_AG_AUDIT_BINARY_BYTES)
+        audit_binary.chmod(0o755)
+        self.write_json(
+            root / "runtime/ag-package/owner-outcome.json", outcome
+        )
+        store_cut = root / "evidence/ag-attempt-store-cut.sqlite"
+        store_cut.write_bytes(b"fixture owner store cut\n")
+        audit_outcome_path = root / "evidence/ag-store-audit-outcome-v1.json"
+        self.write_json(audit_outcome_path, outcome)
+        store_record_path = root / "evidence/ag-store-cut.json"
+        self.write_json(
+            store_record_path,
+            {
+                "schema": "constellation.operator_beta.m1b_ag_store_cut.v1",
+                "run_id": run_id,
+                "owner": "AG-ng",
+                "owner_package_result": RUNNER.AG_STORE_AUDIT_RESULT,
+                "ag_package_sha256": RUNNER.AG_DEB_SHA256,
+                "ag_executable_sha256": RUNNER.AG_EXECUTABLE_SHA256,
+                "source_store": "/var/lib/ag-effectd-m1b/attempts.sqlite",
+                "wal": "ABSENT_OR_ZERO_LENGTH",
+                "store_bytes": store_cut.stat().st_size,
+                "store_sha256": "sha256:"
+                + RUNNER.digest_file(store_cut, "sha256"),
+                "plan_sha256": RUNNER.digest_file(
+                    root / "evidence/systemd-plan-v2.json", "sha256"
+                ),
+                "dispatch_sha256": RUNNER.digest_file(
+                    root / "evidence/docket-shaped-dispatch-v1.json", "sha256"
+                ),
+                "attempt": attempt,
+                "marker": marker,
+                "work": work,
+                "subject": dispatch["subject"],
+                "scope": dispatch["scope"],
+                "owner_outcome_sha256": RUNNER.digest_file(
+                    audit_outcome_path, "sha256"
+                ),
+                "receipt": outcome["receipt"],
+            },
+        )
         systemd_restart = self.artifact(
             bindings, "nq.systemd_unit", "present", "systemd-restart"
         )
@@ -345,6 +415,16 @@ class HarnessTests(unittest.TestCase):
             "subject": dispatch["subject"],
             "scope": dispatch["scope"],
             "receipt": outcome["receipt"],
+            "ag_store_cut_bytes": store_cut.stat().st_size,
+            "ag_store_cut_sha256": RUNNER.digest_file(store_cut, "sha256"),
+            "ag_store_cut_record_sha256": RUNNER.digest_file(
+                store_record_path, "sha256"
+            ),
+            "ag_store_audit_outcome_sha256": RUNNER.digest_file(
+                audit_outcome_path, "sha256"
+            ),
+            "ag_store_audit_result": RUNNER.AG_STORE_AUDIT_RESULT,
+            "ag_executable_sha256": RUNNER.AG_EXECUTABLE_SHA256,
         }
         self.write_json(root / "RECOVERY.json", {
             "schema": "constellation.operator_beta.m1b_recovery.v1",
@@ -559,6 +639,107 @@ class HarnessTests(unittest.TestCase):
             self.assertEqual(current["historical_effect"], "AG_OWNER_RECEIPT_RETAINED")
             self.assertEqual(current["aggregate_postcondition"], "NOT_RECORDED")
 
+    def test_producer_retains_locked_store_cut_and_uses_owner_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, self.fixture_input_identities():
+            output = pathlib.Path(temporary).resolve()
+            (output / "evidence").mkdir()
+            binary = (
+                output
+                / "runtime/ag-package/usr/libexec/agent-governor-ng/ag-effectd"
+            )
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(self.FIXTURE_AG_AUDIT_BINARY_BYTES)
+            binary.chmod(0o755)
+
+            identities, _service, bindings = self.service_records()
+            plan = RUNNER.expected_effect_plan(bindings, identities)
+            dispatch, work = RUNNER.expected_effect_dispatch("fixture-001", plan)
+            outcome = {
+                "attempt": dispatch["attempt"],
+                "marker": dispatch["marker"],
+                "outcome": "success",
+                "receipt": "sha256:" + "7" * 64,
+            }
+            self.write_json(output / "evidence/systemd-plan-v2.json", plan)
+            self.write_json(
+                output / "evidence/docket-shaped-dispatch-v1.json", dispatch
+            )
+            self.write_json(output / "evidence/executor-outcome-v1.json", outcome)
+            self.write_json(output / "runtime/ag-package/owner-outcome.json", outcome)
+
+            producer = RUNNER.Producer(self.args(output))
+            producer.effect_custody = {
+                "plan_sha256": RUNNER.digest_file(
+                    output / "evidence/systemd-plan-v2.json", "sha256"
+                ),
+                "dispatch_sha256": RUNNER.digest_file(
+                    output / "evidence/docket-shaped-dispatch-v1.json", "sha256"
+                ),
+                "attempt": dispatch["attempt"],
+                "marker": dispatch["marker"],
+                "work": work,
+                "subject": dispatch["subject"],
+                "scope": dispatch["scope"],
+                "receipt": outcome["receipt"],
+            }
+            cut_bytes = b"fixture owner store cut\n"
+            cut_sha256 = hashlib.sha256(cut_bytes).hexdigest()
+            commands: list[str] = []
+
+            def ssh(_guest, command, **_kwargs):
+                commands.append(command)
+                return subprocess.CompletedProcess(
+                    [],
+                    0,
+                    stdout=(
+                        f"source_sha256={cut_sha256}\n"
+                        f"source_bytes={len(cut_bytes)}\n"
+                        "wal=ABSENT_OR_ZERO_LENGTH\n"
+                    ).encode(),
+                    stderr=b"",
+                )
+
+            def scp_from(_guest, _source, destination):
+                pathlib.Path(destination).write_bytes(cut_bytes)
+
+            producer.ssh = mock.Mock(side_effect=ssh)
+            producer.scp_from = mock.Mock(side_effect=scp_from)
+            target = RUNNER.Guest(
+                "target",
+                23142,
+                "c",
+                "d",
+                RUNNER.FIXTURE_ADDRESS,
+                output / "target",
+            )
+            with mock.patch.object(producer, "complete_phase") as completed:
+                producer.retain_and_audit_ag_store_cut(target)
+
+            stable_cut = commands[0]
+            syntax = subprocess.run(
+                ["sh", "-n", "-c", stable_cut],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertEqual(syntax.returncode, 0, syntax.stderr.decode())
+            self.assertIn("flock --exclusive --timeout 5", stable_cut)
+            self.assertIn("PRAGMA wal_checkpoint(TRUNCATE)", stable_cut)
+            self.assertIn("test ! -s /var/lib/ag-effectd-m1b/attempts.sqlite-wal", stable_cut)
+            record = json.loads((output / "evidence/ag-store-cut.json").read_bytes())
+            self.assertEqual(record["store_sha256"], "sha256:" + cut_sha256)
+            self.assertEqual(record["owner_package_result"], RUNNER.AG_STORE_AUDIT_RESULT)
+            self.assertEqual(record["owner_outcome_sha256"], RUNNER.digest_file(
+                output / "evidence/ag-store-audit-outcome-v1.json", "sha256"
+            ))
+            self.assertEqual(
+                producer.effect_custody["ag_store_cut_record_sha256"],
+                RUNNER.digest_file(output / "evidence/ag-store-cut.json", "sha256"),
+            )
+            completed.assert_called_once_with(
+                "ag_store_cut_audited", "perform bounded teardown"
+            )
+
     def test_effect_outcome_classes_remain_distinct(self) -> None:
         self.assertEqual(RUNNER.effect_outcome_state("success"), "KNOWN_EFFECT_OWNER_SUCCESS")
         self.assertEqual(RUNNER.effect_outcome_state("failure"), "KNOWN_NO_EFFECT_OWNER_FAILURE")
@@ -622,6 +803,9 @@ class HarnessTests(unittest.TestCase):
                     "accepted_package_result": RUNNER.ACCEPTED_PACKAGE_RESULT,
                     "nq_package_sha256": RUNNER.NQ_DEB_SHA256,
                     "ag_package_sha256": RUNNER.AG_DEB_SHA256,
+                    "ag_package_version": RUNNER.AG_DEB_VERSION,
+                    "ag_store_audit_result": RUNNER.AG_STORE_AUDIT_RESULT,
+                    "ag_executable_sha256": RUNNER.AG_EXECUTABLE_SHA256,
                 },
             )
             self.write_json(root / "evidence/service-subject.json", service_subject)
@@ -742,6 +926,93 @@ class HarnessTests(unittest.TestCase):
             ):
                 RUNNER.reconcile_effect(root)
             owner_query.assert_not_called()
+
+    def test_terminal_reopen_refuses_coherently_substituted_owner_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, self.fixture_input_identities():
+            root = pathlib.Path(temporary).resolve()
+            self.make_sealed_run(root)
+            outcome_path = root / "evidence/executor-outcome-v1.json"
+            outcome = json.loads(outcome_path.read_bytes())
+            outcome["receipt"] = "sha256:" + "9" * 64
+            self.write_json(outcome_path, outcome)
+            occurrence_path = root / "evidence/effect-occurrence.json"
+            occurrence = json.loads(occurrence_path.read_bytes())
+            occurrence["outcome"] = outcome
+            self.write_json(occurrence_path, occurrence)
+            audit_outcome_path = root / "evidence/ag-store-audit-outcome-v1.json"
+            self.write_json(audit_outcome_path, outcome)
+            store_record_path = root / "evidence/ag-store-cut.json"
+            store_record = json.loads(store_record_path.read_bytes())
+            store_record["receipt"] = outcome["receipt"]
+            store_record["owner_outcome_sha256"] = RUNNER.digest_file(
+                audit_outcome_path, "sha256"
+            )
+            self.write_json(store_record_path, store_record)
+            recovery_path = root / "RECOVERY.json"
+            recovery = json.loads(recovery_path.read_bytes())
+            recovery["effect_custody"].update(
+                {
+                    "receipt": outcome["receipt"],
+                    "outcome_sha256": RUNNER.digest_file(outcome_path, "sha256"),
+                    "ag_store_audit_outcome_sha256": RUNNER.digest_file(
+                        audit_outcome_path, "sha256"
+                    ),
+                    "ag_store_cut_record_sha256": RUNNER.digest_file(
+                        store_record_path, "sha256"
+                    ),
+                }
+            )
+            self.write_json(recovery_path, recovery)
+            self.reseal(root)
+            with self.assertRaisesRegex(
+                RUNNER.Refusal, "owner reopener disagrees"
+            ):
+                RUNNER.check_run(root)
+
+    def test_terminal_reopen_refuses_coherently_substituted_store_cut(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, self.fixture_input_identities():
+            root = pathlib.Path(temporary).resolve()
+            self.make_sealed_run(root)
+            cut = root / "evidence/ag-attempt-store-cut.sqlite"
+            cut.write_bytes(b"substituted owner store cut\n")
+            store_record_path = root / "evidence/ag-store-cut.json"
+            store_record = json.loads(store_record_path.read_bytes())
+            store_record["store_bytes"] = cut.stat().st_size
+            store_record["store_sha256"] = "sha256:" + RUNNER.digest_file(
+                cut, "sha256"
+            )
+            self.write_json(store_record_path, store_record)
+            recovery_path = root / "RECOVERY.json"
+            recovery = json.loads(recovery_path.read_bytes())
+            recovery["effect_custody"].update(
+                {
+                    "ag_store_cut_bytes": cut.stat().st_size,
+                    "ag_store_cut_sha256": RUNNER.digest_file(cut, "sha256"),
+                    "ag_store_cut_record_sha256": RUNNER.digest_file(
+                        store_record_path, "sha256"
+                    ),
+                }
+            )
+            self.write_json(recovery_path, recovery)
+            self.reseal(root)
+            with self.assertRaisesRegex(
+                RUNNER.Refusal, "fixture-owner-store-substitution"
+            ):
+                RUNNER.check_run(root)
+
+    def test_terminal_reopen_refuses_substituted_owner_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, self.fixture_input_identities():
+            root = pathlib.Path(temporary).resolve()
+            self.make_sealed_run(root)
+            binary = (
+                root
+                / "runtime/ag-package/usr/libexec/agent-governor-ng/ag-effectd"
+            )
+            binary.write_bytes(b"#!/bin/sh\nexit 0\n")
+            binary.chmod(0o755)
+            self.reseal(root)
+            with self.assertRaisesRegex(RUNNER.Refusal, "accepted package"):
+                RUNNER.check_run(root)
 
     def test_run_reopen_and_semantic_substitutions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary, self.fixture_input_identities():

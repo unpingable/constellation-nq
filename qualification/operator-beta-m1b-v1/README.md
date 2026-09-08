@@ -1,6 +1,8 @@
 # Operator-beta NQ-ng M1B two-VM qualification harness
-**Status:** `PARTIAL_CORRECTION_CHECKPOINT__AG_OWNER_STORE_AUDIT_PENDING__LIVE_RUN_NOT_STARTED`
+**Status:** `INTEGRATED_CORRECTION_CANDIDATE__INDEPENDENT_REVIEW_REQUIRED__LIVE_RUN_NOT_STARTED`
 **Accepted package checkpoint:** `8865dcad23f17a1f26716161554530237e04bb9e`
+**Accepted AG store-audit owner:** `837de287497942c79966aa05c083acee9c312261`
+**Accepted AG package qualification:** `db4bad1fba2b5ab512cc58356314228167b2f48e`
 **Authority effect:** qualification-only local fixtures; no production, provider, default-branch, or deployment authority.
 
 ## Purpose
@@ -26,8 +28,10 @@ The runner requires physical regular non-symlink inputs and exact digests for:
 
 - accepted NQ-ng package bytes rebuilt from package source `5c064f06...` and
   qualification result `8865dcad...`;
-- accepted AG M1A target adapter package `0.1.0-1+m1a3`, exact qualified SHA-256
-  `2852dc8a516980c4a1936d64a3a3f472d95fccf5eb3935f01a1be277f6b24f26`;
+- accepted AG M1A target adapter package `0.1.0-1+m1a4`, exact qualified SHA-256
+  `98a4f31f0b6c13653ae95ce55586dbac6d0826b649cd7612882f3716b80e2279`;
+- its exact `/usr/libexec/agent-governor-ng/ag-effectd` executable, SHA-256
+  `668bdd26646ef6a5ba5502b64984844b84c1f70024a76eb5236af2b17702d068`;
 - Debian 12 genericcloud build `20260903-2590`, exact selected SHA-512
   `490f38e2665bc4c31f1bd4cd66dfab3c7695f652a62862a7034d95f8f05ede4146d6dd55c70cc8b0ac9d9b4f54e18f8860bd5ad5ebfb7a8d5e934f3d12cf3817`;
 - the exact versioned Debian `SHA512SUMS` bytes containing that filename and
@@ -95,7 +99,11 @@ The fixed path is:
 10. restart both guests, preserve historical AG success while separately
     recording the expected disabled-unit current state (`present` systemd mismatch
     and `unresolved` HTTP), and prove query-only reopening performs no helper execution;
-11. stop the fixture, require and retain successful local watcher revocations,
+11. while no adapter writer is active, take the two exact exclusive owner locks,
+    truncate and refuse a nonempty SQLite WAL, copy the bounded AG attempt store,
+    and require the accepted package's query-only `audit-store` outcome to equal
+    the originally retained terminal outcome byte for byte;
+12. stop the fixture, require and retain successful local watcher revocations,
     remove packages and
     campaign-owned guest files, power off only the two named guests, retain host
     process/listener observations, and seal the complete artifact inventory.
@@ -110,7 +118,7 @@ qualification outcomes.
 
 The checked producer is `run_two_vm.py`; its pure-local qualification is
 `test_run_two_vm.py`, and `scripts/check-operator-beta-m1b-v1.sh` is the
-structural gate. The correction candidate passes 22 qualification cases
+structural gate. The correction candidate passes 26 qualification cases
 covering AG-compatible subject framing, durable recovery custody, exact
 diagnostic subject/scope/profile/question/policy/vantage/self-identity binding,
 producer-unit identity, runtime bounds, exact diagnostic policy/condition
@@ -119,7 +127,10 @@ terminal complete-inventory reopen, fixed AG plan/effect/action/unit semantics,
 owner outcome and recovery binding, content mutation, missing-evidence refusal,
 process inspection, a shared pre-query occurrence verifier, same-work/fresh-run
 reconcile refusal, same-attempt reconcile refusal, and coherent package,
-config, effect, attempt, and reconciliation substitutions. The gate's injected missing-boundary
+config, effect, attempt, reconciliation, owner-outcome, owner-store-content,
+and accepted-audit-executable substitutions. A direct producer case checks the
+locked WAL-zero stable cut, exact source/copy relation, accepted owner query,
+and retained cross-component identity record. The gate's injected missing-boundary
 control refuses deterministically. These are harness results only: no VM,
 package install, system bus, fixture service, or effect has run.
 
@@ -165,9 +176,12 @@ canonical signed-checksum item. Live Docket custody, AG authorization
 consumption, cross-profile aggregation, Nightshift currentness, deployment,
 and production also remain outside this lane.
 
-Terminal AG receipt/evidence reopening remains a prerequisite. The current AG
-package exposes execute/reconcile against its live store, but the M1B harness
-must retain and validate an immutable owner store cut before guest teardown.
-The separate AG-owned query-only interface is under qualification; this NQ-ng
-checkpoint neither carries that acceptance forward nor duplicates AG receipt
-semantics locally.
+The accepted AG package supplies the query-only terminal receipt/evidence
+reopener. This candidate retains an exact WAL-zero owner store cut under the
+owner's two-lock boundary and requires the packaged `audit-store` output to
+equal the original terminal outcome. NQ-ng records only the exact owner result,
+package/executable identities, store-cut identity, and AG/Docket-shaped join
+identities; it does not reinterpret AG receipt/evidence semantics or promote
+Docket-shaped testimony into a Docket database occurrence. The live exercise
+and its resulting store cut remain `NOT_RUN` until this integrated candidate is
+independently accepted.
