@@ -6,13 +6,19 @@ runner="$repo/qualification/operator-beta-m1b-v1/run_two_vm.py"
 tests="$repo/qualification/operator-beta-m1b-v1/test_run_two_vm.py"
 readme="$repo/qualification/operator-beta-m1b-v1/README.md"
 bookworm="$repo/qualification/operator-beta-m1b-v1/BOOKWORM-PACKAGE.md"
+bookworm_builder="$repo/qualification/operator-beta-m1b-v1/build_bookworm_package.py"
+bookworm_tests="$repo/qualification/operator-beta-m1b-v1/test_build_bookworm_package.py"
 
 test -f "$runner"
 test -f "$tests"
 test -f "$readme"
 test -f "$bookworm"
-python3 -m py_compile "$runner" "$tests"
+test -f "$bookworm_builder"
+test -f "$bookworm_tests"
+python3 -m py_compile "$runner" "$tests" "$bookworm_builder" "$bookworm_tests"
 python3 -m unittest -v "$tests"
+python3 -m unittest -v "$bookworm_tests"
+python3 "$bookworm_builder" --help >/dev/null
 python3 "$runner" --help >/dev/null
 
 required=(
@@ -32,7 +38,7 @@ required=(
   'systemd_current_condition'
   'http_current_condition'
   'self.check_runtime()'
-  'e49089844c2b0eb56226cb8abe7b8313dc24b8c9838eae7283733bbab78b609d'
+  '0e3ab6307b41e9d80a6bdd503324895b5c46d49aef57e9421abb0e294dbc9fca'
   'db4bad1fba2b5ab512cc58356314228167b2f48e'
   '98a4f31f0b6c13653ae95ce55586dbac6d0826b649cd7612882f3716b80e2279'
   '668bdd26646ef6a5ba5502b64984844b84c1f70024a76eb5236af2b17702d068'
@@ -60,10 +66,19 @@ for token in \
   'REFUSED / NO_EFFECT_ATTEMPTED' \
   'sha256:fb7a58d0482a24e269ba85636ce46cb06aaaef3aea0e868154ed0ae7c18fa379' \
   'rust@sha256:365468470075493dc4583f47387001854321c5a8583ea9604b297e67f01c5a4f' \
-  'e49089844c2b0eb56226cb8abe7b8313dc24b8c9838eae7283733bbab78b609d' \
+  '0e3ab6307b41e9d80a6bdd503324895b5c46d49aef57e9421abb0e294dbc9fca' \
+  '8b0298cc690c2c662cbda5bd931380656775b1caa38aed4d7d8f2c517d384ebe' \
+  'constellation.operator_beta.nq_bookworm_package_build.v1' \
+  'bookworm-package-003' \
+  'cd1561056e4c5ff95185be3e71110c0f7fecafeacd563cfd80addeb617a4c1fc' \
+  'fa9c00821969ce70f5cf2c53b09f2876e759063ceb3645dfdb220bdc1435a5cf' \
   'GLIBC_2.34'; do
   rg -F --quiet "$token" "$bookworm"
 done
+rg -F --quiet 'test_closed_receipt_refuses_identity_substitutions' "$bookworm_tests"
+rg -F --quiet '"--network", "none"' "$bookworm_builder"
+rg -F --quiet '"normalized_docker_argv": normalized_build_command()' "$bookworm_builder"
+rg -F --quiet 'BUILD_USER = "1000:1000"' "$bookworm_builder"
 
 if rg -n 'shell[[:space:]]*=[[:space:]]*True' "$runner"; then
   echo "M1B runner must not use subprocess shell execution" >&2

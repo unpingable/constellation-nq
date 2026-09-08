@@ -1,5 +1,5 @@
 # Operator-beta NQ-ng M1B two-VM qualification harness
-**Status:** `PRE_EFFECT_RUNS_001_002_003_REFUSED__BOOKWORM_PACKAGE_CORRECTION_CANDIDATE__INDEPENDENT_REVIEW_REQUIRED`
+**Status:** `PRE_EFFECT_RUNS_001_002_003_REFUSED__REPRODUCIBLE_BOOKWORM_PACKAGE_CANDIDATE__INDEPENDENT_REVIEW_REQUIRED`
 **Accepted package checkpoint:** `8865dcad23f17a1f26716161554530237e04bb9e`
 **Accepted AG store-audit owner:** `837de287497942c79966aa05c083acee9c312261`
 **Accepted AG package qualification:** `db4bad1fba2b5ab512cc58356314228167b2f48e`
@@ -43,9 +43,11 @@ processes exited. No NQ artifact, AG attempt, Docket occurrence, system-bus
 effect, or fixture-service start occurred.
 
 The package correction rebuilds the unchanged accepted source `5c064f06...`
-inside the locally retained immutable `rust:1.94.0-bookworm` image with network
-access disabled. The resulting exact campaign-owned package has SHA-256
-`e49089844c2b0eb56226cb8abe7b8313dc24b8c9838eae7283733bbab78b609d`;
+twice from one exact campaign-owned vendor snapshot inside the locally retained
+immutable `rust:1.94.0-bookworm` image with network access disabled. The checked
+wrapper requires the two binary and release-artifact sets to be byte-identical
+before retaining a result. The resulting exact campaign-owned package has
+SHA-256 `0e3ab6307b41e9d80a6bdd503324895b5c46d49aef57e9421abb0e294dbc9fca`;
 all four packaged binaries execute their build-info probes in that Bookworm
 image and require no glibc symbol newer than `GLIBC_2.34`. Exact evidence is in
 `BOOKWORM-PACKAGE.md`. Runs 001, 002, and 003 are never retried or relabeled;
@@ -66,7 +68,7 @@ The runner requires physical regular non-symlink inputs and exact digests for:
 - NQ-ng package bytes rebuilt from accepted package source `5c064f06...` and
   qualification result `8865dcad...` in the immutable Bookworm build
   environment recorded by `BOOKWORM-PACKAGE.md`, exact candidate SHA-256
-  `e49089844c2b0eb56226cb8abe7b8313dc24b8c9838eae7283733bbab78b609d`;
+  `0e3ab6307b41e9d80a6bdd503324895b5c46d49aef57e9421abb0e294dbc9fca`;
 - accepted AG M1A target adapter package `0.1.0-1+m1a4`, exact qualified SHA-256
   `98a4f31f0b6c13653ae95ce55586dbac6d0826b649cd7612882f3716b80e2279`;
 - its exact `/usr/libexec/agent-governor-ng/ag-effectd` executable, SHA-256
