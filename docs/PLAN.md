@@ -1,5 +1,10 @@
 # NQ-ng: Professional, Local-First NQ Successor
 
+> **2026-09-08 campaign update:** the restriction recorded below is historical.
+> CLASSIC-RETIREMENT now authorizes the bounded native contracts and identified
+> consumer migrations. See the README's current campaign note; deployment and
+> fleet cutover remain separate. This does not reactivate every item in this plan.
+
 > **Supersession note (2026-07-26):** this plan's successor framing — the
 > Stage 4 "replacement-ready cut", the "At cutover" retirement of old
 > services, and the Nightshift consumer-migration step — is **superseded by

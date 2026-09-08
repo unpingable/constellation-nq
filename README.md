@@ -1,5 +1,19 @@
 # NQ-ng
 
+> **CLASSIC-RETIREMENT update (2026-09-08):** the operator authorizes native
+> replacement contracts and the identified Codex, Monitor, Nightshift and older
+> AG consumer migrations. The July restriction below is historical and no longer
+> limits that implementation campaign. The integrated runtime candidate is
+> `022419593b1065da7e83802d1fb6efc77362f6a1`; exact independent component evidence
+> and final integrated witnesses are tracked in Constellation's
+> `coordination/CLASSIC_RETIREMENT_COMPLETION_GATE.md` and the campaign recovery
+> record. The retirement gate remains open pending those integrated results.
+> This authorization does **not** establish fleet cutover, remote publication,
+> production deployment, or complete Host Operational Portrait coverage. M2's
+> original acceptance stays attached to its original revisions.
+
+## Historical July status (not current campaign authorization)
+
 > **Status (2026-07-28): selected successor development line, not the
 > operationally authoritative NQ.** Classic at `~/git/nq-root/nq` remains the
 > live authority until NQ-NG earns functional equivalence, isolated parallel
@@ -18,6 +32,8 @@
 > exact export/import, and reproducible v1/v2 contract packages. This local
 > untagged work is not remotely published and does not yet provide a generic
 > host portrait or subject qualification.
+
+## Product direction
 
 The target NQ-ng product is a local-first deterministic diagnostic engine and
 recursive evidence fabric. For one exact profile, subject, scope, and vantage,

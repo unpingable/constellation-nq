@@ -1,5 +1,11 @@
 # nq-ng Hardening Program
 
+> **2026-09-08 campaign update:** the July authorization restriction below is
+> historical. CLASSIC-RETIREMENT now authorizes bounded native contracts and
+> identified consumer migrations, not production deployment or fleet cutover.
+> See the README's current campaign note. The frozen program body and its
+> original qualification evidence remain historical, not requalified here.
+
 **Status: RATIFIED / FROZEN — 2026-07-17.**
 
 > **Supersession note (2026-07-26, operator canonicalization direction):**
