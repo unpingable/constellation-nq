@@ -4,6 +4,7 @@ pub mod api;
 pub mod archive;
 pub mod cli;
 pub mod queue_cli;
+pub mod purpose_cli;
 pub mod daemon;
 mod ownership;
 pub mod stage_cli;

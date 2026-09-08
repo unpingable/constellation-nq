@@ -13507,6 +13507,41 @@ sys.stdout.write("\n")
         );
         assert!(admission.judgment.is_some());
 
+        // CLASSIC-RETIREMENT: purpose support must reopen this actual local
+        // history; retained bytes or caller-supplied conclusions are not enough.
+        let mut purpose_request = crate::purpose_support::PurposeRequest {
+            artifact_id: stored_artifact_id.clone(),
+            consumer: "nightshift-readonly".into(),
+            purpose: "historical_readonly".into(),
+            subject_digest: nq_protocol::semantic_digest(&artifact.subject).unwrap(),
+            claim: artifact.claims.iter().find(|c|c.status==crate::diagnostic_execution::DiagnosticClaimStatusV1::Established).unwrap().claim_id.clone(),
+            evaluated_at: artifact.completed_at,
+            maximum_artifact_age_seconds: 300,
+            require_source_currentness: false,
+            supporting_artifact_ids: vec![],
+        };
+        let historical_support=crate::purpose_support::qualify(&engine.store,&purpose_request).unwrap();
+        assert_eq!(historical_support["decision"],"supported_readonly");
+        if let Ok(directory)=std::env::var("NQ_PURPOSE_FIXTURE_OUTPUT") {
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(std::path::Path::new(&directory).join("historical-support.json"),nq_protocol::canonical_json_bytes(&historical_support).unwrap()).unwrap();
+            fs::write(std::path::Path::new(&directory).join("request.json"),nq_protocol::canonical_json_bytes(&purpose_request).unwrap()).unwrap();
+        }
+        purpose_request.purpose="continue_observing".into();
+        let current_support=crate::purpose_support::qualify(&engine.store,&purpose_request).unwrap();
+        assert_eq!(current_support["decision"],"cannot_testify");
+        if let Ok(directory)=std::env::var("NQ_PURPOSE_FIXTURE_OUTPUT") {
+            fs::write(std::path::Path::new(&directory).join("current-support.json"),nq_protocol::canonical_json_bytes(&current_support).unwrap()).unwrap();
+        }
+        purpose_request.purpose="execute".into();
+        assert_eq!(crate::purpose_support::qualify(&engine.store,&purpose_request).unwrap()["decision"],"purpose_not_authorized");
+        purpose_request.purpose="historical_readonly".into();
+        purpose_request.consumer="nightshift-readonly-continuity".into();
+        assert_eq!(crate::purpose_support::qualify(&engine.store,&purpose_request).unwrap()["decision"],"residual_obligation_blocks");
+        purpose_request.consumer="nightshift-readonly".into();
+        purpose_request.evaluated_at=artifact.completed_at+chrono::Duration::seconds(300);
+        assert_eq!(crate::purpose_support::qualify(&engine.store,&purpose_request).unwrap()["decision"],"stale_evidence");
+
         let mut imported_store = Store::initialize_in_memory().expect("import-only store");
         imported_store
             .import_diagnostic_artifact(&nq_store::DiagnosticArtifactImportInput {
@@ -13521,6 +13556,7 @@ sys.stdout.write("\n")
         let imported_error = qualify_diagnostic_admission(&imported_store, &stored_artifact_id)
             .expect_err("imported custody cannot claim local NQ admission");
         assert!(imported_error.to_string().contains("imported custody"));
+        assert!(crate::purpose_support::qualify(&imported_store,&purpose_request).unwrap_err().contains("imported custody"));
 
         let intakes = engine
             .store

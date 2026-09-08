@@ -218,6 +218,11 @@ pub struct InstanceArg {
 /// Bounded diagnostic-execution operations.
 #[derive(Debug, Subcommand)]
 pub enum DiagnosticsCommand {
+    /// Derive explicit read-only purpose support from locally qualified history.
+    PurposeSupport {
+        #[arg(long)]
+        request: PathBuf,
+    },
     /// Collect, evaluate, and emit one exact supported diagnostic artifact.
     Execute(InstanceArg),
     /// Inspect one immutable artifact commitment without changing it.
@@ -625,6 +630,7 @@ async fn diagnostics_command(
         DiagnosticsCommand::Execute(instance) => {
             diagnostic_execute(config_path, &instance.instance_id).await
         }
+        DiagnosticsCommand::PurposeSupport { request } => crate::purpose_cli::run(config_path,&request),
         DiagnosticsCommand::Inspect { artifact_id } => {
             diagnostic_inspect(config_path, &artifact_id, json_output)
         }
