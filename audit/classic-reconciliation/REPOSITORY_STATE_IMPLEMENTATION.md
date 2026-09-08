@@ -1,0 +1,43 @@
+# Repository-state implementation candidate
+
+2026-09-08, CLASSIC-RETIREMENT. This supersedes the implementation deferral in
+REPOSITORY_STATE_PREREQUISITE.md for this bounded consumer contract only. M2
+acceptance and fleet/production authority are unchanged.
+
+`nq-profiles::repository_state` is a closed compiled factual profile, using
+NQ-ng canonical JSON, semantic digests and evaluator source-closure identity.
+`nq repository-state observe --worktree PATH --output ABSENT_FILE` runs fixed
+Git acquisition; `replay --artifact FILE --producer-sha256 SHA256` independently
+reopens exact canonical bytes, evaluator source, producer identity, subject,
+raw evidence and derived disposition. It does not import classic receipts,
+evaluate caller-supplied predicates, or provide automatic fallback.
+
+Claim: one local non-bare enrolled worktree's Git porcelain response reported
+no tracked/untracked changes, or reported changes, during the recorded interval.
+Ignored contents are explicitly excluded. Submodules are unsupported and make
+the result not-established. Unborn HEAD, command failures, bounds violations
+and differing before/after HEAD cannot establish clean. This is neither an
+atomic worktree snapshot nor a currentness/future-execution guarantee. Repeating
+HEAD does not prove absence of concurrent writes. Codex owns freshness and
+subject selection; AG owns authorization, Docket execution custody.
+
+Environment assumptions: trusted installed `/usr/bin/git`, its runtime and
+this enrolled local collector; no concurrent administrative replacement of
+those installed components. Git aliases, system/global config, filesystem
+monitor, optional locks and untracked cache are disabled. Repository-owned
+configuration may only narrow this contract where explicitly addressed by
+qualification; it must not silently suppress tracked changes. Every command
+has a 4-second/1-MiB output bound; no raw stderr or command arguments are exported.
+Repository paths themselves are operational metadata, not automatically safe
+for public export. UTC values are local clock testimony, not a clock-error bound.
+
+Digests establish exact content and semantic identity, not authentication.
+Replay requires trusted local artifact custody and a separately enrolled
+producer executable digest; an untrusted caller able to manufacture all input
+bytes cannot establish producer origin by recomputing a hash. Consumer adapters
+must call the pinned modern replayer, not trust JSON labels or hash shape.
+
+Qualification candidate: three profile controls plus real Git integration
+(clean, tracked, staged, untracked, ignored, unborn and historical replay)
+passed in durable run003; earlier runs001/002 exposed compile/file-offset
+defects and remain in campaign logs. Independent review still required.

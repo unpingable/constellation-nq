@@ -14,6 +14,9 @@ mod projection;
 mod registry;
 mod validation;
 
+/// Closed repository-state factual evaluation and replay contract.
+pub mod repository_state;
+
 /// Conformance-only profile used by the language-neutral helper corpus.
 pub mod conformance;
 /// Local host operational profile.

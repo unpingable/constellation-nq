@@ -60,6 +60,11 @@ pub enum Command {
         #[command(subcommand)]
         command: crate::stage_cli::StageCommand,
     },
+    /// Bounded repository-state observation and exact replay.
+    RepositoryState {
+        #[command(subcommand)]
+        command: crate::repository_cli::RepositoryCommand,
+    },
     /// Explicitly initialize an empty nq-ng database and directory layout.
     Init(InitArgs),
     /// Validate, compare, and atomically activate human intent.
@@ -385,6 +390,7 @@ pub async fn run(options: Nq) -> Result<()> {
         Command::BoundedPredicate { command } => crate::queue_cli::run(command),
         Command::CampaignStageQualification { command } => crate::stage_cli::run(command, false),
         Command::CampaignStageRealization { command } => crate::stage_cli::run(command, true),
+        Command::RepositoryState { command } => crate::repository_cli::run(command),
         Command::Init(arguments) => initialize(&options.config, arguments, options.json),
         Command::Config { command } => config_command(&options.config, command, options.json),
         Command::Profiles { command } => profiles_command(command, options.json),
