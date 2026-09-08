@@ -104,13 +104,9 @@ fn real_git_tracked_untracked_ignored_and_unborn_boundaries() {
         );
         git(
             dir.path(),
-            &[
-                "update-index",
-                "--no-assume-unchanged",
-                "--no-skip-worktree",
-                "new",
-            ],
+            &["update-index", "--no-assume-unchanged", "new"],
         );
+        git(dir.path(), &["update-index", "--no-skip-worktree", "new"]);
     }
 }
 

@@ -37,15 +37,8 @@ fn source_flag_removal_does_not_change_the_captured_index_observation() {
         let digest = capture_index(&repo.join(".git/index"), &copied)
             .unwrap()
             .unwrap();
-        command(
-            &repo,
-            &[
-                "update-index",
-                "--no-assume-unchanged",
-                "--no-skip-worktree",
-                "tracked",
-            ],
-        );
+        command(&repo, &["update-index", "--no-assume-unchanged", "tracked"]);
+        command(&repo, &["update-index", "--no-skip-worktree", "tracked"]);
         assert_eq!(sha256_bytes(&fs::read(&copied).unwrap()), digest);
         let observed = Command::new("/usr/bin/git")
             .arg("-C")
