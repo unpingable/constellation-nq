@@ -1,5 +1,5 @@
 # Operator-beta NQ-ng M1B two-VM qualification harness
-**Status:** `PRE_EFFECT_RUN_001_REFUSED__CDROM_BUS_CORRECTION_CANDIDATE__INDEPENDENT_REVIEW_REQUIRED`
+**Status:** `PRE_EFFECT_RUNS_001_002_REFUSED__VIRTIO_NOCLOUD_CORRECTION_CANDIDATE__INDEPENDENT_REVIEW_REQUIRED`
 **Accepted package checkpoint:** `8865dcad23f17a1f26716161554530237e04bb9e`
 **Accepted AG store-audit owner:** `837de287497942c79966aa05c083acee9c312261`
 **Accepted AG package qualification:** `db4bad1fba2b5ab512cc58356314228167b2f48e`
@@ -14,22 +14,26 @@ oracle. The controller and target observations remain independent artifacts.
 The harness never infers an AG-to-Docket-to-NQ edge from matching identities or
 timestamps.
 
-## Observed pre-effect run
+## Observed pre-effect runs
 
-`operator-beta-m1b-run-001` started both exact local QEMU guests from the
-accepted inputs, but the `-nodefaults` q35 launch did not bind the NoCloud
-CD-ROM to an explicit guest bus. Neither serial log contained an ATA/CD-ROM
-device; both guests retained the base hostname and `ssh.service` failed before
-the producer could connect. The exact producer interruption record is retained
-under `/data/git/.campaign-artifacts/nq-ng-operator-beta-m1b-20260908/operator-beta-m1b-v1/run-001`.
-It classifies `NO_EFFECT_ATTEMPTED`; both named QEMU processes and the producer
-are exited. No package was installed and no NQ, AG, Docket, system-bus, or
-fixture-service operation ran.
+`operator-beta-m1b-run-001` and fresh `operator-beta-m1b-run-002` each started
+both exact local QEMU guests from accepted inputs, but neither `-nodefaults`
+q35 launch exposed its NoCloud image. Run-001 used an implicit `ide-cd`; the
+accepted run-002 correction bound that device to `ide.1`, but the explicit IDE
+device was still absent from both guests. All four serial logs retained the
+base hostname and reported `ssh.service` failure before the producer could
+connect. The exact producer interruption records remain distinct under
+`/data/git/.campaign-artifacts/nq-ng-operator-beta-m1b-20260908/operator-beta-m1b-v1/run-001`
+and `run-002`. Both classify `NO_EFFECT_ATTEMPTED`; every named QEMU process
+and producer is exited. No package was installed and no NQ, AG, Docket,
+system-bus, or fixture-service operation ran.
 
-The correction keeps `-nodefaults` and binds the existing `ide-cd` device to
-q35 bus `ide.1`. A direct command-shape qualification case prevents the launch
-from returning to an implicit bus selection. Run-001 is not retried or relabeled;
-any later exercise is a fresh run occurrence after independent acceptance.
+The next correction keeps `-nodefaults` and attaches the sealed NoCloud image
+as an explicit read-only virtio block drive. This is the exact attachment shape
+used by the accepted AG clean-host qualification rather than a new controller
+guess. A direct command-shape qualification case prevents regression to either
+IDE form. Runs 001 and 002 are never retried or relabeled; any later exercise
+is a fresh run occurrence after independent acceptance.
 
 The target begins with the exact fixture unit installed, disabled, and
 inactive. The controller cannot reach the fixed HTTP response. One fresh
@@ -148,7 +152,8 @@ config, effect, attempt, reconciliation, owner-outcome, owner-store-content,
 and accepted-audit-executable substitutions. A direct producer case checks the
 locked WAL-zero stable cut, exact source/copy relation, accepted owner query,
 and retained cross-component identity record. A separate launch-envelope case
-requires the explicit q35 `ide.1` NoCloud CD-ROM binding under `-nodefaults`.
+requires the explicit read-only virtio NoCloud drive under `-nodefaults` and
+refuses either IDE form.
 The gate's injected missing-boundary
 control refuses deterministically. These are harness results only: no VM,
 package install, system bus, fixture service, or effect has run.

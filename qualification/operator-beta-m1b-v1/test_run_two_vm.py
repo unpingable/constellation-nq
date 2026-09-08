@@ -607,7 +607,7 @@ sys.stdout.buffer.write(
         self.assertIn(f"{RUNNER.NQ_DEB_SHA256}  /home/betaoperator/nq-ng.deb", joined)
         self.assertIn(f"{RUNNER.AG_DEB_SHA256}  /home/betaoperator/agent-governor-ng-systemd-executor_amd64.deb", joined)
 
-    def test_q35_launch_explicitly_binds_nocloud_cdrom_bus(self) -> None:
+    def test_nodefaults_launch_uses_explicit_read_only_virtio_nocloud_drive(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output = pathlib.Path(temporary).resolve()
             guest_root = output / "control"
@@ -637,8 +637,11 @@ sys.stdout.buffer.write(
 
             command = captured["command"]
             self.assertIn("-nodefaults", command)
-            self.assertIn("ide-cd,drive=seed,bus=ide.1", command)
-            self.assertNotIn("ide-cd,drive=seed", command)
+            self.assertIn(
+                f"if=virtio,file={guest_root / 'seed.iso'},format=raw,readonly=on",
+                command,
+            )
+            self.assertFalse(any("ide-cd" in argument for argument in command))
             self.assertEqual(guest.start_ticks, 67890)
 
     def test_restart_preserves_historical_effect_and_records_actual_current_support(self) -> None:
