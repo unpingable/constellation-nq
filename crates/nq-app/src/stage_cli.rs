@@ -145,7 +145,8 @@ fn read<T: DeserializeOwned>(path: &Path) -> Result<T> {
     if bytes.len() as u64 > LIMIT {
         bail!("stage document exceeds 4 MiB bound");
     }
-    serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
+    nq_protocol::decode_json_document(&bytes, 2 * 1024 * 1024)
+        .with_context(|| format!("parsing {}", path.display()))
 }
 
 fn write<T: Serialize>(path: &str, value: &T) -> Result<()> {

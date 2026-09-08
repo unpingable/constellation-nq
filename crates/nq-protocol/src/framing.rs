@@ -71,7 +71,26 @@ pub fn decode_ndjson<T: DeserializeOwned>(
     if body.is_empty() || body.contains(&b'\n') || body.contains(&b'\r') {
         return Err(FramingError::NotExactlyOneLine);
     }
-    let mut deserializer = serde_json::Deserializer::from_slice(body);
+    decode_json_document(body, max_bytes)
+}
+
+/// Decode one bounded JSON document, rejecting duplicate keys at every depth.
+/// Unlike helper NDJSON this accepts pretty-printing, but never trailing values.
+///
+/// # Errors
+/// Returns a framing size or strict JSON/DTO error. This is byte interpretation,
+/// not semantic admission, source authenticity or currentness.
+pub fn decode_json_document<T: DeserializeOwned>(
+    bytes: &[u8],
+    max_bytes: usize,
+) -> Result<T, FramingError> {
+    if bytes.len() > max_bytes {
+        return Err(FramingError::TooLarge {
+            limit: max_bytes,
+            actual: bytes.len(),
+        });
+    }
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
     let value = NoDuplicateValue::deserialize(&mut deserializer)?.0;
     deserializer.end()?;
     serde_json::from_value(value).map_err(FramingError::Json)

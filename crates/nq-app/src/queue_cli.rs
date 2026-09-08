@@ -40,7 +40,7 @@ fn read(path: &PathBuf) -> Result<Value> {
     if bytes.len() > 2 * 1024 * 1024 {
         bail!("artifact exceeds 2 MiB");
     }
-    Ok(serde_json::from_slice(&bytes)?)
+    Ok(nq_protocol::decode_json_document(&bytes, 2 * 1024 * 1024)?)
 }
 
 pub fn run(command: QueueCommand) -> Result<()> {

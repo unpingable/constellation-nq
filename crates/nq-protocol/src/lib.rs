@@ -24,7 +24,9 @@ pub use conformance::{
     ConformanceVersionSummary, MAX_CONFORMANCE_ERROR_BYTES, MAX_CONFORMANCE_RECEIPT_BYTES,
     verify_embedded_conformance_corpus,
 };
-pub use framing::{FramingError, decode_ndjson, encode_ndjson, parse_request, parse_response};
+pub use framing::{
+    FramingError, decode_json_document, decode_ndjson, encode_ndjson, parse_request, parse_response,
+};
 pub use ids::{
     Capability, CoverageKind, ErrorCode, ImplementationName, InstanceId, ObservationKind,
     ProfileId, ProfileVersion, RequestId, ScopeKind, SubjectId, TokenError, VantageKind,
