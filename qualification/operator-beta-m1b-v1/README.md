@@ -310,6 +310,6 @@ owner's two-lock boundary and requires the packaged `audit-store` output to
 equal the original terminal outcome. NQ-ng records only the exact owner result,
 package/executable identities, store-cut identity, and AG/Docket-shaped join
 identities; it does not reinterpret AG receipt/evidence semantics or promote
-Docket-shaped testimony into a Docket database occurrence. The live exercise
-and its resulting store cut remain `NOT_RUN` until this integrated candidate is
-independently accepted.
+Docket-shaped testimony into a Docket database occurrence. A fresh complete
+M1B occurrence and its resulting owner store cut remain `NOT_RUN` until that
+distinct occurrence completes and is independently reviewed.
