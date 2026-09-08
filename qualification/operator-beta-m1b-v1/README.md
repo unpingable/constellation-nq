@@ -1,5 +1,6 @@
 # Operator-beta NQ-ng M1B two-VM qualification harness
-**Status:** `RUNS_001_002_003_004_005_REFUSED_NO_EFFECT__RUN_006_REFUSED_AFTER_KNOWN_EFFECT_OWNER_SUCCESS__PROTECTED_STORE_CORRECTION_READY_FOR_INDEPENDENT_REAUDIT`
+**Status:** `RUNS_001_002_003_004_005_REFUSED_NO_EFFECT__RUN_006_REFUSED_AFTER_KNOWN_EFFECT_OWNER_SUCCESS__PROTECTED_STORE_CORRECTION_ACCEPTED_PUBLISHED__FRESH_RUN_READY`
+**Accepted protected-store correction:** `7750f3185a7fbf3c90c4fc2c8cf3e001e034dc41`
 **Helper correction implementation:** `860452c53d63b6162c18a2e0b4aba4acb736baea`
 **Accepted helper correction result:** `c62eb7130c813896903e0156bd0593e22befe4a5`
 **Accepted package-layout checkpoint:** `8865dcad23f17a1f26716161554530237e04bb9e`
@@ -117,10 +118,11 @@ A snapshot-only diagnostic of the stopped target overlay established that the
 SQLite store remained present under `/var/lib/nq`, whose `0700 nq:nq` boundary
 made the unprivileged shell's `test -f` return false. The same permission error
 could make unprivileged `test ! -s` treat an untraversable WAL as absent. The
-bounded correction runs only those two filesystem predicates as the owning
-identity via `sudo`; checkpointing, exact before/after hashes, package removal
-and reinstall, and every later phase remain unchanged. The diagnostic VM was
-powered off and did not alter run-006.
+accepted correction runs the package-continuity WAL and database predicates and
+both terminal database-absence predicates as the owning identity via `sudo`;
+checkpointing, exact before/after hashes, package removal and reinstall, and
+every other phase remain unchanged. The diagnostic VM was powered off and did
+not alter run-006.
 
 ## Inputs and retained identity
 
@@ -220,7 +222,7 @@ qualification outcomes.
 
 The checked producer is `run_two_vm.py`; its pure-local qualification is
 `test_run_two_vm.py`, and `scripts/check-operator-beta-m1b-v1.sh` is the
-structural gate. The correction candidate passes 28 qualification cases
+structural gate. The accepted correction passes 30 qualification cases
 covering AG-compatible subject framing, durable recovery custody, exact
 diagnostic subject/scope/profile/question/policy/vantage/self-identity binding,
 producer-unit identity, runtime bounds, exact diagnostic policy/condition
@@ -296,8 +298,11 @@ consumption, cross-profile aggregation, Nightshift currentness, deployment,
 and production also remain outside this lane. The Bookworm package-004 bytes
 are accepted and published at
 `e644390b4b761388569d9dbee5b374294f40ae17`; the helper correction is accepted
-and published at `c62eb7130c813896903e0156bd0593e22befe4a5`. Only the narrow
-package-continuity permission-boundary correction awaits review.
+and published at `c62eb7130c813896903e0156bd0593e22befe4a5`; and the protected
+store correction is accepted and published at
+`7750f3185a7fbf3c90c4fc2c8cf3e001e034dc41`. A fresh M1B occurrence may now
+start from the resulting clean subject; run-006 remains terminal and must not be
+resumed or relabeled.
 
 The accepted AG package supplies the query-only terminal receipt/evidence
 reopener. This candidate retains an exact WAL-zero owner store cut under the
