@@ -418,9 +418,10 @@ correction is accepted and published at
 correction is accepted and published at
 `8979bee76924701061770327de220b2cd4c9b9a7`; and the restart boot-identity
 correction is accepted and published at
-`274494b72216d51b9ab7f8316d581f57600054e5`. Another fresh occurrence may start
-from exact accepted correction `4477d30ea3357b421d1cec1b00ada85fee1428ce`;
-runs 006--011 remain terminal and must not be resumed or relabeled.
+`274494b72216d51b9ab7f8316d581f57600054e5`. Run-012 used the exact accepted
+harness subject `dc5d602484a4556c465df6947e98d81dba0d314a` and produced the
+independently accepted mechanism result and owner store cut; runs 006--011
+remain terminal and must not be resumed or relabeled.
 
 The accepted AG package supplies the query-only terminal receipt/evidence
 reopener. This candidate retains an exact WAL-zero owner store cut under the
@@ -428,6 +429,8 @@ owner's two-lock boundary and requires the packaged `audit-store` output to
 equal the original terminal outcome. NQ-ng records only the exact owner result,
 package/executable identities, store-cut identity, and AG/Docket-shaped join
 identities; it does not reinterpret AG receipt/evidence semantics or promote
-Docket-shaped testimony into a Docket database occurrence. A fresh complete
-M1B occurrence and its resulting owner store cut remain `NOT_RUN` until that
-distinct occurrence completes and is independently reviewed.
+Docket-shaped testimony into a Docket database occurrence. The next lawful
+transition is the main-loop branch-reconciliation checkpoint recorded in
+`QUALIFICATION.md`; signed-checksum, Docket occurrence, authorization
+consumption, aggregate-postcondition, deployment, and production limitations
+remain unchanged.
