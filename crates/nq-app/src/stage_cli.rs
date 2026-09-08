@@ -4,7 +4,7 @@ use clap::{Args, Subcommand};
 use nq_core::{stage_qualification as q, stage_realization as r};
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
-    io::{Read, Write},
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -138,13 +138,7 @@ fn check_identity(
 
 fn read<T: DeserializeOwned>(path: &Path) -> Result<T> {
     const LIMIT: u64 = 4 * 1024 * 1024;
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)?
-        .take(LIMIT + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > LIMIT {
-        bail!("stage document exceeds 4 MiB bound");
-    }
+    let bytes = crate::bounded_input::read(path, LIMIT as usize)?;
     nq_protocol::decode_json_document(&bytes, LIMIT as usize)
         .with_context(|| format!("parsing {}", path.display()))
 }

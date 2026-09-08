@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod archive;
+pub mod bounded_input;
 pub mod cli;
 pub mod queue_cli;
 pub mod purpose_cli;

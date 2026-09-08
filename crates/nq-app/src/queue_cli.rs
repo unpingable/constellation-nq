@@ -1,9 +1,9 @@
 //! Offline compiled predicate admission and exact replay.
-use anyhow::{Result, bail};
+use anyhow::Result;
 use clap::{Args, Subcommand};
 use nq_core::fixed_queue;
 use serde_json::{Value, json};
-use std::{fs, io::Read, path::PathBuf};
+use std::{fs, io::Write, path::PathBuf};
 
 #[derive(Debug, Subcommand)]
 pub enum QueueCommand {
@@ -33,13 +33,7 @@ pub struct Inputs {
 }
 
 fn read(path: &PathBuf) -> Result<Value> {
-    let mut bytes = Vec::new();
-    fs::File::open(path)?
-        .take(2 * 1024 * 1024 + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > 2 * 1024 * 1024 {
-        bail!("artifact exceeds 2 MiB");
-    }
+    let bytes = crate::bounded_input::read(path, 2 * 1024 * 1024)?;
     Ok(nq_protocol::decode_json_document(&bytes, 2 * 1024 * 1024)?)
 }
 
@@ -94,7 +88,11 @@ pub fn run(command: QueueCommand) -> Result<()> {
     if a.output.as_os_str() == "-" {
         println!("{}", String::from_utf8(bytes)?);
     } else {
-        fs::write(a.output, bytes)?;
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(a.output)?
+            .write_all(&bytes)?;
     }
     Ok(())
 }
