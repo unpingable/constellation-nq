@@ -610,15 +610,29 @@ class HarnessTests(unittest.TestCase):
             (root / "evidence").mkdir(parents=True)
             (root / "runtime").mkdir()
             (root / "target").mkdir()
-            identities, _, bindings = self.service_records()
+            identities, service_subject, bindings = self.service_records()
             plan = RUNNER.expected_effect_plan(bindings, identities)
             dispatch, work = RUNNER.expected_effect_dispatch("fixture-001", plan)
+            self.write_json(
+                root / "evidence/input-receipt.json",
+                {
+                    "schema": "constellation.operator_beta.m1b_inputs.v1",
+                    "run_id": "fixture-001",
+                    "harness_subject": "a" * 40,
+                    "accepted_package_result": RUNNER.ACCEPTED_PACKAGE_RESULT,
+                    "nq_package_sha256": RUNNER.NQ_DEB_SHA256,
+                    "ag_package_sha256": RUNNER.AG_DEB_SHA256,
+                },
+            )
+            self.write_json(root / "evidence/service-subject.json", service_subject)
             self.write_json(root / "evidence/bindings.json", bindings)
             self.write_json(root / "evidence/guest-identities.json", identities)
             self.write_json(root / "evidence/systemd-plan-v2.json", plan)
             self.write_json(
                 root / "evidence/docket-shaped-dispatch-v1.json", dispatch
             )
+            (root / f"evidence/{RUNNER.UNIT}").write_bytes(RUNNER.FIXTURE_UNIT_BYTES)
+            (root / "evidence/healthz").write_bytes(RUNNER.FIXTURE_HEALTH_BYTES)
             (root / "runtime/id_ed25519").write_bytes(b"key\n")
             (root / "target/known_hosts").write_bytes(b"host\n")
             custody = {
@@ -640,6 +654,8 @@ class HarnessTests(unittest.TestCase):
                     "schema": "constellation.operator_beta.m1b_recovery.v1",
                     "campaign": RUNNER.CAMPAIGN,
                     "run_id": "fixture-001",
+                    "harness_subject": "a" * 40,
+                    "accepted_package_result": RUNNER.ACCEPTED_PACKAGE_RESULT,
                     "paths": {"run_root": str(root)},
                     "guests": [
                         {
@@ -681,6 +697,51 @@ class HarnessTests(unittest.TestCase):
             self.assertFalse(
                 (root / "evidence/reconciliation-outcome-v1.json").exists()
             )
+
+    def test_reconcile_refuses_fresh_run_attempt_for_same_semantic_work(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, self.fixture_input_identities():
+            root = pathlib.Path(temporary).resolve()
+            self.make_sealed_run(root)
+            plan = json.loads((root / "evidence/systemd-plan-v2.json").read_bytes())
+            dispatch, work = RUNNER.expected_effect_dispatch("fixture-002", plan)
+            self.write_json(
+                root / "evidence/docket-shaped-dispatch-v1.json", dispatch
+            )
+            recovery_path = root / "RECOVERY.json"
+            recovery = json.loads(recovery_path.read_bytes())
+            recovery.update(
+                {
+                    "run_id": "fixture-002",
+                    "harness_subject": "a" * 40,
+                    "effect_outcome": "OUTCOME_UNKNOWN_REQUIRES_AG_RECONCILE",
+                    "guests": [{"role": "target", "pid": 1234, "start_ticks": 10}],
+                    "effect_custody": {
+                        "plan_sha256": RUNNER.digest_file(
+                            root / "evidence/systemd-plan-v2.json", "sha256"
+                        ),
+                        "dispatch_sha256": RUNNER.digest_file(
+                            root / "evidence/docket-shaped-dispatch-v1.json", "sha256"
+                        ),
+                        "attempt": dispatch["attempt"],
+                        "marker": dispatch["marker"],
+                        "work": work,
+                        "subject": dispatch["subject"],
+                        "scope": dispatch["scope"],
+                    },
+                }
+            )
+            self.write_json(recovery_path, recovery)
+            inspection = {
+                "producer_state": "EXITED",
+                "guests": [{"role": "target", "state": "ACTIVE"}],
+            }
+            with (
+                mock.patch.object(RUNNER, "inspect_run", return_value=inspection),
+                mock.patch.object(RUNNER, "run") as owner_query,
+                self.assertRaisesRegex(RUNNER.Refusal, "another run occurrence"),
+            ):
+                RUNNER.reconcile_effect(root)
+            owner_query.assert_not_called()
 
     def test_run_reopen_and_semantic_substitutions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary, self.fixture_input_identities():

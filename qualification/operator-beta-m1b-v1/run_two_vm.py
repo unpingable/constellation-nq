@@ -1799,6 +1799,9 @@ def reconcile_effect(path: pathlib.Path) -> None:
     target_state = next((guest for guest in inspection["guests"] if guest.get("role") == "target"), None)
     if target is None or target_state is None or target_state.get("state") != "ACTIVE":
         raise Refusal("exact target guest is not active; outcome remains unknown")
+    identities, bindings, retained_plan, retained_dispatch = verify_effect_attempt_inputs(
+        path, recovery.get("run_id"), recovery.get("harness_subject")
+    )
     plan = path / "evidence" / "systemd-plan-v2.json"
     dispatch = path / "evidence" / "docket-shaped-dispatch-v1.json"
     key = path / "runtime" / "id_ed25519"
@@ -1810,12 +1813,6 @@ def reconcile_effect(path: pathlib.Path) -> None:
         (known_hosts, "retained target host key"),
     ):
         regular_file(artifact, label)
-    bindings = load_json_artifact(path / "evidence" / "bindings.json", "bindings")
-    identities = load_json_artifact(
-        path / "evidence" / "guest-identities.json", "guest identities"
-    )
-    retained_plan = load_json_artifact(plan, "retained AG plan")
-    retained_dispatch = load_json_artifact(dispatch, "retained dispatch")
     expected_plan = expected_effect_plan(bindings, identities)
     expected_dispatch, expected_work = expected_effect_dispatch(
         recovery["run_id"], expected_plan
@@ -2078,11 +2075,59 @@ def expected_nq_config(bindings: dict[str, Any], role: str) -> bytes:
     return config.encode()
 
 
+def verify_effect_attempt_inputs(
+    path: pathlib.Path, run_id: str, harness_subject: str
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Reopen the exact retained occurrence before any owner query."""
+    input_receipt = load_json_artifact(
+        path / "evidence" / "input-receipt.json", "input receipt"
+    )
+    identities = load_json_artifact(
+        path / "evidence" / "guest-identities.json", "guest identities"
+    )
+    service_subject = load_json_artifact(
+        path / "evidence" / "service-subject.json", "service subject"
+    )
+    bindings = load_json_artifact(path / "evidence" / "bindings.json", "bindings")
+    if any(record.get("run_id") != run_id for record in (input_receipt, identities, bindings)):
+        raise Refusal("retained effect inputs name another run occurrence")
+    if (
+        input_receipt.get("schema") != "constellation.operator_beta.m1b_inputs.v1"
+        or input_receipt.get("harness_subject") != harness_subject
+        or input_receipt.get("accepted_package_result") != ACCEPTED_PACKAGE_RESULT
+        or input_receipt.get("nq_package_sha256") != NQ_DEB_SHA256
+        or input_receipt.get("ag_package_sha256") != AG_DEB_SHA256
+    ):
+        raise Refusal("retained input receipt names another admitted execution")
+    expected_bindings = expected_m1b_bindings(run_id, identities)
+    if service_subject != expected_bindings["service_subject"] or bindings != expected_bindings:
+        raise Refusal("retained effect bindings name another fixture occurrence")
+    unit_path = path / "evidence" / UNIT
+    health_path = path / "evidence" / "healthz"
+    if (
+        unit_path.read_bytes() != FIXTURE_UNIT_BYTES
+        or health_path.read_bytes() != FIXTURE_HEALTH_BYTES
+        or identities.get("unit_file_sha256")
+        != "sha256:" + digest_file(unit_path, "sha256")
+    ):
+        raise Refusal("retained fixture bytes name another service subject")
+    plan = load_json_artifact(path / "evidence" / "systemd-plan-v2.json", "AG plan")
+    dispatch = load_json_artifact(
+        path / "evidence" / "docket-shaped-dispatch-v1.json", "dispatch"
+    )
+    expected_plan = expected_effect_plan(bindings, identities)
+    expected_dispatch, _ = expected_effect_dispatch(run_id, expected_plan)
+    if plan != expected_plan or dispatch != expected_dispatch:
+        raise Refusal("retained effect input binding disagrees with the exact original occurrence")
+    return identities, bindings, plan, dispatch
+
+
 def verify_terminal_evidence(path: pathlib.Path, result: dict[str, Any], inventory: set[str]) -> None:
     missing = sorted(REQUIRED_TERMINAL_PATHS - inventory)
     if missing:
         raise Refusal(f"terminal evidence inventory is incomplete: {missing[0]}")
     run_id = result.get("run_id")
+    verify_effect_attempt_inputs(path, run_id, result.get("harness_subject"))
     input_receipt = load_json_artifact(path / "evidence" / "input-receipt.json", "input receipt")
     identities = load_json_artifact(path / "evidence" / "guest-identities.json", "guest identities")
     service_subject = load_json_artifact(path / "evidence" / "service-subject.json", "service subject")

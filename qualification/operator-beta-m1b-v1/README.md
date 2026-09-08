@@ -1,5 +1,5 @@
 # Operator-beta NQ-ng M1B two-VM qualification harness
-**Status:** `CORRECTION_CANDIDATE_READY_FOR_INDEPENDENT_REAUDIT__LIVE_RUN_NOT_STARTED`
+**Status:** `PARTIAL_CORRECTION_CHECKPOINT__AG_OWNER_STORE_AUDIT_PENDING__LIVE_RUN_NOT_STARTED`
 **Accepted package checkpoint:** `8865dcad23f17a1f26716161554530237e04bb9e`
 **Authority effect:** qualification-only local fixtures; no production, provider, default-branch, or deployment authority.
 
@@ -110,14 +110,15 @@ qualification outcomes.
 
 The checked producer is `run_two_vm.py`; its pure-local qualification is
 `test_run_two_vm.py`, and `scripts/check-operator-beta-m1b-v1.sh` is the
-structural gate. The correction candidate passes 21 qualification cases
+structural gate. The correction candidate passes 22 qualification cases
 covering AG-compatible subject framing, durable recovery custody, exact
 diagnostic subject/scope/profile/question/policy/vantage/self-identity binding,
 producer-unit identity, runtime bounds, exact diagnostic policy/condition
 checks, retained image/checksum/package/fixture/config binding, symlink refusal,
 terminal complete-inventory reopen, fixed AG plan/effect/action/unit semantics,
 owner outcome and recovery binding, content mutation, missing-evidence refusal,
-process inspection, same-attempt reconcile refusal, and coherent package,
+process inspection, a shared pre-query occurrence verifier, same-work/fresh-run
+reconcile refusal, same-attempt reconcile refusal, and coherent package,
 config, effect, attempt, and reconciliation substitutions. The gate's injected missing-boundary
 control refuses deterministically. These are harness results only: no VM,
 package install, system bus, fixture service, or effect has run.
@@ -163,3 +164,10 @@ unsigned at the selected versioned directory and therefore cannot satisfy the
 canonical signed-checksum item. Live Docket custody, AG authorization
 consumption, cross-profile aggregation, Nightshift currentness, deployment,
 and production also remain outside this lane.
+
+Terminal AG receipt/evidence reopening remains a prerequisite. The current AG
+package exposes execute/reconcile against its live store, but the M1B harness
+must retain and validate an immutable owner store cut before guest teardown.
+The separate AG-owned query-only interface is under qualification; this NQ-ng
+checkpoint neither carries that acceptance forward nor duplicates AG receipt
+semantics locally.

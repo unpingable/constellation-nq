@@ -25,6 +25,7 @@ required=(
   'self.verify_producer()'
   'inspect-run'
   'reconcile-effect'
+  'verify_effect_attempt_inputs'
   'REQUIRED_TERMINAL_PATHS'
   'systemd_current_condition'
   'http_current_condition'
@@ -36,6 +37,7 @@ fi
 for token in "${required[@]}"; do
   rg -F --quiet "$token" "$runner"
 done
+rg -F --quiet 'test_reconcile_refuses_fresh_run_attempt_for_same_semantic_work' "$tests"
 
 if rg -n 'shell[[:space:]]*=[[:space:]]*True' "$runner"; then
   echo "M1B runner must not use subprocess shell execution" >&2
