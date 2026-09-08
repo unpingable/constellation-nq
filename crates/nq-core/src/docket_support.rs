@@ -325,6 +325,52 @@ struct Qualification {
 }
 
 pub const SCHEMA: &str = "nq.docket-purpose-support/v1";
+
+fn snapshot_identity(raw: &[u8]) -> Result<(Sha256Digest, Sha256Digest), String> {
+    let v: Value =
+        nq_protocol::decode_json_document(raw, 4 * 1024 * 1024).map_err(|e| e.to_string())?;
+    let key = json!({"family":"docket","attempt":v["attempt"],"version":v["version"]});
+    // Exact historical immutable core: associated observation and upstream
+    // authorization records may grow at the same attempt version.
+    let mut core = serde_json::Map::new();
+    for key in [
+        "dossier_format",
+        "attempt",
+        "version",
+        "state",
+        "settlement",
+        "identity",
+        "authority",
+        "timeline",
+        "execution",
+        "qualification",
+    ] {
+        core.insert(key.into(), v[key].clone());
+    }
+    Ok((
+        semantic_digest(&key).map_err(|e| e.to_string())?,
+        semantic_digest(&core).map_err(|e| e.to_string())?,
+    ))
+}
+
+pub fn qualify_with_history(
+    raw: &[u8],
+    r: &Request,
+    acquisition: Option<&Acquisition>,
+    directory: &std::path::Path,
+) -> Result<Value, String> {
+    let mut receipt = qualify(raw, r, acquisition)?;
+    let (key, core) = snapshot_identity(raw)?;
+    receipt["snapshot_context"] = json!(crate::snapshot_history::record(
+        directory,
+        key,
+        core,
+        "nq.docket-source-snapshot/v1"
+    )?);
+    receipt.as_object_mut().unwrap().remove("receipt_id");
+    receipt["receipt_id"] = json!(semantic_digest(&receipt).map_err(|e| e.to_string())?);
+    Ok(receipt)
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
@@ -356,6 +402,14 @@ pub fn qualify(
 ) -> Result<Value, String> {
     let d: Dossier =
         nq_protocol::decode_json_document(raw, 4 * 1024 * 1024).map_err(|e| e.to_string())?;
+    let wire: Value =
+        nq_protocol::decode_json_document(raw, 4 * 1024 * 1024).map_err(|e| e.to_string())?;
+    let identity = wire["identity"].as_object().ok_or("identity missing")?;
+    if identity.contains_key("repository") || !identity.contains_key("ref_continuity_subject") {
+        return Err(
+            "v3 must explicitly carry only logical repository identity and nullable subject".into(),
+        );
+    }
     if d.dossier_format != "gwr:attempt-dossier:v3" || d.attempt != r.attempt {
         return Err("wrong Docket schema/attempt".into());
     }
@@ -369,6 +423,18 @@ pub fn qualify(
         .repository_locator
         .as_ref()
         .ok_or("missing locator")?;
+    let lower_hex = |s: &str, n: usize| {
+        s.len() == n
+            && s.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
+    if !repository
+        .strip_prefix("repo-")
+        .is_some_and(|s| lower_hex(s, 32))
+        || !lower_hex(&d.attempt, 32)
+    {
+        return Err("invalid Docket opaque repository/attempt identity".into());
+    }
     if repository.is_empty()
         || locator.kind != "path"
         || locator.value.is_empty()
@@ -377,7 +443,9 @@ pub fn qualify(
         return Err("invalid v3 repository identity/locator".into());
     }
     let subject = if let Some(c) = &d.execution.commitment {
-        if c.target_ref != d.identity.target_ref || c.result_commit.is_empty() {
+        if c.target_ref != d.identity.target_ref
+            || !(lower_hex(&c.result_commit, 40) || lower_hex(&c.result_commit, 64))
+        {
             return Err("commitment/ref mismatch".into());
         }
         let exact = format!(
@@ -536,6 +604,9 @@ pub fn qualify(
     if r.consumer == "nightshift-readonly-continuity" {
         if let Some(s) = &r.continuity_support {
             crate::continuity_support::replay(s)?;
+            if s.snapshot_context.is_none() {
+                return Err("continuity support lacks scoped source-history qualification".into());
+            }
             if s.binding.subject_digest != subject_digest
                 || s.binding.principal != r.consumer
                 || s.binding.purpose != "continue_observing"
@@ -561,7 +632,7 @@ pub fn qualify(
     let mut receipt = json!({"schema":SCHEMA,"request":r,"request_digest":semantic_digest(r).map_err(|e|e.to_string())?,
         "subject":subject,"subject_digest":subject_digest,"claim":r.claim,"decision":decision,
         "source_record_utf8":std::str::from_utf8(raw).map_err(|e|e.to_string())?,"source_digest":raw_digest,
-        "acquisition":acquisition,"custody_basis":custody,"generated_at":r.evaluated_at,
+        "acquisition":acquisition,"snapshot_context":null,"custody_basis":custody,"generated_at":r.evaluated_at,
         "expires_at":r.evaluated_at.checked_add_signed(chrono::Duration::seconds(900)).ok_or("time overflow")?,
         "premises":premises,"unresolved_residuals":residuals,"retained_contradictions":contradictions,
         "supporting_receipts":supporting,"does_not_establish":[
@@ -579,15 +650,32 @@ pub fn replay(receipt: &Value) -> Result<(), String> {
         serde_json::from_value(receipt["request"].clone()).map_err(|e| e.to_string())?;
     let acquisition: Option<Acquisition> =
         serde_json::from_value(receipt["acquisition"].clone()).map_err(|e| e.to_string())?;
-    if qualify(
+    let mut expected = qualify(
         receipt["source_record_utf8"]
             .as_str()
             .ok_or("source bytes missing")?
             .as_bytes(),
         &request,
         acquisition.as_ref(),
-    )? != *receipt
-    {
+    )?;
+    if !receipt["snapshot_context"].is_null() {
+        let context: crate::snapshot_history::SnapshotContext =
+            serde_json::from_value(receipt["snapshot_context"].clone())
+                .map_err(|e| e.to_string())?;
+        let (key, core) = snapshot_identity(
+            receipt["source_record_utf8"]
+                .as_str()
+                .ok_or("source absent")?
+                .as_bytes(),
+        )?;
+        if context.snapshot_key != key || context.core_digest != core {
+            return Err("Docket snapshot context mismatch".into());
+        }
+        expected["snapshot_context"] = json!(context);
+        expected.as_object_mut().unwrap().remove("receipt_id");
+        expected["receipt_id"] = json!(semantic_digest(&expected).map_err(|e| e.to_string())?);
+    }
+    if expected != *receipt {
         return Err("Docket purpose replay mismatch".into());
     }
     Ok(())

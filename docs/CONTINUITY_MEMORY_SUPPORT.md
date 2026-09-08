@@ -13,7 +13,7 @@ is still a successful export; inability to produce a record is absence/error,
 not fabricated eligible testimony. Source premises, authoring tier, effective
 reliance ceiling, lifecycle and nonclaims are retained verbatim.
 
-`nq continuity-support --source-export FILE --binding FILE` invokes the compiled
+`nq continuity-support --source-export FILE --binding FILE --snapshot-history DIR` invokes the compiled
 native projection. Binding pins raw source bytes, source store/memory/scope,
 primary subject/scope digest, principal `nightshift-readonly-continuity` and
 purpose `continue_observing`. Replay recomputes the entire native receipt.
@@ -30,6 +30,27 @@ revocation/noneligibility remains distinct. Contradictory source code/boolean
 or lifecycle, unknown closed-schema fields, recursive NQ substitutions, wrong
 store/memory/scope/principal/purpose, changed raw bytes and changed receipts
 refuse. No classic executable or classic fixture regenerator is invoked.
+
+The complete emitted v0 shape is required, including explicit nullable fields;
+duplicate keys, malformed timestamps/types and inconsistent source tier ceilings
+refuse. Missing-premise classification reads only the typed `bad_premises`
+identity/reason array; unrelated metadata containing `:missing` changes nothing.
+
+Normal intake requires an existing configured snapshot-history directory. Its
+bounded create-new canonical record binds source store, memory and evaluation
+time to the retained donor's exact twelve-field core. Envelope re-exports may
+differ; same-key changed core refuses. Creation and matching-duplicate success
+both fsync the file and directory. An incomplete record fails closed. No retry
+or automatic deletion repairs it. This is trusted local artifact custody, not
+authenticated/global source history; deleting/resetting the directory invalidates
+its continuity assumption. Source-specific laws remain separate from Docket's
+attempt/version core even though the small file write/compare helper is shared.
+
+Pure stateless qualification/replay remains useful for inspection but cannot
+satisfy a current-role prerequisite. That role requires the exact scoped
+snapshot context, included in the qualified receipt identity and currentness
+query. Replay validates the recorded context; it does not newly inspect the
+history directory or assert present history custody.
 
 The purpose-support request carries this exact native qualification separately
 from locally admitted diagnostic artifacts. It can close the named HISTORICAL

@@ -1,10 +1,15 @@
 # Bounded Docket factual purpose candidate
 
 `nq docket-purpose-support --docket-binary BIN --docket-sha256 SHA --state DIR
---request REQUEST` directly invokes the supported Docket `show --json` surface.
+--request REQUEST --snapshot-history HISTORY` directly invokes the supported
+Docket `show-read-only --json` surface.
 It accepts an existing campaign-owned state directory, never an M2 store.
 Docket runtime baseline c49ad8d; source-store fixture increment f1ea283 changes
-tests only. The DTO inventory follows Docket's closed v3 rendering, with classic
+tests only; read-only query correction6c57926 adds a separate command which older
+binaries refuse. It uses READ_ONLY/query_only and one query transaction, requires
+current schema, and performs no mkdir, migration or journal-mode transition.
+SQLite WAL reader coordination is explicit, not an immutable-file guarantee.
+The DTO inventory follows Docket's closed v3 rendering, with classic
 DTOs used solely as historical field inventory, not an executable dependency.
 
 NQ owns bounded qualification/replay, not Docket settlement. The allowlisted
@@ -21,7 +26,7 @@ execution or qualification refuse current support. Purposes continue/wait/reques
 stop/human-escalation are read-only posture inputs, never action permissions.
 
 The Linux producer binds the opened executable descriptor and expected content
-digest, fixes argv to `show`, strips environment, and bounds output/time to
+digest, fixes argv to `show-read-only`, strips environment, and bounds output/time to
 4MiB/10s. Assumptions: trusted immutable executable contents and runtime libraries,
 trusted same-UID environment and configured state. Descriptor binding prevents
 pathname replacement, not in-place mutation; no stronger confinement is claimed.
@@ -40,6 +45,14 @@ Nightshift exercised these receipts and separate current/absent/unknown/expired/
 wrong-authority/wrong-subject support cases. These are local fixture qualification,
 not deployment or independent acceptance; exact review follows integration.
 
-Remaining Continuity review obligations (separate from Docket source ownership):
-same-memory/evaluation-time snapshot-substitution history and typed missing-premise
-reason parsing must be completed before the full R4 gate closes.
+Required history custody is one configured artifact directory per Docket source
+store. Same(attempt,version) changed immutable core refuses, while associated
+observation/authorization growth remains allowed under the original ten-field
+core inventory. Creation and duplicate success both fsync the file and directory;
+incomplete records fail closed. This is not authenticated/global history and
+reset/deletion invalidates its continuity assumption. Native current consumption
+requires this exact snapshot context; stateless qualification cannot replace it.
+
+Continuity's distinct source-history and typed bad-premise corrections are now
+implemented. Final integrated qualification and independent review remain separate
+from passing earlier source snapshots.

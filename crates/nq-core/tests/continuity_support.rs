@@ -48,6 +48,97 @@ fn real_continuity_positive_refusal_unknown_and_exact_replay() {
         wrong.raw_source_digest = nq_protocol::sha256_bytes(&bytes);
         assert!(qualify(&bytes, &wrong).is_err());
         if name == "eligible" {
+            let history = std::path::PathBuf::from(std::env::var("NQ_CONTINUITY_HISTORY").unwrap());
+            let guarded =
+                nq_core::continuity_support::qualify_with_history(&raw, &binding, &history)
+                    .unwrap();
+            replay(&guarded).unwrap();
+            assert!(guarded.snapshot_context.is_some());
+            assert_eq!(
+                guarded,
+                nq_core::continuity_support::qualify_with_history(&raw, &binding, &history)
+                    .unwrap()
+            );
+            let mut envelope = source.clone();
+            envelope["export_id"] = serde_json::json!(nq_protocol::sha256_bytes(b"reexport"));
+            envelope["history"]["event_count"] = serde_json::json!(100);
+            let reexport = serde_json::to_vec(&envelope).unwrap();
+            let mut rebind = binding.clone();
+            rebind.raw_source_digest = nq_protocol::sha256_bytes(&reexport);
+            assert!(
+                nq_core::continuity_support::qualify_with_history(&reexport, &rebind, &history)
+                    .is_ok()
+            );
+            let mut altered = source.clone();
+            altered["content_hash"] =
+                serde_json::json!(nq_protocol::sha256_bytes(b"different contents"));
+            let changed = serde_json::to_vec(&altered).unwrap();
+            rebind.raw_source_digest = nq_protocol::sha256_bytes(&changed);
+            assert!(
+                nq_core::continuity_support::qualify_with_history(&changed, &rebind, &history)
+                    .unwrap_err()
+                    .contains("SnapshotSubstitution")
+            );
+            altered["evaluation_time"] = serde_json::json!("2027-01-01T00:00:00Z");
+            let later = serde_json::to_vec(&altered).unwrap();
+            rebind.raw_source_digest = nq_protocol::sha256_bytes(&later);
+            assert!(
+                nq_core::continuity_support::qualify_with_history(&later, &rebind, &history)
+                    .is_ok()
+            );
+            let interrupted = history.join("interrupted");
+            std::fs::create_dir(&interrupted).unwrap();
+            let key = guarded
+                .snapshot_context
+                .as_ref()
+                .unwrap()
+                .snapshot_key
+                .to_string();
+            std::fs::write(
+                interrupted.join(format!("{}.json", key.trim_start_matches("sha256:"))),
+                b"",
+            )
+            .unwrap();
+            assert!(
+                nq_core::continuity_support::qualify_with_history(&raw, &binding, &interrupted)
+                    .is_err()
+            );
+            let concurrent = history.join("concurrent");
+            std::fs::create_dir(&concurrent).unwrap();
+            rebind.raw_source_digest = nq_protocol::sha256_bytes(&changed);
+            let results = std::thread::scope(|scope| {
+                let first = scope.spawn(|| {
+                    nq_core::continuity_support::qualify_with_history(&raw, &binding, &concurrent)
+                });
+                let second = scope.spawn(|| {
+                    nq_core::continuity_support::qualify_with_history(
+                        &changed,
+                        &rebind,
+                        &concurrent,
+                    )
+                });
+                [
+                    first.join().unwrap().is_ok(),
+                    second.join().unwrap().is_ok(),
+                ]
+            });
+            assert_eq!(results.into_iter().filter(|ok| *ok).count(), 1);
+            // Source-owned reason array, not substring search over arbitrary details.
+            let mut bad = source.clone();
+            bad["rely"]["rely_ok"] = serde_json::json!(false);
+            bad["rely"]["code"] = serde_json::json!("hard_premise_unavailable");
+            bad["rely"]["details"]["unrelated"] = serde_json::json!("noise:missing");
+            for (reason, expected) in [("revoked", "not_eligible"), ("missing", "indeterminate")] {
+                bad["rely"]["details"]["bad_premises"] =
+                    serde_json::json!([format!("memory:{reason}")]);
+                let bytes = serde_json::to_vec(&bad).unwrap();
+                rebind.raw_source_digest = nq_protocol::sha256_bytes(&bytes);
+                assert_eq!(qualify(&bytes, &rebind).unwrap().disposition, expected);
+            }
+            bad["rely"]["details"]["bad_premises"] = serde_json::json!(["memory:unknown"]);
+            let bytes = serde_json::to_vec(&bad).unwrap();
+            rebind.raw_source_digest = nq_protocol::sha256_bytes(&bytes);
+            assert!(qualify(&bytes, &rebind).is_err());
             // Otherwise valid source and matching custody digest: parser, not
             // an unrelated digest mismatch, must reject duplicate keys.
             let json = serde_json::to_string(&source).unwrap();

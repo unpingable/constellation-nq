@@ -13545,7 +13545,8 @@ sys.stdout.write("\n")
             let source:serde_json::Value=serde_json::from_slice(&raw).unwrap();
             let binding=crate::continuity_support::ContinuityBinding{
                 store_id:source["source"]["store_id"].as_str().unwrap().into(),memory_id:source["subject"]["memory_id"].as_str().unwrap().into(),scope:source["subject"]["scope"].as_str().unwrap().into(),subject_digest:purpose_request.subject_digest.clone(),principal:"nightshift-readonly-continuity".into(),purpose:"continue_observing".into(),raw_source_digest:nq_protocol::sha256_bytes(&raw)};
-            let qualified=crate::continuity_support::qualify(&raw,&binding).unwrap();
+            let history=std::path::PathBuf::from(std::env::var("NQ_CONTINUITY_HISTORY").expect("retained source snapshot history"));
+            let qualified=crate::continuity_support::qualify_with_history(&raw,&binding,&history).unwrap();
             let directory=std::env::var("NQ_PURPOSE_FIXTURE_OUTPUT").unwrap();
             fs::write(std::path::Path::new(&directory).join("continuity-binding.json"),nq_protocol::canonical_json_bytes(&binding).unwrap()).unwrap();
             assert_eq!(qualified.disposition,"eligible");

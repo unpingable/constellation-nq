@@ -13,6 +13,8 @@ fn real_docket_acquisition_and_closed_policy_controls() {
     let nq = std::env::var("NQ_DOCKET_BIN").unwrap();
     for state in ["prepared", "committed", "refused", "indeterminate"] {
         let directory = root.join(format!("retirement-{state}"));
+        let docket_history = output.join(format!("{state}-history"));
+        std::fs::create_dir(&docket_history).unwrap();
         let source: Value =
             serde_json::from_slice(&std::fs::read(directory.join("source.json")).unwrap()).unwrap();
         let subject = source["identity"]["ref_continuity_subject"]
@@ -43,6 +45,8 @@ fn real_docket_acquisition_and_closed_policy_controls() {
                 .arg(state_path)
                 .arg("--request")
                 .arg(&path)
+                .arg("--snapshot-history")
+                .arg(&docket_history)
                 .output()
                 .unwrap()
         };
@@ -108,7 +112,13 @@ fn real_docket_acquisition_and_closed_policy_controls() {
         for purpose in ["wait", "request_evidence", "stop", "human_escalation"] {
             wrong = r.clone();
             wrong.purpose = purpose.into();
-            let result = qualify(raw, &wrong, Some(&a)).unwrap();
+            let result = nq_core::docket_support::qualify_with_history(
+                raw,
+                &wrong,
+                Some(&a),
+                &docket_history,
+            )
+            .unwrap();
             assert_eq!(result["decision"], "supported_readonly");
             std::fs::write(
                 output.join(format!("{purpose}.json")),
@@ -117,6 +127,51 @@ fn real_docket_acquisition_and_closed_policy_controls() {
             .unwrap();
         }
         let source: Value = serde_json::from_slice(raw).unwrap();
+        let guarded =
+            nq_core::docket_support::qualify_with_history(raw, &r, Some(&a), &docket_history)
+                .unwrap();
+        assert_eq!(guarded["snapshot_context"], receipt["snapshot_context"]);
+        let mut altered = source.clone();
+        altered["identity"]["goal"] = json!("different immutable goal");
+        let changed = serde_json::to_vec(&altered).unwrap();
+        let mut changed_a = a.clone();
+        changed_a.raw_digest = sha256_bytes(&changed);
+        assert!(
+            nq_core::docket_support::qualify_with_history(
+                &changed,
+                &r,
+                Some(&changed_a),
+                &docket_history
+            )
+            .unwrap_err()
+            .contains("SnapshotSubstitution")
+        );
+        altered["version"] = json!(source["version"].as_u64().unwrap() + 1);
+        let later = serde_json::to_vec(&altered).unwrap();
+        changed_a.raw_digest = sha256_bytes(&later);
+        assert!(
+            nq_core::docket_support::qualify_with_history(
+                &later,
+                &r,
+                Some(&changed_a),
+                &docket_history
+            )
+            .is_ok()
+        );
+        let mut associated = source.clone();
+        associated["observation"]["reliance_refusals"] =
+            json!([{"kind":"claim_too_strong","detail":null,"subject":null,"at_ms":44}]);
+        let bytes = serde_json::to_vec(&associated).unwrap();
+        changed_a.raw_digest = sha256_bytes(&bytes);
+        assert!(
+            nq_core::docket_support::qualify_with_history(
+                &bytes,
+                &r,
+                Some(&changed_a),
+                &docket_history
+            )
+            .is_ok()
+        );
         for (pointer, value, expected) in [
             (
                 "/observation/residual_obligations",
@@ -173,7 +228,17 @@ fn real_docket_acquisition_and_closed_policy_controls() {
         };
         gated.continuity_support =
             Some(nq_core::continuity_support::qualify(&memory, &binding).unwrap());
-        let result = qualify(raw, &gated, Some(&a)).unwrap();
+        assert!(
+            qualify(raw, &gated, Some(&a)).is_err(),
+            "stateless memory support must not enter current role"
+        );
+        let history = std::path::PathBuf::from(std::env::var("NQ_CONTINUITY_HISTORY").unwrap());
+        gated.continuity_support = Some(
+            nq_core::continuity_support::qualify_with_history(&memory, &binding, &history).unwrap(),
+        );
+        let result =
+            nq_core::docket_support::qualify_with_history(raw, &gated, Some(&a), &docket_history)
+                .unwrap();
         assert_eq!(result["decision"], "supported_readonly");
         replay(&result).unwrap();
         std::fs::write(

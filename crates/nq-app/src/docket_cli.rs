@@ -2,7 +2,7 @@
 //! Linux, trusted immutable executable contents/runtime libraries and same-UID
 //! environment; descriptor binding closes pathname replacement, not in-place writes.
 use anyhow::{Result, bail};
-use nq_core::docket_support::{Acquisition, Request, qualify};
+use nq_core::docket_support::{Acquisition, Request, qualify_with_history};
 use nq_protocol::{Sha256Digest, decode_json_document, sha256_bytes};
 use std::{
     io::{Read, Seek},
@@ -12,7 +12,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub fn run(binary: &Path, expected: &str, state: &Path, request: &Path) -> Result<()> {
+pub fn run(
+    binary: &Path,
+    expected: &str,
+    state: &Path,
+    request: &Path,
+    history: &Path,
+) -> Result<()> {
     let request_bytes = crate::bounded_input::read(request, 4 * 1024 * 1024)?;
     let mut r: Request = decode_json_document(&request_bytes, 4 * 1024 * 1024)?;
     let mut executable = crate::bounded_input::open_regular(binary)?;
@@ -38,7 +44,7 @@ pub fn run(binary: &Path, expected: &str, state: &Path, request: &Path) -> Resul
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("LC_ALL", "C")
-        .arg("show")
+        .arg("show-read-only")
         .arg("--state")
         .arg(state)
         .arg("--attempt")
@@ -76,7 +82,8 @@ pub fn run(binary: &Path, expected: &str, state: &Path, request: &Path) -> Resul
         observed_at,
         raw_digest: sha256_bytes(&raw),
     };
-    let receipt = qualify(&raw, &r, Some(&acquisition)).map_err(anyhow::Error::msg)?;
+    let receipt =
+        qualify_with_history(&raw, &r, Some(&acquisition), history).map_err(anyhow::Error::msg)?;
     println!(
         "{}",
         String::from_utf8(nq_protocol::canonical_json_bytes(&receipt)?)?

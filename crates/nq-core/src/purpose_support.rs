@@ -106,6 +106,9 @@ pub fn qualify(store: &Store, r: &PurposeRequest) -> Result<Value, String> {
     let mut continuity = false;
     if let Some(s) = &r.continuity_support {
         crate::continuity_support::replay(s)?;
+        if s.snapshot_context.is_none() {
+            return Err("continuity support lacks scoped source-history qualification".into());
+        }
         if s.binding.subject_digest != subject
             || s.binding.principal != r.consumer
             || s.binding.purpose != "continue_observing"

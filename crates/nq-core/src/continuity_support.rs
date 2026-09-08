@@ -28,6 +28,65 @@ pub struct ContinuitySupport {
     pub source_code: String,
     pub source_record_utf8: String,
     pub limitations: Vec<String>,
+    /// Conditional testimony about this configured local intake history only.
+    #[serde(default)]
+    pub snapshot_context: Option<SnapshotContext>,
+}
+
+pub use crate::snapshot_history::SnapshotContext;
+
+fn snapshot_identity(raw: &[u8]) -> Result<(Sha256Digest, Sha256Digest), String> {
+    let v: Value =
+        nq_protocol::decode_json_document(raw, 2 * 1024 * 1024).map_err(|e| e.to_string())?;
+    let key = serde_json::json!({"store":v["source"]["store_id"],"memory":v["subject"]["memory_id"],"at":v["evaluation_time"]});
+    // Exact retained donor core inventory; exporter/time/history/prose envelope
+    // differences do not fork an otherwise identical source snapshot.
+    let mut core = serde_json::Map::new();
+    for key in [
+        "schema",
+        "subject",
+        "content_hash",
+        "status",
+        "supersedes",
+        "revoked_by",
+        "authoring_tier",
+        "reliance_class",
+        "effective_reliance",
+        "evaluation_time",
+        "rely",
+        "premises",
+    ] {
+        core.insert(key.into(), v[key].clone());
+    }
+    Ok((
+        semantic_digest(&key).map_err(|e| e.to_string())?,
+        semantic_digest(&core).map_err(|e| e.to_string())?,
+    ))
+}
+
+fn seal(receipt: &mut ContinuitySupport) -> Result<(), String> {
+    let mut value = serde_json::to_value(&receipt).map_err(|e| e.to_string())?;
+    value.as_object_mut().unwrap().remove("receipt_id");
+    receipt.receipt_id = semantic_digest(&value).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Bounded append-only intake guard, not authentication or global history.
+/// The configured directory, immutable records and filesystem durability are
+/// trusted custody. Deleting/resetting it invalidates its continuity claim.
+pub fn qualify_with_history(
+    raw: &[u8],
+    binding: &ContinuityBinding,
+    directory: &std::path::Path,
+) -> Result<ContinuitySupport, String> {
+    let mut receipt = qualify(raw, binding)?;
+    let (key, core) = snapshot_identity(raw)?;
+    let context =
+        crate::snapshot_history::record(directory, key, core, "nq.continuity-source-snapshot/v1")?;
+    receipt.snapshot_context = Some(context);
+    receipt.limitations.push("snapshot consistency checked only within configured trusted local history; reset/deletion invalidates continuity".into());
+    seal(&mut receipt)?;
+    Ok(receipt)
 }
 
 fn fields(v: &Value, allowed: &[&str]) -> Result<(), String> {
@@ -285,10 +344,26 @@ pub fn qualify(raw: &[u8], binding: &ContinuityBinding) -> Result<ContinuitySupp
     for k in ["authoring_tier", "reliance_class", "effective_reliance"] {
         limitations.push(format!("source {k}: {}", text(&v, k)?));
     }
-    let missing = code == "hard_premise_unavailable"
-        && serde_json::to_string(&v["rely"]["details"])
-            .map_err(|e| e.to_string())?
-            .contains(":missing");
+    let missing = if code == "hard_premise_unavailable" {
+        let bad = v["rely"]["details"]["bad_premises"]
+            .as_array()
+            .filter(|items| !items.is_empty())
+            .ok_or("missing typed bad_premises")?;
+        let mut missing = false;
+        for premise in bad {
+            let (identity, reason) = premise
+                .as_str()
+                .and_then(|s| s.rsplit_once(':'))
+                .ok_or("invalid bad premise identity/reason")?;
+            if identity.is_empty() || !["missing", "revoked"].contains(&reason) {
+                return Err("unknown bad premise reason".into());
+            }
+            missing |= reason == "missing";
+        }
+        missing
+    } else {
+        false
+    };
     let disposition = if ok {
         "eligible"
     } else if missing || (code == "status_not_committed" && v["status"] != "revoked") {
@@ -306,6 +381,7 @@ pub fn qualify(raw: &[u8], binding: &ContinuityBinding) -> Result<ContinuitySupp
         source_code: code.into(),
         source_record_utf8: String::from_utf8(raw.to_vec()).map_err(|e| e.to_string())?,
         limitations,
+        snapshot_context: None,
     };
     let mut value = serde_json::to_value(&receipt).map_err(|e| e.to_string())?;
     value.as_object_mut().unwrap().remove("receipt_id");
@@ -314,7 +390,17 @@ pub fn qualify(raw: &[u8], binding: &ContinuityBinding) -> Result<ContinuitySupp
 }
 
 pub fn replay(receipt: &ContinuitySupport) -> Result<(), String> {
-    if qualify(receipt.source_record_utf8.as_bytes(), &receipt.binding)? != *receipt {
+    let mut expected = qualify(receipt.source_record_utf8.as_bytes(), &receipt.binding)?;
+    if let Some(context) = &receipt.snapshot_context {
+        let (key, core) = snapshot_identity(receipt.source_record_utf8.as_bytes())?;
+        if context.snapshot_key != key || context.core_digest != core {
+            return Err("snapshot context mismatch".into());
+        }
+        expected.snapshot_context = Some(context.clone());
+        expected.limitations.push("snapshot consistency checked only within configured trusted local history; reset/deletion invalidates continuity".into());
+        seal(&mut expected)?;
+    }
+    if expected != *receipt {
         return Err("continuity receipt replay mismatch".into());
     }
     Ok(())

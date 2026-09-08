@@ -30,11 +30,12 @@ support identities to a currentness query; NQ does not own this consumer clock
 policy. Earlier missing-producer/clock prerequisite statements are superseded
 by these implementations, not retroactively qualified.
 
-Full current-role equivalence remains unqualified: the historical generic
-established-claim fixture does not demonstrate the donor's specific
-`docket_attempt_settled` allowlist or its enforceable-premise and unresolved-
-residual refusal policy. That bounded factual/policy mapping requires real
-positive and negative evidence, not promotion of an unrelated host claim.
+The historical generic established-claim fixture does not demonstrate the
+donor's specific `docket_attempt_settled` allowlist. The separate bounded
+[Docket purpose family](DOCKET_PURPOSE_RETIREMENT.md) now implements real
+read-only acquisition and the premise/residual/contradiction policy, with exact
+snapshot history; the generic host current bridge rejects that role. These
+new candidates require their own integrated evidence and independent review.
 Source and resolver honesty remain an
 environmental assumption; receipts are integrity-addressed, not authentication
 of arbitrary caller-supplied data. AG authorization and Docket custody unchanged.
