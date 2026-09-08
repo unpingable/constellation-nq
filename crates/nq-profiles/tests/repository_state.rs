@@ -24,6 +24,7 @@ fn evidence() -> RepositoryEvidence {
                 vec![],
                 vec![],
                 head.into_bytes(),
+                vec![],
             ])
             .map(|(operation, stdout)| CommandObservation {
                 operation: operation.into(),
@@ -62,7 +63,7 @@ fn clean_and_changed_are_replayed_not_merely_trusted() {
 
 #[test]
 fn failed_collection_submodules_and_changing_head_never_establish_clean() {
-    for index in 0..5 {
+    for index in 0..OPERATIONS.len() {
         let mut e = evidence();
         e.commands[index].exit_code = None;
         assert!(matches!(

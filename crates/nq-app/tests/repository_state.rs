@@ -85,4 +85,23 @@ fn real_git_tracked_untracked_ignored_and_unborn_boundaries() {
     // Historical replay remains valid after a later worktree change, but does
     // not establish currentness or authorize that later execution.
     clean.replay(&clean.evidence.collector_executable).unwrap();
+    for flag in ["--assume-unchanged", "--skip-worktree"] {
+        git(dir.path(), &["update-index", flag, "new"]);
+        let result = nq_app::repository_cli::observe(dir.path()).unwrap();
+        assert_eq!(
+            result.disposition,
+            RepositoryDisposition::NotEstablished {
+                reason: "index_suppression_flags_unsupported".into()
+            }
+        );
+        git(
+            dir.path(),
+            &[
+                "update-index",
+                "--no-assume-unchanged",
+                "--no-skip-worktree",
+                "new",
+            ],
+        );
+    }
 }

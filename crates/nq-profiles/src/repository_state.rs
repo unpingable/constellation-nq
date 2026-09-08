@@ -67,7 +67,14 @@ pub struct RepositoryExecution {
 }
 
 /// Closed operations: no arbitrary predicate or command is admitted.
-pub const OPERATIONS: [&str; 5] = ["bare", "head_before", "index", "status", "head_after"];
+pub const OPERATIONS: [&str; 6] = [
+    "bare",
+    "head_before",
+    "index",
+    "status",
+    "head_after",
+    "index_flags",
+];
 
 pub fn evaluate(evidence: &RepositoryEvidence) -> Result<RepositoryDisposition, String> {
     if evidence.subject_identity != evidence.subject.identity()?
@@ -90,6 +97,23 @@ pub fn evaluate(evidence: &RepositoryEvidence) -> Result<RepositoryDisposition, 
         }
     }
     let outputs = &evidence.commands;
+    let flags = &outputs[5].stdout;
+    if !flags.is_empty() && !flags.ends_with(&[0]) {
+        return Err("truncated index flags".into());
+    }
+    for entry in flags.split(|b| *b == 0).filter(|e| !e.is_empty()) {
+        if entry.len() < 3 || entry[1] != b' ' {
+            return Err("invalid index flags".into());
+        }
+        if entry[0].is_ascii_lowercase() || entry[0] == b'S' {
+            return Ok(RepositoryDisposition::NotEstablished {
+                reason: "index_suppression_flags_unsupported".into(),
+            });
+        }
+        if !b"HMRCK?U".contains(&entry[0]) {
+            return Err("unsupported index flag".into());
+        }
+    }
     if outputs[0].stdout != b"false\n" {
         return Ok(RepositoryDisposition::NotEstablished {
             reason: "bare_repository_unsupported".into(),

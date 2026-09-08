@@ -169,6 +169,7 @@ pub fn observe(worktree: &Path) -> Result<RepositoryExecution> {
         ]
         .as_slice(),
         ["rev-parse", "--verify", "HEAD"].as_slice(),
+        ["ls-files", "-v", "-z"].as_slice(),
     ]
     .into_iter()
     .zip(OPERATIONS)
