@@ -859,7 +859,7 @@ ethernets:
             "-drive",
             f"if=none,id=seed,file={guest.root / 'seed.iso'},format=raw,readonly=on",
             "-device",
-            "ide-cd,drive=seed",
+            "ide-cd,drive=seed,bus=ide.1",
             "-netdev",
             f"user,id=mgmt,restrict=on,hostfwd=tcp:127.0.0.1:{guest.ssh_port}-:22",
             "-device",

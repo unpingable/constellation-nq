@@ -39,6 +39,7 @@ required=(
   'ag-store-cut.json'
   'ag-store-audit-outcome-v1.json'
   'PRAGMA wal_checkpoint(TRUNCATE)'
+  'ide-cd,drive=seed,bus=ide.1'
 )
 if [[ ${NQ_M1B_INJECT_BOUNDARY_FAILURE:-0} == 1 ]]; then
   required+=("required-boundary-token-that-does-not-exist")
@@ -51,6 +52,7 @@ rg -F --quiet 'test_producer_retains_locked_store_cut_and_uses_owner_audit' "$te
 rg -F --quiet 'test_terminal_reopen_refuses_coherently_substituted_owner_outcome' "$tests"
 rg -F --quiet 'test_terminal_reopen_refuses_coherently_substituted_store_cut' "$tests"
 rg -F --quiet 'test_terminal_reopen_refuses_substituted_owner_executable' "$tests"
+rg -F --quiet 'test_q35_launch_explicitly_binds_nocloud_cdrom_bus' "$tests"
 
 if rg -n 'shell[[:space:]]*=[[:space:]]*True' "$runner"; then
   echo "M1B runner must not use subprocess shell execution" >&2

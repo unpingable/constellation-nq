@@ -607,6 +607,40 @@ sys.stdout.buffer.write(
         self.assertIn(f"{RUNNER.NQ_DEB_SHA256}  /home/betaoperator/nq-ng.deb", joined)
         self.assertIn(f"{RUNNER.AG_DEB_SHA256}  /home/betaoperator/agent-governor-ng-systemd-executor_amd64.deb", joined)
 
+    def test_q35_launch_explicitly_binds_nocloud_cdrom_bus(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = pathlib.Path(temporary).resolve()
+            guest_root = output / "control"
+            guest_root.mkdir()
+            guest = RUNNER.Guest(
+                "control",
+                23141,
+                "52:54:00:0b:10:01",
+                "52:54:00:0b:20:01",
+                RUNNER.CONTROLLER_ADDRESS,
+                guest_root,
+            )
+            producer = RUNNER.Producer(self.args(output))
+            captured: dict[str, list[str]] = {}
+
+            def launch(command, **_kwargs):
+                captured["command"] = command
+                (guest_root / "qemu.pid").write_text("12345\n")
+                return types.SimpleNamespace(pid=12345, poll=lambda: None)
+
+            with (
+                mock.patch.object(RUNNER.subprocess, "Popen", side_effect=launch),
+                mock.patch.object(RUNNER, "process_identity", return_value=67890),
+                mock.patch.object(RUNNER.os, "access", return_value=True),
+            ):
+                producer.start_guest(guest)
+
+            command = captured["command"]
+            self.assertIn("-nodefaults", command)
+            self.assertIn("ide-cd,drive=seed,bus=ide.1", command)
+            self.assertNotIn("ide-cd,drive=seed", command)
+            self.assertEqual(guest.start_ticks, 67890)
+
     def test_restart_preserves_historical_effect_and_records_actual_current_support(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output = pathlib.Path(temporary) / "run"

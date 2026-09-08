@@ -1,5 +1,5 @@
 # Operator-beta NQ-ng M1B two-VM qualification harness
-**Status:** `INTEGRATED_CORRECTION_CANDIDATE__INDEPENDENT_REVIEW_REQUIRED__LIVE_RUN_NOT_STARTED`
+**Status:** `PRE_EFFECT_RUN_001_REFUSED__CDROM_BUS_CORRECTION_CANDIDATE__INDEPENDENT_REVIEW_REQUIRED`
 **Accepted package checkpoint:** `8865dcad23f17a1f26716161554530237e04bb9e`
 **Accepted AG store-audit owner:** `837de287497942c79966aa05c083acee9c312261`
 **Accepted AG package qualification:** `db4bad1fba2b5ab512cc58356314228167b2f48e`
@@ -13,6 +13,23 @@ lifecycle service, deployment system, Docket replacement, or postcondition
 oracle. The controller and target observations remain independent artifacts.
 The harness never infers an AG-to-Docket-to-NQ edge from matching identities or
 timestamps.
+
+## Observed pre-effect run
+
+`operator-beta-m1b-run-001` started both exact local QEMU guests from the
+accepted inputs, but the `-nodefaults` q35 launch did not bind the NoCloud
+CD-ROM to an explicit guest bus. Neither serial log contained an ATA/CD-ROM
+device; both guests retained the base hostname and `ssh.service` failed before
+the producer could connect. The exact producer interruption record is retained
+under `/data/git/.campaign-artifacts/nq-ng-operator-beta-m1b-20260908/operator-beta-m1b-v1/run-001`.
+It classifies `NO_EFFECT_ATTEMPTED`; both named QEMU processes and the producer
+are exited. No package was installed and no NQ, AG, Docket, system-bus, or
+fixture-service operation ran.
+
+The correction keeps `-nodefaults` and binds the existing `ide-cd` device to
+q35 bus `ide.1`. A direct command-shape qualification case prevents the launch
+from returning to an implicit bus selection. Run-001 is not retried or relabeled;
+any later exercise is a fresh run occurrence after independent acceptance.
 
 The target begins with the exact fixture unit installed, disabled, and
 inactive. The controller cannot reach the fixed HTTP response. One fresh
@@ -118,7 +135,7 @@ qualification outcomes.
 
 The checked producer is `run_two_vm.py`; its pure-local qualification is
 `test_run_two_vm.py`, and `scripts/check-operator-beta-m1b-v1.sh` is the
-structural gate. The correction candidate passes 26 qualification cases
+structural gate. The correction candidate passes 27 qualification cases
 covering AG-compatible subject framing, durable recovery custody, exact
 diagnostic subject/scope/profile/question/policy/vantage/self-identity binding,
 producer-unit identity, runtime bounds, exact diagnostic policy/condition
@@ -130,7 +147,9 @@ reconcile refusal, same-attempt reconcile refusal, and coherent package,
 config, effect, attempt, reconciliation, owner-outcome, owner-store-content,
 and accepted-audit-executable substitutions. A direct producer case checks the
 locked WAL-zero stable cut, exact source/copy relation, accepted owner query,
-and retained cross-component identity record. The gate's injected missing-boundary
+and retained cross-component identity record. A separate launch-envelope case
+requires the explicit q35 `ide.1` NoCloud CD-ROM binding under `-nodefaults`.
+The gate's injected missing-boundary
 control refuses deterministically. These are harness results only: no VM,
 package install, system bus, fixture service, or effect has run.
 
