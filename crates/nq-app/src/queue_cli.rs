@@ -98,3 +98,17 @@ pub fn run(command: QueueCommand) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::read;
+    #[test]
+    fn duplicate_profile_keys_are_refused_before_canonicalization() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("catalog.json");
+        std::fs::write(&path, br#"{"profiles":[{"id":"first","id":"second"}]}"#).unwrap();
+        assert!(read(&path).unwrap_err().to_string().contains("duplicate"));
+        std::fs::write(&path, br#"{"profiles":[{"id":"only"}]}"#).unwrap();
+        assert!(read(&path).is_ok());
+    }
+}
