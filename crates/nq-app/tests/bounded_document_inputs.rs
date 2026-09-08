@@ -87,6 +87,8 @@ fn nonregular_documents_and_docket_executable_refuse_before_acquisition() {
             &producer,
             "--state",
             "missing",
+            "--snapshot-history",
+            root.path().to_str().unwrap(),
         ]);
         refused(&[
             "docket-purpose-support",
@@ -98,6 +100,8 @@ fn nonregular_documents_and_docket_executable_refuse_before_acquisition() {
             &producer,
             "--state",
             "missing",
+            "--snapshot-history",
+            root.path().to_str().unwrap(),
         ]);
     }
 }
