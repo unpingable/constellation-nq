@@ -162,6 +162,7 @@ NQ_PACKAGE_PAYLOAD_PATHS = (
     "/usr/bin/nqd",
     "/usr/lib/nq/helpers/nq-host-helper",
     "/usr/lib/nq/helpers/nq-operator-beta-helper",
+    "/usr/lib/nq/helpers/nq_conformance_helper.py",
     "/usr/lib/systemd/system/nqd.service",
 )
 AG_PACKAGE_PAYLOAD_PATHS = (

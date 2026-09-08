@@ -28,6 +28,19 @@ RUNNER = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = RUNNER
 SPEC.loader.exec_module(RUNNER)
 
+PAYLOAD_VERIFIER_PATH = MODULE_PATH.parents[2] / "scripts" / "verify_release_payload.py"
+PAYLOAD_SPEC = importlib.util.spec_from_file_location(
+    "nq_release_payload_verifier", PAYLOAD_VERIFIER_PATH
+)
+assert PAYLOAD_SPEC is not None and PAYLOAD_SPEC.loader is not None
+PAYLOAD_VERIFIER = importlib.util.module_from_spec(PAYLOAD_SPEC)
+sys.modules[PAYLOAD_SPEC.name] = PAYLOAD_VERIFIER
+sys.path.insert(0, str(PAYLOAD_VERIFIER_PATH.parent))
+try:
+    PAYLOAD_SPEC.loader.exec_module(PAYLOAD_VERIFIER)
+finally:
+    sys.path.pop(0)
+
 
 class HarnessTests(unittest.TestCase):
     FIXTURE_IMAGE_BYTES = b"fixture-image\n"
@@ -848,6 +861,7 @@ sys.stdout.buffer.write(
             self.assertIn("/usr/bin/nqd", command)
             self.assertIn("/usr/lib/nq/helpers/nq-host-helper", command)
             self.assertIn("/usr/lib/nq/helpers/nq-operator-beta-helper", command)
+            self.assertIn("/usr/lib/nq/helpers/nq_conformance_helper.py", command)
             self.assertIn("/usr/lib/systemd/system/nqd.service", command)
             self.assertNotIn("! dpkg-query -W nq-ng", command)
         target_command = next(
@@ -860,6 +874,14 @@ sys.stdout.buffer.write(
         self.assertNotIn(
             "! dpkg-query -W agent-governor-ng-systemd-executor", target_command
         )
+
+    def test_package_payload_absence_matches_release_inventory(self) -> None:
+        expected = {
+            "/usr/" + path
+            for path, mode in PAYLOAD_VERIFIER.expected_files([]).items()
+            if mode & 0o111 or path == "lib/systemd/system/nqd.service"
+        }
+        self.assertEqual(set(RUNNER.NQ_PACKAGE_PAYLOAD_PATHS), expected)
 
     def test_package_payload_absence_distinguishes_dpkg_record_states(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
