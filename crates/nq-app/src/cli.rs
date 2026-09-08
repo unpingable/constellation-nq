@@ -45,6 +45,11 @@ pub struct Nq {
 /// Operator workflows.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Qualify an exact external Continuity memory rely export, not action authority.
+    ContinuitySupport {
+        #[arg(long)] source_export: PathBuf,
+        #[arg(long)] binding: PathBuf,
+    },
     /// Admit or replay one compiled, content-bound factual predicate.
     BoundedPredicate {
         #[command(subcommand)]
@@ -392,6 +397,7 @@ pub struct QueryArgs {
 /// workflow's atomicity and custody rules.
 pub async fn run(options: Nq) -> Result<()> {
     match options.command {
+        Command::ContinuitySupport { source_export,binding } => crate::continuity_cli::run(&source_export,&binding),
         Command::BoundedPredicate { command } => crate::queue_cli::run(command),
         Command::CampaignStageQualification { command } => crate::stage_cli::run(command, false),
         Command::CampaignStageRealization { command } => crate::stage_cli::run(command, true),

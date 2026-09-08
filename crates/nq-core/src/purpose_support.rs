@@ -26,6 +26,8 @@ pub struct PurposeRequest {
     pub maximum_artifact_age_seconds: u64,
     pub require_source_currentness: bool,
     pub supporting_artifact_ids: Vec<Sha256Digest>,
+    #[serde(default)]
+    pub continuity_support: Option<crate::continuity_support::ContinuitySupport>,
 }
 
 fn reopen(store: &Store, id: &Sha256Digest) -> Result<DiagnosticExecutionV2, String> {
@@ -101,7 +103,29 @@ pub fn qualify(store: &Store, r: &PurposeRequest) -> Result<Value, String> {
     }
     let mut supporting = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
-    let continuity = false;
+    let mut continuity = false;
+    if let Some(s) = &r.continuity_support {
+        crate::continuity_support::replay(s)?;
+        if s.binding.subject_digest != subject
+            || s.binding.principal != r.consumer
+            || s.binding.purpose != "continue_observing"
+            || s.receipt_id == r.artifact_id
+        {
+            return Err(
+                "continuity exact subject/principal/purpose or independence mismatch".into(),
+            );
+        }
+        let source_time = DateTime::parse_from_rfc3339(&s.evaluation_time)
+            .map_err(|e| e.to_string())?
+            .with_timezone(&Utc);
+        continuity = s.disposition == "eligible"
+            && source_time <= r.evaluated_at
+            && source_time
+                .checked_add_signed(chrono::Duration::seconds(900))
+                .is_some_and(|t| r.evaluated_at < t);
+        supporting.push(json!({"claim":s.claim,"content_hash":s.receipt_id,"status":s.disposition,"subject":s.binding.subject_digest}));
+        reasons.extend(s.limitations.clone());
+    }
     for id in &r.supporting_artifact_ids {
         if id == &r.artifact_id || !seen.insert(id.clone()) {
             return Err("duplicate or primary-as-support artifact".into());

@@ -13519,6 +13519,7 @@ sys.stdout.write("\n")
             maximum_artifact_age_seconds: 300,
             require_source_currentness: false,
             supporting_artifact_ids: vec![],
+            continuity_support: None,
         };
         let historical_support=crate::purpose_support::qualify(&engine.store,&purpose_request).unwrap();
         assert_eq!(historical_support["decision"],"supported_readonly");
@@ -13539,6 +13540,27 @@ sys.stdout.write("\n")
         purpose_request.consumer="nightshift-readonly-continuity".into();
         assert_eq!(crate::purpose_support::qualify(&engine.store,&purpose_request).unwrap()["decision"],"residual_obligation_blocks");
         purpose_request.consumer="nightshift-readonly".into();
+        if let Ok(source_path)=std::env::var("NQ_CONTINUITY_SOURCE_EXPORT") {
+            let raw=fs::read(source_path).unwrap();
+            let source:serde_json::Value=serde_json::from_slice(&raw).unwrap();
+            let binding=crate::continuity_support::ContinuityBinding{
+                store_id:source["source"]["store_id"].as_str().unwrap().into(),memory_id:source["subject"]["memory_id"].as_str().unwrap().into(),scope:source["subject"]["scope"].as_str().unwrap().into(),subject_digest:purpose_request.subject_digest.clone(),principal:"nightshift-readonly-continuity".into(),purpose:"continue_observing".into(),raw_source_digest:nq_protocol::sha256_bytes(&raw)};
+            let qualified=crate::continuity_support::qualify(&raw,&binding).unwrap();
+            let directory=std::env::var("NQ_PURPOSE_FIXTURE_OUTPUT").unwrap();
+            fs::write(std::path::Path::new(&directory).join("continuity-binding.json"),nq_protocol::canonical_json_bytes(&binding).unwrap()).unwrap();
+            assert_eq!(qualified.disposition,"eligible");
+            crate::continuity_support::replay(&qualified).unwrap();
+            let mut forged=qualified.clone();forged.disposition="not_eligible".into();
+            assert!(crate::continuity_support::replay(&forged).is_err());
+            purpose_request.consumer="nightshift-readonly-continuity".into();
+            purpose_request.continuity_support=Some(qualified);
+            let supported=crate::purpose_support::qualify(&engine.store,&purpose_request).unwrap();
+            assert_eq!(supported["decision"],"supported_readonly");
+            let directory=std::env::var("NQ_PURPOSE_FIXTURE_OUTPUT").unwrap();
+            fs::write(std::path::Path::new(&directory).join("continuity-support.json"),nq_protocol::canonical_json_bytes(&supported).unwrap()).unwrap();
+            purpose_request.continuity_support=None;
+            purpose_request.consumer="nightshift-readonly".into();
+        }
         purpose_request.evaluated_at=artifact.completed_at+chrono::Duration::seconds(300);
         assert_eq!(crate::purpose_support::qualify(&engine.store,&purpose_request).unwrap()["decision"],"stale_evidence");
 

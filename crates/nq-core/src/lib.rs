@@ -7,6 +7,7 @@
 pub mod admission;
 pub mod fixed_queue;
 pub mod purpose_support;
+pub mod continuity_support;
 pub mod config;
 pub mod coordination;
 pub mod diagnostic_admission;
