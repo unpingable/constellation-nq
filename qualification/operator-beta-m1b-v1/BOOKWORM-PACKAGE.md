@@ -1,9 +1,10 @@
 # Debian 12 package compatibility and reproducibility evidence
 
-**Status:** `CORRECTION CANDIDATE / INDEPENDENT REVIEW REQUIRED`
+**Status:** `PACKAGE_004_REPRODUCIBLE / INDEPENDENT REVIEW REQUIRED`
 **Rejected package-evidence checkpoint:** `9aa09b35d08b3f52602a30f3079efb9194b8fcc1`
-**Source subject:** `5c064f06d8bcae2fce9dfdb9598167c2343ff706`
-**Source tree:** `c820ea0fc19b065289d9e966926b2ab7a8374b5f`
+**Prior accepted reproducible-package checkpoint:** `b758f47b8a03bf9314520f51d707480babf55e82`
+**Source subject:** `c62eb7130c813896903e0156bd0593e22befe4a5`
+**Source tree:** `110d5becd3613cdae479c33df7f681aa77545da9`
 **Prior package qualification:** `8865dcad23f17a1f26716161554530237e04bb9e`
 **Authority effect:** exact package-build and local qualification evidence only;
 no source semantics, deployment, production, provider, VM effect, AG authority,
@@ -20,6 +21,12 @@ The first Bookworm-compatible candidate, package SHA-256 `e4908984...`, ran on
 Bookworm but was rejected at checkpoint `9aa09b35...`: its prose recipe did not
 reproduce exact binaries under independent review. Those bytes remain separate
 under `bookworm-package-001` and are not accepted by the current harness.
+
+The independently accepted `bookworm-package-003`, package SHA-256
+`0e3ab630...`, remains the exact reproducible result for predecessor source
+`5c064f06...`. It does not contain the accepted systemd observation correction
+at `c62eb713...` and is therefore not the package admitted by the next fresh
+M1B occurrence. Its qualification is preserved rather than transferred.
 
 ## Closed build inputs and wrapper
 
@@ -64,17 +71,17 @@ substitutions, and unknown receipt fields.
 ## Exact retained result
 
 Campaign-owned directory:
-`/data/git/.campaign-artifacts/nq-ng-operator-beta-m1b-20260908/operator-beta-m1b-v1/bookworm-package-003`.
+`/data/git/.campaign-artifacts/nq-ng-operator-beta-m1b-20260908/operator-beta-m1b-v1/bookworm-package-004`.
 
 - receipt schema `constellation.operator_beta.nq_bookworm_package_build.v1`;
-- Debian package `nq-ng_0.1.0_amd64.deb`, 8,694,038 bytes, SHA-256
-  `0e3ab6307b41e9d80a6bdd503324895b5c46d49aef57e9421abb0e294dbc9fca`;
-- release tar `nq-ng-0.1.0-linux-amd64.tar.gz`, 11,961,977 bytes, SHA-256
-  `ea055f7b890032ed84eaf5eb7b10625b7e5237d9c91e3dddcb0a7f75120c12b6`;
+- Debian package `nq-ng_0.1.0_amd64.deb`, 8,703,042 bytes, SHA-256
+  `0fd1ce9e1be48b56ba5e526993a94c4682499bb9dbd9304dffd4500c01603636`;
+- release tar `nq-ng-0.1.0-linux-amd64.tar.gz`, 11,974,132 bytes, SHA-256
+  `1e0abe45506ba718fdbd62ba45d96a3961e5f3050ba70470b81dcca78aa058df`;
 - `SHA256SUMS`, SHA-256
-  `8060a8e0881761a18388f01a413ce82aff1e968a2f420b98a111c47a0e157930`.
+  `3034ed298db522ce1bda26ff0ec43a3198199ca4d93fcd6380f8abf5e29d60c1`.
 - qualification builder SHA-256
-  `cd1561056e4c5ff95185be3e71110c0f7fecafeacd563cfd80addeb617a4c1fc`;
+  `eff5c73963420fcf0a71bd3f379c2ce926f83e1e497006d857fa218cb6787174`;
 - qualification test SHA-256
   `fa9c00821969ce70f5cf2c53b09f2876e759063ceb3645dfdb220bdc1435a5cf`.
 
@@ -86,7 +93,7 @@ artifacts. Exact packaged binary SHA-256 identities are:
 - `/usr/lib/nq/helpers/nq-host-helper`:
   `6fe3a7ae25da7bc7cf43a9ab67812c5ed64f389d7cee8cabd1746c3fc3146881`;
 - `/usr/lib/nq/helpers/nq-operator-beta-helper`:
-  `5613b1a75c2eec1846a47ce6c740632cc0f009114a1bb615c7b7f885a34740dc`.
+  `fff6610979dc9783cf5cfc66d477a753f8ffb2c9793eeac15ff80a55374641d8`.
 
 All four require no glibc symbol newer than `GLIBC_2.34`, within Debian 12's
 glibc 2.36. `build` completed two clean source-to-artifact paths and `verify`

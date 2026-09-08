@@ -1,6 +1,8 @@
 # Operator-beta NQ-ng observation helper checkpoint
 
-**Status:** `LIVE_RUN_005_REFUSED__METADATA_LOAD_DISCLOSURE_READY_FOR_INDEPENDENT_REAUDIT`
+**Status:** `LIVE_RUN_005_REFUSED__CORRECTION_ACCEPTED_PUBLISHED`
+**Accepted correction result:** `c62eb7130c813896903e0156bd0593e22befe4a5`
+**Accepted correction tree:** `110d5becd3613cdae479c33df7f681aa77545da9`
 **Correction implementation candidate:** `860452c53d63b6162c18a2e0b4aba4acb736baea`
 **Correction tree:** `083a6a9c52ba49f1f2cd181c3793941f894b3212`
 **Correction parent:** `1cc635cc3dd8ac092d1ea9b1d772a06ee0d80cc5`
@@ -101,6 +103,11 @@ an explicit `LoadUnit` call with absence of any manager-state change. This
 non-rewriting correction preserves the implementation and records systemd
 v252's possible internal metadata load without promoting it into an effect or
 authority claim.
+
+Independent re-audit accepted exact correction subject
+`c62eb7130c813896903e0156bd0593e22befe4a5`; local, tracking, and remote branch
+refs were then verified equal to that subject. This accepts the bounded helper
+correction only. It does not qualify a fresh package or M1B run.
 
 ## Unqualified dimensions
 

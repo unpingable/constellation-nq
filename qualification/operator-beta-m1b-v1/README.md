@@ -1,6 +1,7 @@
 # Operator-beta NQ-ng M1B two-VM qualification harness
-**Status:** `PRE_EFFECT_RUNS_001_002_003_004_005_REFUSED__HELPER_OBSERVATION_CORRECTION_READY_FOR_INDEPENDENT_AUDIT`
+**Status:** `PRE_EFFECT_RUNS_001_002_003_004_005_REFUSED__HELPER_ACCEPTED_PUBLISHED__PACKAGE_004_READY_FOR_INDEPENDENT_AUDIT`
 **Helper correction implementation:** `860452c53d63b6162c18a2e0b4aba4acb736baea`
+**Accepted helper correction result:** `c62eb7130c813896903e0156bd0593e22befe4a5`
 **Accepted package checkpoint:** `8865dcad23f17a1f26716161554530237e04bb9e`
 **Accepted AG store-audit owner:** `837de287497942c79966aa05c083acee9c312261`
 **Accepted AG package qualification:** `db4bad1fba2b5ab512cc58356314228167b2f48e`
@@ -43,12 +44,12 @@ exact terminal record remains under the adjacent `run-003` directory; it says
 processes exited. No NQ artifact, AG attempt, Docket occurrence, system-bus
 effect, or fixture-service start occurred.
 
-The package correction rebuilds the unchanged accepted source `5c064f06...`
+The current package correction rebuilds exact accepted helper source `c62eb713...`
 twice from one exact campaign-owned vendor snapshot inside the locally retained
 immutable `rust:1.94.0-bookworm` image with network access disabled. The checked
 wrapper requires the two binary and release-artifact sets to be byte-identical
 before retaining a result. The resulting exact campaign-owned package has
-SHA-256 `0e3ab6307b41e9d80a6bdd503324895b5c46d49aef57e9421abb0e294dbc9fca`;
+SHA-256 `0fd1ce9e1be48b56ba5e526993a94c4682499bb9dbd9304dffd4500c01603636`;
 all four packaged binaries execute their build-info probes in that Bookworm
 image and require no glibc symbol newer than `GLIBC_2.34`. Exact evidence is in
 `BOOKWORM-PACKAGE.md`. Runs 001, 002, 003, 004, and 005 are never retried or relabeled;
@@ -105,10 +106,10 @@ occurrence. Those composition edges remain a later main-loop gate.
 
 The runner requires physical regular non-symlink inputs and exact digests for:
 
-- NQ-ng package bytes rebuilt from accepted package source `5c064f06...` and
+- NQ-ng package bytes rebuilt from accepted helper source `c62eb713...` and
   qualification result `8865dcad...` in the immutable Bookworm build
   environment recorded by `BOOKWORM-PACKAGE.md`, exact candidate SHA-256
-  `0e3ab6307b41e9d80a6bdd503324895b5c46d49aef57e9421abb0e294dbc9fca`;
+  `0fd1ce9e1be48b56ba5e526993a94c4682499bb9dbd9304dffd4500c01603636`;
 - accepted AG M1A target adapter package `0.1.0-1+m1a4`, exact qualified SHA-256
   `98a4f31f0b6c13653ae95ce55586dbac6d0826b649cd7612882f3716b80e2279`;
 - its exact `/usr/libexec/agent-governor-ng/ag-effectd` executable, SHA-256
