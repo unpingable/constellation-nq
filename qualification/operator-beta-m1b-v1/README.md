@@ -1,5 +1,6 @@
 # Operator-beta NQ-ng M1B two-VM qualification harness
-**Status:** `RUNS_001_002_003_004_005_REFUSED_NO_EFFECT__RUNS_006_007_008_009_010_REFUSED_AFTER_KNOWN_EFFECT_OWNER_SUCCESS__RESTART_BOOT_IDENTITY_CORRECTION_READY_FOR_INDEPENDENT_AUDIT`
+**Status:** `RUNS_001_002_003_004_005_REFUSED_NO_EFFECT__RUNS_006_007_008_009_010_REFUSED_AFTER_KNOWN_EFFECT_OWNER_SUCCESS__RESTART_BOOT_IDENTITY_CORRECTION_ACCEPTED_PUBLISHED__FRESH_RUN_READY`
+**Accepted restart boot-identity correction:** `274494b72216d51b9ab7f8316d581f57600054e5`
 **Accepted store-cut command correction:** `8979bee76924701061770327de220b2cd4c9b9a7`
 **Accepted post-effect state correction:** `0373da604abb29283b88b3ed7636a69849e52737`
 **Accepted HTTP fixture-readiness correction:** `d00d6640dd5917cd72d932802fe913a827ea14c6`
@@ -387,9 +388,11 @@ correction is accepted and published at
 correction is accepted and published at
 `0373da604abb29283b88b3ed7636a69849e52737`; and the store-cut command
 correction is accepted and published at
-`8979bee76924701061770327de220b2cd4c9b9a7`. The restart boot-identity
-correction requires independent audit before another fresh occurrence may
-start; runs 006--010 remain terminal and must not be resumed or relabeled.
+`8979bee76924701061770327de220b2cd4c9b9a7`; and the restart boot-identity
+correction is accepted and published at
+`274494b72216d51b9ab7f8316d581f57600054e5`. Another fresh occurrence may start
+from the resulting clean subject; runs 006--010 remain terminal and must not be
+resumed or relabeled.
 
 The accepted AG package supplies the query-only terminal receipt/evidence
 reopener. This candidate retains an exact WAL-zero owner store cut under the
