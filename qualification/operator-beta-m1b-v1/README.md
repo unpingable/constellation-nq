@@ -1,5 +1,6 @@
 # Operator-beta NQ-ng M1B two-VM qualification harness
-**Status:** `RUNS_001_002_003_004_005_REFUSED_NO_EFFECT__RUNS_006_007_008_009_010_REFUSED_AFTER_KNOWN_EFFECT_OWNER_SUCCESS__RESTART_BOOT_IDENTITY_CORRECTION_ACCEPTED_PUBLISHED__FRESH_RUN_READY`
+**Status:** `RUNS_001_002_003_004_005_REFUSED_NO_EFFECT__RUNS_006_TO_011_REFUSED_AFTER_KNOWN_EFFECT_OWNER_SUCCESS__TEARDOWN_PACKAGE_STATE_CORRECTION_READY_FOR_INDEPENDENT_AUDIT`
+**Correction parent:** `2d9912880df189fdc5101a094155f15105d50b4a`
 **Accepted restart boot-identity correction:** `274494b72216d51b9ab7f8316d581f57600054e5`
 **Accepted store-cut command correction:** `8979bee76924701061770327de220b2cd4c9b9a7`
 **Accepted post-effect state correction:** `0373da604abb29283b88b3ed7636a69849e52737`
@@ -204,6 +205,28 @@ old identity until one valid, different boot identity is observed. Malformed
 identities, guest-process exit, unchanged identity through the 900-second
 bound, and all later artifact disagreements still refuse.
 
+Fresh `operator-beta-m1b-run-011` used exact accepted and published harness
+subject `2d9912880df189fdc5101a094155f15105d50b4a`. It retained exact AG owner
+success, both expected post-effect NQ artifacts, exact direct target state,
+package continuity, changed boot identities, exact artifact reopening,
+separate current support, and the exact WAL-zero AG owner store cut and
+query-only audit. All six watcher revocations and both verified NQ backups were
+retained. Target teardown completed, but control teardown refused after package
+removal because its final `! dpkg-query -W nq-ng` predicate treated a retained
+package-manager record as though the executable payload were still installed.
+Run-011 is terminal at `ag_store_cut_audited`; host-final teardown observation
+and the terminal M1B result were not retained. It must not be resumed or
+relabeled.
+
+The bounded correction distinguishes package-manager record custody from an
+installed payload. After removal, the owner-context check accepts only an
+absent record or exact `deinstall ok config-files` state, and independently
+requires every packaged executable, helper, unit, and AG adapter path to be
+absent. An installed record, package-query error, retained regular file, or
+dangling pathname refuses. Terminal predicates are one conjunctive chain so a
+later successful observation cannot mask an earlier failed observation. No
+package removal, evidence, effect, retry, or authority semantics changed.
+
 ## Inputs and retained identity
 
 The runner requires physical regular non-symlink inputs and exact digests for:
@@ -302,7 +325,7 @@ qualification outcomes.
 
 The checked producer is `run_two_vm.py`; its pure-local qualification is
 `test_run_two_vm.py`, and `scripts/check-operator-beta-m1b-v1.sh` is the
-structural gate. The restart boot-identity correction passes 35 qualification cases
+structural gate. The teardown package-state correction passes 36 qualification cases
 covering AG-compatible subject framing, durable recovery custody, exact
 diagnostic subject/scope/profile/question/policy/vantage/self-identity binding,
 producer-unit identity, runtime bounds, exact diagnostic policy/condition
@@ -365,13 +388,14 @@ output. `RESULT.json` plus `ARTIFACTS.sha256`, or `REFUSAL.json` plus
 
 ## Still unqualified
 
-The harness candidate is not the M1B result. Runs 006--010 each retain one
+The harness candidate is not the M1B result. Runs 006--011 each retain one
 AG-owned successful effect occurrence. Run-008 additionally retains both
 successful post-effect NQ artifacts. Run-009 additionally establishes package
 continuity and restart/reopen; run-010 establishes package continuity but
-refuses within restart observation. No run establishes AG store-cut audit,
-teardown, or a terminal M1B result. Runs 001--005 remain their separate
-pre-effect refusals; runs 006--010 are not resumed or relabeled.
+refuses within restart observation. Run-011 additionally establishes the exact
+AG owner store-cut audit and begins teardown, but does not establish complete
+teardown or a terminal M1B result. Runs 001--005 remain their separate
+pre-effect refusals; runs 006--011 are not resumed or relabeled.
 The upstream Debian
 cloud checksum relation remains
 unsigned at the selected versioned directory and therefore cannot satisfy the
@@ -391,8 +415,8 @@ correction is accepted and published at
 `8979bee76924701061770327de220b2cd4c9b9a7`; and the restart boot-identity
 correction is accepted and published at
 `274494b72216d51b9ab7f8316d581f57600054e5`. Another fresh occurrence may start
-from the resulting clean subject; runs 006--010 remain terminal and must not be
-resumed or relabeled.
+only after this correction is independently accepted; runs 006--011 remain
+terminal and must not be resumed or relabeled.
 
 The accepted AG package supplies the query-only terminal receipt/evidence
 reopener. This candidate retains an exact WAL-zero owner store cut under the

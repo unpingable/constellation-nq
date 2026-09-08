@@ -157,6 +157,35 @@ NQ_HELPER_UNIT_PROPERTIES = (
     "CPUQuota=200%",
 )
 
+NQ_PACKAGE_PAYLOAD_PATHS = (
+    "/usr/bin/nq",
+    "/usr/bin/nqd",
+    "/usr/lib/nq/helpers/nq-host-helper",
+    "/usr/lib/nq/helpers/nq-operator-beta-helper",
+    "/usr/lib/systemd/system/nqd.service",
+)
+AG_PACKAGE_PAYLOAD_PATHS = (
+    "/usr/libexec/agent-governor-ng/ag-effectd",
+)
+PACKAGE_PAYLOAD_ABSENCE_SCRIPT = r"""package=$1
+shift
+status=
+if status=$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null); then
+    query_rc=0
+else
+    query_rc=$?
+fi
+case "$query_rc:$status" in
+    "0:deinstall ok config-files"|"1:") ;;
+    *) exit 1 ;;
+esac
+for path do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+        exit 1
+    fi
+done
+"""
+
 
 def nq_helper_command(arguments: list[str]) -> str:
     if not arguments or any(not argument or "\n" in argument for argument in arguments):
@@ -168,6 +197,27 @@ def nq_helper_command(arguments: list[str]) -> str:
         ["--", "/usr/bin/nq", "--config=/etc/nq/operator-beta.toml", *arguments]
     )
     return shlex.join(command)
+
+
+def package_payload_absence_command(package: str, paths: tuple[str, ...]) -> str:
+    if not re.fullmatch(r"[a-z0-9][a-z0-9+.-]+", package):
+        raise Refusal("package payload assertion has an invalid package name")
+    if not paths or len(set(paths)) != len(paths):
+        raise Refusal("package payload assertion requires distinct paths")
+    if any(not path.startswith("/") or "\n" in path for path in paths):
+        raise Refusal("package payload assertion has an invalid path")
+    return shlex.join(
+        [
+            "sudo",
+            "sh",
+            "-eu",
+            "-c",
+            PACKAGE_PAYLOAD_ABSENCE_SCRIPT,
+            "package-payload-absence",
+            package,
+            *paths,
+        ]
+    )
 
 
 
@@ -1926,13 +1976,12 @@ while True:
             "/home/betaoperator/docket-shaped-dispatch-v1.json "
             "/home/betaoperator/ag-attempt-store-cut.sqlite "
             f"/home/betaoperator/{UNIT} /home/betaoperator/healthz; "
-            f"test ! -e /etc/systemd/system/{UNIT}; "
-            "test ! -e /var/lib/constellation-beta-http-fixture; "
-            "test ! -e /var/lib/ag-effectd-m1b; "
-            "sudo test ! -e /var/lib/nq/operator-beta.sqlite; "
-            "test ! -e /usr/lib/nq/helpers/nq-operator-beta-helper; "
-            "! dpkg-query -W nq-ng >/dev/null 2>&1; "
-            "! dpkg-query -W agent-governor-ng-systemd-executor >/dev/null 2>&1",
+            f"test ! -e /etc/systemd/system/{UNIT} && "
+            "test ! -e /var/lib/constellation-beta-http-fixture && "
+            "test ! -e /var/lib/ag-effectd-m1b && "
+            "sudo test ! -e /var/lib/nq/operator-beta.sqlite && "
+            f"{package_payload_absence_command('nq-ng', NQ_PACKAGE_PAYLOAD_PATHS)} && "
+            f"{package_payload_absence_command('agent-governor-ng-systemd-executor', AG_PACKAGE_PAYLOAD_PATHS)}",
         )
         self.ssh(
             control,
@@ -1941,9 +1990,8 @@ while True:
             "/var/lib/nq/operator-beta.sqlite-shm /var/lib/nq/operator-beta.sqlite-wal "
             "/var/lib/nq/operator-beta-admissions /var/lib/nq/operator-beta-backup.sqlite; "
             "rm -f /home/betaoperator/nq-ng.deb /home/betaoperator/control-nq.toml; "
-            "sudo test ! -e /var/lib/nq/operator-beta.sqlite; "
-            "test ! -e /usr/lib/nq/helpers/nq-operator-beta-helper; "
-            "! dpkg-query -W nq-ng >/dev/null 2>&1",
+            "sudo test ! -e /var/lib/nq/operator-beta.sqlite && "
+            f"{package_payload_absence_command('nq-ng', NQ_PACKAGE_PAYLOAD_PATHS)}",
         )
         for guest in (control, target):
             self.ssh(guest, "sudo systemctl poweroff", check=False)

@@ -842,6 +842,85 @@ sys.stdout.buffer.write(
             self.assertNotIn(
                 "; test ! -e /var/lib/nq/operator-beta.sqlite", command
             )
+            self.assertIn("deinstall ok config-files", command)
+            self.assertIn("dpkg-query -W -f=", command)
+            self.assertIn("/usr/bin/nq", command)
+            self.assertIn("/usr/bin/nqd", command)
+            self.assertIn("/usr/lib/nq/helpers/nq-host-helper", command)
+            self.assertIn("/usr/lib/nq/helpers/nq-operator-beta-helper", command)
+            self.assertIn("/usr/lib/systemd/system/nqd.service", command)
+            self.assertNotIn("! dpkg-query -W nq-ng", command)
+        target_command = next(
+            command for role, command in commands
+            if role == "target" and "sudo dpkg -r" in command
+        )
+        self.assertIn(
+            "/usr/libexec/agent-governor-ng/ag-effectd", target_command
+        )
+        self.assertNotIn(
+            "! dpkg-query -W agent-governor-ng-systemd-executor", target_command
+        )
+
+    def test_package_payload_absence_distinguishes_dpkg_record_states(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            binary = root / "bin"
+            binary.mkdir()
+            query = binary / "dpkg-query"
+            query.write_text(
+                "#!/bin/sh\n"
+                "case \"$FAKE_DPKG_STATE\" in\n"
+                "  absent) exit 1 ;;\n"
+                "  config-files) printf 'deinstall ok config-files' ;;\n"
+                "  installed) printf 'install ok installed' ;;\n"
+                "  broken) exit 2 ;;\n"
+                "esac\n"
+            )
+            query.chmod(0o755)
+            payload = root / "payload"
+            command = [
+                "sh",
+                "-eu",
+                "-c",
+                RUNNER.PACKAGE_PAYLOAD_ABSENCE_SCRIPT,
+                "package-payload-absence",
+                "nq-ng",
+                str(payload),
+            ]
+            base_env = {**os.environ, "PATH": f"{binary}:{os.environ['PATH']}"}
+
+            for state in ("absent", "config-files"):
+                with self.subTest(state=state):
+                    completed = subprocess.run(
+                        command,
+                        env={**base_env, "FAKE_DPKG_STATE": state},
+                        check=False,
+                    )
+                    self.assertEqual(completed.returncode, 0)
+            for state in ("installed", "broken"):
+                with self.subTest(state=state):
+                    completed = subprocess.run(
+                        command,
+                        env={**base_env, "FAKE_DPKG_STATE": state},
+                        check=False,
+                    )
+                    self.assertNotEqual(completed.returncode, 0)
+
+            payload.write_bytes(b"retained package payload\n")
+            completed = subprocess.run(
+                command,
+                env={**base_env, "FAKE_DPKG_STATE": "config-files"},
+                check=False,
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            payload.unlink()
+            payload.symlink_to(root / "missing")
+            completed = subprocess.run(
+                command,
+                env={**base_env, "FAKE_DPKG_STATE": "config-files"},
+                check=False,
+            )
+            self.assertNotEqual(completed.returncode, 0)
 
     def test_nodefaults_launch_uses_explicit_read_only_virtio_nocloud_drive(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
