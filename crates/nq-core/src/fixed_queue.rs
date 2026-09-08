@@ -1,5 +1,5 @@
-//! Compiled queue predicates with exact, immutable consumer bindings.
-//! Catalogs carry identities, never executable expressions: only the two
+//! Closed factual predicates with exact, immutable consumer bindings.
+//! Catalogs carry identities, never executable expressions: only the finite
 //! compiled forms below are admitted. This is factual testimony, not authority.
 use chrono::DateTime;
 use nq_protocol::{Sha256Digest, semantic_digest};
@@ -184,7 +184,7 @@ pub fn admit(
         return Err("observation future or stale at exclusive boundary".into());
     }
     let conclusion = evaluate(p, &observation["facts"])?;
-    let mut receipt = json!({"schema":"nq.bounded-predicate-admission/v1", "compiled_semantics":"nq.bounded-predicate-17-18/v1", "inventory_digest":digest(inventory)?, "catalog_digest":catalog_digest,"evaluated_at":at,"concern":concern,"semantic_conclusion":conclusion,
+    let mut receipt = json!({"schema":"nq.bounded-predicate-admission/v1", "compiled_semantics":"nq.bounded-predicate-compiled/v1", "inventory_digest":digest(inventory)?, "catalog_digest":catalog_digest,"evaluated_at":at,"concern":concern,"semantic_conclusion":conclusion,
         "witness":{"project":project,"concern":concern,"question":text(p,"question")?,"declaration_profile":text(p,"declaration_profile")?,"predicate_profile":text(p,"id")?,"profile_digest":digest(p)?,"input_schema_digest":digest(&p["input_schema"])?,"producer":producer,"observed_at":observed_at,"valid_for_seconds":validity}});
     receipt["receipt_digest"] = json!(digest(&receipt)?);
     Ok(receipt)
@@ -219,6 +219,6 @@ pub fn support(
         text(witness, "concern")?,
     )?;
     Ok(
-        json!({"schema":"nq.bounded-predicate-support-evaluation/v1","admission_replay_matches":true,"admission_receipt_digest":receipt["receipt_digest"],"catalog_digest":receipt["catalog_digest"],"predicate_profile":witness["predicate_profile"],"profile_digest":witness["profile_digest"],"input_schema_digest":witness["input_schema_digest"],"semantic_conclusion":evaluate(p,facts)?,"trace":{"compiled_semantics":"nq.bounded-predicate-17-18/v1","facts_digest":digest(facts)?}}),
+        json!({"schema":"nq.bounded-predicate-support-evaluation/v1","admission_replay_matches":true,"admission_receipt_digest":receipt["receipt_digest"],"catalog_digest":receipt["catalog_digest"],"predicate_profile":witness["predicate_profile"],"profile_digest":witness["profile_digest"],"input_schema_digest":witness["input_schema_digest"],"semantic_conclusion":evaluate(p,facts)?,"trace":{"compiled_semantics":"nq.bounded-predicate-compiled/v1","facts_digest":digest(facts)?}}),
     )
 }
