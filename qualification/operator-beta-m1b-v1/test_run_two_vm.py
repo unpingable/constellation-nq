@@ -644,6 +644,44 @@ sys.stdout.buffer.write(
         self.assertIn(f"{RUNNER.NQ_DEB_SHA256}  /home/betaoperator/nq-ng.deb", joined)
         self.assertIn(f"{RUNNER.AG_DEB_SHA256}  /home/betaoperator/agent-governor-ng-systemd-executor_amd64.deb", joined)
 
+    def test_package_continuity_checks_protected_store_as_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = pathlib.Path(temporary) / "run"
+            (output / "evidence").mkdir(parents=True)
+            producer = RUNNER.Producer(self.args(output))
+            control = RUNNER.Guest(
+                "control", 23141, "a", "b", RUNNER.CONTROLLER_ADDRESS, output / "control"
+            )
+            target = RUNNER.Guest(
+                "target", 23142, "c", "d", RUNNER.FIXTURE_ADDRESS, output / "target"
+            )
+            commands = []
+            producer.ssh = mock.Mock(
+                side_effect=lambda _guest, command, **_kwargs: (
+                    commands.append(command)
+                    or subprocess.CompletedProcess(
+                        [], 0, stdout=("store_sha256=" + "8" * 64 + "\n").encode(), stderr=b""
+                    )
+                )
+            )
+            with mock.patch.object(producer, "complete_phase"):
+                producer.package_continuity(control, target, [])
+
+        self.assertEqual(len(commands), 2)
+        for command in commands:
+            self.assertIn(
+                "sudo test ! -s /var/lib/nq/operator-beta.sqlite-wal", command
+            )
+            self.assertIn(
+                "sudo test -f /var/lib/nq/operator-beta.sqlite", command
+            )
+            self.assertNotIn(
+                "; test ! -s /var/lib/nq/operator-beta.sqlite-wal", command
+            )
+            self.assertNotIn(
+                "; test -f /var/lib/nq/operator-beta.sqlite", command
+            )
+
     def test_nodefaults_launch_uses_explicit_read_only_virtio_nocloud_drive(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output = pathlib.Path(temporary).resolve()

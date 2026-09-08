@@ -1,5 +1,5 @@
 # Operator-beta NQ-ng M1B two-VM qualification harness
-**Status:** `PRE_EFFECT_RUNS_001_002_003_004_005_REFUSED__PACKAGE_004_ACCEPTED_PUBLISHED__FRESH_RUN_READY`
+**Status:** `RUNS_001_002_003_004_005_REFUSED_NO_EFFECT__RUN_006_REFUSED_AFTER_KNOWN_EFFECT_OWNER_SUCCESS__PACKAGE_CONTINUITY_CORRECTION_READY_FOR_INDEPENDENT_AUDIT`
 **Helper correction implementation:** `860452c53d63b6162c18a2e0b4aba4acb736baea`
 **Accepted helper correction result:** `c62eb7130c813896903e0156bd0593e22befe4a5`
 **Accepted package-layout checkpoint:** `8865dcad23f17a1f26716161554530237e04bb9e`
@@ -17,7 +17,7 @@ oracle. The controller and target observations remain independent artifacts.
 The harness never infers an AG-to-Docket-to-NQ edge from matching identities or
 timestamps.
 
-## Observed pre-effect runs
+## Observed bounded runs
 
 `operator-beta-m1b-run-001` and fresh `operator-beta-m1b-run-002` each started
 both exact local QEMU guests from accepted inputs, but neither `-nodefaults`
@@ -102,6 +102,25 @@ fresh target-local systemd artifact and a fresh controller-vantage HTTP
 artifact. The AG adapter is used only as the already-qualified local effect
 owner; the run does not claim AG authorization consumption or a Docket database
 occurrence. Those composition edges remain a later main-loop gate.
+
+Fresh `operator-beta-m1b-run-006` used exact accepted harness subject
+`f412a1fcc71e9dbe4060afa1b0d7dedd89d75230` and package-004. Both pre-effect
+observations were retained, the AG owner returned an exact successful receipt,
+and the post-effect systemd and HTTP conditions were each established as
+explicitly absent. The run then refused at the first package-continuity check.
+Its terminal records preserve `KNOWN_EFFECT_OWNER_SUCCESS`, exact effect
+custody, last completed phase `effect_owner_completed`, and the instruction not
+to restart the producer. Package continuity, restart reopening, AG store-cut
+audit, teardown, and the terminal M1B result were not completed.
+
+A snapshot-only diagnostic of the stopped target overlay established that the
+SQLite store remained present under `/var/lib/nq`, whose `0700 nq:nq` boundary
+made the unprivileged shell's `test -f` return false. The same permission error
+could make unprivileged `test ! -s` treat an untraversable WAL as absent. The
+bounded correction runs only those two filesystem predicates as the owning
+identity via `sudo`; checkpointing, exact before/after hashes, package removal
+and reinstall, and every later phase remain unchanged. The diagnostic VM was
+powered off and did not alter run-006.
 
 ## Inputs and retained identity
 
@@ -264,19 +283,21 @@ output. `RESULT.json` plus `ARTIFACTS.sha256`, or `REFUSAL.json` plus
 
 ## Still unqualified
 
-The harness candidate is not the M1B result. A successful two-VM exercise,
-complete package lifecycle, AG effect occurrence, NQ artifacts, restart/reopen,
-and teardown are still `NOT_RUN`. Run-004 establishes only installation and
-configuration of the accepted package before its permission-boundary refusal.
+The harness candidate is not the M1B result. Run-006 establishes exact pre/post
+NQ artifacts and one AG-owned successful effect occurrence, but it does not
+establish complete package continuity, restart/reopen, AG store-cut audit,
+teardown, or a terminal M1B result. Runs 001--005 remain their separate
+pre-effect refusals and run-006 is not resumed or relabeled.
 The upstream Debian
 cloud checksum relation remains
 unsigned at the selected versioned directory and therefore cannot satisfy the
 canonical signed-checksum item. Live Docket custody, AG authorization
 consumption, cross-profile aggregation, Nightshift currentness, deployment,
-and production also remain outside this lane. The Bookworm package bytes are
-accepted and published at
-`b758f47b8a03bf9314520f51d707480babf55e82`; the transient-unit harness
-correction remains a candidate until independently reviewed.
+and production also remain outside this lane. The Bookworm package-004 bytes
+are accepted and published at
+`e644390b4b761388569d9dbee5b374294f40ae17`; the helper correction is accepted
+and published at `c62eb7130c813896903e0156bd0593e22befe4a5`. Only the narrow
+package-continuity permission-boundary correction awaits review.
 
 The accepted AG package supplies the query-only terminal receipt/evidence
 reopener. This candidate retains an exact WAL-zero owner store cut under the
