@@ -1,10 +1,11 @@
 # Operator-beta NQ-ng observation helper checkpoint
 
 **Status:** `LIVE_RUN_005_REFUSED__BOUNDED_CORRECTION_READY_FOR_INDEPENDENT_AUDIT`
-**Implementation candidate subject:** `386358190e974c532d5237d36231fe7e806d100e`
-**Accepted qualification result:** `9d8624a2d13cb1562b55a81de6f6cea07fb65dcc`
-**Tree:** `0432d9846d78938181e43f47b10f72f5cf90e027`
-**Rejected qualification parent:** `0fe03f50ff971d910ff61f3ed2dd5d6534e67ab7`
+**Correction implementation candidate:** `860452c53d63b6162c18a2e0b4aba4acb736baea`
+**Correction tree:** `083a6a9c52ba49f1f2cd181c3793941f894b3212`
+**Correction parent:** `1cc635cc3dd8ac092d1ea9b1d772a06ee0d80cc5`
+**Accepted predecessor qualification:** `9d8624a2d13cb1562b55a81de6f6cea07fb65dcc`
+**Accepted predecessor implementation:** `386358190e974c532d5237d36231fe7e806d100e`
 **Accepted contract ancestor:** `e45c7b4bfb18ea740576a65f692b29f4390fbaff`
 
 ## Observed implementation

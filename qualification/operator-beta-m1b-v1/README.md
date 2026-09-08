@@ -1,5 +1,6 @@
 # Operator-beta NQ-ng M1B two-VM qualification harness
 **Status:** `PRE_EFFECT_RUNS_001_002_003_004_005_REFUSED__HELPER_OBSERVATION_CORRECTION_READY_FOR_INDEPENDENT_AUDIT`
+**Helper correction implementation:** `860452c53d63b6162c18a2e0b4aba4acb736baea`
 **Accepted package checkpoint:** `8865dcad23f17a1f26716161554530237e04bb9e`
 **Accepted AG store-audit owner:** `837de287497942c79966aa05c083acee9c312261`
 **Accepted AG package qualification:** `db4bad1fba2b5ab512cc58356314228167b2f48e`
