@@ -5,7 +5,6 @@ use anyhow::{Result, bail};
 use nq_core::docket_support::{Acquisition, Request, qualify};
 use nq_protocol::{Sha256Digest, decode_json_document, sha256_bytes};
 use std::{
-    fs::File,
     io::{Read, Seek},
     os::fd::AsRawFd,
     path::Path,
@@ -16,7 +15,10 @@ use std::{
 pub fn run(binary: &Path, expected: &str, state: &Path, request: &Path) -> Result<()> {
     let request_bytes = crate::bounded_input::read(request, 4 * 1024 * 1024)?;
     let mut r: Request = decode_json_document(&request_bytes, 4 * 1024 * 1024)?;
-    let mut executable = File::open(binary)?;
+    let mut executable = crate::bounded_input::open_regular(binary)?;
+    if executable.metadata()?.len() > 256 * 1024 * 1024 {
+        bail!("Docket executable exceeds size bound");
+    }
     let mut bytes = Vec::new();
     (&mut executable)
         .take(256 * 1024 * 1024 + 1)

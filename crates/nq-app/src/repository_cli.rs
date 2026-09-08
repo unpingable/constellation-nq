@@ -55,19 +55,7 @@ pub fn run(command: RepositoryCommand) -> Result<()> {
             artifact,
             producer_sha256,
         } => {
-            let file = fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOFOLLOW)
-                .open(&artifact)?;
-            let metadata = file.metadata()?;
-            if !metadata.is_file() || metadata.len() > 32 * 1024 * 1024 {
-                bail!("artifact is not a bounded regular file");
-            }
-            let mut bytes = Vec::new();
-            file.take(32 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
-            if bytes.len() > 32 * 1024 * 1024 {
-                bail!("artifact grew beyond its bound");
-            }
+            let bytes = crate::bounded_input::read(&artifact, 32 * 1024 * 1024)?;
             let execution: RepositoryExecution = serde_json::from_slice(&bytes)?;
             if canonical_json_bytes(&execution)? != bytes {
                 bail!("artifact is not exact canonical JSON");

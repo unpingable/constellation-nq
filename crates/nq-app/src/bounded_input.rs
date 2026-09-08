@@ -17,6 +17,26 @@ fn capture(path: &Path) -> Result<File> {
     Ok(reference)
 }
 
+/// Open a readable descriptor only after capturing and checking a regular inode.
+/// Callers retaining this descriptor may hash and execute that same inode; this
+/// does not seal its contents or its dynamic runtime dependencies.
+pub fn open_regular(path: &Path) -> Result<File> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        let reference = capture(path)?;
+        Ok(File::open(format!(
+            "/proc/self/fd/{}",
+            reference.as_raw_fd()
+        ))?)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        anyhow::bail!("regular descriptor custody requires Linux procfs")
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn read_captured(reference: &File, limit: usize) -> Result<Vec<u8>> {
     use std::os::fd::AsRawFd;
@@ -70,7 +90,9 @@ mod tests {
         )
         .unwrap();
         assert!(read(&fifo, 3).is_err());
+        assert!(open_regular(&fifo).is_err());
         assert!(read(Path::new("/dev/null"), 3).is_err());
+        assert!(open_regular(Path::new("/dev/null")).is_err());
         assert!(read(root.path(), 3).is_err());
         let link = root.path().join("link");
         std::os::unix::fs::symlink(&path, &link).unwrap();
