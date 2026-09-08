@@ -10,6 +10,7 @@ import io
 import json
 import os
 import pathlib
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -568,6 +569,14 @@ sys.stdout.buffer.write(
             responses = [subprocess.CompletedProcess([], 0, stdout=b"", stderr=b""), subprocess.CompletedProcess([], 0, stdout=RUNNER.canonical(artifact), stderr=b"")]
             producer.ssh = mock.Mock(side_effect=responses)
             producer.execute_diagnostic(mock.Mock(), "systemd-post", "systemd-post.json", "nq.systemd_unit", "explicitly_absent")
+            commands = [call.args[1] for call in producer.ssh.call_args_list]
+            self.assertEqual(
+                commands,
+                [
+                    RUNNER.nq_helper_command(["watcher", "admit", "systemd-post"]),
+                    RUNNER.nq_helper_command(["diagnostics", "execute", "systemd-post"]),
+                ],
+            )
             changed = dict(artifact)
             changed["subject"] = dict(changed["subject"])
             changed["subject"]["id"] = "sha256:" + "9" * 64
@@ -576,6 +585,34 @@ sys.stdout.buffer.write(
             producer.ssh = mock.Mock(side_effect=responses)
             with self.assertRaisesRegex(RUNNER.Refusal, "wrong subject"):
                 producer.execute_diagnostic(mock.Mock(), "systemd-post", "changed.json", "nq.systemd_unit", "explicitly_absent")
+
+    def test_helper_execution_uses_documented_transient_unit_boundary(self) -> None:
+        command = RUNNER.nq_helper_command(["watcher", "admit", "systemd-pre"])
+        arguments = shlex.split(command)
+        self.assertEqual(arguments[:6], ["sudo", "systemd-run", "--quiet", "--wait", "--pipe", "--collect"])
+        self.assertIn(
+            "--property=CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_KILL",
+            arguments,
+        )
+        self.assertIn(
+            "--property=AmbientCapabilities=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_KILL",
+            arguments,
+        )
+        self.assertIn("--property=User=nq", arguments)
+        self.assertIn("--property=NoNewPrivileges=yes", arguments)
+        self.assertEqual(
+            arguments[-6:],
+            [
+                "--",
+                "/usr/bin/nq",
+                "--config=/etc/nq/operator-beta.toml",
+                "watcher",
+                "admit",
+                "systemd-pre",
+            ],
+        )
+        self.assertNotIn("-u", arguments)
+
     def test_guest_install_uses_canonical_package_paths_and_digests(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output = pathlib.Path(temporary) / "run"

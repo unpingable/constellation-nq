@@ -62,6 +62,9 @@ rg -F --quiet 'test_terminal_reopen_refuses_coherently_substituted_owner_outcome
 rg -F --quiet 'test_terminal_reopen_refuses_coherently_substituted_store_cut' "$tests"
 rg -F --quiet 'test_terminal_reopen_refuses_substituted_owner_executable' "$tests"
 rg -F --quiet 'test_nodefaults_launch_uses_explicit_read_only_virtio_nocloud_drive' "$tests"
+rg -F --quiet 'test_helper_execution_uses_documented_transient_unit_boundary' "$tests"
+rg -F --quiet 'CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_KILL' "$runner"
+rg -F --quiet 'AmbientCapabilities=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_KILL' "$runner"
 for token in \
   'REFUSED / NO_EFFECT_ATTEMPTED' \
   'sha256:fb7a58d0482a24e269ba85636ce46cb06aaaef3aea0e868154ed0ae7c18fa379' \

@@ -1,5 +1,5 @@
 # Operator-beta NQ-ng M1B two-VM qualification harness
-**Status:** `PRE_EFFECT_RUNS_001_002_003_REFUSED__REPRODUCIBLE_BOOKWORM_PACKAGE_CANDIDATE__INDEPENDENT_REVIEW_REQUIRED`
+**Status:** `PRE_EFFECT_RUNS_001_002_003_004_REFUSED__TRANSIENT_UNIT_CORRECTION_CANDIDATE__INDEPENDENT_REVIEW_REQUIRED`
 **Accepted package checkpoint:** `8865dcad23f17a1f26716161554530237e04bb9e`
 **Accepted AG store-audit owner:** `837de287497942c79966aa05c083acee9c312261`
 **Accepted AG package qualification:** `db4bad1fba2b5ab512cc58356314228167b2f48e`
@@ -52,6 +52,23 @@ all four packaged binaries execute their build-info probes in that Bookworm
 image and require no glibc symbol newer than `GLIBC_2.34`. Exact evidence is in
 `BOOKWORM-PACKAGE.md`. Runs 001, 002, and 003 are never retried or relabeled;
 any later exercise is a fresh run occurrence after independent acceptance.
+
+Fresh `operator-beta-m1b-run-004` used the independently accepted and
+published reproducible Bookworm package. Both guests reached `nq_configured`;
+the first target watcher admission then refused because the harness invoked NQ
+as an ordinary `nq` login process, which cannot enter the separate
+`nq-helper` execution account. The exact runtime diagnostic was
+`unsafe or unsupported startup runtime ... Operation not permitted`. The
+retained refusal says `NO_EFFECT_ATTEMPTED` with null effect custody; both
+guests and the producer exited. Run-004 is not retried or relabeled.
+
+The correction reuses NQ's documented one-shot operator boundary: only
+watcher admission and diagnostic execution run through a bounded
+`systemd-run --wait --pipe --collect` transient unit as `nq:nq`, with the
+same four-capability ceiling and service restrictions as `nqd`. The helper
+child still clears all capabilities before execution. Configuration,
+initialization, export, revocation, backup, and other capability-free commands
+retain their existing direct `nq` invocation.
 
 The target begins with the exact fixture unit installed, disabled, and
 inactive. The controller cannot reach the fixed HTTP response. One fresh
@@ -159,7 +176,7 @@ qualification outcomes.
 
 The checked producer is `run_two_vm.py`; its pure-local qualification is
 `test_run_two_vm.py`, and `scripts/check-operator-beta-m1b-v1.sh` is the
-structural gate. The correction candidate passes 27 qualification cases
+structural gate. The correction candidate passes 28 qualification cases
 covering AG-compatible subject framing, durable recovery custody, exact
 diagnostic subject/scope/profile/question/policy/vantage/self-identity binding,
 producer-unit identity, runtime bounds, exact diagnostic policy/condition
@@ -173,12 +190,17 @@ and accepted-audit-executable substitutions. A direct producer case checks the
 locked WAL-zero stable cut, exact source/copy relation, accepted owner query,
 and retained cross-component identity record. A separate launch-envelope case
 requires the explicit read-only virtio NoCloud drive under `-nodefaults` and
-refuses either IDE form.
+refuses either IDE form. Another direct envelope case requires the documented
+transient-unit permission boundary for every helper-executing NQ command and
+refuses a plain login-account substitution.
 The gate's injected missing-boundary
 control refuses deterministically. These cases do not start a VM, install a
 package, use the system bus, or perform an effect. The separately retained
 run-003 installed the exact prior package and fixture, then refused at its first
-NQ invocation before producing an NQ artifact or attempting an effect.
+NQ invocation. Run-004 installed the accepted Bookworm package and reached NQ
+configuration, then refused at its first helper-executing admission because the
+harness omitted the documented transient-unit capabilities. Neither produced
+an NQ artifact or attempted an effect.
 
 A live run must use a clean, accepted harness commit and a named user-systemd
 unit whose `InvocationID` and `MainPID` match the producer. The intended local
@@ -216,14 +238,17 @@ output. `RESULT.json` plus `ARTIFACTS.sha256`, or `REFUSAL.json` plus
 
 The harness candidate is not the M1B result. A successful two-VM exercise,
 complete package lifecycle, AG effect occurrence, NQ artifacts, restart/reopen,
-and teardown are still `NOT_RUN`. Run-003 establishes only installation of the
-prior package before its incompatible executable refused. The upstream Debian
+and teardown are still `NOT_RUN`. Run-004 establishes only installation and
+configuration of the accepted package before its permission-boundary refusal.
+The upstream Debian
 cloud checksum relation remains
 unsigned at the selected versioned directory and therefore cannot satisfy the
 canonical signed-checksum item. Live Docket custody, AG authorization
 consumption, cross-profile aggregation, Nightshift currentness, deployment,
-and production also remain outside this lane. The Bookworm package bytes are a
-candidate until this exact pin and build evidence receive independent review.
+and production also remain outside this lane. The Bookworm package bytes are
+accepted and published at
+`b758f47b8a03bf9314520f51d707480babf55e82`; the transient-unit harness
+correction remains a candidate until independently reviewed.
 
 The accepted AG package supplies the query-only terminal receipt/evidence
 reopener. This candidate retains an exact WAL-zero owner store cut under the

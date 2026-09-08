@@ -10,6 +10,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import sqlite3
 import signal
@@ -116,6 +117,55 @@ REQUIRED_TERMINAL_PATHS = {
 
 class Refusal(RuntimeError):
     """Fail-closed qualification refusal."""
+
+
+NQ_HELPER_UNIT_PROPERTIES = (
+    "User=nq",
+    "Group=nq",
+    "UMask=0077",
+    "NoNewPrivileges=yes",
+    "PrivateTmp=yes",
+    "TemporaryFileSystem=/tmp:rw,nosuid,nodev,noexec,mode=1777,size=64M /var/tmp:rw,nosuid,nodev,noexec,mode=1777,size=64M",
+    "ProtectSystem=strict",
+    "ProtectHome=yes",
+    "ProtectClock=yes",
+    "ProtectControlGroups=yes",
+    "ProtectKernelLogs=yes",
+    "ProtectKernelModules=yes",
+    "ProtectKernelTunables=yes",
+    "ProtectHostname=yes",
+    "RestrictNamespaces=yes",
+    "RestrictRealtime=yes",
+    "RestrictSUIDSGID=yes",
+    "LockPersonality=yes",
+    "RemoveIPC=yes",
+    "KeyringMode=private",
+    "SystemCallArchitectures=native",
+    "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+    "ReadOnlyPaths=/etc/nq",
+    "ReadWritePaths=/var/lib/nq /run/nq",
+    "CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_KILL",
+    "AmbientCapabilities=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_KILL",
+    "LimitNOFILE=4096",
+    "LimitFSIZE=1G",
+    "LimitCORE=0",
+    "TasksMax=256",
+    "MemoryMax=2G",
+    "MemorySwapMax=0",
+    "CPUQuota=200%",
+)
+
+
+def nq_helper_command(arguments: list[str]) -> str:
+    if not arguments or any(not argument or "\n" in argument for argument in arguments):
+        raise Refusal("NQ helper command has an invalid argument")
+    command = ["sudo", "systemd-run", "--quiet", "--wait", "--pipe", "--collect"]
+    for value in NQ_HELPER_UNIT_PROPERTIES:
+        command.append(f"--property={value}")
+    command.extend(
+        ["--", "/usr/bin/nq", "--config=/etc/nq/operator-beta.toml", *arguments]
+    )
+    return shlex.join(command)
 
 
 
@@ -1259,11 +1309,11 @@ helper_runtime_dir = "/run/nq/operator-beta-helpers"
     ) -> dict[str, Any]:
         self.ssh(
             guest,
-            f"sudo -u nq /usr/bin/nq --config /etc/nq/operator-beta.toml watcher admit {instance}",
+            nq_helper_command(["watcher", "admit", instance]),
         )
         result = self.ssh(
             guest,
-            f"sudo -u nq /usr/bin/nq --config /etc/nq/operator-beta.toml diagnostics execute {instance}",
+            nq_helper_command(["diagnostics", "execute", instance]),
         )
         destination = self.output / "evidence" / output_name
         atomic_write(destination, result.stdout, 0o400)
