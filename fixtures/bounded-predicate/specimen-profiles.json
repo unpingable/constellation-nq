@@ -1,0 +1,80 @@
+{
+  "schema": "nq.project-predicate-profile-catalog/v1",
+  "profiles": [
+    {
+      "schema": "nq.project-predicate-profile/v1",
+      "id": "nq.profile.weatherwatch-durable-access/v1",
+      "question": "weatherwatch.question.durable-state-accessible",
+      "declaration_profile": "weatherwatch.profile.durable-state-access.v1",
+      "subject": {"project": "weatherwatch", "concern": "weatherwatch.persistence.access"},
+      "accepted_producers": ["weatherwatch.status"],
+      "accepted_manifest_digests": ["sha256:7f098bedaa0646464104e90c6f727e804598c694a45d8c30df9961a818c336b6"],
+      "input_schema": [
+        {"path": "exists", "type": "bool"},
+        {"path": "readable", "type": "bool"},
+        {"path": "write_transaction_available", "type": "bool"}
+      ],
+      "predicate": {"operator": "all", "clauses": [
+        {"operator": "compare", "fact": "exists", "comparator": "eq", "value": {"type": "bool", "value": true}},
+        {"operator": "compare", "fact": "readable", "comparator": "eq", "value": {"type": "bool", "value": true}},
+        {"operator": "compare", "fact": "write_transaction_available", "comparator": "eq", "value": {"type": "bool", "value": true}}
+      ]}
+    },
+    {
+      "schema": "nq.project-predicate-profile/v1",
+      "id": "nq.profile.labelwatch-sqlite-continuity/v1",
+      "question": "labelwatch.question.sqlite_continuity/v1",
+      "declaration_profile": "labelwatch.profile.local_status/v1",
+      "subject": {"project": "labelwatch", "concern": "labelwatch.persistence.sqlite_continuity"},
+      "accepted_producers": ["labelwatch.ops-status"],
+      "accepted_manifest_digests": ["sha256:895005fc7ffbba099a6d146e26626a04758996f88ac11737433cc26ca0e26737"],
+      "input_schema": [
+        {"path": "quick_check", "type": "string"},
+        {"path": "write_transaction_acquired", "type": "bool"}
+      ],
+      "predicate": {"operator": "all", "clauses": [
+        {"operator": "compare", "fact": "quick_check", "comparator": "eq", "value": {"type": "string", "value": "ok"}},
+        {"operator": "compare", "fact": "write_transaction_acquired", "comparator": "eq", "value": {"type": "bool", "value": true}}
+      ]}
+    },
+    {
+      "schema": "nq.project-predicate-profile/v1",
+      "id": "nq.profile.labelwatch-volume-floor-14gib/v1",
+      "question": "labelwatch.question.volume_capacity/v1",
+      "declaration_profile": "labelwatch.profile.local_status/v1",
+      "subject": {"project": "labelwatch", "concern": "labelwatch.persistence.volume_capacity"},
+      "accepted_producers": ["labelwatch.ops-status"],
+      "accepted_manifest_digests": ["sha256:895005fc7ffbba099a6d146e26626a04758996f88ac11737433cc26ca0e26737"],
+      "input_schema": [{"path": "free_bytes", "type": "u64"}],
+      "predicate": {"operator": "compare", "fact": "free_bytes", "comparator": "ge", "value": {"type": "u64", "value": 15032385536}}
+    },
+    {
+      "schema": "nq.project-predicate-profile/v1",
+      "id": "nq.profile.driftwatch-sqlite-continuity/v1",
+      "question": "driftwatch.question.sqlite_continuity/v1",
+      "declaration_profile": "driftwatch.profile.local_status/v1",
+      "subject": {"project": "driftwatch", "concern": "driftwatch.persistence.sqlite_continuity"},
+      "accepted_producers": ["driftwatch.ops-status"],
+      "accepted_manifest_digests": ["sha256:5b9199b66d956d0ff6f575b3f471abb8eed91197afc348e2f5a593be0ddd629d"],
+      "input_schema": [
+        {"path": "quick_check", "type": "string"},
+        {"path": "write_transaction_acquired", "type": "bool"}
+      ],
+      "predicate": {"operator": "all", "clauses": [
+        {"operator": "compare", "fact": "quick_check", "comparator": "eq", "value": {"type": "string", "value": "ok"}},
+        {"operator": "compare", "fact": "write_transaction_acquired", "comparator": "eq", "value": {"type": "bool", "value": true}}
+      ]}
+    },
+    {
+      "schema": "nq.project-predicate-profile/v1",
+      "id": "nq.profile.driftwatch-sqlite-slack-5000000-pages/v1",
+      "question": "driftwatch.question.sqlite_internal_slack/v1",
+      "declaration_profile": "driftwatch.profile.local_status/v1",
+      "subject": {"project": "driftwatch", "concern": "driftwatch.persistence.sqlite_slack"},
+      "accepted_producers": ["driftwatch.ops-status"],
+      "accepted_manifest_digests": ["sha256:5b9199b66d956d0ff6f575b3f471abb8eed91197afc348e2f5a593be0ddd629d"],
+      "input_schema": [{"path": "freelist_count", "type": "u64"}],
+      "predicate": {"operator": "compare", "fact": "freelist_count", "comparator": "ge", "value": {"type": "u64", "value": 5000000}}
+    }
+  ]
+}

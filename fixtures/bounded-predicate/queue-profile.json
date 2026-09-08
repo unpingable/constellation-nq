@@ -1,0 +1,29 @@
+{
+  "schema": "nq.project-predicate-profile-catalog/v1",
+  "profiles": [
+    {
+      "schema": "nq.project-predicate-profile/v1",
+      "id": "nq.profile.sprocket-queue-bounded-17/v1",
+      "question": "sprocket.question.queue-bounded/v1",
+      "declaration_profile": "sprocket.profile.queue-bounded-17/v1",
+      "subject": {
+        "project": "sprocket-fixture",
+        "concern": "sprocket.queue.bounded"
+      },
+      "accepted_producers": ["sprocket-fixture.status"],
+      "accepted_manifest_digests": [
+        "sha256:8e81b1be2f274e4be29a992fa69ceae81cf337a1323ab319fc06c416afed505c"
+      ],
+      "input_schema": [
+        {"path": "queue.depth", "type": "u64"}
+      ],
+      "predicate": {
+        "operator": "compare",
+        "fact": "queue.depth",
+        "comparator": "le",
+        "value": {"type": "u64", "value": 17}
+      },
+      "max_observation_age_seconds": 300
+    }
+  ]
+}
