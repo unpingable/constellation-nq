@@ -142,24 +142,46 @@ fn entire_inventory_must_remain_well_formed() {
     let mut empty_repository = i.clone();
     empty_repository["repository"] = json!("");
     rejects(&empty_repository);
+    let mut valid_extra = i["concerns"][0].clone();
+    valid_extra["declaration"]["id"] = json!("unselected");
+    let mut valid_inventory = i.clone();
+    valid_inventory["concerns"]
+        .as_array_mut()
+        .unwrap()
+        .push(valid_extra.clone());
+    assert!(
+        admit(
+            &valid_inventory,
+            &c,
+            &digest(&c).unwrap(),
+            concern,
+            "2026-09-08T12:01:00Z"
+        )
+        .is_ok()
+    );
     for state in ["OBSERVED", "unrecognized-state"] {
         let mut malformed = i.clone();
-        malformed["concerns"].as_array_mut().unwrap().push(json!({
-            "declaration":{"id":"unselected"},"monitor_state":state,"observation":null
-        }));
+        let mut row = valid_extra.clone();
+        row["monitor_state"] = json!(state);
+        row["observation"] = Value::Null;
+        malformed["concerns"].as_array_mut().unwrap().push(row);
         rejects(&malformed);
     }
     let mut duplicate = i.clone();
-    let extra = json!({"declaration":{"id":"unselected"},"monitor_state":"MISSING_OPTIONAL_OBSERVATION","observation":null});
+    let mut extra = valid_extra.clone();
+    extra["monitor_state"] = json!("MISSING_OPTIONAL_OBSERVATION");
+    extra["observation"] = Value::Null;
     duplicate["concerns"]
         .as_array_mut()
         .unwrap()
         .extend([extra.clone(), extra]);
     rejects(&duplicate);
     let mut inconsistent = i.clone();
-    inconsistent["concerns"].as_array_mut().unwrap().push(json!({
-        "declaration":{"id":"unselected"},"monitor_state":"MISSING_REQUIRED_OBSERVATION","observation":{}
-    }));
+    valid_extra["monitor_state"] = json!("MISSING_REQUIRED_OBSERVATION");
+    inconsistent["concerns"]
+        .as_array_mut()
+        .unwrap()
+        .push(valid_extra);
     rejects(&inconsistent);
     for observation in [
         json!(false),
