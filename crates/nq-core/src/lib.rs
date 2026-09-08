@@ -5,6 +5,7 @@
 //! finding without profile admission and detector evaluation.
 
 pub mod admission;
+pub mod fixed_queue;
 pub mod config;
 pub mod coordination;
 pub mod diagnostic_admission;

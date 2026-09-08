@@ -45,6 +45,11 @@ pub struct Nq {
 /// Operator workflows.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Admit or replay one compiled, content-bound factual predicate.
+    BoundedPredicate {
+        #[command(subcommand)]
+        command: crate::queue_cli::QueueCommand,
+    },
     /// Explicitly initialize an empty nq-ng database and directory layout.
     Init(InitArgs),
     /// Validate, compare, and atomically activate human intent.
@@ -367,6 +372,7 @@ pub struct QueryArgs {
 /// workflow's atomicity and custody rules.
 pub async fn run(options: Nq) -> Result<()> {
     match options.command {
+        Command::BoundedPredicate { command } => crate::queue_cli::run(command),
         Command::Init(arguments) => initialize(&options.config, arguments, options.json),
         Command::Config { command } => config_command(&options.config, command, options.json),
         Command::Profiles { command } => profiles_command(command, options.json),
