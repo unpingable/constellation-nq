@@ -24,14 +24,35 @@ power-loss/off-host backup custody, or grant deletion authority. The application
 adapter must bind this exact factual receipt and request to the AG subject/scope
 and immutable cleanup input. AG owns authorization; Docket owns execution custody.
 
-The current profile inherits the earlier maximum 30-second observation-start to
-evaluation bound. Small fixture reads fit that bound. Production-sized full
-logical scans have not been timed, and may not fit. A production showing must not
-replace the real start time or silently extend currentness. A measured, explicit
-bounded acquisition/currentness contract remains necessary if those reads exceed
-the current bound.
+The initial cleanup v1 candidate inherited the earlier 30-second bound. It is
+superseded for this unqualified candidate by explicit cleanup **v2**, which
+separates acquisition and currentness. Relief v1 still has its original30s bound.
+The separately named held-acquisition profile reuses its factual checks but
+qualifies only the retained acquisition interval, never present currentness.
 
-Candidate source2b7939d has focused policy controls plus app-side real-copy
+Cleanup v2 requires a declared finite acquisition budget (1..7200 seconds), real
+start/end/duration and exclusions, and a distinct final currentness witness aged
+at most30s at evaluation. The application checks budget before further full-copy
+reads; the enrolled capture process must have an external bounded timeout as
+well. Over-budget or stale evidence cannot establish the prerequisite.
+
+Opening and final witnesses bind the exact hold generation, source/original/
+backup/restore device+inode+size+ownership+mode+mtime+ctime identities and actual
+enrolled writer PID/start identities. Full content digests belong to the retained
+acquisition interval. Final metadata equality does not mean the contents were
+rescanned recently, and does not establish activity. Its continuity meaning
+requires the explicitly enrolled all-writer quiescence, protected copy files and
+stable directory custody. It is not protection against an excluded direct writer
+or root changing custody. The AG adapter binds the resulting exact receipt to
+subject/scope and cleanup input and does not extend the final witness's expiry.
+
+Production-sized scans and helper re-verification have not been timed. The
+7200s ceiling is a finite contract limit, not evidence that a production budget
+is sufficient. Fixture unit25s/driver30s deadlines are also not production-ready
+claims. Exact production measurement requires separately approved current access.
+
+Initial candidate source2b7939d has focused policy controls plus app-side real-copy
 observation controls. Its first build occurrence was refused before Cargo by the
 explicit 8GiB free-space reserve; no test/build acceptance follows from that run.
-Exact binary and integrated app/resolver review are still required.
+The stronger v2 source also remains unbuilt until the reserve permits a new
+bounded occurrence. Exact binary and integrated app/resolver review are required.

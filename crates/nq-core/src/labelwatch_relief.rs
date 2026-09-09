@@ -155,13 +155,31 @@ pub fn qualify(raw: &[u8], request: &Request) -> Result<Value, String> {
 }
 
 fn qualify_depth(raw: &[u8], r: &Request, depth: u8) -> Result<Value, String> {
+    qualify_profile(raw, r, depth, false)
+}
+
+/// Qualify an explicitly bounded historical held acquisition, not currentness.
+/// This separate profile does not change relief v1's 30-second semantics.
+pub fn qualify_held_acquisition(raw: &[u8], r: &Request) -> Result<Value, String> {
+    if r.phase != Phase::PreIngest || r.pre_ingest_qualification.is_some() {
+        return Err("held acquisition is pre-ingest only".into());
+    }
+    qualify_profile(raw, r, 0, true)
+}
+
+fn qualify_profile(raw: &[u8], r: &Request, depth: u8, acquisition: bool) -> Result<Value, String> {
     if depth > 1 {
         return Err("bounded predecessor depth exceeded".into());
     }
     let value =
         nq_protocol::decode_json_document(raw, 2 * 1024 * 1024).map_err(|e| e.to_string())?;
     let s: Source = serde_json::from_value(value).map_err(|e| e.to_string())?;
-    if r.schema != "nq.labelwatch-relief-request/v1"
+    let request_schema = if acquisition {
+        "nq.labelwatch-held-acquisition-request/v1"
+    } else {
+        "nq.labelwatch-relief-request/v1"
+    };
+    if r.schema != request_schema
         || s.schema != "labelwatch.sqlite-relief-observation/v1"
         || s.source_owner != "Labelwatch read-only observer"
         || s.operation != r.operation
@@ -175,7 +193,7 @@ fn qualify_depth(raw: &[u8], r: &Request, depth: u8) -> Result<Value, String> {
         || !hex(&r.application_revision, 40)
         || !hex(&r.expected_cut_sha256, 64)
         || !hex(&r.original_identity.sha256, 64)
-        || !(1..=30).contains(&r.maximum_age_seconds)
+        || !(1..=if acquisition { 7200 } else { 30 }).contains(&r.maximum_age_seconds)
         || r.writer_identities
             .keys()
             .map(String::as_str)
@@ -319,10 +337,15 @@ fn qualify_depth(raw: &[u8], r: &Request, depth: u8) -> Result<Value, String> {
     } else {
         "ESTABLISHED"
     };
-    let mut result = json!({"schema":"nq.labelwatch-relief-qualification/v1", "request":r,
+    let receipt_schema = if acquisition {
+        "nq.labelwatch-held-acquisition-qualification/v1"
+    } else {
+        "nq.labelwatch-relief-qualification/v1"
+    };
+    let mut result = json!({"schema":receipt_schema, "request":r,
         "source_utf8":std::str::from_utf8(raw).map_err(|e|e.to_string())?,
         "source_owner":"Labelwatch read-only observer", "disposition":disposition,
-        "claim":if r.phase==Phase::PreIngest {"held_logical_cut_preserved"} else {"resource_relief_postcondition"},
+        "claim":if acquisition {"held_logical_cut_acquired_not_currentness"} else if r.phase==Phase::PreIngest {"held_logical_cut_preserved"} else {"resource_relief_postcondition"},
         "refuted":refuted,"unknown":unknown,"source_limitations":s.limitations,
         "limitations":["external projection under enrolled local source custody, not producer authentication",
             "qualified at observation interval, not persistent currentness or future execution",
