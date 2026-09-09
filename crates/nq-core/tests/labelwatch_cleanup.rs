@@ -146,3 +146,33 @@ fn long_bounded_acquisition_needs_distinct_fresh_unchanged_custody() {
         "NOT_OBSERVABLE"
     );
 }
+
+#[test]
+fn final_freshness_boundary_future_witness_and_writer_substitution_refuse() {
+    let (source, mut request) = fixture();
+    request.evaluated_at = "2026-09-08T00:00:31.999Z".parse().unwrap();
+    assert_eq!(
+        qualify(&serde_json::to_vec(&source).unwrap(), &request).unwrap()["disposition"],
+        "ESTABLISHED"
+    );
+    request.evaluated_at = "2026-09-08T00:00:32Z".parse().unwrap();
+    assert_eq!(
+        qualify(&serde_json::to_vec(&source).unwrap(), &request).unwrap()["disposition"],
+        "NOT_OBSERVABLE"
+    );
+    let (_, request) = fixture();
+    let mut future = source.clone();
+    future["currentness_started_at"] = json!("2026-09-08T00:00:03Z");
+    future["currentness_completed_at"] = json!("2026-09-08T00:00:04Z");
+    assert!(qualify(&serde_json::to_vec(&future).unwrap(), &request).is_err());
+    for custody in ["opening_custody", "final_custody"] {
+        for field in ["pid", "start_ticks"] {
+            let mut changed = source.clone();
+            changed[custody]["value"]["writers"]["main"][field] = json!(999);
+            assert_eq!(
+                qualify(&serde_json::to_vec(&changed).unwrap(), &request).unwrap()["disposition"],
+                "REFUTED"
+            );
+        }
+    }
+}
