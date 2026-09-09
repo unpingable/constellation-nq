@@ -7,6 +7,7 @@ pub mod cli;
 pub mod queue_cli;
 pub mod purpose_cli;
 pub mod continuity_cli;
+pub mod labelwatch_relief_cli;
 pub mod docket_cli;
 pub mod daemon;
 mod ownership;

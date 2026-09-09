@@ -8,6 +8,7 @@ pub mod admission;
 pub mod fixed_queue;
 pub mod purpose_support;
 pub mod continuity_support;
+pub mod labelwatch_relief;
 pub mod docket_support;
 mod snapshot_history;
 pub mod config;

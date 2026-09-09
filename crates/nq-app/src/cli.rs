@@ -45,6 +45,11 @@ pub struct Nq {
 /// Operator workflows.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Qualify fresh read-only Labelwatch maintenance facts; no action authority.
+    LabelwatchRelief {
+        #[arg(long)] source: PathBuf,
+        #[arg(long)] request: PathBuf,
+    },
     /// Acquire and qualify a bounded Docket committed-attempt factual record.
     DocketPurposeSupport {
         #[arg(long)] docket_binary: PathBuf,
@@ -406,6 +411,7 @@ pub struct QueryArgs {
 /// workflow's atomicity and custody rules.
 pub async fn run(options: Nq) -> Result<()> {
     match options.command {
+        Command::LabelwatchRelief { source, request } => crate::labelwatch_relief_cli::run(&source, &request),
         Command::DocketPurposeSupport { docket_binary,docket_sha256,state,request,snapshot_history } => crate::docket_cli::run(&docket_binary,&docket_sha256,&state,&request,&snapshot_history),
         Command::ContinuitySupport { source_export,binding,snapshot_history } => crate::continuity_cli::run(&source_export,&binding,&snapshot_history),
         Command::BoundedPredicate { command } => crate::queue_cli::run(command),
