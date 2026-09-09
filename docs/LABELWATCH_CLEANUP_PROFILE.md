@@ -1,6 +1,7 @@
 # Labelwatch cleanup prerequisite candidate
 
-Implementation candidate, not yet independently qualified or deployed.
+Bounded native/application qualification completed; deployment and integrated
+AG/Docket/systemd qualification remain separate (see dated evidence below).
 
 `labelwatch-cleanup` is a separately named compiled factual profile. It does not
 change `labelwatch-relief` v1 or inherit its prior a94ca44 qualification. Its
@@ -54,5 +55,30 @@ claims. Exact production measurement requires separately approved current access
 Initial candidate source2b7939d has focused policy controls plus app-side real-copy
 observation controls. Its first build occurrence was refused before Cargo by the
 explicit 8GiB free-space reserve; no test/build acceptance follows from that run.
-The stronger v2 source also remains unbuilt until the reserve permits a new
-bounded occurrence. Exact binary and integrated app/resolver review are required.
+At that earlier checkpoint the stronger v2 source also remained unbuilt. That
+historical status is superseded by the following new occurrences, not rewritten
+as acceptance of the failed initial run.
+
+## 2026-09-09 bounded execution evidence
+
+Runtime source `920dc7621f5cdf768473cef26311294fdf6cf61c` (format-only child of
+`0f1a87b`) passed seven cleanup and three relief tests and an exact Rust1.94 native
+build in `m3-nq-003`. Retained binary SHA256:
+`fb1e1e513589d8d04661b89b80b58d90a229ff61e6e2e644df7267b179bcdab7`.
+Application `17a2dedb2528025ec0c05b173d9be9b4b8b4ba53` passed43 cases/no skips in
+`m3-matrix-006`, including real main/discovery held startup and actual native
+cleanup/pre/post observations. `m3-admission-003` passed the resolver control
+against those retained cleanup facts and AG5194005. `m3-capture-full-001` exercised
+allthree app capture CLI phases with actual held fixture processes; effects in
+that occurrence are explicitly developmental, not an AG/Docket showing.
+
+Exact scripts, logs, terminal records, hashes and recovery identities are retained
+under `/data/git/.campaign-artifacts/operator-beta-completion-20260908/`, with
+`M3-NATIVE-003-READINESS.md` as the supervision index. Independent reviewer has
+rederived the retained cleanup receipt with the pinned image; final scoped review
+is recorded separately and does not transfer to later runtime edits.
+
+These are bounded engineering results, not production dogfood, measured production
+scan sufficiency, backup power-loss qualification, or integrated VM acceptance.
+Guest-compatible packages, final driver and finite AG/Docket/systemd cases remain
+required. This documentation-only descendant does not change the runtime pin.
