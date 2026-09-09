@@ -45,6 +45,13 @@ pub struct Nq {
 /// Operator workflows.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Qualify independent held-cut, backup and restore prerequisites; no authority.
+    LabelwatchCleanup {
+        #[arg(long)]
+        source: PathBuf,
+        #[arg(long)]
+        request: PathBuf,
+    },
     /// Qualify fresh read-only Labelwatch maintenance facts; no action authority.
     LabelwatchRelief {
         #[arg(long)] source: PathBuf,
@@ -412,6 +419,7 @@ pub struct QueryArgs {
 pub async fn run(options: Nq) -> Result<()> {
     match options.command {
         Command::LabelwatchRelief { source, request } => crate::labelwatch_relief_cli::run(&source, &request),
+        Command::LabelwatchCleanup { source, request } => crate::labelwatch_cleanup_cli::run(&source, &request),
         Command::DocketPurposeSupport { docket_binary,docket_sha256,state,request,snapshot_history } => crate::docket_cli::run(&docket_binary,&docket_sha256,&state,&request,&snapshot_history),
         Command::ContinuitySupport { source_export,binding,snapshot_history } => crate::continuity_cli::run(&source_export,&binding,&snapshot_history),
         Command::BoundedPredicate { command } => crate::queue_cli::run(command),
