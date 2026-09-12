@@ -5,28 +5,28 @@
 //! finding without profile admission and detector evaluation.
 
 pub mod admission;
-pub mod fixed_queue;
-pub mod purpose_support;
-pub mod continuity_support;
-pub mod labelwatch_relief;
-pub mod labelwatch_cleanup;
-pub mod docket_support;
-mod snapshot_history;
 pub mod config;
+pub mod continuity_support;
 pub mod coordination;
 pub mod diagnostic_admission;
 pub mod diagnostic_execution;
 pub mod diagnostic_execution_supported;
 pub mod diagnostic_execution_v2;
+pub mod docket_support;
 pub mod ecad_qualification;
 pub mod engine;
 pub mod evaluator_identity;
+pub mod fixed_queue;
 pub mod identity;
+pub mod labelwatch_cleanup;
+pub mod labelwatch_relief;
 pub mod operational_qualification;
 pub mod provider_intake;
 pub mod public;
+pub mod purpose_support;
 pub mod runner;
 pub mod runtime;
+mod snapshot_history;
 pub mod unix_runner;
 
 pub use admission::{AdmissionLock, AdmissionManager, AdmissionVerification};

@@ -1,5 +1,5 @@
-use nq_core::labelwatch_cleanup::{qualify, replay, Request};
-use serde_json::{json, Value};
+use nq_core::labelwatch_cleanup::{Request, qualify, replay};
+use serde_json::{Value, json};
 
 // Reuse the exact earlier profile's meaningful fixture and controls. Its
 // production implementation and original tests remain unchanged.
@@ -88,12 +88,14 @@ fn missing_copy_stale_and_structural_disagreement_remain_distinct() {
     );
     let (_, request) = fixture();
     let raw = serde_json::to_string(&source).unwrap();
-    assert!(qualify(
-        raw.replacen('{', "{\"schema\":\"duplicate\",", 1)
-            .as_bytes(),
-        &request
-    )
-    .is_err());
+    assert!(
+        qualify(
+            raw.replacen('{', "{\"schema\":\"duplicate\",", 1)
+                .as_bytes(),
+            &request
+        )
+        .is_err()
+    );
     let mut receipt = qualify(raw.as_bytes(), &request).unwrap();
     receipt["claim"] = json!("cleanup_authorized");
     assert!(replay(&receipt).is_err());

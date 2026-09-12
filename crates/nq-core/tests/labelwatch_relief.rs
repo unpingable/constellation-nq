@@ -1,5 +1,5 @@
-use nq_core::labelwatch_relief::{qualify, replay, Request};
-use serde_json::{json, Value};
+use nq_core::labelwatch_relief::{Request, qualify, replay};
+use serde_json::{Value, json};
 
 fn fixture() -> (Value, Request) {
     let file = json!({"device":1,"inode":2,"bytes":4096,"uid":1000,"gid":1000,"mode":384,"sha256":"a".repeat(64)});

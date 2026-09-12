@@ -54,22 +54,32 @@ pub enum Command {
     },
     /// Qualify fresh read-only Labelwatch maintenance facts; no action authority.
     LabelwatchRelief {
-        #[arg(long)] source: PathBuf,
-        #[arg(long)] request: PathBuf,
+        #[arg(long)]
+        source: PathBuf,
+        #[arg(long)]
+        request: PathBuf,
     },
     /// Acquire and qualify a bounded Docket committed-attempt factual record.
     DocketPurposeSupport {
-        #[arg(long)] docket_binary: PathBuf,
-        #[arg(long)] docket_sha256: String,
-        #[arg(long)] state: PathBuf,
-        #[arg(long)] request: PathBuf,
-        #[arg(long)] snapshot_history: PathBuf,
+        #[arg(long)]
+        docket_binary: PathBuf,
+        #[arg(long)]
+        docket_sha256: String,
+        #[arg(long)]
+        state: PathBuf,
+        #[arg(long)]
+        request: PathBuf,
+        #[arg(long)]
+        snapshot_history: PathBuf,
     },
     /// Qualify an exact external Continuity memory rely export, not action authority.
     ContinuitySupport {
-        #[arg(long)] source_export: PathBuf,
-        #[arg(long)] binding: PathBuf,
-        #[arg(long)] snapshot_history: PathBuf,
+        #[arg(long)]
+        source_export: PathBuf,
+        #[arg(long)]
+        binding: PathBuf,
+        #[arg(long)]
+        snapshot_history: PathBuf,
     },
     /// Admit or replay one compiled, content-bound factual predicate.
     BoundedPredicate {
@@ -418,10 +428,30 @@ pub struct QueryArgs {
 /// workflow's atomicity and custody rules.
 pub async fn run(options: Nq) -> Result<()> {
     match options.command {
-        Command::LabelwatchRelief { source, request } => crate::labelwatch_relief_cli::run(&source, &request),
-        Command::LabelwatchCleanup { source, request } => crate::labelwatch_cleanup_cli::run(&source, &request),
-        Command::DocketPurposeSupport { docket_binary,docket_sha256,state,request,snapshot_history } => crate::docket_cli::run(&docket_binary,&docket_sha256,&state,&request,&snapshot_history),
-        Command::ContinuitySupport { source_export,binding,snapshot_history } => crate::continuity_cli::run(&source_export,&binding,&snapshot_history),
+        Command::LabelwatchRelief { source, request } => {
+            crate::labelwatch_relief_cli::run(&source, &request)
+        }
+        Command::LabelwatchCleanup { source, request } => {
+            crate::labelwatch_cleanup_cli::run(&source, &request)
+        }
+        Command::DocketPurposeSupport {
+            docket_binary,
+            docket_sha256,
+            state,
+            request,
+            snapshot_history,
+        } => crate::docket_cli::run(
+            &docket_binary,
+            &docket_sha256,
+            &state,
+            &request,
+            &snapshot_history,
+        ),
+        Command::ContinuitySupport {
+            source_export,
+            binding,
+            snapshot_history,
+        } => crate::continuity_cli::run(&source_export, &binding, &snapshot_history),
         Command::BoundedPredicate { command } => crate::queue_cli::run(command),
         Command::CampaignStageQualification { command } => crate::stage_cli::run(command, false),
         Command::CampaignStageRealization { command } => crate::stage_cli::run(command, true),
@@ -660,7 +690,9 @@ async fn diagnostics_command(
         DiagnosticsCommand::Execute(instance) => {
             diagnostic_execute(config_path, &instance.instance_id).await
         }
-        DiagnosticsCommand::PurposeSupport { request } => crate::purpose_cli::run(config_path,&request),
+        DiagnosticsCommand::PurposeSupport { request } => {
+            crate::purpose_cli::run(config_path, &request)
+        }
         DiagnosticsCommand::Inspect { artifact_id } => {
             diagnostic_inspect(config_path, &artifact_id, json_output)
         }
