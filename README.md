@@ -1,5 +1,13 @@
 # NQ-ng
 
+> **Public preview release candidate (2026-09-12):** this source is prepared
+> for the `constellation-nq` repository as a developer preview. It is not a
+> production deployment, an authority switch from classic NQ, or a claim of
+> complete host coverage. Start with [the public preview guide](docs/PUBLIC_RELEASE.md)
+> and [operations/trust limits](docs/OPERATIONS.md). The public repository URL
+> is pending the release owner's rename and visibility transition; do not treat
+> a `constellation-nq` URL as available until the release record says so.
+
 > **CLASSIC-RETIREMENT update (2026-09-08):** the operator authorizes native
 > replacement contracts and the identified Codex, Monitor, Nightshift and older
 > AG consumer migrations. The July restriction below is historical and no longer
