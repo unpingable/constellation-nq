@@ -12,6 +12,12 @@ the exact evidence schema, successful settlement and outcome, nested
 attempt/marker identities, and the receipt recomputed over the canonical
 record preimage.
 
+The example's numeric execution account and `allow_same_identity_in_debug` are
+only for a local debug build. Replace the uid with the current local uid and
+place mutable state below a private `0700` directory whose parent is a safe
+sticky temporary directory. A production admission uses its configured
+distinct helper account and package-owned paths.
+
 From a clean candidate build, use the ordinary admitted watcher path:
 
 ```sh

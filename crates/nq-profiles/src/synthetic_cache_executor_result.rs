@@ -229,6 +229,10 @@ pub struct ResultProjection {
     pub settlement: String,
     /// Executor receipt.
     pub receipt: String,
+    /// Time NQ read the retained records.
+    pub record_read_observed_at: chrono::DateTime<chrono::Utc>,
+    /// Receipt-bound time of the original executor observation.
+    pub executor_observed_at_unix_ms: i64,
 }
 impl ProfileProjection for ResultProjection {
     fn profile(&self) -> &crate::ProfileKey {
@@ -238,7 +242,7 @@ impl ProfileProjection for ResultProjection {
         self.ordinal
     }
     fn canonical_json(&self) -> Value {
-        json!({"profile":self.profile,"ordinal":self.ordinal,"attempt":self.attempt,"settlement":self.settlement,"receipt":self.receipt})
+        json!({"profile":self.profile,"ordinal":self.ordinal,"attempt":self.attempt,"settlement":self.settlement,"receipt":self.receipt,"record_read_observed_at":self.record_read_observed_at,"executor_observed_at_unix_ms":self.executor_observed_at_unix_ms})
     }
     fn as_any(&self) -> &dyn Any {
         self
@@ -279,7 +283,7 @@ impl ProfileModule for SyntheticCacheExecutorResultProfile {
             return Err(inconsistent(
                 c,
                 self.descriptor(),
-                "basis or original observation time differs",
+                "basis or retained-record read time differs",
             ));
         }
         if p.attempt != s.attempt
@@ -341,6 +345,8 @@ impl ProfileModule for SyntheticCacheExecutorResultProfile {
                     attempt: p.attempt,
                     settlement: p.settlement,
                     receipt: p.receipt,
+                    record_read_observed_at: o.observed_at,
+                    executor_observed_at_unix_ms: p.executor_observed_at_unix_ms,
                 }) as Box<dyn ProfileProjection>)
             })
             .collect()
@@ -485,10 +491,17 @@ mod tests {
     #[test]
     fn validates_exact_past_result() {
         let c = context();
-        assert!(
-            MODULE
-                .validate(&c, &report(c.received_at - Duration::seconds(30)))
-                .is_ok()
+        let read_time = c.received_at - Duration::seconds(30);
+        let admitted = MODULE.validate(&c, &report(read_time)).unwrap();
+        let projected = MODULE.project(&admitted).unwrap();
+        let projection = projected[0]
+            .as_any()
+            .downcast_ref::<ResultProjection>()
+            .unwrap();
+        assert_eq!(projection.record_read_observed_at, read_time);
+        assert_eq!(
+            projection.executor_observed_at_unix_ms,
+            read_time.timestamp_millis()
         );
     }
 

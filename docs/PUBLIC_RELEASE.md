@@ -7,6 +7,9 @@ The frozen public source tag `constellation-public-source-20260912` resolves to
 result profile is a later local release candidate at
 `23d9a1962136bc976c33e014ac0439377198c643`; a successor pin and tag must be
 recorded after its final gate. Do not move the frozen public tag.
+The latest cache-profile gate target is recorded by the campaign checkpoint,
+not by this self-referential guide; release review must replace it with the
+exact resulting commit before publication.
 
 The earlier source candidate `e0151d0c090be7ce56e00f7d293440dbe43bf4a4`
 and its Nightshift admission repair are historical inputs to the frozen public

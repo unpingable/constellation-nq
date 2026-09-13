@@ -16,6 +16,8 @@ checkpoint_policy = "disabled"
 executable = "/absolute/nq-synthetic-cache-result-helper"
 args = []
 env = {}
+# Local debug example only: replace with the current numeric uid. Production
+# admission should use a distinct configured helper account.
 execution_account = "1000"
 allow_same_identity_in_debug = true
 working_directory = "/absolute/read-only-helper-directory"
