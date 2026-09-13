@@ -687,11 +687,11 @@ fn read_result_scope(scope: &ResultScope) -> Result<ResultAcquisition, String> {
         .get("observed_at_unix_ms")
         .and_then(Value::as_i64)
         .ok_or("observation time absent")?;
-    let observed_at =
+    let executor_observed_at =
         chrono::DateTime::from_timestamp_millis(millis).ok_or("observation time invalid")?;
     Ok(ResultAcquisition {
-        observed_at,
-        payload: json!({"attempt":row.attempt,"marker":row.executor_marker,"subject":row.subject,"scope":row.scope,"work":row.work,"work_schema":row.work_schema,"executor_plan":row.executor_plan,"executor_program_digest":row.executor_program_digest,"settlement":row.settlement,"receipt":row.receipt,"outcome":row.outcome,"health_status":health,"cache_sequence":sequence,"failure_cache_nodes":failures,"restored_nodes":restored}),
+        observed_at: Utc::now(),
+        payload: json!({"attempt":row.attempt,"marker":row.executor_marker,"subject":row.subject,"scope":row.scope,"work":row.work,"work_schema":row.work_schema,"executor_plan":row.executor_plan,"executor_program_digest":row.executor_program_digest,"settlement":row.settlement,"receipt":row.receipt,"outcome":row.outcome,"executor_observed_at_unix_ms":executor_observed_at.timestamp_millis(),"health_status":health,"cache_sequence":sequence,"failure_cache_nodes":failures,"restored_nodes":restored}),
     })
 }
 
@@ -773,7 +773,11 @@ mod tests {
     fn reads_exact_settled_result_and_preserves_original_time() {
         let (_dir, scope, _) = fixture();
         let result = read_result_scope(&scope).expect("matching records");
-        assert_eq!(result.observed_at.timestamp_millis(), 1_789_128_000_000);
+        assert_eq!(
+            result.payload["executor_observed_at_unix_ms"],
+            1_789_128_000_000_i64
+        );
+        assert!(result.observed_at.timestamp_millis() > 1_789_128_000_000);
         assert_eq!(result.payload["cache_sequence"][2]["cache"], "HIT");
     }
 

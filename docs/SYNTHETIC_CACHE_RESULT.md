@@ -22,8 +22,10 @@ target/debug/nq --config /absolute/cache-result.toml --json collect synthetic-ca
 ```
 
 `watcher test` exercises acquisition without admission. `collect` retains the
-actual report and detector evaluation. The detector uses the executor record's
-original observation time; copying the record does not refresh it. Evidence
+actual report and detector evaluation. The report and observation timestamp is
+the bounded retained-record read time. Its payload separately preserves the
+receipt-bound `executor_observed_at_unix_ms`, and the detector uses that
+original effect time for freshness; copying the record does not refresh it. Evidence
 older than the profile's 60-second reliance interval yields
 `cannot_evaluate`.
 

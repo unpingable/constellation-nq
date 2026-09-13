@@ -118,7 +118,33 @@ impl Detector for SyntheticCacheResultDetector {
             );
         };
         let report = &occurrence.report;
-        let age = input.evaluated_at.signed_duration_since(report.observed_at);
+        let Some(observation) = report.observations.first() else {
+            return cannot_evaluate(
+                input,
+                "cache-result testimony lacks its observation",
+                "missing_observation",
+            );
+        };
+        let Ok(payload) = serde_json::from_value::<ResultPayload>(observation.payload.clone())
+        else {
+            return cannot_evaluate(
+                input,
+                "cache-result testimony payload cannot be reopened",
+                "projection_failure",
+            );
+        };
+        let Some(executor_observed_at) =
+            chrono::DateTime::from_timestamp_millis(payload.executor_observed_at_unix_ms)
+        else {
+            return cannot_evaluate(
+                input,
+                "executor observation time is invalid",
+                "invalid_executor_observation_time",
+            );
+        };
+        let age = input
+            .evaluated_at
+            .signed_duration_since(executor_observed_at);
         if report.profile != DESCRIPTOR.profile
             || report.profile_digest != DETECTOR_DESCRIPTOR.profile_digest
             || report.status != SemanticReportStatus::Complete
@@ -133,13 +159,6 @@ impl Detector for SyntheticCacheResultDetector {
                 "missing_or_stale_testimony",
             );
         }
-        let Some(observation) = report.observations.first() else {
-            return cannot_evaluate(
-                input,
-                "cache-result testimony lacks its observation",
-                "missing_observation",
-            );
-        };
         DetectorResult { state:DetectorState::ExplicitlyAbsent, condition:DETECTOR_DESCRIPTOR.condition.clone(), summary:"the exact past synthetic-cache attempt reported the fixed expected result".into(), evidence:vec![DetectorEvidence{report_id:occurrence.report_id.clone(),report_sequence:occurrence.report_sequence,report_digest:report.report_digest.clone(),observation_ordinal:Some(observation.ordinal),observed_at:observation.observed_at}], limitations:vec!["This conclusion describes one past attempt and does not establish current cache health".into()], refusal:None, watermark:input.watermark }
     }
 }
@@ -191,6 +210,7 @@ struct ResultPayload {
     settlement: String,
     receipt: String,
     outcome: String,
+    executor_observed_at_unix_ms: i64,
     health_status: u16,
     cache_sequence: Vec<CacheRow>,
     failure_cache_nodes: Vec<String>,
@@ -454,7 +474,7 @@ mod tests {
                 subject: D.into(),
                 ordinal: 0,
                 observed_at,
-                payload: json!({"evidence_basis":basis,"attempt":D,"marker":D,"subject":D,"scope":D,"work":D,"work_schema":"maude.local-compose-workflow/v1","executor_plan":D,"executor_program_digest":D,"settlement":D,"receipt":D,"outcome":"success","health_status":200,"cache_sequence":[{"cache":"MISS","cache_node":"cache-a","origin_count":"1","status":200},{"cache":"MISS","cache_node":"cache-b","origin_count":"2","status":200},{"cache":"HIT","cache_node":"cache-a","origin_count":"1","status":200},{"cache":"HIT","cache_node":"cache-b","origin_count":"2","status":200}],"failure_cache_nodes":["cache-b","cache-b","cache-b","cache-b"],"restored_nodes":["cache-a","cache-b"]}),
+                payload: json!({"evidence_basis":basis,"attempt":D,"marker":D,"subject":D,"scope":D,"work":D,"work_schema":"maude.local-compose-workflow/v1","executor_plan":D,"executor_program_digest":D,"settlement":D,"receipt":D,"outcome":"success","executor_observed_at_unix_ms":observed_at.timestamp_millis(),"health_status":200,"cache_sequence":[{"cache":"MISS","cache_node":"cache-a","origin_count":"1","status":200},{"cache":"MISS","cache_node":"cache-b","origin_count":"2","status":200},{"cache":"HIT","cache_node":"cache-a","origin_count":"1","status":200},{"cache":"HIT","cache_node":"cache-b","origin_count":"2","status":200}],"failure_cache_nodes":["cache-b","cache-b","cache-b","cache-b"],"restored_nodes":["cache-a","cache-b"]}),
             }],
             error_count: 0,
             failure_error_count: 0,
