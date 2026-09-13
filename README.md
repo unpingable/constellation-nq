@@ -1,12 +1,19 @@
-# NQ-ng
+# Constellation NQ
 
-> **Public preview release candidate (2026-09-12):** this source is prepared
-> for the `constellation-nq` repository as a developer preview. It is not a
+NQ collects and checks bounded evidence for a specific question. It records what
+was admitted, what was refused, and the diagnostic conclusion its profile can
+support. It does not authorize or execute the work that might follow.
+
+> **Public developer preview (2026-09-12):** this public source is
+> `constellation-nq` at `ce0a04a175b6d87ac17395f08fd7bc70ddf1e7b3`. It is not a
 > production deployment, an authority switch from classic NQ, or a claim of
-> complete host coverage. Start with [the public preview guide](docs/PUBLIC_RELEASE.md)
-> and [operations/trust limits](docs/OPERATIONS.md). The public repository URL
-> is pending the release owner's rename and visibility transition; do not treat
-> a `constellation-nq` URL as available until the release record says so.
+> complete host coverage. Start with [the public preview guide](docs/PUBLIC_RELEASE.md),
+> the [retained synthetic-cache-result profile HOWTO](docs/SYNTHETIC_CACHE_RESULT.md),
+> and [operations/trust limits](docs/OPERATIONS.md). The HOWTO is one bounded
+> local profile, not a completed consumer cache workflow.
+
+<details>
+<summary>Historical status and authority notices</summary>
 
 > **CLASSIC-RETIREMENT update (2026-09-08):** the operator authorizes native
 > replacement contracts and the identified Codex, Monitor, Nightshift and older
@@ -41,9 +48,11 @@
 > untagged work is not remotely published and does not yet provide a generic
 > host portrait or subject qualification.
 
+</details>
+
 ## Product direction
 
-The target NQ-ng product is a local-first deterministic diagnostic engine and
+Constellation NQ is a local-first deterministic diagnostic engine and
 recursive evidence fabric. For one exact profile, subject, scope, and vantage,
 it takes custody of bounded witness or child-NQ testimony, retains accepted
 evidence and rejected custody artifacts, and emits only the diagnostic

@@ -3,13 +3,12 @@
 ## Release pin
 
 The frozen public source tag `constellation-public-source-20260912` resolves to
-`f6b734db2e97ed4ca0c568ec9fccf5223fdecb40`. The retained synthetic-cache
-result profile is a later local release candidate at
-`23d9a1962136bc976c33e014ac0439377198c643`; a successor pin and tag must be
-recorded after its final gate. Do not move the frozen public tag.
-The latest cache-profile gate target is recorded by the campaign checkpoint,
-not by this self-referential guide; release review must replace it with the
-exact resulting commit before publication.
+`f6b734db2e97ed4ca0c568ec9fccf5223fdecb40` and remains unchanged. The current
+public developer-preview runtime pin is
+`ce0a04a175b6d87ac17395f08fd7bc70ddf1e7b3`. Its retained synthetic-cache-result
+profile is documented in [SYNTHETIC_CACHE_RESULT.md](SYNTHETIC_CACHE_RESULT.md).
+That profile retains one already settled Docket result; it is not a completed
+consumer cache workflow or a new release tag.
 
 The earlier source candidate `e0151d0c090be7ce56e00f7d293440dbe43bf4a4`
 and its Nightshift admission repair are historical inputs to the frozen public
@@ -24,14 +23,14 @@ host coverage.
 ## Source preview
 
 Use the public repository at `https://github.com/unpingable/constellation-nq.git`
-and a clean checkout at the verified release pin with Rust 1.94. Source builds
+and a clean checkout at the current developer-preview pin with Rust 1.94. Source builds
 are for developer preview and qualification; a completed package gate is
 required before presenting a package as an installation artifact.
 
 ```sh
 git clone https://github.com/unpingable/constellation-nq.git
 cd constellation-nq
-git checkout --detach constellation-public-source-20260912
+git checkout --detach ce0a04a175b6d87ac17395f08fd7bc70ddf1e7b3
 cargo build --workspace
 target/debug/nq --help
 target/debug/nqd --help
