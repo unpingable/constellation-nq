@@ -23,6 +23,8 @@ pub mod conformance;
 pub mod host;
 /// Controller-vantage bounded HTTP endpoint profile.
 pub mod http_endpoint;
+/// Retained Docket-bound synthetic-cache executor result profile.
+pub mod synthetic_cache_executor_result;
 /// Target-local systemd unit profile.
 pub mod systemd_unit;
 

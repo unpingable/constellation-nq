@@ -26,6 +26,12 @@
       "version": 1,
       "descriptor": "nq.http_endpoint.v1.json",
       "semantic_digest": "sha256:d277728a076d75d8bf5a5294635905b74f6b15b7a9d7a5274ea42a888eb68fae"
+    },
+    {
+      "id": "nq.synthetic_cache_executor_result",
+      "version": 1,
+      "descriptor": "nq.synthetic_cache_executor_result.v1.json",
+      "semantic_digest": "sha256:a25310e70fdf37ce5b9890af8bc35e4d6c4a789e790ee923d2442c8a149782d7"
     }
   ]
 }

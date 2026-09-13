@@ -253,7 +253,7 @@ fn detector_report(
 
 #[test]
 fn registry_is_explicit_and_exact() {
-    assert_eq!(all_profiles().len(), 4);
+    assert_eq!(all_profiles().len(), 5);
     assert!(resolve_profile("nq.conformance", 1).is_some());
     assert!(resolve_profile("nq.host", 1).is_some());
     assert!(resolve_profile(systemd_unit::PROFILE_ID, systemd_unit::PROFILE_VERSION).is_some());

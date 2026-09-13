@@ -1,0 +1,26 @@
+[package]
+name = "nq-synthetic-cache-result-helper"
+description = "Read-only helper for a retained Docket-bound synthetic-cache executor result"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+chrono.workspace = true
+nix = { workspace = true, features = ["time"] }
+nq-build-info = { path = "../nq-build-info" }
+nq-profiles = { path = "../nq-profiles" }
+nq-protocol = { path = "../nq-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

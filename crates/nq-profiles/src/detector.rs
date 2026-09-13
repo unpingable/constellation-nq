@@ -37,6 +37,8 @@ pub enum DetectorRuleParameters {
         /// Only this immutable policy schema may provide expected values.
         threshold_policy_schema: String,
     },
+    /// Exact fixed past-result law for the synthetic-cache executor profile.
+    SyntheticCacheExecutorResult,
 }
 
 /// Canonical identity and operator metadata for one detector revision.

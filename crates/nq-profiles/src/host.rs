@@ -416,7 +416,8 @@ impl Detector for HostLoadPressureDetector {
                 normalized_load_threshold_millis,
             } => normalized_load_threshold_millis,
             DetectorRuleParameters::SystemdUnitPostcondition { .. }
-            | DetectorRuleParameters::HttpEndpointPostcondition { .. } => {
+            | DetectorRuleParameters::HttpEndpointPostcondition { .. }
+            | DetectorRuleParameters::SyntheticCacheExecutorResult => {
                 unreachable!("host detector descriptor uses only load-pressure parameters")
             }
         };

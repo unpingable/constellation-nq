@@ -1039,6 +1039,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "nq-synthetic-cache-result-helper"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "nix",
+ "nq-build-info",
+ "nq-profiles",
+ "nq-protocol",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "nq-system-contract"
 version = "0.1.0"
 dependencies = [
