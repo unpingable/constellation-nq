@@ -14,7 +14,7 @@ Keep product fixtures distinct from qualification records. Do not add local
 campaign artifacts, VM images, package outputs, credentials, account
 configuration, or runtime databases to Git. Release changes require the focused
 gate in `docs/PUBLIC_RELEASE.md`; only the release owner may create a new release
-tag or change remote visibility. Do not move a frozen tag. Keep the four
+tag or change remote visibility. Do not move a frozen tag. Keep all five
 versioned descriptors in `profiles/manifest.json` and their limits explicit.
 
 The workspace requires Rust 1.94. Prefer focused tests for a changed component;

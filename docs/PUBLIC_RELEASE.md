@@ -2,20 +2,16 @@
 
 ## Release pin
 
-The proposed public-preview source pin is
-`e0151d0c090be7ce56e00f7d293440dbe43bf4a4`
-(`campaign/operator-beta-nq-release-integration-20260909`; also
-`beta-m4-harness-20260909`). It descends from the remote default branch
-`main` at `59abd3bcb2d0cc30657a659b3ebc57b981289d9f`.
+The frozen public source tag `constellation-public-source-20260912` resolves to
+`f6b734db2e97ed4ca0c568ec9fccf5223fdecb40`. The retained synthetic-cache
+result profile is a later local release candidate at
+`23d9a1962136bc976c33e014ac0439377198c643`; a successor pin and tag must be
+recorded after its final gate. Do not move the frozen public tag.
 
-The required Nightshift diagnostic-admission repair is present as
-`d20efb1dcda2e53c78fcbbdd6a666fab277b6a2e`. Its stable patch ID and affected
-file delta are identical to the separately named repair
-`7ba57cbdb913673190f7385ae054d54fc317280e`; no merge or duplicate repair is
-required. The source release adds only mechanical formatting and this public
-guide to that candidate, using the normal default-branch publication workflow.
-The fixed source tag is `constellation-public-source-20260912`. Do not move that
-tag or `v0.1.0`, force-push, or rewrite history.
+The earlier source candidate `e0151d0c090be7ce56e00f7d293440dbe43bf4a4`
+and its Nightshift admission repair are historical inputs to the frozen public
+pin, not the current release target. Do not move `constellation-public-source-20260912`
+or `v0.1.0`, force-push, or rewrite history.
 
 This is a source-only developer preview; it supplies no binary package or
 installation artifact. Publication does not authorize a
@@ -24,10 +20,8 @@ host coverage.
 
 ## Source preview
 
-After the release owner has completed the repository rename and public
-visibility transition, use a clean checkout at the verified release pin and
-Rust 1.94. Until then, `https://github.com/unpingable/constellation-nq.git` is
-the intended destination, not an available public-source claim. Source builds
+Use the public repository at `https://github.com/unpingable/constellation-nq.git`
+and a clean checkout at the verified release pin with Rust 1.94. Source builds
 are for developer preview and qualification; a completed package gate is
 required before presenting a package as an installation artifact.
 
@@ -79,10 +73,14 @@ typed refusal. It does not grant authorization, initiate actions, provide a
 general remote-provider service, or own estate-wide recurrence; Nightshift
 owns recurrence and the operational portrait.
 
-The preview has explicit limits. Four compiled descriptors are covered:
+The successor candidate has five compiled descriptors:
 `nq.host/v1` (one host snapshot), `nq.conformance/v1` (local fixture echo),
 `nq.http_endpoint/v1` (one bounded controller-vantage HTTP response), and
-`nq.systemd_unit/v1` (one target-local systemd snapshot). Each has its own exact
+`nq.systemd_unit/v1` (one target-local systemd snapshot), and
+`nq.synthetic_cache_executor_result/v1` (one exact past Docket-bound cache
+attempt). The fifth profile remains a candidate until its helper, diagnostic
+history, consumer pins, and release gate are verified; its presence in source
+does not claim that workflow is already qualified. Each profile has its own exact
 scope, vantage, size and freshness limits. This does not establish an aggregate
 host or service-health claim. Classic NQ remains authoritative pending a separate switch;
 the current host-portrait subjects are not complete; persistent helper resource

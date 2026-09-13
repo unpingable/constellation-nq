@@ -336,6 +336,7 @@ fn binding(c: &ValidationContext, d: &ProfileDescriptor) -> Result<AttemptScope,
     let s: AttemptScope = serde_json::from_value(c.scope.value.clone())
         .map_err(|e| scope_error(c, d, &e.to_string()))?;
     if c.request_subject != s.subject
+        || s.work_schema != "maude.local-compose-workflow/v1"
         || c.vantage.kind != "retained_docket_state"
         || c.vantage.value != json!({})
         || [

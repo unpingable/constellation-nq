@@ -1,0 +1,50 @@
+# Replace every /absolute and sha256 placeholder before admission.
+schema = "nq.config.v1"
+database_path = "/absolute/nq-cache-result.sqlite"
+socket_path = "/absolute/nqd.sock"
+admissions_dir = "/absolute/admissions"
+helper_runtime_dir = "/absolute/helper-runtime"
+
+[[watchers]]
+instance_id = "synthetic-cache-result"
+carrier = "stdio"
+subject = "sha256:6262626262626262626262626262626262626262626262626262626262626262"
+capability_ceiling = ["read_settled_cache_result"]
+checkpoint_policy = "disabled"
+
+[watchers.command]
+executable = "/absolute/nq-synthetic-cache-result-helper"
+args = []
+env = {}
+execution_account = "1000"
+allow_same_identity_in_debug = true
+working_directory = "/absolute/read-only-helper-directory"
+
+[watchers.profile]
+id = "nq.synthetic_cache_executor_result"
+version = 1
+
+[watchers.scope]
+kind = "synthetic_cache_executor_attempt"
+value = { attempt = "sha256:REPLACE", marker = "sha256:REPLACE", subject = "sha256:REPLACE", scope = "sha256:REPLACE", work = "sha256:REPLACE", work_schema = "maude.local-compose-workflow/v1", executor_plan = "sha256:REPLACE", executor_program_digest = "sha256:REPLACE", docket_database = "/absolute/docket-state/state.sqlite", executor_record = "/absolute/evidence/attempts/REPLACE.json" }
+
+[watchers.vantage]
+kind = "retained_docket_state"
+value = {}
+
+[watchers.schedule]
+interval_seconds = 300
+jitter_seconds = 0
+deadline_ms = 30000
+retry_backoff_seconds = 10
+max_retry_backoff_seconds = 300
+
+[watchers.resources]
+max_response_bytes = 1048576
+max_stderr_bytes = 65536
+max_observations = 1
+max_address_space_bytes = 536870912
+max_cpu_seconds = 60
+max_processes = 32
+max_open_files = 128
+max_file_bytes = 67108864
