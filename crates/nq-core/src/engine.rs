@@ -2627,7 +2627,7 @@ impl CollectionEngine {
     ///
     /// This is a deliberately narrow first live producer for
     /// `nq.diagnostic_execution.v2`. It is sealed to the exact current
-    /// `nq.host/v1` load-pressure profile/detector identities and a fresh
+    /// admitted one-detector profile/detector correspondences and a fresh
     /// evaluation context containing exactly the newly admitted report. The
     /// fresh-history restriction keeps complete input accounting truthful until
     /// history-aware manifests exist. Admitted determinate results, detector
@@ -5745,7 +5745,14 @@ fn require_initial_diagnostic_profile(
         && profile_digest == compiled_profile_digest.as_str()
         && detector_descriptor.id == nq_profiles::http_endpoint::DETECTOR_ID
         && detector_descriptor.version == 1;
-    if !(host || systemd || http) {
+    let synthetic_cache_result = descriptor.profile.id
+        == nq_profiles::synthetic_cache_executor_result::PROFILE_ID
+        && descriptor.profile.version
+            == nq_profiles::synthetic_cache_executor_result::PROFILE_VERSION
+        && profile_digest == compiled_profile_digest.as_str()
+        && detector_descriptor.id == "nq.synthetic_cache_executor_result.fixed_result"
+        && detector_descriptor.version == 1;
+    if !(host || systemd || http || synthetic_cache_result) {
         return Err(EngineError::DiagnosticUnsupported(format!(
             "live diagnostic execution has no admitted one-detector correspondence for {} v{} / {} v{}",
             descriptor.profile.id,
@@ -6212,7 +6219,7 @@ fn local_v2_historical_surface(
             kind: DiagnosticLimitationKindV1::Other,
             code: "boot_or_deployment_state_unbound".to_owned(),
             detail:
-                "the current host profile does not export boot or deployment generation identity"
+                "the current profile does not export boot or deployment generation identity"
                     .to_owned(),
         },
         DiagnosticLimitationV1 {
@@ -13678,6 +13685,15 @@ sys.stdout.write("\n")
                 .expect("restart artifact bytes"),
             original
         );
+    }
+
+    #[test]
+    fn retained_cache_profile_has_one_closed_diagnostic_correspondence() {
+        let profile: &'static dyn ProfileModule =
+            &nq_profiles::synthetic_cache_executor_result::MODULE;
+        let digest = profile.descriptor().digest().expect("descriptor digest");
+        require_initial_diagnostic_profile(profile, digest.as_str())
+            .expect("cache-result profile has one admitted v2 correspondence");
     }
 
     #[test]

@@ -27,8 +27,16 @@ original observation time; copying the record does not refresh it. Evidence
 older than the profile's 60-second reliance interval yields
 `cannot_evaluate`.
 
-The current `diagnostics execute` artifact producer remains sealed to
-`nq.host/v1`. Consequently this profile cannot yet produce the locally owned
-`nq.diagnostic_execution.v2` artifact required by `diagnostics qualify` and
-Nightshift's admission-provenance interface. Do not represent ordinary
-`collect` output, a copied record, or a substitution fixture as that artifact.
+For a fresh admitted instance, `diagnostics execute` uses the same collection
+and detector path while atomically retaining an `nq.diagnostic_execution.v2`
+artifact. Reopen and qualify its returned `artifact_id` with:
+
+```sh
+target/debug/nq --config /absolute/cache-result.toml diagnostics execute synthetic-cache-result > diagnostic.json
+target/debug/nq --config /absolute/cache-result.toml --json diagnostics inspect sha256:ARTIFACT
+target/debug/nq --config /absolute/cache-result.toml --json diagnostics qualify sha256:ARTIFACT
+```
+
+Qualification establishes exact local NQ admission provenance, not freshness,
+reliance, authorization, or action. Do not represent ordinary `collect`
+output, a copied record, or a substitution fixture as that artifact.
