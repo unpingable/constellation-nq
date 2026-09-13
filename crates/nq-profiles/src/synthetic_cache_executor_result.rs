@@ -534,6 +534,30 @@ mod tests {
     }
 
     #[test]
+    fn detector_accepts_exact_reliance_boundary() {
+        let c = context();
+        let admitted = MODULE
+            .validate(&c, &report(c.received_at - Duration::seconds(30)))
+            .unwrap();
+        let row = crate::DetectorReport {
+            report_id: "report:cache-boundary".into(),
+            report_sequence: 1,
+            report: admitted,
+        };
+        let input = crate::DetectorInput {
+            instance_id: &c.instance_id,
+            evaluated_at: c.received_at + Duration::seconds(30),
+            watermark: crate::EvidenceWatermark(1),
+            reports: std::slice::from_ref(&row),
+            threshold_policy: None,
+        };
+        assert_eq!(
+            SYNTHETIC_CACHE_RESULT_DETECTOR.evaluate(&input).state,
+            crate::DetectorState::ExplicitlyAbsent
+        );
+    }
+
+    #[test]
     fn changed_cache_sequence_is_refused() {
         let c = context();
         let mut r = report(c.received_at - Duration::seconds(30));

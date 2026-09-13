@@ -805,6 +805,18 @@ mod tests {
     }
 
     #[test]
+    fn refuses_timestamp_only_mutation() {
+        let (_dir, scope, mut record) = fixture();
+        record["observed_at_unix_ms"] = json!(1_789_128_000_001_i64);
+        std::fs::write(&scope.executor_record, serde_json::to_vec(&record).unwrap()).unwrap();
+        assert!(
+            read_result_scope(&scope)
+                .unwrap_err()
+                .contains("receipt mismatch")
+        );
+    }
+
+    #[test]
     fn refuses_missing_record_schema() {
         let (_dir, scope, mut record) = fixture();
         record.as_object_mut().unwrap().remove("evidence_schema");
