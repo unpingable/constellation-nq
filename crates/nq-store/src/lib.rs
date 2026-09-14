@@ -16291,9 +16291,19 @@ mod tests {
         let unrelated = directory.path().join("unrelated-v5.db");
         write_empty_exact_v5(&source);
         write_empty_exact_v5(&unrelated);
-        let unrelated_backup = BackupArtifact { path: unrelated.clone(), sha256: sha256_file(&unrelated).unwrap(), size_bytes: std::fs::metadata(&unrelated).unwrap().len() };
+        Connection::open(&unrelated).unwrap().execute(
+            "INSERT INTO genesis_records (genesis_id, legacy_manifest_digest, created_at, detail_json) VALUES ('unrelated-genesis', NULL, ?1, ?2)",
+            params![TIME, document(json!({"fixture":"unrelated"})).as_bytes()],
+        ).unwrap();
+        let unrelated_backup = BackupArtifact {
+            path: unrelated.clone(),
+            sha256: sha256_file(&unrelated).unwrap(),
+            size_bytes: std::fs::metadata(&unrelated).unwrap().len(),
+        };
         let receipt = exact_v5_to_v12_receipt(&unrelated_backup);
-        assert!(matches!(Store::upgrade_v5_to_v12(&source, &receipt), Err(StoreError::Invariant(message)) if message.contains("logical state differs")));
+        assert!(
+            matches!(Store::upgrade_v5_to_v12(&source, &receipt), Err(StoreError::Invariant(message)) if message.contains("logical state differs"))
+        );
     }
 
     #[test]
