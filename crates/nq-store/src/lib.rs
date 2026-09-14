@@ -16347,7 +16347,7 @@ mod tests {
         let notification = NotificationInput {
             notification_id: "notification-a".into(),
             idempotency_key: "key-a".into(),
-            finding_event_id: "finding-a".into(),
+            finding_event_id: None,
             destination_kind: "fixture".into(),
             payload: document(json!({"body":"bounded"})),
             available_at: TIME.into(),
