@@ -3,8 +3,14 @@
 NQ includes experimental bounded Slack/Discord webhook delivery adapters and a
 local operator-inbox file adapter.
 Deterministic transports and the real Nightshift-to-NQ replay interface have been
-exercised locally. Local-inbox qualification is pending the focused release
-gate. **Live Slack/Discord destination delivery has not been verified.**
+exercised locally. Local-inbox source `1ef98c9c9934ea9dac481d3dcdc42fb7dd2bd073`
+passed 107 application tests, reusing 195 unchanged core tests. A four-component
+disposable run performed actual Monitor acquisition, NQ admission, Pulse support
+checks and Nightshift replay, then retained one local file; duplicate submission
+returned the same delivery identity without a second write. The caller example
+is in the [Monitor/Pulse source distribution](https://github.com/unpingable/constellation-nightshift/tree/main/integrations/monitor-predicate-support).
+This does not qualify a recurring deployment or human acknowledgment.
+**Live Slack/Discord destination delivery has not been verified.**
 Do not describe the webhook adapters or retained outbox as a completed notification
 migration.
 

@@ -7,7 +7,8 @@ cache pin below does not contain them. Their source integration is recorded in
 [SOURCE-PROJECTION.json](../SOURCE-PROJECTION.json). Public schema5 upgrades
 explicitly to12; other development schema lines are not silently imported.
 These additions do not move a release tag or establish a complete consumer
-monitoring migration. Live notification delivery remains unverified.
+monitoring migration. Local-file notification delivery has a qualified disposable
+four-component example; live Slack/Discord delivery remains unverified.
 
 ## Release pin
 
@@ -21,7 +22,10 @@ consumer cache workflow or a new release tag.
 
 The earlier source candidate `e0151d0c090be7ce56e00f7d293440dbe43bf4a4`
 and its Nightshift admission repair are historical inputs to the frozen public
-pin, not the current release target. Do not move `constellation-public-source-20260912`
+pin, not the current release target. The cache pin above is profile-specific;
+it is not the latest source for saved checks or notifications. For the tested
+local-inbox implementation use `1ef98c9c9934ea9dac481d3dcdc42fb7dd2bd073` and
+the exact companion pins in its notification guide. Do not move `constellation-public-source-20260912`
 or `v0.1.0`, force-push, or rewrite history.
 
 This is a source-only developer preview; it supplies no binary package or
