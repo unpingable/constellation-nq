@@ -305,6 +305,15 @@ fn render_local_inbox(intent: &Intent, binding: &CanonicalDocument) -> Result<Ca
     }))?)
 }
 
+fn validate_local_inbox_payload(payload: &CanonicalDocument) -> Result<()> {
+    if payload.as_bytes().len() > LOCAL_INBOX_FILE_MAX_BYTES {
+        bail!(
+            "local inbox message exceeds {LOCAL_INBOX_FILE_MAX_BYTES} bytes before delivery custody"
+        );
+    }
+    Ok(())
+}
+
 enum LocalWriteFailure {
     BeforeCreate,
     AfterCreate,
@@ -412,6 +421,7 @@ fn deliver_local_with<O: LocalInboxWriteOperation>(
     replay_nightshift(route, &intent)?;
     let (root, directory_binding) = local_inbox_binding(route)?;
     let payload = render_local_inbox(&intent, &directory_binding)?;
+    validate_local_inbox_payload(&payload)?;
     let original_intent: Value = serde_json::from_slice(intent_document.as_bytes())?;
     let retained_intent = CanonicalDocument::from_serializable(&json!({
         "schema":"nq.local-inbox-delivery-intent/v1",
@@ -919,6 +929,45 @@ mod tests {
             .expect("list inbox")
             .count(),
             1
+        );
+    }
+
+    #[test]
+    fn local_inbox_oversized_render_refuses_before_custody_or_file_creation() {
+        let root = TempDir::new().expect("temporary root");
+        let mut config = local_config(&root);
+        // The local destination includes the route reference, so keep both
+        // source fields within their independently validated 256-byte limits.
+        let route_reference = "r".repeat(244);
+        config.notification_routes[0].reference = route_reference.clone();
+        let mut value = local_intent();
+        value["route_reference"] = Value::String(route_reference.clone());
+        value["destination_identity"] = Value::String(format!("local-inbox:{route_reference}"));
+        // These are valid non-control intent strings. Canonical JSON escapes
+        // each quote, making the bounded local projection exceed 4 KiB.
+        value["stable_event_id"] = Value::String("\"".repeat(256));
+        value["summary"] = Value::String("\"".repeat(512));
+        value["inspection_reference"] = Value::String("\"".repeat(1024));
+        let path = write_intent(&root, value);
+
+        let error = deliver_local(&config, &path, &route_reference)
+            .expect_err("oversized local projection must refuse before custody")
+            .to_string();
+        assert!(error.contains("local inbox message exceeds 4096 bytes before delivery custody"));
+        assert_eq!(
+            inspect(&config, None).expect("inspect empty custody"),
+            json!([])
+        );
+        assert_eq!(
+            fs::read_dir(
+                config.notification_routes[0]
+                    .local_inbox_directory
+                    .as_ref()
+                    .expect("inbox"),
+            )
+            .expect("list inbox")
+            .count(),
+            0
         );
     }
 

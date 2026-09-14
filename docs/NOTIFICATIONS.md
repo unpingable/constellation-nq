@@ -112,10 +112,10 @@ current conditions, upstream evidence legitimacy or successful underlying work.
 
 | State | Interpretation and next step |
 |---|---|
-|refused|No request was dispatched by this occurrence. Inspect configuration and retained state.|
+|refused|No HTTPS request was dispatched by this occurrence. Inspect configuration and retained state.|
 |pending|No delivery attempt has been claimed. The record remains pending; inspect the owner and inputs before taking another action.|
-|accepted|HTTP2xx received; this does not prove a human saw the message.|
-|failed|Non-success HTTP status received; do not assume the destination made no record.|
+|accepted|For HTTPS, an HTTP 2xx response was received. For `local_file`, exclusive file creation, file sync, and parent-directory sync completed. Neither establishes human receipt.|
+|failed|For HTTPS, a non-success HTTP status was received. For `local_file`, exclusive creation failed before a file was created. Neither result proves the destination made no record outside the retained custody boundary.|
 |unknown|Transport/result uncertainty, including a claimed attempt without terminal state. Inspect before retrying.|
 
 Exact duplicate event/destination submissions converge on one retained record;
@@ -130,7 +130,9 @@ sync, and parent-directory sync. An exact duplicate reopens custody without a
 second file write. If an error occurs after creation begins, delivery is recorded
 as `unknown`; NQ does not overwrite the file, retry automatically, or infer a
 human acknowledgment. A failed pre-creation open is distinct from an uncertain
-post-creation write.
+post-creation write. Before custody, NQ refuses a rendered local message larger
+than 4 KiB; this is a deterministic input-limit refusal, not a failed or unknown
+delivery attempt.
 
 `timeout_ms` and `max_response_bytes` bound HTTPS routes only; they are not a
 hard local-filesystem write or sync deadline. Use bounded caller supervision for
