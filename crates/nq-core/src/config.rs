@@ -328,7 +328,9 @@ pub enum ConfigError {
 
 impl LoadedConfig {
     /// Open, bound, parse, and validate one regular configuration file without
-    /// following a final symlink.
+    /// following a final symlink. On Linux, an explicit `/proc/self/fd/N`
+    /// reference additionally supports an inherited, fully sealed descriptor;
+    /// it is not a general symlink exception or permission grant.
     ///
     /// # Errors
     ///
@@ -767,10 +769,7 @@ impl NqConfig {
 }
 
 fn read_config_source(path: &Path) -> Result<(Vec<u8>, ConfigSourceIdentity), io::Error> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)?;
+    let mut file = open_config_source(path)?;
     let identity_before = config_source_identity(&file)?;
     if identity_before.length > MAX_CONFIG_BYTES as u64 {
         return Err(config_too_large(identity_before.length));
@@ -793,6 +792,75 @@ fn read_config_source(path: &Path) -> Result<(Vec<u8>, ConfigSourceIdentity), io
         ));
     }
     Ok((bytes, identity_after))
+}
+
+fn open_config_source(path: &Path) -> io::Result<File> {
+    #[cfg(target_os = "linux")]
+    if let Some(number) = path
+        .as_os_str()
+        .to_str()
+        .and_then(|s| s.strip_prefix("/proc/self/fd/"))
+    {
+        use nix::fcntl::{FcntlArg, SealFlag, fcntl};
+        use nix::sys::stat::{SFlag, fstat};
+        use std::os::fd::AsRawFd;
+
+        let descriptor: i32 = number.parse().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "sealed configuration reference requires a numeric descriptor",
+            )
+        })?;
+        if descriptor < 3 || number != descriptor.to_string() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "sealed configuration reference must be canonical and exclude standard streams",
+            ));
+        }
+        let required = SealFlag::F_SEAL_WRITE
+            | SealFlag::F_SEAL_GROW
+            | SealFlag::F_SEAL_SHRINK
+            | SealFlag::F_SEAL_SEAL;
+        let verify_seals = |fd| -> io::Result<()> {
+            let seals = fcntl(fd, FcntlArg::F_GET_SEALS).map_err(io::Error::from)?;
+            if seals & required.bits() != required.bits() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "configuration descriptor must prohibit writes, growth, shrinkage and seal changes",
+                ));
+            }
+            Ok(())
+        };
+        // Validate the inherited capability before opening its exact procfs
+        // reference. Validate the opened handle again before reading anything;
+        // an ordinary file, FIFO or replaced descriptor cannot supply this route.
+        let original = fstat(descriptor).map_err(io::Error::from)?;
+        if SFlag::from_bits_truncate(original.st_mode) & SFlag::S_IFMT != SFlag::S_IFREG {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "configuration descriptor must be a regular file",
+            ));
+        }
+        verify_seals(descriptor)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOCTTY)
+            .open(path)?;
+        let opened = config_source_identity(&file)?;
+        if opened.device != original.st_dev || opened.inode != original.st_ino {
+            return Err(io::Error::other(
+                "configuration descriptor changed while opening",
+            ));
+        }
+        verify_seals(file.as_raw_fd())?;
+        // Opening the descriptor reference creates an independent offset. The
+        // common reader still checks type/size/identity and parses exactly once.
+        return Ok(file);
+    }
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
 }
 
 fn config_source_identity(file: &File) -> Result<ConfigSourceIdentity, io::Error> {
@@ -1114,6 +1182,84 @@ max_response_bytes = 1024
             .expect_err("mutated candidate must be rejected");
         assert!(error.to_string().contains("changed after validation"));
         assert_eq!(loaded.source_bytes(), source.as_bytes());
+    }
+
+    #[cfg(target_os = "linux")]
+    fn sealed_config_file(bytes: &[u8], seal: bool) -> File {
+        use nix::fcntl::{FcntlArg, SealFlag, fcntl};
+        use nix::sys::memfd::{MemFdCreateFlag, memfd_create};
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        let descriptor = memfd_create(c"nq-config-test", MemFdCreateFlag::MFD_ALLOW_SEALING)
+            .expect("create local config memfd");
+        let mut file = File::from(descriptor);
+        file.write_all(bytes).expect("write config");
+        if seal {
+            let seals = SealFlag::F_SEAL_WRITE
+                | SealFlag::F_SEAL_GROW
+                | SealFlag::F_SEAL_SHRINK
+                | SealFlag::F_SEAL_SEAL;
+            fcntl(file.as_raw_fd(), FcntlArg::F_ADD_SEALS(seals)).expect("seal config");
+        }
+        file
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn sealed_descriptor_config_reads_exact_bytes_independently_of_offset() {
+        use std::os::fd::AsRawFd;
+        let source = minimal();
+        let file = sealed_config_file(source.as_bytes(), true);
+        // Writer offset is at EOF; the config loader must start at byte zero.
+        let path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
+        let loaded = LoadedConfig::load(&path).expect("read sealed configuration");
+        assert_eq!(loaded.source_bytes(), source.as_bytes());
+        assert_eq!(loaded.config(), &NqConfig::from_toml(&source).unwrap());
+        loaded
+            .verify_source_unchanged()
+            .expect("same sealed descriptor");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn descriptor_config_refuses_unsealed_ordinary_nonregular_and_invalid_handles() {
+        use std::os::fd::AsRawFd;
+        let unsealed = sealed_config_file(minimal().as_bytes(), false);
+        let ordinary = tempfile::tempfile().unwrap();
+        let (read_pipe, _write_pipe) = nix::unistd::pipe().unwrap();
+        for descriptor in [
+            unsealed.as_raw_fd(),
+            ordinary.as_raw_fd(),
+            read_pipe.as_raw_fd(),
+            i32::MAX,
+        ] {
+            assert!(LoadedConfig::load(Path::new(&format!("/proc/self/fd/{descriptor}"))).is_err());
+        }
+        for name in ["0", "01", "-1", "3/../3", "invalid"] {
+            assert!(LoadedConfig::load(Path::new(&format!("/proc/self/fd/{name}"))).is_err());
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn sealed_descriptor_config_keeps_size_and_parse_limits() {
+        use std::os::fd::AsRawFd;
+        for bytes in [
+            vec![b' '; MAX_CONFIG_BYTES + 1],
+            b"schema =".to_vec(),
+            vec![0xff],
+        ] {
+            let file = sealed_config_file(&bytes, true);
+            let path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
+            assert!(LoadedConfig::load(&path).is_err());
+        }
+        // A named symlink to a valid sealed descriptor is still not an explicit
+        // descriptor reference and must retain ordinary final-symlink refusal.
+        let file = sealed_config_file(minimal().as_bytes(), true);
+        let directory = tempfile::tempdir().unwrap();
+        let alias = directory.path().join("config.toml");
+        symlink(format!("/proc/self/fd/{}", file.as_raw_fd()), &alias).unwrap();
+        assert!(LoadedConfig::load(&alias).is_err());
     }
 
     #[test]
