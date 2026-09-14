@@ -2830,6 +2830,8 @@ mod tests {
             .expect("an unfinished claim is historical custody, not successful execution");
         validate_archive_event_fixture(Some("refused"), false, None)
             .expect("refusal without established read remains explicit");
+        validate_archive_event_fixture(Some("passed"), false, Some("2026-09-14T13:00:00Z"))
+            .expect("an earlier projection coordinate marks a future read, not corrupt history");
     }
 
     #[test]
@@ -2842,7 +2844,7 @@ mod tests {
                 .is_err()
         );
         assert!(
-            validate_archive_event_fixture(Some("passed"), false, Some("2026-09-14T13:00:00Z"))
+            validate_archive_event_fixture(Some("passed"), false, Some("not-rfc3339"))
                 .is_err()
         );
     }
