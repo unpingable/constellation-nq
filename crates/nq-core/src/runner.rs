@@ -168,6 +168,30 @@ impl StdioRunner {
         deadline: Duration,
         limits: &ResourceLimits,
     ) -> RunCapture {
+        self.run_verified_inner(launch, Some(request_json), deadline, limits)
+    }
+
+    /// Execute a fixed-argument helper that has no stdin request contract.
+    /// Stdin is closed immediately; stdout retains the ordinary single-frame
+    /// and resource-bound contract.
+    #[must_use]
+    pub fn run_without_request_verified(
+        &self,
+        launch: &VerifiedLaunch,
+        deadline: Duration,
+        limits: &ResourceLimits,
+    ) -> RunCapture {
+        self.run_verified_inner(launch, None, deadline, limits)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn run_verified_inner(
+        &self,
+        launch: &VerifiedLaunch,
+        request_json: Option<&[u8]>,
+        deadline: Duration,
+        limits: &ResourceLimits,
+    ) -> RunCapture {
         let started_at = Utc::now();
         let started = Instant::now();
         let mut child = match spawn(launch, limits) {
@@ -215,17 +239,22 @@ impl StdioRunner {
             Arc::clone(&stderr_overflow),
         );
 
-        let mut framed_request = Vec::with_capacity(request_json.len() + 1);
-        framed_request.extend_from_slice(request_json);
-        framed_request.push(b'\n');
         let (writer_sender, writer_receiver) = mpsc::sync_channel(1);
-        thread::spawn(move || {
-            let mut stdin = stdin;
-            let result = stdin
-                .write_all(&framed_request)
-                .and_then(|()| stdin.flush());
-            let _ = writer_sender.send(result);
-        });
+        if let Some(request_json) = request_json {
+            let mut framed_request = Vec::with_capacity(request_json.len() + 1);
+            framed_request.extend_from_slice(request_json);
+            framed_request.push(b'\n');
+            thread::spawn(move || {
+                let mut stdin = stdin;
+                let result = stdin
+                    .write_all(&framed_request)
+                    .and_then(|()| stdin.flush());
+                let _ = writer_sender.send(result);
+            });
+        } else {
+            drop(stdin);
+            let _ = writer_sender.send(Ok(()));
+        }
 
         let mut forced_outcome = None;
         let status = loop {

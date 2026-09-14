@@ -69,6 +69,53 @@ pub struct NqConfig {
     /// Independently scheduled watcher instances.
     #[serde(default)]
     pub watchers: Vec<WatcherConfig>,
+    /// Explicit notification routes. A route names a secret locator; its value
+    /// is resolved only at an enabled dispatch boundary and is never stored.
+    #[serde(default)]
+    pub notification_routes: Vec<NotificationRouteConfig>,
+}
+
+/// One bounded HTTPS notification route.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NotificationRouteConfig {
+    pub reference: String,
+    pub transport: NotificationTransportKind,
+    /// Environment variable name holding the endpoint at dispatch time.
+    pub endpoint_secret_locator: String,
+    #[serde(default = "default_notification_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_notification_response_bytes")]
+    pub max_response_bytes: usize,
+    /// Optional canonical Nightshift replay required for owner-minted attention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nightshift_attention_replay: Option<NightshiftAttentionReplayConfig>,
+}
+
+/// Exact local Nightshift implementation and policy admitted for attention replay.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NightshiftAttentionReplayConfig {
+    pub executable: PathBuf,
+    pub executable_sha256: String,
+    pub store_locator: PathBuf,
+    pub approved_policy_digest: String,
+    pub execution_account: String,
+}
+
+/// The only initial destination projections.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationTransportKind {
+    Slack,
+    Discord,
+}
+
+fn default_notification_timeout_ms() -> u64 {
+    10_000
+}
+fn default_notification_response_bytes() -> usize {
+    32_768
 }
 
 /// NQ-owned watcher deployment binding.
@@ -380,6 +427,71 @@ impl NqConfig {
                 "watchers",
                 format!("at most {MAX_WATCHERS} watcher instances are accepted"),
             ));
+        }
+        let mut route_references = HashSet::new();
+        for (index, route) in self.notification_routes.iter().enumerate() {
+            let base = format!("notification_routes[{index}]");
+            validate_binding_token(&format!("{base}.reference"), &route.reference)?;
+            if !route_references.insert(&route.reference) {
+                return Err(invalid(
+                    format!("{base}.reference"),
+                    "duplicate route reference",
+                ));
+            }
+            if !valid_env_key(&route.endpoint_secret_locator)
+                || route.endpoint_secret_locator.len() > 128
+                || !route.endpoint_secret_locator.ends_with("_URL")
+            {
+                return Err(invalid(
+                    format!("{base}.endpoint_secret_locator"),
+                    "must be a bounded *_URL environment-variable name",
+                ));
+            }
+            if !(100..=60_000).contains(&route.timeout_ms) {
+                return Err(invalid(
+                    format!("{base}.timeout_ms"),
+                    "must be between 100 and 60000",
+                ));
+            }
+            if !(1..=32_768).contains(&route.max_response_bytes) {
+                return Err(invalid(
+                    format!("{base}.max_response_bytes"),
+                    "must be between 1 and 32768",
+                ));
+            }
+            if let Some(replay) = &route.nightshift_attention_replay {
+                require_absolute(
+                    &format!("{base}.nightshift_attention_replay.executable"),
+                    &replay.executable,
+                )?;
+                require_absolute(
+                    &format!("{base}.nightshift_attention_replay.store_locator"),
+                    &replay.store_locator,
+                )?;
+                for (field, value) in [
+                    ("executable_sha256", replay.executable_sha256.as_str()),
+                    (
+                        "approved_policy_digest",
+                        replay.approved_policy_digest.as_str(),
+                    ),
+                ] {
+                    if value.len() != 71
+                        || !value.starts_with("sha256:")
+                        || !value[7..]
+                            .bytes()
+                            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                    {
+                        return Err(invalid(
+                            format!("{base}.nightshift_attention_replay.{field}"),
+                            "must be sha256: followed by 64 lowercase hexadecimal digits",
+                        ));
+                    }
+                }
+                validate_binding_token(
+                    &format!("{base}.nightshift_attention_replay.execution_account"),
+                    &replay.execution_account,
+                )?;
+            }
         }
 
         let mut ids = HashSet::new();
@@ -857,6 +969,53 @@ version = 1
             );
             assert!(NqConfig::from_toml(&text).is_err());
         }
+    }
+
+    #[test]
+    fn notification_nightshift_replay_binding_is_closed_and_optional() {
+        let route = r#"
+
+[[notification_routes]]
+reference = "ops.primary"
+transport = "slack"
+endpoint_secret_locator = "OPS_URL"
+
+[notification_routes.nightshift_attention_replay]
+executable = "/usr/local/bin/nightshift"
+executable_sha256 = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+store_locator = "/var/lib/nightshift/attention.sqlite"
+approved_policy_digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+execution_account = "nightshift"
+"#;
+        let configured = NqConfig::from_toml(&(minimal() + route)).expect("closed replay config");
+        assert!(
+            configured.notification_routes[0]
+                .nightshift_attention_replay
+                .is_some()
+        );
+
+        for bad in [
+            route.replace(
+                "executable = \"/usr/local/bin/nightshift\"",
+                "executable = \"nightshift\"",
+            ),
+            route.replace(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "sha256:any",
+            ),
+            route.replace(
+                "store_locator = \"/var/lib/nightshift/attention.sqlite\"",
+                "store_locator = \"relative.sqlite\"",
+            ),
+        ] {
+            assert!(NqConfig::from_toml(&(minimal() + &bad)).is_err());
+        }
+        assert!(
+            NqConfig::from_toml(&minimal())
+                .expect("route remains optional")
+                .notification_routes
+                .is_empty()
+        );
     }
 
     #[test]

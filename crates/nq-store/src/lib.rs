@@ -26,9 +26,12 @@ use thiserror::Error;
 const SCHEMA: &str = include_str!("schema.sql");
 const SCHEMA_V3: &str = include_str!("schema_v3.sql");
 const SCHEMA_V4: &str = include_str!("schema_v4.sql");
+const SCHEMA_V5: &str = include_str!("schema_v5.sql");
 const SCHEMA_V3_TO_V4_PROVIDER: &str = include_str!("schema_v3_to_v4_provider.sql");
 const SCHEMA_V4_TO_V5_DIAGNOSTIC_ARTIFACTS: &str =
     include_str!("schema_v4_to_v5_diagnostic_artifacts.sql");
+const SCHEMA_V5_TO_V12_LOCAL_CHECKS_NOTIFICATIONS: &str =
+    include_str!("schema_v5_to_v12_local_checks_notifications.sql");
 const APPLICATION_ID: i64 = 1_313_951_303;
 
 const SCHEMA_METADATA_V4: &str = r"CREATE TABLE schema_metadata (
@@ -61,6 +64,20 @@ const SCHEMA_METADATA_V5: &str = r"CREATE TABLE schema_metadata (
 const SCHEMA_METADATA_V5_TRIGGERS: &str = "CREATE TRIGGER immutable_schema_metadata_update BEFORE UPDATE ON schema_metadata BEGIN SELECT RAISE(ABORT, 'append-only table'); END;\n\
      CREATE TRIGGER immutable_schema_metadata_delete BEFORE DELETE ON schema_metadata BEGIN SELECT RAISE(ABORT, 'append-only table'); END;";
 
+const SCHEMA_METADATA_V12: &str = r"CREATE TABLE schema_metadata (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    product TEXT NOT NULL CHECK (product = 'nq-ng'),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 12),
+    -- Digest of the exact schema.sql artifact compiled into the writing binary.
+    -- Rejects stale provisional-candidate databases at startup; it is NOT a
+    -- tamper attestation of the live SQLite schema (which the structural
+    -- fingerprint checks separately).
+    schema_artifact_digest TEXT NOT NULL CHECK (length(schema_artifact_digest) = 71 AND substr(schema_artifact_digest, 1, 7) = 'sha256:'),
+    initialized_at TEXT NOT NULL
+) STRICT;";
+
+const SCHEMA_METADATA_V12_TRIGGERS: &str = SCHEMA_METADATA_V5_TRIGGERS;
+
 /// Exact schema-artifact digest of the qualified v0.1.0 store. It is retained
 /// only to validate an explicit v3-to-v4 upgrade source; normal opening never
 /// interprets v3 bytes as current storage.
@@ -71,6 +88,11 @@ pub const SCHEMA_V3_ARTIFACT_DIGEST: &str =
 /// retained only to validate an explicit v4-to-v5 upgrade source.
 pub const SCHEMA_V4_ARTIFACT_DIGEST: &str =
     "sha256:649b514a7cacddf4dbd55dad587947edd8499e9dc1ee6785370654075951cfa1";
+
+/// Exact public schema-v5 artifact accepted as the sole source of the direct
+/// additive upgrade. Private lineage versions 6 through 11 are not inputs.
+pub const SCHEMA_V5_ARTIFACT_DIGEST: &str =
+    "sha256:91455172d1bed3b5e67ae25b7122015fc3d1197ab9b676511a938d4eb658e94b";
 
 /// Schema tag bound into every admission-context digest preimage. Bump only when
 /// the constituent set or its canonicalization changes.
@@ -113,9 +135,16 @@ static EXPECTED_SCHEMA_V4_FINGERPRINT: LazyLock<Result<String, String>> = LazyLo
         .map_err(|error| error.to_string())?;
     schema_fingerprint(&connection).map_err(|error| error.to_string())
 });
+static EXPECTED_SCHEMA_V5_FINGERPRINT: LazyLock<Result<String, String>> = LazyLock::new(|| {
+    let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    connection
+        .execute_batch(SCHEMA_V5)
+        .map_err(|error| error.to_string())?;
+    schema_fingerprint(&connection).map_err(|error| error.to_string())
+});
 
 /// The only schema version understood by this crate.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 12;
 
 /// Hard ceiling for one page returned through the public read model helpers.
 pub const MAX_PUBLIC_QUERY_ROWS: u32 = 1_000;
@@ -4128,6 +4157,98 @@ pub struct NotificationAttemptInput {
     pub detail: CanonicalDocument,
 }
 
+/// Immutable custody for one requested human-notification delivery.
+#[derive(Clone, Debug)]
+pub struct NotificationDeliveryIntentInput {
+    pub notification_id: String,
+    pub stable_event_id: String,
+    pub attention_kind: String,
+    pub attention_receipt_digest: Option<String>,
+    pub attention_policy_id: String,
+    pub attention_policy_digest: String,
+    pub transition_id: String,
+    pub route_reference: String,
+    pub destination_identity: String,
+    pub content_digest: String,
+    pub intent: CanonicalDocument,
+    pub created_at: String,
+}
+#[derive(Clone, Debug)]
+pub struct NotificationDeliveryEventInput {
+    pub notification_id: String,
+    pub event_number: u32,
+    pub occurred_at: String,
+    pub outcome: String,
+    pub detail: CanonicalDocument,
+}
+#[derive(Clone, Debug, Serialize)]
+pub struct NotificationDeliveryStatus {
+    pub notification_id: String,
+    pub stable_event_id: String,
+    pub route_reference: String,
+    pub destination_identity: String,
+    pub content_digest: String,
+    pub event_count: u32,
+    pub delivery_state: String,
+}
+#[derive(Clone, Debug)]
+pub enum NotificationDeliveryRetention {
+    Inserted,
+    Existing(NotificationDeliveryStatus),
+}
+#[derive(Clone, Debug)]
+pub struct SavedCheckDefinitionInput {
+    pub definition_id: String,
+    pub stable_reference: String,
+    pub definition_digest: String,
+    pub definition: CanonicalDocument,
+    pub installed_at: String,
+}
+#[derive(Clone, Debug)]
+pub struct SavedCheckEventInput {
+    pub definition_id: String,
+    pub event_number: u32,
+    pub occurred_at: String,
+    pub outcome: String,
+    pub detail: CanonicalDocument,
+    pub evaluation_id: Option<String>,
+}
+#[derive(Clone, Debug)]
+pub struct SavedCheckDefinitionRecord {
+    pub definition_id: String,
+    pub stable_reference: String,
+    pub definition_digest: String,
+    pub definition_json: Vec<u8>,
+    pub installed_at: String,
+}
+#[derive(Clone, Debug)]
+pub struct SavedCheckEventRecord {
+    pub outcome: String,
+    pub detail_json: Vec<u8>,
+}
+#[derive(Clone, Debug)]
+pub struct MaintenanceDeclarationInput {
+    pub maintenance_id: String,
+    pub declaration_digest: String,
+    pub declaration: CanonicalDocument,
+    pub declared_at: String,
+}
+#[derive(Clone, Debug)]
+pub struct MaintenanceDeclarationRecord {
+    pub maintenance_id: String,
+    pub declaration_digest: String,
+    pub declaration_json: Vec<u8>,
+    pub declared_at: String,
+}
+
+fn notification_delivery_state(event_count: u32, state: String) -> String {
+    if event_count > 0 && state == "pending" {
+        "unknown".into()
+    } else {
+        state
+    }
+}
+
 /// A logical retention marker. It never rewrites the original evidence row.
 #[derive(Clone, Debug)]
 pub struct RetentionTombstoneInput {
@@ -4328,6 +4449,65 @@ impl Store {
             }
             drop(target);
             drop(Self::open_v4_upgrade_source_read_only(destination)?);
+            Ok(BackupArtifact {
+                path: destination.to_path_buf(),
+                sha256: sha256_file(destination)?,
+                size_bytes: std::fs::metadata(destination)?.len(),
+            })
+        })();
+        if result.is_err() {
+            remove_database_artifact(destination);
+        }
+        result
+    }
+
+    /// Create and verify the mandatory backup of the exact published schema-v5
+    /// source before the direct public v5-to-v12 upgrade.
+    pub fn backup_v5_verified(
+        source: impl AsRef<Path>,
+        destination: impl AsRef<Path>,
+    ) -> Result<BackupArtifact, StoreError> {
+        validate_v5_public_upgrade_source(source.as_ref())?;
+        let source_connection = Connection::open_with_flags(
+            source.as_ref(),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let source_logical_digest = v5_logical_state_digest(&source_connection)?;
+        let destination = destination.as_ref();
+        if destination.exists() {
+            return Err(StoreError::Invariant(format!(
+                "backup destination already exists: {}",
+                destination.display()
+            )));
+        }
+        drop(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(destination)?,
+        );
+        let result = (|| {
+            let source = Connection::open_with_flags(
+                source,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            let mut target =
+                Connection::open_with_flags(destination, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+            {
+                let backup = rusqlite::backup::Backup::new(&source, &mut target)?;
+                backup.run_to_completion(64, std::time::Duration::from_millis(10), None)?;
+            }
+            drop(target);
+            validate_v5_public_upgrade_source(destination)?;
+            let copied = Connection::open_with_flags(
+                destination,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            if v5_logical_state_digest(&copied)? != source_logical_digest {
+                return Err(StoreError::Integrity(
+                    "verified v5 backup logical state differs from its source".into(),
+                ));
+            }
             Ok(BackupArtifact {
                 path: destination.to_path_buf(),
                 sha256: sha256_file(destination)?,
@@ -4574,24 +4754,12 @@ impl Store {
                  )
                  SELECT singleton, product, 5, ?1, initialized_at
                  FROM schema_metadata_v4",
-                [schema_artifact_digest()],
+                [SCHEMA_V5_ARTIFACT_DIGEST],
             )?;
             transaction.execute("DROP TABLE schema_metadata_v4", [])?;
             transaction.execute_batch(SCHEMA_METADATA_V5_TRIGGERS)?;
             transaction.execute_batch(SCHEMA_V4_TO_V5_DIAGNOSTIC_ARTIFACTS)?;
-            transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-
-            let expected = EXPECTED_SCHEMA_FINGERPRINT.as_ref().map_err(|error| {
-                StoreError::Integrity(format!(
-                    "compiled schema cannot be fingerprinted after migration: {error}"
-                ))
-            })?;
-            let actual = schema_fingerprint(&transaction)?;
-            if &actual != expected {
-                return Err(StoreError::Integrity(format!(
-                    "migrated v5 schema fingerprint {actual} differs from fresh v5 {expected}"
-                )));
-            }
+            transaction.pragma_update(None, "user_version", 5)?;
             validate_stored_digests(&transaction)?;
             validate_upgrade_receipts(&transaction)?;
             validate_all_admission_context_digests(&transaction)?;
@@ -4609,6 +4777,107 @@ impl Store {
             validate_upgrade_receipts(&transaction)?;
             transaction.commit()?;
         }
+        // The returned handle is an explicitly chained v5 intermediate. It
+        // cannot be treated as a current store; callers must immediately take
+        // the verified v5 backup and run the separate direct v5-to-v12 step.
+        validate_v5_public_upgrade_source_connection(&store.connection)?;
+        configure_connection(&store.connection, true)?;
+        Ok(store)
+    }
+
+    /// Explicit public schema-v5 to schema-v12 upgrade. It accepts the exact
+    /// public v5 artifact only; unpublished lineage versions are not decoded.
+    pub fn upgrade_v5_to_v12(
+        path: impl AsRef<Path>,
+        receipt: &UpgradeReceiptInput,
+    ) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        validate_v5_to_v12_receipt(receipt)?;
+        let backup = Path::new(&receipt.backup_location);
+        if !backup.is_file() || sha256_file(backup)? != receipt.backup_digest {
+            return Err(StoreError::Invariant(
+                "v5-to-v12 migration requires the exact verified backup named by its receipt"
+                    .into(),
+            ));
+        }
+        if std::fs::canonicalize(path)? == std::fs::canonicalize(backup)? {
+            return Err(StoreError::Invariant(
+                "v5-to-v12 migration backup must be distinct from the source database".into(),
+            ));
+        }
+        validate_v5_public_upgrade_source(path)?;
+        validate_v5_public_upgrade_source(backup)?;
+        let source_read = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let backup_read = Connection::open_with_flags(
+            backup,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        if v5_logical_state_digest(&source_read)? != v5_logical_state_digest(&backup_read)? {
+            return Err(StoreError::Invariant(
+                "v5-to-v12 migration backup logical state differs from its source".into(),
+            ));
+        }
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        configure_connection(&connection, false)?;
+        let mut store = Self {
+            connection,
+            path: Some(path.to_path_buf()),
+        };
+        let transaction = store.immediate_transaction()?;
+        validate_v5_public_upgrade_source_connection(&transaction)?;
+        if sha256_file(backup)? != receipt.backup_digest {
+            return Err(StoreError::Invariant(
+                "v5-to-v12 migration backup changed after preflight validation".into(),
+            ));
+        }
+        let locked_backup = Connection::open_with_flags(
+            backup,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        if v5_logical_state_digest(&transaction)? != v5_logical_state_digest(&locked_backup)? {
+            return Err(StoreError::Invariant(
+                "v5-to-v12 migration locked source differs from its verified backup".into(),
+            ));
+        }
+        transaction.execute_batch("DROP TRIGGER immutable_schema_metadata_update; DROP TRIGGER immutable_schema_metadata_delete; ALTER TABLE schema_metadata RENAME TO schema_metadata_v5;")?;
+        transaction.execute_batch(SCHEMA_METADATA_V12)?;
+        transaction.execute("INSERT INTO schema_metadata (singleton, product, schema_version, schema_artifact_digest, initialized_at) SELECT singleton, product, 12, ?1, initialized_at FROM schema_metadata_v5", [schema_artifact_digest()])?;
+        transaction.execute("DROP TABLE schema_metadata_v5", [])?;
+        transaction.execute_batch(SCHEMA_METADATA_V12_TRIGGERS)?;
+        transaction.execute_batch(SCHEMA_V5_TO_V12_LOCAL_CHECKS_NOTIFICATIONS)?;
+        transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        let mut committed = receipt.clone();
+        committed.finished_at = now_utc();
+        insert_upgrade_receipt(&transaction, &committed)?;
+        let expected = EXPECTED_SCHEMA_FINGERPRINT.as_ref().map_err(|error| {
+            StoreError::Integrity(format!(
+                "compiled schema cannot be fingerprinted after migration: {error}"
+            ))
+        })?;
+        if schema_fingerprint(&transaction)? != *expected {
+            return Err(StoreError::Integrity(
+                "migrated v12 schema fingerprint differs from fresh v12".into(),
+            ));
+        }
+        validate_stored_digests(&transaction)?;
+        validate_upgrade_receipts(&transaction)?;
+        validate_all_admission_context_digests(&transaction)?;
+        validate_local_provider_admissions(&transaction)?;
+        validate_provider_intake_invariants(&transaction)?;
+        validate_refusal_invariants(&transaction)?;
+        validate_run_results(&transaction)?;
+        validate_evaluation_refusal_invariants(&transaction)?;
+        validate_diagnostic_artifact_invariants(&transaction)?;
+        validate_admitted_report_associations_connection(&transaction)?;
+        validate_status_sequence_lower_bound(&transaction)?;
+        validate_projection_invariants(&transaction)?;
+        transaction.commit()?;
         store.validate()?;
         configure_connection(&store.connection, true)?;
         Ok(store)
@@ -5278,6 +5547,262 @@ impl Store {
         Ok(())
     }
 
+    /// Atomically retain an outbox row and its immutable delivery intent.
+    pub fn retain_notification_delivery(
+        &mut self,
+        notification: &NotificationInput,
+        intent: &NotificationDeliveryIntentInput,
+    ) -> Result<NotificationDeliveryRetention, StoreError> {
+        validate_digest("attention_policy_digest", &intent.attention_policy_digest)?;
+        validate_digest("content_digest", &intent.content_digest)?;
+        if let Some(receipt) = &intent.attention_receipt_digest {
+            validate_digest("attention_receipt_digest", receipt)?;
+        }
+        if !matches!(
+            intent.attention_kind.as_str(),
+            "operator_assertion" | "nightshift_receipt"
+        ) || (intent.attention_kind == "nightshift_receipt"
+            && intent.attention_receipt_digest.is_none())
+        {
+            return Err(StoreError::Invariant(
+                "notification delivery intent has no supported attention binding".into(),
+            ));
+        }
+        let transaction = self.immediate_transaction()?;
+        let existing: Option<(String, String, Vec<u8>)> = transaction.query_row("SELECT notification_id, content_digest, intent_json FROM notification_delivery_intents WHERE stable_event_id = ?1 AND destination_identity = ?2", params![intent.stable_event_id, intent.destination_identity], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
+        if let Some((notification_id, digest, bytes)) = existing {
+            if digest != intent.content_digest || bytes != intent.intent.as_bytes() {
+                return Err(StoreError::Invariant(
+                    "notification identity is already retained with different canonical intent"
+                        .into(),
+                ));
+            }
+            let status = notification_delivery_status_row(&transaction, &notification_id)?;
+            transaction.commit()?;
+            return Ok(NotificationDeliveryRetention::Existing(status));
+        }
+        transaction.execute("INSERT INTO notification_outbox (notification_id, idempotency_key, finding_event_id, destination_kind, payload_json, available_at, max_attempts, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)", params![notification.notification_id, notification.idempotency_key, notification.finding_event_id, notification.destination_kind, notification.payload.as_bytes(), notification.available_at, notification.max_attempts, notification.created_at])?;
+        transaction.execute("INSERT INTO notification_delivery_intents (notification_id, intent_schema, stable_event_id, attention_kind, attention_receipt_digest, attention_policy_id, attention_policy_digest, transition_id, route_reference, destination_identity, content_digest, intent_json, created_at) VALUES (?1, 'nq.notification_delivery_intent.v1', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)", params![intent.notification_id, intent.stable_event_id, intent.attention_kind, intent.attention_receipt_digest, intent.attention_policy_id, intent.attention_policy_digest, intent.transition_id, intent.route_reference, intent.destination_identity, intent.content_digest, intent.intent.as_bytes(), intent.created_at])?;
+        transaction.commit()?;
+        Ok(NotificationDeliveryRetention::Inserted)
+    }
+
+    /// Record one claim or terminal delivery observation. A claim without a terminal observation reads as unknown.
+    pub fn append_notification_delivery_event(
+        &mut self,
+        event: &NotificationDeliveryEventInput,
+    ) -> Result<(), StoreError> {
+        let transaction = self.immediate_transaction()?;
+        transaction.execute("INSERT INTO notification_delivery_events (notification_id, event_number, occurred_at, outcome, detail_json) VALUES (?1, ?2, ?3, ?4, ?5)", params![event.notification_id, event.event_number, event.occurred_at, event.outcome, event.detail.as_bytes()])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn notification_delivery_by_identity(
+        &self,
+        stable_event_id: &str,
+        destination_identity: &str,
+    ) -> Result<Option<NotificationDeliveryStatus>, StoreError> {
+        self.connection.query_row("SELECT notification_id, stable_event_id, route_reference, destination_identity, content_digest, event_count, delivery_state FROM public_notification_delivery_status_v1 WHERE stable_event_id = ?1 AND destination_identity = ?2", params![stable_event_id, destination_identity], notification_delivery_status_from_row).optional().map_err(StoreError::from)
+    }
+
+    pub fn notification_delivery_status(
+        &self,
+        notification_id: Option<&str>,
+    ) -> Result<Vec<NotificationDeliveryStatus>, StoreError> {
+        let sql = if notification_id.is_some() {
+            "SELECT notification_id, stable_event_id, route_reference, destination_identity, content_digest, event_count, delivery_state FROM public_notification_delivery_status_v1 WHERE notification_id = ?1 ORDER BY notification_id"
+        } else {
+            "SELECT notification_id, stable_event_id, route_reference, destination_identity, content_digest, event_count, delivery_state FROM public_notification_delivery_status_v1 ORDER BY notification_id"
+        };
+        let mut statement = self.connection.prepare(sql)?;
+        let rows = if let Some(id) = notification_id {
+            statement.query_map([id], notification_delivery_status_from_row)?
+        } else {
+            statement.query_map([], notification_delivery_status_from_row)?
+        };
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    /// Install immutable saved-check bytes. An existing stable reference can only replay exact material.
+    pub fn install_saved_check(
+        &mut self,
+        input: &SavedCheckDefinitionInput,
+    ) -> Result<(), StoreError> {
+        validate_bounded_identity("saved check definition_id", &input.definition_id)?;
+        validate_bounded_identity("saved check stable_reference", &input.stable_reference)?;
+        validate_digest("saved check definition_digest", &input.definition_digest)?;
+        let transaction = self.immediate_transaction()?;
+        let existing: Option<(String, Vec<u8>)> = transaction.query_row("SELECT definition_digest, definition_json FROM saved_check_definitions WHERE stable_reference = ?1", [&input.stable_reference], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+        if let Some((digest, bytes)) = existing {
+            if digest == input.definition_digest && bytes == input.definition.as_bytes() {
+                transaction.commit()?;
+                return Ok(());
+            }
+            return Err(StoreError::Invariant(
+                "saved check stable reference is already bound to different material".into(),
+            ));
+        }
+        transaction.execute("INSERT INTO saved_check_definitions (definition_id, stable_reference, definition_digest, definition_json, installed_at) VALUES (?1, ?2, ?3, ?4, ?5)", params![input.definition_id, input.stable_reference, input.definition_digest, input.definition.as_bytes(), input.installed_at])?;
+        transaction.execute("INSERT INTO saved_check_events (definition_id, event_number, occurred_at, outcome, detail_json) VALUES (?1, 1, ?2, 'installed', ?3)", params![input.definition_id, input.installed_at, CanonicalDocument::from_serializable(&serde_json::json!({"definition_digest": input.definition_digest}))?.as_bytes()])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn claim_saved_check_evaluation(
+        &mut self,
+        definition_id: &str,
+        evaluation_id: &str,
+        occurred_at: &str,
+        detail: &CanonicalDocument,
+    ) -> Result<bool, StoreError> {
+        validate_bounded_identity("saved check definition_id", definition_id)?;
+        validate_bounded_identity("saved check evaluation_id", evaluation_id)?;
+        let claim: Value = serde_json::from_slice(detail.as_bytes())
+            .map_err(|_| StoreError::Invariant("saved check claim detail is not JSON".into()))?;
+        if !claim
+            .get("binding")
+            .is_some_and(|v| v.as_object().is_some_and(|o| !o.is_empty()))
+        {
+            return Err(StoreError::Invariant(
+                "saved check claim requires an explicit nonempty binding".into(),
+            ));
+        }
+        let transaction = self.immediate_transaction()?;
+        let existing: Option<(String, Vec<u8>)> = transaction.query_row("SELECT definition_id, detail_json FROM saved_check_events WHERE evaluation_id = ?1 AND outcome = 'claimed'", [evaluation_id], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+        if let Some((id, bytes)) = existing {
+            if id == definition_id && bytes == detail.as_bytes() {
+                transaction.commit()?;
+                return Ok(false);
+            }
+            return Err(StoreError::Invariant(
+                "saved check evaluation id is already bound to different material".into(),
+            ));
+        }
+        let number: i64 = transaction.query_row("SELECT COALESCE(MAX(event_number), 0) + 1 FROM saved_check_events WHERE definition_id = ?1", [definition_id], |row| row.get(0))?;
+        transaction.execute("INSERT INTO saved_check_events (definition_id, event_number, occurred_at, outcome, detail_json, evaluation_id) VALUES (?1, ?2, ?3, 'claimed', ?4, ?5)", params![definition_id, number, occurred_at, detail.as_bytes(), evaluation_id])?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    pub fn append_saved_check_event(
+        &mut self,
+        input: &SavedCheckEventInput,
+    ) -> Result<(), StoreError> {
+        if !matches!(input.outcome.as_str(), "refused" | "passed" | "failed") {
+            return Err(StoreError::Invariant(
+                "saved check event outcome is unsupported".into(),
+            ));
+        }
+        let Some(evaluation_id) = input.evaluation_id.as_deref() else {
+            return Err(StoreError::Invariant(
+                "saved check terminal event requires an evaluation claim".into(),
+            ));
+        };
+        validate_bounded_identity("saved check definition_id", &input.definition_id)?;
+        validate_bounded_identity("saved check evaluation_id", evaluation_id)?;
+        let transaction = self.immediate_transaction()?;
+        let existing: Option<(String, String, Vec<u8>)> = transaction.query_row("SELECT definition_id, outcome, detail_json FROM saved_check_events WHERE evaluation_id = ?1 AND outcome IN ('refused', 'passed', 'failed')", [evaluation_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
+        if let Some((id, outcome, bytes)) = existing {
+            if id == input.definition_id
+                && outcome == input.outcome
+                && bytes == input.detail.as_bytes()
+            {
+                transaction.commit()?;
+                return Ok(());
+            }
+            return Err(StoreError::Invariant(
+                "saved check evaluation id is already bound to different terminal material".into(),
+            ));
+        }
+        let claim: Option<(String, Vec<u8>)> = transaction.query_row("SELECT definition_id, detail_json FROM saved_check_events WHERE evaluation_id = ?1 AND outcome = 'claimed'", [evaluation_id], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+        let Some((id, claim_bytes)) = claim else {
+            return Err(StoreError::Invariant(
+                "saved check terminal event has no retained claim".into(),
+            ));
+        };
+        let claim: Value = serde_json::from_slice(&claim_bytes)
+            .map_err(|_| StoreError::Invariant("saved check claim detail is not JSON".into()))?;
+        let terminal: Value = serde_json::from_slice(input.detail.as_bytes())
+            .map_err(|_| StoreError::Invariant("saved check terminal detail is not JSON".into()))?;
+        if id != input.definition_id
+            || claim.get("binding").is_none()
+            || claim.get("binding") != terminal.get("binding")
+        {
+            return Err(StoreError::Invariant(
+                "saved check terminal binding differs from its exact claim".into(),
+            ));
+        }
+        let number: i64 = transaction.query_row("SELECT COALESCE(MAX(event_number), 0) + 1 FROM saved_check_events WHERE definition_id = ?1", [&input.definition_id], |row| row.get(0))?;
+        transaction.execute("INSERT INTO saved_check_events (definition_id, event_number, occurred_at, outcome, detail_json, evaluation_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![input.definition_id, number, input.occurred_at, input.outcome, input.detail.as_bytes(), input.evaluation_id])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn declare_maintenance(
+        &mut self,
+        input: &MaintenanceDeclarationInput,
+    ) -> Result<(), StoreError> {
+        validate_bounded_identity("maintenance_id", &input.maintenance_id)?;
+        validate_digest("maintenance declaration_digest", &input.declaration_digest)?;
+        let transaction = self.immediate_transaction()?;
+        let existing: Option<(String, Vec<u8>, String)> = transaction.query_row("SELECT declaration_digest, declaration_json, declared_at FROM maintenance_declarations WHERE maintenance_id = ?1", [&input.maintenance_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
+        if let Some((digest, bytes, at)) = existing {
+            if digest == input.declaration_digest
+                && bytes == input.declaration.as_bytes()
+                && at == input.declared_at
+            {
+                transaction.commit()?;
+                return Ok(());
+            }
+            return Err(StoreError::Invariant(
+                "maintenance declaration is already bound to different material".into(),
+            ));
+        }
+        transaction.execute("INSERT INTO maintenance_declarations (maintenance_id, declaration_digest, declaration_json, declared_at) VALUES (?1, ?2, ?3, ?4)", params![input.maintenance_id, input.declaration_digest, input.declaration.as_bytes(), input.declared_at])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn saved_check_definition(
+        &self,
+        reference: &str,
+    ) -> Result<Option<SavedCheckDefinitionRecord>, StoreError> {
+        self.connection.query_row("SELECT definition_id, stable_reference, definition_digest, definition_json, installed_at FROM saved_check_definitions WHERE stable_reference = ?1", [reference], |row| Ok(SavedCheckDefinitionRecord { definition_id: row.get(0)?, stable_reference: row.get(1)?, definition_digest: row.get(2)?, definition_json: row.get(3)?, installed_at: row.get(4)? })).optional().map_err(StoreError::from)
+    }
+
+    pub fn saved_check_event_by_evaluation_id(
+        &self,
+        evaluation_id: &str,
+    ) -> Result<Option<SavedCheckEventRecord>, StoreError> {
+        self.connection.query_row("SELECT outcome, detail_json FROM saved_check_events WHERE evaluation_id = ?1 ORDER BY event_number DESC LIMIT 1", [evaluation_id], |row| Ok(SavedCheckEventRecord { outcome: row.get(0)?, detail_json: row.get(1)? })).optional().map_err(StoreError::from)
+    }
+
+    pub fn maintenance_declarations(
+        &self,
+    ) -> Result<Vec<MaintenanceDeclarationRecord>, StoreError> {
+        let mut statement = self.connection.prepare("SELECT maintenance_id, declaration_digest, declaration_json, declared_at FROM maintenance_declarations ORDER BY declared_at, maintenance_id")?;
+        statement
+            .query_map([], |row| {
+                Ok(MaintenanceDeclarationRecord {
+                    maintenance_id: row.get(0)?,
+                    declaration_digest: row.get(1)?,
+                    declaration_json: row.get(2)?,
+                    declared_at: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn maintenance_declaration(
+        &self,
+        id: &str,
+    ) -> Result<Option<MaintenanceDeclarationRecord>, StoreError> {
+        self.connection.query_row("SELECT maintenance_id, declaration_digest, declaration_json, declared_at FROM maintenance_declarations WHERE maintenance_id = ?1", [id], |row| Ok(MaintenanceDeclarationRecord { maintenance_id: row.get(0)?, declaration_digest: row.get(1)?, declaration_json: row.get(2)?, declared_at: row.get(3)? })).optional().map_err(StoreError::from)
+    }
+
     /// Append a logical retention tombstone without refreshing or rewriting evidence.
     pub fn append_retention_tombstone(
         &mut self,
@@ -5392,6 +5917,101 @@ impl Store {
     }
 }
 
+fn notification_delivery_status_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<NotificationDeliveryStatus> {
+    let event_count: u32 = row.get(5)?;
+    let state: String = row.get(6)?;
+    Ok(NotificationDeliveryStatus {
+        notification_id: row.get(0)?,
+        stable_event_id: row.get(1)?,
+        route_reference: row.get(2)?,
+        destination_identity: row.get(3)?,
+        content_digest: row.get(4)?,
+        event_count,
+        delivery_state: notification_delivery_state(event_count, state),
+    })
+}
+
+fn notification_delivery_status_row(
+    transaction: &Transaction<'_>,
+    notification_id: &str,
+) -> Result<NotificationDeliveryStatus, StoreError> {
+    transaction.query_row("SELECT notification_id, stable_event_id, route_reference, destination_identity, content_digest, event_count, delivery_state FROM public_notification_delivery_status_v1 WHERE notification_id = ?1", [notification_id], notification_delivery_status_from_row).map_err(StoreError::from)
+}
+
+fn validate_v5_public_upgrade_source(path: &Path) -> Result<(), StoreError> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    validate_v5_public_upgrade_source_connection(&connection)
+}
+
+fn validate_v5_public_upgrade_source_connection(connection: &Connection) -> Result<(), StoreError> {
+    let version = pragma_i64(connection, "user_version")?;
+    if version != 5 {
+        return Err(StoreError::SchemaVersionMismatch {
+            found: version,
+            supported: 5,
+        });
+    }
+    if pragma_i64(connection, "application_id")? != APPLICATION_ID {
+        return Err(StoreError::Integrity(
+            "v5-to-v12 source has another application identity".into(),
+        ));
+    }
+    let digest: String = connection.query_row(
+        "SELECT schema_artifact_digest FROM schema_metadata WHERE singleton = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    if digest != SCHEMA_V5_ARTIFACT_DIGEST
+        || sha256_digest(SCHEMA_V5.as_bytes()) != SCHEMA_V5_ARTIFACT_DIGEST
+    {
+        return Err(StoreError::Invariant(
+            "v5-to-v12 source is not the pinned public schema-v5 artifact".into(),
+        ));
+    }
+    let quick_check: String =
+        connection.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+    if quick_check != "ok" {
+        return Err(StoreError::Integrity(quick_check));
+    }
+    let foreign_key_failures: i64 =
+        connection.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })?;
+    if foreign_key_failures != 0 {
+        return Err(StoreError::Integrity(format!(
+            "{foreign_key_failures} schema-v5 foreign-key violations"
+        )));
+    }
+    let expected = EXPECTED_SCHEMA_V5_FINGERPRINT.as_ref().map_err(|error| {
+        StoreError::Integrity(format!(
+            "compiled v5 schema cannot be fingerprinted: {error}"
+        ))
+    })?;
+    let actual = schema_fingerprint(connection)?;
+    if &actual != expected {
+        return Err(StoreError::Integrity(format!(
+            "schema-v5 definition fingerprint {actual} differs from exact public v5 {expected}"
+        )));
+    }
+    validate_stored_digests(connection)?;
+    validate_upgrade_receipts(connection)?;
+    validate_all_admission_context_digests(connection)?;
+    validate_local_provider_admissions(connection)?;
+    validate_provider_intake_invariants(connection)?;
+    validate_refusal_invariants(connection)?;
+    validate_run_results(connection)?;
+    validate_evaluation_refusal_invariants(connection)?;
+    validate_diagnostic_artifact_invariants(connection)?;
+    validate_admitted_report_associations_connection(connection)?;
+    validate_status_sequence_lower_bound(connection)?;
+    validate_projection_invariants(connection)
+}
+
 fn insert_upgrade_receipt(
     transaction: &Transaction<'_>,
     receipt: &UpgradeReceiptInput,
@@ -5402,6 +6022,7 @@ fn insert_upgrade_receipt(
     match (receipt.from_schema_version, receipt.to_schema_version) {
         (3, 4) => validate_v3_to_v4_receipt(receipt)?,
         (4, 5) => validate_v4_to_v5_receipt(receipt)?,
+        (5, 12) => validate_v5_to_v12_receipt(receipt)?,
         _ => {}
     }
     transaction.execute(
@@ -5512,6 +6133,39 @@ fn validate_v4_to_v5_receipt(receipt: &UpgradeReceiptInput) -> Result<(), StoreE
     if receipt.verification != expected_verification {
         return Err(StoreError::Invariant(
             "v4-to-v5 migration receipt verification does not match the exact closed vocabulary"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_v5_to_v12_receipt(receipt: &UpgradeReceiptInput) -> Result<(), StoreError> {
+    if receipt.from_schema_version != 5 || receipt.to_schema_version != 12 {
+        return Err(StoreError::Invariant(
+            "v5-to-v12 migration receipt names the wrong version transition".into(),
+        ));
+    }
+    validate_digest("binary_digest", &receipt.binary_digest)?;
+    validate_digest("backup_digest", &receipt.backup_digest)?;
+    validate_upgrade_receipt_times(receipt)?;
+    if receipt.migrations
+        != CanonicalDocument::from_serializable(&["schema_v5_to_v12_local_checks_notifications"])?
+        || receipt.result != "migrated"
+    {
+        return Err(StoreError::Invariant(
+            "v5-to-v12 migration receipt does not name the exact migration vocabulary".into(),
+        ));
+    }
+    let expected = CanonicalDocument::from_serializable(&serde_json::json!({
+        "integrity": "ok", "source_schema_version": 5,
+        "source_schema_artifact_digest": SCHEMA_V5_ARTIFACT_DIGEST,
+        "backup_reopened": true,
+        "historical_saved_checks": "absent_not_synthesized",
+        "historical_notification_delivery": "absent_not_synthesized",
+    }))?;
+    if receipt.verification != expected {
+        return Err(StoreError::Invariant(
+            "v5-to-v12 migration receipt verification does not match the exact closed vocabulary"
                 .into(),
         ));
     }
@@ -6787,6 +7441,10 @@ fn v3_logical_state_digest(connection: &Connection) -> Result<String, StoreError
 
 fn v4_logical_state_digest(connection: &Connection) -> Result<String, StoreError> {
     logical_state_digest(connection, b"nq.schema_v4.logical_state.v1\0")
+}
+
+fn v5_logical_state_digest(connection: &Connection) -> Result<String, StoreError> {
+    logical_state_digest(connection, b"nq.schema_v5.logical_state.v1\0")
 }
 
 fn logical_state_digest(connection: &Connection, domain: &[u8]) -> Result<String, StoreError> {
@@ -15546,6 +16204,182 @@ mod tests {
             commitment_count, 0,
             "migration synthesized artifacts from schema-v4 absence"
         );
-        migrated.validate().expect("migrated v5 validates");
+        validate_v5_public_upgrade_source_connection(&migrated.connection)
+            .expect("migrated v5 remains the pinned intermediate");
+    }
+
+    fn write_empty_exact_v5(path: &Path) {
+        let v5_schema = SCHEMA
+            .split("-- Keep this fresh-store suffix exactly aligned with schema_v5_to_v12_local_checks_notifications.sql.")
+            .next()
+            .expect("current schema has v5-to-v12 suffix")
+            .replacen("PRAGMA user_version = 12;", "PRAGMA user_version = 5;", 1)
+            .replacen("schema_version INTEGER NOT NULL CHECK (schema_version = 12)", "schema_version INTEGER NOT NULL CHECK (schema_version = 5)", 1);
+        let connection = Connection::open(path).expect("open v5 fixture");
+        connection
+            .execute_batch(&v5_schema)
+            .expect("create exact v5 fixture schema");
+        connection.execute("INSERT INTO schema_metadata (singleton, product, schema_version, schema_artifact_digest, initialized_at) VALUES (1, 'nq-ng', 5, ?1, ?2)", params![SCHEMA_V5_ARTIFACT_DIGEST, TIME]).expect("seed v5 metadata");
+    }
+
+    fn exact_v5_to_v12_receipt(backup: &BackupArtifact) -> UpgradeReceiptInput {
+        UpgradeReceiptInput {
+            receipt_id: "upgrade-v5-v12-local-checks-notifications".to_owned(),
+            from_schema_version: 5,
+            to_schema_version: 12,
+            migrations: document(json!(["schema_v5_to_v12_local_checks_notifications"])),
+            binary_digest: digest("migration-binary-v12"),
+            backup_digest: backup.sha256.clone(),
+            backup_location: backup.path.to_string_lossy().into_owned(),
+            started_at: TIME.to_owned(),
+            finished_at: "2026-07-16T12:00:01.000Z".to_owned(),
+            result: "migrated".to_owned(),
+            operator_identity: document(json!({"operator": "fixture"})),
+            verification: document(
+                json!({"integrity":"ok","source_schema_version":5,"source_schema_artifact_digest":SCHEMA_V5_ARTIFACT_DIGEST,"backup_reopened":true,"historical_saved_checks":"absent_not_synthesized","historical_notification_delivery":"absent_not_synthesized"}),
+            ),
+        }
+    }
+
+    #[test]
+    fn exact_public_v5_backup_and_direct_v12_upgrade_preserve_source() {
+        let directory = tempdir().expect("temporary directory");
+        let source = directory.path().join("source-v5.db");
+        let backup_path = directory.path().join("backup-v5.db");
+        write_empty_exact_v5(&source);
+        let before = sha256_file(&source).expect("source digest");
+        let backup = Store::backup_v5_verified(&source, &backup_path).expect("verified v5 backup");
+        let migrated = Store::upgrade_v5_to_v12(&source, &exact_v5_to_v12_receipt(&backup))
+            .expect("direct public upgrade");
+        assert_eq!(
+            sha256_file(&backup_path).expect("backup remains"),
+            backup.sha256
+        );
+        assert_ne!(sha256_file(&source).expect("source migrated"), before);
+        migrated.validate().expect("v12 validates");
+        assert_eq!(Store::database_schema_version(&source).unwrap(), 12);
+    }
+
+    #[test]
+    fn v5_to_v12_refuses_private_lineage_and_wrong_backup() {
+        let directory = tempdir().expect("temporary directory");
+        let source = directory.path().join("source-v5.db");
+        let backup_path = directory.path().join("backup-v5.db");
+        write_empty_exact_v5(&source);
+        let backup = Store::backup_v5_verified(&source, &backup_path).expect("backup");
+        let receipt = exact_v5_to_v12_receipt(&backup);
+        Connection::open(&source)
+            .unwrap()
+            .pragma_update(None, "user_version", 6)
+            .unwrap();
+        assert!(matches!(
+            Store::upgrade_v5_to_v12(&source, &receipt),
+            Err(StoreError::SchemaVersionMismatch {
+                found: 6,
+                supported: 5
+            })
+        ));
+        let mut wrong = receipt;
+        wrong.backup_digest = digest("other backup");
+        assert!(Store::upgrade_v5_to_v12(&backup_path, &wrong).is_err());
+    }
+
+    #[test]
+    fn v5_to_v12_refuses_a_different_valid_public_v5_backup() {
+        let directory = tempdir().expect("temporary directory");
+        let source = directory.path().join("source-v5.db");
+        let unrelated = directory.path().join("unrelated-v5.db");
+        write_empty_exact_v5(&source);
+        write_empty_exact_v5(&unrelated);
+        let unrelated_backup = BackupArtifact { path: unrelated.clone(), sha256: sha256_file(&unrelated).unwrap(), size_bytes: std::fs::metadata(&unrelated).unwrap().len() };
+        let receipt = exact_v5_to_v12_receipt(&unrelated_backup);
+        assert!(matches!(Store::upgrade_v5_to_v12(&source, &receipt), Err(StoreError::Invariant(message)) if message.contains("logical state differs")));
+    }
+
+    #[test]
+    fn local_check_custody_replays_exact_bindings_and_marks_unsettled_delivery_unknown() {
+        let mut store = Store::initialize_in_memory().expect("store initializes");
+        let definition = SavedCheckDefinitionInput {
+            definition_id: "check-a".into(),
+            stable_reference: "saved-check:a".into(),
+            definition_digest: digest("definition-a"),
+            definition: document(json!({"schema":"nq.saved_check.v1"})),
+            installed_at: TIME.into(),
+        };
+        store.install_saved_check(&definition).unwrap();
+        store.install_saved_check(&definition).unwrap();
+        let claim = document(json!({"binding":{"observation":"one"}}));
+        assert!(
+            store
+                .claim_saved_check_evaluation("check-a", "eval-a", TIME, &claim)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .claim_saved_check_evaluation("check-a", "eval-a", TIME, &claim)
+                .unwrap()
+        );
+        let result = SavedCheckEventInput {
+            definition_id: "check-a".into(),
+            event_number: 9,
+            occurred_at: TIME.into(),
+            outcome: "passed".into(),
+            detail: document(json!({"binding":{"observation":"one"},"result":"passed"})),
+            evaluation_id: Some("eval-a".into()),
+        };
+        store.append_saved_check_event(&result).unwrap();
+        store.append_saved_check_event(&result).unwrap();
+        let changed = SavedCheckEventInput {
+            detail: document(json!({"binding":{"observation":"two"},"result":"passed"})),
+            ..result
+        };
+        assert!(store.append_saved_check_event(&changed).is_err());
+        let notification = NotificationInput {
+            notification_id: "notification-a".into(),
+            idempotency_key: "key-a".into(),
+            finding_event_id: "finding-a".into(),
+            destination_kind: "fixture".into(),
+            payload: document(json!({"body":"bounded"})),
+            available_at: TIME.into(),
+            max_attempts: 1,
+            created_at: TIME.into(),
+        };
+        let intent = NotificationDeliveryIntentInput {
+            notification_id: "notification-a".into(),
+            stable_event_id: "event-a".into(),
+            attention_kind: "operator_assertion".into(),
+            attention_receipt_digest: None,
+            attention_policy_id: "policy-a".into(),
+            attention_policy_digest: digest("policy-a"),
+            transition_id: "transition-a".into(),
+            route_reference: "route-a".into(),
+            destination_identity: "destination-a".into(),
+            content_digest: digest("content-a"),
+            intent: document(json!({"message":"bounded"})),
+            created_at: TIME.into(),
+        };
+        assert!(matches!(
+            store
+                .retain_notification_delivery(&notification, &intent)
+                .unwrap(),
+            NotificationDeliveryRetention::Inserted
+        ));
+        store
+            .append_notification_delivery_event(&NotificationDeliveryEventInput {
+                notification_id: "notification-a".into(),
+                event_number: 1,
+                occurred_at: TIME.into(),
+                outcome: "claimed".into(),
+                detail: document(json!({"transport":"fixture"})),
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .notification_delivery_by_identity("event-a", "destination-a")
+                .unwrap()
+                .unwrap()
+                .delivery_state,
+            "unknown"
+        );
     }
 }

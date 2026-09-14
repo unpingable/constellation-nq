@@ -1,9 +1,25 @@
-# NQ-ng developer-preview operations
+# NQ operations: current scope and historical runbook
 
-This runbook covers the behavior implemented in the current developer
-preview. Package installation creates a service identity and empty standard
-directories only. It never creates or replaces configuration, initializes a
-database, admits a helper, migrates data, enables the service, or starts it.
+The current source has SQLite schema v12, including retained saved-check,
+maintenance-declaration, and notification-delivery custody. The small supported
+starting path is the credential-free local saved-check example in
+[`SAVED_CHECKS.md`](SAVED_CHECKS.md). Notification delivery is documented in
+[`NOTIFICATIONS.md`](NOTIFICATIONS.md): local deterministic transport and the
+Nightshift replay boundary have been exercised, while delivery to a live
+destination and a recurring Monitor/NQ/Nightshift profile have not.
+
+The remainder of this runbook preserves the earlier NQ-ng developer-preview
+service procedures. It remains useful for its named daemon, package and
+diagnostic surfaces, but its schema-v5 and “not implemented yet” statements are
+historical. Do not treat those statements as a description of saved checks or
+notification delivery, and do not infer that every historical service procedure
+has been requalified for schema v12.
+
+## Historical developer-preview runbook
+
+Package installation creates a service identity and empty standard directories
+only. It never creates or replaces configuration, initializes a database,
+admits a helper, migrates data, enables the service, or starts it.
 
 The walkthrough below uses the one-shot `stdio` conformance specimen; the same
 protocol exchange is also supported by a supervised persistent `unix` helper
@@ -153,11 +169,21 @@ With the sample watcher configured, `doctor` is expected to report a missing
 admission until the next section is complete. That is a useful failed state,
 not a reason to create a lock by hand.
 
-The current binary normally opens only SQLite schema v5. It has two exact
-migration sources: schema v4, and the exact schema-v3 artifact shipped in the
-qualified `v0.1.0` release. `admin upgrade` validates the complete source
-schema and stored semantics, creates and reopens a digest-addressed backup for
-each transition, and applies v3-to-v4 and then v4-to-v5 transactionally.
+At the time this historical section was written, the binary normally opened
+only SQLite schema v5. The current source opens schema v12 and has an explicit
+upgrade from the published v5 schema. For a v5 store, the v5→v12
+transition takes a separate verified backup and adds empty saved-check custody;
+it also adds empty notification-delivery custody, without synthesizing historical
+checks or delivery records. Development schema versions6–11 are not accepted
+inputs to this public migration. Use the current binary's `admin
+upgrade` output and preserve every recorded backup before relying on an older
+schema procedure below.
+
+The historical v3/v4 discussion records the then-supported migration sources:
+schema v4, and the exact schema-v3 artifact shipped in the qualified `v0.1.0`
+release. `admin upgrade` validates the complete source schema and stored
+semantics, creates and reopens a digest-addressed backup for each transition,
+and applies v3-to-v4 and then v4-to-v5 transactionally.
 Historical v3 watcher runs retain explicit `provider_intake_not_recorded`
 gaps; the migration manufactures neither provider identities, raw captures,
 durable acknowledgments, nor diagnostic artifacts that the source never
@@ -495,6 +521,46 @@ checked against their retained semantic history before qualification,
 inspection, or export;
 that local correspondence is not inferred for imported bytes.
 
+## Replay Nightshift attention before notification delivery
+
+An operator-asserted notification remains available without Nightshift. A
+route that accepts `nightshift_receipt` intents must additionally configure
+`nightshift_attention_replay` with the absolute canonical Nightshift executable,
+its exact `sha256:` digest, the absolute Nightshift store locator required by
+the CLI, the one approved attention-policy digest, and the local execution
+account. `nq config check` validates the closed field shapes and paths.
+
+Before NQ writes notification custody, resolves an endpoint secret, constructs
+an HTTPS client, or performs transport I/O, it runs exactly
+`nightshift --store STORE attention replay --bundle-stdin`
+through NQ's descriptor-bound bounded process runner. NQ requires the nested
+policy and receipt to match the configured policy and delivery intent, requires
+`ATTENTION_REQUIRED`, and accepts only a successful replay whose expected and
+recomputed receipt digests both equal the owner receipt digest. Missing
+configuration, changed executable bytes, timeout, malformed output, or any
+mismatch fails closed before notification state or transport effects.
+NQ sends the retained canonical bundle followed by one newline on stdin and
+closes the stream. Nightshift accepts one bounded JSON value. This explicit
+interface avoids converting sealed descriptors into pathnames rejected by
+Nightshift's existing no-symlink file reader. Older Nightshift versions without
+`--bundle-stdin` are incompatible with this adapter and refuse; there is no
+fallback to unchecked pathname or synthetic replay. Failure reporting retains
+only a closed outcome class and never includes helper stderr.
+
+For a Nightshift receipt, the intent's policy digest must equal that approved
+digest and its stable event and transition identities must both equal the exact
+attention receipt digest. This prevents one receipt from being assigned
+arbitrary deduplication or transition identities. `route_reference` selects the
+configured transport route. `destination_identity` is a bounded operator label
+used with the stable event for deduplication; the route does not independently
+verify that label as destination provenance.
+
+Replay proves only that canonical Nightshift recomputed the exact receipt from
+the supplied policy and history. It does not prove that an upstream condition
+is currently true, that source testimony is correct, or that delivery occurred.
+An `operator_assertion` remains a separate explicit attention kind and is never
+silently converted to a Nightshift receipt.
+
 ## Apply configuration safely
 
 There is no daemon reload in this preview. Validate a root-owned candidate,
@@ -594,7 +660,7 @@ An archive of an incompatible database is integrity custody only. It records
 be downgraded from a valid current store merely by resealing metadata. Archive
 verification never grants current standing or authority.
 
-## Binary and schema upgrade
+## Historical binary and schema upgrade
 
 The Debian scripts stop `nqd` before replacing binaries and do not restart it.
 On a systemd host, the package transaction refuses to proceed if stopping the
@@ -608,18 +674,17 @@ nq_helper_command --config /etc/nq/nq.toml doctor
 sudo systemctl start nqd.service
 ```
 
-Schema v5 is the current schema. The preview's `admin upgrade` creates and
-semantically verifies a digest-addressed backup before each supported
-transition. It returns `already_current` only for an exactly compatible v5
-store. Exact v4 receives the additive diagnostic-artifact custody transition.
-Exact qualified v3 first records the established v3-to-v4 receipt and explicit
-historical provider-intake gaps, then receives a separately backed-up
-v4-to-v5 transition. The v5 receipt states that historical diagnostic
-artifacts were absent and synthesized none. Every backup is complete before
+Schema v12 is current. `admin upgrade` creates and semantically verifies a
+digest-addressed backup before each supported transition, and returns
+`already_current` only for an exactly compatible v12 store. Current source
+preserves the v3→v4→v5 chain before its explicit v5→v12 transition;
+each preserves gaps rather than manufacturing historical provider activity,
+notification delivery, or saved-check results. Every backup is complete before
 the corresponding source write; failure leaves that transition's source
 transactionally unchanged.
 
-There is no v1-to-v5, v2-to-v5, or arbitrary-v3/v4 migration. `nqd` and the
+There is no arbitrary migration from modified or unknown schema artifacts.
+`nqd` and the
 command reject those representations before any rewrite. Validation compares
 the compiled definitions of tables, indexes, triggers, and views as well as the
 application and schema version, so a same-named object with changed SQL is
@@ -627,9 +692,9 @@ refused. Do not force startup, edit SQLite metadata, or relabel old rows as
 provider intake, acknowledgment, or typed testimony.
 
 Rollback means reinstalling the matching previous binaries and using `nq
-restore` with the verified backup for that exact transition. A chained
-v3-to-v5 upgrade therefore has distinct v3 and v4 recovery points. Reverse
-migration is not assumed.
+restore` with the verified backup for that exact transition. Reverse migration
+is not assumed; use a recorded backup rather than altering a newer store in
+place.
 
 ## Uninstall versus explicit data purge
 

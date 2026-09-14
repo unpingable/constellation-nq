@@ -1,5 +1,14 @@
 # Constellation NQ public-preview release guide
 
+The saved-check/maintenance and notification additions are documented in
+[Saved checks](SAVED_CHECKS.md) and [Notifications](NOTIFICATIONS.md). Build
+those capabilities from the public commit containing these guides; the older
+cache pin below does not contain them. Their source integration is recorded in
+[SOURCE-PROJECTION.json](../SOURCE-PROJECTION.json). Public schema5 upgrades
+explicitly to12; other development schema lines are not silently imported.
+These additions do not move a release tag or establish a complete consumer
+monitoring migration. Live notification delivery remains unverified.
+
 ## Release pin
 
 The frozen public source tag `constellation-public-source-20260912` resolves to

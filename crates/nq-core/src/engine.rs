@@ -12248,6 +12248,7 @@ sys.stdout.write("\n")
             admissions_dir: root.join("admissions"),
             helper_runtime_dir: root.join("helpers"),
             watchers: vec![watcher.clone()],
+            notification_routes: Vec::new(),
         };
         let profile = resolve(&watcher).expect("compiled fixture profile");
         let corpus = nq_protocol::verify_embedded_conformance_corpus().expect("corpus");
@@ -12326,6 +12327,7 @@ sys.stdout.write("\n")
             admissions_dir: root.join("admissions"),
             helper_runtime_dir: root.join("helpers"),
             watchers: vec![watcher.clone()],
+            notification_routes: Vec::new(),
         };
         (config, watcher, mode)
     }

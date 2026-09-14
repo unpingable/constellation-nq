@@ -1047,7 +1047,7 @@ fn exact_v3_upgrade_accepts_typed_empty_history_and_refuses_semantic_or_schema_d
     drop(store);
 
     let receipts = read_only_upgrade_receipts(&database);
-    assert_eq!(receipts.len(), 2, "v3 to v5 requires two exact receipts");
+    assert_eq!(receipts.len(), 3, "v3 to v12 requires three exact receipts");
     let receipt = &receipts[0];
     assert_eq!(receipt.from_version, 3);
     assert_eq!(receipt.to_version, 4);
@@ -1063,7 +1063,7 @@ fn exact_v3_upgrade_accepts_typed_empty_history_and_refuses_semantic_or_schema_d
     assert_eq!(verification["acknowledgments_synthesized"], false);
     let receipt = &receipts[1];
     assert_eq!(receipt.from_version, 4);
-    assert_eq!(receipt.to_version, nq_store::SCHEMA_VERSION);
+    assert_eq!(receipt.to_version, 5);
     assert_eq!(receipt.result, "migrated");
     assert_eq!(receipt.backup_digest, v4_backup_digest);
     assert_eq!(receipt.backup_location, v4_backup.display().to_string());
@@ -1073,6 +1073,29 @@ fn exact_v3_upgrade_accepts_typed_empty_history_and_refuses_semantic_or_schema_d
     );
     let verification: Value = serde_json::from_str(&receipt.verification_json).unwrap();
     assert_eq!(verification["diagnostic_artifacts_synthesized"], false);
+
+    let receipt = &receipts[2];
+    assert_eq!(receipt.from_version, 5);
+    assert_eq!(receipt.to_version, 12);
+    let backup = PathBuf::from(&receipt.backup_location);
+    assert_eq!(sha256_file(&backup), receipt.backup_digest);
+    assert_eq!(
+        nq_store::Store::database_schema_version(&backup).unwrap(),
+        5
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&receipt.migrations_json).unwrap(),
+        serde_json::json!(["schema_v5_to_v12_local_checks_notifications"])
+    );
+    let verification: Value = serde_json::from_str(&receipt.verification_json).unwrap();
+    assert_eq!(
+        verification["historical_saved_checks"],
+        "absent_not_synthesized"
+    );
+    assert_eq!(
+        verification["historical_notification_delivery"],
+        "absent_not_synthesized"
+    );
 
     let semantic_invalid = root.join("semantic-invalid-v3.db");
     write_exact_v3_database(&semantic_invalid, true);

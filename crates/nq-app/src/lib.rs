@@ -10,6 +10,8 @@ pub mod docket_cli;
 pub mod labelwatch_cleanup_cli;
 pub mod labelwatch_relief_cli;
 mod ownership;
+pub mod notification;
+pub mod saved_check;
 pub mod purpose_cli;
 pub mod queue_cli;
 pub mod repository_cli;

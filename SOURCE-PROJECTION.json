@@ -1,0 +1,36 @@
+{
+  "schema": "constellation.source-projection/v1",
+  "component": "constellation-nq",
+  "source_revision": "eda2d18393be398e354316be72574edee33e16fd",
+  "public_base_revision": "0919c0172202e02c33f3ca84deeb165c29ff4001",
+  "mode": "adapted_product_integration",
+  "procedure": "The containing public Git commit is the complete build source. Starting at public_base_revision, apply its product diff from that baseline; no private checkout is required. The source_revision records the origin of the saved-check and notification implementation, not a public installation prerequisite. Preserve the public bounded-predicate and cache interfaces. Integrate the existing custody implementation through the explicit public schema-v5 to schema-v12 migration, rather than importing another schema line or its history. Existing public tags are unchanged.",
+  "source_modules": [
+    {
+      "path": "crates/nq-app/src/notification.rs",
+      "source_sha256": "6da6554677e0280d42a485eeacaf68101bb4bce025aef7c2da90290a523a1dbd"
+    },
+    {
+      "path": "crates/nq-app/src/saved_check.rs",
+      "source_sha256": "a6e6429e42e076a538c5a7853d87033e03bdcf67164661daae1d6901f91ea02e"
+    }
+  ],
+  "compatibility": {
+    "public_source_schema": 5,
+    "target_schema": 12,
+    "unsupported_source_schemas": [
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "migration": "schema_v5_to_v12_local_checks_notifications",
+    "binary_and_package_names_unchanged": true
+  },
+  "limitations": [
+    "Source-module hashes identify original inputs; integration formatting and compatibility changes are recorded by the public Git diff.",
+    "This source distribution does not qualify a full recurring monitoring or notification deployment."
+  ]
+}

@@ -1547,6 +1547,30 @@ mod tests {
             })),
         };
         drop(Store::upgrade_v4_to_v5(&database, &v4_receipt).expect("upgrade schema-v4 store"));
+        let backup_path = root.join("nq-v5.pre-upgrade.db");
+        let backup = Store::backup_v5_verified(&database, &backup_path).expect("verify v5 backup");
+        let receipt = nq_store::UpgradeReceiptInput {
+            receipt_id: "upgrade-archive-v5-v12".into(),
+            from_schema_version: 5,
+            to_schema_version: 12,
+            migrations: canonical(&serde_json::json!([
+                "schema_v5_to_v12_local_checks_notifications"
+            ])),
+            binary_digest: nq_protocol::sha256_bytes(b"archive-upgrade-binary").into_string(),
+            backup_digest: backup.sha256,
+            backup_location: backup.path.to_string_lossy().into_owned(),
+            started_at: "2026-07-20T12:00:06Z".into(),
+            finished_at: "2026-07-20T12:00:07Z".into(),
+            result: "migrated".into(),
+            operator_identity: canonical(&serde_json::json!({"uid":991})),
+            verification: canonical(
+                &serde_json::json!({"integrity":"ok", "source_schema_version":5,
+                "source_schema_artifact_digest":nq_store::SCHEMA_V5_ARTIFACT_DIGEST,
+                "backup_reopened":true,"historical_saved_checks":"absent_not_synthesized",
+                "historical_notification_delivery":"absent_not_synthesized"}),
+            ),
+        };
+        drop(Store::upgrade_v5_to_v12(&database, &receipt).expect("upgrade schema-v5 store"));
         let config = write_config(root, &database);
         let archive = root.join("archive");
         create_archive(&config, &archive).expect("create migrated-v3 archive");

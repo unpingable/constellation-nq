@@ -5,6 +5,8 @@ use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use crate::notification;
+use crate::saved_check::{self, MaintenanceDeclaration, SavedCheckDefinition, SavedCheckOutcome};
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use nix::libc;
@@ -15,11 +17,13 @@ use nq_protocol::semantic_digest;
 use nq_store::{
     CanonicalDocument, DiagnosticArtifactByteState, DiagnosticArtifactImportDisposition,
     DiagnosticArtifactImportInput, DiagnosticArtifactLookup, DiagnosticArtifactOrigin,
-    DiagnosticArtifactSchemaSupport, MAX_PUBLIC_QUERY_ROWS, MAX_STORED_JSON_BYTES, Store,
+    DiagnosticArtifactSchemaSupport, MAX_PUBLIC_QUERY_ROWS, MAX_STORED_JSON_BYTES,
+    MaintenanceDeclarationInput, SavedCheckDefinitionInput, SavedCheckEventInput, Store,
     UpgradeReceiptInput,
 };
 use serde::Serialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
 /// Local-first NQ-ng operator CLI.
@@ -170,6 +174,22 @@ pub enum Command {
         /// Refusal-history workflow.
         #[command(subcommand)]
         command: RefusalsCommand,
+    },
+    /// Retain and inspect bounded human-notification delivery custody. This
+    /// never creates attention, admission, or execution authority.
+    Notification {
+        #[command(subcommand)]
+        command: NotificationCommand,
+    },
+    /// Retain and locally evaluate bounded explicit saved checks.
+    SavedCheck {
+        #[command(subcommand)]
+        command: SavedCheckCommand,
+    },
+    /// Retain append-only scoped maintenance declarations.
+    Maintenance {
+        #[command(subcommand)]
+        command: MaintenanceCommand,
     },
     /// Execute a single bounded read-only query over documented public views.
     Query(QueryArgs),
@@ -377,6 +397,72 @@ pub enum RefusalsCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+pub enum NotificationCommand {
+    /// Retain one explicit operator/Nightshift intent and perform at most one
+    /// transport attempt. Network dispatch is disabled unless explicitly named.
+    Submit {
+        #[arg(long)]
+        intent: PathBuf,
+        #[arg(long)]
+        route: String,
+        #[arg(long)]
+        enable_network: bool,
+    },
+    /// Inspect retained delivery custody. A claim without terminal result is
+    /// shown as unknown and is never resubmitted automatically.
+    Inspect {
+        #[arg(long)]
+        notification_id: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SavedCheckCommand {
+    Install {
+        #[arg(long)]
+        definition: PathBuf,
+    },
+    Inspect {
+        reference: String,
+    },
+    /// Inspect retained work without touching its source or submitting again.
+    Result {
+        #[arg(long)]
+        evaluation_id: String,
+    },
+    Evaluate {
+        reference: String,
+        #[arg(long)]
+        evaluation_id: String,
+        #[arg(long)]
+        target: PathBuf,
+        /// Caller-supplied observation time for this source, not inferred from a file's mtime.
+        #[arg(long)]
+        source_observed_at: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MaintenanceCommand {
+    Declare {
+        #[arg(long)]
+        declaration: PathBuf,
+    },
+    List,
+    /// Annotate an explicitly supplied condition; does not detect or clear it.
+    Inspect {
+        #[arg(long)]
+        component: String,
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        subject: String,
+        #[arg(long)]
+        at: String,
+    },
+}
+
 /// Closed schema identity for structured watcher-action failures.
 #[derive(Debug, Clone, Copy, Serialize)]
 enum WatcherActionErrorSchema {
@@ -479,7 +565,248 @@ pub async fn run(options: Nq) -> Result<()> {
         Command::Status { command } => status_command(&options.config, &command),
         Command::Evaluations { command } => evaluations_command(&options.config, &command),
         Command::Refusals { command } => refusals_command(&options.config, &command),
+        Command::Notification { command } => {
+            notification_command(&options.config, command, options.json).await
+        }
+        Command::SavedCheck { command } => {
+            saved_check_command(&options.config, command, options.json)
+        }
+        Command::Maintenance { command } => {
+            maintenance_command(&options.config, command, options.json)
+        }
         Command::Query(arguments) => query_command(&options.config, &arguments),
+    }
+}
+
+fn saved_check_command(
+    config_path: &Path,
+    command: SavedCheckCommand,
+    json_output: bool,
+) -> Result<()> {
+    let config = NqConfig::load(config_path)?;
+    match command {
+        SavedCheckCommand::Result { evaluation_id } => {
+            let store = Store::open_read_only(&config.database_path)?;
+            let event = store.saved_check_event_by_evaluation_id(&evaluation_id)?;
+            match event {
+                Some(event) => print_value(
+                    &json!({"evaluation_id":evaluation_id,"outcome":event.outcome,"detail":serde_json::from_slice::<serde_json::Value>(&event.detail_json)?,"indeterminate":event.outcome == "claimed"}),
+                    json_output,
+                ),
+                None => print_value(
+                    &json!({"evaluation_id":evaluation_id,"outcome":"missing","indeterminate":true}),
+                    json_output,
+                ),
+            }
+        }
+        SavedCheckCommand::Install { definition } => {
+            let definition: SavedCheckDefinition = read_exact_json(&definition)?;
+            definition.validate()?;
+            let document = CanonicalDocument::from_serializable(&definition)?;
+            let digest = format!("sha256:{:x}", Sha256::digest(document.as_bytes()));
+            let mut store = Store::open(&config.database_path)?;
+            store.install_saved_check(&SavedCheckDefinitionInput {
+                definition_id: uuid::Uuid::new_v4().to_string(),
+                stable_reference: definition.reference.clone(),
+                definition_digest: digest.to_string(),
+                definition: document,
+                installed_at: chrono::Utc::now().to_rfc3339(),
+            })?;
+            print_value(
+                &json!({"result":"installed", "reference": definition.reference, "definition_digest": digest}),
+                json_output,
+            )
+        }
+        SavedCheckCommand::Inspect { reference } => {
+            let store = Store::open_read_only(&config.database_path)?;
+            let record = store
+                .saved_check_definition(&reference)?
+                .context("saved check reference is not installed")?;
+            let definition: serde_json::Value = serde_json::from_slice(&record.definition_json)?;
+            print_value(
+                &json!({"definition_id":record.definition_id,"reference":record.stable_reference,"definition_digest":record.definition_digest,"installed_at":record.installed_at,"definition":definition}),
+                json_output,
+            )
+        }
+        SavedCheckCommand::Evaluate {
+            reference,
+            evaluation_id,
+            target,
+            source_observed_at,
+        } => {
+            if !target.is_absolute() {
+                bail!("saved-check target must be an explicit absolute pathname");
+            }
+            let observed_at = chrono::DateTime::parse_from_rfc3339(&source_observed_at)
+                .context("source_observed_at must be an explicit RFC3339 timestamp")?
+                .with_timezone(&chrono::Utc);
+            let mut store = Store::open(&config.database_path)?;
+            let record = store
+                .saved_check_definition(&reference)?
+                .context("saved check reference is not installed")?;
+            let definition: SavedCheckDefinition = serde_json::from_slice(&record.definition_json)?;
+            // Replay compares request material, without inspecting a target which
+            // may since have changed or disappeared. Snapshot details are evidence
+            // of the first read only, never a condition for retrieving that result.
+            let binding = json!({"definition_digest":record.definition_digest,"target_reference":target,"source_identity":definition.source_identity,"currentness_seconds":definition.currentness_seconds,"source_observed_at_assertion":source_observed_at});
+            if let Some(event) = store.saved_check_event_by_evaluation_id(&evaluation_id)? {
+                let detail: serde_json::Value = serde_json::from_slice(&event.detail_json)?;
+                if detail.get("binding") != Some(&binding) {
+                    bail!("evaluation_id is already bound to different saved-check material");
+                }
+                return print_value(
+                    &json!({"reference":reference,"evaluation_id":evaluation_id,"outcome":event.outcome,"detail":detail,"retained":true,"indeterminate":event.outcome == "claimed"}),
+                    json_output,
+                );
+            }
+            let claim = CanonicalDocument::from_serializable(&json!({"binding":binding}))?;
+            if !store.claim_saved_check_evaluation(
+                &record.definition_id,
+                &evaluation_id,
+                &chrono::Utc::now().to_rfc3339(),
+                &claim,
+            )? {
+                return print_value(
+                    &json!({"reference":reference,"evaluation_id":evaluation_id,"outcome":"claimed","retained":true,"indeterminate":true}),
+                    json_output,
+                );
+            }
+            // This records when the bounded read was attempted, not when an
+            // external collector last refreshed the database's contents.
+            let checked_at = chrono::Utc::now();
+            let outcome =
+                saved_check::evaluate_read_only_at(&definition, &target, observed_at, checked_at);
+            let (outcome_text, refusal_reason) = match outcome
+                .unwrap_or(SavedCheckOutcome::Refused("target_or_sqlite_unavailable"))
+            {
+                SavedCheckOutcome::Passed => ("passed", None),
+                SavedCheckOutcome::Failed => ("failed", None),
+                SavedCheckOutcome::Refused(reason) => ("refused", Some(reason)),
+            };
+            let detail = json!({"binding":binding,"read_attempted_at":checked_at.to_rfc3339(),"refusal_reason":refusal_reason});
+            store.append_saved_check_event(&SavedCheckEventInput {
+                definition_id: record.definition_id,
+                event_number: 0,
+                occurred_at: checked_at.to_rfc3339(),
+                outcome: outcome_text.into(),
+                detail: CanonicalDocument::from_serializable(&detail)?,
+                evaluation_id: Some(evaluation_id.clone()),
+            })?;
+            print_value(
+                &json!({"reference":reference,"evaluation_id":evaluation_id,"outcome":outcome_text,"detail":detail,"retained":false,"indeterminate":false}),
+                json_output,
+            )
+        }
+    }
+}
+
+fn maintenance_command(
+    config_path: &Path,
+    command: MaintenanceCommand,
+    json_output: bool,
+) -> Result<()> {
+    let config = NqConfig::load(config_path)?;
+    match command {
+        MaintenanceCommand::Declare { declaration } => {
+            let declaration: MaintenanceDeclaration = read_exact_json(&declaration)?;
+            declaration.validate()?;
+            let document = CanonicalDocument::from_serializable(&declaration)?;
+            let digest = format!("sha256:{:x}", Sha256::digest(document.as_bytes()));
+            let mut store = Store::open(&config.database_path)?;
+            if let Some(retained) = store.maintenance_declaration(&declaration.maintenance_id)? {
+                if retained.declaration_digest == digest {
+                    return print_value(
+                        &json!({"result":"declared","maintenance_id":declaration.maintenance_id,"declaration_digest":digest,"retained":true}),
+                        json_output,
+                    );
+                }
+                bail!("maintenance_id is already bound to different declaration material");
+            }
+            let start = chrono::DateTime::parse_from_rfc3339(&declaration.start_at)?
+                .with_timezone(&chrono::Utc);
+            if start < chrono::Utc::now() - chrono::Duration::seconds(1) {
+                bail!("maintenance start_at is in the past");
+            }
+            store.declare_maintenance(&MaintenanceDeclarationInput {
+                maintenance_id: declaration.maintenance_id.clone(),
+                declaration_digest: digest.to_string(),
+                declaration: document,
+                declared_at: chrono::Utc::now().to_rfc3339(),
+            })?;
+            print_value(
+                &json!({"result":"declared","maintenance_id":declaration.maintenance_id,"declaration_digest":digest}),
+                json_output,
+            )
+        }
+        MaintenanceCommand::List => {
+            let store = Store::open_read_only(&config.database_path)?;
+            let records = store.maintenance_declarations()?;
+            let values: Result<Vec<_>> = records.into_iter().map(|r| Ok(json!({"maintenance_id":r.maintenance_id,"declaration_digest":r.declaration_digest,"declared_at":r.declared_at,"declaration":serde_json::from_slice::<serde_json::Value>(&r.declaration_json)?}))).collect();
+            print_value(&values?, json_output)
+        }
+        MaintenanceCommand::Inspect {
+            component,
+            kind,
+            subject,
+            at,
+        } => {
+            let at = chrono::DateTime::parse_from_rfc3339(&at)?.with_timezone(&chrono::Utc);
+            let store = Store::open_read_only(&config.database_path)?;
+            let declarations: Result<Vec<_>> = store
+                .maintenance_declarations()?
+                .into_iter()
+                .map(|record| {
+                    Ok((
+                        serde_json::from_slice::<MaintenanceDeclaration>(&record.declaration_json)?,
+                        chrono::DateTime::parse_from_rfc3339(&record.declared_at)?
+                            .with_timezone(&chrono::Utc),
+                    ))
+                })
+                .collect();
+            let declarations = declarations?;
+            let annotation = saved_check::maintenance_annotation(
+                declarations.iter().map(|(d, t)| (d, *t)),
+                &component,
+                &kind,
+                &subject,
+                at,
+            )?;
+            let (state, declaration_id) = match annotation {
+                Some((d, saved_check::MaintenanceAnnotation::Covered)) => {
+                    ("covered", Some(&d.maintenance_id))
+                }
+                Some((d, saved_check::MaintenanceAnnotation::Overrun)) => {
+                    ("overrun", Some(&d.maintenance_id))
+                }
+                None => ("uncovered", None),
+            };
+            print_value(
+                &json!({"component":component,"kind":kind,"subject":subject,"at":at,"maintenance_state":state,"maintenance_id":declaration_id,"condition_source":"caller_assertion","condition_changed":false}),
+                json_output,
+            )
+        }
+    }
+}
+
+async fn notification_command(
+    config_path: &Path,
+    command: NotificationCommand,
+    json_output: bool,
+) -> Result<()> {
+    let config = NqConfig::load(config_path)?;
+    match command {
+        NotificationCommand::Submit {
+            intent,
+            route,
+            enable_network,
+        } => {
+            let result = notification::submit(&config, &intent, &route, enable_network).await?;
+            print_value(&result, json_output)
+        }
+        NotificationCommand::Inspect { notification_id } => print_value(
+            &notification::inspect(&config, notification_id.as_deref())?,
+            json_output,
+        ),
     }
 }
 
@@ -1351,6 +1678,41 @@ fn diagnostic_artifact_custody_summary(store: &Store) -> Result<DiagnosticArtifa
     }
 }
 
+fn upgrade_v5_to_current(
+    database_path: &Path,
+    backup_directory: &Path,
+    binary_digest: &str,
+    operator_identity: &CanonicalDocument,
+) -> Result<(PathBuf, String)> {
+    let started_at = chrono::Utc::now();
+    let temporary = backup_directory.join(format!(".nq-upgrade-{}.db", uuid::Uuid::new_v4()));
+    let artifact = Store::backup_v5_verified(database_path, &temporary)?;
+    let backup = finalize_upgrade_backup(&temporary, backup_directory, &artifact.sha256)?;
+    let receipt = UpgradeReceiptInput {
+        receipt_id: uuid::Uuid::new_v4().to_string(),
+        from_schema_version: 5,
+        to_schema_version: 12,
+        migrations: CanonicalDocument::from_serializable(&[
+            "schema_v5_to_v12_local_checks_notifications",
+        ])?,
+        binary_digest: binary_digest.to_owned(),
+        backup_digest: artifact.sha256.clone(),
+        backup_location: backup.display().to_string(),
+        started_at: started_at.to_rfc3339(),
+        finished_at: started_at.to_rfc3339(),
+        result: "migrated".into(),
+        operator_identity: operator_identity.clone(),
+        verification: CanonicalDocument::from_serializable(&json!({
+            "integrity":"ok", "source_schema_version":5,
+            "source_schema_artifact_digest":nq_store::SCHEMA_V5_ARTIFACT_DIGEST,
+            "backup_reopened":true, "historical_notification_delivery":"absent_not_synthesized",
+            "historical_saved_checks":"absent_not_synthesized"
+        }))?,
+    };
+    Store::upgrade_v5_to_v12(database_path, &receipt)?.validate()?;
+    Ok((backup, artifact.sha256))
+}
+
 fn finalize_upgrade_backup(
     temporary_backup: &Path,
     backup_directory: &Path,
@@ -1431,7 +1793,7 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                         started_at: started_at.to_rfc3339(),
                         finished_at: finished_at.to_rfc3339(),
                         result: "already_current".into(),
-                        operator_identity,
+                        operator_identity: operator_identity.clone(),
                         verification: CanonicalDocument::from_serializable(&json!({
                             "integrity": "ok",
                             "schema_version": nq_store::SCHEMA_VERSION,
@@ -1500,18 +1862,18 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                     let v4_receipt = UpgradeReceiptInput {
                         receipt_id: uuid::Uuid::new_v4().to_string(),
                         from_schema_version: 4,
-                        to_schema_version: u32::try_from(nq_store::SCHEMA_VERSION)?,
+                        to_schema_version: 5,
                         migrations: CanonicalDocument::from_serializable(&[
                             "schema_v4_to_v5_diagnostic_artifacts",
                         ])?,
-                        binary_digest,
+                        binary_digest: binary_digest.clone(),
                         backup_digest: v4_artifact.sha256.clone(),
                         backup_location: v4_backup.display().to_string(),
                         started_at: v4_started_at.to_rfc3339(),
                         // The store owns the durable terminal timestamp.
                         finished_at: v4_started_at.to_rfc3339(),
                         result: "migrated".into(),
-                        operator_identity,
+                        operator_identity: operator_identity.clone(),
                         verification: CanonicalDocument::from_serializable(&json!({
                             "integrity": "ok",
                             "source_schema_version": 4,
@@ -1521,7 +1883,14 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                             "diagnostic_artifacts_synthesized": false,
                         }))?,
                     };
-                    let store = Store::upgrade_v4_to_v5(&config.database_path, &v4_receipt)?;
+                    drop(Store::upgrade_v4_to_v5(&config.database_path, &v4_receipt)?);
+                    let (v5_backup, v5_backup_digest) = upgrade_v5_to_current(
+                        &config.database_path,
+                        &backup_directory,
+                        &binary_digest,
+                        &operator_identity,
+                    )?;
+                    let store = Store::open(&config.database_path)?;
                     store.validate()?;
                     print_value(
                         &json!({
@@ -1532,6 +1901,8 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                             "v3_backup_digest": v3_artifact.sha256,
                             "v4_backup": v4_backup,
                             "v4_backup_digest": v4_artifact.sha256,
+                            "v5_backup": v5_backup,
+                            "v5_backup_digest": v5_backup_digest,
                             "historical_provider_intake": "explicit_gap_only",
                             "historical_diagnostic_artifacts": "no_durable_commitments",
                         }),
@@ -1549,18 +1920,18 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                     let receipt = UpgradeReceiptInput {
                         receipt_id: uuid::Uuid::new_v4().to_string(),
                         from_schema_version: 4,
-                        to_schema_version: u32::try_from(nq_store::SCHEMA_VERSION)?,
+                        to_schema_version: 5,
                         migrations: CanonicalDocument::from_serializable(&[
                             "schema_v4_to_v5_diagnostic_artifacts",
                         ])?,
-                        binary_digest,
+                        binary_digest: binary_digest.clone(),
                         backup_digest: artifact.sha256.clone(),
                         backup_location: backup.display().to_string(),
                         started_at: started_at.to_rfc3339(),
                         // The store owns the durable terminal timestamp.
                         finished_at: started_at.to_rfc3339(),
                         result: "migrated".into(),
-                        operator_identity,
+                        operator_identity: operator_identity.clone(),
                         verification: CanonicalDocument::from_serializable(&json!({
                             "integrity": "ok",
                             "source_schema_version": 4,
@@ -1570,17 +1941,41 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                             "diagnostic_artifacts_synthesized": false,
                         }))?,
                     };
-                    let store = Store::upgrade_v4_to_v5(&config.database_path, &receipt)?;
+                    drop(Store::upgrade_v4_to_v5(&config.database_path, &receipt)?);
+                    let (v5_backup, v5_backup_digest) = upgrade_v5_to_current(
+                        &config.database_path,
+                        &backup_directory,
+                        &binary_digest,
+                        &operator_identity,
+                    )?;
+                    let store = Store::open(&config.database_path)?;
                     store.validate()?;
                     print_value(
                         &json!({
                             "result": "migrated",
                             "from_schema_version": 4,
                             "schema_version": nq_store::SCHEMA_VERSION,
+                            "v5_backup": v5_backup,
+                            "v5_backup_digest": v5_backup_digest,
                             "backup": backup,
                             "backup_digest": artifact.sha256,
                             "historical_diagnostic_artifacts": "no_durable_commitments",
                         }),
+                        json_output,
+                    )
+                }
+                5 => {
+                    let (backup, backup_digest) = upgrade_v5_to_current(
+                        &config.database_path,
+                        &backup_directory,
+                        &binary_digest,
+                        &operator_identity,
+                    )?;
+                    print_value(
+                        &json!({"result":"migrated", "from_schema_version":5,
+                        "schema_version":nq_store::SCHEMA_VERSION, "backup":backup,
+                        "backup_digest":backup_digest, "historical_saved_checks":"absent_not_synthesized",
+                        "historical_notification_delivery":"absent_not_synthesized"}),
                         json_output,
                     )
                 }

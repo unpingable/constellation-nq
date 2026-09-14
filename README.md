@@ -4,6 +4,13 @@ NQ collects and checks bounded evidence for a specific question. It records what
 was admitted, what was refused, and the diagnostic conclusion its profile can
 support. It does not authorize or execute the work that might follow.
 
+For a smaller starting point, [run a saved check](docs/SAVED_CHECKS.md) against
+a disposable SQLite source and inspect its retained result. The
+[notification adapter](docs/NOTIFICATIONS.md) provides bounded Slack/Discord
+delivery mechanics; live destination delivery remains unverified. Saved checks
+and maintenance annotations are local capabilities, not a complete recurring
+monitoring deployment or a migration approval for Classic NQ.
+
 > **Public developer preview (2026-09-12):** this public source is
 > `constellation-nq` at `ce0a04a175b6d87ac17395f08fd7bc70ddf1e7b3`. It is not a
 > production deployment, an authority switch from classic NQ, or a claim of
