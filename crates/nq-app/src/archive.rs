@@ -472,6 +472,10 @@ fn validate_notification_delivery_history(store: &Store) -> Result<(usize, usize
             }
             Sha256Digest::parse(intent.attention_policy_digest.clone())?;
             Sha256Digest::parse(intent.content_digest.clone())?;
+            let payload = canonical_document(intent.payload_json, "notification outbox content")?;
+            if payload.digest() != intent.content_digest {
+                bail!("notification outbox content digest differs from retained delivery intent");
+            }
             if let Some(digest) = &intent.attention_receipt_digest {
                 Sha256Digest::parse(digest.clone())?;
             }
@@ -1977,6 +1981,7 @@ mod tests {
             "sql_text":"SELECT 1", "mode":"empty", "threshold":null, "column":null,
             "description":null
         }));
+        let definition_digest = definition.digest().to_owned();
         store
             .install_saved_check(&nq_store::SavedCheckDefinitionInput {
                 definition_id: "fixture-check".into(),
@@ -1986,7 +1991,14 @@ mod tests {
                 installed_at: "2026-09-14T00:00:00Z".into(),
             })
             .expect("install saved check");
-        let claim = canonical(&serde_json::json!({"binding":{"fixture":"one"}}));
+        let binding = serde_json::json!({
+            "definition_digest": definition_digest,
+            "target_reference": "/absent/fixture.sqlite",
+            "source_identity": "fixture",
+            "currentness_seconds": 60,
+            "source_observed_at_assertion": "2026-09-14T00:00:00Z"
+        });
+        let claim = canonical(&serde_json::json!({"binding":binding}));
         store
             .claim_saved_check_evaluation(
                 "fixture-check",
@@ -1997,7 +2009,7 @@ mod tests {
             .expect("claim saved check");
         store.append_saved_check_event(&nq_store::SavedCheckEventInput {
             definition_id: "fixture-check".into(), event_number: 0, occurred_at: "2026-09-14T00:00:02Z".into(), outcome: "passed".into(),
-            detail: canonical(&serde_json::json!({"binding":{"fixture":"one"},"read_attempted_at":"2026-09-14T00:00:02Z","refusal_reason":null})), evaluation_id: Some("fixture-evaluation".into()),
+            detail: canonical(&serde_json::json!({"binding":binding,"read_attempted_at":"2026-09-14T00:00:02Z","refusal_reason":null})), evaluation_id: Some("fixture-evaluation".into()),
         }).expect("complete saved check");
         let maintenance = canonical(
             &serde_json::json!({"schema":"nq.maintenance-declaration/v1","maintenance_id":"fixture-maintenance","declared_by":null,"start_at":"2026-09-14T00:00:00Z","end_at":"2026-09-14T01:00:00Z","component":"fixture","kind":"capacity","subject":null,"reason":null}),
@@ -2052,6 +2064,20 @@ mod tests {
                 detail: canonical(&serde_json::json!({"transport":"fixture"})),
             })
             .expect("claim notification");
+        // Negative fixtures must begin with valid typed history, not merely
+        // fail later because their baseline was already malformed.
+        assert_eq!(
+            validate_saved_check_history(&store).expect("valid check baseline"),
+            (1, 3)
+        );
+        assert_eq!(
+            validate_maintenance_history(&store).expect("valid maintenance baseline"),
+            1
+        );
+        assert_eq!(
+            validate_notification_delivery_history(&store).expect("valid notification baseline"),
+            (1, 1)
+        );
     }
 
     #[test]
@@ -2221,6 +2247,10 @@ mod tests {
                 })
                 .expect("declare page row");
         }
+        assert_eq!(
+            validate_maintenance_history(&store).expect("all pages initially valid"),
+            nq_store::MAX_PUBLIC_QUERY_ROWS as usize + 1
+        );
         drop(store);
         let connection = rusqlite::Connection::open(&database).expect("database");
         let trigger: String = connection.query_row("SELECT sql FROM sqlite_schema WHERE type='trigger' AND name='immutable_maintenance_declarations_update'", [], |row| row.get(0)).expect("trigger");
@@ -2228,11 +2258,34 @@ mod tests {
             .execute_batch("DROP TRIGGER immutable_maintenance_declarations_update;")
             .expect("drop");
         let malformed = canonical(&serde_json::json!({}));
-        connection.execute("UPDATE maintenance_declarations SET declaration_json=?1, declaration_digest=?2 WHERE maintenance_id='page-maintenance-1000'", rusqlite::params![malformed.as_bytes(), malformed.digest()]).expect("corrupt late row");
+        let last_id = format!("page-maintenance-{:04}", nq_store::MAX_PUBLIC_QUERY_ROWS);
+        assert_eq!(connection.execute("UPDATE maintenance_declarations SET declaration_json=?1, declaration_digest=?2 WHERE maintenance_id=?3", rusqlite::params![malformed.as_bytes(), malformed.digest(), last_id]).expect("corrupt late row"), 1);
         connection.execute_batch(&trigger).expect("restore");
         drop(connection);
         reseal_after_database_change(&archive);
         assert!(verify_archive(&archive).is_err());
+    }
+
+    #[test]
+    fn archive_refuses_notification_outbox_content_substitution() {
+        let dir = tempfile::tempdir().expect("dir");
+        let archive = valid_archive(dir.path());
+        let database = archive.join("db/nq.db");
+        append_local_history(&database);
+        let connection = rusqlite::Connection::open(&database).expect("database");
+        let trigger: String = connection.query_row("SELECT sql FROM sqlite_schema WHERE type='trigger' AND name='immutable_notification_outbox_update'", [], |row| row.get(0)).expect("trigger");
+        connection
+            .execute_batch("DROP TRIGGER immutable_notification_outbox_update;")
+            .expect("fixture permits one content mutation");
+        let changed = canonical(&serde_json::json!({"body":"different recorded content"}));
+        assert_eq!(connection.execute("UPDATE notification_outbox SET payload_json=?1 WHERE notification_id='fixture-notification'", [changed.as_bytes()]).expect("change one fixture record"), 1);
+        connection
+            .execute_batch(&trigger)
+            .expect("restore original schema");
+        drop(connection);
+        reseal_after_database_change(&archive);
+        let error = verify_archive(&archive).expect_err("content hash must bind the outbox");
+        assert!(format!("{error:#}").contains("outbox content digest differs"));
     }
 
     #[test]

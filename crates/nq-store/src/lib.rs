@@ -4284,6 +4284,8 @@ pub struct NotificationDeliveryIntentRecord {
     pub content_digest: String,
     pub intent_json: Vec<u8>,
     pub created_at: String,
+    /// Exact retained outbox bytes whose canonical digest is content_digest.
+    pub payload_json: Vec<u8>,
 }
 /// One immutable notification delivery event in its per-notification append order.
 #[derive(Clone, Debug)]
@@ -5701,7 +5703,7 @@ impl Store {
         after_notification_id: Option<&str>,
     ) -> Result<Vec<NotificationDeliveryIntentRecord>, StoreError> {
         validate_public_limit(limit)?;
-        let mut statement = self.connection.prepare("SELECT notification_id, stable_event_id, attention_kind, attention_receipt_digest, attention_policy_id, attention_policy_digest, transition_id, route_reference, destination_identity, content_digest, intent_json, created_at FROM notification_delivery_intents WHERE (?1 IS NULL OR notification_id > ?1) ORDER BY notification_id LIMIT ?2")?;
+        let mut statement = self.connection.prepare("SELECT i.notification_id, i.stable_event_id, i.attention_kind, i.attention_receipt_digest, i.attention_policy_id, i.attention_policy_digest, i.transition_id, i.route_reference, i.destination_identity, i.content_digest, i.intent_json, i.created_at, o.payload_json FROM notification_delivery_intents i LEFT JOIN notification_outbox o ON o.notification_id = i.notification_id WHERE (?1 IS NULL OR i.notification_id > ?1) ORDER BY i.notification_id LIMIT ?2")?;
         statement
             .query_map(params![after_notification_id, i64::from(limit)], |row| {
                 Ok(NotificationDeliveryIntentRecord {
@@ -5717,6 +5719,7 @@ impl Store {
                     content_digest: row.get(9)?,
                     intent_json: row.get(10)?,
                     created_at: row.get(11)?,
+                    payload_json: row.get(12)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()
