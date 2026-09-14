@@ -409,6 +409,13 @@ pub enum NotificationCommand {
         #[arg(long)]
         enable_network: bool,
     },
+    /// Deliver one retained attention intent to an explicitly configured local inbox.
+    DeliverLocal {
+        #[arg(long)]
+        intent: PathBuf,
+        #[arg(long)]
+        route: String,
+    },
     /// Inspect retained delivery custody. A claim without terminal result is
     /// shown as unknown and is never resubmitted automatically.
     Inspect {
@@ -1192,6 +1199,10 @@ async fn notification_command(
             enable_network,
         } => {
             let result = notification::submit(&config, &intent, &route, enable_network).await?;
+            print_value(&result, json_output)
+        }
+        NotificationCommand::DeliverLocal { intent, route } => {
+            let result = notification::deliver_local(&config, &intent, &route)?;
             print_value(&result, json_output)
         }
         NotificationCommand::Inspect { notification_id } => print_value(

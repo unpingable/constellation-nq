@@ -1,9 +1,12 @@
 # Tell a person that attention is needed
 
-NQ includes an experimental, bounded Slack/Discord webhook delivery adapter.
+NQ includes experimental bounded Slack/Discord webhook delivery adapters and a
+local operator-inbox file adapter.
 Deterministic transports and the real Nightshift-to-NQ replay interface have been
-exercised locally. **Live destination delivery has not been verified.** Do not
-describe the adapter or retained outbox as a completed notification migration.
+exercised locally. Local-inbox qualification is pending the focused release
+gate. **Live Slack/Discord destination delivery has not been verified.**
+Do not describe the webhook adapters or retained outbox as a completed notification
+migration.
 
 Detection, attention and delivery are separate. A diagnostic supplies evidence;
 Nightshift/operator policy decides what warrants attention; this adapter attempts
@@ -24,6 +27,20 @@ timeout_ms = 10000
 max_response_bytes = 32768
 ```
 
+For a local operator inbox, no secret or network route is used. The directory
+must already be an absolute, canonical, operator-owned directory satisfying
+NQ's protected runtime-root checks (including exact mode `0711` and no
+write-granting POSIX ACL).
+
+```toml
+[[notification_routes]]
+reference = "local-operations"
+transport = "local_file"
+local_inbox_directory = "/absolute/operator-owned/nq-inbox"
+timeout_ms = 10000
+max_response_bytes = 32768
+```
+
 The locator names an environment variable, not a secret value. Provision it
 locally without committing or printing the webhook URL. HTTPS is required;
 redirects are disabled. Response bodies are not consumed or logged; the
@@ -35,6 +52,26 @@ nq --config ./nq.toml config check
 nq --config ./nq.toml notification submit --intent ./intent.json --route operations
 nq --config ./nq.toml notification inspect --notification-id ID
 ```
+
+An explicitly prepared local intent uses the configured logical destination
+identity, then writes one bounded JSON message only through the local command:
+
+```sh
+nq --config ./nq.toml notification deliver-local \
+  --intent ./intent.json --route local-operations
+```
+
+The canonical intent must use `destination_identity` exactly
+`local-inbox:local-operations`. It can use `attention_kind:
+operator_assertion` with no receipt bundle, or `attention_kind:
+nightshift_receipt` with the exact replay material described below. Neither kind
+establishes that a person read the resulting file.
+
+The message contains what happened, the inspection reference, and a hashed
+directory binding; it does not contain the raw local path, credentials, the
+full receipt bundle, or an acknowledgment. A created and synced file establishes
+only that local delivery artifact. It does not establish that a person saw it,
+that attention was acted on, or that the underlying work succeeded.
 
 Without `--enable-network`, submission retains a refusal without contacting or
 resolving the endpoint. It is not a dry run that can later be promoted: repeating
@@ -86,6 +123,20 @@ changed intent or rendered content refuses. The destination identity is an
 operator label used for deduplication, not independently verified channel
 provenance. Inspection exposes state and event count, not raw endpoint secrets
 or all internal failure detail. Keep the NQ database and its verified backups.
+
+For `local_file`, NQ retains a descriptor-bound directory identity and uses a
+generated notification filename with exclusive creation, mode `0600`, file
+sync, and parent-directory sync. An exact duplicate reopens custody without a
+second file write. If an error occurs after creation begins, delivery is recorded
+as `unknown`; NQ does not overwrite the file, retry automatically, or infer a
+human acknowledgment. A failed pre-creation open is distinct from an uncertain
+post-creation write.
+
+`timeout_ms` and `max_response_bytes` bound HTTPS routes only; they are not a
+hard local-filesystem write or sync deadline. Use bounded caller supervision for
+the local command. If the process is interrupted after its custody claim, inspect
+the retained delivery record before any recovery decision; a claimed or `unknown`
+record is not permission to issue another delivery attempt.
 
 There is no recursive delivery-failure alert, retry daemon, acknowledgment,
 automatic resolution/update, paging escalation or PagerDuty integration. Delivery

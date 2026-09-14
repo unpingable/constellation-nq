@@ -6,6 +6,8 @@ use nq_core::config::{
 };
 use nq_core::identity::VerifiedLaunch;
 use nq_core::runner::{AcquisitionOutcome, StdioRunner};
+use nq_helper_sandbox::open_runtime_root;
+use nq_protocol::sha256_bytes;
 use nq_store::{
     CanonicalDocument, NotificationDeliveryEventInput, NotificationDeliveryIntentInput,
     NotificationDeliveryRetention, NotificationInput, Store,
@@ -15,11 +17,14 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::future::Future;
-use std::io::Read;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::io::{Read, Write};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::path::Path;
 use std::time::Duration;
 
 const MAX_INTENT_BYTES: usize = 32_768;
+const LOCAL_INBOX_FILE_MAX_BYTES: usize = 4_096;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -261,8 +266,229 @@ fn render(route: &NotificationRouteConfig, intent: &Intent) -> Result<CanonicalD
     let payload = match route.transport {
         NotificationTransportKind::Slack => json!({"text": text}),
         NotificationTransportKind::Discord => json!({"content": text}),
+        NotificationTransportKind::LocalFile => {
+            bail!("local inbox uses its own bounded message envelope")
+        }
     };
     Ok(CanonicalDocument::from_serializable(&payload)?)
+}
+
+fn local_inbox_binding(
+    route: &NotificationRouteConfig,
+) -> Result<(nq_helper_sandbox::ValidatedRuntimeRoot, CanonicalDocument)> {
+    let configured = route
+        .local_inbox_directory
+        .as_ref()
+        .context("local_file route has no inbox directory")?;
+    let root = open_runtime_root(configured).context("validate local inbox directory")?;
+    let metadata = fs::metadata(root.descriptor_path()).context("inspect local inbox directory")?;
+    let binding = CanonicalDocument::from_serializable(&json!({
+        "schema":"nq.local-inbox-directory-binding/v1",
+        "path_sha256":sha256_bytes(root.canonical_path().as_os_str().as_bytes()).as_str(),
+        "device":metadata.dev(),
+        "inode":metadata.ino(),
+        "mode":metadata.mode() & 0o7777
+    }))?;
+    Ok((root, binding))
+}
+
+fn render_local_inbox(intent: &Intent, binding: &CanonicalDocument) -> Result<CanonicalDocument> {
+    Ok(CanonicalDocument::from_serializable(&json!({
+        "schema":"nq.local-inbox-message/v1",
+        "stable_event_id":intent.stable_event_id,
+        "summary":intent.summary,
+        "inspection_reference":intent.inspection_reference,
+        "route_reference":intent.route_reference,
+        "destination_identity":intent.destination_identity,
+        "destination_binding_digest":binding.digest(),
+        "delivery_statement":"local file retained; human receipt is not established"
+    }))?)
+}
+
+enum LocalWriteFailure {
+    BeforeCreate,
+    AfterCreate,
+}
+
+trait LocalInboxWriteOperation {
+    fn write_and_sync(&self, file: &mut fs::File, bytes: &[u8]) -> std::io::Result<()>;
+    fn sync_directory(&self, root: &nq_helper_sandbox::ValidatedRuntimeRoot)
+    -> std::io::Result<()>;
+}
+
+struct SystemLocalInboxWriteOperation;
+
+impl LocalInboxWriteOperation for SystemLocalInboxWriteOperation {
+    fn write_and_sync(&self, file: &mut fs::File, bytes: &[u8]) -> std::io::Result<()> {
+        file.write_all(bytes)?;
+        file.sync_all()
+    }
+
+    fn sync_directory(
+        &self,
+        root: &nq_helper_sandbox::ValidatedRuntimeRoot,
+    ) -> std::io::Result<()> {
+        fs::File::open(root.descriptor_path())?.sync_all()
+    }
+}
+
+fn write_local_inbox_with<O: LocalInboxWriteOperation>(
+    root: &nq_helper_sandbox::ValidatedRuntimeRoot,
+    filename: &str,
+    bytes: &[u8],
+    operation: &O,
+) -> Result<(), LocalWriteFailure> {
+    if root.revalidate().is_err()
+        || bytes.len() > LOCAL_INBOX_FILE_MAX_BYTES
+        || filename.is_empty()
+        || filename.len() > 128
+        || filename.contains('/')
+        || filename.contains('\0')
+    {
+        return Err(LocalWriteFailure::BeforeCreate);
+    }
+    let path = root.descriptor_path().join(filename);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|_| LocalWriteFailure::BeforeCreate)?;
+    operation
+        .write_and_sync(&mut file, bytes)
+        .map_err(|_| LocalWriteFailure::AfterCreate)?;
+    root.revalidate()
+        .and_then(|()| operation.sync_directory(root))
+        .map_err(|_| LocalWriteFailure::AfterCreate)
+}
+
+#[cfg(test)]
+fn write_local_inbox(
+    root: &nq_helper_sandbox::ValidatedRuntimeRoot,
+    filename: &str,
+    bytes: &[u8],
+) -> Result<(), LocalWriteFailure> {
+    write_local_inbox_with(root, filename, bytes, &SystemLocalInboxWriteOperation)
+}
+
+/// Deliver one exact attention intent to a descriptor-bound local inbox.
+/// This creates a factual local file only; it does not establish human receipt.
+pub(crate) fn deliver_local(
+    config: &NqConfig,
+    intent_path: &std::path::Path,
+    route_ref: &str,
+) -> Result<Value> {
+    deliver_local_with(
+        config,
+        intent_path,
+        route_ref,
+        &SystemLocalInboxWriteOperation,
+    )
+}
+
+fn deliver_local_with<O: LocalInboxWriteOperation>(
+    config: &NqConfig,
+    intent_path: &std::path::Path,
+    route_ref: &str,
+    operation: &O,
+) -> Result<Value> {
+    let (intent, intent_document) = read_intent(intent_path)?;
+    if intent.route_reference != route_ref {
+        bail!("CLI route does not match intent route reference");
+    }
+    let route = config
+        .notification_routes
+        .iter()
+        .find(|route| route.reference == route_ref)
+        .context("route reference is not configured")?;
+    if route.transport != NotificationTransportKind::LocalFile {
+        bail!("notification deliver-local requires a local_file route");
+    }
+    let expected_destination = format!("local-inbox:{}", route.reference);
+    if intent.destination_identity != expected_destination {
+        bail!("local inbox intent destination identity does not match its configured route");
+    }
+    replay_nightshift(route, &intent)?;
+    let (root, directory_binding) = local_inbox_binding(route)?;
+    let payload = render_local_inbox(&intent, &directory_binding)?;
+    let original_intent: Value = serde_json::from_slice(intent_document.as_bytes())?;
+    let retained_intent = CanonicalDocument::from_serializable(&json!({
+        "schema":"nq.local-inbox-delivery-intent/v1",
+        "intent":original_intent,
+        "directory_binding":serde_json::from_slice::<Value>(directory_binding.as_bytes())?
+    }))?;
+    let mut store = Store::open(&config.database_path)?;
+    let notification_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let notification = NotificationInput {
+        notification_id: notification_id.clone(),
+        idempotency_key: format!("{}:{}", intent.stable_event_id, expected_destination),
+        finding_event_id: None,
+        destination_kind: "local_file".into(),
+        payload: payload.clone(),
+        available_at: now.clone(),
+        max_attempts: 1,
+        created_at: now.clone(),
+    };
+    let delivery_intent = NotificationDeliveryIntentInput {
+        notification_id: notification_id.clone(),
+        stable_event_id: intent.stable_event_id,
+        attention_kind: intent.attention_kind,
+        attention_receipt_digest: intent.attention_receipt_digest,
+        attention_policy_id: intent.attention_policy_id,
+        attention_policy_digest: intent.attention_policy_digest,
+        transition_id: intent.transition_id,
+        route_reference: intent.route_reference,
+        destination_identity: expected_destination,
+        content_digest: payload.digest().to_owned(),
+        intent: retained_intent,
+        created_at: now.clone(),
+    };
+    match store.retain_notification_delivery(&notification, &delivery_intent)? {
+        NotificationDeliveryRetention::Inserted => {}
+        NotificationDeliveryRetention::Existing(existing) => {
+            return Ok(
+                json!({"notification_id":existing.notification_id,"delivery_state":existing.delivery_state}),
+            );
+        }
+    }
+    store.append_notification_delivery_event(&NotificationDeliveryEventInput {
+        notification_id: notification_id.clone(),
+        event_number: 1,
+        occurred_at: now.clone(),
+        outcome: "claimed".into(),
+        detail: CanonicalDocument::from_serializable(&json!({
+            "route_reference":route.reference,
+            "transport":"local_file",
+            "directory_binding_digest":directory_binding.digest()
+        }))?,
+    })?;
+    let filename = format!("{notification_id}.json");
+    let (outcome, detail) =
+        match write_local_inbox_with(&root, &filename, payload.as_bytes(), operation) {
+            Ok(()) => (
+                "accepted",
+                json!({"filename":filename,"message_digest":payload.digest()}),
+            ),
+            Err(LocalWriteFailure::BeforeCreate) => {
+                ("failed", json!({"reason":"local_inbox_create_unavailable"}))
+            }
+            Err(LocalWriteFailure::AfterCreate) => (
+                "unknown",
+                json!({"reason":"local_inbox_post_create_state_uncertain"}),
+            ),
+        };
+    store.append_notification_delivery_event(&NotificationDeliveryEventInput {
+        notification_id: notification_id.clone(),
+        event_number: 2,
+        occurred_at: chrono::Utc::now().to_rfc3339(),
+        outcome: outcome.into(),
+        detail: CanonicalDocument::from_serializable(&detail)?,
+    })?;
+    Ok(
+        json!({"notification_id":notification_id,"delivery_state":outcome,"human_receipt":"not_established"}),
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -307,6 +533,9 @@ where
         destination_kind: match route.transport {
             NotificationTransportKind::Slack => "slack".into(),
             NotificationTransportKind::Discord => "discord".into(),
+            NotificationTransportKind::LocalFile => {
+                unreachable!("local routes use notification deliver-local")
+            }
         },
         payload: payload.clone(),
         available_at: now.clone(),
@@ -348,7 +577,11 @@ where
         })?;
         return Ok(json!({"notification_id": notification_id, "delivery_state":"refused"}));
     }
-    let endpoint = match resolve_endpoint(&route.endpoint_secret_locator) {
+    let endpoint_locator = route
+        .endpoint_secret_locator
+        .as_deref()
+        .context("HTTPS route has no endpoint secret locator")?;
+    let endpoint = match resolve_endpoint(endpoint_locator) {
         Ok(endpoint) => endpoint,
         Err(_) => {
             store.append_notification_delivery_event(&NotificationDeliveryEventInput {
@@ -468,7 +701,8 @@ mod tests {
         NotificationRouteConfig {
             reference: "ops.primary".into(),
             transport,
-            endpoint_secret_locator: "NQ_TEST_URL".into(),
+            endpoint_secret_locator: Some("NQ_TEST_URL".into()),
+            local_inbox_directory: None,
             // Replay includes descriptor custody, account/sandbox setup, and
             // process launch. Keep the explicit timeout qualification below at
             // 100 ms; ordinary positive fixtures use a realistic local bound.
@@ -490,6 +724,38 @@ mod tests {
         };
         Store::initialize(&config.database_path).expect("initialize notification fixture store");
         config
+    }
+
+    fn local_config(root: &TempDir) -> NqConfig {
+        let inbox = root.path().join("inbox");
+        fs::create_dir(&inbox).expect("create inbox");
+        fs::set_permissions(&inbox, fs::Permissions::from_mode(0o711)).expect("protect inbox");
+        let config = NqConfig {
+            schema: CONFIG_SCHEMA.into(),
+            database_path: root.path().join("notification.db"),
+            socket_path: root.path().join("nqd.sock"),
+            admissions_dir: root.path().join("admissions"),
+            helper_runtime_dir: root.path().join("helpers"),
+            watchers: Vec::new(),
+            notification_routes: vec![NotificationRouteConfig {
+                reference: "local.ops".into(),
+                transport: NotificationTransportKind::LocalFile,
+                endpoint_secret_locator: None,
+                local_inbox_directory: Some(inbox),
+                timeout_ms: 10_000,
+                max_response_bytes: 1024,
+                nightshift_attention_replay: None,
+            }],
+        };
+        Store::initialize(&config.database_path).expect("initialize local inbox Store");
+        config
+    }
+
+    fn local_intent() -> Value {
+        let mut value = intent("check storage", "operator_assertion", None);
+        value["route_reference"] = Value::String("local.ops".into());
+        value["destination_identity"] = Value::String("local-inbox:local.ops".into());
+        value
     }
 
     fn intent(summary: &str, attention_kind: &str, owner_receipt: Option<Value>) -> Value {
@@ -600,6 +866,147 @@ mod tests {
             discord,
             json!({"content":"Attention required: check storage\nInspect: record:1"})
         );
+    }
+
+    #[test]
+    fn local_inbox_writes_one_exact_file_and_duplicate_reopens_custody() {
+        let root = TempDir::new().expect("temporary root");
+        let config = local_config(&root);
+        let path = write_intent(&root, local_intent());
+        let first = deliver_local(&config, &path, "local.ops").expect("write local inbox");
+        assert_eq!(first["delivery_state"], "accepted");
+        assert_eq!(first["human_receipt"], "not_established");
+        let notification_id = first["notification_id"].as_str().expect("notification id");
+        let message: Value = serde_json::from_slice(
+            &fs::read(
+                config.notification_routes[0]
+                    .local_inbox_directory
+                    .as_ref()
+                    .expect("inbox")
+                    .join(format!("{notification_id}.json")),
+            )
+            .expect("read local inbox file"),
+        )
+        .expect("message JSON");
+        assert_eq!(message["schema"], "nq.local-inbox-message/v1");
+        assert_eq!(message["stable_event_id"], "event-1");
+        assert_eq!(
+            message["delivery_statement"],
+            "local file retained; human receipt is not established"
+        );
+        assert_eq!(
+            fs::metadata(
+                config.notification_routes[0]
+                    .local_inbox_directory
+                    .as_ref()
+                    .expect("inbox")
+                    .join(format!("{notification_id}.json")),
+            )
+            .expect("inbox metadata")
+            .mode()
+                & 0o777,
+            0o600
+        );
+        let duplicate = deliver_local(&config, &path, "local.ops").expect("reopen duplicate");
+        assert_eq!(duplicate["notification_id"], first["notification_id"]);
+        assert_eq!(
+            fs::read_dir(
+                config.notification_routes[0]
+                    .local_inbox_directory
+                    .as_ref()
+                    .expect("inbox")
+            )
+            .expect("list inbox")
+            .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn local_inbox_precreated_name_refuses_before_any_file_mutation() {
+        let root = TempDir::new().expect("temporary root");
+        let inbox = root.path().join("inbox");
+        fs::create_dir(&inbox).expect("create inbox");
+        fs::set_permissions(&inbox, fs::Permissions::from_mode(0o711)).expect("protect inbox");
+        let root = open_runtime_root(&inbox).expect("open protected inbox");
+        let existing = root.descriptor_path().join("known.json");
+        fs::write(&existing, b"existing").expect("precreate inbox entry");
+        assert!(matches!(
+            write_local_inbox(&root, "known.json", b"replacement"),
+            Err(LocalWriteFailure::BeforeCreate)
+        ));
+        assert_eq!(fs::read(existing).expect("reopen existing"), b"existing");
+        assert!(matches!(
+            write_local_inbox(&root, "../outside", b"ignored"),
+            Err(LocalWriteFailure::BeforeCreate)
+        ));
+    }
+
+    struct FailingWrite;
+
+    impl LocalInboxWriteOperation for FailingWrite {
+        fn write_and_sync(&self, _file: &mut fs::File, _bytes: &[u8]) -> std::io::Result<()> {
+            Err(std::io::Error::other("deterministic post-create failure"))
+        }
+
+        fn sync_directory(
+            &self,
+            _root: &nq_helper_sandbox::ValidatedRuntimeRoot,
+        ) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct CountingWrite(Arc<AtomicUsize>);
+
+    impl LocalInboxWriteOperation for CountingWrite {
+        fn write_and_sync(&self, file: &mut fs::File, bytes: &[u8]) -> std::io::Result<()> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            file.write_all(bytes)?;
+            file.sync_all()
+        }
+
+        fn sync_directory(
+            &self,
+            root: &nq_helper_sandbox::ValidatedRuntimeRoot,
+        ) -> std::io::Result<()> {
+            fs::File::open(root.descriptor_path())?.sync_all()
+        }
+    }
+
+    #[test]
+    fn local_inbox_post_create_failure_is_unknown_and_duplicate_does_not_write_again() {
+        let root = TempDir::new().expect("temporary root");
+        let config = local_config(&root);
+        let path = write_intent(&root, local_intent());
+        let first = deliver_local_with(&config, &path, "local.ops", &FailingWrite)
+            .expect("retain uncertain local write");
+        assert_eq!(first["delivery_state"], "unknown");
+        let writes = Arc::new(AtomicUsize::new(0));
+        let duplicate = deliver_local_with(
+            &config,
+            &path,
+            "local.ops",
+            &CountingWrite(Arc::clone(&writes)),
+        )
+        .expect("reopen uncertain custody");
+        assert_eq!(duplicate["notification_id"], first["notification_id"]);
+        assert_eq!(duplicate["delivery_state"], "unknown");
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn local_inbox_changed_directory_for_same_event_refuses_retargeting() {
+        let root = TempDir::new().expect("temporary root");
+        let mut config = local_config(&root);
+        let path = write_intent(&root, local_intent());
+        deliver_local(&config, &path, "local.ops").expect("first local delivery");
+        let replacement = root.path().join("replacement-inbox");
+        fs::create_dir(&replacement).expect("create replacement inbox");
+        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o711))
+            .expect("protect replacement inbox");
+        config.notification_routes[0].local_inbox_directory = Some(replacement);
+        assert!(deliver_local(&config, &path, "local.ops").is_err());
     }
 
     #[tokio::test]

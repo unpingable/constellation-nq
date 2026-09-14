@@ -75,14 +75,18 @@ pub struct NqConfig {
     pub notification_routes: Vec<NotificationRouteConfig>,
 }
 
-/// One bounded HTTPS notification route.
+/// One bounded notification route.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct NotificationRouteConfig {
     pub reference: String,
     pub transport: NotificationTransportKind,
-    /// Environment variable name holding the endpoint at dispatch time.
-    pub endpoint_secret_locator: String,
+    /// Environment variable name holding an HTTPS endpoint at dispatch time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_secret_locator: Option<String>,
+    /// Descriptor-validated local inbox root for the `local_file` transport.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_inbox_directory: Option<PathBuf>,
     #[serde(default = "default_notification_timeout_ms")]
     pub timeout_ms: u64,
     #[serde(default = "default_notification_response_bytes")]
@@ -109,6 +113,7 @@ pub struct NightshiftAttentionReplayConfig {
 pub enum NotificationTransportKind {
     Slack,
     Discord,
+    LocalFile,
 }
 
 fn default_notification_timeout_ms() -> u64 {
@@ -438,14 +443,43 @@ impl NqConfig {
                     "duplicate route reference",
                 ));
             }
-            if !valid_env_key(&route.endpoint_secret_locator)
-                || route.endpoint_secret_locator.len() > 128
-                || !route.endpoint_secret_locator.ends_with("_URL")
-            {
-                return Err(invalid(
-                    format!("{base}.endpoint_secret_locator"),
-                    "must be a bounded *_URL environment-variable name",
-                ));
+            match route.transport {
+                NotificationTransportKind::Slack | NotificationTransportKind::Discord => {
+                    let locator = route.endpoint_secret_locator.as_deref().ok_or_else(|| {
+                        invalid(
+                            format!("{base}.endpoint_secret_locator"),
+                            "is required for an HTTPS route",
+                        )
+                    })?;
+                    if !valid_env_key(locator) || locator.len() > 128 || !locator.ends_with("_URL")
+                    {
+                        return Err(invalid(
+                            format!("{base}.endpoint_secret_locator"),
+                            "must be a bounded *_URL environment-variable name",
+                        ));
+                    }
+                    if route.local_inbox_directory.is_some() {
+                        return Err(invalid(
+                            format!("{base}.local_inbox_directory"),
+                            "is only accepted for a local_file route",
+                        ));
+                    }
+                }
+                NotificationTransportKind::LocalFile => {
+                    if route.endpoint_secret_locator.is_some() {
+                        return Err(invalid(
+                            format!("{base}.endpoint_secret_locator"),
+                            "is not accepted for a local_file route",
+                        ));
+                    }
+                    let inbox = route.local_inbox_directory.as_ref().ok_or_else(|| {
+                        invalid(
+                            format!("{base}.local_inbox_directory"),
+                            "is required for a local_file route",
+                        )
+                    })?;
+                    require_absolute(&format!("{base}.local_inbox_directory"), inbox)?;
+                }
             }
             if !(100..=60_000).contains(&route.timeout_ms) {
                 return Err(invalid(
@@ -1015,6 +1049,51 @@ execution_account = "nightshift"
                 .expect("route remains optional")
                 .notification_routes
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn local_file_notification_route_requires_only_a_bounded_absolute_directory() {
+        let route = r#"
+
+[[notification_routes]]
+reference = "local.ops"
+transport = "local_file"
+local_inbox_directory = "/var/lib/nq/inbox"
+timeout_ms = 10000
+max_response_bytes = 1024
+"#;
+        let configured = NqConfig::from_toml(&(minimal() + route)).expect("local route config");
+        assert_eq!(
+            configured.notification_routes[0].transport,
+            NotificationTransportKind::LocalFile
+        );
+        assert!(
+            configured.notification_routes[0]
+                .endpoint_secret_locator
+                .is_none()
+        );
+
+        let invalid = route.replace(
+            "local_inbox_directory = \"/var/lib/nq/inbox\"",
+            "endpoint_secret_locator = \"NQ_LOCAL_URL\"\nlocal_inbox_directory = \"/var/lib/nq/inbox\"",
+        );
+        assert!(NqConfig::from_toml(&(minimal() + &invalid)).is_err());
+        assert!(
+            NqConfig::from_toml(
+                &(minimal() + &route.replace("reference = \"local.ops\"", "reference = \"\""))
+            )
+            .is_err()
+        );
+        assert!(
+            NqConfig::from_toml(
+                &(minimal()
+                    + &route.replace(
+                        "local_inbox_directory = \"/var/lib/nq/inbox\"",
+                        "local_inbox_directory = \"relative-inbox\"",
+                    ))
+            )
+            .is_err()
         );
     }
 
