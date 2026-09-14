@@ -17479,6 +17479,14 @@ mod tests {
     #[test]
     fn maintenance_carry_pairs_new_declaration_with_exact_lineage_idempotently() {
         let mut store = Store::initialize_in_memory().expect("store");
+        store
+            .append_genesis(&GenesisInput {
+                genesis_id: "carry-fixture-genesis".into(),
+                legacy_manifest_digest: None,
+                created_at: TIME.into(),
+                detail: document(json!({"source":"maintenance-carry-test"})),
+            })
+            .expect("append exact fixture genesis");
         let declaration = document(json!({
             "schema":"nq.maintenance-declaration/v1",
             "maintenance_id":"successor-maintenance",
