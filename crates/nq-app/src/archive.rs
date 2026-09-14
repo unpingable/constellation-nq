@@ -2007,7 +2007,7 @@ mod tests {
                 maintenance_id: "fixture-maintenance".into(),
                 declaration_digest: maintenance.digest().to_owned(),
                 declaration: maintenance,
-                declared_at: "2026-09-14T00:00:00Z",
+                declared_at: "2026-09-14T00:00:00Z".into(),
             })
             .expect("declare maintenance");
         let intent = canonical(
