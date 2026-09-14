@@ -100,6 +100,36 @@ a 2-second SQLite progress deadline and bounded lock waits. These are not a hard
 wall-clock guarantee for a stalled filesystem; use bounded process supervision
 where a whole-command deadline is necessary.
 
+## Project a retained result into a caller condition
+
+An attention or scheduling integration can read a retained result without
+rereading its SQLite source:
+
+```sh
+nq --config ./nq.toml --json saved-check condition \
+  --evaluation-id check-001 \
+  --component queue --kind backlog --subject local \
+  --at 2026-09-14T00:00:30Z
+```
+
+The output is `nq.saved-check-condition/v1`. It binds the evaluation ID and
+retained definition digest to the original outcome and source-time assertion,
+then records the caller's component/kind/subject/time mapping separately. Its
+`source_assertion.state` is `fresh`, `stale`, or `future` only relative to the
+caller-provided `--at`; it is not a read of present source state. A missing or
+invalid retained result refuses explicitly. A claimed evaluation remains
+indeterminate. A refused source or SQL evaluation remains a refusal rather than
+a false predicate result.
+
+The projection also returns a maintenance annotation: `covered`, `overrun`,
+`uncovered`, or `unavailable`. Coverage never changes a failed result, hides a
+refusal, grants permission, or suppresses attention. The mapping is caller-owned;
+NQ does not schedule it, submit it to Nightshift, or decide whether a person
+needs attention. The command makes no source-target reads. Current Store helpers
+do not expose one explicit cross-table SQLite read snapshot, so concurrent
+writes can make the retained evaluation and maintenance view a closely timed,
+but not atomic, read view.
+
 ## Maintenance and lifecycle
 
 `maintenance declare` accepts `nq.maintenance-declaration/v1`: a future increasing

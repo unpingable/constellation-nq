@@ -4226,6 +4226,19 @@ pub struct SavedCheckEventRecord {
     pub outcome: String,
     pub detail_json: Vec<u8>,
 }
+/// One retained evaluation joined to its immutable saved-check definition.
+/// This read-only view lets a consumer verify binding material without relying
+/// only on event detail supplied at evaluation time.
+#[derive(Clone, Debug)]
+pub struct SavedCheckEvaluationRecord {
+    pub definition_id: String,
+    pub stable_reference: String,
+    pub definition_digest: String,
+    pub definition_json: Vec<u8>,
+    pub installed_at: String,
+    pub outcome: String,
+    pub detail_json: Vec<u8>,
+}
 #[derive(Clone, Debug)]
 pub struct MaintenanceDeclarationInput {
     pub maintenance_id: String,
@@ -5777,6 +5790,30 @@ impl Store {
         evaluation_id: &str,
     ) -> Result<Option<SavedCheckEventRecord>, StoreError> {
         self.connection.query_row("SELECT outcome, detail_json FROM saved_check_events WHERE evaluation_id = ?1 ORDER BY event_number DESC LIMIT 1", [evaluation_id], |row| Ok(SavedCheckEventRecord { outcome: row.get(0)?, detail_json: row.get(1)? })).optional().map_err(StoreError::from)
+    }
+
+    /// Read one retained evaluation together with the definition selected by
+    /// its foreign key. No source target is opened by this custody query.
+    pub fn saved_check_evaluation_by_id(
+        &self,
+        evaluation_id: &str,
+    ) -> Result<Option<SavedCheckEvaluationRecord>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT d.definition_id, d.stable_reference, d.definition_digest, d.definition_json, d.installed_at, e.outcome, e.detail_json FROM saved_check_events e JOIN saved_check_definitions d ON d.definition_id = e.definition_id WHERE e.evaluation_id = ?1 ORDER BY e.event_number DESC LIMIT 1",
+                [evaluation_id],
+                |row| Ok(SavedCheckEvaluationRecord {
+                    definition_id: row.get(0)?,
+                    stable_reference: row.get(1)?,
+                    definition_digest: row.get(2)?,
+                    definition_json: row.get(3)?,
+                    installed_at: row.get(4)?,
+                    outcome: row.get(5)?,
+                    detail_json: row.get(6)?,
+                }),
+            )
+            .optional()
+            .map_err(StoreError::from)
     }
 
     pub fn maintenance_declarations(

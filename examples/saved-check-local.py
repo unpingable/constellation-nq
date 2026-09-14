@@ -251,6 +251,37 @@ def main() -> int:
         require(inspection["maintenance_state"] == expected, f"maintenance inspect must report {expected}")
         require(inspection["condition_source"] == "caller_assertion", "inspection must remain a caller assertion")
 
+    # These are caller-selected projection times, not assertions that the
+    # removed SQLite source is currently healthy. The retained terminal result
+    # remains the original passed evaluation throughout.
+    def project(evaluation: str, at: str) -> dict[str, Any]:
+        return invoke(
+            nq, config, root, transcript, "saved-check", "condition",
+            "--evaluation-id", evaluation,
+            "--component", maintenance["component"],
+            "--kind", maintenance["kind"],
+            "--subject", maintenance["subject"],
+            "--at", at,
+        )
+
+    covered_projection = project(evaluation_id, covered_at)
+    require(covered_projection["schema"] == "nq.saved-check-condition/v1", "condition must identify its schema")
+    require(covered_projection["original_result"]["outcome"] == "passed", "condition must retain original outcome")
+    require(covered_projection["maintenance"]["state"] == "covered", "condition must retain coverage annotation")
+    require(covered_projection["source_assertion"]["state"] == "fresh", "covered projection must retain source-time state")
+
+    overrun_projection = project(evaluation_id, overrun_at)
+    require(overrun_projection["original_result"]["outcome"] == "passed", "overrun must not rewrite original result")
+    require(overrun_projection["maintenance"]["state"] == "overrun", "condition must retain overrun annotation")
+
+    stale_projection = project(evaluation_id, utc_timestamp(now + dt.timedelta(minutes=6)))
+    require(stale_projection["original_result"]["outcome"] == "passed", "stale projection must retain original result")
+    require(stale_projection["source_assertion"]["state"] == "stale", "condition must report stale source assertion")
+
+    missing_projection = project("fixture-evaluation-missing-001", covered_at)
+    require(missing_projection["projection_state"] == "refused", "missing result must refuse projection")
+    require(missing_projection["refusal_reason"] == "evaluation_missing", "missing result must be explicit")
+
     print(json.dumps({"result": "qualified", "root": str(root), "transcript": str(transcript)}, sort_keys=True))
     return 0
 

@@ -13,7 +13,7 @@ use nix::libc;
 use nq_core::config::{LoadedConfig, NqConfig};
 use nq_helper_sandbox::{open_runtime_root, require_no_posix_acl};
 use nq_profiles::all_profiles;
-use nq_protocol::semantic_digest;
+use nq_protocol::{Sha256Digest, semantic_digest};
 use nq_store::{
     CanonicalDocument, DiagnosticArtifactByteState, DiagnosticArtifactImportDisposition,
     DiagnosticArtifactImportInput, DiagnosticArtifactLookup, DiagnosticArtifactOrigin,
@@ -22,7 +22,7 @@ use nq_store::{
     UpgradeReceiptInput,
 };
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
@@ -441,6 +441,20 @@ pub enum SavedCheckCommand {
         #[arg(long)]
         source_observed_at: String,
     },
+    /// Project one retained result and a caller-selected maintenance annotation.
+    /// This is read-only and never rereads the saved-check source.
+    Condition {
+        #[arg(long)]
+        evaluation_id: String,
+        #[arg(long)]
+        component: String,
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        subject: String,
+        #[arg(long)]
+        at: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -593,6 +607,21 @@ fn saved_check_command(
 ) -> Result<()> {
     let config = NqConfig::load(config_path)?;
     match command {
+        SavedCheckCommand::Condition {
+            evaluation_id,
+            component,
+            kind,
+            subject,
+            at,
+        } => saved_check_condition(
+            &config.database_path,
+            &evaluation_id,
+            &component,
+            &kind,
+            &subject,
+            &at,
+            json_output,
+        ),
         SavedCheckCommand::Result { evaluation_id } => {
             let store = Store::open_read_only(&config.database_path)?;
             let event = store.saved_check_event_by_evaluation_id(&evaluation_id)?;
@@ -706,6 +735,301 @@ fn saved_check_command(
             )
         }
     }
+}
+
+/// Read one retained saved-check outcome together with a caller-selected
+/// maintenance annotation. This is deliberately a projection: it neither reads
+/// the saved target nor turns historical custody into a present condition.
+fn saved_check_condition(
+    database_path: &Path,
+    evaluation_id: &str,
+    component: &str,
+    kind: &str,
+    subject: &str,
+    at: &str,
+    json_output: bool,
+) -> Result<()> {
+    let requested_at = at;
+    let at = chrono::DateTime::parse_from_rfc3339(requested_at)
+        .context("condition --at must be RFC3339")?
+        .with_timezone(&chrono::Utc);
+    let store = Store::open_read_only(database_path)?;
+    let value = saved_check_condition_value(
+        &store,
+        evaluation_id,
+        component,
+        kind,
+        subject,
+        requested_at,
+        at,
+    )?;
+    print_value(&value, json_output)
+}
+
+/// Construct a projection exclusively from retained NQ custody. This accepts no
+/// source target or evaluator and therefore cannot read a saved-check target.
+fn saved_check_condition_value(
+    store: &Store,
+    evaluation_id: &str,
+    component: &str,
+    kind: &str,
+    subject: &str,
+    requested_at: &str,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Result<Value> {
+    let mapping = json!({"component":component,"kind":kind,"subject":subject,"at":requested_at,"mapping_owner":"caller"});
+    let Some(event) = store.saved_check_evaluation_by_id(evaluation_id)? else {
+        return Ok(saved_check_condition_refusal(
+            evaluation_id,
+            mapping,
+            "evaluation_missing",
+        ));
+    };
+    let detail: Value = match serde_json::from_slice(&event.detail_json) {
+        Ok(value) => value,
+        Err(_) => {
+            return Ok(saved_check_condition_refusal(
+                evaluation_id,
+                mapping,
+                "retained_result_invalid",
+            ));
+        }
+    };
+    let binding = match retained_saved_check_binding(&detail) {
+        Ok(binding) => binding,
+        Err(_) => {
+            return Ok(saved_check_condition_refusal(
+                evaluation_id,
+                mapping,
+                "retained_result_invalid",
+            ));
+        }
+    };
+    let definition_document =
+        match CanonicalDocument::from_canonical_bytes(event.definition_json.clone()) {
+            Ok(document) => document,
+            Err(_) => {
+                return Ok(saved_check_condition_refusal(
+                    evaluation_id,
+                    mapping,
+                    "retained_definition_invalid",
+                ));
+            }
+        };
+    let definition_digest = match Sha256Digest::parse(event.definition_digest.clone()) {
+        Ok(digest) if digest.as_str() == definition_document.digest() => digest,
+        _ => {
+            return Ok(saved_check_condition_refusal(
+                evaluation_id,
+                mapping,
+                "retained_definition_invalid",
+            ));
+        }
+    };
+    let definition: SavedCheckDefinition =
+        match serde_json::from_slice(definition_document.as_bytes()) {
+            Ok(definition) if definition.validate().is_ok() => definition,
+            _ => {
+                return Ok(saved_check_condition_refusal(
+                    evaluation_id,
+                    mapping,
+                    "retained_definition_invalid",
+                ));
+            }
+        };
+    if !retained_definition_binding_matches(
+        &event.stable_reference,
+        &definition,
+        &binding,
+        definition_digest.as_str(),
+    ) {
+        return Ok(saved_check_condition_refusal(
+            evaluation_id,
+            mapping,
+            "retained_binding_mismatch",
+        ));
+    }
+    let declarations: Result<Vec<_>> = store
+        .maintenance_declarations()?
+        .into_iter()
+        .map(|record| {
+            let document = CanonicalDocument::from_canonical_bytes(record.declaration_json.clone())
+                .context("retained maintenance declaration is not canonical")?;
+            let stored_digest = Sha256Digest::parse(record.declaration_digest.clone())
+                .context("retained maintenance declaration digest is invalid")?;
+            if stored_digest.as_str() != document.digest() {
+                bail!("retained maintenance declaration digest does not match canonical bytes");
+            }
+            let declaration: MaintenanceDeclaration =
+                serde_json::from_slice(document.as_bytes())
+                    .context("retained maintenance declaration is invalid")?;
+            let declared_at = chrono::DateTime::parse_from_rfc3339(&record.declared_at)
+                .context("retained maintenance declaration time is invalid")?
+                .with_timezone(&chrono::Utc);
+            Ok((
+                declaration,
+                record.declaration_digest,
+                record.declared_at,
+                declared_at,
+            ))
+        })
+        .collect();
+    let maintenance = match declarations {
+        Err(error) => json!({"state":"unavailable","reason":error.to_string()}),
+        Ok(declarations) => match saved_check::maintenance_annotation(
+            declarations
+                .iter()
+                .map(|(declaration, _, _, declared_at)| (declaration, *declared_at)),
+            component,
+            kind,
+            subject,
+            at,
+        ) {
+            Err(error) => json!({"state":"unavailable","reason":error.to_string()}),
+            Ok(annotation) => match annotation {
+                Some((declaration, saved_check::MaintenanceAnnotation::Covered)) => {
+                    let record = declarations
+                        .iter()
+                        .find(|(candidate, _, _, _)| {
+                            candidate.maintenance_id == declaration.maintenance_id
+                        })
+                        .context("maintenance annotation lost retained record")?;
+                    json!({"state":"covered","maintenance_id":declaration.maintenance_id,"declaration_digest":record.1,"declared_at":record.2})
+                }
+                Some((declaration, saved_check::MaintenanceAnnotation::Overrun)) => {
+                    let record = declarations
+                        .iter()
+                        .find(|(candidate, _, _, _)| {
+                            candidate.maintenance_id == declaration.maintenance_id
+                        })
+                        .context("maintenance annotation lost retained record")?;
+                    json!({"state":"overrun","maintenance_id":declaration.maintenance_id,"declaration_digest":record.1,"declared_at":record.2})
+                }
+                None => json!({"state":"uncovered"}),
+            },
+        },
+    };
+    let result_state = retained_result_state(&event.outcome);
+    Ok(json!({
+        "schema":"nq.saved-check-condition/v1", "projection_state": projection_state(result_state),
+        "evaluation_id":evaluation_id, "definition_identity":{"id":event.definition_id,"reference":event.stable_reference,"digest":definition_digest.as_str(),"installed_at":event.installed_at},
+        "original_result":{"state":result_state,"outcome":event.outcome,"detail":detail},
+        "source_assertion":{"identity":binding.source_identity,"observed_at":binding.source_assertion,"currentness_seconds":binding.currentness_seconds,"state":currentness_state(binding.observed_at, at, binding.currentness_seconds)},
+        "maintenance":maintenance, "caller_mapping":mapping,
+        "authority":"none", "automatic_nightshift_integration":false,
+        "limitations":["Projection does not reread the source","Maintenance annotates and does not alter the original result","A retained result does not establish current conditions or attention authority","The current Store read helpers do not expose one explicit cross-table read snapshot"]
+    }))
+}
+
+struct RetainedSavedCheckBinding<'a> {
+    definition_digest: &'a str,
+    target_reference: &'a str,
+    source_identity: &'a str,
+    source_assertion: &'a str,
+    currentness_seconds: u32,
+    observed_at: chrono::DateTime<chrono::Utc>,
+}
+
+fn retained_saved_check_binding(detail: &Value) -> Result<RetainedSavedCheckBinding<'_>> {
+    let binding = detail
+        .get("binding")
+        .and_then(Value::as_object)
+        .context("retained saved-check event has no exact binding")?;
+    let definition_digest = binding
+        .get("definition_digest")
+        .and_then(Value::as_str)
+        .context("retained saved-check event has no definition digest")?;
+    Sha256Digest::parse(definition_digest.to_owned())
+        .context("retained saved-check definition digest is invalid")?;
+    let target_reference = binding
+        .get("target_reference")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .context("retained saved-check event has no target reference")?;
+    let source_identity = binding
+        .get("source_identity")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .context("retained saved-check event has no source identity")?;
+    let source_assertion = binding
+        .get("source_observed_at_assertion")
+        .and_then(Value::as_str)
+        .context("retained saved-check event has no source observation assertion")?;
+    let currentness_seconds = binding
+        .get("currentness_seconds")
+        .and_then(Value::as_u64)
+        .context("retained saved-check event has no currentness bound")?;
+    let currentness_seconds = u32::try_from(currentness_seconds)
+        .context("retained saved-check currentness exceeds definition bounds")?;
+    let observed_at = chrono::DateTime::parse_from_rfc3339(source_assertion)
+        .context("retained saved-check source assertion is not RFC3339")?
+        .with_timezone(&chrono::Utc);
+    Ok(RetainedSavedCheckBinding {
+        definition_digest,
+        target_reference,
+        source_identity,
+        source_assertion,
+        currentness_seconds,
+        observed_at,
+    })
+}
+
+fn retained_definition_binding_matches(
+    stable_reference: &str,
+    definition: &SavedCheckDefinition,
+    binding: &RetainedSavedCheckBinding<'_>,
+    definition_digest: &str,
+) -> bool {
+    stable_reference == definition.reference
+        && binding.definition_digest == definition_digest
+        && !binding.target_reference.is_empty()
+        && binding.source_identity == definition.source_identity
+        && binding.currentness_seconds == definition.currentness_seconds
+}
+
+fn currentness_state(
+    observed_at: chrono::DateTime<chrono::Utc>,
+    at: chrono::DateTime<chrono::Utc>,
+    currentness_seconds: u32,
+) -> &'static str {
+    if at < observed_at {
+        "future"
+    } else if at.signed_duration_since(observed_at)
+        > chrono::Duration::seconds(i64::from(currentness_seconds))
+    {
+        "stale"
+    } else {
+        "fresh"
+    }
+}
+
+fn retained_result_state(outcome: &str) -> &str {
+    match outcome {
+        "passed" | "failed" | "refused" => outcome,
+        "claimed" => "indeterminate",
+        _ => "unavailable",
+    }
+}
+
+fn projection_state(result_state: &str) -> &'static str {
+    match result_state {
+        "refused" | "unavailable" => "refused",
+        "indeterminate" => "indeterminate",
+        _ => "available",
+    }
+}
+
+fn saved_check_condition_refusal(evaluation_id: &str, mapping: Value, reason: &str) -> Value {
+    json!({
+        "schema":"nq.saved-check-condition/v1",
+        "projection_state":"refused",
+        "refusal_reason":reason,
+        "evaluation_id":evaluation_id,
+        "caller_mapping":mapping,
+        "maintenance":{"state":"unavailable","reason":"retained_result_unavailable"},
+        "authority":"none",
+        "automatic_nightshift_integration":false
+    })
 }
 
 fn maintenance_command(
@@ -2391,6 +2715,108 @@ helper_runtime_dir = "/run/nq/helpers"
 "#
     }
 
+    fn condition_test_store(
+        terminal_outcome: Option<&str>,
+        malformed_terminal_binding: bool,
+        declare_maintenance: bool,
+        expired_maintenance: bool,
+    ) -> Store {
+        let mut store = Store::initialize_in_memory().expect("initialize Store");
+        let definition = SavedCheckDefinition {
+            schema: crate::saved_check::SavedCheckSchema::V1,
+            reference: "capacity".into(),
+            source_identity: "sqlite:disposable".into(),
+            currentness_seconds: 60,
+            name: "Capacity".into(),
+            sql_text: "SELECT 1".into(),
+            mode: crate::saved_check::SavedCheckMode::Empty,
+            threshold: None,
+            column: None,
+            description: None,
+        };
+        let definition_document =
+            CanonicalDocument::from_serializable(&definition).expect("canonical definition");
+        let definition_digest = definition_document.digest().to_owned();
+        store
+            .install_saved_check(&SavedCheckDefinitionInput {
+                definition_id: "definition-001".into(),
+                stable_reference: definition.reference.clone(),
+                definition_digest: definition_digest.clone(),
+                definition: definition_document,
+                installed_at: "2026-09-14T12:00:00Z".into(),
+            })
+            .expect("install definition");
+        let binding = if malformed_terminal_binding {
+            json!({"definition_digest":"sha256:invalid","source_identity":"sqlite:disposable"})
+        } else {
+            json!({
+                "definition_digest": definition_digest,
+                "target_reference": "/removed/disposable-source.sqlite",
+                "source_identity": "sqlite:disposable",
+                "currentness_seconds": 60,
+                "source_observed_at_assertion": "2026-09-14T12:00:00Z"
+            })
+        };
+        let claim = CanonicalDocument::from_serializable(&json!({"binding":binding.clone()}))
+            .expect("canonical claim");
+        assert!(
+            store
+                .claim_saved_check_evaluation(
+                    "definition-001",
+                    "evaluation-001",
+                    "2026-09-14T12:00:01Z",
+                    &claim,
+                )
+                .expect("claim evaluation")
+        );
+        if let Some(outcome) = terminal_outcome {
+            let detail = CanonicalDocument::from_serializable(&json!({
+                "binding":binding,
+                "read_attempted_at":"2026-09-14T12:00:02Z",
+                "refusal_reason":null
+            }))
+            .expect("canonical terminal event");
+            store
+                .append_saved_check_event(&SavedCheckEventInput {
+                    definition_id: "definition-001".into(),
+                    event_number: 0,
+                    occurred_at: "2026-09-14T12:00:02Z".into(),
+                    outcome: outcome.into(),
+                    detail,
+                    evaluation_id: Some("evaluation-001".into()),
+                })
+                .expect("append terminal result");
+        }
+        if declare_maintenance {
+            let declaration = MaintenanceDeclaration {
+                schema: crate::saved_check::MaintenanceSchema::V1,
+                maintenance_id: "maintenance-001".into(),
+                declared_by: Some("operator".into()),
+                start_at: "2026-09-14T12:00:00Z".into(),
+                end_at: if expired_maintenance {
+                    "2026-09-14T12:00:10Z".into()
+                } else {
+                    "2026-09-14T13:00:00Z".into()
+                },
+                component: "queue".into(),
+                kind: "backlog".into(),
+                subject: Some("local".into()),
+                reason: None,
+            };
+            let document = CanonicalDocument::from_serializable(&declaration)
+                .expect("canonical maintenance declaration");
+            store
+                .declare_maintenance(&MaintenanceDeclarationInput {
+                    maintenance_id: declaration.maintenance_id,
+                    declaration_digest: document.digest().to_owned(),
+                    declaration: document,
+                    declared_at: "2026-09-14T11:59:00Z".into(),
+                })
+                .expect("declare maintenance");
+        }
+        store
+    }
+
     #[test]
     fn command_tree_exposes_required_operator_workflows() {
         use clap::CommandFactory;
@@ -2788,5 +3214,281 @@ helper_runtime_dir = "{}"
             config_fixture().as_bytes()
         );
         NqConfig::load(&active).expect("active config remains the validated document");
+    }
+
+    #[test]
+    fn saved_check_condition_keeps_result_currentness_and_maintenance_separate() {
+        let detail = json!({"binding":{
+            "definition_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "target_reference":"/removed/disposable-source.sqlite",
+            "source_identity":"sqlite:disposable",
+            "source_observed_at_assertion":"2026-09-14T12:00:00Z",
+            "currentness_seconds":60
+        }});
+        let binding = retained_saved_check_binding(&detail).expect("exact retained binding");
+        let at = chrono::DateTime::parse_from_rfc3339("2026-09-14T12:00:30Z")
+            .expect("RFC3339")
+            .with_timezone(&chrono::Utc);
+        assert_eq!(retained_result_state("failed"), "failed");
+        assert_eq!(
+            projection_state(retained_result_state("failed")),
+            "available"
+        );
+        assert_eq!(
+            currentness_state(binding.observed_at, at, binding.currentness_seconds),
+            "fresh"
+        );
+
+        let declaration = MaintenanceDeclaration {
+            schema: crate::saved_check::MaintenanceSchema::V1,
+            maintenance_id: "maintenance-001".into(),
+            declared_by: Some("operator".into()),
+            start_at: "2026-09-14T12:00:00Z".into(),
+            end_at: "2026-09-14T13:00:00Z".into(),
+            component: "queue".into(),
+            kind: "backlog".into(),
+            subject: Some("local".into()),
+            reason: None,
+        };
+        let annotation = saved_check::maintenance_annotation(
+            [(&declaration, binding.observed_at)],
+            "queue",
+            "backlog",
+            "local",
+            at,
+        )
+        .expect("valid declaration")
+        .expect("covered declaration");
+        assert_eq!(annotation.1, saved_check::MaintenanceAnnotation::Covered);
+        // Coverage annotates the caller condition but never rewrites failure.
+        assert_eq!(retained_result_state("failed"), "failed");
+
+        let mismatched_definition = SavedCheckDefinition {
+            schema: crate::saved_check::SavedCheckSchema::V1,
+            reference: "other-reference".into(),
+            source_identity: "sqlite:disposable".into(),
+            currentness_seconds: 60,
+            name: "Other".into(),
+            sql_text: "SELECT 1".into(),
+            mode: crate::saved_check::SavedCheckMode::Empty,
+            threshold: None,
+            column: None,
+            description: None,
+        };
+        assert!(!retained_definition_binding_matches(
+            "capacity",
+            &mismatched_definition,
+            &binding,
+            binding.definition_digest,
+        ));
+    }
+
+    #[test]
+    fn saved_check_condition_reports_stale_future_pending_and_invalid_material() {
+        let detail = json!({"binding":{
+            "definition_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "target_reference":"/removed/disposable-source.sqlite",
+            "source_identity":"sqlite:disposable",
+            "source_observed_at_assertion":"2026-09-14T12:00:00Z",
+            "currentness_seconds":60
+        }});
+        let binding = retained_saved_check_binding(&detail).expect("exact retained binding");
+        let stale = chrono::DateTime::parse_from_rfc3339("2026-09-14T12:01:01Z")
+            .expect("RFC3339")
+            .with_timezone(&chrono::Utc);
+        let future = chrono::DateTime::parse_from_rfc3339("2026-09-14T11:59:59Z")
+            .expect("RFC3339")
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            currentness_state(binding.observed_at, stale, binding.currentness_seconds),
+            "stale"
+        );
+        let boundary = chrono::DateTime::parse_from_rfc3339("2026-09-14T12:01:00Z")
+            .expect("RFC3339")
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            currentness_state(binding.observed_at, boundary, binding.currentness_seconds),
+            "fresh"
+        );
+        assert_eq!(
+            currentness_state(binding.observed_at, future, binding.currentness_seconds),
+            "future"
+        );
+        assert_eq!(retained_result_state("claimed"), "indeterminate");
+        assert_eq!(
+            projection_state(retained_result_state("claimed")),
+            "indeterminate"
+        );
+        assert_eq!(
+            projection_state(retained_result_state("unknown")),
+            "refused"
+        );
+        assert_eq!(
+            projection_state(retained_result_state("refused")),
+            "refused"
+        );
+        assert!(retained_saved_check_binding(&json!({"binding":{}})).is_err());
+        assert!(
+            retained_saved_check_binding(&json!({"binding":{
+            "definition_digest":"sha256:definition",
+            "target_reference":"/removed/disposable-source.sqlite",
+            "source_identity":"sqlite:disposable",
+                "source_observed_at_assertion":"2026-09-14T12:00:00Z",
+                "currentness_seconds":60
+            }}))
+            .is_err()
+        );
+        assert!(retained_saved_check_binding(&json!({"binding":{
+            "definition_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "target_reference":"/removed/disposable-source.sqlite",
+            "source_identity":"sqlite:disposable",
+            "source_observed_at_assertion":"2026-09-14T12:00:00Z",
+            "currentness_seconds":4294967296u64
+        }})).is_err());
+        assert!(retained_saved_check_binding(&json!({"binding":{
+            "definition_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "target_reference":"",
+            "source_identity":"sqlite:disposable",
+            "source_observed_at_assertion":"2026-09-14T12:00:00Z",
+            "currentness_seconds":60
+        }})).is_err());
+        let refusal = saved_check_condition_refusal(
+            "absent",
+            json!({"mapping_owner":"caller"}),
+            "evaluation_missing",
+        );
+        assert_eq!(refusal["projection_state"], "refused");
+        assert_eq!(refusal["maintenance"]["state"], "unavailable");
+    }
+
+    #[test]
+    fn saved_check_condition_preserves_an_overrun_annotation() {
+        let declaration = MaintenanceDeclaration {
+            schema: crate::saved_check::MaintenanceSchema::V1,
+            maintenance_id: "maintenance-ended".into(),
+            declared_by: None,
+            start_at: "2026-09-14T10:00:00Z".into(),
+            end_at: "2026-09-14T11:00:00Z".into(),
+            component: "queue".into(),
+            kind: "backlog".into(),
+            subject: None,
+            reason: None,
+        };
+        let declared_at = chrono::DateTime::parse_from_rfc3339("2026-09-14T09:00:00Z")
+            .expect("RFC3339")
+            .with_timezone(&chrono::Utc);
+        let at = chrono::DateTime::parse_from_rfc3339("2026-09-14T12:00:00Z")
+            .expect("RFC3339")
+            .with_timezone(&chrono::Utc);
+        let annotation = saved_check::maintenance_annotation(
+            [(&declaration, declared_at)],
+            "queue",
+            "backlog",
+            "local",
+            at,
+        )
+        .expect("valid declaration")
+        .expect("expired matching declaration");
+        assert_eq!(annotation.1, saved_check::MaintenanceAnnotation::Overrun);
+    }
+
+    #[test]
+    fn saved_check_condition_reads_retained_store_material_without_a_source_target() {
+        let store = condition_test_store(Some("failed"), false, true, false);
+        let at = chrono::DateTime::parse_from_rfc3339("2026-09-14T12:00:30Z")
+            .expect("RFC3339")
+            .with_timezone(&chrono::Utc);
+        // The target reference retained in the event does not exist. The
+        // projection accepts no target path and only reads Store custody.
+        let value = saved_check_condition_value(
+            &store,
+            "evaluation-001",
+            "queue",
+            "backlog",
+            "local",
+            "2026-09-14T12:00:30Z",
+            at,
+        )
+        .expect("retained projection");
+        assert_eq!(value["projection_state"], "available");
+        assert_eq!(value["original_result"]["state"], "failed");
+        assert_eq!(value["maintenance"]["state"], "covered");
+        assert_eq!(value["definition_identity"]["id"], "definition-001");
+        assert_eq!(value["source_assertion"]["state"], "fresh");
+    }
+
+    #[test]
+    fn saved_check_condition_returns_store_backed_overrun_without_rewriting_failure() {
+        let store = condition_test_store(Some("failed"), false, true, true);
+        let at = chrono::DateTime::parse_from_rfc3339("2026-09-14T12:00:30Z")
+            .expect("RFC3339")
+            .with_timezone(&chrono::Utc);
+        let value = saved_check_condition_value(
+            &store,
+            "evaluation-001",
+            "queue",
+            "backlog",
+            "local",
+            "2026-09-14T12:00:30Z",
+            at,
+        )
+        .expect("retained projection");
+        assert_eq!(value["original_result"]["state"], "failed");
+        assert_eq!(value["maintenance"]["state"], "overrun");
+        assert_eq!(value["maintenance"]["maintenance_id"], "maintenance-001");
+        assert!(
+            value["maintenance"]["declaration_digest"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("sha256:"))
+        );
+    }
+
+    #[test]
+    fn saved_check_condition_refuses_missing_or_invalid_store_material_and_keeps_claims_indeterminate()
+     {
+        let at = chrono::DateTime::parse_from_rfc3339("2026-09-14T14:00:00Z")
+            .expect("RFC3339")
+            .with_timezone(&chrono::Utc);
+        let missing = Store::initialize_in_memory().expect("initialize Store");
+        let missing = saved_check_condition_value(
+            &missing,
+            "absent",
+            "queue",
+            "backlog",
+            "local",
+            "2026-09-14T14:00:00Z",
+            at,
+        )
+        .expect("missing projection");
+        assert_eq!(missing["projection_state"], "refused");
+        assert_eq!(missing["refusal_reason"], "evaluation_missing");
+
+        let claimed = condition_test_store(None, false, false, false);
+        let claimed = saved_check_condition_value(
+            &claimed,
+            "evaluation-001",
+            "queue",
+            "backlog",
+            "local",
+            "2026-09-14T14:00:00Z",
+            at,
+        )
+        .expect("claimed projection");
+        assert_eq!(claimed["projection_state"], "indeterminate");
+        assert_eq!(claimed["original_result"]["state"], "indeterminate");
+
+        let invalid = condition_test_store(Some("failed"), true, false, false);
+        let invalid = saved_check_condition_value(
+            &invalid,
+            "evaluation-001",
+            "queue",
+            "backlog",
+            "local",
+            "2026-09-14T14:00:00Z",
+            at,
+        )
+        .expect("invalid retained projection");
+        assert_eq!(invalid["projection_state"], "refused");
+        assert_eq!(invalid["refusal_reason"], "retained_result_invalid");
     }
 }
