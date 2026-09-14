@@ -2749,6 +2749,40 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    /// Locate the one successor fence bound to an immutable local run.
+    /// `run_id` is unique in the fence table, so this is a bounded point read
+    /// suitable for historical artifact reopening.
+    pub fn local_successor_acquisition_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<LocalSuccessorAcquisitionIntentRow>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT acquisition_id, watcher_instance_id, watcher_semantic_digest,
+                        selection_digest, run_id, intake_id, intent_json
+                 FROM local_successor_acquisition_intents WHERE run_id = ?1",
+                [run_id],
+                |row| {
+                    let bytes: Vec<u8> = row.get(6)?;
+                    let intent =
+                        CanonicalDocument::from_canonical_bytes(bytes).map_err(|error| {
+                            rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                        })?;
+                    Ok(LocalSuccessorAcquisitionIntentRow {
+                        acquisition_id: row.get(0)?,
+                        watcher_instance_id: row.get(1)?,
+                        watcher_semantic_digest: row.get(2)?,
+                        selection_digest: row.get(3)?,
+                        run_id: row.get(4)?,
+                        intake_id: row.get(5)?,
+                        intent,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
     /// Return the append-only phases for a named local successor occurrence.
     pub fn local_successor_acquisition_phases(
         &self,

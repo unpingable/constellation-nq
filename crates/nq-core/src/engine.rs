@@ -2695,9 +2695,7 @@ impl CollectionEngine {
         })?;
         self.store
             .complete_local_successor_acquisition(acquisition_id, &artifact)?;
-        execution
-            .diagnostic
-            .ok_or_else(|| EngineError::Invariant("local successor artifact did not reopen".into()))
+        reopen_diagnostic_artifact(&self.store, &artifact)
     }
 
     /// Read only an already terminal local successor occurrence.
@@ -3269,6 +3267,11 @@ impl CollectionEngine {
                                     &snapshot,
                                     &current_findings,
                                     &evaluator_artifact_digest,
+                                    if local_successor_acquisition_id.is_some() {
+                                        EvaluationReportSelection::ExactCurrent(&report_id)
+                                    } else {
+                                        EvaluationReportSelection::AllMatching
+                                    },
                                 )?;
                                 let (diagnostic_artifact_id, diagnostic_artifact) =
                                     if let Some(context) = diagnostic_context.as_ref() {
@@ -3352,7 +3355,9 @@ impl CollectionEngine {
                         )?;
                         match committed {
                             ProviderIntakeCommit::Committed { mut value, .. } => {
-                                if let Some(artifact_id) = value.diagnostic_artifact_id.as_ref() {
+                                if local_successor_acquisition_id.is_none()
+                                    && let Some(artifact_id) = value.diagnostic_artifact_id.as_ref()
+                                {
                                     value.diagnostic =
                                         Some(reopen_diagnostic_artifact(&self.store, artifact_id)?);
                                 }
@@ -4032,12 +4037,22 @@ impl CollectionEngine {
                 reopened
             }
         };
-        let reopened_diagnostic = completion
-            .diagnostic_artifact_id
-            .as_ref()
-            .map(|artifact_id| reopen_diagnostic_artifact(&self.store, artifact_id))
-            .transpose()?;
-        if reopened_diagnostic.is_some() != completion.diagnostic_artifact_id.is_some() {
+        let successor_fence = self
+            .store
+            .local_successor_acquisition_for_run(run_id)?
+            .is_some();
+        let reopened_diagnostic = if successor_fence {
+            None
+        } else {
+            completion
+                .diagnostic_artifact_id
+                .as_ref()
+                .map(|artifact_id| reopen_diagnostic_artifact(&self.store, artifact_id))
+                .transpose()?
+        };
+        if !successor_fence
+            && reopened_diagnostic.is_some() != completion.diagnostic_artifact_id.is_some()
+        {
             return Err(EngineError::Invariant(
                 "non-success diagnostic reopening lost its committed artifact identity".into(),
             ));
@@ -4073,6 +4088,7 @@ impl CollectionEngine {
             &snapshot,
             &current_findings,
             &evaluator_artifact_digest,
+            EvaluationReportSelection::AllMatching,
         )?;
         let mut evaluations = Vec::with_capacity(prepared.len());
         for prepared in prepared {
@@ -4829,15 +4845,39 @@ fn validate_local_v2_provider_correspondence(
             "profile_semantic_id": provider_intake.provider.profile_semantic_id,
         }),
     )?;
-    let expected_selection_rule = semantic_identity(
-        "nq.fresh_single_admitted_report",
-        "1",
-        &json!({
-            "schema": "nq.diagnostic_selection_rule.v1",
-            "question": expected_question,
-            "cardinality": "exactly_one_newly_admitted_report_with_no_prior_matching_history",
-        }),
-    )?;
+    let expected_selection_rule = if let Some(successor) =
+        store.local_successor_acquisition_for_run(run_id)?
+    {
+        if successor.watcher_instance_id != run.instance_id {
+            return Err(EngineError::Invariant(format!(
+                "local v2 diagnostic artifact {} successor fence substitutes watcher instance",
+                artifact.artifact_id.0
+            )));
+        }
+        validate_local_successor_terminal_phases(
+            &store.local_successor_acquisition_phases(&successor.acquisition_id)?,
+        )?;
+        semantic_identity(
+            "nq.deliberate_successor_single_admitted_report",
+            "1",
+            &json!({
+                "schema": "nq.diagnostic_selection_rule.v1",
+                "question": expected_question,
+                "cardinality": "exactly_one_newly_admitted_report_for_exact_successor_acquisition",
+                "prior_matching_history":"required_present_retained_excluded",
+            }),
+        )?
+    } else {
+        semantic_identity(
+            "nq.fresh_single_admitted_report",
+            "1",
+            &json!({
+                "schema": "nq.diagnostic_selection_rule.v1",
+                "question": expected_question,
+                "cardinality": "exactly_one_newly_admitted_report_with_no_prior_matching_history",
+            }),
+        )?
+    };
     let mut substitutions = Vec::new();
     if artifact.producer.node_id != node_id {
         substitutions.push("producer.node_id");
@@ -5539,6 +5579,16 @@ struct PreparedEvaluation {
     detector_reports: Vec<DetectorReport>,
 }
 
+/// The normal evaluator consumes its complete matching context. A named local
+/// successor has a separately retained selection law: its newly admitted
+/// occurrence is the only detector input while earlier matching reports remain
+/// durable history, deliberately excluded from that detector invocation.
+#[derive(Clone, Copy)]
+enum EvaluationReportSelection<'a> {
+    AllMatching,
+    ExactCurrent(&'a str),
+}
+
 impl FindingLineage<'_> {
     fn matches(self, finding: &nq_store::FindingSnapshotRow) -> bool {
         finding.instance_id == self.instance_id
@@ -5569,6 +5619,7 @@ fn prepare_instance_evaluations(
     snapshot: &EvidenceSnapshot,
     current_findings: &[FindingSnapshotRow],
     evaluator_artifact_digest: &str,
+    selection: EvaluationReportSelection<'_>,
 ) -> Result<Vec<PreparedEvaluation>, EngineError> {
     let profile_version = watcher.profile.version.to_string();
     let profile_digest = profile
@@ -5579,7 +5630,23 @@ fn prepare_instance_evaluations(
         .map_err(|error| EngineError::Canonical(error.to_string()))?;
     let matching_rows =
         evaluation_context_rows(&snapshot.reports, watcher, profile_digest.as_str())?;
-    let reports = matching_rows
+    let selected_rows = match selection {
+        EvaluationReportSelection::AllMatching => matching_rows.clone(),
+        EvaluationReportSelection::ExactCurrent(report_id) => {
+            let selected = matching_rows
+                .iter()
+                .filter(|row| row.report_id == report_id)
+                .collect::<Vec<_>>();
+            let [selected] = selected.as_slice() else {
+                return Err(EngineError::Invariant(format!(
+                    "local successor detector selection requires exactly its newly admitted report {report_id}; found {} matching rows",
+                    selected.len()
+                )));
+            };
+            vec![(*selected).clone()]
+        }
+    };
+    let reports = selected_rows
         .iter()
         .map(|row| reconstruct_admitted(row, profile))
         .collect::<Result<Vec<_>, _>>()?;
@@ -11659,6 +11726,7 @@ sys.stdout.write("\n")
                     &snapshot,
                     &current_findings,
                     &evaluator_artifact_digest,
+                    EvaluationReportSelection::AllMatching,
                 )?;
                 let evaluations = prepared
                     .iter()
