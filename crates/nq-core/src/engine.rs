@@ -4022,6 +4022,10 @@ impl CollectionEngine {
             &result,
             artifact_commit.as_ref(),
         )?;
+        let successor_fence = self
+            .store
+            .local_successor_acquisition_for_run(run_id)?
+            .is_some();
         let stored_outcome = match &completion.intake {
             ProviderIntakeCommit::Committed { .. } => outcome,
             ProviderIntakeCommit::Replayed {
@@ -4037,10 +4041,6 @@ impl CollectionEngine {
                 reopened
             }
         };
-        let successor_fence = self
-            .store
-            .local_successor_acquisition_for_run(run_id)?
-            .is_some();
         let reopened_diagnostic = if successor_fence {
             None
         } else {
