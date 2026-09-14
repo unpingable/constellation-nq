@@ -11,6 +11,13 @@ delivery mechanics; live destination delivery remains unverified. Saved checks
 and maintenance annotations are local capabilities, not a complete recurring
 monitoring deployment or a migration approval for Classic NQ.
 
+For the connected local path, [evaluate a saved check and deliver attention](https://unpingable.com/constellation/saved-check-attention.html).
+That guide pins the actual Monitor, NQ and Nightshift combination, preserves a
+failed result under maintenance, and shows exact replay, one local inbox file,
+duplicate handling and retained-state inspection. Public-only reproduction is
+verified; human acknowledgment, live webhooks and unattended installation are
+not implied. Use the pinned composition rather than arbitrary repository heads.
+
 > **Public developer preview (2026-09-12):** this public source is
 > `constellation-nq` at `ce0a04a175b6d87ac17395f08fd7bc70ddf1e7b3`. It is not a
 > production deployment, an authority switch from classic NQ, or a claim of
