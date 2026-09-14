@@ -21,6 +21,15 @@ contents merely because the descriptor is sealed. Filesystem locators inside
 the document must remain explicit, valid and accessible in the child environment.
 This is a local Linux integration surface; no network or provider is involved.
 
-Native qualification of this additive interface is pending. Existing source
-releases without this interface correctly refuse such final-symlink references;
-do not advertise them as compatible with a caller requiring sealed configuration.
+Qualification covers sealed-byte loading, independent reader offsets, ordinary
+pathname behavior and refusal of unsealed, nonregular, oversized or malformed
+inputs. The actual Nightshift saved-check caller also exercised this interface
+with Monitor acquisition, NQ evaluation, maintenance annotation and durable
+slot replay. Nightshift source `3f6d0a434232c0f5d4c24c54049bc0c6a19c8f57`
+contains the caller; this does not establish compatibility with older callers
+or a family-wide integration release. See the published composition manifest
+for a tested public combination when available.
+
+Existing source releases without this interface correctly refuse such
+final-symlink references; do not advertise them as compatible with a caller
+requiring sealed configuration.
