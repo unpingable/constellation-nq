@@ -130,16 +130,21 @@ pub struct VerifyReport {
     /// Whether every retained saved-check definition and event reopened through
     /// its typed local contract. `None` when history is un-openable.
     pub historical_saved_check_semantics_verified: Option<bool>,
+    /// Number of definitions visited across all cursor pages.
     pub historical_saved_check_definitions_verified: Option<usize>,
+    /// Number of installation, claim and terminal events reopened.
     pub historical_saved_check_events_verified: Option<usize>,
     /// Whether every retained maintenance declaration reopened through its
     /// typed local contract. `None` when history is un-openable.
     pub historical_maintenance_semantics_verified: Option<bool>,
+    /// Number of retained declarations checked, including expired declarations.
     pub historical_maintenance_declarations_verified: Option<usize>,
     /// Whether every retained notification intent and delivery-event sequence
     /// reopened without delivering or replaying it. `None` when history is un-openable.
     pub historical_notification_delivery_semantics_verified: Option<bool>,
+    /// Number of delivery intents bound to their retained outbox content.
     pub historical_notification_delivery_intents_verified: Option<usize>,
+    /// Number of delivery events checked; unfinished claims remain unknown.
     pub historical_notification_delivery_events_verified: Option<usize>,
     /// Always false: verification confirms history, it grants nothing.
     pub grants_authority: bool,
@@ -239,6 +244,10 @@ fn parse_history_time(value: &str, label: &str) -> Result<()> {
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "Keep the cursor, installation and claim-terminal checks in one auditable streaming pass"
+)]
 fn validate_saved_check_history(store: &Store) -> Result<(usize, usize)> {
     let mut definitions = 0usize;
     let mut events = 0usize;
@@ -287,7 +296,7 @@ fn validate_saved_check_history(store: &Store) -> Result<(usize, usize)> {
                 if rows.is_empty() {
                     break;
                 }
-                for row in rows.iter() {
+                for row in &rows {
                     if row.event_number != expected_number {
                         bail!(
                             "saved-check definition {} event sequence is incomplete",
@@ -439,6 +448,10 @@ fn validate_maintenance_history(store: &Store) -> Result<usize> {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "Keep intent, content and ordered delivery-state checks in one streaming pass"
+)]
 fn validate_notification_delivery_history(store: &Store) -> Result<(usize, usize)> {
     let mut intents = 0usize;
     let mut events = 0usize;
@@ -493,7 +506,7 @@ fn validate_notification_delivery_history(store: &Store) -> Result<(usize, usize
                 if rows.is_empty() {
                     break;
                 }
-                for row in rows.iter() {
+                for row in &rows {
                     if row.event_number != expected_number {
                         bail!(
                             "notification {} event sequence is incomplete",
@@ -512,7 +525,7 @@ fn validate_notification_delivery_history(store: &Store) -> Result<(usize, usize
                         (1, "claimed", None) => {}
                         (1, "refused", None) => terminal = Some("refused".to_owned()),
                         (2, "failed" | "unknown" | "accepted", None) => {
-                            terminal = Some(row.outcome.clone())
+                            terminal = Some(row.outcome.clone());
                         }
                         _ => bail!(
                             "notification {} has unsupported delivery event sequence",
@@ -1973,6 +1986,10 @@ mod tests {
             .collect()
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "The shared fixture visibly constructs each of the three retained history planes"
+    )]
     fn append_local_history(database: &Path) {
         let mut store = Store::open(database).expect("open local-history fixture");
         let definition = canonical(&serde_json::json!({
