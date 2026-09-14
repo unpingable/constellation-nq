@@ -2844,8 +2844,7 @@ mod tests {
                 .is_err()
         );
         assert!(
-            validate_archive_event_fixture(Some("passed"), false, Some("not-rfc3339"))
-                .is_err()
+            validate_archive_event_fixture(Some("passed"), false, Some("not-rfc3339")).is_err()
         );
     }
 
