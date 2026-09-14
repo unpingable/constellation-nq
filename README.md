@@ -18,8 +18,15 @@ duplicate handling and retained-state inspection. Public-only reproduction is
 verified; human acknowledgment, live webhooks and unattended installation are
 not implied. Use the pinned composition rather than arbitrary repository heads.
 
-> **Public developer preview (2026-09-12):** this public source is
-> `constellation-nq` at `ce0a04a175b6d87ac17395f08fd7bc70ddf1e7b3`. It is not a
+To keep a past result inspectable, see
+[read saved checks from a sealed archive](docs/HISTORICAL_READS.md). This verified
+historical read path does not supply automated retention or migration.
+
+> **Public developer preview:** use the tested source pins for your selected
+> [integration profile](https://unpingable.com/constellation/integration.html).
+> The retained cache-result profile pins `ce0a04a175b6d87ac17395f08fd7bc70ddf1e7b3`;
+> saved-check attention and objective-read profiles pin
+> `e259852ed58b8c0bf65a629b3c494afba28d9ce9`. Neither is a
 > production deployment, an authority switch from classic NQ, or a claim of
 > complete host coverage. Start with [the public preview guide](docs/PUBLIC_RELEASE.md),
 > the [retained synthetic-cache-result profile HOWTO](docs/SYNTHETIC_CACHE_RESULT.md),

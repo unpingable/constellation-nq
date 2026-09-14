@@ -1,5 +1,13 @@
 # Constellation NQ public-preview release guide
 
+Use the published [integration profiles](https://unpingable.com/constellation/integration.html)
+for reproducible combinations: saved-check attention (alpha.2) and objective
+saved-check read (alpha.3) both pin NQ
+`e259852ed58b8c0bf65a629b3c494afba28d9ce9`. Their manifests record companion
+components, toolchains and qualification. The cache pin below belongs to a
+different, narrower retained-result profile; it is not the current source for
+every capability. Component versions remain independent.
+
 The saved-check/maintenance and notification additions are documented in
 [Saved checks](SAVED_CHECKS.md) and [Notifications](NOTIFICATIONS.md). Build
 those capabilities from the public commit containing these guides; the older
@@ -11,13 +19,14 @@ monitoring migration. Local-file notification delivery has a qualified disposabl
 four-component example; live Slack/Discord delivery remains unverified.
 The additive [sealed configuration interface](SEALED-CONFIGURATION.md) supports
 the Nightshift saved-check caller on Linux. It does not change ordinary named
-configuration handling or imply a released multi-component profile.
+configuration handling. Qualification of the multi-component profiles above is
+separate from that interface's component tests.
 
 ## Release pin
 
 The frozen public source tag `constellation-public-source-20260912` resolves to
-`f6b734db2e97ed4ca0c568ec9fccf5223fdecb40` and remains unchanged. The current
-public developer-preview runtime pin is
+`f6b734db2e97ed4ca0c568ec9fccf5223fdecb40` and remains unchanged. The retained
+cache-result developer-preview runtime pin is
 `ce0a04a175b6d87ac17395f08fd7bc70ddf1e7b3`. Its retained synthetic-cache-result
 profile is documented in [SYNTHETIC_CACHE_RESULT.md](SYNTHETIC_CACHE_RESULT.md).
 That profile retains one already settled Docket result; it is not a completed

@@ -633,14 +633,20 @@ and restore the quarantined database and matching sidecars as one set.
 
 ## Cold archive and historical reopen
 
+For the saved-check/maintenance/notification read path, see
+[Inspect saved checks in a sealed archive](HISTORICAL_READS.md). Use a separate
+external inspection configuration: the sealed configuration retains its original
+database path. The exercised archive reads do not establish retention rollover.
+The archive verifier's exhaustive historical validators listed below do not yet
+include typed traversal of saved-check, maintenance or notification histories.
+
 Create a cold archive at a new destination, then verify it with the exact
 preserved verifier:
 
 ```sh
 sudo -u nq nq --config /etc/nq/nq.toml admin archive \
   --destination /SAFE/ARCHIVES/nq-ARCHIVE-ID
-/SAFE/ARCHIVES/nq-ARCHIVE-ID/bin/nq --config /etc/nq/nq.toml \
-  admin archive-verify /SAFE/ARCHIVES/nq-ARCHIVE-ID
+/SAFE/ARCHIVES/nq-ARCHIVE-ID/bin/nq admin archive-verify /SAFE/ARCHIVES/nq-ARCHIVE-ID
 ```
 
 Creation uses a verified online backup, checkpoints the standalone copy out of
