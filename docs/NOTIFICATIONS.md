@@ -14,6 +14,12 @@ This does not qualify a recurring deployment or human acknowledgment.
 Do not describe the webhook adapters or retained outbox as a completed notification
 migration.
 
+For retained saved checks, the separate [saved-check attention adapter](SAVED_CHECK_ATTENTION.md)
+replays Nightshift's task-specific decision before delivery. An actual local
+Monitor/NQ/Nightshift example exercised that path, maintenance annotations,
+exact duplicate custody and changed-receipt refusal. It does not substitute a
+Pulse project-predicate receipt or require Pulse for this particular use case.
+
 Detection, attention and delivery are separate. A diagnostic supplies evidence;
 Nightshift/operator policy decides what warrants attention; this adapter attempts
 delivery and retains factual state. Human acknowledgment is not implemented.

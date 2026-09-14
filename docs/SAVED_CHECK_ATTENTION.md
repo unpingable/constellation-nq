@@ -41,6 +41,10 @@ silently truncated or transmitted through another route.
 Focused qualification covers the closed replay union, malformed/expired time
 refusals, fractional window bounds, delivery-surface refusal, exact duplicates
 when the producer or inbox is unavailable, and changed-material refusal.
-Those deterministic checks do not establish real Nightshift receipt replay or
-a supported released saved-check-to-notification profile; actual composition
-qualification is a separate required check.
+An actual disposable composition also acquired SQLite observations through
+Monitor, evaluated a saved check in NQ, retained Nightshift attention and replay,
+and delivered one local inbox message through NQ. Duplicate delivery reopened
+custody and an altered receipt refused. This establishes the exercised local
+path, not live Slack/Discord, human acknowledgment, recurring installation or
+a family-wide release. Use the exact public combination in the matching
+Nightshift example; older saved-check or notification pins do not imply this seam.
