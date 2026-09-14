@@ -637,7 +637,10 @@ and restore the quarantined database and matching sidecars as one set.
 For the saved-check/maintenance/notification read path, see
 [Inspect saved checks in a sealed archive](HISTORICAL_READS.md). Use a separate
 external inspection configuration: the sealed configuration retains its original
-database path. The exercised archive reads do not establish retention rollover.
+database path. For the separately qualified procedure that prepares an inactive
+successor while retaining explicit archive reads, see
+[Operator-controlled archive rollover](ROLLOVER.md). It provides no transparent
+cross-store lookup and leaves activation as a separate decision.
 The separate archiver pin in that guide adds bounded whole-history validation of
 saved checks, maintenance declarations and notification delivery records. Older
 archives keep their original verifier and validation scope; no release pin or

@@ -143,8 +143,11 @@ they do not turn a pending delivery into a sent message or renew an expired
 maintenance declaration. Notification event details retain their existing
 canonical-JSON contract, not a newly inferred transport guarantee.
 
-Archive-based rollover, cross-store lookup,
-automatic disposal, restoration and rollback are not established by this check.
+The separate [operator-controlled rollover procedure](ROLLOVER.md) has a
+qualified disposable schema-12-to-13 archive and inactive-successor path.
+Historical reads still name their archive explicitly: transparent cross-store
+lookup, automatic disposal, activation, restoration and rollback are not
+provided.
 
 Keep the archive and matching inspection configuration while they are needed for
 recovery or investigation. Removing disposable inspection outputs does not remove

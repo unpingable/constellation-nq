@@ -27,9 +27,12 @@ separate from that interface's component tests.
 
 The [historical-read guide](HISTORICAL_READS.md) separately pins an archiver with
 typed saved-check, maintenance and notification history validation. It was
-exercised against a copy of the saved-check profile's populated store. This is
-not a new suite release, writer upgrade, classic-store migration or retention
-rollover qualification.
+exercised against a copy of the saved-check profile's populated store. The
+related [operator-controlled rollover](ROLLOVER.md) was separately exercised for
+an explicit schema-12 backup upgrade to 13, verified archive, eligibility scan,
+and inactive successor preparation. Neither procedure creates a new suite
+release, upgrades an active profile in place, activates the successor, provides
+transparent cross-store lookup, or transfers classic-NQ authority.
 
 ## Release pin
 
