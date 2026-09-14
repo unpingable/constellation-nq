@@ -102,6 +102,13 @@ where a whole-command deadline is necessary.
 
 ## Project a retained result into a caller condition
 
+This command and the extended local example are qualified at source
+`a0d6bb8af44bed66183036e227fa2d2c5e1c87cb`. The focused gate passed 102
+application unit tests, including absent/malformed read evidence and historical
+maintenance controls, plus the actual CLI example. The earlier public-only
+reproduction above covers the baseline saved-check interface, not this additive
+projection; its matching source and example must be used together.
+
 An attention or scheduling integration can read a retained result without
 rereading its SQLite source:
 
