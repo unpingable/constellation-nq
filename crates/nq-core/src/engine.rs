@@ -12051,6 +12051,7 @@ sys.stdout.write("\n")
             admissions_dir: root.join("admissions"),
             helper_runtime_dir: root.join("helpers"),
             watchers: vec![watcher.clone()],
+            notification_routes: Vec::new(),
         };
 
         let mut store = Store::initialize(&config.database_path).expect("initialize store");
