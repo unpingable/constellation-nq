@@ -9,6 +9,9 @@ explicitly to12; other development schema lines are not silently imported.
 These additions do not move a release tag or establish a complete consumer
 monitoring migration. Local-file notification delivery has a qualified disposable
 four-component example; live Slack/Discord delivery remains unverified.
+The additive [sealed configuration interface](SEALED-CONFIGURATION.md) supports
+the Nightshift saved-check caller on Linux. It does not change ordinary named
+configuration handling or imply a released multi-component profile.
 
 ## Release pin
 
@@ -93,9 +96,9 @@ The successor candidate has five compiled descriptors:
 `nq.http_endpoint/v1` (one bounded controller-vantage HTTP response), and
 `nq.systemd_unit/v1` (one target-local systemd snapshot), and
 `nq.synthetic_cache_executor_result/v1` (one exact past Docket-bound cache
-attempt). The fifth profile remains a candidate until its helper, diagnostic
-history, consumer pins, and release gate are verified; its presence in source
-does not claim that workflow is already qualified. Each profile has its own exact
+attempt). The fifth profile's retained-result behavior has been qualified
+separately; it does not establish a connected current-state or successor
+workflow. Each profile has its own exact
 scope, vantage, size and freshness limits. This does not establish an aggregate
 host or service-health claim. Classic NQ remains authoritative pending a separate switch;
 the current host-portrait subjects are not complete; persistent helper resource
