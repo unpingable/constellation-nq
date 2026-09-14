@@ -2619,7 +2619,7 @@ impl CollectionEngine {
     /// Returns only local engine/storage failures. Expected helper, protocol,
     /// and admission outcomes are retained and returned as `CollectionOutcome`.
     pub fn collect(&mut self, watcher: &WatcherConfig) -> Result<CollectionOutcome, EngineError> {
-        self.collect_internal(watcher, false)
+        self.collect_internal(watcher, false, None)
             .map(|execution| execution.outcome)
     }
 
@@ -2645,7 +2645,7 @@ impl CollectionEngine {
         &mut self,
         watcher: &WatcherConfig,
     ) -> Result<SupportedDiagnosticExecution, EngineError> {
-        let execution = self.collect_internal(watcher, true)?;
+        let execution = self.collect_internal(watcher, true, None)?;
         execution.diagnostic.ok_or_else(|| {
             EngineError::DiagnosticUnsupported(format!(
                 "collection for {} produced no admitted determinate diagnostic execution; inspect the retained collection outcome",
@@ -2654,11 +2654,94 @@ impl CollectionEngine {
         })
     }
 
+    /// Acquire a caller-named ordinary-local successor through the existing
+    /// admitted watcher/provider path. A retained start without completion is
+    /// deliberately outcome-unknown, never a reason to dispatch again.
+    pub fn diagnostic_acquire_successor_local(
+        &mut self,
+        watcher: &WatcherConfig,
+        acquisition_id: &str,
+    ) -> Result<SupportedDiagnosticExecution, EngineError> {
+        let watcher_digest = canonical(watcher)?.digest().to_owned();
+        if let Some(existing) = self.store.local_successor_acquisition(acquisition_id)? {
+            if existing.watcher_instance_id != watcher.instance_id
+                || existing.watcher_semantic_digest != watcher_digest
+                || existing.selection_digest != local_successor_selection_digest(watcher)?
+            {
+                return Err(EngineError::Invariant(
+                    "local successor acquisition differs from exact watcher binding".into(),
+                ));
+            }
+            validate_local_successor_terminal_phases(
+                &self
+                    .store
+                    .local_successor_acquisition_phases(acquisition_id)?,
+            )?;
+            let artifact = self
+                .store
+                .diagnostic_artifact_id_for_run(&existing.run_id)?
+                .ok_or_else(|| {
+                    EngineError::Invariant(
+                        "completed local successor lacks diagnostic artifact".into(),
+                    )
+                })?;
+            return reopen_diagnostic_artifact(&self.store, &artifact);
+        }
+        let execution = self.collect_internal(watcher, true, Some(acquisition_id))?;
+        let artifact = execution.diagnostic_artifact_id.ok_or_else(|| {
+            EngineError::Invariant(
+                "local successor completed without a qualified diagnostic artifact".into(),
+            )
+        })?;
+        self.store
+            .complete_local_successor_acquisition(acquisition_id, &artifact)?;
+        execution
+            .diagnostic
+            .ok_or_else(|| EngineError::Invariant("local successor artifact did not reopen".into()))
+    }
+
+    /// Read only an already terminal local successor occurrence.
+    pub fn diagnostic_replay_local_successor(
+        &self,
+        watcher: &WatcherConfig,
+        acquisition_id: &str,
+    ) -> Result<SupportedDiagnosticExecution, EngineError> {
+        let existing = self
+            .store
+            .local_successor_acquisition(acquisition_id)?
+            .ok_or_else(|| {
+                EngineError::DiagnosticUnsupported(format!(
+                    "no local successor acquisition {acquisition_id}"
+                ))
+            })?;
+        if existing.watcher_instance_id != watcher.instance_id
+            || existing.watcher_semantic_digest != canonical(watcher)?.digest()
+            || existing.selection_digest != local_successor_selection_digest(watcher)?
+        {
+            return Err(EngineError::Invariant(
+                "local successor replay differs from exact watcher binding".into(),
+            ));
+        }
+        validate_local_successor_terminal_phases(
+            &self
+                .store
+                .local_successor_acquisition_phases(acquisition_id)?,
+        )?;
+        let artifact = self
+            .store
+            .diagnostic_artifact_id_for_run(&existing.run_id)?
+            .ok_or_else(|| {
+                EngineError::Invariant("completed local successor lacks diagnostic artifact".into())
+            })?;
+        reopen_diagnostic_artifact(&self.store, &artifact)
+    }
+
     #[allow(clippy::too_many_lines)]
     fn collect_internal(
         &mut self,
         watcher: &WatcherConfig,
         emit_diagnostic: bool,
+        local_successor_acquisition_id: Option<&str>,
     ) -> Result<CollectionExecution, EngineError> {
         validate_compiled_watcher(watcher)?;
         let _guard =
@@ -2683,7 +2766,11 @@ impl CollectionEngine {
             let snapshot = self
                 .store
                 .evidence_snapshot(std::slice::from_ref(&watcher.instance_id))?;
-            require_empty_diagnostic_history(&snapshot, watcher, descriptor_digest.as_str())?;
+            if local_successor_acquisition_id.is_some() {
+                require_prior_diagnostic_history(&snapshot, watcher, descriptor_digest.as_str())?;
+            } else {
+                require_empty_diagnostic_history(&snapshot, watcher, descriptor_digest.as_str())?;
+            }
         }
         let authoritative = match self.authoritative_active_lock(watcher) {
             Ok(Some(lock)) => lock,
@@ -2768,7 +2855,7 @@ impl CollectionEngine {
         let attempt_id = Uuid::new_v4().to_string();
         let run_id = Uuid::new_v4().to_string();
         let attempt = ProviderAttempt::new(
-            intake_id,
+            intake_id.clone(),
             attempt_id,
             run_id.clone(),
             request.clone(),
@@ -2777,6 +2864,29 @@ impl CollectionEngine {
             watcher.schedule.deadline_ms,
             &checkpoint_contract_digest,
         )?;
+        if let Some(acquisition_id) = local_successor_acquisition_id {
+            let selection_digest = local_successor_selection_digest(watcher)?;
+            let intent = canonical(&serde_json::json!({
+                "schema":"nq.local_successor_acquisition_intent.v1",
+                "acquisition_id":acquisition_id,
+                "watcher_instance_id":watcher.instance_id,
+                "watcher_semantic_digest":canonical(watcher)?.digest(),
+                "selection_digest":selection_digest,
+                "run_id":run_id,
+                "intake_id":intake_id,
+            }))?;
+            self.store.commit_local_successor_dispatch(
+                &nq_store::LocalSuccessorAcquisitionIntentInput {
+                    acquisition_id: acquisition_id.to_owned(),
+                    watcher_instance_id: watcher.instance_id.clone(),
+                    watcher_semantic_digest: canonical(watcher)?.digest().to_owned(),
+                    selection_digest,
+                    run_id: run_id.clone(),
+                    intake_id: intake_id.clone(),
+                    intent,
+                },
+            )?;
+        }
         let capture = self.run_capture(
             watcher,
             &request_json,
@@ -2858,6 +2968,7 @@ impl CollectionEngine {
                         &capture,
                         self.require_evaluator_identity()?,
                         &outcome,
+                        local_successor_acquisition_id.is_some(),
                     )
                 })
                 .transpose()?;
@@ -2910,6 +3021,7 @@ impl CollectionEngine {
                             &capture,
                             self.require_evaluator_identity()?,
                             &outcome,
+                            local_successor_acquisition_id.is_some(),
                         )
                     })
                     .transpose()?;
@@ -2958,6 +3070,7 @@ impl CollectionEngine {
                             &capture,
                             self.require_evaluator_identity()?,
                             &outcome,
+                            local_successor_acquisition_id.is_some(),
                         )
                     })
                     .transpose()?;
@@ -3012,6 +3125,7 @@ impl CollectionEngine {
                                     &capture,
                                     self.require_evaluator_identity()?,
                                     &outcome,
+                                    local_successor_acquisition_id.is_some(),
                                 )
                             })
                             .transpose()?;
@@ -3070,6 +3184,7 @@ impl CollectionEngine {
                                     &capture,
                                     self.require_evaluator_identity()?,
                                     &outcome,
+                                    local_successor_acquisition_id.is_some(),
                                 )
                             })
                             .transpose()?;
@@ -3111,6 +3226,7 @@ impl CollectionEngine {
                                     &validated,
                                     &capture,
                                     self.require_evaluator_identity()?,
+                                    local_successor_acquisition_id.is_some(),
                                 )
                             })
                             .transpose()?;
@@ -3139,12 +3255,11 @@ impl CollectionEngine {
                                     &watcher.instance_id,
                                 ))?;
                                 if emit_diagnostic {
-                                    require_fresh_diagnostic_snapshot(
-                                        &snapshot,
-                                        watcher,
-                                        descriptor_digest.as_str(),
-                                        &report_id,
-                                    )?;
+                                    if local_successor_acquisition_id.is_some() {
+                                        require_successor_diagnostic_snapshot(&snapshot, watcher, descriptor_digest.as_str(), &report_id)?;
+                                    } else {
+                                        require_fresh_diagnostic_snapshot(&snapshot, watcher, descriptor_digest.as_str(), &report_id)?;
+                                    }
                                 }
                                 let current_findings = view.finding_snapshots()?;
                                 let prepared = prepare_instance_evaluations(
@@ -5780,6 +5895,47 @@ fn require_empty_diagnostic_history(
     )))
 }
 
+fn require_prior_diagnostic_history(
+    snapshot: &EvidenceSnapshot,
+    watcher: &WatcherConfig,
+    profile_digest: &str,
+) -> Result<(), EngineError> {
+    let matching = evaluation_context_rows(&snapshot.reports, watcher, profile_digest)?;
+    if matching.is_empty() {
+        return Err(EngineError::DiagnosticUnsupported(format!(
+            "deliberate local successor requires prior matching history for {}",
+            watcher.instance_id
+        )));
+    }
+    Ok(())
+}
+
+fn local_successor_selection_digest(watcher: &WatcherConfig) -> Result<String, EngineError> {
+    Ok(canonical(&serde_json::json!({
+        "schema":"nq.diagnostic_selection_rule.v1",
+        "id":"nq.deliberate_successor_single_admitted_report",
+        "version":"1",
+        "watcher":watcher,
+        "cardinality":"exactly_one_newly_admitted_report_for_exact_successor_acquisition",
+        "prior_matching_history":"required_present_retained_excluded",
+    }))?
+    .digest()
+    .to_owned())
+}
+
+/// Shared read-only classification for archive and rollover consumers. Unknown
+/// phase shapes are not historical success and must remain a refusal boundary.
+#[doc(hidden)]
+pub fn validate_local_successor_terminal_phases(phases: &[String]) -> Result<(), EngineError> {
+    if phases == ["provider_invocation_started", "provider_intake_completed"] {
+        Ok(())
+    } else {
+        Err(EngineError::Invariant(
+            "local successor acquisition is incomplete or outcome-unknown".into(),
+        ))
+    }
+}
+
 fn require_fresh_diagnostic_snapshot(
     snapshot: &EvidenceSnapshot,
     watcher: &WatcherConfig,
@@ -5799,6 +5955,26 @@ fn require_fresh_diagnostic_snapshot(
             "diagnostic execution fresh-history snapshot does not identify the current admitted report"
                 .into(),
         ));
+    }
+    Ok(())
+}
+
+fn require_successor_diagnostic_snapshot(
+    snapshot: &EvidenceSnapshot,
+    watcher: &WatcherConfig,
+    profile_digest: &str,
+    current_report_id: &str,
+) -> Result<(), EngineError> {
+    let matching = evaluation_context_rows(&snapshot.reports, watcher, profile_digest)?;
+    if matching.len() < 2
+        || !matching
+            .iter()
+            .any(|report| report.report_id == current_report_id)
+    {
+        return Err(EngineError::Invariant(format!(
+            "deliberate successor requires its newly admitted report and retained prior matching history for {}",
+            watcher.instance_id
+        )));
     }
     Ok(())
 }
@@ -6343,6 +6519,7 @@ fn prepare_diagnostic_emission_base(
     run_id: &str,
     capture: &RunCapture,
     evaluator: &EvaluatorRuntimeIdentity,
+    deliberate_successor: bool,
 ) -> Result<DiagnosticEmissionBase, EngineError> {
     let detector = profile.detectors().first().ok_or_else(|| {
         EngineError::Invariant("diagnostic execution profile has no detector".into())
@@ -6484,15 +6661,19 @@ fn prepare_diagnostic_emission_base(
             "profile_semantic_id": provider.profile_semantic_id,
         }),
     )?;
-    let selection_rule = semantic_identity(
-        "nq.fresh_single_admitted_report",
-        "1",
-        &json!({
-            "schema": "nq.diagnostic_selection_rule.v1",
-            "question": question,
-            "cardinality": "exactly_one_newly_admitted_report_with_no_prior_matching_history",
-        }),
-    )?;
+    let selection_rule = if deliberate_successor {
+        semantic_identity(
+            "nq.deliberate_successor_single_admitted_report",
+            "1",
+            &json!({"schema":"nq.diagnostic_selection_rule.v1","question":question,"cardinality":"exactly_one_newly_admitted_report_for_exact_successor_acquisition","prior_matching_history":"required_present_retained_excluded"}),
+        )?
+    } else {
+        semantic_identity(
+            "nq.fresh_single_admitted_report",
+            "1",
+            &json!({"schema":"nq.diagnostic_selection_rule.v1","question":question,"cardinality":"exactly_one_newly_admitted_report_with_no_prior_matching_history"}),
+        )?
+    };
     Ok(DiagnosticEmissionBase {
         producer: DiagnosticProducerV1 {
             node_id: node_id.to_owned(),
@@ -6552,6 +6733,7 @@ fn prepare_non_success_diagnostic(
     capture: &RunCapture,
     evaluator: &EvaluatorRuntimeIdentity,
     outcome: &CollectionOutcome,
+    deliberate_successor: bool,
 ) -> Result<DiagnosticExecutionV2, EngineError> {
     if outcome.run_id.as_deref() != Some(run_id) || outcome.instance_id != watcher.instance_id {
         return Err(EngineError::Invariant(
@@ -6559,7 +6741,15 @@ fn prepare_non_success_diagnostic(
         ));
     }
     let base = prepare_diagnostic_emission_base(
-        node_id, watcher, profile, provider, request, run_id, capture, evaluator,
+        node_id,
+        watcher,
+        profile,
+        provider,
+        request,
+        run_id,
+        capture,
+        evaluator,
+        deliberate_successor,
     )?;
     let expected = vec![ExpectedInputV1 {
         expectation_id: "expected:current_provider_report".to_owned(),
@@ -6727,9 +6917,18 @@ fn prepare_diagnostic_emission(
     validated: &ValidatedReport,
     capture: &RunCapture,
     evaluator: &EvaluatorRuntimeIdentity,
+    deliberate_successor: bool,
 ) -> Result<DiagnosticEmissionContext, EngineError> {
     let base = prepare_diagnostic_emission_base(
-        node_id, watcher, profile, provider, request, run_id, capture, evaluator,
+        node_id,
+        watcher,
+        profile,
+        provider,
+        request,
+        run_id,
+        capture,
+        evaluator,
+        deliberate_successor,
     )?;
     let normalized_document = canonical(normalized)?;
     let projected_artifact_placeholder = ProjectedArtifactId(nq_protocol::sha256_bytes(
@@ -16456,6 +16655,106 @@ sys.stdout.write("\n")
         assert!(
             decode_collection_outcome(&omitted_details).is_err(),
             "profile refusal details must not default during historical reopen"
+        );
+    }
+
+    #[test]
+    fn local_successor_terminal_classifier_refuses_pending_and_unknown() {
+        assert!(
+            validate_local_successor_terminal_phases(&[
+                "provider_invocation_started".into(),
+                "provider_intake_completed".into(),
+            ])
+            .is_ok()
+        );
+        assert!(
+            validate_local_successor_terminal_phases(&["provider_invocation_started".into()])
+                .is_err()
+        );
+        assert!(
+            validate_local_successor_terminal_phases(&[
+                "provider_invocation_started".into(),
+                "unknown".into(),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn local_successor_replays_exactly_and_refuses_pending_or_changed_watcher() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let Some((mut engine, watcher, mode)) = admitted_host_diagnostic_fixture(
+            directory.path(),
+            "local-successor-genesis",
+            b"local-successor-evaluator",
+        ) else {
+            return;
+        };
+        let initial = engine
+            .diagnostic_execute(&watcher)
+            .expect("initial diagnostic");
+        let successor = engine
+            .diagnostic_acquire_successor_local(&watcher, "local-successor-a")
+            .expect("one named successor");
+        assert_ne!(initial.artifact_id(), successor.artifact_id());
+        let SupportedDiagnosticExecution::V2(successor_v2) = &successor else {
+            panic!("v2 successor");
+        };
+        assert_eq!(
+            successor_v2.inputs.selection_rule.id,
+            "nq.deliberate_successor_single_admitted_report"
+        );
+        let intakes_before_replay = engine
+            .store
+            .provider_intakes_bounded(100, None)
+            .expect("intakes")
+            .len();
+        let replay = engine
+            .diagnostic_acquire_successor_local(&watcher, "local-successor-a")
+            .expect("same id replay");
+        assert_eq!(
+            successor.canonical_bytes().expect("successor bytes"),
+            replay.canonical_bytes().expect("replay bytes")
+        );
+        assert_eq!(
+            engine
+                .store
+                .provider_intakes_bounded(100, None)
+                .expect("intakes")
+                .len(),
+            intakes_before_replay,
+            "same acquisition id never dispatches a second provider attempt"
+        );
+        fs::write(&mode, "no_response\n").expect("select non-success provider fixture");
+        let non_success = engine
+            .diagnostic_acquire_successor_local(&watcher, "local-successor-non-success")
+            .expect("non-success diagnostic is still exact retained history");
+        let SupportedDiagnosticExecution::V2(non_success_v2) = &non_success else {
+            panic!("v2 non-success successor");
+        };
+        assert_eq!(
+            non_success_v2.inputs.selection_rule.id,
+            "nq.deliberate_successor_single_admitted_report"
+        );
+        let mut changed = watcher.clone();
+        changed.subject = "host:changed".into();
+        assert!(
+            engine
+                .diagnostic_replay_local_successor(&changed, "local-successor-a")
+                .is_err()
+        );
+        let pending_id = "local-successor-pending";
+        let semantic = canonical(&watcher).expect("watcher").digest().to_owned();
+        engine.store.commit_local_successor_dispatch(&nq_store::LocalSuccessorAcquisitionIntentInput {
+            acquisition_id: pending_id.into(), watcher_instance_id: watcher.instance_id.clone(),
+            watcher_semantic_digest: semantic, selection_digest: nq_protocol::sha256_bytes(b"selection").into_string(),
+            run_id: "pending-run".into(), intake_id: "pending-intake".into(),
+            intent: canonical(&json!({"schema":"nq.local_successor_acquisition_intent.v1","acquisition_id":pending_id})).expect("intent"),
+        }).expect("pending fence");
+        assert!(
+            engine
+                .diagnostic_acquire_successor_local(&watcher, pending_id)
+                .is_err()
         );
     }
 }

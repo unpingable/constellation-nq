@@ -32,6 +32,8 @@ const SCHEMA_V4_TO_V5_DIAGNOSTIC_ARTIFACTS: &str =
     include_str!("schema_v4_to_v5_diagnostic_artifacts.sql");
 const SCHEMA_V5_TO_V12_LOCAL_CHECKS_NOTIFICATIONS: &str =
     include_str!("schema_v5_to_v12_local_checks_notifications.sql");
+const SCHEMA_V12_TO_V13_LOCAL_SUCCESSOR: &str =
+    include_str!("schema_v12_to_v13_local_successor.sql");
 const APPLICATION_ID: i64 = 1_313_951_303;
 
 const SCHEMA_METADATA_V4: &str = r"CREATE TABLE schema_metadata (
@@ -94,6 +96,11 @@ pub const SCHEMA_V4_ARTIFACT_DIGEST: &str =
 pub const SCHEMA_V5_ARTIFACT_DIGEST: &str =
     "sha256:91455172d1bed3b5e67ae25b7122015fc3d1197ab9b676511a938d4eb658e94b";
 
+/// Exact public schema-v12 artifact accepted only as the direct predecessor of
+/// the additive local-successor fence migration.
+pub const SCHEMA_V12_ARTIFACT_DIGEST: &str =
+    "sha256:3a24b66098fb645a0facdb9bb8cae56ba52c5e2930b7c3e33d8dcfa253736064";
+
 /// Schema tag bound into every admission-context digest preimage. Bump only when
 /// the constituent set or its canonicalization changes.
 pub const ADMISSION_CONTEXT_SCHEMA: &str = "nq-ng.admission_context.v1";
@@ -144,10 +151,20 @@ static EXPECTED_SCHEMA_V5_FINGERPRINT: LazyLock<Result<String, String>> = LazyLo
 });
 
 /// The only schema version understood by this crate.
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 13;
 
 /// Hard ceiling for one page returned through the public read model helpers.
 pub const MAX_PUBLIC_QUERY_ROWS: u32 = 1_000;
+
+fn validate_public_query_limit(limit: u32) -> Result<(), StoreError> {
+    if (1..=MAX_PUBLIC_QUERY_ROWS).contains(&limit) {
+        Ok(())
+    } else {
+        Err(StoreError::Invariant(format!(
+            "public query limit must be between 1 and {MAX_PUBLIC_QUERY_ROWS}"
+        )))
+    }
+}
 
 /// Storage-wide ceiling for any one canonical JSON document.
 pub const MAX_STORED_JSON_BYTES: usize = nq_protocol::MAX_RESPONSE_FRAME_BYTES;
@@ -1732,7 +1749,7 @@ impl Store {
         if !path.is_file() || std::fs::metadata(path)?.len() == 0 {
             return Err(StoreError::NotInitialized(path.to_path_buf()));
         }
-        let connection = Connection::open_with_flags(
+        let mut connection = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
@@ -1777,7 +1794,7 @@ impl Store {
         if !path.is_file() || std::fs::metadata(path)?.len() == 0 {
             return Err(StoreError::NotInitialized(path.to_path_buf()));
         }
-        let connection = Connection::open_with_flags(
+        let mut connection = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
@@ -2027,6 +2044,7 @@ impl Store {
         validate_all_admission_context_digests(&self.connection)?;
         validate_local_provider_admissions(&self.connection)?;
         validate_provider_intake_invariants(&self.connection)?;
+        validate_local_successor_acquisition_invariants(&self.connection)?;
         validate_refusal_invariants(&self.connection)?;
         validate_run_results(&self.connection)?;
         validate_evaluation_refusal_invariants(&self.connection)?;
@@ -2653,6 +2671,179 @@ impl Store {
         run_id: &str,
     ) -> Result<Option<Sha256Digest>, StoreError> {
         diagnostic_artifact_id_for_run_on_connection(&self.connection, run_id)
+    }
+
+    /// Reopen a caller-named local successor acquisition without treating an
+    /// incomplete fence as a retryable absence.
+    pub fn local_successor_acquisition(
+        &self,
+        acquisition_id: &str,
+    ) -> Result<Option<LocalSuccessorAcquisitionIntentRow>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT acquisition_id, watcher_instance_id, watcher_semantic_digest,
+                        selection_digest, run_id, intake_id, intent_json
+                 FROM local_successor_acquisition_intents WHERE acquisition_id = ?1",
+                [acquisition_id],
+                |row| {
+                    let bytes: Vec<u8> = row.get(6)?;
+                    let intent =
+                        CanonicalDocument::from_canonical_bytes(bytes).map_err(|error| {
+                            rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                        })?;
+                    Ok(LocalSuccessorAcquisitionIntentRow {
+                        acquisition_id: row.get(0)?,
+                        watcher_instance_id: row.get(1)?,
+                        watcher_semantic_digest: row.get(2)?,
+                        selection_digest: row.get(3)?,
+                        run_id: row.get(4)?,
+                        intake_id: row.get(5)?,
+                        intent,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    /// Return the append-only phases for a named local successor occurrence.
+    pub fn local_successor_acquisition_phases(
+        &self,
+        acquisition_id: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT phase FROM local_successor_acquisition_events
+             WHERE acquisition_id = ?1 ORDER BY event_number",
+        )?;
+        statement
+            .query_map([acquisition_id], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    /// Page local successor fences without materializing an unbounded history.
+    pub fn local_successor_acquisitions_bounded(
+        &self,
+        limit: u32,
+        after: Option<&str>,
+    ) -> Result<Vec<LocalSuccessorAcquisitionIntentRow>, StoreError> {
+        validate_public_query_limit(limit)?;
+        let mut statement = self.connection.prepare(
+            "SELECT acquisition_id, watcher_instance_id, watcher_semantic_digest, selection_digest, run_id, intake_id, intent_json
+             FROM local_successor_acquisition_intents WHERE acquisition_id > ?1 ORDER BY acquisition_id LIMIT ?2",
+        )?;
+        statement
+            .query_map(params![after.unwrap_or(""), limit], |row| {
+                let bytes: Vec<u8> = row.get(6)?;
+                let intent = CanonicalDocument::from_canonical_bytes(bytes)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+                Ok(LocalSuccessorAcquisitionIntentRow {
+                    acquisition_id: row.get(0)?,
+                    watcher_instance_id: row.get(1)?,
+                    watcher_semantic_digest: row.get(2)?,
+                    selection_digest: row.get(3)?,
+                    run_id: row.get(4)?,
+                    intake_id: row.get(5)?,
+                    intent,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    /// Atomically retain the exact invocation fence before dispatch. Exact
+    /// redelivery converges; changed bytes for the same acquisition refuse.
+    pub fn commit_local_successor_dispatch(
+        &mut self,
+        input: &LocalSuccessorAcquisitionIntentInput,
+    ) -> Result<(), StoreError> {
+        for (name, value) in [
+            ("local successor acquisition", &input.acquisition_id),
+            ("local successor watcher", &input.watcher_instance_id),
+            ("local successor run", &input.run_id),
+            ("local successor intake", &input.intake_id),
+        ] {
+            validate_bounded_identity(name, value)?;
+        }
+        validate_digest(
+            "local successor watcher semantic",
+            &input.watcher_semantic_digest,
+        )?;
+        validate_digest("local successor selection", &input.selection_digest)?;
+        let transaction = self.immediate_transaction()?;
+        let existing: Option<(String,String,String,String,String,Vec<u8>,String)> = transaction.query_row(
+            "SELECT watcher_instance_id, watcher_semantic_digest, selection_digest, run_id, intake_id, intent_json, intent_digest FROM local_successor_acquisition_intents WHERE acquisition_id = ?1",
+            [&input.acquisition_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?))
+        ).optional()?;
+        if let Some((watcher, semantic, selection, run, intake, bytes, digest)) = existing {
+            if watcher != input.watcher_instance_id
+                || semantic != input.watcher_semantic_digest
+                || selection != input.selection_digest
+                || run != input.run_id
+                || intake != input.intake_id
+                || bytes != input.intent.as_bytes()
+                || digest != input.intent.digest()
+            {
+                return Err(StoreError::ReplayConflict(
+                    "local successor acquisition identity was reused for different bytes".into(),
+                ));
+            }
+            return Ok(());
+        }
+        transaction.execute(
+            "INSERT INTO local_successor_acquisition_intents (acquisition_id, watcher_instance_id, watcher_semantic_digest, selection_digest, run_id, intake_id, intent_json, intent_digest, committed_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![input.acquisition_id, input.watcher_instance_id, input.watcher_semantic_digest, input.selection_digest, input.run_id, input.intake_id, input.intent.as_bytes(), input.intent.digest(), now_utc()])?;
+        let event = CanonicalDocument::from_serializable(
+            &serde_json::json!({"schema":"nq.local_successor_acquisition_event.v1","acquisition_id":input.acquisition_id,"phase":"provider_invocation_started","run_id":input.run_id,"intake_id":input.intake_id}),
+        )?;
+        transaction.execute("INSERT INTO local_successor_acquisition_events (acquisition_id,event_number,phase,event_json,event_digest,occurred_at) VALUES (?1,1,'provider_invocation_started',?2,?3,?4)", params![input.acquisition_id,event.as_bytes(),event.digest(),now_utc()])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Append the only terminal fence after the existing provider/intake and
+    /// artifact transaction has committed.
+    pub fn complete_local_successor_acquisition(
+        &mut self,
+        acquisition_id: &str,
+        artifact_id: &Sha256Digest,
+    ) -> Result<(), StoreError> {
+        let transaction = self.immediate_transaction()?;
+        let (run_id, intake_id): (String, String) = transaction.query_row(
+            "SELECT run_id, intake_id FROM local_successor_acquisition_intents WHERE acquisition_id = ?1",
+            [acquisition_id], |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if diagnostic_artifact_id_for_run_on_connection(&transaction, &run_id)?.as_ref()
+            != Some(artifact_id)
+        {
+            return Err(StoreError::Invariant(
+                "local successor completion artifact differs from its exact run".into(),
+            ));
+        }
+        let intake_matches: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM local_watcher_provider_intakes WHERE intake_id = ?1 AND run_id = ?2",
+            params![intake_id, run_id], |row| row.get(0),
+        )?;
+        if intake_matches != 1 {
+            return Err(StoreError::Invariant(
+                "local successor completion lacks its exact provider intake/run link".into(),
+            ));
+        }
+        let event = CanonicalDocument::from_serializable(
+            &serde_json::json!({"schema":"nq.local_successor_acquisition_event.v1","acquisition_id":acquisition_id,"phase":"provider_intake_completed","artifact_id":artifact_id}),
+        )?;
+        let existing: Option<(Vec<u8>,String)> = transaction.query_row("SELECT event_json,event_digest FROM local_successor_acquisition_events WHERE acquisition_id=?1 AND phase='provider_intake_completed'", [acquisition_id], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
+        if let Some((bytes, digest)) = existing {
+            if bytes == event.as_bytes() && digest == event.digest() {
+                return Ok(());
+            }
+            return Err(StoreError::ReplayConflict(
+                "local successor completion was reused for different bytes".into(),
+            ));
+        }
+        transaction.execute("INSERT INTO local_successor_acquisition_events (acquisition_id,event_number,phase,event_json,event_digest,occurred_at) VALUES (?1,2,'provider_intake_completed',?2,?3,?4)", params![acquisition_id,event.as_bytes(),event.digest(),now_utc()])?;
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Reopen the exact canonical collection result bound to one completed run.
@@ -4191,6 +4382,16 @@ pub struct NotificationDeliveryStatus {
     pub event_count: u32,
     pub delivery_state: String,
 }
+/// Bounded status projection for legacy/general outbox rows not represented by
+/// the newer delivery-intent contract. Callers must treat absent or nonterminal
+/// attempts as ineligible rather than infer delivery.
+#[derive(Clone, Debug, Serialize)]
+pub struct LegacyNotificationAttemptStatus {
+    pub notification_id: String,
+    pub max_attempts: u32,
+    pub attempt_count: u32,
+    pub last_outcome: Option<String>,
+}
 #[derive(Clone, Debug)]
 pub enum NotificationDeliveryRetention {
     Inserted,
@@ -4351,6 +4552,31 @@ pub struct UpgradeReceiptInput {
     pub result: String,
     pub operator_identity: CanonicalDocument,
     pub verification: CanonicalDocument,
+}
+
+/// Immutable fence for one caller-named ordinary-local successor acquisition.
+#[derive(Clone, Debug)]
+pub struct LocalSuccessorAcquisitionIntentInput {
+    pub acquisition_id: String,
+    pub watcher_instance_id: String,
+    pub watcher_semantic_digest: String,
+    pub selection_digest: String,
+    pub run_id: String,
+    pub intake_id: String,
+    pub intent: CanonicalDocument,
+}
+
+/// Reopened local-successor fence.  A missing completion event is deliberately
+/// indeterminate rather than permission to invoke the provider again.
+#[derive(Clone, Debug)]
+pub struct LocalSuccessorAcquisitionIntentRow {
+    pub acquisition_id: String,
+    pub watcher_instance_id: String,
+    pub watcher_semantic_digest: String,
+    pub selection_digest: String,
+    pub run_id: String,
+    pub intake_id: String,
+    pub intent: CanonicalDocument,
 }
 
 /// A verified SQLite backup artifact.
@@ -4563,6 +4789,50 @@ impl Store {
                     "verified v5 backup logical state differs from its source".into(),
                 ));
             }
+            Ok(BackupArtifact {
+                path: destination.to_path_buf(),
+                sha256: sha256_file(destination)?,
+                size_bytes: std::fs::metadata(destination)?.len(),
+            })
+        })();
+        if result.is_err() {
+            remove_database_artifact(destination);
+        }
+        result
+    }
+
+    /// Back up the exact public v12 predecessor before the additive v13 fence
+    /// migration. This source is never opened as current writable storage.
+    pub fn backup_v12_verified(
+        source: impl AsRef<Path>,
+        destination: impl AsRef<Path>,
+    ) -> Result<BackupArtifact, StoreError> {
+        validate_v12_upgrade_source(source.as_ref())?;
+        let destination = destination.as_ref();
+        if destination.exists() {
+            return Err(StoreError::Invariant(format!(
+                "backup destination already exists: {}",
+                destination.display()
+            )));
+        }
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(destination)?;
+        let result = (|| {
+            let source_connection = Connection::open_with_flags(
+                source.as_ref(),
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            let mut target =
+                Connection::open_with_flags(destination, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+            rusqlite::backup::Backup::new(&source_connection, &mut target)?.run_to_completion(
+                64,
+                std::time::Duration::from_millis(10),
+                None,
+            )?;
+            drop(target);
+            validate_v12_upgrade_source(destination)?;
             Ok(BackupArtifact {
                 path: destination.to_path_buf(),
                 sha256: sha256_file(destination)?,
@@ -4933,6 +5203,73 @@ impl Store {
         validate_status_sequence_lower_bound(&transaction)?;
         validate_projection_invariants(&transaction)?;
         transaction.commit()?;
+        store.validate()?;
+        configure_connection(&store.connection, true)?;
+        Ok(store)
+    }
+
+    /// Add the local-successor fence to the exact public schema-v12 store.
+    /// Historical rows are deliberately not synthesized; v12 has no such
+    /// occurrence identity and its absence remains explicit.
+    pub fn upgrade_v12_to_v13(
+        path: impl AsRef<Path>,
+        receipt: &UpgradeReceiptInput,
+    ) -> Result<Self, StoreError> {
+        if receipt.from_schema_version != 12 || receipt.to_schema_version != 13 {
+            return Err(StoreError::Invariant(
+                "v12-to-v13 receipt has wrong schema endpoints".into(),
+            ));
+        }
+        validate_digest("backup_digest", &receipt.backup_digest)?;
+        let path = path.as_ref();
+        let backup = Path::new(&receipt.backup_location);
+        if !backup.is_file() || sha256_file(backup)? != receipt.backup_digest {
+            return Err(StoreError::Invariant(
+                "v12-to-v13 migration requires its exact verified backup".into(),
+            ));
+        }
+        if std::fs::canonicalize(path)? == std::fs::canonicalize(backup)? {
+            return Err(StoreError::Invariant(
+                "v12-to-v13 backup must differ from source database".into(),
+            ));
+        }
+        let mut connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        configure_connection(&connection, false)?;
+        if pragma_i64(&connection, "user_version")? != 12
+            || pragma_i64(&connection, "application_id")? != APPLICATION_ID
+        {
+            return Err(StoreError::SchemaVersionMismatch {
+                found: pragma_i64(&connection, "user_version")?,
+                supported: 12,
+            });
+        }
+        let source_digest: String = connection.query_row(
+            "SELECT schema_artifact_digest FROM schema_metadata WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        if source_digest != SCHEMA_V12_ARTIFACT_DIGEST {
+            return Err(StoreError::Invariant(
+                "v12-to-v13 source is not the pinned public schema-v12 artifact".into(),
+            ));
+        }
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute_batch("DROP TRIGGER immutable_schema_metadata_update; DROP TRIGGER immutable_schema_metadata_delete; ALTER TABLE schema_metadata RENAME TO schema_metadata_v12;")?;
+        transaction.execute_batch("CREATE TABLE schema_metadata (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), product TEXT NOT NULL CHECK (product = 'nq-ng'), schema_version INTEGER NOT NULL CHECK (schema_version = 13), schema_artifact_digest TEXT NOT NULL CHECK (length(schema_artifact_digest) = 71 AND substr(schema_artifact_digest, 1, 7) = 'sha256:'), initialized_at TEXT NOT NULL) STRICT;")?;
+        transaction.execute("INSERT INTO schema_metadata (singleton, product, schema_version, schema_artifact_digest, initialized_at) SELECT singleton, product, 13, ?1, initialized_at FROM schema_metadata_v12", [schema_artifact_digest()])?;
+        transaction.execute("DROP TABLE schema_metadata_v12", [])?;
+        transaction.execute_batch(SCHEMA_METADATA_V5_TRIGGERS)?;
+        transaction.execute_batch(SCHEMA_V12_TO_V13_LOCAL_SUCCESSOR)?;
+        transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        insert_upgrade_receipt(&transaction, receipt)?;
+        transaction.commit()?;
+        let store = Self {
+            connection,
+            path: Some(path.to_path_buf()),
+        };
         store.validate()?;
         configure_connection(&store.connection, true)?;
         Ok(store)
@@ -5696,6 +6033,34 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    /// Page every legacy/general outbox status without unbounded materialization.
+    pub fn legacy_notification_attempt_statuses_bounded(
+        &self,
+        limit: u32,
+        after: Option<&str>,
+    ) -> Result<Vec<LegacyNotificationAttemptStatus>, StoreError> {
+        validate_public_query_limit(limit)?;
+        let mut statement = self.connection.prepare(
+            "SELECT o.notification_id, o.max_attempts, COUNT(a.attempt_number),
+                    (SELECT outcome FROM notification_attempts x WHERE x.notification_id=o.notification_id ORDER BY x.attempt_number DESC LIMIT 1)
+             FROM notification_outbox o LEFT JOIN notification_attempts a ON a.notification_id=o.notification_id
+             WHERE o.notification_id > ?1
+               AND NOT EXISTS (SELECT 1 FROM notification_delivery_intents i WHERE i.notification_id = o.notification_id)
+             GROUP BY o.notification_id, o.max_attempts ORDER BY o.notification_id LIMIT ?2",
+        )?;
+        statement
+            .query_map(params![after.unwrap_or(""), i64::from(limit)], |row| {
+                Ok(LegacyNotificationAttemptStatus {
+                    notification_id: row.get(0)?,
+                    max_attempts: row.get(1)?,
+                    attempt_count: row.get(2)?,
+                    last_outcome: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
     /// Page immutable delivery intents by their stable primary-key cursor.
     pub fn notification_delivery_intents_bounded(
         &self,
@@ -6182,6 +6547,36 @@ fn validate_v5_public_upgrade_source(path: &Path) -> Result<(), StoreError> {
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     validate_v5_public_upgrade_source_connection(&connection)
+}
+
+fn validate_v12_upgrade_source(path: &Path) -> Result<(), StoreError> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    if pragma_i64(&connection, "user_version")? != 12
+        || pragma_i64(&connection, "application_id")? != APPLICATION_ID
+    {
+        return Err(StoreError::SchemaVersionMismatch {
+            found: pragma_i64(&connection, "user_version")?,
+            supported: 12,
+        });
+    }
+    let digest: String = connection.query_row(
+        "SELECT schema_artifact_digest FROM schema_metadata WHERE singleton = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    if digest != SCHEMA_V12_ARTIFACT_DIGEST {
+        return Err(StoreError::Invariant(
+            "v12-to-v13 source is not the pinned public schema-v12 artifact".into(),
+        ));
+    }
+    let quick: String = connection.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+    if quick != "ok" {
+        return Err(StoreError::Integrity(quick));
+    }
+    Ok(())
 }
 
 fn validate_v5_public_upgrade_source_connection(connection: &Connection) -> Result<(), StoreError> {
@@ -7967,6 +8362,87 @@ fn stored_provider_intake_row(
 /// Prove that provider-intake custody is exact and every run is explicitly
 /// classified as either a real v4 intake or a non-upgraded v3 historical gap.
 #[allow(clippy::too_many_lines, clippy::type_complexity)]
+fn validate_local_successor_acquisition_invariants(
+    connection: &Connection,
+) -> Result<(), StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT acquisition_id, watcher_instance_id, watcher_semantic_digest, selection_digest, run_id, intake_id, intent_json, intent_digest FROM local_successor_acquisition_intents ORDER BY acquisition_id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, Vec<u8>>(6)?,
+            row.get::<_, String>(7)?,
+        ))
+    })?;
+    for row in rows {
+        let (
+            acquisition_id,
+            watcher,
+            watcher_digest,
+            selection_digest,
+            run_id,
+            intake_id,
+            bytes,
+            digest,
+        ) = row?;
+        validate_bounded_identity("local successor acquisition", &acquisition_id)?;
+        validate_bounded_identity("local successor watcher", &watcher)?;
+        validate_digest("local successor watcher semantic", &watcher_digest)?;
+        validate_digest("local successor selection", &selection_digest)?;
+        let intent = CanonicalDocument::from_canonical_bytes(bytes)?;
+        if intent.digest() != digest {
+            return Err(StoreError::Integrity(
+                "local successor intent digest differs from canonical bytes".into(),
+            ));
+        }
+        let phases: Vec<(String, Vec<u8>, String)> = connection.prepare("SELECT phase,event_json,event_digest FROM local_successor_acquisition_events WHERE acquisition_id=?1 ORDER BY event_number")?.query_map([&acquisition_id], |event| Ok((event.get(0)?,event.get(1)?,event.get(2)?)))?.collect::<Result<_,_>>()?;
+        if phases.is_empty()
+            || phases.len() > 2
+            || phases[0].0 != "provider_invocation_started"
+            || (phases.len() == 2 && phases[1].0 != "provider_intake_completed")
+        {
+            return Err(StoreError::Integrity(
+                "local successor acquisition has an invalid phase sequence".into(),
+            ));
+        }
+        for (_, event_bytes, event_digest) in &phases {
+            let event = CanonicalDocument::from_canonical_bytes(event_bytes.clone())?;
+            if event.digest() != *event_digest {
+                return Err(StoreError::Integrity(
+                    "local successor event digest differs from canonical bytes".into(),
+                ));
+            }
+        }
+        if phases.len() == 2 {
+            let artifact: String = serde_json::from_slice::<Value>(&phases[1].1)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("artifact_id")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
+                .ok_or_else(|| {
+                    StoreError::Integrity(
+                        "local successor completion has no artifact identity".into(),
+                    )
+                })?;
+            let expected = diagnostic_artifact_id_for_run_on_connection(connection, &run_id)?
+                .ok_or_else(|| {
+                    StoreError::Integrity("local successor completed run lacks artifact".into())
+                })?;
+            if expected.as_str() != artifact || connection.query_row("SELECT COUNT(*) FROM local_watcher_provider_intakes WHERE intake_id=?1 AND run_id=?2", params![intake_id,run_id], |r| r.get::<_,i64>(0))? != 1 { return Err(StoreError::Integrity("local successor completion differs from its exact run/intake".into())); }
+        }
+    }
+    Ok(())
+}
+
 fn validate_provider_intake_invariants(connection: &Connection) -> Result<(), StoreError> {
     let invalid_run: Option<(String, i64, i64)> = connection
         .query_row(
@@ -16677,6 +17153,48 @@ mod tests {
             store
                 .maintenance_declarations_bounded(1, Some(TIME), None)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn local_successor_fence_is_exact_and_pending_is_visible() {
+        let mut store = Store::initialize_in_memory().expect("store");
+        let input = LocalSuccessorAcquisitionIntentInput {
+            acquisition_id: "successor-a".into(),
+            watcher_instance_id: "host-local".into(),
+            watcher_semantic_digest: digest("watcher-a"),
+            selection_digest: digest("selection-a"),
+            run_id: "run-successor-a".into(),
+            intake_id: "intake-successor-a".into(),
+            intent: document(
+                json!({"schema":"nq.local_successor_acquisition_intent.v1","acquisition_id":"successor-a"}),
+            ),
+        };
+        store
+            .commit_local_successor_dispatch(&input)
+            .expect("fence");
+        assert_eq!(
+            store
+                .local_successor_acquisition_phases("successor-a")
+                .expect("phases"),
+            ["provider_invocation_started"]
+        );
+        assert_eq!(
+            store
+                .local_successor_acquisitions_bounded(1, None)
+                .expect("page")
+                .len(),
+            1
+        );
+        let mut changed = input.clone();
+        changed.selection_digest = digest("selection-b");
+        assert!(store.commit_local_successor_dispatch(&changed).is_err());
+        let artifact = Sha256Digest::parse(digest("artifact-a")).expect("digest");
+        assert!(
+            store
+                .complete_local_successor_acquisition("successor-a", &artifact)
+                .is_err(),
+            "an unrelated artifact cannot terminalize the named run"
         );
     }
 }

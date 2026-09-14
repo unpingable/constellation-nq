@@ -281,6 +281,22 @@ pub enum DiagnosticsCommand {
     },
     /// Collect, evaluate, and emit one exact supported diagnostic artifact.
     Execute(InstanceArg),
+    /// Acquire one caller-named successor through the same admitted local watcher.
+    AcquireNextLocal {
+        /// Configured watcher instance with retained matching history.
+        instance_id: String,
+        /// Caller-owned exact acquisition identity.
+        #[arg(long)]
+        acquisition_id: String,
+    },
+    /// Reopen one completed local successor without a provider surface.
+    ReplayLocalSuccessor {
+        /// Configured watcher instance.
+        instance_id: String,
+        /// Exact retained acquisition identity.
+        #[arg(long)]
+        acquisition_id: String,
+    },
     /// Inspect one immutable artifact commitment without changing it.
     Inspect {
         /// Exact contract-owned artifact identity.
@@ -345,6 +361,15 @@ pub enum AdminCommand {
     ArchiveVerify {
         /// Archive directory to verify.
         archive: PathBuf,
+    },
+    /// Read one immutable sealed-snapshot database for rollover eligibility.
+    /// Archive verification remains a separate embedded-binary procedure.
+    RolloverInspect {
+        /// Exact database file beneath an operator-selected sealed archive.
+        database: PathBuf,
+        /// Explicit RFC3339 inspection time.
+        #[arg(long)]
+        inspected_at: String,
     },
 }
 
@@ -1441,6 +1466,14 @@ async fn diagnostics_command(
         DiagnosticsCommand::Execute(instance) => {
             diagnostic_execute(config_path, &instance.instance_id).await
         }
+        DiagnosticsCommand::AcquireNextLocal {
+            instance_id,
+            acquisition_id,
+        } => diagnostic_acquire_next_local(config_path, &instance_id, &acquisition_id).await,
+        DiagnosticsCommand::ReplayLocalSuccessor {
+            instance_id,
+            acquisition_id,
+        } => diagnostic_replay_local_successor(config_path, &instance_id, &acquisition_id),
         DiagnosticsCommand::PurposeSupport { request } => {
             crate::purpose_cli::run(config_path, &request)
         }
@@ -1477,6 +1510,46 @@ async fn diagnostic_execute(config_path: &Path, instance_id: &str) -> Result<()>
         engine.diagnostic_execute(&watcher)
     })
     .await??;
+    std::io::stdout()
+        .lock()
+        .write_all(&artifact.canonical_bytes()?)?;
+    Ok(())
+}
+
+async fn diagnostic_acquire_next_local(
+    config_path: &Path,
+    instance_id: &str,
+    acquisition_id: &str,
+) -> Result<()> {
+    let config = NqConfig::load(config_path)?;
+    let watcher = config
+        .watcher(instance_id)
+        .with_context(|| format!("unknown instance {instance_id}"))?
+        .clone();
+    let acquisition_id = acquisition_id.to_owned();
+    let artifact = tokio::task::spawn_blocking(move || {
+        let mut engine = nq_core::CollectionEngine::open(&config)?;
+        engine.diagnostic_acquire_successor_local(&watcher, &acquisition_id)
+    })
+    .await??;
+    std::io::stdout()
+        .lock()
+        .write_all(&artifact.canonical_bytes()?)?;
+    Ok(())
+}
+
+fn diagnostic_replay_local_successor(
+    config_path: &Path,
+    instance_id: &str,
+    acquisition_id: &str,
+) -> Result<()> {
+    let config = NqConfig::load(config_path)?;
+    let watcher = config
+        .watcher(instance_id)
+        .with_context(|| format!("unknown instance {instance_id}"))?
+        .clone();
+    let engine = nq_core::CollectionEngine::open(&config)?;
+    let artifact = engine.diagnostic_replay_local_successor(&watcher, acquisition_id)?;
     std::io::stdout()
         .lock()
         .write_all(&artifact.canonical_bytes()?)?;
@@ -2174,6 +2247,13 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
             let report = crate::archive::verify_archive(&archive)?;
             print_value(&serde_json::to_value(&report)?, json_output)
         }
+        AdminCommand::RolloverInspect {
+            database,
+            inspected_at,
+        } => {
+            let report = crate::rollover::inspect_rollover(&database, &inspected_at)?;
+            print_value(&serde_json::to_value(&report)?, json_output)
+        }
         AdminCommand::Upgrade { backup_directory } => {
             let config = NqConfig::load(config_path)?;
             let _ownership = crate::ownership::acquire(&config.database_path, "admin-upgrade")?;
@@ -2400,6 +2480,38 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                         "schema_version":nq_store::SCHEMA_VERSION, "backup":backup,
                         "backup_digest":backup_digest, "historical_saved_checks":"absent_not_synthesized",
                         "historical_notification_delivery":"absent_not_synthesized"}),
+                        json_output,
+                    )
+                }
+                12 => {
+                    let artifact =
+                        Store::backup_v12_verified(&config.database_path, &temporary_backup)?;
+                    let backup = finalize_upgrade_backup(
+                        &temporary_backup,
+                        &backup_directory,
+                        &artifact.sha256,
+                    )?;
+                    let receipt = UpgradeReceiptInput {
+                        receipt_id: uuid::Uuid::new_v4().to_string(),
+                        from_schema_version: 12,
+                        to_schema_version: 13,
+                        migrations: CanonicalDocument::from_serializable(&[
+                            "schema_v12_to_v13_local_successor",
+                        ])?,
+                        binary_digest,
+                        backup_digest: artifact.sha256.clone(),
+                        backup_location: backup.display().to_string(),
+                        started_at: started_at.to_rfc3339(),
+                        finished_at: started_at.to_rfc3339(),
+                        result: "migrated".into(),
+                        operator_identity,
+                        verification: CanonicalDocument::from_serializable(
+                            &json!({"integrity":"ok","source_schema_version":12,"source_schema_artifact_digest":nq_store::SCHEMA_V12_ARTIFACT_DIGEST,"backup_reopened":true,"historical_local_successor_acquisitions":"absent_not_synthesized"}),
+                        )?,
+                    };
+                    Store::upgrade_v12_to_v13(&config.database_path, &receipt)?.validate()?;
+                    print_value(
+                        &json!({"result":"migrated","from_schema_version":12,"schema_version":nq_store::SCHEMA_VERSION,"backup":backup,"backup_digest":artifact.sha256,"historical_local_successor_acquisitions":"absent_not_synthesized"}),
                         json_output,
                     )
                 }
@@ -2983,6 +3095,56 @@ helper_runtime_dir = "/run/nq/helpers"
         assert!(
             Nq::try_parse_from(["nq", "diagnostics", "execute", "host-a", "host-b"]).is_err(),
             "one invocation cannot silently broaden to multiple subjects"
+        );
+    }
+
+    #[test]
+    fn local_successor_and_replay_have_closed_distinct_surfaces() {
+        let acquire = Nq::try_parse_from([
+            "nq",
+            "diagnostics",
+            "acquire-next-local",
+            "host-local",
+            "--acquisition-id",
+            "local-successor-001",
+        ])
+        .expect("explicit local successor parses");
+        assert!(matches!(
+            acquire.command,
+            Command::Diagnostics {
+                command: DiagnosticsCommand::AcquireNextLocal { .. }
+            }
+        ));
+        assert!(
+            Nq::try_parse_from(["nq", "diagnostics", "acquire-next-local", "host-local"]).is_err()
+        );
+        let replay = Nq::try_parse_from([
+            "nq",
+            "diagnostics",
+            "replay-local-successor",
+            "host-local",
+            "--acquisition-id",
+            "local-successor-001",
+        ])
+        .expect("closed replay parses");
+        assert!(matches!(
+            replay.command,
+            Command::Diagnostics {
+                command: DiagnosticsCommand::ReplayLocalSuccessor { .. }
+            }
+        ));
+        assert!(
+            Nq::try_parse_from([
+                "nq",
+                "diagnostics",
+                "replay-local-successor",
+                "host-local",
+                "--acquisition-id",
+                "local-successor-001",
+                "--origin-helper",
+                "/not-a-surface",
+            ])
+            .is_err()
         );
     }
 

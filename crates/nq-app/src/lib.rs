@@ -14,6 +14,7 @@ mod ownership;
 pub mod purpose_cli;
 pub mod queue_cli;
 pub mod repository_cli;
+mod rollover;
 pub mod saved_check;
 pub mod stage_cli;
 mod transport;
