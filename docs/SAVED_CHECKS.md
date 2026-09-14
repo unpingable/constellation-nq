@@ -183,6 +183,9 @@ remove the exact disposable example directory if no longer needed. Do not apply
 tutorial cleanup to user records. If interrupted, inspect the recorded occurrence
 with `saved-check result` first; stopping a process does not complete its work.
 
-Recurring Monitor/NQ/Nightshift admission and attention binding remain incomplete.
-This local example does not qualify legacy monitoring retirement, live delivery,
-federation or the full multi-component integration profile.
+This local example does not schedule another check or deliver attention. The
+separately qualified [saved-check attention profile](https://unpingable.com/constellation/releases/0.1.0-alpha.2/guide.html)
+connects actual Monitor acquisition, finite Nightshift recurrence, NQ evaluation,
+maintenance annotation, attention replay and one local inbox file using exact
+public pins. It does not qualify unattended monitoring, legacy retirement,
+live Slack/Discord, human acknowledgment, federation or a full consumer migration.
