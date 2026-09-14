@@ -5619,6 +5619,22 @@ impl Store {
         self.connection.query_row("SELECT notification_id, stable_event_id, route_reference, destination_identity, content_digest, event_count, delivery_state FROM public_notification_delivery_status_v1 WHERE stable_event_id = ?1 AND destination_identity = ?2", params![stable_event_id, destination_identity], notification_delivery_status_from_row).optional().map_err(StoreError::from)
     }
 
+    /// Read exact retained intent for duplicate reconciliation, without
+    /// reopening the delivery route or requiring its producer to be available.
+    pub fn notification_delivery_intent_by_identity(
+        &self,
+        stable_event_id: &str,
+        destination_identity: &str,
+    ) -> Result<Option<CanonicalDocument>, StoreError> {
+        let bytes: Option<Vec<u8>> = self.connection.query_row(
+            "SELECT intent_json FROM notification_delivery_intents WHERE stable_event_id=?1 AND destination_identity=?2",
+            params![stable_event_id, destination_identity], |row| row.get(0),
+        ).optional()?;
+        bytes
+            .map(CanonicalDocument::from_canonical_bytes)
+            .transpose()
+    }
+
     pub fn notification_delivery_status(
         &self,
         notification_id: Option<&str>,
@@ -16411,6 +16427,20 @@ mod tests {
                 .unwrap(),
             NotificationDeliveryRetention::Inserted
         ));
+        assert_eq!(
+            store
+                .notification_delivery_intent_by_identity("event-a", "destination-a")
+                .unwrap()
+                .unwrap()
+                .as_bytes(),
+            intent.intent.as_bytes()
+        );
+        assert!(
+            store
+                .notification_delivery_intent_by_identity("missing", "destination-a")
+                .unwrap()
+                .is_none()
+        );
         store
             .append_notification_delivery_event(&NotificationDeliveryEventInput {
                 notification_id: "notification-a".into(),

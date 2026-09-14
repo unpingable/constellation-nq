@@ -137,11 +137,39 @@ fn replay_nightshift(route: &NotificationRouteConfig, intent: &Intent) -> Result
     let receipt = bundle
         .get("receipt")
         .context("Nightshift bundle receipt is missing")?;
-    if required_json_string(bundle, "schema")?
-        != "nightshift.project-predicate-attention-replay-bundle/v1"
-        || required_json_string(policy, "schema")?
-            != "nightshift.project-predicate-attention-policy/v1"
-        || required_json_string(receipt, "schema")? != "nightshift.project-predicate-attention/v1"
+    // These are two closed owner contracts, not interchangeable evidence or
+    // arbitrary verifier commands. The enrolled executable and policy still
+    // bind the caller's exact route; SQLite's owner kind remains unchanged.
+    let saved_check = match required_json_string(bundle, "schema")? {
+        "nightshift.project-predicate-attention-replay-bundle/v1" => false,
+        "nightshift.saved-check-attention-replay-bundle/v1" => true,
+        _ => bail!("unsupported Nightshift attention replay bundle schema"),
+    };
+    let (policy_schema, receipt_schema, replay_schema) = if saved_check {
+        (
+            "nightshift.saved-check-attention-policy/v1",
+            "nightshift.saved-check-attention-receipt/v1",
+            "nightshift.saved-check-attention-replay/v1",
+        )
+    } else {
+        (
+            "nightshift.project-predicate-attention-policy/v1",
+            "nightshift.project-predicate-attention/v1",
+            "nightshift.project-predicate-attention-replay/v1",
+        )
+    };
+    let disposition = required_json_string(receipt, "disposition")?;
+    let eligible = if saved_check {
+        matches!(disposition, "ATTENTION_REQUIRED" | "LOSS_OF_ASSURANCE")
+            && receipt.get("delivery_eligible").and_then(Value::as_bool) == Some(true)
+            && required_json_string(receipt, "authority")? == "none"
+            && required_json_string(receipt, "inspection_reference")? == intent.inspection_reference
+    } else {
+        disposition == "ATTENTION_REQUIRED"
+    };
+    if !eligible
+        || required_json_string(policy, "schema")? != policy_schema
+        || required_json_string(receipt, "schema")? != receipt_schema
         || required_json_string(policy, "policy_digest")? != replay.approved_policy_digest
         || required_json_string(receipt, "policy_digest")? != replay.approved_policy_digest
         || intent.attention_policy_digest != replay.approved_policy_digest
@@ -151,7 +179,6 @@ fn replay_nightshift(route: &NotificationRouteConfig, intent: &Intent) -> Result
                 .attention_receipt_digest
                 .as_deref()
                 .context("attention receipt digest is missing")?
-        || required_json_string(receipt, "disposition")? != "ATTENTION_REQUIRED"
     {
         bail!("Nightshift attention bundle does not match the approved policy and intent binding");
     }
@@ -161,7 +188,7 @@ fn replay_nightshift(route: &NotificationRouteConfig, intent: &Intent) -> Result
             "Nightshift delivery event and transition identities must equal the exact attention receipt digest"
         );
     }
-    if bundle.get("history").and_then(Value::as_array).is_none() {
+    if !saved_check && bundle.get("history").and_then(Value::as_array).is_none() {
         bail!("Nightshift attention bundle history is missing");
     }
 
@@ -179,15 +206,26 @@ fn replay_nightshift(route: &NotificationRouteConfig, intent: &Intent) -> Result
         Some(nix::unistd::Gid::from_raw(account.gid)),
     )
     .context("assign private Nightshift replay directory")?;
-    let command = CommandConfig {
-        executable: replay.executable.clone(),
-        args: vec![
+    let args = if saved_check {
+        vec![
+            "--store".into(),
+            replay.store_locator.to_string_lossy().into_owned(),
+            "saved-check".into(),
+            "attention-replay".into(),
+            "--bundle-stdin".into(),
+        ]
+    } else {
+        vec![
             "--store".into(),
             replay.store_locator.to_string_lossy().into_owned(),
             "attention".into(),
             "replay".into(),
             "--bundle-stdin".into(),
-        ],
+        ]
+    };
+    let command = CommandConfig {
+        executable: replay.executable.clone(),
+        args,
         env: BTreeMap::new(),
         execution_account: replay.execution_account.clone(),
         allow_same_identity_in_debug: cfg!(debug_assertions),
@@ -247,8 +285,7 @@ fn replay_nightshift(route: &NotificationRouteConfig, intent: &Intent) -> Result
         .attention_receipt_digest
         .as_deref()
         .expect("checked above");
-    if required_json_string(&result, "schema")?
-        != "nightshift.project-predicate-attention-replay/v1"
+    if required_json_string(&result, "schema")? != replay_schema
         || result.get("matches").and_then(Value::as_bool) != Some(true)
         || required_json_string(&result, "expected_receipt_digest")? != expected
         || required_json_string(&result, "recomputed_receipt_digest")? != expected
@@ -256,6 +293,113 @@ fn replay_nightshift(route: &NotificationRouteConfig, intent: &Intent) -> Result
         bail!("Nightshift replay did not reproduce the exact attention receipt");
     }
     Ok(())
+}
+
+/// Replay establishes a past owner decision, not freshness at delivery. Check
+/// the fixed event window with the delivery process's clock, without replacing
+/// the older source-observation time or extending a duplicate's eligibility.
+fn saved_check_delivery_is_current(
+    owner: Option<&Value>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<bool> {
+    let Some(bundle) = owner else {
+        return Ok(true);
+    };
+    if bundle.get("schema").and_then(Value::as_str)
+        != Some("nightshift.saved-check-attention-replay-bundle/v1")
+    {
+        return Ok(true);
+    }
+    let receipt = bundle
+        .get("receipt")
+        .context("saved-check receipt missing")?;
+    let parse = |field| -> Result<chrono::DateTime<chrono::FixedOffset>> {
+        Ok(chrono::DateTime::parse_from_rfc3339(required_json_string(
+            receipt, field,
+        )?)?)
+    };
+    let projected = parse("projection_at")?;
+    let evaluated = parse("evaluated_at")?;
+    let until = parse("event_current_until")?;
+    Ok(projected <= evaluated
+        && evaluated <= now
+        && now <= until
+        && until.signed_duration_since(projected) <= chrono::Duration::seconds(300))
+}
+
+fn refuse_expired_saved_check(store: &mut Store, id: &str, owner: Option<&Value>) -> Result<bool> {
+    let now = chrono::Utc::now();
+    let reason = match saved_check_delivery_is_current(owner, now) {
+        Ok(true) => return Ok(false),
+        Ok(false) => "saved_check_attention_event_not_current",
+        Err(_) => "saved_check_attention_event_time_invalid",
+    };
+    store.append_notification_delivery_event(&NotificationDeliveryEventInput {
+        notification_id: id.to_owned(),
+        event_number: 1,
+        occurred_at: now.to_rfc3339(),
+        outcome: "refused".into(),
+        detail: CanonicalDocument::from_serializable(&json!({"reason":reason}))?,
+    })?;
+    Ok(true)
+}
+
+/// A duplicate is a read of old custody, not a second replay or delivery. The
+/// exact submitted bytes must match; for local inboxes the configured pathname
+/// must still name the same enrolled route. Its current existence/contents and
+/// the replay executable's availability cannot establish the past outcome.
+fn retained_duplicate(
+    config: &NqConfig,
+    route: &NotificationRouteConfig,
+    intent: &Intent,
+    document: &CanonicalDocument,
+) -> Result<Option<Value>> {
+    let store = Store::open_read_only(&config.database_path)?;
+    let Some(retained) = store.notification_delivery_intent_by_identity(
+        &intent.stable_event_id,
+        &intent.destination_identity,
+    )?
+    else {
+        return Ok(None);
+    };
+    let retained: Value = serde_json::from_slice(retained.as_bytes())?;
+    let submitted: Value = serde_json::from_slice(document.as_bytes())?;
+    if route.transport == NotificationTransportKind::LocalFile {
+        let path = route
+            .local_inbox_directory
+            .as_ref()
+            .context("local inbox directory absent")?;
+        let path_digest = sha256_bytes(path.as_os_str().as_bytes());
+        if retained.get("schema").and_then(Value::as_str)
+            != Some("nq.local-inbox-delivery-intent/v1")
+            || retained.get("intent") != Some(&submitted)
+            || retained
+                .pointer("/directory_binding/path_sha256")
+                .and_then(Value::as_str)
+                != Some(path_digest.as_str())
+        {
+            bail!(
+                "notification identity is already retained with different canonical intent or local route"
+            );
+        }
+    } else if retained != submitted {
+        bail!("notification identity is already retained with different canonical intent");
+    }
+    if intent.attention_kind == "nightshift_receipt" {
+        let replay = route
+            .nightshift_attention_replay
+            .as_ref()
+            .context("Nightshift replay is not configured for this route")?;
+        if replay.approved_policy_digest != intent.attention_policy_digest {
+            bail!("retained notification differs from the route's approved policy");
+        }
+    }
+    let status = store
+        .notification_delivery_by_identity(&intent.stable_event_id, &intent.destination_identity)?
+        .context("retained notification custody is incomplete")?;
+    Ok(Some(
+        json!({"notification_id":status.notification_id,"delivery_state":status.delivery_state}),
+    ))
 }
 
 fn render(route: &NotificationRouteConfig, intent: &Intent) -> Result<CanonicalDocument> {
@@ -418,7 +562,11 @@ fn deliver_local_with<O: LocalInboxWriteOperation>(
     if intent.destination_identity != expected_destination {
         bail!("local inbox intent destination identity does not match its configured route");
     }
+    if let Some(existing) = retained_duplicate(config, route, &intent, &intent_document)? {
+        return Ok(existing);
+    }
     replay_nightshift(route, &intent)?;
+    let owner_receipt = intent.owner_receipt.clone();
     let (root, directory_binding) = local_inbox_binding(route)?;
     let payload = render_local_inbox(&intent, &directory_binding)?;
     validate_local_inbox_payload(&payload)?;
@@ -462,6 +610,9 @@ fn deliver_local_with<O: LocalInboxWriteOperation>(
                 json!({"notification_id":existing.notification_id,"delivery_state":existing.delivery_state}),
             );
         }
+    }
+    if refuse_expired_saved_check(&mut store, &notification_id, owner_receipt.as_ref())? {
+        return Ok(json!({"notification_id":notification_id,"delivery_state":"refused"}));
     }
     store.append_notification_delivery_event(&NotificationDeliveryEventInput {
         notification_id: notification_id.clone(),
@@ -531,7 +682,14 @@ where
         .iter()
         .find(|r| r.reference == route_ref)
         .context("route reference is not configured")?;
+    if route.transport == NotificationTransportKind::LocalFile {
+        bail!("local_file routes require notification deliver-local");
+    }
+    if let Some(existing) = retained_duplicate(config, route, &intent, &intent_document)? {
+        return Ok(existing);
+    }
     replay_nightshift(route, &intent)?;
+    let owner_receipt = intent.owner_receipt.clone();
     let payload = render(route, &intent)?;
     let mut store = Store::open(&config.database_path)?;
     let notification_id = uuid::Uuid::new_v4().to_string();
@@ -574,6 +732,9 @@ where
                 "delivery_state": existing.delivery_state,
             }));
         }
+    }
+    if refuse_expired_saved_check(&mut store, &notification_id, owner_receipt.as_ref())? {
+        return Ok(json!({"notification_id":notification_id,"delivery_state":"refused"}));
     }
     if !enable_network {
         store.append_notification_delivery_event(&NotificationDeliveryEventInput {
@@ -819,6 +980,196 @@ mod tests {
         })
     }
 
+    fn saved_check_bundle(at: chrono::DateTime<chrono::Utc>) -> Value {
+        let mut bundle = replay_bundle();
+        bundle["schema"] = json!("nightshift.saved-check-attention-replay-bundle/v1");
+        bundle["policy"]["schema"] = json!("nightshift.saved-check-attention-policy/v1");
+        bundle["receipt"]["schema"] = json!("nightshift.saved-check-attention-receipt/v1");
+        bundle["receipt"]["delivery_eligible"] = json!(true);
+        bundle["receipt"]["authority"] = json!("none");
+        bundle["receipt"]["inspection_reference"] = json!("record:1");
+        bundle["receipt"]["projection_at"] = json!(at.to_rfc3339());
+        bundle["receipt"]["evaluated_at"] = json!(at.to_rfc3339());
+        bundle["receipt"]["event_current_until"] =
+            json!((at + chrono::Duration::seconds(300)).to_rfc3339());
+        bundle
+    }
+
+    // The deterministic transport checks NQ's command selection and refusal
+    // ordering only; actual Nightshift receipt replay is a separate integration
+    // check. This fixture does not establish an owner-minted decision.
+    const SAVED_CHECK_REPLAY_FIXTURE: &str = "#!/bin/sh\ntest \"$3\" = saved-check || exit 90\ntest \"$4\" = attention-replay || exit 91\ntest \"$5\" = --bundle-stdin || exit 92\nIFS= read -r bundle || exit 93\nprintf '%s\\n' '{\"schema\":\"nightshift.saved-check-attention-replay/v1\",\"matches\":true,\"expected_receipt_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"recomputed_receipt_digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}'\n";
+
+    #[test]
+    fn saved_check_freshness_is_delivery_time_not_source_or_replay_time() {
+        let at = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let bundle = saved_check_bundle(at);
+        for (delta, expected) in [(-1, false), (0, true), (300, true), (301, false)] {
+            assert_eq!(
+                saved_check_delivery_is_current(
+                    Some(&bundle),
+                    at + chrono::Duration::seconds(delta)
+                )
+                .unwrap(),
+                expected
+            );
+        }
+        let mut invalid = bundle.clone();
+        invalid["receipt"]["evaluated_at"] =
+            json!((at - chrono::Duration::seconds(1)).to_rfc3339());
+        assert!(!saved_check_delivery_is_current(Some(&invalid), at).unwrap());
+        invalid["receipt"]["projection_at"] = json!("not-a-time");
+        assert!(saved_check_delivery_is_current(Some(&invalid), at).is_err());
+        let mut fractional = bundle.clone();
+        fractional["receipt"]["event_current_until"] =
+            json!((at + chrono::Duration::milliseconds(300_001)).to_rfc3339());
+        assert!(!saved_check_delivery_is_current(Some(&fractional), at).unwrap());
+        assert!(saved_check_delivery_is_current(Some(&replay_bundle()), at).unwrap());
+    }
+
+    #[test]
+    fn saved_check_union_preserves_local_delivery_replay_and_expiry() {
+        for expired in [false, true] {
+            let root = TempDir::new().unwrap();
+            let mut config = local_config(&root);
+            configure_replay(
+                &root,
+                &mut config.notification_routes[0],
+                SAVED_CHECK_REPLAY_FIXTURE,
+            );
+            let at = chrono::Utc::now() - chrono::Duration::seconds(if expired { 600 } else { 1 });
+            let mut bundle = saved_check_bundle(at);
+            bundle["receipt"]["disposition"] = json!("LOSS_OF_ASSURANCE");
+            let mut value = intent(
+                "check result unavailable; inspect retained record",
+                "nightshift_receipt",
+                Some(bundle),
+            );
+            value["route_reference"] = json!("local.ops");
+            value["destination_identity"] = json!("local-inbox:local.ops");
+            let path = write_intent(&root, value);
+            let first = deliver_local(&config, &path, "local.ops").unwrap();
+            assert_eq!(
+                first["delivery_state"],
+                if expired { "refused" } else { "accepted" }
+            );
+            let duplicate = deliver_local(&config, &path, "local.ops").unwrap();
+            assert_eq!(first["notification_id"], duplicate["notification_id"]);
+            assert_eq!(first["delivery_state"], duplicate["delivery_state"]);
+            assert_eq!(
+                fs::read_dir(root.path().join("inbox")).unwrap().count(),
+                if expired { 0 } else { 1 }
+            );
+        }
+    }
+
+    #[test]
+    fn saved_check_union_rejects_ineligible_or_mismatched_material_before_replay() {
+        for field in [
+            "delivery_eligible",
+            "authority",
+            "inspection_reference",
+            "disposition",
+            "schema",
+        ] {
+            let root = TempDir::new().unwrap();
+            let mut route = route(NotificationTransportKind::Slack);
+            configure_replay(&root, &mut route, "#!/bin/sh\nexit 99\n");
+            let mut bundle = saved_check_bundle(chrono::Utc::now());
+            bundle["receipt"][field] = if field == "delivery_eligible" {
+                json!(false)
+            } else {
+                json!("unsupported")
+            };
+            let parsed: Intent = serde_json::from_value(intent(
+                "inspect condition",
+                "nightshift_receipt",
+                Some(bundle),
+            ))
+            .unwrap();
+            assert!(
+                replay_nightshift(&route, &parsed)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("does not match")
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_saved_check_times_end_in_retained_refusal_not_pending_custody() {
+        for field in ["projection_at", "evaluated_at", "event_current_until"] {
+            let root = TempDir::new().unwrap();
+            let mut config = local_config(&root);
+            configure_replay(
+                &root,
+                &mut config.notification_routes[0],
+                SAVED_CHECK_REPLAY_FIXTURE,
+            );
+            let mut bundle = saved_check_bundle(chrono::Utc::now());
+            bundle["receipt"][field] = Value::Null;
+            let mut value = intent(
+                "inspect unavailable check",
+                "nightshift_receipt",
+                Some(bundle),
+            );
+            value["route_reference"] = json!("local.ops");
+            value["destination_identity"] = json!("local-inbox:local.ops");
+            let path = write_intent(&root, value);
+            let first = deliver_local(&config, &path, "local.ops").unwrap();
+            assert_eq!(first["delivery_state"], "refused");
+            assert_eq!(deliver_local(&config, &path, "local.ops").unwrap(), first);
+            let status = inspect(&config, first["notification_id"].as_str()).unwrap();
+            assert_eq!(status[0]["event_count"], 1);
+            assert_eq!(fs::read_dir(root.path().join("inbox")).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn exact_duplicate_needs_neither_replay_executable_nor_live_inbox() {
+        let root = TempDir::new().unwrap();
+        let mut config = local_config(&root);
+        configure_replay(
+            &root,
+            &mut config.notification_routes[0],
+            SAVED_CHECK_REPLAY_FIXTURE,
+        );
+        let mut value = intent(
+            "inspect failed check",
+            "nightshift_receipt",
+            Some(saved_check_bundle(
+                chrono::Utc::now() - chrono::Duration::seconds(1),
+            )),
+        );
+        value["route_reference"] = json!("local.ops");
+        value["destination_identity"] = json!("local-inbox:local.ops");
+        let path = write_intent(&root, value.clone());
+        let first = deliver_local(&config, &path, "local.ops").unwrap();
+        assert_eq!(first["delivery_state"], "accepted");
+        fs::rename(
+            root.path().join("nightshift-fixture"),
+            root.path().join("retained-verifier"),
+        )
+        .unwrap();
+        fs::rename(
+            root.path().join("inbox"),
+            root.path().join("retained-inbox"),
+        )
+        .unwrap();
+        let writes = Arc::new(AtomicUsize::new(0));
+        let duplicate =
+            deliver_local_with(&config, &path, "local.ops", &CountingWrite(writes.clone()))
+                .unwrap();
+        assert_eq!(duplicate["notification_id"], first["notification_id"]);
+        assert_eq!(duplicate["delivery_state"], first["delivery_state"]);
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+        value["summary"] = json!("different material with same identity");
+        write_intent(&root, value);
+        assert!(deliver_local(&config, &path, "local.ops").is_err());
+    }
+
     fn configure_replay(root: &TempDir, route: &mut NotificationRouteConfig, body: &str) {
         let executable = root.path().join("nightshift-fixture");
         fs::write(&executable, body).unwrap();
@@ -1056,6 +1407,45 @@ mod tests {
             .expect("protect replacement inbox");
         config.notification_routes[0].local_inbox_directory = Some(replacement);
         assert!(deliver_local(&config, &path, "local.ops").is_err());
+    }
+
+    #[test]
+    fn local_inbox_alias_refuses_before_first_custody() {
+        let root = TempDir::new().unwrap();
+        let mut config = local_config(&root);
+        fs::create_dir(root.path().join("neighbor")).unwrap();
+        config.notification_routes[0].local_inbox_directory =
+            Some(root.path().join("neighbor/../inbox"));
+        let path = write_intent(&root, local_intent());
+        assert!(deliver_local(&config, &path, "local.ops").is_err());
+        assert_eq!(inspect(&config, None).unwrap(), json!([]));
+    }
+
+    #[tokio::test]
+    async fn https_command_refuses_local_route_before_new_or_duplicate_custody() {
+        let root = TempDir::new().unwrap();
+        let config = local_config(&root);
+        let path = write_intent(&root, local_intent());
+        for existing in [false, true] {
+            if existing {
+                deliver_local(&config, &path, "local.ops").unwrap();
+            }
+            let result = submit_with_dispatch(
+                &config,
+                &path,
+                "local.ops",
+                false,
+                |_| panic!("wrong surface must not resolve a destination"),
+                |_| Ok(|_, _, _| async { panic!("wrong surface must not dispatch") }),
+            )
+            .await;
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("require notification deliver-local")
+            );
+        }
     }
 
     #[tokio::test]
