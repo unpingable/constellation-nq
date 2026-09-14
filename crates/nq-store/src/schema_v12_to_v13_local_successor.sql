@@ -16,10 +16,15 @@ CREATE TABLE local_successor_acquisition_events (
     event_json BLOB NOT NULL CHECK (length(event_json) <= 32768 AND json_valid(CAST(event_json AS TEXT))),
     event_digest TEXT NOT NULL CHECK (length(event_digest) = 71 AND substr(event_digest, 1, 7) = 'sha256:'),
     occurred_at TEXT NOT NULL,
-    PRIMARY KEY (acquisition_id, event_number), UNIQUE (acquisition_id, phase)
+    PRIMARY KEY (acquisition_id, event_number),
+    UNIQUE (acquisition_id, phase)
 ) STRICT;
-CREATE TRIGGER local_successor_event_first BEFORE INSERT ON local_successor_acquisition_events WHEN NEW.event_number = 1 AND NEW.phase != 'provider_invocation_started' BEGIN SELECT RAISE(ABORT, 'local successor first event must fence provider invocation'); END;
-CREATE TRIGGER local_successor_event_followup BEFORE INSERT ON local_successor_acquisition_events WHEN NEW.event_number > 1 AND (NEW.event_number != (SELECT COUNT(*) + 1 FROM local_successor_acquisition_events WHERE acquisition_id = NEW.acquisition_id) OR NEW.phase != 'provider_intake_completed') BEGIN SELECT RAISE(ABORT, 'local successor completion must immediately follow its fence'); END;
+CREATE TRIGGER local_successor_event_first BEFORE INSERT ON local_successor_acquisition_events
+WHEN NEW.event_number = 1 AND NEW.phase != 'provider_invocation_started'
+BEGIN SELECT RAISE(ABORT, 'local successor first event must fence provider invocation'); END;
+CREATE TRIGGER local_successor_event_followup BEFORE INSERT ON local_successor_acquisition_events
+WHEN NEW.event_number > 1 AND (NEW.event_number != (SELECT COUNT(*) + 1 FROM local_successor_acquisition_events WHERE acquisition_id = NEW.acquisition_id) OR NEW.phase != 'provider_intake_completed')
+BEGIN SELECT RAISE(ABORT, 'local successor completion must immediately follow its fence'); END;
 CREATE TRIGGER immutable_local_successor_acquisition_intents_update BEFORE UPDATE ON local_successor_acquisition_intents BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER immutable_local_successor_acquisition_intents_delete BEFORE DELETE ON local_successor_acquisition_intents BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER immutable_local_successor_acquisition_events_update BEFORE UPDATE ON local_successor_acquisition_events BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
