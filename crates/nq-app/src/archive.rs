@@ -1960,6 +1960,30 @@ mod tests {
             ),
         };
         drop(Store::upgrade_v5_to_v12(&database, &receipt).expect("upgrade schema-v5 store"));
+        let v12_backup_path = root.join("nq-v12.pre-upgrade.db");
+        let v12_backup =
+            Store::backup_v12_verified(&database, &v12_backup_path).expect("verify v12 backup");
+        let v12_receipt = nq_store::UpgradeReceiptInput {
+            receipt_id: "upgrade-archive-v12-v13".into(),
+            from_schema_version: 12,
+            to_schema_version: 13,
+            migrations: canonical(&serde_json::json!(["schema_v12_to_v13_local_successor"])),
+            binary_digest: nq_protocol::sha256_bytes(b"archive-upgrade-binary").into_string(),
+            backup_digest: v12_backup.sha256,
+            backup_location: v12_backup.path.to_string_lossy().into_owned(),
+            started_at: "2026-07-20T12:00:08Z".into(),
+            finished_at: "2026-07-20T12:00:09Z".into(),
+            result: "migrated".into(),
+            operator_identity: canonical(&serde_json::json!({"uid":991})),
+            verification: canonical(&serde_json::json!({
+                "integrity":"ok",
+                "source_schema_version":12,
+                "source_schema_artifact_digest":nq_store::SCHEMA_V12_ARTIFACT_DIGEST,
+                "backup_reopened":true,
+                "historical_local_successor":"absent_not_synthesized"
+            })),
+        };
+        drop(Store::upgrade_v12_to_v13(&database, &v12_receipt).expect("upgrade schema-v12 store"));
         let config = write_config(root, &database);
         let archive = root.join("archive");
         create_archive(&config, &archive).expect("create migrated-v3 archive");

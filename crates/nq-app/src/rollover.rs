@@ -788,7 +788,21 @@ mod tests {
     }
 
     fn notification(store: &mut Store, id: &str) {
-        let intent = document(json!({"fixture":"intent"}));
+        let policy_digest = document(json!({"policy":true})).digest().to_owned();
+        let intent = document(json!({
+            "schema":"nq.notification_delivery_intent.v1",
+            "attention_kind":"operator_assertion",
+            "stable_event_id":format!("event-{id}"),
+            "attention_receipt_digest":null,
+            "attention_policy_id":"policy-fixture",
+            "attention_policy_digest":policy_digest,
+            "transition_id":"transition-fixture",
+            "route_reference":"route-fixture",
+            "destination_identity":format!("destination-{id}"),
+            "summary":"fixture notification",
+            "inspection_reference":"fixture://notification",
+            "owner_receipt":null
+        }));
         let payload = document(json!({"fixture":"payload"}));
         store
             .retain_notification_delivery(
@@ -808,7 +822,7 @@ mod tests {
                     attention_kind: "operator_assertion".into(),
                     attention_receipt_digest: None,
                     attention_policy_id: "policy-fixture".into(),
-                    attention_policy_digest: document(json!({"policy":true})).digest().into(),
+                    attention_policy_digest: policy_digest,
                     transition_id: "transition-fixture".into(),
                     route_reference: "route-fixture".into(),
                     destination_identity: format!("destination-{id}"),
