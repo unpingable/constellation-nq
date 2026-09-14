@@ -40,6 +40,25 @@ pub(crate) struct RolloverInspection {
     limitations: [&'static str; 4],
 }
 
+impl RolloverInspection {
+    /// Narrow eligibility predicate for a command that has already verified the
+    /// containing archive with its own verifier.  It exposes no transfer data.
+    pub(crate) fn permits_maintenance_carry(
+        &self,
+        maintenance_id: &str,
+        declaration_digest: &str,
+        declared_at: &str,
+    ) -> bool {
+        self.eligible
+            && self.refusals.is_empty()
+            && self.current_maintenance.iter().any(|current| {
+                current.prior_maintenance_id == maintenance_id
+                    && current.prior_declaration_digest == declaration_digest
+                    && current.prior_declared_at == declared_at
+            })
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct SnapshotScope {
     source: &'static str,

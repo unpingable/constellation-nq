@@ -6390,6 +6390,11 @@ impl Store {
             "maintenance declaration_digest",
             &declaration.declaration_digest,
         )?;
+        if declaration.declaration.digest() != declaration.declaration_digest {
+            return Err(StoreError::Invariant(
+                "maintenance carry declaration digest differs from canonical bytes".into(),
+            ));
+        }
         if let Some(digest) = &reference.artifact_digest {
             validate_digest("artifact_digest", digest)?;
         }
@@ -17499,6 +17504,14 @@ mod tests {
             detail: document(json!({"schema":"nq.rollover_maintenance_carry.v1"})),
             created_at: TIME.into(),
         };
+        let mut wrong_digest = input.clone();
+        wrong_digest.declaration_digest = digest("not-the-canonical-maintenance");
+        assert!(
+            store
+                .carry_maintenance_with_legacy_reference(&wrong_digest, &reference)
+                .is_err(),
+            "a carry never accepts a declared digest that differs from canonical bytes"
+        );
         assert!(
             store
                 .carry_maintenance_with_legacy_reference(&input, &reference)
@@ -17508,6 +17521,14 @@ mod tests {
             !store
                 .carry_maintenance_with_legacy_reference(&input, &reference)
                 .expect("exact replay")
+        );
+        let mut conflicting_reference = reference.clone();
+        conflicting_reference.artifact_digest = Some(digest("other-source-maintenance"));
+        assert!(
+            store
+                .carry_maintenance_with_legacy_reference(&input, &conflicting_reference)
+                .is_err(),
+            "an existing carried declaration refuses a lineage receipt conflict"
         );
         let mut conflicting = input.clone();
         conflicting.declaration_digest = digest("different-maintenance");

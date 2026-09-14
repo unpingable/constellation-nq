@@ -70,6 +70,12 @@ pub struct VerifyReport {
     pub archive: PathBuf,
     /// Archive format identity.
     pub archive_format: String,
+    /// Exact digest of the verified `SEAL` control file.  Consumers that retain
+    /// a derivative record can bind it to this sealed archive identity without
+    /// treating the archive pathname alone as evidence.
+    pub archive_seal: String,
+    /// Digest of the exact `db/nq.db` bytes covered by the verified manifest.
+    pub database_digest: String,
     /// Whether the seal, manifest, per-file, and file-set checks all held.
     pub integrity_verified: bool,
     /// Whether the preserved database opened and validated under this verifier.
@@ -895,6 +901,8 @@ pub fn verify_archive(archive: &Path) -> Result<VerifyReport> {
     Ok(VerifyReport {
         archive: archive.to_path_buf(),
         archive_format: metadata.archive_format,
+        archive_seal: String::from_utf8(seal).context("archive seal is not UTF-8")?,
+        database_digest: sha256_file(&archive.join("db/nq.db"))?,
         integrity_verified: true,
         historical_database_verified: historical_counts.as_ref().map(|_| true),
         historical_admitted_report_semantics_verified: historical_counts.as_ref().map(|_| true),

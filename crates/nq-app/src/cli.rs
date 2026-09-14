@@ -1198,11 +1198,25 @@ fn maintenance_command(
             source_maintenance_id,
             new_maintenance_id,
         } => {
+            require_distinct_maintenance_ids(&source_maintenance_id, &new_maintenance_id)?;
             let verified = crate::archive::verify_archive(&archive)?;
             if !verified.integrity_verified || verified.historical_database_verified != Some(true) {
                 bail!("maintenance carry requires a verified openable current-schema archive");
             }
-            let source = Store::open_immutable(archive.join("db/nq.db"))?;
+            let source_database = archive.join("db/nq.db");
+            let source_archive =
+                fs::canonicalize(&archive).context("canonicalize verified archive root")?;
+            let destination_database = fs::canonicalize(&config.database_path)
+                .context("canonicalize successor database before maintenance carry")?;
+            if same_database_file(&source_database, &destination_database)? {
+                bail!(
+                    "maintenance carry refuses a successor database that resolves to the sealed archive database"
+                );
+            }
+            let inspected_at = chrono::Utc::now().to_rfc3339();
+            let inspection = crate::rollover::inspect_rollover(&source_database, &inspected_at)
+                .context("inspect verified archive snapshot for unresolved rollover work")?;
+            let source = Store::open_immutable(&source_database)?;
             let record = source
                 .maintenance_declaration(&source_maintenance_id)?
                 .with_context(|| {
@@ -1230,6 +1244,21 @@ fn maintenance_command(
                     "archive maintenance declaration is not currently active and cannot be carried"
                 );
             }
+            if !inspection.permits_maintenance_carry(
+                &source_maintenance_id,
+                &record.declaration_digest,
+                &record.declared_at,
+            ) {
+                bail!(
+                    "verified archive snapshot has unresolved history or does not retain this declaration as currently active"
+                );
+            }
+            let opened_database_digest = sha256_file_streaming(&source_database)?;
+            if opened_database_digest != verified.database_digest {
+                bail!(
+                    "verified archive database changed before immutable maintenance carry reopening"
+                );
+            }
             let mut carried = source_declaration.clone();
             carried.maintenance_id = new_maintenance_id.clone();
             carried.validate()?;
@@ -1240,9 +1269,13 @@ fn maintenance_command(
             let lineage_id = format!("rollover-maintenance-{new_maintenance_id}");
             let lineage = CanonicalDocument::from_serializable(&json!({
                 "schema":"nq.rollover_maintenance_carry.v1",
-                "source_archive":archive,
+                "source_archive":source_archive,
+                "source_archive_format":verified.archive_format,
+                "source_archive_seal":verified.archive_seal,
+                "source_database_digest":verified.database_digest,
                 "source_maintenance_id":source_maintenance_id,
                 "source_declaration_digest":record.declaration_digest,
+                "source_declared_at":record.declared_at,
                 "successor_maintenance_id":new_maintenance_id,
                 "successor_declaration_digest":carried_digest,
                 "preserved_fields":["start_at","end_at","component","kind","subject","declared_by","reason"]
@@ -1318,6 +1351,42 @@ fn maintenance_command(
             )
         }
     }
+}
+
+fn sha256_file_streaming(path: &Path) -> Result<String> {
+    let mut input =
+        File::open(path).with_context(|| format!("open {} for digest", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = input.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn require_distinct_maintenance_ids(source: &str, successor: &str) -> Result<()> {
+    if source == successor {
+        bail!("maintenance carry requires a successor maintenance_id distinct from the source");
+    }
+    Ok(())
+}
+
+fn same_database_file(source: &Path, destination: &Path) -> Result<bool> {
+    let source = fs::canonicalize(source)
+        .with_context(|| format!("canonicalize source database {}", source.display()))?;
+    let destination = fs::canonicalize(destination)
+        .with_context(|| format!("canonicalize successor database {}", destination.display()))?;
+    if source == destination {
+        return Ok(true);
+    }
+    let source_metadata = fs::metadata(&source)?;
+    let destination_metadata = fs::metadata(&destination)?;
+    Ok(source_metadata.dev() == destination_metadata.dev()
+        && source_metadata.ino() == destination_metadata.ino())
 }
 
 async fn notification_command(
@@ -3199,6 +3268,27 @@ helper_runtime_dir = "/run/nq/helpers"
                 "source-maintenance",
             ])
             .is_err()
+        );
+    }
+
+    #[test]
+    fn maintenance_archive_carry_rejects_same_source_and_successor_identity() {
+        assert!(require_distinct_maintenance_ids("same-maintenance", "same-maintenance").is_err());
+        require_distinct_maintenance_ids("source-maintenance", "successor-maintenance")
+            .expect("distinct maintenance identities are permitted");
+    }
+
+    #[test]
+    fn same_database_file_detects_path_alias_and_distinct_destination() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let source = directory.path().join("source.db");
+        let destination = directory.path().join("destination.db");
+        fs::write(&source, b"source").expect("source fixture");
+        fs::write(&destination, b"destination").expect("destination fixture");
+        assert!(same_database_file(&source, &source).expect("same source"));
+        assert!(
+            !same_database_file(&source, &destination).expect("distinct destination"),
+            "different database files remain distinct even when their pathname parent is shared"
         );
     }
 
