@@ -24,6 +24,9 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 const SCHEMA: &str = include_str!("schema.sql");
+// Pinned public predecessor accepted only by the explicit v5-to-v12 and
+// v12-to-v13 migration paths. Normal store opens never use this artifact.
+const SCHEMA_V12: &str = include_str!("schema_v12.sql");
 const SCHEMA_V3: &str = include_str!("schema_v3.sql");
 const SCHEMA_V4: &str = include_str!("schema_v4.sql");
 const SCHEMA_V5: &str = include_str!("schema_v5.sql");
@@ -79,6 +82,18 @@ const SCHEMA_METADATA_V12: &str = r"CREATE TABLE schema_metadata (
 ) STRICT;";
 
 const SCHEMA_METADATA_V12_TRIGGERS: &str = SCHEMA_METADATA_V5_TRIGGERS;
+
+const SCHEMA_METADATA_V13: &str = r"CREATE TABLE schema_metadata (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    product TEXT NOT NULL CHECK (product = 'nq-ng'),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 13),
+    -- Digest of the exact schema.sql artifact compiled into the writing binary.
+    -- Rejects stale provisional-candidate databases at startup; it is NOT a
+    -- tamper attestation of the live SQLite schema (which the structural
+    -- fingerprint checks separately).
+    schema_artifact_digest TEXT NOT NULL CHECK (length(schema_artifact_digest) = 71 AND substr(schema_artifact_digest, 1, 7) = 'sha256:'),
+    initialized_at TEXT NOT NULL
+) STRICT;";
 
 /// Exact schema-artifact digest of the qualified v0.1.0 store. It is retained
 /// only to validate an explicit v3-to-v4 upgrade source; normal opening never
@@ -146,6 +161,13 @@ static EXPECTED_SCHEMA_V5_FINGERPRINT: LazyLock<Result<String, String>> = LazyLo
     let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
     connection
         .execute_batch(SCHEMA_V5)
+        .map_err(|error| error.to_string())?;
+    schema_fingerprint(&connection).map_err(|error| error.to_string())
+});
+static EXPECTED_SCHEMA_V12_FINGERPRINT: LazyLock<Result<String, String>> = LazyLock::new(|| {
+    let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
+    connection
+        .execute_batch(SCHEMA_V12)
         .map_err(|error| error.to_string())?;
     schema_fingerprint(&connection).map_err(|error| error.to_string())
 });
@@ -1739,6 +1761,16 @@ pub struct PendingBindingMaterializationRow {
 pub struct Store {
     connection: Connection,
     path: Option<PathBuf>,
+    schema_mode: StoreSchemaMode,
+}
+
+/// A handle's schema contract. Legacy-v12 handles exist solely as the return
+/// value of the historical v5-to-v12 upgrade endpoint; they cannot perform
+/// ordinary writes or be created by an ordinary open.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StoreSchemaMode {
+    CurrentV13,
+    LegacyUpgradeV12,
 }
 
 impl Store {
@@ -1783,6 +1815,7 @@ impl Store {
         let store = Self {
             connection,
             path: Some(path.to_path_buf()),
+            schema_mode: StoreSchemaMode::CurrentV13,
         };
         store.validate()?;
         Ok(store)
@@ -1803,6 +1836,7 @@ impl Store {
         let store = Self {
             connection,
             path: Some(path.to_path_buf()),
+            schema_mode: StoreSchemaMode::CurrentV13,
         };
         store.validate()?;
         configure_connection(&store.connection, true)?;
@@ -1825,6 +1859,7 @@ impl Store {
         let store = Self {
             connection,
             path: Some(path.to_path_buf()),
+            schema_mode: StoreSchemaMode::CurrentV13,
         };
         store.validate()?;
         Ok(store)
@@ -1861,6 +1896,7 @@ impl Store {
         let store = Self {
             connection,
             path: Some(canonical_path),
+            schema_mode: StoreSchemaMode::CurrentV13,
         };
         store.validate()?;
         Ok(store)
@@ -1885,6 +1921,7 @@ impl Store {
         let store = Self {
             connection,
             path: Some(path.to_path_buf()),
+            schema_mode: StoreSchemaMode::CurrentV13,
         };
         store.validate_v3_upgrade_source()?;
         Ok(store)
@@ -1910,6 +1947,7 @@ impl Store {
         let store = Self {
             connection,
             path: Some(path.to_path_buf()),
+            schema_mode: StoreSchemaMode::CurrentV13,
         };
         validate_v4_upgrade_source_connection(&store.connection)?;
         Ok(store)
@@ -1918,6 +1956,7 @@ impl Store {
     /// Checkpoint a writable backup copy and leave it in rollback-journal mode
     /// before archive inventory and sealing.
     pub fn prepare_archive_copy(&self) -> Result<(), StoreError> {
+        self.require_current_schema()?;
         let checkpoint: (i64, i64, i64) =
             self.connection
                 .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
@@ -1948,6 +1987,7 @@ impl Store {
         let store = Self {
             connection,
             path: None,
+            schema_mode: StoreSchemaMode::CurrentV13,
         };
         store.validate()?;
         Ok(store)
@@ -1961,6 +2001,9 @@ impl Store {
 
     /// Verify SQLite integrity, foreign keys, application identity, and schema shape.
     pub fn validate(&self) -> Result<(), StoreError> {
+        if self.schema_mode == StoreSchemaMode::LegacyUpgradeV12 {
+            return validate_v12_upgrade_source_connection(&self.connection);
+        }
         let version = pragma_i64(&self.connection, "user_version")?;
         if version != SCHEMA_VERSION {
             return Err(StoreError::SchemaVersionMismatch {
@@ -3926,9 +3969,20 @@ impl Store {
     }
 
     fn immediate_transaction(&mut self) -> Result<Transaction<'_>, StoreError> {
+        self.require_current_schema()?;
         self.connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StoreError::from)
+    }
+
+    fn require_current_schema(&self) -> Result<(), StoreError> {
+        if self.schema_mode != StoreSchemaMode::CurrentV13 {
+            return Err(StoreError::SchemaVersionMismatch {
+                found: 12,
+                supported: SCHEMA_VERSION,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -4808,6 +4862,11 @@ impl Store {
         destination: impl AsRef<Path>,
     ) -> Result<BackupArtifact, StoreError> {
         validate_v12_upgrade_source(source.as_ref())?;
+        let source_connection = Connection::open_with_flags(
+            source.as_ref(),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let source_logical_digest = v12_logical_state_digest(&source_connection)?;
         let destination = destination.as_ref();
         if destination.exists() {
             return Err(StoreError::Invariant(format!(
@@ -4833,6 +4892,15 @@ impl Store {
             )?;
             drop(target);
             validate_v12_upgrade_source(destination)?;
+            let copied = Connection::open_with_flags(
+                destination,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            if v12_logical_state_digest(&copied)? != source_logical_digest {
+                return Err(StoreError::Integrity(
+                    "verified v12 backup logical state differs from its source".into(),
+                ));
+            }
             Ok(BackupArtifact {
                 path: destination.to_path_buf(),
                 sha256: sha256_file(destination)?,
@@ -4893,6 +4961,7 @@ impl Store {
         let mut store = Self {
             connection,
             path: Some(path.to_path_buf()),
+            schema_mode: StoreSchemaMode::CurrentV13,
         };
         store.validate_v3_upgrade_source()?;
         {
@@ -5047,6 +5116,7 @@ impl Store {
         let mut store = Self {
             connection,
             path: Some(path.to_path_buf()),
+            schema_mode: StoreSchemaMode::CurrentV13,
         };
         validate_v4_upgrade_source_connection(&store.connection)?;
         {
@@ -5153,6 +5223,7 @@ impl Store {
         let mut store = Self {
             connection,
             path: Some(path.to_path_buf()),
+            schema_mode: StoreSchemaMode::CurrentV13,
         };
         let transaction = store.immediate_transaction()?;
         validate_v5_public_upgrade_source_connection(&transaction)?;
@@ -5172,22 +5243,22 @@ impl Store {
         }
         transaction.execute_batch("DROP TRIGGER immutable_schema_metadata_update; DROP TRIGGER immutable_schema_metadata_delete; ALTER TABLE schema_metadata RENAME TO schema_metadata_v5;")?;
         transaction.execute_batch(SCHEMA_METADATA_V12)?;
-        transaction.execute("INSERT INTO schema_metadata (singleton, product, schema_version, schema_artifact_digest, initialized_at) SELECT singleton, product, 12, ?1, initialized_at FROM schema_metadata_v5", [schema_artifact_digest()])?;
+        transaction.execute("INSERT INTO schema_metadata (singleton, product, schema_version, schema_artifact_digest, initialized_at) SELECT singleton, product, 12, ?1, initialized_at FROM schema_metadata_v5", [SCHEMA_V12_ARTIFACT_DIGEST])?;
         transaction.execute("DROP TABLE schema_metadata_v5", [])?;
         transaction.execute_batch(SCHEMA_METADATA_V12_TRIGGERS)?;
         transaction.execute_batch(SCHEMA_V5_TO_V12_LOCAL_CHECKS_NOTIFICATIONS)?;
-        transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        transaction.pragma_update(None, "user_version", 12)?;
         let mut committed = receipt.clone();
         committed.finished_at = now_utc();
         insert_upgrade_receipt(&transaction, &committed)?;
-        let expected = EXPECTED_SCHEMA_FINGERPRINT.as_ref().map_err(|error| {
+        let expected = EXPECTED_SCHEMA_V12_FINGERPRINT.as_ref().map_err(|error| {
             StoreError::Integrity(format!(
                 "compiled schema cannot be fingerprinted after migration: {error}"
             ))
         })?;
         if schema_fingerprint(&transaction)? != *expected {
             return Err(StoreError::Integrity(
-                "migrated v12 schema fingerprint differs from fresh v12".into(),
+                "migrated v12 schema fingerprint differs from pinned public v12".into(),
             ));
         }
         validate_stored_digests(&transaction)?;
@@ -5203,7 +5274,8 @@ impl Store {
         validate_status_sequence_lower_bound(&transaction)?;
         validate_projection_invariants(&transaction)?;
         transaction.commit()?;
-        store.validate()?;
+        store.schema_mode = StoreSchemaMode::LegacyUpgradeV12;
+        validate_v12_upgrade_source_connection(&store.connection)?;
         configure_connection(&store.connection, true)?;
         Ok(store)
     }
@@ -5233,32 +5305,44 @@ impl Store {
                 "v12-to-v13 backup must differ from source database".into(),
             ));
         }
+        validate_v12_upgrade_source(path)?;
+        validate_v12_upgrade_source(backup)?;
+        let source_read = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let backup_read = Connection::open_with_flags(
+            backup,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        if v12_logical_state_digest(&source_read)? != v12_logical_state_digest(&backup_read)? {
+            return Err(StoreError::Invariant(
+                "v12-to-v13 migration backup logical state differs from its source".into(),
+            ));
+        }
         let mut connection = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         configure_connection(&connection, false)?;
-        if pragma_i64(&connection, "user_version")? != 12
-            || pragma_i64(&connection, "application_id")? != APPLICATION_ID
-        {
-            return Err(StoreError::SchemaVersionMismatch {
-                found: pragma_i64(&connection, "user_version")?,
-                supported: 12,
-            });
-        }
-        let source_digest: String = connection.query_row(
-            "SELECT schema_artifact_digest FROM schema_metadata WHERE singleton = 1",
-            [],
-            |row| row.get(0),
-        )?;
-        if source_digest != SCHEMA_V12_ARTIFACT_DIGEST {
+        validate_v12_upgrade_source_connection(&connection)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if sha256_file(backup)? != receipt.backup_digest {
             return Err(StoreError::Invariant(
-                "v12-to-v13 source is not the pinned public schema-v12 artifact".into(),
+                "v12-to-v13 migration backup changed after preflight validation".into(),
             ));
         }
-        let transaction = connection.unchecked_transaction()?;
+        let locked_backup = Connection::open_with_flags(
+            backup,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        if v12_logical_state_digest(&transaction)? != v12_logical_state_digest(&locked_backup)? {
+            return Err(StoreError::Invariant(
+                "v12-to-v13 migration locked source differs from its verified backup".into(),
+            ));
+        }
         transaction.execute_batch("DROP TRIGGER immutable_schema_metadata_update; DROP TRIGGER immutable_schema_metadata_delete; ALTER TABLE schema_metadata RENAME TO schema_metadata_v12;")?;
-        transaction.execute_batch("CREATE TABLE schema_metadata (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), product TEXT NOT NULL CHECK (product = 'nq-ng'), schema_version INTEGER NOT NULL CHECK (schema_version = 13), schema_artifact_digest TEXT NOT NULL CHECK (length(schema_artifact_digest) = 71 AND substr(schema_artifact_digest, 1, 7) = 'sha256:'), initialized_at TEXT NOT NULL) STRICT;")?;
+        transaction.execute_batch(SCHEMA_METADATA_V13)?;
         transaction.execute("INSERT INTO schema_metadata (singleton, product, schema_version, schema_artifact_digest, initialized_at) SELECT singleton, product, 13, ?1, initialized_at FROM schema_metadata_v12", [schema_artifact_digest()])?;
         transaction.execute("DROP TABLE schema_metadata_v12", [])?;
         transaction.execute_batch(SCHEMA_METADATA_V5_TRIGGERS)?;
@@ -5269,6 +5353,7 @@ impl Store {
         let store = Self {
             connection,
             path: Some(path.to_path_buf()),
+            schema_mode: StoreSchemaMode::CurrentV13,
         };
         store.validate()?;
         configure_connection(&store.connection, true)?;
@@ -6554,6 +6639,13 @@ fn validate_v12_upgrade_source(path: &Path) -> Result<(), StoreError> {
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
+    validate_v12_upgrade_source_connection(&connection)
+}
+
+/// Validate the sole retained public v12 predecessor without treating it as a
+/// normal current-store opener. This deliberately excludes v13-only tables
+/// and invariants, which did not exist in the retained source.
+fn validate_v12_upgrade_source_connection(connection: &Connection) -> Result<(), StoreError> {
     if pragma_i64(&connection, "user_version")? != 12
         || pragma_i64(&connection, "application_id")? != APPLICATION_ID
     {
@@ -6572,10 +6664,48 @@ fn validate_v12_upgrade_source(path: &Path) -> Result<(), StoreError> {
             "v12-to-v13 source is not the pinned public schema-v12 artifact".into(),
         ));
     }
+    if sha256_digest(SCHEMA_V12.as_bytes()) != SCHEMA_V12_ARTIFACT_DIGEST {
+        return Err(StoreError::Integrity(
+            "compiled pinned schema-v12 artifact digest disagrees with its declared provenance"
+                .into(),
+        ));
+    }
     let quick: String = connection.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
     if quick != "ok" {
         return Err(StoreError::Integrity(quick));
     }
+    let foreign_key_failures: i64 =
+        connection.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })?;
+    if foreign_key_failures != 0 {
+        return Err(StoreError::Integrity(format!(
+            "{foreign_key_failures} foreign-key violations"
+        )));
+    }
+    let expected = EXPECTED_SCHEMA_V12_FINGERPRINT.as_ref().map_err(|error| {
+        StoreError::Integrity(format!(
+            "compiled pinned schema-v12 cannot be fingerprinted: {error}"
+        ))
+    })?;
+    let actual = schema_fingerprint(connection)?;
+    if &actual != expected {
+        return Err(StoreError::Integrity(format!(
+            "schema-v12 definition fingerprint {actual} differs from pinned public {expected}"
+        )));
+    }
+    validate_stored_digests(connection)?;
+    validate_upgrade_receipts(connection)?;
+    validate_all_admission_context_digests(connection)?;
+    validate_local_provider_admissions(connection)?;
+    validate_provider_intake_invariants(connection)?;
+    validate_refusal_invariants(connection)?;
+    validate_run_results(connection)?;
+    validate_evaluation_refusal_invariants(connection)?;
+    validate_diagnostic_artifact_invariants(connection)?;
+    validate_admitted_report_associations_connection(connection)?;
+    validate_status_sequence_lower_bound(connection)?;
+    validate_projection_invariants(connection)?;
     Ok(())
 }
 
@@ -8076,6 +8206,10 @@ fn v4_logical_state_digest(connection: &Connection) -> Result<String, StoreError
 
 fn v5_logical_state_digest(connection: &Connection) -> Result<String, StoreError> {
     logical_state_digest(connection, b"nq.schema_v5.logical_state.v1\0")
+}
+
+fn v12_logical_state_digest(connection: &Connection) -> Result<String, StoreError> {
+    logical_state_digest(connection, b"nq.schema_v12.logical_state.v1\0")
 }
 
 fn logical_state_digest(connection: &Connection, domain: &[u8]) -> Result<String, StoreError> {
@@ -16921,10 +17055,10 @@ mod tests {
     }
 
     fn write_empty_exact_v5(path: &Path) {
-        let v5_schema = SCHEMA
+        let v5_schema = SCHEMA_V12
             .split("-- Keep this fresh-store suffix exactly aligned with schema_v5_to_v12_local_checks_notifications.sql.")
             .next()
-            .expect("current schema has v5-to-v12 suffix")
+            .expect("pinned v12 schema has v5-to-v12 suffix")
             .replacen("PRAGMA user_version = 12;", "PRAGMA user_version = 5;", 1)
             .replacen("schema_version INTEGER NOT NULL CHECK (schema_version = 12)", "schema_version INTEGER NOT NULL CHECK (schema_version = 5)", 1);
         let connection = Connection::open(path).expect("open v5 fixture");
@@ -16953,6 +17087,37 @@ mod tests {
         }
     }
 
+    fn exact_v12_to_v13_receipt(backup: &BackupArtifact) -> UpgradeReceiptInput {
+        UpgradeReceiptInput {
+            receipt_id: "upgrade-v12-v13-local-successor".to_owned(),
+            from_schema_version: 12,
+            to_schema_version: 13,
+            migrations: document(json!(["schema_v12_to_v13_local_successor"])),
+            binary_digest: digest("migration-binary-v13"),
+            backup_digest: backup.sha256.clone(),
+            backup_location: backup.path.to_string_lossy().into_owned(),
+            started_at: TIME.to_owned(),
+            finished_at: "2026-07-16T12:00:02.000Z".to_owned(),
+            result: "migrated".to_owned(),
+            operator_identity: document(json!({"operator": "fixture"})),
+            verification: document(json!({
+                "integrity":"ok",
+                "source_schema_version":12,
+                "source_schema_artifact_digest":SCHEMA_V12_ARTIFACT_DIGEST,
+                "backup_reopened":true,
+                "historical_local_successor":"absent_not_synthesized"
+            })),
+        }
+    }
+
+    fn write_exact_v12_from_v5(path: &Path, backup_path: &Path) {
+        write_empty_exact_v5(path);
+        let backup = Store::backup_v5_verified(path, backup_path).expect("verified v5 backup");
+        let legacy = Store::upgrade_v5_to_v12(path, &exact_v5_to_v12_receipt(&backup))
+            .expect("exact v5 upgrades to v12");
+        legacy.validate().expect("legacy v12 validates");
+    }
+
     #[test]
     fn exact_public_v5_backup_and_direct_v12_upgrade_preserve_source() {
         let directory = tempdir().expect("temporary directory");
@@ -16961,7 +17126,7 @@ mod tests {
         write_empty_exact_v5(&source);
         let before = sha256_file(&source).expect("source digest");
         let backup = Store::backup_v5_verified(&source, &backup_path).expect("verified v5 backup");
-        let migrated = Store::upgrade_v5_to_v12(&source, &exact_v5_to_v12_receipt(&backup))
+        let mut migrated = Store::upgrade_v5_to_v12(&source, &exact_v5_to_v12_receipt(&backup))
             .expect("direct public upgrade");
         assert_eq!(
             sha256_file(&backup_path).expect("backup remains"),
@@ -16970,6 +17135,56 @@ mod tests {
         assert_ne!(sha256_file(&source).expect("source migrated"), before);
         migrated.validate().expect("v12 validates");
         assert_eq!(Store::database_schema_version(&source).unwrap(), 12);
+        assert!(matches!(
+            migrated.immediate_transaction(),
+            Err(StoreError::SchemaVersionMismatch {
+                found: 12,
+                supported: SCHEMA_VERSION
+            })
+        ));
+    }
+
+    #[test]
+    fn exact_v12_backup_and_direct_v13_upgrade_preserve_logical_source() {
+        let directory = tempdir().expect("temporary directory");
+        let source = directory.path().join("source-v12.db");
+        let v5_backup = directory.path().join("backup-v5.db");
+        let v12_backup = directory.path().join("backup-v12.db");
+        write_exact_v12_from_v5(&source, &v5_backup);
+        let backup = Store::backup_v12_verified(&source, &v12_backup).expect("verified v12 backup");
+        let migrated = Store::upgrade_v12_to_v13(&source, &exact_v12_to_v13_receipt(&backup))
+            .expect("exact v12 upgrades to v13");
+        migrated.validate().expect("current v13 validates");
+        assert_eq!(Store::database_schema_version(&source).unwrap(), 13);
+        assert_eq!(Store::database_schema_version(&v12_backup).unwrap(), 12);
+        assert_eq!(sha256_file(&v12_backup).unwrap(), backup.sha256);
+    }
+
+    #[test]
+    fn v12_to_v13_refuses_a_different_valid_v12_backup() {
+        let directory = tempdir().expect("temporary directory");
+        let source = directory.path().join("source-v12.db");
+        let source_v5_backup = directory.path().join("source-v5-backup.db");
+        let unrelated = directory.path().join("unrelated-v12.db");
+        let unrelated_v5_backup = directory.path().join("unrelated-v5-backup.db");
+        write_exact_v12_from_v5(&source, &source_v5_backup);
+        write_exact_v12_from_v5(&unrelated, &unrelated_v5_backup);
+        Connection::open(&unrelated)
+            .unwrap()
+            .execute(
+                "INSERT INTO genesis_records (genesis_id, legacy_manifest_digest, created_at, detail_json) VALUES ('unrelated-v12-genesis', NULL, ?1, ?2)",
+                params![TIME, document(json!({"fixture":"unrelated-v12"})).as_bytes()],
+            )
+            .unwrap();
+        let unrelated_backup = BackupArtifact {
+            path: unrelated.clone(),
+            sha256: sha256_file(&unrelated).unwrap(),
+            size_bytes: std::fs::metadata(&unrelated).unwrap().len(),
+        };
+        assert!(matches!(
+            Store::upgrade_v12_to_v13(&source, &exact_v12_to_v13_receipt(&unrelated_backup)),
+            Err(StoreError::Invariant(message)) if message.contains("logical state differs")
+        ));
     }
 
     #[test]
