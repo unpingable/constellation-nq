@@ -9,8 +9,8 @@ profile. A successful query does not establish legitimate reliance on its source
 
 ## Run the disposable example
 
-Public prerequisites: this repository, Rust1.94.0/Cargo, a C compiler for bundled
-SQLite, Python3.10 or newer, and Linux. No private source, credentials or background
+Public prerequisites: this repository, Rust 1.94.0/Cargo, a C compiler for bundled
+SQLite, Python 3.10 or newer, and Linux. No private source, credentials or background
 services are required. Rust dependency downloads use the committed Cargo.lock.
 
 ```sh
@@ -23,11 +23,27 @@ python3 examples/saved-check-local.py \
   --root /tmp/nq-saved-check-cli-001-example
 ```
 
-The root must not already exist. The example creates only its own NQ store and
+The root must not already exist. Use the `/tmp` location shown, or a parent
+directory owned by the operator and protected from replacement by other users
+or groups (for example, a newly created mode `0700` work directory). A
+group-writable checkout or custom container mount may be refused by NQ's
+helper-runtime directory checks. Do not relax that check or change permissions
+on someone else's directory to make the example pass.
+
+The example creates only its own NQ store and
 SQLite source, then checks exact-install replay, result inspection, duplicate
 evaluation after source change/removal, stale/future observation refusal, and
 maintenance coverage/overrun. Success prints `"result": "qualified"` with the
 retained transcript location. No message, provider or production action occurs.
+
+Verified public source: `ad7dd887b52269c6e8c9dd7ffd10829861de4596`, Linux x86-64,
+Rust/Cargo 1.94.0. An anonymous HTTPS clone built with an empty target directory
+and public registry dependencies; the example then passed in a separate
+network-isolated filesystem view with no private repository or home-directory
+access. The first example invocation refused a group-writable parent before
+initialization; a fresh protected directory passed using that same built
+executable. This qualifies the local check and its failure/replay cases, not
+a recurring or multi-component profile.
 
 The central caller boundary uses actual supported commands:
 
@@ -79,8 +95,8 @@ under the same occurrence ID refuses. A claim without a terminal result remains
 indeterminate; inspect it before considering another occurrence. No automatic
 claim reclamation, retry or inferred success exists.
 
-Limits include1024rows,256KiB aggregate returned values and per-value limits,
-a2-second SQLite progress deadline and bounded lock waits. These are not a hard
+Limits include 1,024 rows, 256 KiB aggregate returned values and per-value limits,
+a 2-second SQLite progress deadline and bounded lock waits. These are not a hard
 wall-clock guarantee for a stalled filesystem; use bounded process supervision
 where a whole-command deadline is necessary.
 
@@ -103,7 +119,7 @@ observation references. Stop the invoking scheduler before an upgrade/backup and
 use [NQ's backup, doctor and explicit upgrade procedures](OPERATIONS.md), not a
 raw copy omitting SQLite WAL state. The public v5→v12 upgrade verifies a separate
 backup and adds empty custody tables; it does not synthesize historical checks.
-Versions6–11 belong to a separate development schema line and are not accepted
+Versions 6–11 belong to a separate development schema line and are not accepted
 by this migration. They must retain their matching verifier and recovery tools;
 changing a version number is not migration. Downgrade and in-place rollback are
 not advertised.
