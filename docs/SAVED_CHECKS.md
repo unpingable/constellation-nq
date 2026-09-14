@@ -121,6 +121,14 @@ invalid retained result refuses explicitly. A claimed evaluation remains
 indeterminate. A refused source or SQL evaluation remains a refusal rather than
 a false predicate result.
 
+For a retained `passed` or `failed` result, the projection also requires and
+returns its `read_attempt` time as retained local-read evidence. That evidence
+is distinct from the caller's source-observation assertion and does not establish
+upstream currentness. Missing or malformed local-read evidence refuses. If `--at`
+precedes the retained read attempt, the projection is `indeterminate` with
+`read_attempt.state: not_yet_observed`, rather than presenting a later result as
+available history.
+
 The projection also returns a maintenance annotation: `covered`, `overrun`,
 `uncovered`, or `unavailable`. Coverage never changes a failed result, hides a
 refusal, grants permission, or suppresses attention. The mapping is caller-owned;
@@ -129,6 +137,11 @@ needs attention. The command makes no source-target reads. Current Store helpers
 do not expose one explicit cross-table SQLite read snapshot, so concurrent
 writes can make the retained evaluation and maintenance view a closely timed,
 but not atomic, read view.
+
+For a historical projection, declarations retained after `--at` are excluded.
+That prevents a later record from retrospectively covering or overrunning an
+earlier condition. Invalid retained declaration material yields `unavailable`,
+not `uncovered`.
 
 ## Maintenance and lifecycle
 

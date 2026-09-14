@@ -849,6 +849,17 @@ fn saved_check_condition_value(
             "retained_binding_mismatch",
         ));
     }
+    let result_state = retained_result_state(&event.outcome);
+    let read_attempt = match retained_read_attempt(&detail, result_state, at) {
+        Ok(read_attempt) => read_attempt,
+        Err(_) => {
+            return Ok(saved_check_condition_refusal(
+                evaluation_id,
+                mapping,
+                "retained_read_attempt_invalid",
+            ));
+        }
+    };
     let declarations: Result<Vec<_>> = store
         .maintenance_declarations()?
         .into_iter()
@@ -909,16 +920,64 @@ fn saved_check_condition_value(
             },
         },
     };
-    let result_state = retained_result_state(&event.outcome);
+    let projection_state = if read_attempt.state == "not_yet_observed" {
+        "indeterminate"
+    } else {
+        projection_state(result_state)
+    };
     Ok(json!({
-        "schema":"nq.saved-check-condition/v1", "projection_state": projection_state(result_state),
+    "schema":"nq.saved-check-condition/v1", "projection_state": projection_state,
         "evaluation_id":evaluation_id, "definition_identity":{"id":event.definition_id,"reference":event.stable_reference,"digest":definition_digest.as_str(),"installed_at":event.installed_at},
         "original_result":{"state":result_state,"outcome":event.outcome,"detail":detail},
         "source_assertion":{"identity":binding.source_identity,"observed_at":binding.source_assertion,"currentness_seconds":binding.currentness_seconds,"state":currentness_state(binding.observed_at, at, binding.currentness_seconds)},
-        "maintenance":maintenance, "caller_mapping":mapping,
-        "authority":"none", "automatic_nightshift_integration":false,
-        "limitations":["Projection does not reread the source","Maintenance annotates and does not alter the original result","A retained result does not establish current conditions or attention authority","The current Store read helpers do not expose one explicit cross-table read snapshot"]
+        "read_attempt":{"state":read_attempt.state,"at":read_attempt.at,"scope":"retained_local_read_evidence"},
+    "maintenance":maintenance, "caller_mapping":mapping,
+    "authority":"none", "automatic_nightshift_integration":false,
+        "limitations":["Projection does not reread the source","Maintenance annotates and does not alter the original result","Retained local read evidence does not establish upstream current conditions","A retained result does not establish attention authority","The current Store read helpers do not expose one explicit cross-table read snapshot"]
     }))
+}
+
+struct RetainedReadAttempt<'a> {
+    state: &'static str,
+    at: Option<&'a str>,
+}
+
+fn retained_read_attempt<'a>(
+    detail: &'a Value,
+    result_state: &str,
+    projection_at: chrono::DateTime<chrono::Utc>,
+) -> Result<RetainedReadAttempt<'a>> {
+    match result_state {
+        "passed" | "failed" => {
+            let at = detail
+                .get("read_attempted_at")
+                .and_then(Value::as_str)
+                .context("retained terminal result has no read attempt time")?;
+            let read_at = chrono::DateTime::parse_from_rfc3339(at)
+                .context("retained terminal read attempt time is not RFC3339")?
+                .with_timezone(&chrono::Utc);
+            Ok(RetainedReadAttempt {
+                state: if projection_at < read_at {
+                    "not_yet_observed"
+                } else {
+                    "recorded"
+                },
+                at: Some(at),
+            })
+        }
+        "indeterminate" => Ok(RetainedReadAttempt {
+            state: "indeterminate",
+            at: None,
+        }),
+        "refused" => Ok(RetainedReadAttempt {
+            state: "not_established",
+            at: None,
+        }),
+        _ => Ok(RetainedReadAttempt {
+            state: "unavailable",
+            at: None,
+        }),
+    }
 }
 
 struct RetainedSavedCheckBinding<'a> {
@@ -2720,6 +2779,7 @@ helper_runtime_dir = "/run/nq/helpers"
         malformed_terminal_binding: bool,
         declare_maintenance: bool,
         expired_maintenance: bool,
+        read_attempt_at: Option<&str>,
     ) -> Store {
         let mut store = Store::initialize_in_memory().expect("initialize Store");
         let definition = SavedCheckDefinition {
@@ -2770,12 +2830,15 @@ helper_runtime_dir = "/run/nq/helpers"
                 .expect("claim evaluation")
         );
         if let Some(outcome) = terminal_outcome {
-            let detail = CanonicalDocument::from_serializable(&json!({
+            let mut detail = json!({
                 "binding":binding,
-                "read_attempted_at":"2026-09-14T12:00:02Z",
                 "refusal_reason":null
-            }))
-            .expect("canonical terminal event");
+            });
+            if let Some(read_attempt_at) = read_attempt_at {
+                detail["read_attempted_at"] = Value::String(read_attempt_at.into());
+            }
+            let detail =
+                CanonicalDocument::from_serializable(&detail).expect("canonical terminal event");
             store
                 .append_saved_check_event(&SavedCheckEventInput {
                     definition_id: "definition-001".into(),
@@ -3394,7 +3457,13 @@ helper_runtime_dir = "{}"
 
     #[test]
     fn saved_check_condition_reads_retained_store_material_without_a_source_target() {
-        let store = condition_test_store(Some("failed"), false, true, false);
+        let store = condition_test_store(
+            Some("failed"),
+            false,
+            true,
+            false,
+            Some("2026-09-14T12:00:02Z"),
+        );
         let at = chrono::DateTime::parse_from_rfc3339("2026-09-14T12:00:30Z")
             .expect("RFC3339")
             .with_timezone(&chrono::Utc);
@@ -3415,11 +3484,82 @@ helper_runtime_dir = "{}"
         assert_eq!(value["maintenance"]["state"], "covered");
         assert_eq!(value["definition_identity"]["id"], "definition-001");
         assert_eq!(value["source_assertion"]["state"], "fresh");
+        assert_eq!(value["read_attempt"]["state"], "recorded");
+    }
+
+    #[test]
+    fn saved_check_condition_refuses_missing_read_evidence_and_marks_future_projection() {
+        let missing_read = condition_test_store(Some("passed"), false, false, false, None);
+        let at = chrono::DateTime::parse_from_rfc3339("2026-09-14T12:00:30Z")
+            .expect("RFC3339")
+            .with_timezone(&chrono::Utc);
+        let missing_read = saved_check_condition_value(
+            &missing_read,
+            "evaluation-001",
+            "queue",
+            "backlog",
+            "local",
+            "2026-09-14T12:00:30Z",
+            at,
+        )
+        .expect("projection refusal");
+        assert_eq!(missing_read["projection_state"], "refused");
+        assert_eq!(
+            missing_read["refusal_reason"],
+            "retained_read_attempt_invalid"
+        );
+
+        let malformed_read =
+            condition_test_store(Some("passed"), false, false, false, Some("not-a-time"));
+        let malformed_read = saved_check_condition_value(
+            &malformed_read,
+            "evaluation-001",
+            "queue",
+            "backlog",
+            "local",
+            "2026-09-14T12:00:30Z",
+            at,
+        )
+        .expect("malformed-read projection refusal");
+        assert_eq!(malformed_read["projection_state"], "refused");
+        assert_eq!(
+            malformed_read["refusal_reason"],
+            "retained_read_attempt_invalid"
+        );
+
+        let future = condition_test_store(
+            Some("passed"),
+            false,
+            false,
+            false,
+            Some("2026-09-14T12:00:02Z"),
+        );
+        let before_read = chrono::DateTime::parse_from_rfc3339("2026-09-14T12:00:01Z")
+            .expect("RFC3339")
+            .with_timezone(&chrono::Utc);
+        let future = saved_check_condition_value(
+            &future,
+            "evaluation-001",
+            "queue",
+            "backlog",
+            "local",
+            "2026-09-14T12:00:01Z",
+            before_read,
+        )
+        .expect("future projection");
+        assert_eq!(future["projection_state"], "indeterminate");
+        assert_eq!(future["read_attempt"]["state"], "not_yet_observed");
     }
 
     #[test]
     fn saved_check_condition_returns_store_backed_overrun_without_rewriting_failure() {
-        let store = condition_test_store(Some("failed"), false, true, true);
+        let store = condition_test_store(
+            Some("failed"),
+            false,
+            true,
+            true,
+            Some("2026-09-14T12:00:02Z"),
+        );
         let at = chrono::DateTime::parse_from_rfc3339("2026-09-14T12:00:30Z")
             .expect("RFC3339")
             .with_timezone(&chrono::Utc);
@@ -3463,7 +3603,7 @@ helper_runtime_dir = "{}"
         assert_eq!(missing["projection_state"], "refused");
         assert_eq!(missing["refusal_reason"], "evaluation_missing");
 
-        let claimed = condition_test_store(None, false, false, false);
+        let claimed = condition_test_store(None, false, false, false, None);
         let claimed = saved_check_condition_value(
             &claimed,
             "evaluation-001",
@@ -3476,8 +3616,15 @@ helper_runtime_dir = "{}"
         .expect("claimed projection");
         assert_eq!(claimed["projection_state"], "indeterminate");
         assert_eq!(claimed["original_result"]["state"], "indeterminate");
+        assert_eq!(claimed["read_attempt"]["state"], "indeterminate");
 
-        let invalid = condition_test_store(Some("failed"), true, false, false);
+        let invalid = condition_test_store(
+            Some("failed"),
+            true,
+            false,
+            false,
+            Some("2026-09-14T12:00:02Z"),
+        );
         let invalid = saved_check_condition_value(
             &invalid,
             "evaluation-001",

@@ -121,6 +121,12 @@ pub fn maintenance_annotation<'a>(
         // Invalid recorded material is an unavailable annotation, not proof
         // that the condition has no maintenance coverage.
         d.validate()?;
+        // A projection at `now` cannot rely on a declaration retained later.
+        // It may still describe a planned future window when that declaration
+        // was already recorded at the projected time.
+        if declared_at > now {
+            continue;
+        }
         if d.component != component
             || d.kind != kind
             || !d
@@ -523,6 +529,38 @@ mod tests {
             .unwrap()
             .map(|(_, a)| a),
             Some(MaintenanceAnnotation::Overrun)
+        );
+    }
+
+    #[test]
+    fn maintenance_recorded_after_projection_time_does_not_annotate_history() {
+        let declaration = MaintenanceDeclaration {
+            schema: MaintenanceSchema::V1,
+            maintenance_id: "future-record".into(),
+            declared_by: None,
+            start_at: "2026-09-14T00:00:00Z".into(),
+            end_at: "2026-09-14T01:00:00Z".into(),
+            component: "component".into(),
+            kind: "capacity".into(),
+            subject: None,
+            reason: None,
+        };
+        let at = DateTime::parse_from_rfc3339("2026-09-14T00:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let retained_later = DateTime::parse_from_rfc3339("2026-09-14T00:31:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            maintenance_annotation(
+                [(&declaration, retained_later)],
+                "component",
+                "capacity",
+                "subject",
+                at,
+            )
+            .unwrap(),
+            None
         );
     }
     #[test]
