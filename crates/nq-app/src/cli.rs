@@ -827,7 +827,7 @@ fn saved_check_condition_value(
         }
     };
     let definition: SavedCheckDefinition =
-        match serde_json::from_slice(definition_document.as_bytes()) {
+        match serde_json::from_slice::<SavedCheckDefinition>(definition_document.as_bytes()) {
             Ok(definition) if definition.validate().is_ok() => definition,
             _ => {
                 return Ok(saved_check_condition_refusal(
