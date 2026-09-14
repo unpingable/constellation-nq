@@ -8,12 +8,25 @@ rollover. It does not start a monitor, repeat a check or deliver a message.
 
 ## Prerequisites and ownership
 
-The exercised runtime is public commit
-`e259852ed58b8c0bf65a629b3c494afba28d9ce9`, Rust 1.94.0, Linux x86_64.
+The historical-read runtime with the additional whole-history validators is
+`7e27f25ada675ed16a90fe11f170b9970bea51a0`, Rust 1.94.0, Linux x86_64.
+Build it from the public source in a separate checkout:
+
+```sh
+git clone https://github.com/unpingable/constellation-nq.git nq-archive-reader
+cd nq-archive-reader
+git checkout --detach 7e27f25ada675ed16a90fe11f170b9970bea51a0
+cargo build --locked -p nq-app --bin nq
+```
+
 The [objective saved-check profile](https://unpingable.com/constellation/releases/0.1.0-alpha.3/guide.html)
-provides a disposable populated store and matching component pins. Its immutable
-release did not qualify archive inspection; this guide records an additional
-check of the same NQ runtime, not a replacement release manifest.
+provides a disposable populated store at its unchanged NQ pin
+`e259852ed58b8c0bf65a629b3c494afba28d9ce9`. This guide qualifies the separate
+archiver against a copy of that store. It does not upgrade the profile's writer,
+replace its manifest, or qualify a classic-NQ database migration. The older
+runtime also passed the five selected reads below, but lacks the additional
+whole-history validators. Use the exact binary embedded in each archive;
+installing a newer binary does not retrofit an older archive's verifier.
 
 Use a configuration and store you own. For a stable comparison, stop new
 submissions and reconcile unfinished work first. An archive is not evidence that
@@ -37,9 +50,17 @@ ARCHIVE=/absolute/path/to/new-archive
 
 Expect `nq.cold_archive.v1`, `source_openable: true` from creation, and
 `integrity_verified: true` plus `historical_database_verified: true` from
-verification. Check the actual exit code and structured result. An incompatible
+verification. At the new archiver pin also require these fields to be `true`:
+
+- `historical_saved_check_semantics_verified`
+- `historical_maintenance_semantics_verified`
+- `historical_notification_delivery_semantics_verified`
+
+Their corresponding counts describe records actually traversed, not successful
+checks or delivered messages. Check the actual exit code and structured result. An incompatible
 store may be preserved with `source_openable: false`; that is custody of bytes,
-not verified historical meaning. A failed or uncertain creation must be inspected
+not verified historical meaning; the typed verification fields remain `null`.
+A failed or uncertain creation must be inspected
 at its exact destination before considering another command.
 
 Verification does not require the live configuration. Use the archived binary;
@@ -108,11 +129,21 @@ The source copy's sidecar bytes were not compared. The sealed archive uses DELET
 journal mode and required no write access. Do not generalize the archive's
 read-only mount behavior to an arbitrary live WAL database.
 
-`archive-verify` checks the sealed bytes, database schema and its implemented
-historical validators. At this pin it does **not** exhaustively traverse typed
-saved-check, maintenance or notification histories. The five reader comparisons
-above exercise specific records; they are not a substitute for that missing
-whole-history semantic check. Archive-based rollover, cross-store lookup,
+`archive-verify` checks sealed bytes, database schema and historical validators.
+At the new pin it also traverses saved-check definitions and event histories,
+maintenance declarations, and notification intents and delivery events in bounded
+pages. It checks retained bindings, event order and content hashes using the
+existing contracts, without rereading source targets or contacting destinations.
+The populated example verified one definition, five saved-check events, one
+maintenance declaration, one notification intent and two delivery events.
+Focused tests additionally cover unfinished claims, malformed bindings, changed
+definitions, malformed maintenance, notification content/state disagreement and
+corruption beyond the first page. These checks preserve recorded uncertainty;
+they do not turn a pending delivery into a sent message or renew an expired
+maintenance declaration. Notification event details retain their existing
+canonical-JSON contract, not a newly inferred transport guarantee.
+
+Archive-based rollover, cross-store lookup,
 automatic disposal, restoration and rollback are not established by this check.
 
 Keep the archive and matching inspection configuration while they are needed for

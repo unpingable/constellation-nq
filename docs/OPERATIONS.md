@@ -637,8 +637,10 @@ For the saved-check/maintenance/notification read path, see
 [Inspect saved checks in a sealed archive](HISTORICAL_READS.md). Use a separate
 external inspection configuration: the sealed configuration retains its original
 database path. The exercised archive reads do not establish retention rollover.
-The archive verifier's exhaustive historical validators listed below do not yet
-include typed traversal of saved-check, maintenance or notification histories.
+The separate archiver pin in that guide adds bounded whole-history validation of
+saved checks, maintenance declarations and notification delivery records. Older
+archives keep their original verifier and validation scope; no release pin or
+archived binary is replaced.
 
 Create a cold archive at a new destination, then verify it with the exact
 preserved verifier:

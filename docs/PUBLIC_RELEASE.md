@@ -22,6 +22,12 @@ the Nightshift saved-check caller on Linux. It does not change ordinary named
 configuration handling. Qualification of the multi-component profiles above is
 separate from that interface's component tests.
 
+The [historical-read guide](HISTORICAL_READS.md) separately pins an archiver with
+typed saved-check, maintenance and notification history validation. It was
+exercised against a copy of the saved-check profile's populated store. This is
+not a new suite release, writer upgrade, classic-store migration or retention
+rollover qualification.
+
 ## Release pin
 
 The frozen public source tag `constellation-public-source-20260912` resolves to
