@@ -303,6 +303,7 @@ fn registry_contains_the_two_generic_operator_beta_profiles() {
             ("nq.host", 1),
             ("nq.systemd_unit", 1),
             ("nq.http_endpoint", 1),
+            ("nq.synthetic_cache_executor_result", 1),
         ]
     );
 }
