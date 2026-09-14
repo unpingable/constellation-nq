@@ -17,9 +17,9 @@ use nq_protocol::{Sha256Digest, semantic_digest};
 use nq_store::{
     CanonicalDocument, DiagnosticArtifactByteState, DiagnosticArtifactImportDisposition,
     DiagnosticArtifactImportInput, DiagnosticArtifactLookup, DiagnosticArtifactOrigin,
-    DiagnosticArtifactSchemaSupport, MAX_PUBLIC_QUERY_ROWS, MAX_STORED_JSON_BYTES,
-    MaintenanceDeclarationInput, SavedCheckDefinitionInput, SavedCheckEventInput, Store,
-    UpgradeReceiptInput,
+    DiagnosticArtifactSchemaSupport, LegacyReferenceInput, MAX_PUBLIC_QUERY_ROWS,
+    MAX_STORED_JSON_BYTES, MaintenanceDeclarationInput, SavedCheckDefinitionInput,
+    SavedCheckEventInput, Store, UpgradeReceiptInput,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -494,6 +494,16 @@ pub enum MaintenanceCommand {
     Declare {
         #[arg(long)]
         declaration: PathBuf,
+    },
+    /// Carry one still-active declaration from a separately verified archive
+    /// into this initialized successor store under a new custody identity.
+    CarryFromArchive {
+        #[arg(long)]
+        archive: PathBuf,
+        #[arg(long)]
+        source_maintenance_id: String,
+        #[arg(long)]
+        new_maintenance_id: String,
     },
     List,
     /// Annotate an explicitly supplied condition; does not detect or clear it.
@@ -1180,6 +1190,83 @@ fn maintenance_command(
             })?;
             print_value(
                 &json!({"result":"declared","maintenance_id":declaration.maintenance_id,"declaration_digest":digest}),
+                json_output,
+            )
+        }
+        MaintenanceCommand::CarryFromArchive {
+            archive,
+            source_maintenance_id,
+            new_maintenance_id,
+        } => {
+            let verified = crate::archive::verify_archive(&archive)?;
+            if !verified.integrity_verified || verified.historical_database_verified != Some(true) {
+                bail!("maintenance carry requires a verified openable current-schema archive");
+            }
+            let source = Store::open_immutable(archive.join("db/nq.db"))?;
+            let record = source
+                .maintenance_declaration(&source_maintenance_id)?
+                .with_context(|| {
+                    format!("archive lacks maintenance declaration {source_maintenance_id}")
+                })?;
+            let source_document = CanonicalDocument::from_canonical_bytes(record.declaration_json)?;
+            if source_document.digest() != record.declaration_digest {
+                bail!("archive maintenance declaration digest differs from canonical bytes");
+            }
+            let source_declaration: MaintenanceDeclaration =
+                serde_json::from_slice(source_document.as_bytes())?;
+            source_declaration.validate()?;
+            if source_declaration.maintenance_id != source_maintenance_id {
+                bail!("archive maintenance declaration ID differs from its typed material");
+            }
+            let now = chrono::Utc::now();
+            let declared_at = chrono::DateTime::parse_from_rfc3339(&record.declared_at)?
+                .with_timezone(&chrono::Utc);
+            let start = chrono::DateTime::parse_from_rfc3339(&source_declaration.start_at)?
+                .with_timezone(&chrono::Utc);
+            let end = chrono::DateTime::parse_from_rfc3339(&source_declaration.end_at)?
+                .with_timezone(&chrono::Utc);
+            if declared_at > now || start > now || now >= end {
+                bail!(
+                    "archive maintenance declaration is not currently active and cannot be carried"
+                );
+            }
+            let mut carried = source_declaration.clone();
+            carried.maintenance_id = new_maintenance_id.clone();
+            carried.validate()?;
+            let carried_document = CanonicalDocument::from_serializable(&carried)?;
+            let carried_digest = carried_document.digest().to_owned();
+            let mut destination = Store::open(&config.database_path)?;
+            let genesis_id = destination.sole_genesis_id()?;
+            let lineage_id = format!("rollover-maintenance-{new_maintenance_id}");
+            let lineage = CanonicalDocument::from_serializable(&json!({
+                "schema":"nq.rollover_maintenance_carry.v1",
+                "source_archive":archive,
+                "source_maintenance_id":source_maintenance_id,
+                "source_declaration_digest":record.declaration_digest,
+                "successor_maintenance_id":new_maintenance_id,
+                "successor_declaration_digest":carried_digest,
+                "preserved_fields":["start_at","end_at","component","kind","subject","declared_by","reason"]
+            }))?;
+            let inserted = destination.carry_maintenance_with_legacy_reference(
+                &MaintenanceDeclarationInput {
+                    maintenance_id: carried.maintenance_id.clone(),
+                    declaration_digest: carried_digest.clone(),
+                    declaration: carried_document,
+                    declared_at: now.to_rfc3339(),
+                },
+                &LegacyReferenceInput {
+                    legacy_reference_id: lineage_id.clone(),
+                    genesis_id,
+                    reference_uri: format!(
+                        "legacy-nq://archive/maintenance/{source_maintenance_id}/{new_maintenance_id}"
+                    ),
+                    artifact_digest: Some(record.declaration_digest.clone()),
+                    detail: lineage,
+                    created_at: now.to_rfc3339(),
+                },
+            )?;
+            print_value(
+                &json!({"result":"carried","inserted":inserted,"source_maintenance_id":source_maintenance_id,"source_declaration_digest":record.declaration_digest,"maintenance_id":carried.maintenance_id,"declaration_digest":carried_digest,"lineage_reference_id":lineage_id,"preserved_window":{"start_at":carried.start_at,"end_at":carried.end_at},"grants_authority":false}),
                 json_output,
             )
         }
@@ -3079,6 +3166,40 @@ helper_runtime_dir = "/run/nq/helpers"
     fn command_tree_exposes_required_operator_workflows() {
         use clap::CommandFactory;
         Nq::command().debug_assert();
+    }
+
+    #[test]
+    fn maintenance_archive_carry_requires_exact_source_and_new_identity() {
+        let parsed = Nq::try_parse_from([
+            "nq",
+            "maintenance",
+            "carry-from-archive",
+            "--archive",
+            "/sealed/archive",
+            "--source-maintenance-id",
+            "source-maintenance",
+            "--new-maintenance-id",
+            "successor-maintenance",
+        ])
+        .expect("exact archive carry parses");
+        assert!(matches!(
+            parsed.command,
+            Command::Maintenance {
+                command: MaintenanceCommand::CarryFromArchive { .. }
+            }
+        ));
+        assert!(
+            Nq::try_parse_from([
+                "nq",
+                "maintenance",
+                "carry-from-archive",
+                "--archive",
+                "/sealed/archive",
+                "--source-maintenance-id",
+                "source-maintenance",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

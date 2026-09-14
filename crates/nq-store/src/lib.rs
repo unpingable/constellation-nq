@@ -6375,6 +6375,72 @@ impl Store {
         Ok(())
     }
 
+    /// Atomically retain one successor maintenance declaration and its
+    /// immutable reference to verified archive custody.  This narrow pairing
+    /// prevents a new active declaration from being left without its required
+    /// rollover lineage receipt.
+    pub fn carry_maintenance_with_legacy_reference(
+        &mut self,
+        declaration: &MaintenanceDeclarationInput,
+        reference: &LegacyReferenceInput,
+    ) -> Result<bool, StoreError> {
+        validate_bounded_identity("maintenance_id", &declaration.maintenance_id)?;
+        validate_bounded_identity("legacy_reference_id", &reference.legacy_reference_id)?;
+        validate_digest(
+            "maintenance declaration_digest",
+            &declaration.declaration_digest,
+        )?;
+        if let Some(digest) = &reference.artifact_digest {
+            validate_digest("artifact_digest", digest)?;
+        }
+        let transaction = self.immediate_transaction()?;
+        let existing: Option<(String, Vec<u8>)> = transaction
+            .query_row(
+                "SELECT declaration_digest, declaration_json FROM maintenance_declarations WHERE maintenance_id = ?1",
+                [&declaration.maintenance_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((digest, bytes)) = existing {
+            if digest != declaration.declaration_digest
+                || bytes != declaration.declaration.as_bytes()
+            {
+                return Err(StoreError::Invariant(
+                    "maintenance carry target is already bound to different material".into(),
+                ));
+            }
+            let stored: Option<(String, String, Option<String>, Vec<u8>)> = transaction.query_row(
+                "SELECT genesis_id, reference_uri, artifact_digest, detail_json FROM legacy_references WHERE legacy_reference_id = ?1",
+                [&reference.legacy_reference_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            ).optional()?;
+            if stored
+                == Some((
+                    reference.genesis_id.clone(),
+                    reference.reference_uri.clone(),
+                    reference.artifact_digest.clone(),
+                    reference.detail.as_bytes().to_vec(),
+                ))
+            {
+                transaction.commit()?;
+                return Ok(false);
+            }
+            return Err(StoreError::Invariant(
+                "maintenance carry target lacks its exact lineage receipt".into(),
+            ));
+        }
+        transaction.execute(
+            "INSERT INTO maintenance_declarations (maintenance_id, declaration_digest, declaration_json, declared_at) VALUES (?1, ?2, ?3, ?4)",
+            params![declaration.maintenance_id, declaration.declaration_digest, declaration.declaration.as_bytes(), declaration.declared_at],
+        )?;
+        transaction.execute(
+            "INSERT INTO legacy_references (legacy_reference_id, genesis_id, reference_uri, artifact_digest, detail_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![reference.legacy_reference_id, reference.genesis_id, reference.reference_uri, reference.artifact_digest, reference.detail.as_bytes(), reference.created_at],
+        )?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
     pub fn saved_check_definition(
         &self,
         reference: &str,
@@ -17401,6 +17467,53 @@ mod tests {
         assert!(
             store
                 .maintenance_declarations_bounded(1, Some(TIME), None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn maintenance_carry_pairs_new_declaration_with_exact_lineage_idempotently() {
+        let mut store = Store::initialize_in_memory().expect("store");
+        let declaration = document(json!({
+            "schema":"nq.maintenance-declaration/v1",
+            "maintenance_id":"successor-maintenance",
+            "component":"fixture",
+            "kind":"fixture",
+            "subject":"fixture",
+            "declared_by":"fixture",
+            "reason":"carry",
+            "start_at":"2026-07-16T12:00:00Z",
+            "end_at":"2026-07-16T12:05:00Z"
+        }));
+        let input = MaintenanceDeclarationInput {
+            maintenance_id: "successor-maintenance".into(),
+            declaration_digest: declaration.digest().to_owned(),
+            declaration,
+            declared_at: TIME.into(),
+        };
+        let reference = LegacyReferenceInput {
+            legacy_reference_id: "rollover-maintenance-successor".into(),
+            genesis_id: store.sole_genesis_id().expect("genesis"),
+            reference_uri: "legacy-nq://archive/maintenance/source-maintenance".into(),
+            artifact_digest: Some(digest("source-maintenance")),
+            detail: document(json!({"schema":"nq.rollover_maintenance_carry.v1"})),
+            created_at: TIME.into(),
+        };
+        assert!(
+            store
+                .carry_maintenance_with_legacy_reference(&input, &reference)
+                .expect("first carry")
+        );
+        assert!(
+            !store
+                .carry_maintenance_with_legacy_reference(&input, &reference)
+                .expect("exact replay")
+        );
+        let mut conflicting = input.clone();
+        conflicting.declaration_digest = digest("different-maintenance");
+        assert!(
+            store
+                .carry_maintenance_with_legacy_reference(&conflicting, &reference)
                 .is_err()
         );
     }
