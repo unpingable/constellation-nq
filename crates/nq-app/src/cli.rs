@@ -578,6 +578,14 @@ pub async fn run(options: Nq) -> Result<()> {
     }
 }
 
+fn read_exact_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+    // Reuse the public descriptor-bound reader before allocation/decoding.
+    // Duplicate keys cannot disappear through a Value conversion.
+    let bytes = crate::bounded_input::read(path, MAX_STORED_JSON_BYTES)?;
+    let value = nq_protocol::decode_json_document(&bytes, MAX_STORED_JSON_BYTES)?;
+    serde_json::from_value(value).with_context(|| format!("cannot decode {}", path.display()))
+}
+
 fn saved_check_command(
     config_path: &Path,
     command: SavedCheckCommand,
