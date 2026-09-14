@@ -170,12 +170,13 @@ admission until the next section is complete. That is a useful failed state,
 not a reason to create a lock by hand.
 
 At the time this historical section was written, the binary normally opened
-only SQLite schema v5. The current source opens schema v12 and has an explicit
+only SQLite schema v5. The current source opens schema v13 and has an explicit
 upgrade from the published v5 schema. For a v5 store, the v5→v12
 transition takes a separate verified backup and adds empty saved-check custody;
 it also adds empty notification-delivery custody, without synthesizing historical
 checks or delivery records. Development schema versions6–11 are not accepted
-inputs to this public migration. Use the current binary's `admin
+inputs to this public migration. The subsequent v12→v13 transition takes its
+own verified backup and adds empty local-successor acquisition custody. Use the current binary's `admin
 upgrade` output and preserve every recorded backup before relying on an older
 schema procedure below.
 
@@ -682,14 +683,21 @@ nq_helper_command --config /etc/nq/nq.toml doctor
 sudo systemctl start nqd.service
 ```
 
-Schema v12 is current. `admin upgrade` creates and semantically verifies a
+Schema v13 is current. `admin upgrade` creates and semantically verifies a
 digest-addressed backup before each supported transition, and returns
-`already_current` only for an exactly compatible v12 store. Current source
-preserves the v3→v4→v5 chain before its explicit v5→v12 transition;
+`already_current` only for an exactly compatible v13 store. Current source
+preserves the v3→v4→v5 chain, its explicit v5→v12 transition, and a separately
+backed-up v12→v13 transition;
 each preserves gaps rather than manufacturing historical provider activity,
 notification delivery, or saved-check results. Every backup is complete before
 the corresponding source write; failure leaves that transition's source
 transactionally unchanged.
+
+For a second observation from the same admitted local watcher, use the
+[bounded local-successor profile](LOCAL_SUCCESSOR.md). Do not initialize a
+different evidence owner or repeat initial-only diagnostics to imitate
+continuity. A completed acquisition replays exact recorded bytes; unresolved
+acquisitions refuse without automatically invoking the helper again.
 
 There is no arbitrary migration from modified or unknown schema artifacts.
 `nqd` and the

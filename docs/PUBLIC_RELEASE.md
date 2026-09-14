@@ -13,7 +13,10 @@ The saved-check/maintenance and notification additions are documented in
 those capabilities from the public commit containing these guides; the older
 cache pin below does not contain them. Their source integration is recorded in
 [SOURCE-PROJECTION.json](../SOURCE-PROJECTION.json). Public schema5 upgrades
-explicitly to12; other development schema lines are not silently imported.
+explicitly to12, then through a separately verified backup to13; other
+development schema lines are not silently imported. Current source includes
+the [bounded local-successor profile](LOCAL_SUCCESSOR.md). Its component tests
+do not by themselves qualify a new connected integration release.
 These additions do not move a release tag or establish a complete consumer
 monitoring migration. Local-file notification delivery has a qualified disposable
 four-component example; live Slack/Discord delivery remains unverified.
