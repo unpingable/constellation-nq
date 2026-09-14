@@ -105,9 +105,13 @@ where a whole-command deadline is necessary.
 This command and the extended local example are qualified at source
 `a0d6bb8af44bed66183036e227fa2d2c5e1c87cb`. The focused gate passed 102
 application unit tests, including absent/malformed read evidence and historical
-maintenance controls, plus the actual CLI example. The earlier public-only
-reproduction above covers the baseline saved-check interface, not this additive
-projection; its matching source and example must be used together.
+maintenance controls, plus the actual CLI example. Public source
+`b4487cbb44d4046be2a852963ca1f08592d9cb05` (same runtime, added documentation)
+was then cloned anonymously, built with an empty target and public dependencies,
+and ran this extended example in a network-isolated environment with no private
+repository or home-directory mounts. Linux x86-64 and Rust/Cargo 1.94.0 were
+used. Its matching source and example must be used together. This reproduction
+still does not establish a recurring monitoring or full consumer profile.
 
 An attention or scheduling integration can read a retained result without
 rereading its SQLite source:
