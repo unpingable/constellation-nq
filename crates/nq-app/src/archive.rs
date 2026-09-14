@@ -16,7 +16,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use nq_core::config::NqConfig;
-use nq_store::Store;
+use nq_protocol::Sha256Digest;
+use nq_store::{CanonicalDocument, Store};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -126,6 +127,20 @@ pub struct VerifyReport {
     pub historical_unsupported_diagnostic_artifacts_available: Option<usize>,
     /// Exact number of unsupported-schema commitments with unavailable bytes.
     pub historical_unsupported_diagnostic_artifacts_committed_unavailable: Option<usize>,
+    /// Whether every retained saved-check definition and event reopened through
+    /// its typed local contract. `None` when history is un-openable.
+    pub historical_saved_check_semantics_verified: Option<bool>,
+    pub historical_saved_check_definitions_verified: Option<usize>,
+    pub historical_saved_check_events_verified: Option<usize>,
+    /// Whether every retained maintenance declaration reopened through its
+    /// typed local contract. `None` when history is un-openable.
+    pub historical_maintenance_semantics_verified: Option<bool>,
+    pub historical_maintenance_declarations_verified: Option<usize>,
+    /// Whether every retained notification intent and delivery-event sequence
+    /// reopened without delivering or replaying it. `None` when history is un-openable.
+    pub historical_notification_delivery_semantics_verified: Option<bool>,
+    pub historical_notification_delivery_intents_verified: Option<usize>,
+    pub historical_notification_delivery_events_verified: Option<usize>,
     /// Always false: verification confirms history, it grants nothing.
     pub grants_authority: bool,
 }
@@ -139,6 +154,11 @@ struct HistoricalSemanticCounts {
     provider_intake_acknowledgments: usize,
     legacy_provider_intake_gaps: usize,
     diagnostic_artifacts: nq_core::DiagnosticArtifactHistoryVerification,
+    saved_check_definitions: usize,
+    saved_check_events: usize,
+    maintenance_declarations: usize,
+    notification_delivery_intents: usize,
+    notification_delivery_events: usize,
 }
 
 fn validate_historical_semantics(store: &Store) -> Result<HistoricalSemanticCounts> {
@@ -184,6 +204,13 @@ fn validate_historical_semantics(store: &Store) -> Result<HistoricalSemanticCoun
         .context("reopen provider-intake and legacy-gap semantics")?;
     let diagnostic_artifacts = nq_core::validate_diagnostic_artifact_history(store)
         .context("reopen diagnostic-artifact commitments and available semantics")?;
+    let (saved_check_definitions, saved_check_events) =
+        validate_saved_check_history(store).context("reopen typed saved-check semantics")?;
+    let maintenance_declarations =
+        validate_maintenance_history(store).context("reopen typed maintenance semantics")?;
+    let (notification_delivery_intents, notification_delivery_events) =
+        validate_notification_delivery_history(store)
+            .context("reopen typed notification-delivery semantics")?;
     Ok(HistoricalSemanticCounts {
         admitted_reports,
         status_events,
@@ -193,7 +220,332 @@ fn validate_historical_semantics(store: &Store) -> Result<HistoricalSemanticCoun
         provider_intake_acknowledgments: provider_history.acknowledgments,
         legacy_provider_intake_gaps: provider_history.legacy_gaps,
         diagnostic_artifacts,
+        saved_check_definitions,
+        saved_check_events,
+        maintenance_declarations,
+        notification_delivery_intents,
+        notification_delivery_events,
     })
+}
+
+fn canonical_document(bytes: Vec<u8>, label: &str) -> Result<CanonicalDocument> {
+    CanonicalDocument::from_canonical_bytes(bytes)
+        .with_context(|| format!("{label} is not canonical"))
+}
+
+fn parse_history_time(value: &str, label: &str) -> Result<()> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .with_context(|| format!("{label} is not an RFC3339 timestamp"))?;
+    Ok(())
+}
+
+fn validate_saved_check_history(store: &Store) -> Result<(usize, usize)> {
+    let mut definitions = 0usize;
+    let mut events = 0usize;
+    let mut after = None;
+    loop {
+        let page = store
+            .saved_check_definitions_bounded(nq_store::MAX_PUBLIC_QUERY_ROWS, after.as_deref())?;
+        if page.is_empty() {
+            return Ok((definitions, events));
+        }
+        let page_len = page.len();
+        for definition in page {
+            after = Some(definition.definition_id.clone());
+            let document =
+                canonical_document(definition.definition_json, "saved-check definition")?;
+            let digest = Sha256Digest::parse(definition.definition_digest.clone())?;
+            if digest.as_str() != document.digest() {
+                bail!(
+                    "saved-check definition {} digest differs from canonical bytes",
+                    definition.definition_id
+                );
+            }
+            let typed: crate::saved_check::SavedCheckDefinition =
+                serde_json::from_slice(document.as_bytes())
+                    .context("saved-check definition is not typed material")?;
+            typed.validate()?;
+            if typed.reference != definition.stable_reference {
+                bail!(
+                    "saved-check definition {} stable reference differs from typed material",
+                    definition.definition_id
+                );
+            }
+            parse_history_time(&definition.installed_at, "saved-check installation")?;
+            definitions = definitions
+                .checked_add(1)
+                .context("saved-check definition count overflowed")?;
+            let mut event_after = None;
+            let mut expected_number = 1u32;
+            let mut installed = false;
+            loop {
+                let rows = store.saved_check_events_bounded(
+                    &definition.definition_id,
+                    nq_store::MAX_PUBLIC_QUERY_ROWS,
+                    event_after,
+                )?;
+                if rows.is_empty() {
+                    break;
+                }
+                for row in rows.iter() {
+                    if row.event_number != expected_number {
+                        bail!(
+                            "saved-check definition {} event sequence is incomplete",
+                            definition.definition_id
+                        );
+                    }
+                    expected_number = expected_number
+                        .checked_add(1)
+                        .context("saved-check event sequence overflowed")?;
+                    parse_history_time(&row.occurred_at, "saved-check event")?;
+                    let detail =
+                        canonical_document(row.detail_json.clone(), "saved-check event detail")?;
+                    let value: serde_json::Value = serde_json::from_slice(detail.as_bytes())
+                        .context("saved-check event detail is not JSON")?;
+                    if row.event_number == 1 && row.outcome != "installed" {
+                        bail!(
+                            "saved-check definition {} lacks its installation event",
+                            definition.definition_id
+                        );
+                    }
+                    match row.outcome.as_str() {
+                        "installed" if row.event_number == 1 && row.evaluation_id.is_none() => {
+                            if value != serde_json::json!({"definition_digest": digest.as_str()}) {
+                                bail!(
+                                    "saved-check definition {} installation event differs from retained definition",
+                                    definition.definition_id
+                                );
+                            }
+                            installed = true;
+                        }
+                        "claimed" if installed => {
+                            let id = row
+                                .evaluation_id
+                                .as_deref()
+                                .filter(|id| !id.is_empty())
+                                .context("saved-check claim lacks evaluation identity")?;
+                            let binding = value
+                                .get("binding")
+                                .filter(|binding| {
+                                    binding.as_object().is_some_and(|object| !object.is_empty())
+                                })
+                                .context("saved-check claim lacks explicit binding")?;
+                            crate::cli::validate_retained_saved_check_event(
+                                &definition.stable_reference,
+                                &typed,
+                                digest.as_str(),
+                                &row.outcome,
+                                &value,
+                                chrono::Utc::now(),
+                            )?;
+                            let _ = (id, binding);
+                        }
+                        "refused" | "passed" | "failed" if installed => {
+                            let id = row
+                                .evaluation_id
+                                .as_deref()
+                                .filter(|id| !id.is_empty())
+                                .context("saved-check terminal event lacks evaluation identity")?;
+                            let binding = value
+                                .get("binding")
+                                .context("saved-check terminal event lacks binding")?;
+                            let claim = store
+                                .saved_check_claim_by_evaluation_id(id)?
+                                .context("saved-check terminal event has no retained claim")?;
+                            let claim_detail =
+                                canonical_document(claim.detail_json, "saved-check claim detail")?;
+                            let claim_value: serde_json::Value =
+                                serde_json::from_slice(claim_detail.as_bytes())
+                                    .context("saved-check claim detail is not JSON")?;
+                            if claim.definition_id != definition.definition_id
+                                || claim.event_number >= row.event_number
+                                || claim_value.get("binding") != Some(binding)
+                            {
+                                bail!(
+                                    "saved-check terminal event {id} differs from its exact claim"
+                                );
+                            }
+                            crate::cli::validate_retained_saved_check_event(
+                                &definition.stable_reference,
+                                &typed,
+                                digest.as_str(),
+                                &row.outcome,
+                                &value,
+                                chrono::Utc::now(),
+                            )?;
+                        }
+                        _ => bail!(
+                            "saved-check definition {} has unsupported event sequence",
+                            definition.definition_id
+                        ),
+                    }
+                    events = events
+                        .checked_add(1)
+                        .context("saved-check event count overflowed")?;
+                }
+                event_after = rows.last().map(|row| row.event_number);
+            }
+            if !installed {
+                bail!(
+                    "saved-check definition {} lacks its installation event",
+                    definition.definition_id
+                );
+            }
+        }
+        if page_len < nq_store::MAX_PUBLIC_QUERY_ROWS as usize {
+            return Ok((definitions, events));
+        }
+    }
+}
+
+fn validate_maintenance_history(store: &Store) -> Result<usize> {
+    let mut count = 0usize;
+    let mut after: Option<(String, String)> = None;
+    loop {
+        let page = store.maintenance_declarations_bounded(
+            nq_store::MAX_PUBLIC_QUERY_ROWS,
+            after.as_ref().map(|(at, _)| at.as_str()),
+            after.as_ref().map(|(_, id)| id.as_str()),
+        )?;
+        if page.is_empty() {
+            return Ok(count);
+        }
+        let page_len = page.len();
+        for row in page {
+            let document = canonical_document(row.declaration_json, "maintenance declaration")?;
+            let digest = Sha256Digest::parse(row.declaration_digest.clone())?;
+            if digest.as_str() != document.digest() {
+                bail!(
+                    "maintenance declaration {} digest differs from canonical bytes",
+                    row.maintenance_id
+                );
+            }
+            let typed: crate::saved_check::MaintenanceDeclaration =
+                serde_json::from_slice(document.as_bytes())
+                    .context("maintenance declaration is not typed material")?;
+            typed.validate()?;
+            if typed.maintenance_id != row.maintenance_id {
+                bail!("maintenance declaration identity differs from typed material");
+            }
+            parse_history_time(&row.declared_at, "maintenance declaration")?;
+            after = Some((row.declared_at, row.maintenance_id));
+            count = count
+                .checked_add(1)
+                .context("maintenance declaration count overflowed")?;
+        }
+        if page_len < nq_store::MAX_PUBLIC_QUERY_ROWS as usize {
+            return Ok(count);
+        }
+    }
+}
+
+fn validate_notification_delivery_history(store: &Store) -> Result<(usize, usize)> {
+    let mut intents = 0usize;
+    let mut events = 0usize;
+    let mut after = None;
+    loop {
+        let page = store.notification_delivery_intents_bounded(
+            nq_store::MAX_PUBLIC_QUERY_ROWS,
+            after.as_deref(),
+        )?;
+        if page.is_empty() {
+            return Ok((intents, events));
+        }
+        let page_len = page.len();
+        for intent in page {
+            after = Some(intent.notification_id.clone());
+            let document = canonical_document(intent.intent_json, "notification delivery intent")?;
+            let typed = crate::notification::reopen_retained_intent(&document)?;
+            if typed.stable_event_id != intent.stable_event_id
+                || typed.attention_kind != intent.attention_kind
+                || typed.attention_receipt_digest != intent.attention_receipt_digest
+                || typed.attention_policy_id != intent.attention_policy_id
+                || typed.attention_policy_digest != intent.attention_policy_digest
+                || typed.transition_id != intent.transition_id
+                || typed.route_reference != intent.route_reference
+                || typed.destination_identity != intent.destination_identity
+            {
+                bail!(
+                    "notification {} columns differ from retained typed intent",
+                    intent.notification_id
+                );
+            }
+            Sha256Digest::parse(intent.attention_policy_digest.clone())?;
+            Sha256Digest::parse(intent.content_digest.clone())?;
+            if let Some(digest) = &intent.attention_receipt_digest {
+                Sha256Digest::parse(digest.clone())?;
+            }
+            parse_history_time(&intent.created_at, "notification delivery intent")?;
+            let mut event_after = None;
+            let mut expected_number = 1u32;
+            let mut terminal: Option<String> = None;
+            let mut event_count = 0usize;
+            loop {
+                let rows = store.notification_delivery_events_bounded(
+                    &intent.notification_id,
+                    nq_store::MAX_PUBLIC_QUERY_ROWS,
+                    event_after,
+                )?;
+                if rows.is_empty() {
+                    break;
+                }
+                for row in rows.iter() {
+                    if row.event_number != expected_number {
+                        bail!(
+                            "notification {} event sequence is incomplete",
+                            intent.notification_id
+                        );
+                    }
+                    expected_number = expected_number
+                        .checked_add(1)
+                        .context("notification event sequence overflowed")?;
+                    parse_history_time(&row.occurred_at, "notification delivery event")?;
+                    canonical_document(
+                        row.detail_json.clone(),
+                        "notification delivery event detail",
+                    )?;
+                    match (row.event_number, row.outcome.as_str(), terminal.as_deref()) {
+                        (1, "claimed", None) => {}
+                        (1, "refused", None) => terminal = Some("refused".to_owned()),
+                        (2, "failed" | "unknown" | "accepted", None) => {
+                            terminal = Some(row.outcome.clone())
+                        }
+                        _ => bail!(
+                            "notification {} has unsupported delivery event sequence",
+                            intent.notification_id
+                        ),
+                    }
+                    event_count += 1;
+                    events = events
+                        .checked_add(1)
+                        .context("notification event count overflowed")?;
+                }
+                event_after = rows.last().map(|row| row.event_number);
+            }
+            let status = store
+                .notification_delivery_status(Some(&intent.notification_id))?
+                .pop()
+                .context("notification intent lacks a status projection")?;
+            let expected_state = terminal.as_deref().unwrap_or(if event_count == 0 {
+                "pending"
+            } else {
+                "unknown"
+            });
+            if status.event_count as usize != event_count || status.delivery_state != expected_state
+            {
+                bail!(
+                    "notification {} status projection differs from immutable event history",
+                    intent.notification_id
+                );
+            }
+            intents = intents
+                .checked_add(1)
+                .context("notification intent count overflowed")?;
+        }
+        if page_len < nq_store::MAX_PUBLIC_QUERY_ROWS as usize {
+            return Ok((intents, events));
+        }
+    }
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
@@ -574,6 +926,26 @@ pub fn verify_archive(archive: &Path) -> Result<VerifyReport> {
                     .diagnostic_artifacts
                     .unsupported_committed_unavailable
             }),
+        historical_saved_check_semantics_verified: historical_counts.as_ref().map(|_| true),
+        historical_saved_check_definitions_verified: historical_counts
+            .as_ref()
+            .map(|counts| counts.saved_check_definitions),
+        historical_saved_check_events_verified: historical_counts
+            .as_ref()
+            .map(|counts| counts.saved_check_events),
+        historical_maintenance_semantics_verified: historical_counts.as_ref().map(|_| true),
+        historical_maintenance_declarations_verified: historical_counts
+            .as_ref()
+            .map(|counts| counts.maintenance_declarations),
+        historical_notification_delivery_semantics_verified: historical_counts
+            .as_ref()
+            .map(|_| true),
+        historical_notification_delivery_intents_verified: historical_counts
+            .as_ref()
+            .map(|counts| counts.notification_delivery_intents),
+        historical_notification_delivery_events_verified: historical_counts
+            .as_ref()
+            .map(|counts| counts.notification_delivery_events),
         grants_authority: false,
     })
 }
@@ -1597,6 +1969,91 @@ mod tests {
             .collect()
     }
 
+    fn append_local_history(database: &Path) {
+        let mut store = Store::open(database).expect("open local-history fixture");
+        let definition = canonical(&serde_json::json!({
+            "schema":"nq.saved-check-definition/v1", "reference":"fixture.check",
+            "source_identity":"fixture", "currentness_seconds":60, "name":"fixture",
+            "sql_text":"SELECT 1", "mode":"empty", "threshold":null, "column":null,
+            "description":null
+        }));
+        store
+            .install_saved_check(&nq_store::SavedCheckDefinitionInput {
+                definition_id: "fixture-check".into(),
+                stable_reference: "fixture.check".into(),
+                definition_digest: definition.digest().to_owned(),
+                definition,
+                installed_at: "2026-09-14T00:00:00Z".into(),
+            })
+            .expect("install saved check");
+        let claim = canonical(&serde_json::json!({"binding":{"fixture":"one"}}));
+        store
+            .claim_saved_check_evaluation(
+                "fixture-check",
+                "fixture-evaluation",
+                "2026-09-14T00:00:01Z",
+                &claim,
+            )
+            .expect("claim saved check");
+        store.append_saved_check_event(&nq_store::SavedCheckEventInput {
+            definition_id: "fixture-check".into(), event_number: 0, occurred_at: "2026-09-14T00:00:02Z".into(), outcome: "passed".into(),
+            detail: canonical(&serde_json::json!({"binding":{"fixture":"one"},"read_attempted_at":"2026-09-14T00:00:02Z","refusal_reason":null})), evaluation_id: Some("fixture-evaluation".into()),
+        }).expect("complete saved check");
+        let maintenance = canonical(
+            &serde_json::json!({"schema":"nq.maintenance-declaration/v1","maintenance_id":"fixture-maintenance","declared_by":null,"start_at":"2026-09-14T00:00:00Z","end_at":"2026-09-14T01:00:00Z","component":"fixture","kind":"capacity","subject":null,"reason":null}),
+        );
+        store
+            .declare_maintenance(&nq_store::MaintenanceDeclarationInput {
+                maintenance_id: "fixture-maintenance".into(),
+                declaration_digest: maintenance.digest().to_owned(),
+                declaration: maintenance,
+                declared_at: "2026-09-14T00:00:00Z",
+            })
+            .expect("declare maintenance");
+        let intent = canonical(
+            &serde_json::json!({"schema":"nq.notification_delivery_intent.v1","attention_kind":"operator_assertion","stable_event_id":"fixture-event","attention_receipt_digest":null,"attention_policy_id":"fixture-policy","attention_policy_digest":nq_protocol::sha256_bytes(b"fixture-policy").as_str(),"transition_id":"fixture-transition","route_reference":"fixture-route","destination_identity":"fixture-destination","summary":"fixture","inspection_reference":"fixture-inspection","owner_receipt":null}),
+        );
+        let payload = canonical(&serde_json::json!({"body":"fixture"}));
+        store
+            .retain_notification_delivery(
+                &nq_store::NotificationInput {
+                    notification_id: "fixture-notification".into(),
+                    idempotency_key: "fixture-key".into(),
+                    finding_event_id: None,
+                    destination_kind: "fixture".into(),
+                    payload: payload.clone(),
+                    available_at: "2026-09-14T00:00:00Z".into(),
+                    max_attempts: 1,
+                    created_at: "2026-09-14T00:00:00Z".into(),
+                },
+                &nq_store::NotificationDeliveryIntentInput {
+                    notification_id: "fixture-notification".into(),
+                    stable_event_id: "fixture-event".into(),
+                    attention_kind: "operator_assertion".into(),
+                    attention_receipt_digest: None,
+                    attention_policy_id: "fixture-policy".into(),
+                    attention_policy_digest: nq_protocol::sha256_bytes(b"fixture-policy")
+                        .into_string(),
+                    transition_id: "fixture-transition".into(),
+                    route_reference: "fixture-route".into(),
+                    destination_identity: "fixture-destination".into(),
+                    content_digest: payload.digest().to_owned(),
+                    intent,
+                    created_at: "2026-09-14T00:00:00Z".into(),
+                },
+            )
+            .expect("retain notification");
+        store
+            .append_notification_delivery_event(&nq_store::NotificationDeliveryEventInput {
+                notification_id: "fixture-notification".into(),
+                event_number: 1,
+                occurred_at: "2026-09-14T00:00:01Z".into(),
+                outcome: "claimed".into(),
+                detail: canonical(&serde_json::json!({"transport":"fixture"})),
+            })
+            .expect("claim notification");
+    }
+
     #[test]
     fn a_sealed_archive_verifies_and_grants_no_authority() {
         let dir = tempfile::tempdir().expect("dir");
@@ -1645,6 +2102,137 @@ mod tests {
             Some(0)
         );
         assert!(!report.grants_authority);
+    }
+
+    #[test]
+    fn archive_reopens_nonempty_local_histories() {
+        let dir = tempfile::tempdir().expect("dir");
+        let archive = valid_archive(dir.path());
+        append_local_history(&archive.join("db/nq.db"));
+        reseal_after_database_change(&archive);
+        let report = verify_archive(&archive).expect("reopen local histories");
+        assert_eq!(report.historical_saved_check_definitions_verified, Some(1));
+        assert_eq!(report.historical_saved_check_events_verified, Some(3));
+        assert_eq!(report.historical_maintenance_declarations_verified, Some(1));
+        assert_eq!(
+            report.historical_notification_delivery_intents_verified,
+            Some(1)
+        );
+        assert_eq!(
+            report.historical_notification_delivery_events_verified,
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn archive_refuses_saved_check_terminal_binding_drift() {
+        let dir = tempfile::tempdir().expect("dir");
+        let archive = valid_archive(dir.path());
+        let database = archive.join("db/nq.db");
+        append_local_history(&database);
+        let connection = rusqlite::Connection::open(&database).expect("open fixture database");
+        let trigger: String = connection.query_row("SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = 'immutable_saved_check_events_update'", [], |row| row.get(0)).expect("capture trigger");
+        connection
+            .execute_batch("DROP TRIGGER immutable_saved_check_events_update;")
+            .expect("drop fixture trigger");
+        connection.execute("UPDATE saved_check_events SET detail_json = ?1 WHERE definition_id = 'fixture-check' AND outcome = 'passed'", [canonical(&serde_json::json!({"binding":{"wrong":"binding"},"read_attempted_at":"2026-09-14T00:00:02Z","refusal_reason":null})).as_bytes()]).expect("substitute terminal detail");
+        connection.execute_batch(&trigger).expect("restore trigger");
+        drop(connection);
+        reseal_after_database_change(&archive);
+        assert!(verify_archive(&archive).is_err());
+    }
+
+    #[test]
+    fn archive_refuses_saved_check_definition_digest_substitution() {
+        let dir = tempfile::tempdir().expect("dir");
+        let archive = valid_archive(dir.path());
+        let database = archive.join("db/nq.db");
+        append_local_history(&database);
+        let connection = rusqlite::Connection::open(&database).expect("database");
+        let trigger: String = connection.query_row("SELECT sql FROM sqlite_schema WHERE type='trigger' AND name='immutable_saved_check_definitions_update'", [], |row| row.get(0)).expect("trigger");
+        connection
+            .execute_batch("DROP TRIGGER immutable_saved_check_definitions_update;")
+            .expect("drop");
+        connection.execute("UPDATE saved_check_definitions SET definition_digest=?1 WHERE definition_id='fixture-check'", [format!("sha256:{}", "0".repeat(64))]).expect("substitute digest");
+        connection.execute_batch(&trigger).expect("restore");
+        drop(connection);
+        reseal_after_database_change(&archive);
+        assert!(verify_archive(&archive).is_err());
+    }
+
+    #[test]
+    fn archive_refuses_malformed_maintenance_declaration() {
+        let dir = tempfile::tempdir().expect("dir");
+        let archive = valid_archive(dir.path());
+        let database = archive.join("db/nq.db");
+        append_local_history(&database);
+        let connection = rusqlite::Connection::open(&database).expect("database");
+        let trigger: String = connection.query_row("SELECT sql FROM sqlite_schema WHERE type='trigger' AND name='immutable_maintenance_declarations_update'", [], |row| row.get(0)).expect("trigger");
+        connection
+            .execute_batch("DROP TRIGGER immutable_maintenance_declarations_update;")
+            .expect("drop");
+        let malformed = canonical(&serde_json::json!({}));
+        connection.execute("UPDATE maintenance_declarations SET declaration_json=?1, declaration_digest=?2 WHERE maintenance_id='fixture-maintenance'", rusqlite::params![malformed.as_bytes(), malformed.digest()]).expect("substitute declaration");
+        connection.execute_batch(&trigger).expect("restore");
+        drop(connection);
+        reseal_after_database_change(&archive);
+        assert!(verify_archive(&archive).is_err());
+    }
+
+    #[test]
+    fn archive_refuses_notification_intent_column_mismatch() {
+        let dir = tempfile::tempdir().expect("dir");
+        let archive = valid_archive(dir.path());
+        let database = archive.join("db/nq.db");
+        append_local_history(&database);
+        let connection = rusqlite::Connection::open(&database).expect("database");
+        let trigger: String = connection.query_row("SELECT sql FROM sqlite_schema WHERE type='trigger' AND name='immutable_notification_delivery_intents_update'", [], |row| row.get(0)).expect("trigger");
+        connection
+            .execute_batch("DROP TRIGGER immutable_notification_delivery_intents_update;")
+            .expect("drop");
+        connection.execute("UPDATE notification_delivery_intents SET route_reference='different-route' WHERE notification_id='fixture-notification'", []).expect("substitute route");
+        connection.execute_batch(&trigger).expect("restore");
+        drop(connection);
+        reseal_after_database_change(&archive);
+        assert!(verify_archive(&archive).is_err());
+    }
+
+    #[test]
+    fn archive_traverses_past_a_full_maintenance_page_before_refusing() {
+        let dir = tempfile::tempdir().expect("dir");
+        let archive = valid_archive(dir.path());
+        let database = archive.join("db/nq.db");
+        let mut store = Store::open(&database).expect("store");
+        for number in 0..=nq_store::MAX_PUBLIC_QUERY_ROWS {
+            let id = format!("page-maintenance-{number:04}");
+            let declaration = canonical(
+                &serde_json::json!({"schema":"nq.maintenance-declaration/v1","maintenance_id":id,"declared_by":null,"start_at":"2026-09-14T00:00:00Z","end_at":"2026-09-14T01:00:00Z","component":"fixture","kind":"capacity","subject":null,"reason":null}),
+            );
+            store
+                .declare_maintenance(&nq_store::MaintenanceDeclarationInput {
+                    maintenance_id: format!("page-maintenance-{number:04}"),
+                    declaration_digest: declaration.digest().to_owned(),
+                    declaration,
+                    declared_at: format!(
+                        "2026-09-14T00:{:02}:{:02}Z",
+                        (number / 60) % 60,
+                        number % 60
+                    ),
+                })
+                .expect("declare page row");
+        }
+        drop(store);
+        let connection = rusqlite::Connection::open(&database).expect("database");
+        let trigger: String = connection.query_row("SELECT sql FROM sqlite_schema WHERE type='trigger' AND name='immutable_maintenance_declarations_update'", [], |row| row.get(0)).expect("trigger");
+        connection
+            .execute_batch("DROP TRIGGER immutable_maintenance_declarations_update;")
+            .expect("drop");
+        let malformed = canonical(&serde_json::json!({}));
+        connection.execute("UPDATE maintenance_declarations SET declaration_json=?1, declaration_digest=?2 WHERE maintenance_id='page-maintenance-1000'", rusqlite::params![malformed.as_bytes(), malformed.digest()]).expect("corrupt late row");
+        connection.execute_batch(&trigger).expect("restore");
+        drop(connection);
+        reseal_after_database_change(&archive);
+        assert!(verify_archive(&archive).is_err());
     }
 
     #[test]
@@ -2290,6 +2878,23 @@ mod tests {
             None
         );
         assert_eq!(verified.historical_evaluation_records_verified, None);
+        assert_eq!(verified.historical_saved_check_semantics_verified, None);
+        assert_eq!(verified.historical_saved_check_definitions_verified, None);
+        assert_eq!(verified.historical_saved_check_events_verified, None);
+        assert_eq!(verified.historical_maintenance_semantics_verified, None);
+        assert_eq!(verified.historical_maintenance_declarations_verified, None);
+        assert_eq!(
+            verified.historical_notification_delivery_semantics_verified,
+            None
+        );
+        assert_eq!(
+            verified.historical_notification_delivery_intents_verified,
+            None
+        );
+        assert_eq!(
+            verified.historical_notification_delivery_events_verified,
+            None
+        );
     }
 
     #[test]

@@ -26,18 +26,18 @@ use std::time::Duration;
 const MAX_INTENT_BYTES: usize = 32_768;
 const LOCAL_INBOX_FILE_MAX_BYTES: usize = 4_096;
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Intent {
-    schema: String,
-    attention_kind: String,
-    stable_event_id: String,
-    attention_receipt_digest: Option<String>,
-    attention_policy_id: String,
-    attention_policy_digest: String,
-    transition_id: String,
-    route_reference: String,
-    destination_identity: String,
+pub(crate) struct Intent {
+    pub(crate) schema: String,
+    pub(crate) attention_kind: String,
+    pub(crate) stable_event_id: String,
+    pub(crate) attention_receipt_digest: Option<String>,
+    pub(crate) attention_policy_id: String,
+    pub(crate) attention_policy_digest: String,
+    pub(crate) transition_id: String,
+    pub(crate) route_reference: String,
+    pub(crate) destination_identity: String,
     summary: String,
     inspection_reference: String,
     owner_receipt: Option<Value>,
@@ -82,6 +82,11 @@ fn read_intent(path: &std::path::Path) -> Result<(Intent, CanonicalDocument)> {
     if document.as_bytes() != bytes {
         bail!("notification intent must be canonical JSON");
     }
+    let intent = parse_submitted_intent(value)?;
+    Ok((intent, document))
+}
+
+fn parse_submitted_intent(value: Value) -> Result<Intent> {
     let intent: Intent = serde_json::from_value(value)?;
     if intent.schema != "nq.notification_delivery_intent.v1" {
         bail!("unsupported notification intent schema");
@@ -116,7 +121,51 @@ fn read_intent(path: &std::path::Path) -> Result<(Intent, CanonicalDocument)> {
             if intent.attention_receipt_digest.is_some() && intent.owner_receipt.is_some() => {}
         _ => bail!("unsupported or ambiguous notification attention kind"),
     }
-    Ok((intent, document))
+    Ok(intent)
+}
+
+/// Reopen a retained intent without consulting a configured route or delivery target.
+/// Local-inbox custody wraps the submitted intent with a directory binding; the
+/// wrapper remains historical custody and is not replayed here.
+pub(crate) fn reopen_retained_intent(document: &CanonicalDocument) -> Result<Intent> {
+    let value: Value = serde_json::from_slice(document.as_bytes())
+        .context("retained notification intent is not JSON")?;
+    if value.get("schema").and_then(Value::as_str) == Some("nq.local-inbox-delivery-intent/v1") {
+        let wrapper = value
+            .as_object()
+            .context("retained local inbox intent is not an object")?;
+        if wrapper.len() != 3
+            || !wrapper.contains_key("schema")
+            || !wrapper.contains_key("intent")
+            || !wrapper.contains_key("directory_binding")
+        {
+            bail!("retained local inbox intent has an unsupported wrapper shape");
+        }
+        let inner = value
+            .get("intent")
+            .cloned()
+            .context("retained local inbox intent is missing submitted intent")?;
+        let binding = value
+            .get("directory_binding")
+            .and_then(Value::as_object)
+            .context("retained local inbox intent has no directory binding")?;
+        if binding.len() != 5
+            || binding.get("schema").and_then(Value::as_str)
+                != Some("nq.local-inbox-directory-binding/v1")
+            || binding
+                .get("path_sha256")
+                .and_then(Value::as_str)
+                .and_then(|value| nq_protocol::Sha256Digest::parse(value.to_owned()).ok())
+                .is_none()
+            || binding.get("device").and_then(Value::as_u64).is_none()
+            || binding.get("inode").and_then(Value::as_u64).is_none()
+            || binding.get("mode").and_then(Value::as_u64).is_none()
+        {
+            bail!("retained local inbox directory binding is invalid");
+        }
+        return parse_submitted_intent(inner);
+    }
+    parse_submitted_intent(value)
 }
 
 fn replay_nightshift(route: &NotificationRouteConfig, intent: &Intent) -> Result<()> {

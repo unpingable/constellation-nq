@@ -1053,6 +1053,28 @@ fn retained_definition_binding_matches(
         && binding.currentness_seconds == definition.currentness_seconds
 }
 
+/// Validate saved-check retained event material without reading its source target.
+pub(crate) fn validate_retained_saved_check_event(
+    stable_reference: &str,
+    definition: &SavedCheckDefinition,
+    definition_digest: &str,
+    outcome: &str,
+    detail: &Value,
+    projection_at: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    let binding = retained_saved_check_binding(detail)?;
+    if !retained_definition_binding_matches(
+        stable_reference,
+        definition,
+        &binding,
+        definition_digest,
+    ) {
+        bail!("retained saved-check binding differs from its definition");
+    }
+    let _ = retained_read_attempt(detail, retained_result_state(outcome), projection_at)?;
+    Ok(())
+}
+
 fn currentness_state(
     observed_at: chrono::DateTime<chrono::Utc>,
     at: chrono::DateTime<chrono::Utc>,
@@ -2775,6 +2797,55 @@ mod tests {
     use super::*;
     use nq_core::engine::{EngineError, GovernedRefusal};
     use nq_protocol::{InstanceId, Refusal, RefusalBoundary, RefusalCode, canonical_json_bytes};
+
+    fn validate_archive_event_fixture(
+        outcome: Option<&str>,
+        malformed_binding: bool,
+        read_attempt: Option<&str>,
+    ) -> Result<()> {
+        let store = condition_test_store(outcome, malformed_binding, false, false, read_attempt);
+        let event = store
+            .saved_check_evaluation_by_id("evaluation-001")?
+            .expect("retained fixture evaluation");
+        let definition: SavedCheckDefinition = serde_json::from_slice(&event.definition_json)?;
+        let detail: Value = serde_json::from_slice(&event.detail_json)?;
+        validate_retained_saved_check_event(
+            &event.stable_reference,
+            &definition,
+            &event.definition_digest,
+            &event.outcome,
+            &detail,
+            chrono::DateTime::parse_from_rfc3339("2026-09-14T12:00:30Z")?
+                .with_timezone(&chrono::Utc),
+        )
+    }
+
+    #[test]
+    fn archive_event_validator_preserves_unfinished_and_refused_history() {
+        for outcome in [Some("passed"), Some("failed")] {
+            validate_archive_event_fixture(outcome, false, Some("2026-09-14T12:00:02Z"))
+                .expect("recorded read remains interpretable");
+        }
+        validate_archive_event_fixture(None, false, None)
+            .expect("an unfinished claim is historical custody, not successful execution");
+        validate_archive_event_fixture(Some("refused"), false, None)
+            .expect("refusal without established read remains explicit");
+    }
+
+    #[test]
+    fn archive_event_validator_refuses_missing_or_mismatched_read_material() {
+        for outcome in [Some("passed"), Some("failed")] {
+            assert!(validate_archive_event_fixture(outcome, false, None).is_err());
+        }
+        assert!(
+            validate_archive_event_fixture(Some("passed"), true, Some("2026-09-14T12:00:02Z"))
+                .is_err()
+        );
+        assert!(
+            validate_archive_event_fixture(Some("passed"), false, Some("2026-09-14T13:00:00Z"))
+                .is_err()
+        );
+    }
 
     fn config_fixture() -> &'static str {
         r#"schema = "nq.config.v1"

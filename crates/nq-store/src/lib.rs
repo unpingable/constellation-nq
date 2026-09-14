@@ -4226,6 +4226,22 @@ pub struct SavedCheckEventRecord {
     pub outcome: String,
     pub detail_json: Vec<u8>,
 }
+/// The exact immutable claim retained for one saved-check evaluation identity.
+#[derive(Clone, Debug)]
+pub struct SavedCheckClaimRecord {
+    pub definition_id: String,
+    pub event_number: u32,
+    pub detail_json: Vec<u8>,
+}
+/// One immutable saved-check event in its per-definition append order.
+#[derive(Clone, Debug)]
+pub struct SavedCheckHistoryEventRecord {
+    pub event_number: u32,
+    pub occurred_at: String,
+    pub outcome: String,
+    pub detail_json: Vec<u8>,
+    pub evaluation_id: Option<String>,
+}
 /// One retained evaluation joined to its immutable saved-check definition.
 /// This read-only view lets a consumer verify binding material without relying
 /// only on event detail supplied at evaluation time.
@@ -4252,6 +4268,30 @@ pub struct MaintenanceDeclarationRecord {
     pub declaration_digest: String,
     pub declaration_json: Vec<u8>,
     pub declared_at: String,
+}
+/// One immutable notification delivery intent, including its retained canonical bytes.
+#[derive(Clone, Debug)]
+pub struct NotificationDeliveryIntentRecord {
+    pub notification_id: String,
+    pub stable_event_id: String,
+    pub attention_kind: String,
+    pub attention_receipt_digest: Option<String>,
+    pub attention_policy_id: String,
+    pub attention_policy_digest: String,
+    pub transition_id: String,
+    pub route_reference: String,
+    pub destination_identity: String,
+    pub content_digest: String,
+    pub intent_json: Vec<u8>,
+    pub created_at: String,
+}
+/// One immutable notification delivery event in its per-notification append order.
+#[derive(Clone, Debug)]
+pub struct NotificationDeliveryHistoryEventRecord {
+    pub event_number: u32,
+    pub occurred_at: String,
+    pub outcome: String,
+    pub detail_json: Vec<u8>,
 }
 
 fn notification_delivery_state(event_count: u32, state: String) -> String {
@@ -5654,6 +5694,60 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    /// Page immutable delivery intents by their stable primary-key cursor.
+    pub fn notification_delivery_intents_bounded(
+        &self,
+        limit: u32,
+        after_notification_id: Option<&str>,
+    ) -> Result<Vec<NotificationDeliveryIntentRecord>, StoreError> {
+        validate_public_limit(limit)?;
+        let mut statement = self.connection.prepare("SELECT notification_id, stable_event_id, attention_kind, attention_receipt_digest, attention_policy_id, attention_policy_digest, transition_id, route_reference, destination_identity, content_digest, intent_json, created_at FROM notification_delivery_intents WHERE (?1 IS NULL OR notification_id > ?1) ORDER BY notification_id LIMIT ?2")?;
+        statement
+            .query_map(params![after_notification_id, i64::from(limit)], |row| {
+                Ok(NotificationDeliveryIntentRecord {
+                    notification_id: row.get(0)?,
+                    stable_event_id: row.get(1)?,
+                    attention_kind: row.get(2)?,
+                    attention_receipt_digest: row.get(3)?,
+                    attention_policy_id: row.get(4)?,
+                    attention_policy_digest: row.get(5)?,
+                    transition_id: row.get(6)?,
+                    route_reference: row.get(7)?,
+                    destination_identity: row.get(8)?,
+                    content_digest: row.get(9)?,
+                    intent_json: row.get(10)?,
+                    created_at: row.get(11)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    /// Page immutable delivery events for one retained intent.
+    pub fn notification_delivery_events_bounded(
+        &self,
+        notification_id: &str,
+        limit: u32,
+        after_event_number: Option<u32>,
+    ) -> Result<Vec<NotificationDeliveryHistoryEventRecord>, StoreError> {
+        validate_public_limit(limit)?;
+        let mut statement = self.connection.prepare("SELECT event_number, occurred_at, outcome, detail_json FROM notification_delivery_events WHERE notification_id = ?1 AND (?2 IS NULL OR event_number > ?2) ORDER BY event_number LIMIT ?3")?;
+        statement
+            .query_map(
+                params![notification_id, after_event_number, i64::from(limit)],
+                |row| {
+                    Ok(NotificationDeliveryHistoryEventRecord {
+                        event_number: row.get(0)?,
+                        occurred_at: row.get(1)?,
+                        outcome: row.get(2)?,
+                        detail_json: row.get(3)?,
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
     /// Install immutable saved-check bytes. An existing stable reference can only replay exact material.
     pub fn install_saved_check(
         &mut self,
@@ -5801,11 +5895,67 @@ impl Store {
         self.connection.query_row("SELECT definition_id, stable_reference, definition_digest, definition_json, installed_at FROM saved_check_definitions WHERE stable_reference = ?1", [reference], |row| Ok(SavedCheckDefinitionRecord { definition_id: row.get(0)?, stable_reference: row.get(1)?, definition_digest: row.get(2)?, definition_json: row.get(3)?, installed_at: row.get(4)? })).optional().map_err(StoreError::from)
     }
 
+    /// Page immutable saved-check definitions by their stable primary-key cursor.
+    pub fn saved_check_definitions_bounded(
+        &self,
+        limit: u32,
+        after_definition_id: Option<&str>,
+    ) -> Result<Vec<SavedCheckDefinitionRecord>, StoreError> {
+        validate_public_limit(limit)?;
+        let mut statement = self.connection.prepare("SELECT definition_id, stable_reference, definition_digest, definition_json, installed_at FROM saved_check_definitions WHERE (?1 IS NULL OR definition_id > ?1) ORDER BY definition_id LIMIT ?2")?;
+        statement
+            .query_map(params![after_definition_id, i64::from(limit)], |row| {
+                Ok(SavedCheckDefinitionRecord {
+                    definition_id: row.get(0)?,
+                    stable_reference: row.get(1)?,
+                    definition_digest: row.get(2)?,
+                    definition_json: row.get(3)?,
+                    installed_at: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    /// Page immutable saved-check events for one definition.
+    pub fn saved_check_events_bounded(
+        &self,
+        definition_id: &str,
+        limit: u32,
+        after_event_number: Option<u32>,
+    ) -> Result<Vec<SavedCheckHistoryEventRecord>, StoreError> {
+        validate_public_limit(limit)?;
+        let mut statement = self.connection.prepare("SELECT event_number, occurred_at, outcome, detail_json, evaluation_id FROM saved_check_events WHERE definition_id = ?1 AND (?2 IS NULL OR event_number > ?2) ORDER BY event_number LIMIT ?3")?;
+        statement
+            .query_map(
+                params![definition_id, after_event_number, i64::from(limit)],
+                |row| {
+                    Ok(SavedCheckHistoryEventRecord {
+                        event_number: row.get(0)?,
+                        occurred_at: row.get(1)?,
+                        outcome: row.get(2)?,
+                        detail_json: row.get(3)?,
+                        evaluation_id: row.get(4)?,
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
     pub fn saved_check_event_by_evaluation_id(
         &self,
         evaluation_id: &str,
     ) -> Result<Option<SavedCheckEventRecord>, StoreError> {
         self.connection.query_row("SELECT outcome, detail_json FROM saved_check_events WHERE evaluation_id = ?1 ORDER BY event_number DESC LIMIT 1", [evaluation_id], |row| Ok(SavedCheckEventRecord { outcome: row.get(0)?, detail_json: row.get(1)? })).optional().map_err(StoreError::from)
+    }
+
+    /// Read the exact retained claim for one evaluation without opening a source target.
+    pub fn saved_check_claim_by_evaluation_id(
+        &self,
+        evaluation_id: &str,
+    ) -> Result<Option<SavedCheckClaimRecord>, StoreError> {
+        self.connection.query_row("SELECT definition_id, event_number, detail_json FROM saved_check_events WHERE evaluation_id = ?1 AND outcome = 'claimed'", [evaluation_id], |row| Ok(SavedCheckClaimRecord { definition_id: row.get(0)?, event_number: row.get(1)?, detail_json: row.get(2)? })).optional().map_err(StoreError::from)
     }
 
     /// Read one retained evaluation together with the definition selected by
@@ -5854,6 +6004,36 @@ impl Store {
         id: &str,
     ) -> Result<Option<MaintenanceDeclarationRecord>, StoreError> {
         self.connection.query_row("SELECT maintenance_id, declaration_digest, declaration_json, declared_at FROM maintenance_declarations WHERE maintenance_id = ?1", [id], |row| Ok(MaintenanceDeclarationRecord { maintenance_id: row.get(0)?, declaration_digest: row.get(1)?, declaration_json: row.get(2)?, declared_at: row.get(3)? })).optional().map_err(StoreError::from)
+    }
+
+    /// Page immutable maintenance declarations in their deterministic public order.
+    pub fn maintenance_declarations_bounded(
+        &self,
+        limit: u32,
+        after_declared_at: Option<&str>,
+        after_maintenance_id: Option<&str>,
+    ) -> Result<Vec<MaintenanceDeclarationRecord>, StoreError> {
+        validate_public_limit(limit)?;
+        if after_declared_at.is_some() != after_maintenance_id.is_some() {
+            return Err(StoreError::Invariant(
+                "maintenance cursor requires both timestamp and identity".into(),
+            ));
+        }
+        let mut statement = self.connection.prepare("SELECT maintenance_id, declaration_digest, declaration_json, declared_at FROM maintenance_declarations WHERE (?1 IS NULL OR declared_at > ?1 OR (declared_at = ?1 AND maintenance_id > ?2)) ORDER BY declared_at, maintenance_id LIMIT ?3")?;
+        statement
+            .query_map(
+                params![after_declared_at, after_maintenance_id, i64::from(limit)],
+                |row| {
+                    Ok(MaintenanceDeclarationRecord {
+                        maintenance_id: row.get(0)?,
+                        declaration_digest: row.get(1)?,
+                        declaration_json: row.get(2)?,
+                        declared_at: row.get(3)?,
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     /// Append a logical retention tombstone without refreshing or rewriting evidence.
@@ -16457,6 +16637,43 @@ mod tests {
                 .unwrap()
                 .delivery_state,
             "unknown"
+        );
+    }
+
+    #[test]
+    fn local_history_readers_page_without_materializing_complete_histories() {
+        let mut store = Store::initialize_in_memory().expect("store initializes");
+        for id in ["check-a", "check-b"] {
+            store
+                .install_saved_check(&SavedCheckDefinitionInput {
+                    definition_id: id.into(),
+                    stable_reference: format!("reference-{id}"),
+                    definition_digest: digest(id),
+                    definition: document(json!({"fixture": id})),
+                    installed_at: TIME.into(),
+                })
+                .expect("install fixture definition");
+        }
+        let first = store
+            .saved_check_definitions_bounded(1, None)
+            .expect("first definition page");
+        assert_eq!(first.len(), 1);
+        let second = store
+            .saved_check_definitions_bounded(1, Some(&first[0].definition_id))
+            .expect("second definition page");
+        assert_eq!(second.len(), 1);
+        assert_ne!(first[0].definition_id, second[0].definition_id);
+        assert_eq!(
+            store
+                .saved_check_events_bounded(&first[0].definition_id, 1, None)
+                .expect("installation page")
+                .len(),
+            1
+        );
+        assert!(
+            store
+                .maintenance_declarations_bounded(1, Some(TIME), None)
+                .is_err()
         );
     }
 }
