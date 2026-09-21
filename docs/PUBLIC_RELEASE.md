@@ -1,4 +1,14 @@
-# Constellation NQ public-preview release guide
+# Constellation NQ source and integration guide
+
+The current immutable Constellation integration release is
+[0.1.0-alpha.6](https://unpingable.com/constellation/releases/0.1.0-alpha.6/guide.html).
+Its `reviewed-local-copy/v1` profile pins NQ
+`d3089a9787a27c50faf1e3f393a88f8e64bd412d` for bounded host-observation
+admission before one reviewed, authorized-once, Docket-custodied local effect.
+The public newcomer procedure verifies frozen evidence and refusal behavior; it
+does not repeat the provider call or effect. This profile is not a general
+monitoring deployment, a notification-delivery qualification, or a Classic NQ
+cutover.
 
 Use the published [integration profiles](https://unpingable.com/constellation/integration.html)
 for reproducible combinations: saved-check attention (alpha.2) and objective

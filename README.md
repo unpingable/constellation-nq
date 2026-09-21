@@ -4,6 +4,14 @@ NQ collects and checks bounded evidence for a specific question. It records what
 was admitted, what was refused, and the diagnostic conclusion its profile can
 support. It does not authorize or execute the work that might follow.
 
+The current immutable Constellation integration release is
+[0.1.0-alpha.6](https://unpingable.com/constellation/releases/0.1.0-alpha.6/guide.html).
+Its `reviewed-local-copy/v1` profile uses NQ for bounded host-observation
+admission before one reviewed, authorized-once local effect. The public
+newcomer procedure reproduces retained evidence without repeating the provider
+call or effect. This does not qualify a complete monitoring deployment, live
+notification delivery, or a transfer of Classic NQ operational responsibility.
+
 For a smaller starting point, [run a saved check](docs/SAVED_CHECKS.md) against
 a disposable SQLite source and inspect its retained result. The
 [notification adapter](docs/NOTIFICATIONS.md) provides bounded Slack/Discord
@@ -22,7 +30,7 @@ To keep a past result inspectable, see
 [read saved checks from a sealed archive](docs/HISTORICAL_READS.md). This verified
 historical read path does not supply automated retention or migration.
 
-> **Public developer preview:** use the tested source pins for your selected
+> **Source and profile status:** use the tested source pins for your selected
 > [integration profile](https://unpingable.com/constellation/integration.html).
 > The retained cache-result profile pins `ce0a04a175b6d87ac17395f08fd7bc70ddf1e7b3`;
 > saved-check attention and objective-read profiles pin
