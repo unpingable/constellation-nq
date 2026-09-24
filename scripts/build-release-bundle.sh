@@ -160,7 +160,7 @@ PY
 
 mapfile -d '' descriptors < <(
     find "$profile_dir" -maxdepth 1 -type f -name '*.json' \
-        ! -name 'manifest.json' -print0 | sort -z
+        ! -name 'manifest.json' ! -name 'failure-codes.json' -print0 | sort -z
 )
 if [[ ${#descriptors[@]} -eq 0 ]]; then
     echo "PROFILE_DIR contains no descriptor JSON files" >&2
@@ -175,6 +175,10 @@ for descriptor in "${descriptors[@]}"; do
 done
 [[ -f "$profile_dir/manifest.json" && ! -L "$profile_dir/manifest.json" ]] || {
     echo "PROFILE_DIR is missing a regular manifest.json" >&2
+    exit 1
+}
+[[ -f "$profile_dir/failure-codes.json" && ! -L "$profile_dir/failure-codes.json" ]] || {
+    echo "PROFILE_DIR is missing a regular failure-codes.json" >&2
     exit 1
 }
 python3 -B "$root/profiles/verify_catalog.py" \
@@ -292,6 +296,8 @@ for descriptor in "${descriptors[@]}"; do
 done
 install -Dm0644 "$profile_dir/manifest.json" \
     "$stage/share/nq/profiles/manifest.json"
+install -Dm0644 "$profile_dir/failure-codes.json" \
+    "$stage/share/nq/profiles/failure-codes.json"
 install -Dm0644 "$root/protocol/README.md" \
     "$stage/share/nq/protocol/README.md"
 install -Dm0644 "$root/system-contract/manifest.json" \
