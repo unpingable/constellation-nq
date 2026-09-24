@@ -240,9 +240,25 @@ impl<C: Copy> CollectionFailure<C> {
     pub fn message(&self) -> &str {
         &self.message
     }
+}
 
-    fn into_parts(self) -> (C, String, bool) {
-        (self.code, self.message, self.retriable)
+/// An owner's closed failure-code enum, as the helper may emit it. Only the
+/// two owner enums implement it (the trait is private to this crate), so
+/// [`failed_report`] cannot receive a bare string or any other type: a new
+/// wire token needs a new variant in the owning profile's enum first.
+trait OwnerFailureCode: Copy {
+    fn wire_token(self) -> &'static str;
+}
+
+impl OwnerFailureCode for FilesystemFailureCode {
+    fn wire_token(self) -> &'static str {
+        self.as_str()
+    }
+}
+
+impl OwnerFailureCode for MemoryFailureCode {
+    fn wire_token(self) -> &'static str {
+        self.as_str()
     }
 }
 
@@ -269,10 +285,7 @@ fn handle_request(
             };
             match observe(&scope, source) {
                 Ok(observation) => complete_report(request, &scope, &observation),
-                Err(failure) => {
-                    let (code, message, retriable) = failure.into_parts();
-                    failed_report(request, branch, code.as_str(), message, retriable)
-                }
+                Err(failure) => failed_report(request, branch, failure),
             }
         }
         Branch::Memory => {
@@ -282,10 +295,7 @@ fn handle_request(
             };
             match observe_memory(&scope, source, clock) {
                 Ok(observation) => complete_memory_report(request, &scope, &observation),
-                Err(failure) => {
-                    let (code, message, retriable) = failure.into_parts();
-                    failed_report(request, branch, code.as_str(), message, retriable)
-                }
+                Err(failure) => failed_report(request, branch, failure),
             }
         }
     };
@@ -965,15 +975,17 @@ fn complete_report(
 }
 
 /// Build the Failed report. This is the only place an owner's typed code
-/// becomes a wire token, and it receives the token already converted by the
-/// branch that owns it.
-fn failed_report(
+/// becomes a wire token; it accepts only a failure typed by an owner enum.
+fn failed_report<C: OwnerFailureCode>(
     request: &HelperRequest,
     branch: Branch,
-    code: &'static str,
-    message: String,
-    retriable: bool,
+    failure: CollectionFailure<C>,
 ) -> Result<EvidenceReport, String> {
+    let CollectionFailure {
+        code,
+        message,
+        retriable,
+    } = failure;
     let mut builder = EvidenceReport::builder(
         request.profile.clone(),
         request.binding.clone(),
@@ -988,7 +1000,7 @@ fn failed_report(
         detail: None,
     })
     .error(ReportError {
-        code: token(ErrorCode::new(code))?,
+        code: token(ErrorCode::new(code.wire_token()))?,
         severity: ErrorSeverity::Error,
         message,
         subject: Some(request.binding.subject.clone()),
