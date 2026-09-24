@@ -485,6 +485,7 @@ mod tests {
             error_count: 0,
             failure_error_count: 0,
             used_capabilities: BTreeSet::from(["read_settled_cache_result".into()]),
+            errors: Vec::new(),
         }
     }
 

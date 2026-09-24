@@ -152,6 +152,7 @@ fn conformance_report() -> ReportInput {
         error_count: 0,
         failure_error_count: 0,
         used_capabilities: BTreeSet::new(),
+        errors: Vec::new(),
     }
 }
 
@@ -222,6 +223,7 @@ fn host_report(at: chrono::DateTime<Utc>, load_1m: f64) -> ReportInput {
         error_count: 0,
         failure_error_count: 0,
         used_capabilities: BTreeSet::from(["read_procfs".to_owned()]),
+        errors: Vec::new(),
     }
 }
 

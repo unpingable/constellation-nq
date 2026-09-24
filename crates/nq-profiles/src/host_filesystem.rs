@@ -49,6 +49,87 @@ pub const COVERAGE_KIND: &str = "filesystem_statistics";
 /// declared path only.
 pub const ACCESS_PATH: &str = "mountinfo_statfs";
 /// Required capabilities; partial grants are refused.
+/// The closed set of typed failure codes the filesystem helper may emit,
+/// shared by the capacity and inodes profiles (one collector). This list is
+/// the owner's whole vocabulary: a detector carries a code into its refusal
+/// only if it parses here, and the helper builds its failures only from it.
+/// The meaning of each code belongs to this module and nowhere else.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FilesystemFailureCode {
+    /// `/etc/machine-id` could not be read (retriable).
+    MachineIdentityUnavailable,
+    /// The live machine identity is not the enrolled one.
+    MachineIdentityMismatch,
+    /// The mount table could not be read (retriable).
+    MountTableUnavailable,
+    /// The enrolled mountpoint is not a mountpoint.
+    NotAMountpoint,
+    /// The mounted filesystem is not of the enrolled type.
+    UnsupportedFilesystemType,
+    /// The mount at the mountpoint is not a filesystem root.
+    MountRootNotFilesystemRoot,
+    /// The mounted device is not the enrolled filesystem.
+    FilesystemIdentityMismatch,
+    /// The by-uuid identity could not be read (retriable).
+    FilesystemIdentityUnavailable,
+    /// The mount changed while it was being observed (retriable).
+    MountChangedDuringObservation,
+    /// The mountpoint could not be opened.
+    FilesystemInaccessible,
+    /// The descriptor's mount identity could not be read.
+    MountIdentityUnavailable,
+    /// `fstat` failed (retriable).
+    StatFailed,
+    /// `fstatvfs` failed (retriable).
+    StatfsFailed,
+}
+
+impl FilesystemFailureCode {
+    /// Every code, in declaration order.
+    pub const ALL: [Self; 13] = [
+        Self::MachineIdentityUnavailable,
+        Self::MachineIdentityMismatch,
+        Self::MountTableUnavailable,
+        Self::NotAMountpoint,
+        Self::UnsupportedFilesystemType,
+        Self::MountRootNotFilesystemRoot,
+        Self::FilesystemIdentityMismatch,
+        Self::FilesystemIdentityUnavailable,
+        Self::MountChangedDuringObservation,
+        Self::FilesystemInaccessible,
+        Self::MountIdentityUnavailable,
+        Self::StatFailed,
+        Self::StatfsFailed,
+    ];
+
+    /// The wire code, exactly as the helper emits it.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MachineIdentityUnavailable => "machine_identity_unavailable",
+            Self::MachineIdentityMismatch => "machine_identity_mismatch",
+            Self::MountTableUnavailable => "mount_table_unavailable",
+            Self::NotAMountpoint => "not_a_mountpoint",
+            Self::UnsupportedFilesystemType => "unsupported_filesystem_type",
+            Self::MountRootNotFilesystemRoot => "mount_root_not_filesystem_root",
+            Self::FilesystemIdentityMismatch => "filesystem_identity_mismatch",
+            Self::FilesystemIdentityUnavailable => "filesystem_identity_unavailable",
+            Self::MountChangedDuringObservation => "mount_changed_during_observation",
+            Self::FilesystemInaccessible => "filesystem_inaccessible",
+            Self::MountIdentityUnavailable => "mount_identity_unavailable",
+            Self::StatFailed => "stat_failed",
+            Self::StatfsFailed => "statfs_failed",
+        }
+    }
+
+    /// Exact lookup; anything else is not a filesystem code, whatever it
+    /// looks like.
+    #[must_use]
+    pub fn parse(code: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|known| known.as_str() == code)
+    }
+}
+
 pub const CAPABILITIES: [&str; 3] = [
     "read_machine_identity",
     "read_mount_table",
@@ -789,10 +870,10 @@ fn newest_current_report<'a>(
     if admitted.status != SemanticReportStatus::Complete
         || admitted.coverage.get(COVERAGE_KIND) != Some(&SemanticCoverageState::Complete)
     {
-        // The helper's typed failure code (identity mismatch, not a mountpoint,
-        // ...) is in the raw protocol report, but `ValidatedReport` retains only
-        // error counts, so the detector cannot surface it here (recorded gap).
-        let details = BTreeMap::from([
+        // The owner's typed code travels with the refusal when the report
+        // carries exactly one collection error and that code is in this
+        // module's closed list; NQ copies it and interprets nothing.
+        let mut details = BTreeMap::from([
             (
                 "reason".to_owned(),
                 "incomplete_filesystem_coverage".to_owned(),
@@ -811,6 +892,15 @@ fn newest_current_report<'a>(
                 admitted.failure_error_count.to_string(),
             ),
         ]);
+        if let Some(failure) = admitted.single_failure_error()
+            && let Some(code) = FilesystemFailureCode::parse(&failure.code)
+        {
+            details.insert("failure_code".to_owned(), code.as_str().to_owned());
+            details.insert(
+                "failure_retriable".to_owned(),
+                failure.retriable.to_string(),
+            );
+        }
         return Err(Box::new(DetectorResult::cannot_evaluate_with_details(
             input,
             descriptor,

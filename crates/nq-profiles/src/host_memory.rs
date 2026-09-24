@@ -42,6 +42,57 @@ pub const COVERAGE_KIND: &str = "memory_pressure_stall";
 /// Controlled access path.
 pub const ACCESS_PATH: &str = "procfs_pressure";
 /// Required capabilities; partial grants are refused.
+/// The closed set of typed failure codes the memory helper may emit. The
+/// meaning of each code belongs to this module; `machine_identity_mismatch`
+/// and `machine_identity_unavailable` share their text with the filesystem
+/// list and mean nothing outside the profile that carried them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MemoryFailureCode {
+    /// `/etc/machine-id` could not be read (retriable).
+    MachineIdentityUnavailable,
+    /// The live machine identity is not the enrolled one.
+    MachineIdentityMismatch,
+    /// The pressure file could not be read.
+    PsiReadFailed,
+    /// The pressure file was not in the expected form.
+    PsiMalformed,
+    /// The kernel provides no memory pressure accounting.
+    PsiNotProvided,
+    /// The boot clock could not be read (retriable).
+    BootClockUnavailable,
+}
+
+impl MemoryFailureCode {
+    /// Every code, in declaration order.
+    pub const ALL: [Self; 6] = [
+        Self::MachineIdentityUnavailable,
+        Self::MachineIdentityMismatch,
+        Self::PsiReadFailed,
+        Self::PsiMalformed,
+        Self::PsiNotProvided,
+        Self::BootClockUnavailable,
+    ];
+
+    /// The wire code, exactly as the helper emits it.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MachineIdentityUnavailable => "machine_identity_unavailable",
+            Self::MachineIdentityMismatch => "machine_identity_mismatch",
+            Self::PsiReadFailed => "psi_read_failed",
+            Self::PsiMalformed => "psi_malformed",
+            Self::PsiNotProvided => "psi_not_provided",
+            Self::BootClockUnavailable => "boot_clock_unavailable",
+        }
+    }
+
+    /// Exact lookup; anything else is not a memory code.
+    #[must_use]
+    pub fn parse(code: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|known| known.as_str() == code)
+    }
+}
+
 pub const CAPABILITIES: [&str; 2] = ["read_machine_identity", "read_procfs"];
 /// Compiled threshold on `some avg60`, in hundredths of a percent (10.00 %).
 pub const SOME_AVG60_THRESHOLD_CENTIPERCENT: u32 = 1_000;
@@ -626,18 +677,31 @@ fn newest_current_report<'a>(
     if admitted.status != SemanticReportStatus::Complete
         || admitted.coverage.get(COVERAGE_KIND) != Some(&SemanticCoverageState::Complete)
     {
+        let mut details = BTreeMap::from([
+            ("reason".to_owned(), "incomplete_memory_coverage".to_owned()),
+            (
+                "failure_error_count".to_owned(),
+                admitted.failure_error_count.to_string(),
+            ),
+        ]);
+        // The owner's typed code travels with the refusal when the report
+        // carries exactly one collection error and that code is in this
+        // module's closed list; NQ copies it and interprets nothing.
+        if let Some(failure) = admitted.single_failure_error()
+            && let Some(code) = MemoryFailureCode::parse(&failure.code)
+        {
+            details.insert("failure_code".to_owned(), code.as_str().to_owned());
+            details.insert(
+                "failure_retriable".to_owned(),
+                failure.retriable.to_string(),
+            );
+        }
         return Err(Box::new(DetectorResult::cannot_evaluate_with_details(
             input,
             descriptor,
             "the newest memory testimony lacks complete memory_pressure_stall coverage",
             vec!["A newer failed report is not shadowed by older success".to_owned()],
-            BTreeMap::from([
-                ("reason".to_owned(), "incomplete_memory_coverage".to_owned()),
-                (
-                    "failure_error_count".to_owned(),
-                    admitted.failure_error_count.to_string(),
-                ),
-            ]),
+            details,
         )));
     }
     let age = input

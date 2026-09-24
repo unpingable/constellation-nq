@@ -111,6 +111,7 @@ fn report(
         error_count: 0,
         failure_error_count: 0,
         used_capabilities: capabilities,
+        errors: Vec::new(),
     }
 }
 

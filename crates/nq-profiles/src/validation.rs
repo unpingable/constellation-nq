@@ -21,6 +21,37 @@ pub enum SemanticReportStatus {
     Failed,
 }
 
+/// Severity of one retained helper error.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetainedErrorSeverity {
+    /// A collection error: the helper could not collect what it declared.
+    Error,
+    /// A warning: testimony the helper still considers usable.
+    Warning,
+}
+
+/// The owner-defined identity of one helper error, retained through
+/// admission without its prose.
+///
+/// `code` is the helper's machine-readable code exactly as emitted, bounded
+/// by the protocol's token rules and closed by the owning profile module,
+/// which is the only place its meaning exists. `retriable` is carried only
+/// because the owner emitted it; NQ never infers it. The helper's message,
+/// subject and observation ordinal are deliberately not retained here: they
+/// carry host paths and identities that must not travel past admission.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedReportError {
+    /// Helper code, verbatim.
+    pub code: String,
+    /// Error or warning.
+    pub severity: RetainedErrorSeverity,
+    /// The owner's own statement of whether a later independent collection
+    /// may succeed.
+    pub retriable: bool,
+}
+
 /// State of one controlled coverage declaration.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -94,6 +125,12 @@ pub struct ReportInput {
     pub failure_error_count: u32,
     /// Capability subset the report declares it exercised.
     pub used_capabilities: BTreeSet<String>,
+    /// Owner-defined identities of the report's errors, carried beside the
+    /// normalized input and never serialized with it: the normalized
+    /// artifact identity of every historical report is computed from this
+    /// struct's canonical form and must not move.
+    #[serde(skip)]
+    pub errors: Vec<RetainedReportError>,
 }
 
 impl ReportInput {
@@ -162,6 +199,18 @@ impl ReportInput {
             .iter()
             .map(ToString::to_string)
             .collect();
+        let errors = report
+            .errors
+            .iter()
+            .map(|error| RetainedReportError {
+                code: error.code.to_string(),
+                severity: match error.severity {
+                    nq_protocol::ErrorSeverity::Error => RetainedErrorSeverity::Error,
+                    nq_protocol::ErrorSeverity::Warning => RetainedErrorSeverity::Warning,
+                },
+                retriable: error.retriable,
+            })
+            .collect();
 
         Ok(Self {
             report_digest: report_digest.to_string(),
@@ -174,6 +223,7 @@ impl ReportInput {
             error_count,
             failure_error_count,
             used_capabilities,
+            errors,
         })
     }
 
@@ -446,6 +496,27 @@ pub struct ValidatedReport {
     pub used_capabilities: BTreeSet<String>,
     /// NQ receive time. This is not an observation time.
     pub received_at: DateTime<Utc>,
+    /// Owner-defined error identities retained from the protocol report, in
+    /// order, without prose. Empty for a complete report, and omitted from the
+    /// canonical form when empty so every previously stored report keeps its
+    /// exact bytes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub report_errors: Vec<RetainedReportError>,
+}
+
+impl ValidatedReport {
+    /// The single error-severity error, when the report carries exactly one.
+    /// A detector uses this to carry the owner's code into its refusal
+    /// details; with none or several, nothing is carried.
+    #[must_use]
+    pub fn single_failure_error(&self) -> Option<&RetainedReportError> {
+        let mut failures = self
+            .report_errors
+            .iter()
+            .filter(|error| error.severity == RetainedErrorSeverity::Error);
+        let first = failures.next()?;
+        failures.next().is_none().then_some(first)
+    }
 }
 
 /// Result of compiled profile admission.
@@ -485,6 +556,7 @@ pub(crate) fn validate_common(
         failure_error_count: report.failure_error_count,
         used_capabilities: report.used_capabilities.clone(),
         received_at: context.received_at,
+        report_errors: report.errors.clone(),
     })
 }
 
