@@ -122,14 +122,12 @@ typed refusal. It does not grant authorization, initiate actions, provide a
 general remote-provider service, or own estate-wide recurrence; Nightshift
 owns recurrence and the operational portrait.
 
-The successor candidate has five compiled descriptors:
-`nq.host/v1` (one host snapshot), `nq.conformance/v1` (local fixture echo),
-`nq.http_endpoint/v1` (one bounded controller-vantage HTTP response), and
-`nq.systemd_unit/v1` (one target-local systemd snapshot), and
-`nq.synthetic_cache_executor_result/v1` (one exact past Docket-bound cache
-attempt). The fifth profile's retained-result behavior has been qualified
-separately; it does not establish a connected current-state or successor
-workflow. Each profile has its own exact
+The successor candidate's compiled descriptors are the ones listed in
+`profiles/manifest.json`; the catalog verifier keeps that list exact against
+the binary, so this document does not repeat the count. The
+`nq.synthetic_cache_executor_result/v1` retained-result behavior has been
+qualified separately; it does not establish a connected current-state or
+successor workflow. Each profile has its own exact
 scope, vantage, size and freshness limits. This does not establish an aggregate
 host or service-health claim. Classic NQ remains authoritative pending a separate switch;
 the current host-portrait subjects are not complete; persistent helper resource
@@ -137,3 +135,12 @@ limits are bounded controls rather than a per-instance quota; and runtime
 qualification does not inventory later dynamic/plugin/module loading. See
 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) and
 [OPERATIONS.md](OPERATIONS.md) for the exact boundaries.
+
+The release bundle has not been rebuilt since `profiles/failure-codes.json`
+was added (`b919be2`). A rebuild is required before the next publish or
+deploy. It needs release-profile binaries, a version decision (the `v0.1.0`
+tag already exists, so a rebuild cannot reuse that name), and passing
+reproducibility and failure-atomicity checks against the staged payload.
+`nq-host-resource-helper`, which serves `nq.host_filesystem_capacity/v1`,
+`nq.host_filesystem_inodes/v1` and `nq.host_memory/v1`, is not yet packaged,
+and the release path does not run `verify_catalog.py --helper`.

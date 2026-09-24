@@ -29,6 +29,24 @@ import verify_release_payload as payload  # noqa: E402
 
 ROOT = SCRIPT_DIRECTORY.parent
 
+# Published profile identities the release catalog must keep serving.  This is
+# a floor, not a count: the only source-only count is the manifest itself,
+# which load_manifest already returns, so asserting it would be a tautology.
+# A later profile (for example nq.systemd_unit v2) may land without editing
+# this set; dropping or renaming a qualified identity fails.
+QUALIFIED_PROFILE_FLOOR = frozenset(
+    {
+        ("nq.conformance", 1),
+        ("nq.host", 1),
+        ("nq.systemd_unit", 1),
+        ("nq.http_endpoint", 1),
+        ("nq.synthetic_cache_executor_result", 1),
+        ("nq.host_filesystem_capacity", 1),
+        ("nq.host_filesystem_inodes", 1),
+        ("nq.host_memory", 1),
+    }
+)
+
 
 def load_catalog_module():
     path = ROOT / "profiles/verify_catalog.py"
@@ -95,7 +113,11 @@ class CatalogVerifierTest(unittest.TestCase):
     def test_checked_catalog_is_strict_and_exact(self) -> None:
         with tempfile.TemporaryDirectory(prefix="nq-catalog-test-") as directory:
             destination = self.copy_catalog(Path(directory))
-            self.assertEqual(len(catalog.load_manifest(destination)), 5)
+            entries = catalog.load_manifest(destination)
+            self.assertLessEqual(
+                QUALIFIED_PROFILE_FLOOR,
+                {(entry["id"], entry["version"]) for entry in entries},
+            )
             (destination / "extra.v1.json").write_text("{}\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "inventory differs"):
                 catalog.load_manifest(destination)
@@ -106,6 +128,115 @@ class CatalogVerifierTest(unittest.TestCase):
                 output.truncate(catalog.MAX_CATALOG_JSON_BYTES + 1)
             with self.assertRaisesRegex(ValueError, "exceeds"):
                 catalog.read_strict_json(descriptor)
+
+    def manifest_keys(self, destination: Path) -> set[tuple[str, int]]:
+        return {
+            (entry["id"], entry["version"])
+            for entry in catalog.load_manifest(destination)
+        }
+
+    def checked_in_vocabularies(self) -> list[dict]:
+        packaged = catalog.read_strict_json(
+            ROOT / "profiles" / catalog.FAILURE_CODES_NAME
+        )
+        return packaged["profiles"]
+
+    def write_vocabularies(self, destination: Path, profiles: list[dict]) -> None:
+        (destination / catalog.FAILURE_CODES_NAME).write_text(
+            json.dumps(
+                {
+                    "schema": catalog.FAILURE_CODES_SCHEMA,
+                    "generated_by": catalog.FAILURE_CODES_GENERATOR,
+                    "profiles": profiles,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def write_stub_nq(self, directory: Path, profiles: list[dict]) -> Path:
+        document = directory / "compiled-failure-codes.json"
+        document.write_text(json.dumps(profiles), encoding="utf-8")
+        stub = directory / "nq"
+        stub.write_text(
+            f"""#!{sys.executable}
+import pathlib
+import sys
+
+if sys.argv[1:] != ["profiles", "failure-codes"]:
+    raise SystemExit(2)
+sys.stdout.write(pathlib.Path({str(document)!r}).read_text(encoding="utf-8"))
+""",
+            encoding="utf-8",
+        )
+        os.chmod(stub, 0o755)
+        return stub
+
+    def test_failure_code_vocabularies_cover_exactly_the_manifest(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nq-catalog-test-") as directory:
+            destination = self.copy_catalog(Path(directory))
+            manifest_keys = self.manifest_keys(destination)
+            packaged = catalog.read_strict_json(
+                destination / catalog.FAILURE_CODES_NAME
+            )
+            self.assertEqual(set(packaged), catalog.FAILURE_CODES_FIELDS)
+            self.assertEqual(packaged["schema"], catalog.FAILURE_CODES_SCHEMA)
+            published = catalog.normalize_vocabularies(
+                packaged["profiles"], source=catalog.FAILURE_CODES_NAME
+            )
+            self.assertEqual(set(published), manifest_keys)
+            for codes in published.values():
+                self.assertIsInstance(codes, list)
+                self.assertTrue(all(isinstance(code, str) for code in codes))
+                self.assertEqual(len(codes), len(set(codes)))
+
+    def test_failure_code_verifier_refuses_hostile_vocabularies(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="nq-catalog-test-") as directory:
+            root = Path(directory)
+            destination = self.copy_catalog(root)
+            manifest_keys = self.manifest_keys(destination)
+            checked_in = self.checked_in_vocabularies()
+            stub = self.write_stub_nq(root, checked_in)
+            counted = catalog.verify_failure_codes(
+                stub, destination, manifest_keys, None
+            )
+            self.assertEqual(
+                counted, sum(len(entry["codes"]) for entry in checked_in)
+            )
+
+            def removed(profiles: list[dict]) -> None:
+                next(entry for entry in profiles if entry["codes"])["codes"].pop()
+
+            def added(profiles: list[dict]) -> None:
+                profiles[0]["codes"].append("late_code")
+
+            def duplicated(profiles: list[dict]) -> None:
+                owner = next(entry for entry in profiles if entry["codes"])
+                owner["codes"].append(owner["codes"][0])
+
+            def non_token(profiles: list[dict]) -> None:
+                next(entry for entry in profiles if entry["codes"])["codes"][0] = (
+                    "Not-A-Token"
+                )
+
+            def unlisted(profiles: list[dict]) -> None:
+                profiles.append({"id": "nq.unlisted", "version": 1, "codes": []})
+
+            cases = [
+                ("removed", removed, "published failure vocabulary differs"),
+                ("added", added, "published failure vocabulary differs"),
+                ("duplicated", duplicated, "lists .* twice"),
+                ("non_token", non_token, "non-token code"),
+                ("unlisted", unlisted, "must cover exactly the manifest's profiles"),
+            ]
+            for name, mutate, message in cases:
+                with self.subTest(name):
+                    profiles = self.checked_in_vocabularies()
+                    mutate(profiles)
+                    self.write_vocabularies(destination, profiles)
+                    with self.assertRaisesRegex(ValueError, message):
+                        catalog.verify_failure_codes(
+                            stub, destination, manifest_keys, None
+                        )
 
     def test_duplicate_manifest_key_and_entry_are_refused(self) -> None:
         with tempfile.TemporaryDirectory(prefix="nq-catalog-test-") as directory:
