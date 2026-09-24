@@ -497,9 +497,10 @@ pub struct ValidatedReport {
     /// NQ receive time. This is not an observation time.
     pub received_at: DateTime<Utc>,
     /// Owner-defined error identities retained from the protocol report, in
-    /// order, without prose. Empty for a complete report, and omitted from the
-    /// canonical form when empty so every previously stored report keeps its
-    /// exact bytes.
+    /// order, without prose, for every profile. Empty whenever the helper
+    /// emitted no structured error (every complete report so far), and
+    /// omitted from the canonical form when empty so every previously stored
+    /// report keeps its exact bytes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub report_errors: Vec<RetainedReportError>,
 }

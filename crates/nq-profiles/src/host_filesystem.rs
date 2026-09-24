@@ -48,7 +48,6 @@ pub const COVERAGE_KIND: &str = "filesystem_statistics";
 /// Controlled access path: mountinfo selection followed by statfs on the
 /// declared path only.
 pub const ACCESS_PATH: &str = "mountinfo_statfs";
-/// Required capabilities; partial grants are refused.
 /// The closed set of typed failure codes the filesystem helper may emit,
 /// shared by the capacity and inodes profiles (one collector). This list is
 /// the owner's whole vocabulary: a detector carries a code into its refusal
@@ -130,6 +129,7 @@ impl FilesystemFailureCode {
     }
 }
 
+/// Required capabilities; partial grants are refused.
 pub const CAPABILITIES: [&str; 3] = [
     "read_machine_identity",
     "read_mount_table",

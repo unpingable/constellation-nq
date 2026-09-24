@@ -41,7 +41,6 @@ pub const OBSERVATION_KIND: &str = "memory_pressure_snapshot";
 pub const COVERAGE_KIND: &str = "memory_pressure_stall";
 /// Controlled access path.
 pub const ACCESS_PATH: &str = "procfs_pressure";
-/// Required capabilities; partial grants are refused.
 /// The closed set of typed failure codes the memory helper may emit. The
 /// meaning of each code belongs to this module; `machine_identity_mismatch`
 /// and `machine_identity_unavailable` share their text with the filesystem
@@ -93,6 +92,7 @@ impl MemoryFailureCode {
     }
 }
 
+/// Required capabilities; partial grants are refused.
 pub const CAPABILITIES: [&str; 2] = ["read_machine_identity", "read_procfs"];
 /// Compiled threshold on `some avg60`, in hundredths of a percent (10.00 %).
 pub const SOME_AVG60_THRESHOLD_CENTIPERCENT: u32 = 1_000;
