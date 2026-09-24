@@ -1,42 +1,65 @@
-//! The helper's typed failure codes are exactly the owning profiles' closed
-//! lists: every `CollectionFailure` is built from a profile enum, never from
-//! a string literal, so a code cannot exist that the owner did not define.
+//! The helper's failure codes are closed by the owning profiles' types: a
+//! filesystem failure carries a `FilesystemFailureCode`, a memory failure a
+//! `MemoryFailureCode`, and the wire tokens the helper publishes are the
+//! modules' own vocabularies. The compile-fail doctests on
+//! `CollectionFailure` show that one owner's code cannot be placed in the
+//! other owner's failure.
 
-use nq_profiles::{host_filesystem::FilesystemFailureCode, host_memory::MemoryFailureCode};
-
-const SOURCE: &str = include_str!("../src/lib.rs");
+use nq_host_resource_helper::{CollectionFailure, failure_code_vocabularies};
+use nq_profiles::{
+    ProfileModule, host_filesystem, host_filesystem::FilesystemFailureCode, host_memory,
+    host_memory::MemoryFailureCode,
+};
 
 #[test]
-fn every_collection_failure_is_built_from_a_profile_enum() {
-    let mut sites = 0;
-    for (index, _) in SOURCE.match_indices("CollectionFailure::new(") {
-        let rest = &SOURCE[index + "CollectionFailure::new(".len()..];
-        let first_argument = rest.trim_start();
-        assert!(
-            first_argument.starts_with("FilesystemFailureCode::")
-                || first_argument.starts_with("MemoryFailureCode::"),
-            "a CollectionFailure is built from something other than a profile code enum near byte {index}"
-        );
-        sites += 1;
+fn the_helper_publishes_exactly_the_owner_vocabularies() {
+    let vocabularies = failure_code_vocabularies();
+    let entries = vocabularies.as_array().expect("array");
+    assert_eq!(entries.len(), 3);
+    for (entry, module, expected) in [
+        (
+            &entries[0],
+            &host_filesystem::CAPACITY_MODULE as &dyn ProfileModule,
+            FilesystemFailureCode::tokens(),
+        ),
+        (
+            &entries[1],
+            &host_filesystem::INODES_MODULE as &dyn ProfileModule,
+            FilesystemFailureCode::tokens(),
+        ),
+        (
+            &entries[2],
+            &host_memory::MODULE as &dyn ProfileModule,
+            MemoryFailureCode::tokens(),
+        ),
+    ] {
+        assert_eq!(entry["id"], module.descriptor().profile.id);
+        assert_eq!(entry["version"], module.descriptor().profile.version);
+        let codes = entry["codes"]
+            .as_array()
+            .expect("codes")
+            .iter()
+            .map(|code| code.as_str().expect("token"))
+            .collect::<Vec<_>>();
+        assert_eq!(codes, expected);
+        assert_eq!(module.failure_codes(), expected);
     }
-    assert!(
-        sites >= 20,
-        "expected the helper's failure sites, found {sites}"
-    );
-    // The constructor itself is the only place that accepts a bare string.
-    assert_eq!(SOURCE.matches("fn new(code: &'static str").count(), 1);
 }
 
 #[test]
-fn the_closed_lists_are_tokens_and_parse_exactly() {
+fn every_owner_token_is_stable_unique_and_parses_back_to_its_own_enum_only() {
+    let mut seen = std::collections::BTreeSet::new();
     for code in FilesystemFailureCode::ALL {
         let text = code.as_str();
         assert!(is_token(text), "{text}");
+        assert!(seen.insert(("filesystem", text)), "duplicate {text}");
         assert_eq!(FilesystemFailureCode::parse(text), Some(code));
     }
+    seen.clear();
     for code in MemoryFailureCode::ALL {
         let text = code.as_str();
         assert!(is_token(text), "{text}");
+        assert!(seen.insert(("memory", text)), "duplicate {text}");
         assert_eq!(MemoryFailureCode::parse(text), Some(code));
     }
     for foreign in [
@@ -58,17 +81,31 @@ fn the_closed_lists_are_tokens_and_parse_exactly() {
         "backend_failed",
         "/etc/machine-id",
         "Machine_Identity_Mismatch",
-        " psi_malformed",
     ] {
         assert_eq!(FilesystemFailureCode::parse(junk), None, "{junk}");
         assert_eq!(MemoryFailureCode::parse(junk), None, "{junk}");
     }
-    // The two shared texts are distinct values of distinct types; equality
-    // of text implies nothing about meaning.
+    // Shared text is not shared meaning: two enums, two values.
     assert_eq!(
         FilesystemFailureCode::MachineIdentityMismatch.as_str(),
         MemoryFailureCode::MachineIdentityMismatch.as_str()
     );
+}
+
+#[test]
+fn retriable_is_per_occurrence_data_not_a_property_of_the_code() {
+    let once = CollectionFailure::owner(MemoryFailureCode::PsiReadFailed, "read", true);
+    let again = CollectionFailure::owner(MemoryFailureCode::PsiReadFailed, "bound", false);
+    assert_eq!(once.code(), again.code());
+    assert_ne!(once.retriable(), again.retriable());
+    let typed: CollectionFailure<FilesystemFailureCode> = CollectionFailure::owner(
+        FilesystemFailureCode::MountIdentityUnavailable,
+        "fdinfo",
+        true,
+    );
+    assert_eq!(typed.code().as_str(), "mount_identity_unavailable");
+    assert!(typed.retriable());
+    assert_eq!(typed.message(), "fdinfo");
 }
 
 fn is_token(text: &str) -> bool {

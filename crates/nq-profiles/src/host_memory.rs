@@ -90,6 +90,19 @@ impl MemoryFailureCode {
     pub fn parse(code: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|known| known.as_str() == code)
     }
+
+    /// Every wire token, in declaration order: the published vocabulary,
+    /// derived from the enum so it cannot drift from it.
+    #[must_use]
+    pub fn tokens() -> &'static [&'static str] {
+        static TOKENS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+            MemoryFailureCode::ALL
+                .iter()
+                .map(|code| code.as_str())
+                .collect()
+        });
+        &TOKENS
+    }
 }
 
 /// Required capabilities; partial grants are refused.
@@ -432,6 +445,9 @@ fn validate_binding(
 }
 
 impl ProfileModule for HostMemoryProfile {
+    fn failure_codes(&self) -> &'static [&'static str] {
+        MemoryFailureCode::tokens()
+    }
     fn descriptor(&self) -> &'static ProfileDescriptor {
         &DESCRIPTOR
     }

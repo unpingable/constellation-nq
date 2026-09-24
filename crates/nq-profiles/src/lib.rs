@@ -113,4 +113,14 @@ pub trait ProfileModule: Send + Sync {
 
     /// Separately versioned detectors owned by this profile revision.
     fn detectors(&self) -> &'static [&'static dyn Detector];
+
+    /// The owner's closed collection-failure vocabulary as opaque tokens, in
+    /// the owner's declaration order, for catalog publication and
+    /// cross-binary verification. Generic code lists these tokens and never
+    /// interprets them; the meaning of each token belongs to the module that
+    /// declares the enum behind it. Profiles whose helpers carry no typed
+    /// collection failures list nothing.
+    fn failure_codes(&self) -> &'static [&'static str] {
+        &[]
+    }
 }

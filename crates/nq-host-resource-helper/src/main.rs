@@ -11,6 +11,15 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
+    if std::env::args().nth(1).as_deref() == Some("--failure-codes") {
+        return match nq_host_resource_helper::write_failure_codes(std::io::stdout().lock()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("nq-host-resource-helper: cannot write failure codes: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     match nq_host_resource_helper::run_stdio() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

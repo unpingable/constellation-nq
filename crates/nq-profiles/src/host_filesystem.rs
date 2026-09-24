@@ -127,6 +127,19 @@ impl FilesystemFailureCode {
     pub fn parse(code: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|known| known.as_str() == code)
     }
+
+    /// Every wire token, in declaration order: the published vocabulary,
+    /// derived from the enum so it cannot drift from it.
+    #[must_use]
+    pub fn tokens() -> &'static [&'static str] {
+        static TOKENS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+            FilesystemFailureCode::ALL
+                .iter()
+                .map(|code| code.as_str())
+                .collect()
+        });
+        &TOKENS
+    }
 }
 
 /// Required capabilities; partial grants are refused.
@@ -617,6 +630,9 @@ fn project_report(report: &ValidatedReport) -> ProjectionResult {
 }
 
 impl ProfileModule for CapacityProfile {
+    fn failure_codes(&self) -> &'static [&'static str] {
+        FilesystemFailureCode::tokens()
+    }
     fn descriptor(&self) -> &'static ProfileDescriptor {
         &CAPACITY_DESCRIPTOR
     }
@@ -635,6 +651,9 @@ impl ProfileModule for CapacityProfile {
 }
 
 impl ProfileModule for InodesProfile {
+    fn failure_codes(&self) -> &'static [&'static str] {
+        FilesystemFailureCode::tokens()
+    }
     fn descriptor(&self) -> &'static ProfileDescriptor {
         &INODES_DESCRIPTOR
     }

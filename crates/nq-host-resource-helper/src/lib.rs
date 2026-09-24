@@ -80,6 +80,39 @@ pub fn run_stdio() -> Result<(), StdioError> {
     run(stdin.lock(), stdout.lock())
 }
 
+/// The owner vocabularies this helper build can emit, as the profile modules
+/// publish them, one entry per served profile. `nq profiles failure-codes`
+/// prints the same shape from the `nq` binary; a catalog verifier compares
+/// the two so a helper and an `nq` built from different sources cannot
+/// silently disagree about a vocabulary.
+#[must_use]
+pub fn failure_code_vocabularies() -> Value {
+    Value::Array(
+        [Branch::Capacity, Branch::Inodes, Branch::Memory]
+            .into_iter()
+            .map(|branch| {
+                let descriptor = branch.module().descriptor();
+                json!({
+                    "id": descriptor.profile.id,
+                    "version": descriptor.profile.version,
+                    "codes": branch.module().failure_codes(),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Write [`failure_code_vocabularies`] as one JSON document.
+///
+/// # Errors
+///
+/// Returns the write error.
+pub fn write_failure_codes(mut output: impl Write) -> io::Result<()> {
+    let text = serde_json::to_string_pretty(&failure_code_vocabularies())?;
+    output.write_all(text.as_bytes())?;
+    output.write_all(b"\n")
+}
+
 /// Runs one exchange over supplied streams (public for embedding tests).
 ///
 /// # Errors
@@ -139,23 +172,77 @@ impl Branch {
 }
 
 /// A typed collection failure that becomes a Failed report.
+///
+/// `C` is the owning profile's closed code enum: the filesystem branch can
+/// only produce `CollectionFailure<FilesystemFailureCode>` and the memory
+/// branch only `CollectionFailure<MemoryFailureCode>`, so an unlisted code,
+/// or another owner's code, cannot be constructed without first changing the
+/// owner's type. `retriable` is the owner's separate statement for this
+/// occurrence, never a property of the code. The code becomes an opaque wire
+/// token only when the failed report is built.
+///
+/// A memory code cannot be used where a filesystem failure is expected:
+///
+/// ```compile_fail
+/// use nq_host_resource_helper::CollectionFailure;
+/// use nq_profiles::host_filesystem::FilesystemFailureCode;
+/// use nq_profiles::host_memory::MemoryFailureCode;
+/// let failure: CollectionFailure<FilesystemFailureCode> =
+///     CollectionFailure::owner(MemoryFailureCode::PsiNotProvided, "x", false);
+/// ```
+///
+/// And the reverse:
+///
+/// ```compile_fail
+/// use nq_host_resource_helper::CollectionFailure;
+/// use nq_profiles::host_filesystem::FilesystemFailureCode;
+/// use nq_profiles::host_memory::MemoryFailureCode;
+/// let failure: CollectionFailure<MemoryFailureCode> =
+///     CollectionFailure::owner(FilesystemFailureCode::NotAMountpoint, "x", true);
+/// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CollectionFailure {
-    /// Stable error code (see the profile design's refusal table).
-    pub code: &'static str,
-    /// Bounded operator-facing message.
-    pub message: String,
-    /// Whether a retry may succeed without operator action.
-    pub retriable: bool,
+pub struct CollectionFailure<C> {
+    code: C,
+    message: String,
+    retriable: bool,
 }
 
-impl CollectionFailure {
-    fn new(code: &'static str, message: impl Into<String>, retriable: bool) -> Self {
+impl<C: Copy> CollectionFailure<C> {
+    fn new(code: C, message: impl Into<String>, retriable: bool) -> Self {
         Self {
             code,
             message: bounded_message(&message.into(), 768),
             retriable,
         }
+    }
+
+    /// Build a failure from the owner's typed code (the same constructor the
+    /// helper uses; public so embedding tests can name it).
+    #[must_use]
+    pub fn owner(code: C, message: impl Into<String>, retriable: bool) -> Self {
+        Self::new(code, message, retriable)
+    }
+
+    /// The owner's typed code.
+    #[must_use]
+    pub fn code(&self) -> C {
+        self.code
+    }
+
+    /// The owner's retriable statement for this occurrence.
+    #[must_use]
+    pub const fn retriable(&self) -> bool {
+        self.retriable
+    }
+
+    /// The bounded operator-facing message.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    fn into_parts(self) -> (C, String, bool) {
+        (self.code, self.message, self.retriable)
     }
 }
 
@@ -182,7 +269,10 @@ fn handle_request(
             };
             match observe(&scope, source) {
                 Ok(observation) => complete_report(request, &scope, &observation),
-                Err(failure) => failed_report(request, branch, failure),
+                Err(failure) => {
+                    let (code, message, retriable) = failure.into_parts();
+                    failed_report(request, branch, code.as_str(), message, retriable)
+                }
             }
         }
         Branch::Memory => {
@@ -192,7 +282,10 @@ fn handle_request(
             };
             match observe_memory(&scope, source, clock) {
                 Ok(observation) => complete_memory_report(request, &scope, &observation),
-                Err(failure) => failed_report(request, branch, failure),
+                Err(failure) => {
+                    let (code, message, retriable) = failure.into_parts();
+                    failed_report(request, branch, code.as_str(), message, retriable)
+                }
             }
         }
     };
@@ -438,10 +531,10 @@ pub trait ResourceSource {
         &self,
         mountpoint: &str,
         expected_mount_id: u64,
-    ) -> Result<StatfsCut, CollectionFailure>;
+    ) -> Result<StatfsCut, CollectionFailure<FilesystemFailureCode>>;
     /// Bounded read-only read of `/proc/pressure/memory`. Errors are typed
     /// collection failures (`psi_not_provided`, `psi_read_failed`).
-    fn pressure_memory(&self) -> Result<String, CollectionFailure>;
+    fn pressure_memory(&self) -> Result<String, CollectionFailure<MemoryFailureCode>>;
 }
 
 /// Validated memory observation ready for the payload.
@@ -508,42 +601,33 @@ pub fn observe_memory(
     scope: &host_memory::HostMemoryScope,
     source: &impl ResourceSource,
     clock: &impl DeadlineClock,
-) -> Result<MemoryObservation, CollectionFailure> {
+) -> Result<MemoryObservation, CollectionFailure<MemoryFailureCode>> {
     let machine_id = source.machine_id().map_err(|error| {
-        CollectionFailure::new(
-            MemoryFailureCode::MachineIdentityUnavailable.as_str(),
-            error,
-            true,
-        )
+        CollectionFailure::new(MemoryFailureCode::MachineIdentityUnavailable, error, true)
     })?;
     if machine_id != scope.machine_id {
         return Err(CollectionFailure::new(
-            MemoryFailureCode::MachineIdentityMismatch.as_str(),
+            MemoryFailureCode::MachineIdentityMismatch,
             "live /etc/machine-id differs from the exact request scope",
             false,
         ));
     }
     let text = source.pressure_memory()?;
-    let (some, full) = host_memory::parse_pressure_file(&text).map_err(|error| {
-        CollectionFailure::new(MemoryFailureCode::PsiMalformed.as_str(), error, false)
-    })?;
+    let (some, full) = host_memory::parse_pressure_file(&text)
+        .map_err(|error| CollectionFailure::new(MemoryFailureCode::PsiMalformed, error, false))?;
     if full.avg10_centipercent > some.avg10_centipercent
         || full.avg60_centipercent > some.avg60_centipercent
         || full.avg300_centipercent > some.avg300_centipercent
         || full.total_microseconds > some.total_microseconds
     {
         return Err(CollectionFailure::new(
-            MemoryFailureCode::PsiMalformed.as_str(),
+            MemoryFailureCode::PsiMalformed,
             "full stall figures exceed some stall figures",
             false,
         ));
     }
     let boot_age_seconds = clock.now_ns().map_err(|error| {
-        CollectionFailure::new(
-            MemoryFailureCode::BootClockUnavailable.as_str(),
-            error,
-            true,
-        )
+        CollectionFailure::new(MemoryFailureCode::BootClockUnavailable, error, true)
     })? / 1_000_000_000;
     Ok(MemoryObservation {
         boot_age_seconds,
@@ -708,38 +792,34 @@ fn makedev(major: u32, minor: u32) -> u64 {
 pub fn observe(
     scope: &HostFilesystemScope,
     source: &impl ResourceSource,
-) -> Result<Observation, CollectionFailure> {
+) -> Result<Observation, CollectionFailure<FilesystemFailureCode>> {
     let machine_id = source.machine_id().map_err(|error| {
         CollectionFailure::new(
-            FilesystemFailureCode::MachineIdentityUnavailable.as_str(),
+            FilesystemFailureCode::MachineIdentityUnavailable,
             error,
             true,
         )
     })?;
     if machine_id != scope.machine_id {
         return Err(CollectionFailure::new(
-            FilesystemFailureCode::MachineIdentityMismatch.as_str(),
+            FilesystemFailureCode::MachineIdentityMismatch,
             "live /etc/machine-id differs from the exact request scope",
             false,
         ));
     }
     let before = parse_mountinfo(&source.mountinfo().map_err(|error| {
-        CollectionFailure::new(
-            FilesystemFailureCode::MountTableUnavailable.as_str(),
-            error,
-            true,
-        )
+        CollectionFailure::new(FilesystemFailureCode::MountTableUnavailable, error, true)
     })?);
     let Some(mount) = select_mount(&before, &scope.mountpoint).cloned() else {
         return Err(CollectionFailure::new(
-            FilesystemFailureCode::NotAMountpoint.as_str(),
+            FilesystemFailureCode::NotAMountpoint,
             "the declared path is not a mount point in this mount namespace",
             false,
         ));
     };
     if mount.fs_type != scope.filesystem_type {
         return Err(CollectionFailure::new(
-            FilesystemFailureCode::UnsupportedFilesystemType.as_str(),
+            FilesystemFailureCode::UnsupportedFilesystemType,
             format!(
                 "top mount at the declared path is {} not {}",
                 mount.fs_type, scope.filesystem_type
@@ -749,7 +829,7 @@ pub fn observe(
     }
     if mount.root != "/" {
         return Err(CollectionFailure::new(
-            FilesystemFailureCode::MountRootNotFilesystemRoot.as_str(),
+            FilesystemFailureCode::MountRootNotFilesystemRoot,
             "the top mount at the declared path is a subtree (bind) mount",
             false,
         ));
@@ -759,21 +839,21 @@ pub fn observe(
         Ok(Some(rdev)) if rdev == expected_dev => {}
         Ok(Some(_)) => {
             return Err(CollectionFailure::new(
-                FilesystemFailureCode::FilesystemIdentityMismatch.as_str(),
+                FilesystemFailureCode::FilesystemIdentityMismatch,
                 "the by-uuid device differs from the mounted device",
                 false,
             ));
         }
         Ok(None) => {
             return Err(CollectionFailure::new(
-                FilesystemFailureCode::FilesystemIdentityMismatch.as_str(),
+                FilesystemFailureCode::FilesystemIdentityMismatch,
                 "no by-uuid entry exists for the declared filesystem UUID",
                 false,
             ));
         }
         Err(error) => {
             return Err(CollectionFailure::new(
-                FilesystemFailureCode::FilesystemIdentityUnavailable.as_str(),
+                FilesystemFailureCode::FilesystemIdentityUnavailable,
                 error,
                 true,
             ));
@@ -782,7 +862,7 @@ pub fn observe(
     let cut = source.statfs_cut(&scope.mountpoint, mount.mount_id)?;
     if cut.st_dev != expected_dev || cut.mount_id != mount.mount_id {
         return Err(CollectionFailure::new(
-            FilesystemFailureCode::MountChangedDuringObservation.as_str(),
+            FilesystemFailureCode::MountChangedDuringObservation,
             "the opened path is not the selected mount entry",
             true,
         ));
@@ -790,24 +870,20 @@ pub fn observe(
     let expected_fsid =
         host_filesystem::ext4_fsid_hex(&scope.filesystem_uuid).ok_or_else(|| {
             CollectionFailure::new(
-                FilesystemFailureCode::FilesystemIdentityMismatch.as_str(),
+                FilesystemFailureCode::FilesystemIdentityMismatch,
                 "scope UUID is not canonical",
                 false,
             )
         })?;
     if format!("{:016x}", cut.fsid) != expected_fsid {
         return Err(CollectionFailure::new(
-            FilesystemFailureCode::FilesystemIdentityMismatch.as_str(),
+            FilesystemFailureCode::FilesystemIdentityMismatch,
             "statfs f_fsid differs from the ext4 fold of the declared UUID",
             false,
         ));
     }
     let after = parse_mountinfo(&source.mountinfo().map_err(|error| {
-        CollectionFailure::new(
-            FilesystemFailureCode::MountTableUnavailable.as_str(),
-            error,
-            true,
-        )
+        CollectionFailure::new(FilesystemFailureCode::MountTableUnavailable, error, true)
     })?);
     match select_mount(&after, &scope.mountpoint) {
         Some(again)
@@ -816,7 +892,7 @@ pub fn observe(
                 && again.minor == mount.minor => {}
         _ => {
             return Err(CollectionFailure::new(
-                FilesystemFailureCode::MountChangedDuringObservation.as_str(),
+                FilesystemFailureCode::MountChangedDuringObservation,
                 "the mount table changed between the pre and post reads",
                 true,
             ));
@@ -888,10 +964,15 @@ fn complete_report(
     builder.build().map_err(|error| format!("{error:?}"))
 }
 
+/// Build the Failed report. This is the only place an owner's typed code
+/// becomes a wire token, and it receives the token already converted by the
+/// branch that owns it.
 fn failed_report(
     request: &HelperRequest,
     branch: Branch,
-    failure: CollectionFailure,
+    code: &'static str,
+    message: String,
+    retriable: bool,
 ) -> Result<EvidenceReport, String> {
     let mut builder = EvidenceReport::builder(
         request.profile.clone(),
@@ -907,12 +988,12 @@ fn failed_report(
         detail: None,
     })
     .error(ReportError {
-        code: token(ErrorCode::new(failure.code))?,
+        code: token(ErrorCode::new(code))?,
         severity: ErrorSeverity::Error,
-        message: failure.message,
+        message,
         subject: Some(request.binding.subject.clone()),
         observation_ordinal: None,
-        retriable: failure.retriable,
+        retriable,
     });
     for capability in branch.capabilities() {
         builder = builder.used_capability(token(Capability::new(*capability))?);
@@ -1066,28 +1147,28 @@ impl ResourceSource for LinuxSource {
         read_bounded(MOUNTINFO_PATH, MAX_MOUNTINFO_BYTES)
     }
 
-    fn pressure_memory(&self) -> Result<String, CollectionFailure> {
+    fn pressure_memory(&self) -> Result<String, CollectionFailure<MemoryFailureCode>> {
         // O_RDONLY only: a write to this file registers a PSI trigger.
         match File::open(PRESSURE_MEMORY_PATH) {
             Ok(file) => {
                 let mut bytes = Vec::with_capacity(512);
                 file.take(4_097).read_to_end(&mut bytes).map_err(|error| {
                     CollectionFailure::new(
-                        MemoryFailureCode::PsiReadFailed.as_str(),
+                        MemoryFailureCode::PsiReadFailed,
                         error.to_string(),
                         true,
                     )
                 })?;
                 if bytes.len() > 4_096 {
                     return Err(CollectionFailure::new(
-                        MemoryFailureCode::PsiReadFailed.as_str(),
+                        MemoryFailureCode::PsiReadFailed,
                         "pressure file exceeds its bound",
                         false,
                     ));
                 }
                 String::from_utf8(bytes).map_err(|_| {
                     CollectionFailure::new(
-                        MemoryFailureCode::PsiMalformed.as_str(),
+                        MemoryFailureCode::PsiMalformed,
                         "pressure file is not UTF-8",
                         false,
                     )
@@ -1098,13 +1179,13 @@ impl ResourceSource for LinuxSource {
                     || error.raw_os_error() == Some(libc::EOPNOTSUPP) =>
             {
                 Err(CollectionFailure::new(
-                    MemoryFailureCode::PsiNotProvided.as_str(),
+                    MemoryFailureCode::PsiNotProvided,
                     "/proc/pressure/memory is not available to this process (kernel without PSI, psi=0, or a restricted proc view)",
                     false,
                 ))
             }
             Err(error) => Err(CollectionFailure::new(
-                MemoryFailureCode::PsiReadFailed.as_str(),
+                MemoryFailureCode::PsiReadFailed,
                 error.to_string(),
                 true,
             )),
@@ -1127,7 +1208,7 @@ impl ResourceSource for LinuxSource {
         &self,
         mountpoint: &str,
         expected_mount_id: u64,
-    ) -> Result<StatfsCut, CollectionFailure> {
+    ) -> Result<StatfsCut, CollectionFailure<FilesystemFailureCode>> {
         // O_PATH opens no file description for reading; the access mode is
         // required by the standard library, not used by the kernel.
         let file = OpenOptions::new()
@@ -1136,7 +1217,7 @@ impl ResourceSource for LinuxSource {
             .open(mountpoint)
             .map_err(|error| {
                 CollectionFailure::new(
-                    FilesystemFailureCode::FilesystemInaccessible.as_str(),
+                    FilesystemFailureCode::FilesystemInaccessible,
                     error.to_string(),
                     false,
                 )
@@ -1146,11 +1227,7 @@ impl ResourceSource for LinuxSource {
         // read and the open is never measured.
         let fdinfo = read_bounded(&format!("/proc/self/fdinfo/{}", file.as_raw_fd()), 4_096)
             .map_err(|error| {
-                CollectionFailure::new(
-                    FilesystemFailureCode::MountIdentityUnavailable.as_str(),
-                    error,
-                    true,
-                )
+                CollectionFailure::new(FilesystemFailureCode::MountIdentityUnavailable, error, true)
             })?;
         let mount_id = fdinfo
             .lines()
@@ -1158,33 +1235,25 @@ impl ResourceSource for LinuxSource {
             .and_then(|value| value.trim().parse::<u64>().ok())
             .ok_or_else(|| {
                 CollectionFailure::new(
-                    FilesystemFailureCode::MountIdentityUnavailable.as_str(),
+                    FilesystemFailureCode::MountIdentityUnavailable,
                     "kernel did not report a mount id",
                     false,
                 )
             })?;
         if mount_id != expected_mount_id {
             return Err(CollectionFailure::new(
-                FilesystemFailureCode::MountChangedDuringObservation.as_str(),
+                FilesystemFailureCode::MountChangedDuringObservation,
                 "the opened path is not the selected mount entry",
                 true,
             ));
         }
         let metadata = file.metadata().map_err(|error| {
-            CollectionFailure::new(
-                FilesystemFailureCode::StatFailed.as_str(),
-                error.to_string(),
-                true,
-            )
+            CollectionFailure::new(FilesystemFailureCode::StatFailed, error.to_string(), true)
         })?;
         // statvfs carries the same superblock counters; glibc folds f_fsid into
         // one word exactly as the ext4 UUID fold expects (val[0] | val[1] << 32).
         let statistics = fstatvfs(&file).map_err(|error| {
-            CollectionFailure::new(
-                FilesystemFailureCode::StatfsFailed.as_str(),
-                error.to_string(),
-                true,
-            )
+            CollectionFailure::new(FilesystemFailureCode::StatfsFailed, error.to_string(), true)
         })?;
         Ok(StatfsCut {
             st_dev: metadata.dev(),
@@ -1232,17 +1301,17 @@ mod tests {
             &self,
             _mountpoint: &str,
             expected_mount_id: u64,
-        ) -> Result<StatfsCut, CollectionFailure> {
+        ) -> Result<StatfsCut, CollectionFailure<FilesystemFailureCode>> {
             if self.cut.mount_id != expected_mount_id {
                 return Err(CollectionFailure::new(
-                    FilesystemFailureCode::MountChangedDuringObservation.as_str(),
+                    FilesystemFailureCode::MountChangedDuringObservation,
                     "the opened path is not the selected mount entry",
                     true,
                 ));
             }
             Ok(self.cut.clone())
         }
-        fn pressure_memory(&self) -> Result<String, CollectionFailure> {
+        fn pressure_memory(&self) -> Result<String, CollectionFailure<MemoryFailureCode>> {
             Ok(
                 "some avg10=0.00 avg60=12.34 avg300=0.00 total=311022455\nfull avg10=0.00 avg60=1.00 avg300=0.00 total=304797313\n"
                     .to_owned(),
@@ -1280,7 +1349,8 @@ mod tests {
         assert_eq!(
             observe_memory(&other, &ok, &FixedClock(1))
                 .unwrap_err()
-                .code,
+                .code()
+                .as_str(),
             "machine_identity_mismatch"
         );
         let real = LinuxSource.pressure_memory();
@@ -1353,19 +1423,29 @@ mod tests {
         assert_eq!(
             observe(&scope("/data", "ext4"), &other_machine)
                 .unwrap_err()
-                .code,
+                .code()
+                .as_str(),
             "machine_identity_mismatch"
         );
         assert_eq!(
-            observe(&scope("/nope", "ext4"), &ok).unwrap_err().code,
+            observe(&scope("/nope", "ext4"), &ok)
+                .unwrap_err()
+                .code()
+                .as_str(),
             "not_a_mountpoint"
         );
         assert_eq!(
-            observe(&scope("/mnt/net", "ext4"), &ok).unwrap_err().code,
+            observe(&scope("/mnt/net", "ext4"), &ok)
+                .unwrap_err()
+                .code()
+                .as_str(),
             "unsupported_filesystem_type"
         );
         assert_eq!(
-            observe(&scope("/mnt/bind", "ext4"), &ok).unwrap_err().code,
+            observe(&scope("/mnt/bind", "ext4"), &ok)
+                .unwrap_err()
+                .code()
+                .as_str(),
             "mount_root_not_filesystem_root"
         );
         let replaced = Fake {
@@ -1375,7 +1455,8 @@ mod tests {
         assert_eq!(
             observe(&scope("/data", "ext4"), &replaced)
                 .unwrap_err()
-                .code,
+                .code()
+                .as_str(),
             "filesystem_identity_mismatch"
         );
         let missing = Fake {
@@ -1383,7 +1464,10 @@ mod tests {
             ..ok_clone(&ok)
         };
         assert_eq!(
-            observe(&scope("/data", "ext4"), &missing).unwrap_err().code,
+            observe(&scope("/data", "ext4"), &missing)
+                .unwrap_err()
+                .code()
+                .as_str(),
             "filesystem_identity_mismatch"
         );
         let mut cloned_uuid_other_fsid = ok_clone(&ok);
@@ -1391,13 +1475,17 @@ mod tests {
         assert_eq!(
             observe(&scope("/data", "ext4"), &cloned_uuid_other_fsid)
                 .unwrap_err()
-                .code,
+                .code()
+                .as_str(),
             "filesystem_identity_mismatch"
         );
         let mut moved = ok_clone(&ok);
         moved.cut.mount_id = 99;
         assert_eq!(
-            observe(&scope("/data", "ext4"), &moved).unwrap_err().code,
+            observe(&scope("/data", "ext4"), &moved)
+                .unwrap_err()
+                .code()
+                .as_str(),
             "mount_changed_during_observation"
         );
     }
@@ -1427,7 +1515,8 @@ mod tests {
             LinuxSource
                 .statfs_cut("/", root.mount_id + 1_000_000)
                 .unwrap_err()
-                .code,
+                .code()
+                .as_str(),
             "mount_changed_during_observation"
         );
         assert_eq!(makedev(root.major, root.minor), cut.st_dev);
@@ -1456,10 +1545,10 @@ mod tests {
             &self,
             mountpoint: &str,
             expected: u64,
-        ) -> Result<StatfsCut, CollectionFailure> {
+        ) -> Result<StatfsCut, CollectionFailure<FilesystemFailureCode>> {
             self.0.statfs_cut(mountpoint, expected)
         }
-        fn pressure_memory(&self) -> Result<String, CollectionFailure> {
+        fn pressure_memory(&self) -> Result<String, CollectionFailure<MemoryFailureCode>> {
             self.0.pressure_memory()
         }
     }
@@ -1478,7 +1567,8 @@ mod tests {
         assert_eq!(
             observe(&scope("/data", "ext4"), &Stacked(&ok))
                 .unwrap_err()
-                .code,
+                .code()
+                .as_str(),
             "unsupported_filesystem_type"
         );
         // An ambiguous stack (two tops) is refused as not a mountpoint.
