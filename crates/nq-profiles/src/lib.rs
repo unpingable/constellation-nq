@@ -21,6 +21,10 @@ pub mod repository_state;
 pub mod conformance;
 /// Local host operational profile.
 pub mod host;
+/// `nq.host_filesystem_capacity/v1` and `nq.host_filesystem_inodes/v1`.
+pub mod host_filesystem;
+/// `nq.host_memory/v1`.
+pub mod host_memory;
 /// Controller-vantage bounded HTTP endpoint profile.
 pub mod http_endpoint;
 /// Retained Docket-bound synthetic-cache executor result profile.

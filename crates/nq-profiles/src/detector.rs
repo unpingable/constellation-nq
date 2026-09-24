@@ -39,6 +39,27 @@ pub enum DetectorRuleParameters {
     },
     /// Exact fixed past-result law for the synthetic-cache executor profile.
     SyntheticCacheExecutorResult,
+    /// Filesystem capacity law: `Present` when
+    /// `1000 * (f_blocks - f_bfree) >= used_threshold_permille * ((f_blocks - f_bfree) + f_bavail)`.
+    FilesystemCapacityPressure {
+        /// Used fraction of non-reserved capacity, in thousandths.
+        used_threshold_permille: u32,
+    },
+    /// Filesystem inode law: `Present` when
+    /// `1000 * (f_files - f_ffree) >= used_threshold_permille * f_files`.
+    FilesystemInodePressure {
+        /// Used fraction of total inodes, in thousandths.
+        used_threshold_permille: u32,
+    },
+    /// Kernel PSI memory law: `Present` when `some avg60` (hundredths of a
+    /// percent) is at least the threshold, evaluable only once boot age has
+    /// reached the warm-up guard.
+    MemoryPressureStall {
+        /// Threshold on `some avg60` in hundredths of a percent.
+        some_avg60_threshold_centipercent: u32,
+        /// Minimum `CLOCK_BOOTTIME` seconds before the averages are trusted.
+        minimum_boot_age_seconds: u32,
+    },
 }
 
 /// Canonical identity and operator metadata for one detector revision.

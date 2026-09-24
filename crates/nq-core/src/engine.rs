@@ -5934,7 +5934,31 @@ fn require_initial_diagnostic_profile(
         && profile_digest == compiled_profile_digest.as_str()
         && detector_descriptor.id == "nq.synthetic_cache_executor_result.fixed_result"
         && detector_descriptor.version == 1;
-    if !(host || systemd || http || synthetic_cache_result) {
+    let filesystem_capacity = descriptor.profile.id
+        == nq_profiles::host_filesystem::CAPACITY_PROFILE_ID
+        && descriptor.profile.version == nq_profiles::host_filesystem::PROFILE_VERSION
+        && profile_digest == compiled_profile_digest.as_str()
+        && detector_descriptor.id == nq_profiles::host_filesystem::CAPACITY_DETECTOR_ID
+        && detector_descriptor.version == 1;
+    let filesystem_inodes = descriptor.profile.id
+        == nq_profiles::host_filesystem::INODES_PROFILE_ID
+        && descriptor.profile.version == nq_profiles::host_filesystem::PROFILE_VERSION
+        && profile_digest == compiled_profile_digest.as_str()
+        && detector_descriptor.id == nq_profiles::host_filesystem::INODES_DETECTOR_ID
+        && detector_descriptor.version == 1;
+    let memory = descriptor.profile.id == nq_profiles::host_memory::PROFILE_ID
+        && descriptor.profile.version == nq_profiles::host_memory::PROFILE_VERSION
+        && profile_digest == compiled_profile_digest.as_str()
+        && detector_descriptor.id == nq_profiles::host_memory::DETECTOR_ID
+        && detector_descriptor.version == 1;
+    if !(host
+        || systemd
+        || http
+        || synthetic_cache_result
+        || filesystem_capacity
+        || filesystem_inodes
+        || memory)
+    {
         return Err(EngineError::DiagnosticUnsupported(format!(
             "live diagnostic execution has no admitted one-detector correspondence for {} v{} / {} v{}",
             descriptor.profile.id,

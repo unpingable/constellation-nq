@@ -32,6 +32,24 @@
       "version": 1,
       "descriptor": "nq.synthetic_cache_executor_result.v1.json",
       "semantic_digest": "sha256:a25310e70fdf37ce5b9890af8bc35e4d6c4a789e790ee923d2442c8a149782d7"
+    },
+    {
+      "id": "nq.host_filesystem_capacity",
+      "version": 1,
+      "descriptor": "nq.host_filesystem_capacity.v1.json",
+      "semantic_digest": "sha256:48d23e2e27fa47f591455c27a3d994b6409eb57a52dabf08d92607332d215636"
+    },
+    {
+      "id": "nq.host_filesystem_inodes",
+      "version": 1,
+      "descriptor": "nq.host_filesystem_inodes.v1.json",
+      "semantic_digest": "sha256:1a4f5e289b2f63e811e552141c7d624ca46880343b3126450522dc338bcdd664"
+    },
+    {
+      "id": "nq.host_memory",
+      "version": 1,
+      "descriptor": "nq.host_memory.v1.json",
+      "semantic_digest": "sha256:e4eb42dd954e7e4cd13514a5c787caa905fb395f9aaadc82e5b060638edf523e"
     }
   ]
 }

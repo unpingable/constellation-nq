@@ -10,6 +10,7 @@ members = [
     "crates/nq-core",
     "crates/nq-app",
     "crates/nq-host-helper",
+    "crates/nq-host-resource-helper",
     "crates/nq-operator-beta-helper",
     "crates/nq-synthetic-cache-result-helper",
 ]

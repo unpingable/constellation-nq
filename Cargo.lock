@@ -1260,6 +1260,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "nq-host-resource-helper"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "libc",
+ "nix",
+ "nq-build-info",
+ "nq-profiles",
+ "nq-protocol",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "nq-operator-beta-helper"
 version = "0.1.0"
 dependencies = [
