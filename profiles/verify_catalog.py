@@ -23,6 +23,11 @@ EXPECTED_DIGEST_BASIS = (
 )
 EXPECTED_GENERATOR = "nq profiles show"
 MAX_CATALOG_JSON_BYTES = 1_048_576
+FAILURE_CODES_NAME = "failure-codes.json"
+FAILURE_CODES_SCHEMA = "nq.profile_failure_codes.v1"
+FAILURE_CODES_FIELDS = {"schema", "generated_by", "profiles"}
+FAILURE_CODES_GENERATOR = "nq profiles failure-codes"
+FAILURE_CODE_TOKEN = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 
 
 def strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -120,7 +125,7 @@ def load_manifest(catalog_dir: Path) -> list[dict[str, Any]]:
 
     actual_names: set[str] = set()
     for path in catalog_dir.iterdir():
-        if path.name == "manifest.json" or path.suffix != ".json":
+        if path.name in ("manifest.json", FAILURE_CODES_NAME) or path.suffix != ".json":
             continue
         if path.is_symlink() or not path.is_file():
             raise ValueError(f"catalog descriptor must be a regular file: {path.name}")
@@ -134,9 +139,92 @@ def load_manifest(catalog_dir: Path) -> list[dict[str, Any]]:
     return entries
 
 
+def normalize_vocabularies(value: Any, *, source: str) -> dict[tuple[str, int], list[str]]:
+    """Validate one failure-vocabulary listing: profile keys, unique tokens."""
+    if not isinstance(value, list):
+        raise ValueError(f"{source}: failure vocabularies are not an array")
+    result: dict[tuple[str, int], list[str]] = {}
+    for position, entry in enumerate(value):
+        if not isinstance(entry, dict) or set(entry) != {"id", "version", "codes"}:
+            raise ValueError(f"{source}: vocabulary entry {position} has missing or unknown fields")
+        profile_id, version, codes = entry["id"], entry["version"], entry["codes"]
+        if not isinstance(profile_id, str) or PROFILE_ID.fullmatch(profile_id) is None:
+            raise ValueError(f"{source}: vocabulary entry {position} has an invalid id")
+        if isinstance(version, bool) or not isinstance(version, int) or version <= 0:
+            raise ValueError(f"{source}: vocabulary entry {position} has an invalid version")
+        if not isinstance(codes, list) or len(codes) > 256:
+            raise ValueError(f"{source}: {profile_id} v{version} codes are not a bounded array")
+        seen: set[str] = set()
+        for code in codes:
+            if not isinstance(code, str) or FAILURE_CODE_TOKEN.fullmatch(code) is None:
+                raise ValueError(f"{source}: {profile_id} v{version} has a non-token code {code!r}")
+            if code in seen:
+                raise ValueError(f"{source}: {profile_id} v{version} lists {code} twice")
+            seen.add(code)
+        key = (profile_id, version)
+        if key in result:
+            raise ValueError(f"{source}: duplicate vocabulary for {profile_id} v{version}")
+        result[key] = list(codes)
+    return result
+
+
+def verify_failure_codes(
+    binary: Path,
+    catalog_dir: Path,
+    manifest_keys: set[tuple[str, int]],
+    helper: Path | None,
+) -> int:
+    """Check the published owner vocabularies against the compiled ones.
+
+    Each owner's enum is the source of truth; the packaged file is its
+    publication. A removed or added token, a duplicate, a non-token, a
+    vocabulary for a profile the manifest does not list, and a helper binary
+    that disagrees with `nq` about any profile it serves are all errors.
+    """
+    path = catalog_dir / FAILURE_CODES_NAME
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"{FAILURE_CODES_NAME} must be a regular non-symlink file")
+    packaged = read_strict_json(path)
+    if not isinstance(packaged, dict) or set(packaged) != FAILURE_CODES_FIELDS:
+        raise ValueError(f"{FAILURE_CODES_NAME} has missing or unknown fields")
+    if packaged["schema"] != FAILURE_CODES_SCHEMA:
+        raise ValueError(f"{FAILURE_CODES_NAME} has the wrong schema")
+    if packaged["generated_by"] != FAILURE_CODES_GENERATOR:
+        raise ValueError(f"{FAILURE_CODES_NAME} has the wrong generator identity")
+    published = normalize_vocabularies(packaged["profiles"], source=FAILURE_CODES_NAME)
+    compiled = normalize_vocabularies(
+        invoke(binary, "profiles", "failure-codes"), source="nq profiles failure-codes"
+    )
+    if set(published) != manifest_keys or set(compiled) != manifest_keys:
+        raise ValueError("failure vocabularies must cover exactly the manifest's profiles")
+    for key in sorted(manifest_keys):
+        if published[key] != compiled[key]:
+            removed = sorted(set(published[key]) - set(compiled[key]))
+            added = sorted(set(compiled[key]) - set(published[key]))
+            raise ValueError(
+                f"{key}: published failure vocabulary differs from the compiled owner enum;"
+                f" removed={removed}, added={added}, order_or_duplicates_changed={not removed and not added}"
+            )
+    counted = sum(len(codes) for codes in compiled.values())
+    if helper is not None:
+        served = normalize_vocabularies(invoke(helper, "--failure-codes"), source=str(helper))
+        for key, codes in served.items():
+            if key not in compiled:
+                raise ValueError(f"helper serves {key}, which nq does not compile")
+            if codes != compiled[key]:
+                raise ValueError(f"{key}: the helper's vocabulary differs from nq's")
+    return counted
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("nq", type=Path, help="path to the nq binary under test")
+    parser.add_argument(
+        "--helper",
+        type=Path,
+        default=None,
+        help="optional nq-host-resource-helper binary whose served vocabularies must equal nq's",
+    )
     parser.add_argument(
         "--catalog-dir",
         type=Path,
@@ -199,7 +287,11 @@ def main() -> int:
         if packaged_descriptor != compiled_descriptor:
             raise ValueError(f"{key}: packaged descriptor differs from the compiled module")
 
-    print(f"verified {len(manifest_by_key)} compiled profile descriptors")
+    counted = verify_failure_codes(binary, catalog_dir, set(manifest_by_key), arguments.helper)
+    print(
+        f"verified {len(manifest_by_key)} compiled profile descriptors and"
+        f" {counted} owner failure codes"
+    )
     return 0
 
 

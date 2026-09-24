@@ -1,0 +1,81 @@
+{
+  "schema": "nq.profile_failure_codes.v1",
+  "generated_by": "nq profiles failure-codes",
+  "profiles": [
+    {
+      "codes": [],
+      "id": "nq.conformance",
+      "version": 1
+    },
+    {
+      "codes": [],
+      "id": "nq.host",
+      "version": 1
+    },
+    {
+      "codes": [],
+      "id": "nq.systemd_unit",
+      "version": 1
+    },
+    {
+      "codes": [],
+      "id": "nq.http_endpoint",
+      "version": 1
+    },
+    {
+      "codes": [],
+      "id": "nq.synthetic_cache_executor_result",
+      "version": 1
+    },
+    {
+      "codes": [
+        "machine_identity_unavailable",
+        "machine_identity_mismatch",
+        "mount_table_unavailable",
+        "not_a_mountpoint",
+        "unsupported_filesystem_type",
+        "mount_root_not_filesystem_root",
+        "filesystem_identity_mismatch",
+        "filesystem_identity_unavailable",
+        "mount_changed_during_observation",
+        "filesystem_inaccessible",
+        "mount_identity_unavailable",
+        "stat_failed",
+        "statfs_failed"
+      ],
+      "id": "nq.host_filesystem_capacity",
+      "version": 1
+    },
+    {
+      "codes": [
+        "machine_identity_unavailable",
+        "machine_identity_mismatch",
+        "mount_table_unavailable",
+        "not_a_mountpoint",
+        "unsupported_filesystem_type",
+        "mount_root_not_filesystem_root",
+        "filesystem_identity_mismatch",
+        "filesystem_identity_unavailable",
+        "mount_changed_during_observation",
+        "filesystem_inaccessible",
+        "mount_identity_unavailable",
+        "stat_failed",
+        "statfs_failed"
+      ],
+      "id": "nq.host_filesystem_inodes",
+      "version": 1
+    },
+    {
+      "codes": [
+        "machine_identity_unavailable",
+        "machine_identity_mismatch",
+        "psi_read_failed",
+        "psi_malformed",
+        "psi_not_provided",
+        "boot_clock_unavailable"
+      ],
+      "id": "nq.host_memory",
+      "version": 1
+    }
+  ]
+}

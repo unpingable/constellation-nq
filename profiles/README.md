@@ -26,3 +26,20 @@ Verify a staged catalog against the exact binary being packaged with:
 ```console
 python3 profiles/verify_catalog.py /path/to/nq
 ```
+
+## Owner failure vocabularies
+
+`failure-codes.json` publishes each compiled profile's closed
+collection-failure vocabulary as opaque tokens, exactly as `nq profiles
+failure-codes` prints it. The source of truth is the owning profile module's
+enum (`FilesystemFailureCode`, `MemoryFailureCode`); the helper builds every
+failure from that type, so a token cannot be emitted that the owner did not
+declare, and the tokens' meaning lives only in the owning module. Profiles
+whose helpers carry no typed failures list an empty vocabulary. The verifier
+refuses a removed or added token, a duplicate, a non-token, a vocabulary for
+a profile outside the manifest, and, with `--helper`, a helper binary whose
+served vocabularies differ from `nq`'s:
+
+```console
+python3 profiles/verify_catalog.py /path/to/nq --helper /path/to/nq-host-resource-helper
+```

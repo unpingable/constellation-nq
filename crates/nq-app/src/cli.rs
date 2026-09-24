@@ -228,6 +228,9 @@ pub enum ConfigCommand {
 pub enum ProfilesCommand {
     /// List every explicitly compiled profile and descriptor digest.
     List,
+    /// Print every compiled profile's closed collection-failure vocabulary as
+    /// opaque tokens, for catalog publication and verification.
+    FailureCodes,
     /// Print one canonical descriptor.
     Show {
         /// Profile ID.
@@ -1556,6 +1559,20 @@ fn profiles_command(command: ProfilesCommand, json_output: bool) -> Result<()> {
             let module = nq_profiles::resolve_profile(&id, version)
                 .with_context(|| format!("profile {id} v{version} is not compiled"))?;
             print_value(module.descriptor(), true)
+        }
+        ProfilesCommand::FailureCodes => {
+            let vocabularies: Vec<_> = all_profiles()
+                .iter()
+                .map(|module| {
+                    let descriptor = module.descriptor();
+                    json!({
+                        "id": descriptor.profile.id,
+                        "version": descriptor.profile.version,
+                        "codes": module.failure_codes(),
+                    })
+                })
+                .collect();
+            print_value(&vocabularies, true)
         }
     }
 }
