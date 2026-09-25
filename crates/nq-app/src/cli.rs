@@ -28,7 +28,7 @@ use tempfile::NamedTempFile;
 
 /// Local-first NQ-ng operator CLI.
 #[derive(Debug, Parser)]
-#[command(name = "nq", version, about)]
+#[command(name = "nq", version = nq_build_info::VERSION_STRING, about)]
 pub struct Nq {
     /// Human-edited configuration path.
     #[arg(

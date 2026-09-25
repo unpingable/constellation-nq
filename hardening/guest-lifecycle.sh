@@ -175,7 +175,9 @@ verify_build_info() {
 import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
 assert [row["component"] for row in rows] == ["nq", "nqd", "nq-host-helper"]
-assert all(row["schema"] == "nq.build_info.v1" for row in rows)
+assert all(row["schema"] == "nq.build_info.v2" for row in rows)
+assert all(row["source_commit"] and len(row["source_commit"]) == 40 for row in rows)
+assert len({row["source_commit"] for row in rows}) == 1
 assert all(row["debug_assertions"] is False for row in rows)
 assert all(row["helper_isolation_policy"] == "production_separate_identity_required" for row in rows)
 PY
