@@ -243,3 +243,35 @@ fn an_exhausted_budget_never_queries_the_manager() {
     );
     assert_eq!(manager.queried.get(), 0);
 }
+
+#[test]
+fn the_bus_budget_keeps_a_report_margin_before_the_request_deadline() {
+    use nq_host_resource_helper::{SYSTEMD_REPORT_MARGIN, systemd_query_budget};
+    assert_eq!(
+        systemd_query_budget(Duration::from_secs(5)),
+        Duration::from_millis(4_250)
+    );
+    // With no more than the margin left, the manager is never queried and
+    // the report still carries the typed timeout.
+    for remaining in [
+        SYSTEMD_REPORT_MARGIN,
+        Duration::from_millis(1),
+        Duration::ZERO,
+    ] {
+        let budget = systemd_query_budget(remaining);
+        assert!(budget.is_zero());
+        let manager = Manager::answering(
+            MACHINE,
+            vec![row("cron.service", "loaded", "active", "running")],
+        );
+        assert_eq!(
+            code(observe_systemd_unit(
+                &scope("cron.service"),
+                &manager,
+                budget
+            )),
+            (SystemdUnitFailureCode::QueryTimeout, true)
+        );
+        assert_eq!(manager.queried.get(), 0);
+    }
+}

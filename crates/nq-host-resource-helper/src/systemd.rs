@@ -10,8 +10,11 @@
 //! `SystemdUnitFailureCode`; an unexpected unit state is an observation,
 //! never a failure.
 //!
-//! The exchange is one blocking Unix stream with socket timeouts taken from
-//! the request deadline. It creates no thread and no async runtime: the
+//! The exchange is one blocking Unix stream whose reads and writes carry
+//! socket timeouts from a budget that ends before the request deadline (the
+//! caller keeps a report margin). `connect` to the local bus socket is the
+//! one step without a timeout: it returns immediately unless the bus's
+//! listen backlog is full, and NQ's own exchange deadline still bounds it. It creates no thread and no async runtime: the
 //! helper runs under `RLIMIT_NPROC`, which a thread-spawning bus library
 //! cannot satisfy when the execution account already runs many processes.
 //! The wire subset is fixed (EXTERNAL authentication, three method calls,
@@ -148,7 +151,8 @@ pub fn observe_systemd_unit(
     })
 }
 
-/// Query the local system manager, bounded as a whole by `budget`.
+/// Query the local system manager; every read and write after `connect` is
+/// bounded by `budget`.
 pub(crate) fn query_system_manager(
     unit_name: &str,
     budget: Duration,
@@ -162,7 +166,7 @@ fn query_bus(
     budget: Duration,
 ) -> Result<ManagerUnitReply, Failure> {
     let mut bus = Bus::connect(socket, Instant::now() + budget)?;
-    bus.authenticate(nix::unistd::getuid().as_raw())?;
+    bus.authenticate(nix::unistd::geteuid().as_raw())?;
     let hello = bus.call(BUS_SERVICE, BUS_PATH, BUS_SERVICE, "Hello", None)?;
     let _unique_name = single_string(&hello)?;
     let machine = bus.call(
@@ -312,7 +316,7 @@ impl Bus {
             return Err(failure(
                 SystemdUnitFailureCode::SystemBusUnavailable,
                 "the system bus refused EXTERNAL authentication",
-                false,
+                true,
             ));
         }
         self.write_all(b"BEGIN\r\n")
@@ -363,8 +367,10 @@ impl Bus {
                 body: received[header.body_start..].to_vec(),
             });
         }
-        Err(malformed(
+        Err(failure(
+            SystemdUnitFailureCode::QueryFailed,
             "no reply arrived within the bound on unrelated messages",
+            true,
         ))
     }
 
@@ -861,7 +867,7 @@ mod tests {
                 Vec::new(),
                 Duration::from_secs(5)
             )),
-            (SystemdUnitFailureCode::SystemBusUnavailable, false)
+            (SystemdUnitFailureCode::SystemBusUnavailable, true)
         );
         let mut unknown = happy(&rows_body(&[]));
         unknown[1] = vec![Step::Reply(reply(

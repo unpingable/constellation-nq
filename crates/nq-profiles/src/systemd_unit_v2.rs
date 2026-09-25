@@ -617,7 +617,7 @@ impl Detector for RequiredActiveDetector {
                 observed_at: observation.observed_at,
             }],
             limitations: vec![
-                "An active unit state is not a service operational, reachability, dependency, or application health claim".to_owned(),
+                "An active unit state is not a service operational, reachability, dependency, or application health claim, and does not establish that a main process is running (active/exited is active)".to_owned(),
                 "An inactive, failed, transitional, masked, or not-found state is not an outage or user-visible impact claim, and names no cause".to_owned(),
                 "One manager cut does not establish which unit definition is loaded or whether it matches disk".to_owned(),
                 "Nothing here authorizes a restart, reload, or any other actuation".to_owned(),

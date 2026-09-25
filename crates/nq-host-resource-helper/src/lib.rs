@@ -337,9 +337,9 @@ fn handle_request(
                 Err(response) => return *response,
             };
             let budget = match clock.now_ns() {
-                Ok(now_ns) => std::time::Duration::from_nanos(
+                Ok(now_ns) => systemd_query_budget(std::time::Duration::from_nanos(
                     request.deadline.expires_at_ns.saturating_sub(now_ns),
-                ),
+                )),
                 Err(error) => {
                     return internal_refusal(
                         request,
@@ -764,6 +764,19 @@ fn complete_memory_report(
         builder = builder.used_capability(token(Capability::new(capability))?);
     }
     builder.build().map_err(|error| format!("{error:?}"))
+}
+
+/// Part of the remaining request time kept back from the bus exchange, so a
+/// stalled manager still ends in a Failed report carrying `query_timeout`
+/// before NQ's own exchange deadline, instead of an untyped exchange timeout.
+pub const SYSTEMD_REPORT_MARGIN: std::time::Duration = std::time::Duration::from_millis(750);
+
+/// The bus budget for a request with `remaining` time left: the remainder
+/// less [`SYSTEMD_REPORT_MARGIN`], and zero (an immediate typed
+/// `query_timeout`) when no more than the margin remains.
+#[must_use]
+pub fn systemd_query_budget(remaining: std::time::Duration) -> std::time::Duration {
+    remaining.saturating_sub(SYSTEMD_REPORT_MARGIN)
 }
 
 fn validate_systemd_binding_request(
