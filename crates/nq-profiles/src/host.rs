@@ -420,7 +420,8 @@ impl Detector for HostLoadPressureDetector {
             | DetectorRuleParameters::SyntheticCacheExecutorResult
             | DetectorRuleParameters::FilesystemCapacityPressure { .. }
             | DetectorRuleParameters::FilesystemInodePressure { .. }
-            | DetectorRuleParameters::MemoryPressureStall { .. } => {
+            | DetectorRuleParameters::MemoryPressureStall { .. }
+            | DetectorRuleParameters::SystemdUnitRequiredActive { .. } => {
                 unreachable!("host detector descriptor uses only load-pressure parameters")
             }
         };

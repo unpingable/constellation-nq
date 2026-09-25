@@ -1,7 +1,9 @@
 //! First-party, one-shot stdio watcher for the compiled
-//! `nq.host_filesystem_capacity/v1`, `nq.host_filesystem_inodes/v1`, and
-//! `nq.host_memory/v1` profiles: closed branches selected by the exact
-//! admitted profile, in the same way `nq-operator-beta-helper` selects its two.
+//! `nq.host_filesystem_capacity/v1`, `nq.host_filesystem_inodes/v1`,
+//! `nq.host_memory/v1`, and `nq.systemd_unit/v2` profiles: closed branches
+//! selected by the exact admitted profile, in the same way
+//! `nq-operator-beta-helper` selects its two. The systemd branch lives in
+//! [`systemd`].
 //!
 //! Read-only by construction: it reads `/etc/machine-id`, `/proc/self/mountinfo`,
 //! one `/dev/disk/by-uuid` entry, and performs `open(O_PATH)`, `statx`, `fstat`
@@ -31,6 +33,7 @@ use nq_profiles::{
     },
     host_memory,
     host_memory::MemoryFailureCode,
+    systemd_unit_v2::{self, SystemdUnitFailureCode},
 };
 use nq_protocol::{
     BackendIdentity, BackendProvenance, Capability, CoverageDeclaration, CoverageKind,
@@ -41,6 +44,10 @@ use nq_protocol::{
 };
 use serde_json::{Value, json};
 use thiserror::Error;
+
+mod systemd;
+
+pub use systemd::{ManagerUnitReply, ManagerUnitRow, SystemdUnitObservation, observe_systemd_unit};
 
 const MACHINE_ID_PATH: &str = "/etc/machine-id";
 const MOUNTINFO_PATH: &str = "/proc/self/mountinfo";
@@ -88,17 +95,22 @@ pub fn run_stdio() -> Result<(), StdioError> {
 #[must_use]
 pub fn failure_code_vocabularies() -> Value {
     Value::Array(
-        [Branch::Capacity, Branch::Inodes, Branch::Memory]
-            .into_iter()
-            .map(|branch| {
-                let descriptor = branch.module().descriptor();
-                json!({
-                    "id": descriptor.profile.id,
-                    "version": descriptor.profile.version,
-                    "codes": branch.module().failure_codes(),
-                })
+        [
+            Branch::Capacity,
+            Branch::Inodes,
+            Branch::Memory,
+            Branch::SystemdUnit,
+        ]
+        .into_iter()
+        .map(|branch| {
+            let descriptor = branch.module().descriptor();
+            json!({
+                "id": descriptor.profile.id,
+                "version": descriptor.profile.version,
+                "codes": branch.module().failure_codes(),
             })
-            .collect(),
+        })
+        .collect(),
     )
 }
 
@@ -145,6 +157,7 @@ enum Branch {
     Capacity,
     Inodes,
     Memory,
+    SystemdUnit,
 }
 
 impl Branch {
@@ -153,6 +166,7 @@ impl Branch {
             Self::Capacity => &host_filesystem::CAPACITY_MODULE,
             Self::Inodes => &host_filesystem::INODES_MODULE,
             Self::Memory => &host_memory::MODULE,
+            Self::SystemdUnit => &systemd_unit_v2::MODULE,
         }
     }
 
@@ -160,6 +174,7 @@ impl Branch {
         match self {
             Self::Capacity | Self::Inodes => &CAPABILITIES,
             Self::Memory => &host_memory::CAPABILITIES,
+            Self::SystemdUnit => &systemd_unit_v2::CAPABILITIES,
         }
     }
 
@@ -167,6 +182,7 @@ impl Branch {
         match self {
             Self::Capacity | Self::Inodes => COVERAGE_KIND,
             Self::Memory => host_memory::COVERAGE_KIND,
+            Self::SystemdUnit => systemd_unit_v2::COVERAGE_KIND,
         }
     }
 }
@@ -199,6 +215,17 @@ impl Branch {
 /// use nq_profiles::host_memory::MemoryFailureCode;
 /// let failure: CollectionFailure<MemoryFailureCode> =
 ///     CollectionFailure::owner(FilesystemFailureCode::NotAMountpoint, "x", true);
+/// ```
+///
+/// Nor can another owner's code stand in for a systemd unit failure, even
+/// where the wire text is the same:
+///
+/// ```compile_fail
+/// use nq_host_resource_helper::CollectionFailure;
+/// use nq_profiles::host_memory::MemoryFailureCode;
+/// use nq_profiles::systemd_unit_v2::SystemdUnitFailureCode;
+/// let failure: CollectionFailure<SystemdUnitFailureCode> =
+///     CollectionFailure::owner(MemoryFailureCode::MachineIdentityMismatch, "x", false);
 /// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CollectionFailure<C> {
@@ -243,7 +270,7 @@ impl<C: Copy> CollectionFailure<C> {
 }
 
 /// An owner's closed failure-code enum, as the helper may emit it. Only the
-/// two owner enums implement it (the trait is private to this crate), so
+/// owner enums implement it (the trait is private to this crate), so
 /// [`failed_report`] cannot receive a bare string or any other type: a new
 /// wire token needs a new variant in the owning profile's enum first.
 trait OwnerFailureCode: Copy {
@@ -257,6 +284,12 @@ impl OwnerFailureCode for FilesystemFailureCode {
 }
 
 impl OwnerFailureCode for MemoryFailureCode {
+    fn wire_token(self) -> &'static str {
+        self.as_str()
+    }
+}
+
+impl OwnerFailureCode for SystemdUnitFailureCode {
     fn wire_token(self) -> &'static str {
         self.as_str()
     }
@@ -298,6 +331,28 @@ fn handle_request(
                 Err(failure) => failed_report(request, branch, failure),
             }
         }
+        Branch::SystemdUnit => {
+            let scope = match validate_systemd_binding_request(request) {
+                Ok(scope) => scope,
+                Err(response) => return *response,
+            };
+            let budget = match clock.now_ns() {
+                Ok(now_ns) => std::time::Duration::from_nanos(
+                    request.deadline.expires_at_ns.saturating_sub(now_ns),
+                ),
+                Err(error) => {
+                    return internal_refusal(
+                        request,
+                        "the Linux boot-time clock could not be read",
+                        json!({"error": bounded_message(&error, 1_024)}),
+                    );
+                }
+            };
+            match observe_systemd_unit(&scope, source, budget) {
+                Ok(observation) => complete_systemd_report(request, &scope, &observation),
+                Err(failure) => failed_report(request, branch, failure),
+            }
+        }
     };
     match report {
         Ok(report) => match validate_compiled_report(request, branch, &report) {
@@ -324,12 +379,13 @@ fn validate_profile_request(request: &HelperRequest) -> Result<Branch, Box<Helpe
         (host_filesystem::CAPACITY_PROFILE_ID, "1") => Branch::Capacity,
         (host_filesystem::INODES_PROFILE_ID, "1") => Branch::Inodes,
         (host_memory::PROFILE_ID, "1") => Branch::Memory,
+        (systemd_unit_v2::PROFILE_ID, "2") => Branch::SystemdUnit,
         _ => {
             return Err(Box::new(refusal(
                 request,
                 RefusalBoundary::Profile,
                 RefusalCode::UnknownProfile,
-                "this helper implements only nq.host_filesystem_capacity/v1, nq.host_filesystem_inodes/v1, and nq.host_memory/v1",
+                "this helper implements only nq.host_filesystem_capacity/v1, nq.host_filesystem_inodes/v1, nq.host_memory/v1, and nq.systemd_unit/v2",
                 false,
                 json!({
                     "requested_id": request.profile.id,
@@ -545,6 +601,14 @@ pub trait ResourceSource {
     /// Bounded read-only read of `/proc/pressure/memory`. Errors are typed
     /// collection failures (`psi_not_provided`, `psi_read_failed`).
     fn pressure_memory(&self) -> Result<String, CollectionFailure<MemoryFailureCode>>;
+    /// The system manager's machine identity and its `ListUnitsByNames`
+    /// rows for exactly `unit_name`, uninterpreted, within `budget`. Errors
+    /// are typed collection failures (bus, manager, timeout, call, decode).
+    fn systemd_unit(
+        &self,
+        unit_name: &str,
+        budget: std::time::Duration,
+    ) -> Result<ManagerUnitReply, CollectionFailure<SystemdUnitFailureCode>>;
 }
 
 /// Validated memory observation ready for the payload.
@@ -697,6 +761,105 @@ fn complete_memory_report(
         payload,
     );
     for capability in host_memory::CAPABILITIES {
+        builder = builder.used_capability(token(Capability::new(capability))?);
+    }
+    builder.build().map_err(|error| format!("{error:?}"))
+}
+
+fn validate_systemd_binding_request(
+    request: &HelperRequest,
+) -> Result<systemd_unit_v2::SystemdUnitScope, Box<HelperResponse>> {
+    if request.binding.scope.kind.as_str() != systemd_unit_v2::SCOPE_KIND {
+        return Err(Box::new(refusal(
+            request,
+            RefusalBoundary::Scope,
+            RefusalCode::UnsupportedScope,
+            "nq.systemd_unit/v2 requires systemd_unit scope",
+            false,
+            json!({}),
+        )));
+    }
+    let scope = systemd_unit_v2::validate_scope_value(
+        &request.binding.scope.value,
+        request.binding.subject.as_str(),
+    )
+    .map_err(|message| {
+        Box::new(refusal(
+            request,
+            RefusalBoundary::Scope,
+            RefusalCode::UnsupportedScope,
+            &message,
+            false,
+            json!({}),
+        ))
+    })?;
+    if request.binding.vantage.kind.as_str() != "local"
+        || request.binding.vantage.value != json!({})
+    {
+        return Err(Box::new(refusal(
+            request,
+            RefusalBoundary::Vantage,
+            RefusalCode::UnsupportedVantage,
+            "nq.systemd_unit/v2 requires the empty local vantage",
+            false,
+            json!({}),
+        )));
+    }
+    Ok(scope)
+}
+
+fn complete_systemd_report(
+    request: &HelperRequest,
+    scope: &systemd_unit_v2::SystemdUnitScope,
+    observation: &SystemdUnitObservation,
+) -> Result<EvidenceReport, String> {
+    let observed_at = Utc::now();
+    let basis = EvidenceBasis {
+        scope: ScopeGrant {
+            kind: request.binding.scope.kind.to_string(),
+            value: request.binding.scope.value.clone(),
+        },
+        vantage: VantageGrant {
+            kind: request.binding.vantage.kind.to_string(),
+            value: request.binding.vantage.value.clone(),
+        },
+        access_path: systemd_unit_v2::ACCESS_PATH.to_owned(),
+        basis: "manager_snapshot".to_owned(),
+        regime: "normal".to_owned(),
+        capabilities_used: systemd_unit_v2::CAPABILITIES
+            .iter()
+            .map(|c| (*c).to_owned())
+            .collect(),
+    };
+    let payload = systemd_unit_v2::SystemdUnitStatePayload {
+        evidence_basis: basis,
+        machine_id: scope.machine_id.clone(),
+        unit_name: scope.unit_name.clone(),
+        load_state: observation.load_state.clone(),
+        active_state: observation.active_state.clone(),
+        sub_state: observation.sub_state.clone(),
+    };
+    let payload = serde_json::to_value(payload).map_err(|error| error.to_string())?;
+    let mut builder = EvidenceReport::builder(
+        request.profile.clone(),
+        request.binding.clone(),
+        observed_at,
+        ReportStatus::Complete,
+        backend_provenance()?,
+    )
+    .coverage(CoverageDeclaration {
+        kind: token(CoverageKind::new(systemd_unit_v2::COVERAGE_KIND))?,
+        subject: None,
+        state: CoverageState::Complete,
+        detail: None,
+    })
+    .observed_payload(
+        token(ObservationKind::new(systemd_unit_v2::OBSERVATION_KIND))?,
+        request.binding.subject.clone(),
+        observed_at,
+        payload,
+    );
+    for capability in systemd_unit_v2::CAPABILITIES {
         builder = builder.used_capability(token(Capability::new(capability))?);
     }
     builder.build().map_err(|error| format!("{error:?}"))
@@ -1204,6 +1367,14 @@ impl ResourceSource for LinuxSource {
         }
     }
 
+    fn systemd_unit(
+        &self,
+        unit_name: &str,
+        budget: std::time::Duration,
+    ) -> Result<ManagerUnitReply, CollectionFailure<SystemdUnitFailureCode>> {
+        systemd::query_system_manager(unit_name, budget)
+    }
+
     fn by_uuid_rdev(&self, uuid: &str) -> Result<Option<u64>, String> {
         if !host_filesystem::is_canonical_uuid(uuid) {
             return Ok(None);
@@ -1328,6 +1499,22 @@ mod tests {
                 "some avg10=0.00 avg60=12.34 avg300=0.00 total=311022455\nfull avg10=0.00 avg60=1.00 avg300=0.00 total=304797313\n"
                     .to_owned(),
             )
+        }
+        fn systemd_unit(
+            &self,
+            unit_name: &str,
+            _budget: std::time::Duration,
+        ) -> Result<ManagerUnitReply, CollectionFailure<SystemdUnitFailureCode>> {
+            Ok(ManagerUnitReply {
+                machine_id: self.machine_id.to_owned(),
+                rows: vec![ManagerUnitRow {
+                    name: unit_name.to_owned(),
+                    load_state: "loaded".to_owned(),
+                    active_state: "active".to_owned(),
+                    sub_state: "running".to_owned(),
+                    following: String::new(),
+                }],
+            })
         }
     }
 
@@ -1562,6 +1749,13 @@ mod tests {
         }
         fn pressure_memory(&self) -> Result<String, CollectionFailure<MemoryFailureCode>> {
             self.0.pressure_memory()
+        }
+        fn systemd_unit(
+            &self,
+            unit_name: &str,
+            budget: std::time::Duration,
+        ) -> Result<ManagerUnitReply, CollectionFailure<SystemdUnitFailureCode>> {
+            self.0.systemd_unit(unit_name, budget)
         }
     }
 

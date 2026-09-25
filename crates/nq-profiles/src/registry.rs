@@ -2,12 +2,12 @@
 
 use crate::{
     ProfileKey, ProfileModule, conformance, host, host_filesystem, host_memory, http_endpoint,
-    synthetic_cache_executor_result, systemd_unit,
+    synthetic_cache_executor_result, systemd_unit, systemd_unit_v2,
 };
 
 // Adding a compiled profile intentionally requires one visible registry entry.
 // There is no runtime scanning, inventory mechanism, or integration enum.
-static PROFILES: [&'static dyn ProfileModule; 8] = [
+static PROFILES: [&'static dyn ProfileModule; 9] = [
     &conformance::MODULE,
     &host::MODULE,
     &systemd_unit::MODULE,
@@ -16,6 +16,7 @@ static PROFILES: [&'static dyn ProfileModule; 8] = [
     &host_filesystem::CAPACITY_MODULE,
     &host_filesystem::INODES_MODULE,
     &host_memory::MODULE,
+    &systemd_unit_v2::MODULE,
 ];
 
 /// Returns all profile modules compiled into this binary.

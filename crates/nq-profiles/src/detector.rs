@@ -60,6 +60,16 @@ pub enum DetectorRuleParameters {
         /// Minimum `CLOCK_BOOTTIME` seconds before the averages are trusted.
         minimum_boot_age_seconds: u32,
     },
+    /// Systemd unit required-active law: `ExplicitlyAbsent` exactly when the
+    /// system manager reports `LoadState == required_load_state` and
+    /// `ActiveState == required_active_state`; `Present` for every other
+    /// admitted state.
+    SystemdUnitRequiredActive {
+        /// Required `LoadState`, verbatim.
+        required_load_state: String,
+        /// Required `ActiveState`, verbatim.
+        required_active_state: String,
+    },
 }
 
 /// Canonical identity and operator metadata for one detector revision.

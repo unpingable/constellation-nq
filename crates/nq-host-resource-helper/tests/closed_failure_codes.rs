@@ -8,14 +8,14 @@
 use nq_host_resource_helper::{CollectionFailure, failure_code_vocabularies};
 use nq_profiles::{
     ProfileModule, host_filesystem, host_filesystem::FilesystemFailureCode, host_memory,
-    host_memory::MemoryFailureCode,
+    host_memory::MemoryFailureCode, systemd_unit_v2, systemd_unit_v2::SystemdUnitFailureCode,
 };
 
 #[test]
 fn the_helper_publishes_exactly_the_owner_vocabularies() {
     let vocabularies = failure_code_vocabularies();
     let entries = vocabularies.as_array().expect("array");
-    assert_eq!(entries.len(), 3);
+    assert_eq!(entries.len(), 4);
     for (entry, module, expected) in [
         (
             &entries[0],
@@ -31,6 +31,11 @@ fn the_helper_publishes_exactly_the_owner_vocabularies() {
             &entries[2],
             &host_memory::MODULE as &dyn ProfileModule,
             MemoryFailureCode::tokens(),
+        ),
+        (
+            &entries[3],
+            &systemd_unit_v2::MODULE as &dyn ProfileModule,
+            SystemdUnitFailureCode::tokens(),
         ),
     ] {
         assert_eq!(entry["id"], module.descriptor().profile.id);
@@ -62,12 +67,24 @@ fn every_owner_token_is_stable_unique_and_parses_back_to_its_own_enum_only() {
         assert!(seen.insert(("memory", text)), "duplicate {text}");
         assert_eq!(MemoryFailureCode::parse(text), Some(code));
     }
+    seen.clear();
+    for code in SystemdUnitFailureCode::ALL {
+        let text = code.as_str();
+        assert!(is_token(text), "{text}");
+        assert!(seen.insert(("systemd_unit", text)), "duplicate {text}");
+        assert_eq!(SystemdUnitFailureCode::parse(text), Some(code));
+        if code != SystemdUnitFailureCode::MachineIdentityMismatch {
+            assert_eq!(FilesystemFailureCode::parse(text), None, "{text}");
+            assert_eq!(MemoryFailureCode::parse(text), None, "{text}");
+        }
+    }
     for foreign in [
         "psi_not_provided",
         "boot_clock_unavailable",
         "psi_malformed",
     ] {
         assert_eq!(FilesystemFailureCode::parse(foreign), None, "{foreign}");
+        assert_eq!(SystemdUnitFailureCode::parse(foreign), None, "{foreign}");
     }
     for foreign in [
         "not_a_mountpoint",

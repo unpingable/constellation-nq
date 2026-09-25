@@ -31,6 +31,8 @@ pub mod http_endpoint;
 pub mod synthetic_cache_executor_result;
 /// Target-local systemd unit profile.
 pub mod systemd_unit;
+/// `nq.systemd_unit/v2`: required unit active state on the local system manager.
+pub mod systemd_unit_v2;
 
 pub use descriptor::{
     CardinalityLimits, DescriptorError, FreshnessPolicy, PROFILE_DESCRIPTOR_SCHEMA,

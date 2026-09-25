@@ -76,6 +76,21 @@
       ],
       "id": "nq.host_memory",
       "version": 1
+    },
+    {
+      "codes": [
+        "system_bus_unavailable",
+        "manager_unavailable",
+        "query_timeout",
+        "query_failed",
+        "reply_malformed",
+        "machine_identity_mismatch",
+        "unit_list_cardinality",
+        "unit_name_not_canonical",
+        "unit_state_unrecognized"
+      ],
+      "id": "nq.systemd_unit",
+      "version": 2
     }
   ]
 }

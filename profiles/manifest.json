@@ -50,6 +50,12 @@
       "version": 1,
       "descriptor": "nq.host_memory.v1.json",
       "semantic_digest": "sha256:e4eb42dd954e7e4cd13514a5c787caa905fb395f9aaadc82e5b060638edf523e"
+    },
+    {
+      "id": "nq.systemd_unit",
+      "version": 2,
+      "descriptor": "nq.systemd_unit.v2.json",
+      "semantic_digest": "sha256:5691c4db8d736df5a7cf7da3557f8e07a9d9523d27ff16326963734e2b737b49"
     }
   ]
 }

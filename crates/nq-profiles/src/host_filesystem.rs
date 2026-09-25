@@ -775,7 +775,8 @@ fn evaluate(
         | DetectorRuleParameters::SystemdUnitPostcondition { .. }
         | DetectorRuleParameters::HttpEndpointPostcondition { .. }
         | DetectorRuleParameters::SyntheticCacheExecutorResult
-        | DetectorRuleParameters::MemoryPressureStall { .. } => {
+        | DetectorRuleParameters::MemoryPressureStall { .. }
+        | DetectorRuleParameters::SystemdUnitRequiredActive { .. } => {
             unreachable!("filesystem detectors use only filesystem pressure parameters")
         }
     };
