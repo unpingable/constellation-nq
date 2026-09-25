@@ -122,7 +122,7 @@ These commands do not initialize NQ. The Debian package also deliberately
 leaves `nqd` stopped and disabled.
 
 To read which build is deployed, ask the installed binary rather than the
-package name: `nq --version` (and `nqd --version`) prints `nq 0.1.0 (<commit>)`,
+package name: `nq --version` prints `nq 0.1.0 (<commit>)` (and `nqd --version` prints `nqd 0.1.0 (<commit>)`),
 where `<commit>` is the full git commit id release automation recorded at
 compile time through `NQ_SOURCE_COMMIT`; `nq --build-info` prints the same
 commit as `source_commit` in a one-line JSON document
