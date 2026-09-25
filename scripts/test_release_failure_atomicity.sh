@@ -89,6 +89,77 @@ if find "$substituted_resource_out" -mindepth 1 -print -quit | grep -q .; then
     exit 1
 fi
 
+# Every binary must carry the same recorded source commit. A binary whose
+# embedded commit differs (here: one helper's 40-hex commit rewritten in place
+# with a same-length different value, so the ELF layout is untouched) and a
+# binary whose recorded commit is malformed are refused by identity, before
+# any output artifact is created.
+drift_bin_dir=$work/drift-binaries
+drift_out=$work/drift-commit-out
+malformed_bin_dir=$work/malformed-binaries
+malformed_out=$work/malformed-commit-out
+mkdir -p -- "$drift_bin_dir" "$drift_out" "$malformed_bin_dir" "$malformed_out"
+for binary in nq nqd nq-host-helper nq-host-resource-helper \
+    nq-operator-beta-helper nq-synthetic-cache-result-helper; do
+    cp -- "$bin_dir/$binary" "$drift_bin_dir/$binary"
+    cp -- "$bin_dir/$binary" "$malformed_bin_dir/$binary"
+done
+python3 - "$bin_dir/nq-host-helper" "$drift_bin_dir/nq-host-helper" \
+    "$malformed_bin_dir/nq-host-helper" <<'PY'
+import json
+import pathlib
+import re
+import subprocess
+import sys
+
+original, drifted, malformed = (pathlib.Path(argument) for argument in sys.argv[1:])
+probe = subprocess.run(
+    [original, "--build-info"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, check=True
+)
+commit = json.loads(probe.stdout)["source_commit"]
+if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+    raise SystemExit(f"fixture binary does not record a source commit: {commit!r}")
+image = original.read_bytes()
+needle = commit.encode("ascii")
+if image.count(needle) == 0:
+    raise SystemExit("fixture binary does not embed its source commit literally")
+different = "".join(f"{15 - int(digit, 16):x}" for digit in commit).encode("ascii")
+drifted.write_bytes(image.replace(needle, different))
+malformed.write_bytes(image.replace(needle, b"Z" * 40))
+PY
+chmod 0755 "$drift_bin_dir/nq-host-helper" "$malformed_bin_dir/nq-host-helper"
+set +e
+PATH="$base_path" "$root/scripts/build-release-bundle.sh" \
+    "$version" "$arch" "$drift_bin_dir" "$profile_dir" "$drift_out" \
+    >"$work/drift-commit.stdout" 2>"$work/drift-commit.stderr"
+drift_commit_status=$?
+set -e
+[[ $drift_commit_status -ne 0 ]] || {
+    echo "release assembly accepted a binary from a different source commit" >&2
+    exit 1
+}
+grep -Fq "release binaries must come from one source commit" \
+    "$work/drift-commit.stderr"
+if find "$drift_out" -mindepth 1 -print -quit | grep -q .; then
+    echo "source-commit drift created a release output" >&2
+    exit 1
+fi
+set +e
+PATH="$base_path" "$root/scripts/build-release-bundle.sh" \
+    "$version" "$arch" "$malformed_bin_dir" "$profile_dir" "$malformed_out" \
+    >"$work/malformed-commit.stdout" 2>"$work/malformed-commit.stderr"
+malformed_commit_status=$?
+set -e
+[[ $malformed_commit_status -ne 0 ]] || {
+    echo "release assembly accepted a binary without a well-formed source commit" >&2
+    exit 1
+}
+grep -Fq "not a full lowercase git commit id" "$work/malformed-commit.stderr"
+if find "$malformed_out" -mindepth 1 -print -quit | grep -q .; then
+    echo "malformed source commit created a release output" >&2
+    exit 1
+fi
+
 # Concurrent assemblers must fail before constructing anything. The lock is on
 # the output-directory inode and therefore cannot become stale after a crash.
 lock_out=$work/lock-out
@@ -285,7 +356,8 @@ package="nq-ng-${version}-linux-${arch}.tar.gz"
     sha256sum --check "$package.sha256" >/dev/null
 )
 
-printf 'release failure atomicity passed (missing=%s, substituted=%s, substituted_resource=%s, lock=%s, failure=%s, killed=%s)\n' \
+printf 'release failure atomicity passed (missing=%s, substituted=%s, substituted_resource=%s, drift_commit=%s, malformed_commit=%s, lock=%s, failure=%s, killed=%s)\n' \
     "$missing_helper_status" "$substituted_helper_status" \
-    "$substituted_resource_status" "$lock_status" "$failure_status" \
+    "$substituted_resource_status" "$drift_commit_status" \
+    "$malformed_commit_status" "$lock_status" "$failure_status" \
     "$kill_status"

@@ -121,6 +121,18 @@ sudo systemctl daemon-reload
 These commands do not initialize NQ. The Debian package also deliberately
 leaves `nqd` stopped and disabled.
 
+To read which build is deployed, ask the installed binary rather than the
+package name: `nq --version` (and `nqd --version`) prints `nq 0.1.0 (<commit>)`,
+where `<commit>` is the full git commit id release automation recorded at
+compile time through `NQ_SOURCE_COMMIT`; `nq --build-info` prints the same
+commit as `source_commit` in a one-line JSON document
+(`nq.build_info.v2`) alongside the component, version, and helper isolation
+policy, without reading any configuration. Every binary in a release carries
+the same commit because the assembler refuses a cohort whose commits differ or
+are absent, and the qualification package receipt binds that commit through the
+recorded build environment. A development build without `NQ_SOURCE_COMMIT`
+prints `nq 0.1.0` and `"source_commit":null`, and is not packageable.
+
 At every service start under the intact packaged unit, systemd runs the
 installed inner-manifest check from `/usr` before `config check`. Missing or
 changed packaged bytes fail startup:
@@ -755,12 +767,16 @@ the off-host backup and release checksums if later custody or audit is needed.
 Build or obtain `nq`, `nqd`, `nq-host-helper`, `nq-host-resource-helper`,
 `nq-operator-beta-helper`, and `nq-synthetic-cache-result-helper` for each
 target without allowing network access. They must be `--release` builds from
-one reviewed source cohort. Verify the checked-in descriptor catalog against
-that exact `nq` binary and the `nq-host-resource-helper` it will ship with,
-then pass those inputs to the assembler:
+one reviewed source commit, compiled with `NQ_SOURCE_COMMIT` set to that
+commit's full 40-character id so each binary records it. Verify the checked-in
+descriptor catalog against that exact `nq` binary and the
+`nq-host-resource-helper` it will ship with, then pass those inputs to the
+assembler:
 
 ```sh
 mkdir -p dist
+export NQ_SOURCE_COMMIT=$(git rev-parse HEAD)
+cargo build --release --locked
 python3 profiles/verify_catalog.py target/release/nq \
   --helper target/release/nq-host-resource-helper
 SOURCE_DATE_EPOCH=0 scripts/build-release-bundle.sh \
@@ -782,16 +798,20 @@ The assembler verifies the profile catalog (including that the packaged
 compiles) and architecture, then executes
 each binary's configuration-independent `--build-info` probe. It requires the
 requested version exactly, rejects any binary with debug assertions or the
-debug same-identity exception compiled in, and requires production
-separate-identity policy. It refuses profile files outside the strict manifest,
+debug same-identity exception compiled in, requires production
+separate-identity policy, and requires every binary to record the same full
+source commit (a `null` or malformed `source_commit`, or two binaries
+reporting different commits, is refused before staging; the accepted commit is
+printed as `source_commit` in the assembler's final report). It refuses
+profile files outside the strict manifest,
 refuses protocol assets outside the exact v1 inventory, matches the fixture
 byte digest to the packaged `nq` receipt, strictly verifies the bounded
 system-contract schemas and fixtures against their manifest, binds their
 compiled-profile fixture to the exact profile catalog being packaged, and
 verifies an exact generated payload path/type/mode/digest allowlist before
-either archive is assembled. It does not establish that equal-version binaries
-came from one source revision, so release automation must still provide one
-reviewed source cohort.
+either archive is assembled. The shared recorded commit establishes that the
+six binaries name one source revision; it does not establish that the revision
+was reviewed, so release automation must still build from a reviewed commit.
 
 Only one assembler may own an output-directory inode at a time. Complete
 outputs are built and fsynced under a hidden same-filesystem directory, then
