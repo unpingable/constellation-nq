@@ -55,7 +55,7 @@ The packaged defaults are:
 | Private supervised-helper runtime directory | `/run/nq/helpers/` |
 | Loopback console (opt-in; off by default) | `http://127.0.0.1:8787/` when enabled |
 
-`nqd` runs as `nq:nq`; packaged watchers default to the separate
+`nqd` runs as `nq:nq` and immediately execs the installed `nq daemon`, so the process that evaluates a watcher is the same `nq` executable that admitted it (admission binds the evaluator's exact bytes); packaged watchers default to the separate
 `nq-helper:nq-helper` identity. Configuration may name another local account
 or decimal UID, but it must resolve through the account database to an exact
 non-root UID and primary GID. Admission records both. A helper may share

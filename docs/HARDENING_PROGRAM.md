@@ -524,7 +524,7 @@ admission-context layer, per the two-layer identity the plan already mandates:
 - `profile_semantic_id` is a **declared-semantics** identity (source closure of the
   law-bearing crates + declared features + locked versions + toolchain). Boundary +
   asymmetric law documented in `crates/nq-profiles/src/identity.rs`.
-- **`evaluator_artifact_digest`** — SHA-256 of the exact running `nqd` executable,
+- **`evaluator_artifact_digest`** — SHA-256 of the exact running evaluator executable (amended 2026-09-25: `nqd` execs `nq daemon`, so the daemon and the CLI that admits watchers are one artifact; before this, a separately built `nqd` refused every CLI admission),
   derived **inside the daemon** from `/proc/self/exe` at startup (never from config
   or a helper claim; identifies the executing inode, so on-disk replacement of a
   running process is caught), cached, and compared to the packaged release manifest

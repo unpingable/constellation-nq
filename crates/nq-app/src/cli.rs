@@ -107,6 +107,17 @@ pub enum Command {
     },
     /// Explicitly initialize an empty nq-ng database and directory layout.
     Init(InitArgs),
+    /// Run the resident service. This is the daemon evaluator: `nqd` execs
+    /// `nq daemon`, so the process that evaluates a watcher is the same
+    /// executable artifact that admitted it through this CLI.
+    Daemon {
+        /// Optional loopback console address (e.g. `127.0.0.1:8787`).
+        #[arg(long)]
+        console_address: Option<String>,
+        /// Collect every configured instance once, then exit.
+        #[arg(long)]
+        once: bool,
+    },
     /// Validate, compare, and atomically activate human intent.
     Config {
         /// Configuration workflow.
@@ -573,6 +584,17 @@ pub struct QueryArgs {
 /// workflow's atomicity and custody rules.
 pub async fn run(options: Nq) -> Result<()> {
     match options.command {
+        Command::Daemon {
+            console_address,
+            once,
+        } => {
+            crate::daemon::run(crate::daemon::Nqd {
+                config: options.config,
+                console_address,
+                once,
+            })
+            .await
+        }
         Command::LabelwatchRelief { source, request } => {
             crate::labelwatch_relief_cli::run(&source, &request)
         }
