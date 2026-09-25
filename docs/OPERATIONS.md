@@ -742,15 +742,17 @@ the off-host backup and release checksums if later custody or audit is needed.
 
 ## Build offline release artifacts
 
-Build or obtain `nq`, `nqd`, `nq-host-helper`, and
-`nq-operator-beta-helper` for each target without
-allowing network access. They must be `--release` builds from one reviewed
-source cohort. Verify the checked-in descriptor catalog against that exact
-`nq` binary, then pass those inputs to the assembler:
+Build or obtain `nq`, `nqd`, `nq-host-helper`, `nq-host-resource-helper`,
+`nq-operator-beta-helper`, and `nq-synthetic-cache-result-helper` for each
+target without allowing network access. They must be `--release` builds from
+one reviewed source cohort. Verify the checked-in descriptor catalog against
+that exact `nq` binary and the `nq-host-resource-helper` it will ship with,
+then pass those inputs to the assembler:
 
 ```sh
 mkdir -p dist
-python3 profiles/verify_catalog.py target/release/nq
+python3 profiles/verify_catalog.py target/release/nq \
+  --helper target/release/nq-host-resource-helper
 SOURCE_DATE_EPOCH=0 scripts/build-release-bundle.sh \
   0.1.0 amd64 target/release profiles dist
 (cd dist && sha256sum --check SHA256SUMS)
@@ -765,7 +767,9 @@ reproducible tarball, a binary Debian package, per-artifact checksums, and
 `SHA256SUMS`. Produce AMD64 and ARM64 artifacts from separately built binaries;
 never relabel one architecture's executable as the other.
 
-The assembler verifies the profile catalog and architecture, then executes
+The assembler verifies the profile catalog (including that the packaged
+`nq-host-resource-helper` serves exactly the failure-code vocabularies `nq`
+compiles) and architecture, then executes
 each binary's configuration-independent `--build-info` probe. It requires the
 requested version exactly, rejects any binary with debug assertions or the
 debug same-identity exception compiled in, and requires production

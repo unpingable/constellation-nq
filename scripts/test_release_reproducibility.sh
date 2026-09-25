@@ -13,7 +13,7 @@ absolute paths, directory insertion orders, umasks, locales, time zones, and
 TMPDIRs. The test compares the archives, extracted trees, embedded manifests,
 and checksum sidecars byte for byte without writing to dist/.
 
-NQ_REPRO_SCRATCH_KIB bounds aggregate scratch use (default: 327680 KiB).
+NQ_REPRO_SCRATCH_KIB bounds aggregate scratch use (default: 524288 KiB).
 NQ_REPRO_EPOCH selects the shared SOURCE_DATE_EPOCH (default: 1700000000).
 USAGE
     exit 2
@@ -25,7 +25,7 @@ version=$1
 arch=$2
 bin_dir=$3
 profile_dir=$4
-scratch_limit_kib=${NQ_REPRO_SCRATCH_KIB:-327680}
+scratch_limit_kib=${NQ_REPRO_SCRATCH_KIB:-524288}
 epoch=${NQ_REPRO_EPOCH:-1700000000}
 
 [[ "$scratch_limit_kib" =~ ^[1-9][0-9]*$ ]] || {
@@ -212,11 +212,13 @@ copy_profiles() {
 copy_binaries() {
     local destination=$1
     local order=$2
-    local names=(nq nqd nq-host-helper nq-operator-beta-helper)
+    local names=(nq nqd nq-host-helper nq-host-resource-helper
+        nq-operator-beta-helper nq-synthetic-cache-result-helper)
     local name
     mkdir -p -- "$destination"
     if [[ "$order" == reverse ]]; then
-        names=(nq-operator-beta-helper nq-host-helper nqd nq)
+        names=(nq-synthetic-cache-result-helper nq-operator-beta-helper
+            nq-host-resource-helper nq-host-helper nqd nq)
     fi
     for name in "${names[@]}"; do
         [[ -f "$bin_dir/$name" && -x "$bin_dir/$name" ]] || {

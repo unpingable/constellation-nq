@@ -141,7 +141,12 @@ was added (`b919be2`). A rebuild is required before the next publish or
 deploy. It needs release-profile binaries, a version decision (the `v0.1.0`
 tag already exists, so a rebuild cannot reuse that name), and passing
 reproducibility and failure-atomicity checks against the staged payload.
-`nq-host-resource-helper`, which serves `nq.host_filesystem_capacity/v1`,
-`nq.host_filesystem_inodes/v1`, `nq.host_memory/v1` and `nq.systemd_unit/v2`,
-is not yet packaged, and the release path does not run
-`verify_catalog.py --helper`.
+The release path now packages `nq-host-resource-helper`, which serves
+`nq.host_filesystem_capacity/v1`, `nq.host_filesystem_inodes/v1`,
+`nq.host_memory/v1` and `nq.systemd_unit/v2`, and
+`nq-synthetic-cache-result-helper`, which serves
+`nq.synthetic_cache_executor_result/v1`, under `/usr/lib/nq/helpers/`, and the
+assembler runs `verify_catalog.py --helper` against the packaged
+`nq-host-resource-helper` so a helper whose failure-code vocabularies disagree
+with `nq` is refused at assembly. No bundle containing them has been built or
+published yet.

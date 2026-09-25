@@ -3,9 +3,12 @@
 These files are inputs to `scripts/build-release-bundle.sh`; they are not a
 claim that the repository is a conventional Debian source package.
 
-The exact package inventory includes the bounded `nq-operator-beta-helper`
-binary under `/usr/lib/nq/helpers/`. Installing the package does not admit or
-execute that helper; watcher admission remains a separate explicit operation.
+The exact package inventory includes every helper that serves a cataloged
+profile under `/usr/lib/nq/helpers/`: `nq-host-helper`,
+`nq-host-resource-helper`, `nq-operator-beta-helper`, and
+`nq-synthetic-cache-result-helper`, plus the Python conformance specimen.
+Installing the package does not admit or execute any helper; watcher admission
+remains a separate explicit operation.
 
 The generated binary package has deliberately conservative maintainer-script
 semantics:

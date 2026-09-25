@@ -21,14 +21,17 @@ trap cleanup EXIT HUP INT TERM
 
 base_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-# The fourth package-owned binary is mandatory and its build-info component
+# Every package-owned helper binary is mandatory and its build-info component
 # identity must match its installed name. Missing or substituted bytes refuse
 # before any output artifact is created.
 invalid_bin_dir=$work/invalid-binaries
 missing_out=$work/missing-helper-out
 substituted_out=$work/substituted-helper-out
-mkdir -p -- "$invalid_bin_dir" "$missing_out" "$substituted_out"
-for binary in nq nqd nq-host-helper; do
+substituted_resource_out=$work/substituted-resource-helper-out
+mkdir -p -- "$invalid_bin_dir" "$missing_out" "$substituted_out" \
+    "$substituted_resource_out"
+for binary in nq nqd nq-host-helper nq-host-resource-helper \
+    nq-synthetic-cache-result-helper; do
     cp -- "$bin_dir/$binary" "$invalid_bin_dir/$binary"
 done
 set +e
@@ -61,6 +64,28 @@ set -e
 grep -Fq "expected 'nq-operator-beta-helper'" "$work/substituted-helper.stderr"
 if find "$substituted_out" -mindepth 1 -print -quit | grep -q .; then
     echo "substituted operator-beta helper created a release output" >&2
+    exit 1
+fi
+
+# The host-resource helper is also the catalog agreement witness; bytes of a
+# different helper installed under its name must be refused by identity.
+cp -- "$bin_dir/nq-operator-beta-helper" "$invalid_bin_dir/nq-operator-beta-helper"
+cp -- "$bin_dir/nq-host-helper" "$invalid_bin_dir/nq-host-resource-helper"
+set +e
+PATH="$base_path" "$root/scripts/build-release-bundle.sh" \
+    "$version" "$arch" "$invalid_bin_dir" "$profile_dir" "$substituted_resource_out" \
+    >"$work/substituted-resource-helper.stdout" \
+    2>"$work/substituted-resource-helper.stderr"
+substituted_resource_status=$?
+set -e
+[[ $substituted_resource_status -ne 0 ]] || {
+    echo "release assembly accepted substituted host-resource helper bytes" >&2
+    exit 1
+}
+grep -Fq "expected 'nq-host-resource-helper'" \
+    "$work/substituted-resource-helper.stderr"
+if find "$substituted_resource_out" -mindepth 1 -print -quit | grep -q .; then
+    echo "substituted host-resource helper created a release output" >&2
     exit 1
 fi
 
@@ -260,6 +285,7 @@ package="nq-ng-${version}-linux-${arch}.tar.gz"
     sha256sum --check "$package.sha256" >/dev/null
 )
 
-printf 'release failure atomicity passed (missing=%s, substituted=%s, lock=%s, failure=%s, killed=%s)\n' \
-    "$missing_helper_status" "$substituted_helper_status" "$lock_status" \
-    "$failure_status" "$kill_status"
+printf 'release failure atomicity passed (missing=%s, substituted=%s, substituted_resource=%s, lock=%s, failure=%s, killed=%s)\n' \
+    "$missing_helper_status" "$substituted_helper_status" \
+    "$substituted_resource_status" "$lock_status" "$failure_status" \
+    "$kill_status"

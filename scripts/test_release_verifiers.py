@@ -557,6 +557,34 @@ class PayloadVerifierTest(unittest.TestCase):
         os.chmod(manifest, 0o644)
         return stage, descriptors
 
+    def test_manifest_files_literal_entries_match_the_exact_allowlist(self) -> None:
+        # MANIFEST.files is the human-readable form of the allowlist; every
+        # literal (non-glob) path it names must be in the exact inventory with
+        # the same mode, and every packaged helper must be named by both.
+        files = payload.expected_files(["fixture.v1.json"])
+        literal: dict[str, int] = {}
+        for line in (ROOT / "packaging/tarball/MANIFEST.files").read_text(
+            encoding="utf-8"
+        ).splitlines():
+            if not line or line.startswith("#"):
+                continue
+            name, mode = line.split()
+            if "*" in name:
+                continue
+            literal[name] = int(mode, 8)
+        for name, mode in literal.items():
+            self.assertEqual(files.get(name), mode, name)
+        helpers = {
+            "lib/nq/helpers/nq-host-helper",
+            "lib/nq/helpers/nq-host-resource-helper",
+            "lib/nq/helpers/nq-operator-beta-helper",
+            "lib/nq/helpers/nq-synthetic-cache-result-helper",
+            "lib/nq/helpers/nq_conformance_helper.py",
+        }
+        self.assertLessEqual(helpers, set(literal))
+        for name in helpers:
+            self.assertEqual(files[name], 0o755, name)
+
     def test_exact_payload_passes_and_extra_file_or_mode_fails(self) -> None:
         with tempfile.TemporaryDirectory(prefix="nq-payload-test-") as directory:
             stage, descriptors = self.make_stage(Path(directory))
