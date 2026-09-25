@@ -142,5 +142,6 @@ deploy. It needs release-profile binaries, a version decision (the `v0.1.0`
 tag already exists, so a rebuild cannot reuse that name), and passing
 reproducibility and failure-atomicity checks against the staged payload.
 `nq-host-resource-helper`, which serves `nq.host_filesystem_capacity/v1`,
-`nq.host_filesystem_inodes/v1` and `nq.host_memory/v1`, is not yet packaged,
-and the release path does not run `verify_catalog.py --helper`.
+`nq.host_filesystem_inodes/v1`, `nq.host_memory/v1` and `nq.systemd_unit/v2`,
+is not yet packaged, and the release path does not run
+`verify_catalog.py --helper`.
