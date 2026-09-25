@@ -16,8 +16,8 @@ import tempfile
 from typing import Any
 
 SCHEMA = "constellation.operator_beta.nq_bookworm_package_build.v1"
-SOURCE_HEAD = "c62eb7130c813896903e0156bd0593e22befe4a5"
-SOURCE_TREE = "110d5becd3613cdae479c33df7f681aa77545da9"
+SOURCE_HEAD = "fc671a4126c5fabbf87be15dbd79d6c12132ee3f"
+SOURCE_TREE = "64e118d642703fe17da4e7f959099e8a1726fe31"
 IMAGE_ID = "sha256:fb7a58d0482a24e269ba85636ce46cb06aaaef3aea0e868154ed0ae7c18fa379"
 IMAGE_REPO_DIGEST = "rust@sha256:365468470075493dc4583f47387001854321c5a8583ea9604b297e67f01c5a4f"
 SOURCE_DATE_EPOCH = "1700000000"
@@ -32,7 +32,9 @@ BINARIES = {
     "nq": "usr/bin/nq",
     "nqd": "usr/bin/nqd",
     "nq-host-helper": "usr/lib/nq/helpers/nq-host-helper",
+    "nq-host-resource-helper": "usr/lib/nq/helpers/nq-host-resource-helper",
     "nq-operator-beta-helper": "usr/lib/nq/helpers/nq-operator-beta-helper",
+    "nq-synthetic-cache-result-helper": "usr/lib/nq/helpers/nq-synthetic-cache-result-helper",
 }
 BUILD_ENV = {
     "CARGO_HOME": "/cargo-home",
