@@ -701,10 +701,20 @@ still be refused when it is reopened: historical diagnostic artifacts are
 checked against the running build's compiled profile surface and
 `profile_semantic_id`, which change whenever profile or protocol sources change
 (constellation-nq#12). Until continuity is qualified, the supported procedure for
-moving to a different NQ build is: settle or record any in-flight work, take
-and verify a backup, export the artifacts you must keep with `nq diagnostics
-export`, then initialize a fresh store under the new build and re-admit every
-watcher. Keep the old backup together with the old package bytes for rollback.
+moving to a different NQ build is:
+
+1. While the old build is still installed, settle or record in-flight work,
+   run `nq backup` and verify it, and `nq diagnostics export` every artifact
+   you must keep. After a migration the new build may refuse both.
+2. Stop `nqd`, install the new build, and move both the old database and the
+   whole `/var/lib/nq/admissions` directory aside into one quarantine
+   directory. An old admission lock without a binding event in the new store
+   is refused: `instance ... has an active lock but no authoritative binding
+   event`.
+3. `nq init`, then re-admit every watcher and start `nqd`.
+
+Keep the old backup, the quarantined admissions, and the old package bytes
+together for rollback: reinstall the old package and `nq restore` the backup.
 
 For a second observation from the same admitted local watcher, use the
 [bounded local-successor profile](LOCAL_SUCCESSOR.md). Do not initialize a
