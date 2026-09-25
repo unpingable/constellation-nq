@@ -1,5 +1,40 @@
 # Constellation NQ source and integration guide
 
+## NQ 0.2.0 component package
+
+NQ 0.2.0 is a release of the NQ component alone. The GitHub Release
+[`v0.2.0`](https://github.com/unpingable/constellation-nq/releases/tag/v0.2.0)
+carries a Debian 12 (Bookworm) amd64 package, `nq-ng_0.2.0_amd64.deb`, a
+matching tarball, `SHA256SUMS`, the build receipt and the clean-VM acceptance
+result. It is **not an installable Constellation suite**. It contains no
+Monitor, Pulse, Nightshift, Docket or AG component, qualifies no composed
+profile (including the host-posture operator profile), and creates or moves no
+Constellation integration release. Those remain the alpha guides below.
+
+The package was built twice offline by the pinned Bookworm builder, with
+byte-equal results, and was installed and exercised in a clean Debian 12 VM
+with no source tree. Install and operate it as described in
+[OPERATIONS.md](OPERATIONS.md). Installation does not initialize, enable or
+start NQ. Identify a deployed build by version, source commit and package
+digest together: `v0.1.0` names an earlier, different package.
+
+Known limitations:
+
+- Store continuity across NQ builds is not qualified. A store made by another
+  build, including 0.1.0, is not carried forward in place. Back up and export
+  under the old build, quarantine the old database and `/var/lib/nq/admissions`,
+  then `nq init` and re-admit, as described in
+  [OPERATIONS.md](OPERATIONS.md#historical-binary-and-schema-upgrade). After
+  `nq admin upgrade`, a store that already has history can refuse to reopen
+  (nq#12 part B, open).
+- `nq.http_endpoint/v1`, `nq.systemd_unit/v1`,
+  `nq.synthetic_cache_executor_result/v1` and `nq.conformance/v1` are packaged
+  but were not run as watchers in the acceptance VM. Memory `present` was not
+  induced. Staleness has no NQ-level operator trigger.
+- Only Debian 12 amd64 is built and qualified.
+
+## Constellation integration releases
+
 The current immutable Constellation integration release is
 [0.1.0-alpha.6](https://unpingable.com/constellation/releases/0.1.0-alpha.6/guide.html).
 Its `reviewed-local-copy/v1` profile pins NQ
@@ -62,8 +97,9 @@ local-inbox implementation use `1ef98c9c9934ea9dac481d3dcdc42fb7dd2bd073` and
 the exact companion pins in its notification guide. Do not move `constellation-public-source-20260912`
 or `v0.1.0`, force-push, or rewrite history.
 
-This is a source-only developer preview; it supplies no binary package or
-installation artifact. Publication does not authorize a
+The integration profiles above are source-only developer previews; they supply
+no binary package or installation artifact. The separate NQ 0.2.0 component
+package is described at the top of this guide. Publication does not authorize a
 production deployment, classic-NQ authority transfer, or a claim of complete
 host coverage.
 
@@ -105,7 +141,7 @@ python3 -B helpers/python-conformance/test_helper.py
 cargo build --workspace
 target/debug/nq protocol check
 python3 -B profiles/verify_catalog.py target/debug/nq
-python3 -B scripts/verify_protocol_assets.py protocol target/debug/nq 0.1.0
+python3 -B scripts/verify_protocol_assets.py protocol target/debug/nq 0.2.0
 ```
 
 Before publishing a package, additionally run the existing reproducibility and
@@ -136,20 +172,13 @@ qualification does not inventory later dynamic/plugin/module loading. See
 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) and
 [OPERATIONS.md](OPERATIONS.md) for the exact boundaries.
 
-The release bundle has not been rebuilt since `profiles/failure-codes.json`
-was added (`b919be2`). A rebuild is required before the next publish or
-deploy. It needs release-profile binaries, a version decision (the `v0.1.0`
-tag already exists, so a rebuild cannot reuse that name), and passing
-reproducibility and failure-atomicity checks against the staged payload.
-The release path now packages `nq-host-resource-helper`, which serves
+The 0.2.0 package includes `nq-host-resource-helper`, which serves
 `nq.host_filesystem_capacity/v1`, `nq.host_filesystem_inodes/v1`,
 `nq.host_memory/v1` and `nq.systemd_unit/v2`, and
 `nq-synthetic-cache-result-helper`, which serves
-`nq.synthetic_cache_executor_result/v1`, under `/usr/lib/nq/helpers/`, and the
+`nq.synthetic_cache_executor_result/v1`, under `/usr/lib/nq/helpers/`. The
 assembler runs `verify_catalog.py --helper` against the packaged
-`nq-host-resource-helper` so a helper whose failure-code vocabularies disagree
-with `nq` is refused at assembly. A disposable candidate containing them was built from `fc671a4` by the
-offline Bookworm builder (two byte-equal builds) and qualified with explicit
-limitations; it is not published. Before promotion: `nqd` cannot evaluate
-watchers admitted by the `nq` CLI, store upgrade from earlier builds is not
-supported, and `/run/nq` disappears after `nqd` stops.
+`nq-host-resource-helper`, so a helper whose failure-code vocabularies disagree
+with `nq` is refused at assembly. `nqd` runs `nq daemon`, so watchers admitted
+with the `nq` CLI are evaluated by the service, and `/run/nq` survives an `nqd`
+stop.

@@ -4,6 +4,12 @@ NQ collects and checks bounded evidence for a specific question. It records what
 was admitted, what was refused, and the diagnostic conclusion its profile can
 support. It does not authorize or execute the work that might follow.
 
+**NQ 0.2.0** is a component package for Debian 12 amd64: NQ alone, not an
+installable Constellation suite. See [the 0.2.0 release notes and known
+limitations](docs/PUBLIC_RELEASE.md#nq-020-component-package); the main one is
+that stores do not carry across NQ builds, so the documented procedure is to
+re-initialize ([OPERATIONS](docs/OPERATIONS.md#historical-binary-and-schema-upgrade)).
+
 The current immutable Constellation integration release is
 [0.1.0-alpha.6](https://unpingable.com/constellation/releases/0.1.0-alpha.6/guide.html).
 Its `reviewed-local-copy/v1` profile uses NQ for bounded host-observation
