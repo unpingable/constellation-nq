@@ -11,6 +11,11 @@ NOT_EXERCISED with the exact observed messages; nothing is relabelled.
 
 Only the release artifacts, the build receipt and the campaign-owned guest
 scripts enter a guest. No source tree, share or host PATH is exposed.
+
+`--candidate-dir` selects the candidate under the campaign directory (default
+candidate-001, reproducing the first run) and `--output-name` the result
+directory (default acceptance-001). The result records the harness commit and
+the digest of every harness file that entered the run.
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ from typing import Any
 
 HERE = pathlib.Path(__file__).resolve().parent
 GUEST_SCRIPTS = ("nq-run.sh", "fixtures.sh", "load.sh", "assert-clean.sh")
+HARNESS_FILES = ("run_acceptance.py", *(f"guest/{name}" for name in GUEST_SCRIPTS))
 IMAGE_NAME = "debian-12-genericcloud-amd64-20260903-2590.qcow2"
 DEFAULT_IMAGE_DIR = pathlib.Path(
     "/data/git/.campaign-artifacts/constellation-operator-beta-composed-m2-run-002/input"
@@ -105,7 +111,8 @@ CASES: list[tuple[str, str]] = [
     ("A-28", "runtime: systemd v2 wrong machine id -> cannot_evaluate machine_identity_mismatch"),
     ("A-29", "runtime: typed owner failure detail on every cannot_evaluate"),
     ("A-30", "runtime: nqd.service start (ExecStartPre), status, stop, restart"),
-    ("A-31", "runtime: nqd scheduled collections after start (journal)"),
+    ("A-31", "runtime: nqd collects and evaluates every CLI-admitted watcher (journal, evaluations export)"),
+    ("A-32", "runtime: nqd process image is /usr/bin/nq running `nq daemon`"),
     ("N-01", "negative: execution_account = nq refused"),
     ("N-02", "negative: helper missing refused; dpkg -i reinstall restores"),
     ("N-03", "negative: helper mode 0700 root refused"),
@@ -119,12 +126,12 @@ CASES: list[tuple[str, str]] = [
     ("N-11", "packaging: corrupted .deb"),
     ("N-12", "packaging: missing artifact"),
     ("N-13", "packaging: truncated .deb"),
-    ("N-14", "negative: /run/nq after nqd stop (RuntimeDirectory=nq) and the documented CLI wrapper"),
+    ("N-14", "negative: /run/nq preserved after nqd stop; documented CLI wrapper works without tmpfiles"),
     ("B-01", "predecessor: install M3 package"),
     ("B-02", "predecessor: configure nq.host, init, admit, execute"),
     ("B-03", "predecessor: dpkg -i candidate over M3 (prerm/postinst)"),
-    ("B-04", "predecessor: store schema, old config, re-admission, new executions"),
-    ("B-05", "predecessor: roll back to M3 against the touched store"),
+    ("B-04", "predecessor: one admin upgrade 5->13 with v5 and v12 backups, doctor, store usability, documented continuity path"),
+    ("B-05", "predecessor: roll back to M3, refuse the newer store, restore the v5 backup with nq restore"),
 ]
 
 
@@ -374,8 +381,9 @@ class Harness:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         self.campaign: pathlib.Path = args.campaign_dir
-        self.candidate = self.campaign / "candidate-001"
-        self.out = self.campaign / "acceptance-001"
+        candidate = pathlib.Path(args.candidate_dir)
+        self.candidate = candidate if "/" in args.candidate_dir else self.campaign / candidate
+        self.out = self.campaign / args.output_name
         self.state: pathlib.Path = args.state_dir
         self.started = utc_now()
         self.results: dict[str, dict[str, Any]] = {
@@ -390,6 +398,11 @@ class Harness:
         self.artifacts: dict[str, dict[str, Any]] = {}
         self.exports: dict[str, bytes] = {}
         self.cannot_evaluate: list[dict[str, Any]] = []
+        self.admitted: dict[str, list[str]] = {}
+        self.evaluation_sequence_before_nqd: int | None = None
+        self.m3_backup: dict[str, Any] | None = None
+        self.upgrade_backups: dict[str, dict[str, Any]] = {}
+        self.harness_identity: dict[str, Any] | None = None
         self.host_log = None
 
     # ----------------------------------------------------------------- logging
@@ -419,6 +432,8 @@ class Harness:
         document = {
             "schema": "release_closure.acceptance_result.v1",
             "campaign": "release-closure-20260925",
+            "harness": self.harness_identity,
+            "invocation": sys.argv,
             "started_at": self.started,
             "updated_at": utc_now(),
             "candidate": getattr(self, "candidate_identity", None),
@@ -518,7 +533,32 @@ class Harness:
         run(guest.scp_base() + [f"{GUEST_USER}@127.0.0.1:{source}", str(destination)], check=False)
 
     # -------------------------------------------------------------- preflight
+    def describe_harness(self) -> dict[str, Any]:
+        """Exact identity of the harness that produced this result (review finding L5)."""
+        def git(*arguments: str) -> str | None:
+            completed = subprocess.run(["git", "-C", str(HERE), *arguments], capture_output=True,
+                                       text=True, check=False)
+            return completed.stdout.strip() if completed.returncode == 0 else None
+        return {
+            "directory": str(HERE),
+            "commit": git("rev-parse", "HEAD"),
+            "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
+            "dirty_paths": (git("status", "--porcelain", "--", ".") or "").splitlines(),
+            "files": {name: sha256_file(HERE / name) for name in HARNESS_FILES},
+        }
+
+    def build_exit_file(self) -> pathlib.Path:
+        if self.args.build_exit_file is not None:
+            return self.args.build_exit_file
+        match = re.fullmatch(r"candidate-(\d+)", self.candidate.name)
+        if match and match.group(1) != "001":
+            numbered = self.campaign / f"build-{match.group(1)}.exit"
+            if numbered.exists():
+                return numbered
+        return self.campaign / "build.exit"
+
     def preflight(self) -> None:
+        self.harness_identity = self.describe_harness()
         for tool in ("qemu-img", "qemu-system-x86_64", "xorriso", "ssh", "ssh-keygen", "scp",
                      "sha256sum", "dpkg-deb"):
             if shutil.which(tool) is None:
@@ -539,9 +579,9 @@ class Harness:
         self.host_log = (self.out / "host.log").open("a", encoding="utf-8")
 
         # Candidate: built by the pinned builder, exit 0, exact files.
-        exit_file = self.campaign / "build.exit"
+        exit_file = self.build_exit_file()
         if not exit_file.exists() or exit_file.read_text().strip() != "0":
-            raise Refusal("build.exit is missing or non-zero; not accepting a candidate")
+            raise Refusal(f"{exit_file.name} is missing or non-zero; not accepting a candidate")
         for name in (*BUNDLE_FILES, RECEIPT):
             if not (self.candidate / name).is_file():
                 raise Refusal(f"candidate file missing: {name}")
@@ -554,6 +594,7 @@ class Harness:
         receipt = json.loads((self.candidate / RECEIPT).read_text())
         self.candidate_identity = {
             "directory": str(self.candidate),
+            "build_exit_file": str(exit_file),
             "deb_sha256": sha256_file(self.candidate / PACKAGE),
             "tarball_sha256": sha256_file(self.candidate / TARBALL),
             "receipt_sha256": sha256_file(self.candidate / RECEIPT),
@@ -735,6 +776,8 @@ users:
     def admit(self, guest: Guest, instance: str) -> dict[str, Any]:
         r, doc = self.nq_json(guest, f"watcher admit {instance}", privileged=True)
         activated = isinstance(doc, dict) and doc.get("outcome") == "activated"
+        if activated:
+            self.admitted.setdefault(guest.role, []).append(instance)
         return {"instance": instance, "exit": r.returncode, "activated": activated,
                 "admission_id": doc.get("admission_id") if isinstance(doc, dict) else None,
                 "output": None if activated else text(r.stdout + r.stderr)[-2000:]}
@@ -1004,6 +1047,8 @@ users:
                 "output": None if isinstance(doc, dict) and doc.get("outcome") == "activated" else text(r.stdout + r.stderr)[-2000:],
             }
             ok = ok and r.returncode == 0 and isinstance(doc, dict) and doc.get("outcome") == "activated"
+            if outcomes[instance]["outcome"] == "activated":
+                self.admitted.setdefault(g.role, []).append(instance)
         self.fixtures["admissions"] = outcomes
         self.record("PASS" if ok else "FAIL", admissions=outcomes)
 
@@ -1073,6 +1118,8 @@ users:
         return text(self.ssh(g, f"systemctl show nqd.service -p {props}").stdout)
 
     def case_a30(self, g: Guest) -> None:
+        _, page = self.nq_json(g, "evaluations export --limit 1000")
+        self.evaluation_sequence_before_nqd = page.get("through_sequence") if isinstance(page, dict) else None
         start = self.ssh(g, "sudo systemctl start nqd.service; echo start-exit=$?; sleep 3; systemctl is-active nqd.service", timeout=120)
         show = self.unit_state(g)
         status = self.ssh(g, "systemctl status nqd.service --no-pager -l; sudo journalctl -u nqd.service -b --no-pager -o short-iso | tail -60")
@@ -1082,39 +1129,124 @@ users:
         pre_ok = len(pre) == 3 and all(re.search(r"status=0(/SUCCESS)? \}", p) for p in pre)
         ok = b"start-exit=0" in start.stdout and text(start.stdout).strip().endswith("active") and pre_ok and b"stop-exit=0" in stop.stdout and text(stop.stdout).strip().endswith("inactive") and b"restart-exit=0" in restart.stdout and "ActiveState=active" in text(restart.stdout)
         self.record("PASS" if ok else "FAIL", start=text(start.stdout), exec_start_pre=pre, stop=text(stop.stdout),
-                    restart=text(restart.stdout), status=self.evidence(f"{g.role}-nqd-status.txt", status.stdout + status.stderr))
+                    restart=text(restart.stdout), status=self.evidence(f"{g.role}-nqd-status.txt", status.stdout + status.stderr),
+                    evaluation_sequence_before_nqd=self.evaluation_sequence_before_nqd)
 
     def case_a31(self, g: Guest) -> None:
-        self.ssh(g, "systemctl is-active nqd.service || sudo systemctl start nqd.service; sleep 25")
-        journal = self.ssh(g, "sudo journalctl -u nqd.service -b --no-pager -o short-iso")
-        lines = text(journal.stdout).splitlines()
-        errors = [l for l in lines if " ERROR " in l or "error=" in l]
-        warns = [l for l in lines if " WARN " in l]
-        admitted = [l for l in lines if "collection admitted and evaluated" in l]
+        """Every CLI-admitted watcher is collected and evaluated by nqd itself.
+
+        Gate: zero ERROR lines (in particular zero `uses evaluator artifact`
+        invariant violations) in the current nqd run, every CLI-admitted
+        instance collected with outcome `admitted` (an owner-failure
+        cannot_evaluate report is admitted with report_status failed and is
+        logged as retained, but it is evaluated), and every evaluation appended
+        since nqd first started, for every CLI-admitted instance, carries
+        evaluator_artifact_digest equal to the installed /usr/bin/nq sha256.
+        """
+        nq_sha = text(self.ssh(g, "sha256sum /usr/bin/nq | cut -d' ' -f1", check=True).stdout).strip()
+        unit = text(self.ssh(g, "systemctl is-active nqd.service || sudo systemctl start nqd.service; systemctl show nqd.service -p ActiveState,MainPID,ActiveEnterTimestamp", check=True).stdout)
+        expected = sorted(set(self.admitted.get(g.role, [])))
+        deadline = time.monotonic() + 120
+        while True:
+            journal = self.ssh(g, "sudo journalctl -u nqd.service -b --no-pager -o short-iso")
+            lines = text(journal.stdout).splitlines()
+            begin = max((i for i, l in enumerate(lines) if "Started nqd.service" in l), default=0)
+            current = lines[begin:]
+            admitted_lines = [l for l in current if "collection admitted and evaluated" in l]
+            retained_lines = [l for l in current if "collection retained without admitted report" in l]
+            errors = [l for l in current if " ERROR " in l]
+            evaluated_ok = {m.group(1) for l in admitted_lines if (m := re.search(r"instance=(\S+)", l))}
+            retained = {}
+            for l in retained_lines:
+                m = re.search(r"instance=(\S+) governed_result=(\{.*\})\s*$", l)
+                if m:
+                    doc = parse_json(m.group(2).encode())
+                    result = (doc or {}).get("result", {}) if isinstance(doc, dict) else {}
+                    retained[m.group(1)] = {"outcome": result.get("outcome"),
+                                            "report_status": result.get("report_status"),
+                                            "refusal_code": (result.get("refusal") or {}).get("code")}
+            evaluated_failed_report = {i for i, r in retained.items() if r["outcome"] == "admitted"}
+            evaluated = evaluated_ok | evaluated_failed_report
+            if set(expected) <= evaluated or errors or time.monotonic() > deadline:
+                break
+            time.sleep(5)
+        evaluator_errors = [l for l in current if "uses evaluator artifact" in l]
+        missing = [i for i in expected if i not in evaluated]
         messages = sorted({re.sub(r"run [0-9a-f-]{36}", "run <uuid>", l.split(" nqd[", 1)[-1].split("]: ", 1)[-1]) for l in errors})
-        refusals = self.ssh(g, f"{NQ} --json refusals export --limit 20")
         self.evidence(f"{g.role}-nqd-journal-after-start.txt", journal.stdout)
+
+        export, page = self.nq_json(g, "evaluations export --limit 1000")
+        self.evidence(f"{g.role}-evaluations-export-after-nqd.json", export.stdout + export.stderr)
+        records = page.get("records", []) if isinstance(page, dict) else []
+        before = self.evaluation_sequence_before_nqd or 0
+        since_nqd = [r for r in records if isinstance(r.get("sequence"), int) and r["sequence"] > before]
+        per_instance: dict[str, dict[str, int]] = {}
+        digests: dict[str, int] = {}
+        for rec in since_nqd:
+            result = rec.get("result") or {}
+            digest = str(result.get("evaluator_artifact_digest"))
+            instance = str((result.get("context") or {}).get("instance_id"))
+            digests[digest] = digests.get(digest, 0) + 1
+            per_instance.setdefault(instance, {})[digest] = per_instance.setdefault(instance, {}).get(digest, 0) + 1
+        expected_digest = f"sha256:{nq_sha}"
+        mismatched = sorted(d for d in digests if d != expected_digest)
+        instances_without_daemon_evaluation = [i for i in expected if i not in per_instance]
+        refusals = self.ssh(g, f"{NQ} --json refusals export --limit 20")
         self.evidence(f"{g.role}-refusals-export.json", refusals.stdout + refusals.stderr)
-        self.ssh(g, "sudo systemctl stop nqd.service")
-        self.record("PASS" if not errors else "FAIL", error_count=len(errors), warn_count=len(warns),
-                    admitted_and_evaluated_count=len(admitted), distinct_error_messages=messages,
-                    first_errors=errors[:6], journal="evidence/" + f"{g.role}-nqd-journal-after-start.txt",
-                    note="nqd started against watchers admitted and executed by the nq CLI; any ERROR line is recorded verbatim")
+        ok = (
+            bool(expected) and not missing and not errors and not evaluator_errors
+            and export.returncode == 0 and bool(since_nqd) and not mismatched
+            and not instances_without_daemon_evaluation
+        )
+        self.record("PASS" if ok else "FAIL", installed_nq_sha256=nq_sha, nqd_unit=unit.strip(),
+                    cli_admitted_instances=expected, admitted_and_evaluated=sorted(evaluated_ok),
+                    admitted_and_evaluated_with_failed_report=sorted(evaluated_failed_report),
+                    admitted_but_not_collected_by_nqd=missing, retained_without_admitted_report=retained,
+                    error_count=len(errors), evaluator_artifact_error_count=len(evaluator_errors),
+                    distinct_error_messages=messages, first_errors=errors[:6],
+                    evaluation_sequence_before_nqd=self.evaluation_sequence_before_nqd,
+                    evaluations_total=len(records), evaluations_since_nqd_start=len(since_nqd),
+                    evaluator_artifact_digests_since_nqd_start=digests, mismatched_evaluator_digests=mismatched,
+                    evaluations_per_instance_since_nqd_start=per_instance,
+                    cli_admitted_instances_without_exported_nqd_evaluation=instances_without_daemon_evaluation,
+                    journal=f"evidence/{g.role}-nqd-journal-after-start.txt",
+                    evaluations_export=f"evidence/{g.role}-evaluations-export-after-nqd.json",
+                    note="nqd keeps running for A-32; the spare fs-roomy-n* instances are not admitted yet, so their missing_active_binding retention is expected")
+
+    def case_a32(self, g: Guest) -> None:
+        """While nqd.service runs, MainPID's image is /usr/bin/nq running `nq daemon`."""
+        r = self.ssh(g, "systemctl is-active nqd.service || sudo systemctl start nqd.service; pid=$(systemctl show nqd.service -p MainPID --value); echo pid=$pid; echo exe=$(sudo readlink /proc/$pid/exe); printf 'cmdline='; sudo tr '\\0' ' ' < /proc/$pid/cmdline; echo; echo comm=$(sudo cat /proc/$pid/comm); ps -o pid,user,comm,args -p $pid; echo exe_sha256=$(sudo sha256sum /proc/$pid/exe | cut -d' ' -f1); sha256sum /usr/bin/nq /usr/bin/nqd; systemctl show nqd.service -p ExecStart --value")
+        out = text(r.stdout)
+        exe = (re.search(r"^exe=(.*)$", out, re.M) or [None, ""])[1].strip()
+        cmdline = (re.search(r"^cmdline=(.*)$", out, re.M) or [None, ""])[1].strip()
+        exe_sha = (re.search(r"^exe_sha256=(.*)$", out, re.M) or [None, ""])[1].strip()
+        nq_sha = (re.search(r"^([0-9a-f]{64})  /usr/bin/nq$", out, re.M) or [None, ""])[1]
+        ok = exe == "/usr/bin/nq" and cmdline == "nq daemon --config=/etc/nq/nq.toml" and exe_sha == nq_sha and bool(nq_sha)
+        # nqd is stopped here so its scheduled collections cannot create history
+        # on the spare instances the negatives admit lazily.
+        stop = self.ssh(g, "sudo systemctl stop nqd.service; echo stop-exit=$?; systemctl is-active nqd.service")
+        self.record("PASS" if ok else "FAIL", exe=exe, cmdline=cmdline, exe_sha256=exe_sha, installed_nq_sha256=nq_sha,
+                    observed=out, stop=text(stop.stdout))
 
     def case_n14(self, g: Guest) -> None:
-        state = self.ssh(g, "systemctl is-active nqd.service; ls -ld /run/nq /run/nq/helpers 2>&1; systemctl show nqd.service -p RuntimeDirectory,RuntimeDirectoryPreserve")
+        """After `systemctl stop nqd`, /run/nq (0751) and /run/nq/helpers (0711) persist
+        and the documented nq_helper_command wrapper works without systemd-tmpfiles."""
+        state = self.ssh(g, "systemctl is-active nqd.service; sudo stat -c '%n %a %U:%G' /run/nq /run/nq/helpers 2>&1; systemctl show nqd.service -p RuntimeDirectory,RuntimeDirectoryMode,RuntimeDirectoryPreserve")
+        out = text(state.stdout)
+        inactive = out.startswith("inactive")
+        present = "/run/nq 751 nq:nq" in out and "/run/nq/helpers 711 nq:nq" in out
         wrapper = self.ssh(g, f"{NQ_RUN} watcher test host-local")
+        wrapper_ok = wrapper.returncode == 0 and b'"outcome": "tested"' in wrapper.stdout
         direct = self.ssh(g, f"{NQ} config check")
-        restore = self.ssh(g, "sudo systemd-tmpfiles --create /usr/lib/tmpfiles.d/nq.conf; echo tmpfiles-exit=$?; ls -ld /run/nq /run/nq/helpers 2>&1")
-        wrapper_after = self.ssh(g, f"{NQ_RUN} watcher test host-local")
-        missing = "No such file" in text(state.stdout)
-        self.record("FAIL" if missing else "PASS",
-                    after_nqd_stop=text(state.stdout), wrapper_exit=wrapper.returncode,
-                    wrapper_output=text(wrapper.stdout + wrapper.stderr)[-1500:],
-                    config_check_direct_exit=direct.returncode,
-                    tmpfiles_restore=text(restore.stdout + restore.stderr),
-                    wrapper_after_restore={"exit": wrapper_after.returncode, "output": text(wrapper_after.stdout + wrapper_after.stderr)[-1200:]},
-                    note="systemd removes a RuntimeDirectory when the unit stops; OPERATIONS.md's nq_helper_command (ReadWritePaths=/run/nq) and helper_runtime_dir=/run/nq/helpers then depend on it existing; exit 226 is systemd EXIT_NAMESPACE")
+        fallback = None
+        if not present:
+            r = self.ssh(g, "sudo systemd-tmpfiles --create /usr/lib/tmpfiles.d/nq.conf; echo tmpfiles-exit=$?; ls -ld /run/nq /run/nq/helpers 2>&1")
+            fallback = {"note": "harness repair so later cases can run; not part of the verdict", "output": text(r.stdout + r.stderr)}
+        self.record("PASS" if inactive and present and wrapper_ok and "RuntimeDirectoryPreserve=yes" in out else "FAIL",
+                    nqd_inactive=inactive, runtime_directories_present=present, after_nqd_stop=out,
+                    wrapper_exit=wrapper.returncode, wrapper_output=text(wrapper.stdout + wrapper.stderr)[-1500:],
+                    config_check_direct_exit=direct.returncode, tmpfiles_fallback=fallback,
+                    note="no systemd-tmpfiles run before the wrapper check; exit 226 would be systemd EXIT_NAMESPACE from ReadWritePaths=/run/nq")
 
     # negatives -------------------------------------------------------------
     def case_n01(self, g: Guest) -> None:
@@ -1194,6 +1326,20 @@ users:
         pre = self.admit(g, "fs-roomy-n04")
         self.ssh(g, f"sudo cp {HOST_HELPER} {RESOURCE_HELPER} && sha256sum {HOST_HELPER} {RESOURCE_HELPER}", check=True)
         cls, _, exe = self.execute(g, "fs-roomy-n04", "helper-substituted")
+        why_test = self.ssh(g, f"{NQ_RUN} watcher test fs-roomy-n04")
+        why_collect = self.ssh(g, f"{NQ_RUN} --json collect fs-roomy-n04")
+        why_doctor = self.ssh(g, f"{NQ_RUN} --json doctor")
+        doctor_doc = parse_json(why_doctor.stdout)
+        doctor_instance = None
+        if isinstance(doctor_doc, dict):
+            doctor_instance = next((i for i in doctor_doc.get("instances", []) if i.get("instance_id") == "fs-roomy-n04"), None)
+        why = {
+            "execute_stderr": text(exe.stderr).strip(),
+            "watcher_test": {"exit": why_test.returncode, "output": text(why_test.stdout + why_test.stderr).strip()[-2000:]},
+            "collect": {"exit": why_collect.returncode, "output": text(why_collect.stdout + why_collect.stderr).strip()[-3000:]},
+            "doctor_instance_entry": doctor_instance,
+            "doctor_exit": why_doctor.returncode,
+        }
         start = self.ssh(g, "sudo systemctl start nqd.service; echo start-exit=$?; sleep 2; systemctl is-active nqd.service; systemctl show nqd.service -p ExecStartPre,ActiveState,Result; sudo journalctl -u nqd.service -b --no-pager -o short-iso | tail -15; sudo systemctl stop nqd.service; sudo systemctl reset-failed nqd.service 2>/dev/null; true", timeout=120)
         reinstall = self.reinstall(g, "restore after helper substitution")
         post = self.admit(g, "fs-roomy-n04b")
@@ -1203,6 +1349,7 @@ users:
         nqd_refused = re.search(r"sha256sum[^}]*status=1\b", text(start.stdout)) is not None and "\nactive\n" not in text(start.stdout)
         self.record("PASS" if pre["activated"] and exec_refused and nqd_refused and reinstall["dpkg_exit"] == 0 and post["activated"] and effective(cls2) == "explicitly_absent" and "\nactive\n" in text(after.stdout) else "FAIL",
                     admission_before_substitution=pre, execute_after_substitution=cls,
+                    why_execution_refused=why,
                     nqd_start_with_substituted_helper=text(start.stdout + start.stderr), reinstall=reinstall,
                     admission_after_reinstall=post, execute_after_reinstall=effective(cls2),
                     nqd_after_reinstall=text(after.stdout))
@@ -1407,10 +1554,17 @@ users:
         export = self.ssh(g, f"{NQ} diagnostics export {aid}") if aid else None
         if export is not None and export.returncode == 0:
             self.exports[f"b:{aid}"] = export.stdout
+        # The store continuity rule (OPERATIONS.md) starts with a verified backup
+        # taken under the build that owns the store.
+        backup = self.ssh(g, f"{NQ} backup /var/lib/nq/backups/nq-m3-pre-upgrade.db; echo backup-exit=$?; sudo sha256sum /var/lib/nq/backups/nq-m3-pre-upgrade.db")
+        digest = re.search(r"^([0-9a-f]{64})  /var/lib/nq/backups/nq-m3-pre-upgrade.db$", text(backup.stdout), re.M)
+        self.m3_backup = {"path": "/var/lib/nq/backups/nq-m3-pre-upgrade.db", "exit_ok": b"backup-exit=0" in backup.stdout,
+                          "sha256": digest.group(1) if digest else None, "output": text(backup.stdout + backup.stderr)[-1500:]}
         ok = init.returncode == 0 and check.returncode == 0 and isinstance(admit_json, dict) and admit_json.get("outcome") == "activated" and effective(cls) in ("present", "explicitly_absent")
         self.record("PASS" if ok else "FAIL", config=ref, init=init_json or text(init.stdout + init.stderr)[-800:],
                     config_check_exit=check.returncode, admission=admit_json or text(admit.stdout + admit.stderr)[-1500:],
-                    artifact=cls, export_sha256=hashlib.sha256(export.stdout).hexdigest() if export is not None else None)
+                    artifact=cls, export_sha256=hashlib.sha256(export.stdout).hexdigest() if export is not None else None,
+                    pre_upgrade_backup_under_m3=self.m3_backup)
 
     def case_b03(self, g: Guest) -> None:
         start = self.ssh(g, "sudo systemctl start nqd.service; echo start-exit=$?; sleep 2; systemctl is-active nqd.service; systemctl is-enabled nqd.service", timeout=120)
@@ -1424,74 +1578,205 @@ users:
                     note="prerm upgrade must stop nqd and leave it inactive; postinst must not start or enable it")
 
     def case_b04(self, g: Guest) -> None:
+        """One `admin upgrade` from schema 5 to 13 with v5 and v12 backups; doctor reports
+        the true store state; the migrated store's usability is recorded exactly; then
+        the documented continuity rule (backup, export attempt, fresh store, re-admit,
+        execute) is exercised as the supported path."""
         steps: dict[str, Any] = {}
         def cmd(label, command, timeout=300):
             r = self.ssh(g, command, timeout=timeout)
-            steps[label] = {"exit": r.returncode, "output": text(r.stdout + r.stderr)[-3000:]}
+            steps[label] = {"exit": r.returncode, "stdout": text(r.stdout)[-3000:], "stderr": text(r.stderr)[-2000:]}
             return r
+        old_key = next((k for k in self.exports if k.startswith("b:")), None)
+        old_aid = old_key[2:] if old_key else None
+        def export_old(label):
+            if old_aid is None:
+                steps[label] = {"note": "no M3 artifact export retained"}
+                return None
+            e = self.ssh(g, f"{NQ} diagnostics export {old_aid}")
+            identical = e.stdout == self.exports[old_key]
+            steps[label] = {"exit": e.returncode, "identical_to_m3_export": identical,
+                            "message": None if identical else text(e.stdout + e.stderr).strip()[-1500:]}
+            return steps[label]
+
         cmd("config_check_old_config_new_binary", f"{NQ} config check")
         cmd("doctor_before_upgrade", f"{NQ_RUN} --json doctor")
-        cmd("watcher_test_before_upgrade", f"{NQ_RUN} watcher test host-local")
-        cls0, _, exe0 = self.execute(g, "host-local-2", "old-store-new-binary")
-        steps["execute_fresh_instance_before_upgrade"] = {"exit": exe0.returncode, "effective": effective(cls0), "artifact": cls0}
-        old_key = next((k for k in self.exports if k.startswith("b:")), None)
-        def export_old(label):
-            if old_key:
-                aid = old_key[2:]
-                e = self.ssh(g, f"{NQ} diagnostics export {aid}")
-                steps[label] = {"exit": e.returncode, "identical_to_m3_export": e.stdout == self.exports[old_key],
-                                "output_if_not_identical": None if e.stdout == self.exports[old_key] else text(e.stdout + e.stderr)[-1500:]}
         export_old("export_old_artifact_before_upgrade")
-        cmd("admin_upgrade_1", f"{NQ} --json admin upgrade --backup-directory /var/lib/nq/backups; echo upgrade-exit=$?; sudo ls -la /var/lib/nq/backups")
-        d1 = cmd("doctor_after_upgrade_1", f"{NQ_RUN} --json doctor")
-        if d1.returncode != 0:
-            cmd("admin_upgrade_2", f"{NQ} --json admin upgrade --backup-directory /var/lib/nq/backups; echo upgrade-exit=$?; sudo ls -la /var/lib/nq/backups")
-            cmd("doctor_after_upgrade_2", f"{NQ_RUN} --json doctor")
-        export_old("export_old_artifact_after_upgrade")
-        test = cmd("watcher_test_host_local_after_upgrade", f"{NQ_RUN} watcher test host-local")
-        readmitted = None
-        if test.returncode != 0:
-            rotate = cmd("watcher_rotate_host_local", f"{NQ_RUN} watcher rotate host-local")
-            readmitted = rotate.returncode == 0
+
+        up = cmd("admin_upgrade", f"{NQ} --json admin upgrade --backup-directory /var/lib/nq/backups; echo upgrade-exit=$?")
+        upgrade = next((d for d in (parse_json(l.encode()) for l in text(up.stdout).splitlines()) if isinstance(d, dict)), None) or {}
+        cmd("backups_listing", "sudo ls -la /var/lib/nq/backups")
+        backups: dict[str, dict[str, Any]] = {}
+        for key in ("v5", "v12"):
+            path = upgrade.get(f"{key}_backup")
+            digest = str(upgrade.get(f"{key}_backup_digest") or "").removeprefix("sha256:")
+            entry: dict[str, Any] = {"path": path, "reported_digest": digest or None, "verified": False}
+            if path:
+                r = self.ssh(g, f"sudo sha256sum {shlex.quote(str(path))}")
+                entry["computed_digest"] = text(r.stdout).split()[0] if r.returncode == 0 and r.stdout else None
+                entry["verified"] = bool(digest) and entry["computed_digest"] == digest
+            backups[key] = entry
+        self.upgrade_backups = backups
+        upgrade_ok = (
+            b"upgrade-exit=0" in up.stdout and upgrade.get("result") == "migrated"
+            and upgrade.get("from_schema_version") == 5 and upgrade.get("schema_version") == 13
+            and backups["v5"]["verified"] and backups["v12"]["verified"]
+        )
+        cmd("admin_upgrade_second_invocation", f"{NQ} --json admin upgrade --backup-directory /var/lib/nq/backups; echo upgrade-exit=$?")
+
+        doctor = cmd("doctor_after_upgrade", f"{NQ_RUN} --json doctor")
+        doctor_doc = next((d for d in (parse_json(l.encode()) for l in text(doctor.stdout).splitlines()) if isinstance(d, dict)), None)
+        doctor_claims_healthy = doctor.returncode == 0 and isinstance(doctor_doc, dict) and doctor_doc.get("healthy") is True
+
+        historical = export_old("export_old_artifact_after_upgrade")
+        cmd("watcher_test_host_local_after_upgrade", f"{NQ_RUN} watcher test host-local")
         successor = self.acquire(g, "host-local", "after-upgrade-001", "after-upgrade")
         steps["acquire_next_local_host_local_after_upgrade"] = successor
         admission = self.admit(g, "host-local-2")
         steps["admit_fresh_instance_after_upgrade"] = admission
         cls1, _, exe1 = self.execute(g, "host-local-2", "after-upgrade")
         steps["execute_fresh_instance_after_upgrade"] = {"exit": exe1.returncode, "effective": effective(cls1), "artifact": cls1}
-        nqd = cmd("nqd_start_after_upgrade", "sudo systemctl start nqd.service; echo start-exit=$?; sleep 3; systemctl is-active nqd.service; sudo journalctl -u nqd.service -b --no-pager -o short-iso | tail -8; sudo systemctl stop nqd.service; sudo systemctl reset-failed nqd.service 2>/dev/null; true", timeout=120)
-        final = effective(cls1)
-        ok = final in ("present", "explicitly_absent") and "\nactive\n" in text(nqd.stdout)
-        self.record("PASS" if ok else "FAIL", steps=steps, re_admission_needed=readmitted is not None,
-                    re_admission_succeeded=readmitted, successor_on_original_watcher=successor.get("effective"),
-                    final_new_execution=final,
-                    note="observed behaviour recorded step by step; refusals of the pre-upgrade store are expected fail-closed behaviour; a reported upgrade that leaves the store unusable is not")
+        nqd = cmd("nqd_start_on_migrated_store", "sudo systemctl start nqd.service; echo start-exit=$?; sleep 3; systemctl is-active nqd.service; sudo journalctl -u nqd.service -b --no-pager -o short-iso | tail -8; sudo systemctl stop nqd.service; sudo systemctl reset-failed nqd.service 2>/dev/null; true", timeout=120)
+        migrated_usable = admission["activated"] and effective(cls1) in ("present", "explicitly_absent") and "\nactive\n" in text(nqd.stdout)
+        doctor_truthful = doctor_claims_healthy == migrated_usable
+
+        # Documented continuity rule: backup, export what must be kept, fresh
+        # store under the new build, re-admit every watcher.
+        cont: dict[str, Any] = {}
+        if self.m3_backup and self.m3_backup.get("sha256"):
+            r = self.ssh(g, f"sudo sha256sum {self.m3_backup['path']}")
+            cont["pre_upgrade_backup_under_m3"] = {**self.m3_backup, "still_matches": text(r.stdout).split()[0:1] == [self.m3_backup["sha256"]]}
+        else:
+            cont["pre_upgrade_backup_under_m3"] = self.m3_backup
+        b = self.ssh(g, f"{NQ} backup /var/lib/nq/backups/nq-migrated-v13.db; echo backup-exit=$?; sudo sha256sum /var/lib/nq/backups/nq-migrated-v13.db")
+        cont["backup_of_migrated_store"] = {"exit_ok": b"backup-exit=0" in b.stdout, "output": text(b.stdout + b.stderr)[-1500:]}
+        cont["export_retained_m3_artifact"] = export_old("continuity_export_retained_m3_artifact")
+        mv = self.ssh(g, "sudo install -d -o nq -g nq -m 0700 /var/lib/nq/continuity-quarantine && sudo sh -c 'for p in /var/lib/nq/nq.db /var/lib/nq/nq.db-wal /var/lib/nq/nq.db-shm; do if test -e \"$p\"; then mv -- \"$p\" /var/lib/nq/continuity-quarantine/; fi; done' && sudo ls -la /var/lib/nq /var/lib/nq/continuity-quarantine")
+        cont["move_old_store_aside"] = {"exit": mv.returncode, "output": text(mv.stdout + mv.stderr)[-1500:]}
+        init, init_json = self.nq_json(g, "--json init")
+        cont["init_fresh_store"] = {"exit": init.returncode, "output": init_json or text(init.stdout + init.stderr)[-1000:]}
+        d = self.ssh(g, f"{NQ_RUN} --json doctor")
+        cont["doctor_fresh_store"] = {"exit": d.returncode, "output": text(d.stdout + d.stderr)[-2000:]}
+        readmit = self.admit(g, "host-local")
+        cont["readmit_host_local_as_documented"] = readmit
+        documented_ok = False
+        repair_ok = None
+        cls2 = None
+        n2 = None
+        if readmit["activated"]:
+            cls2, _, exe2 = self.execute(g, "host-local", "fresh-store-under-candidate")
+            cont["execute_host_local"] = {"exit": exe2.returncode, "effective": effective(cls2), "artifact": cls2}
+            n2 = self.ssh(g, "sudo systemctl start nqd.service; echo start-exit=$?; sleep 3; systemctl is-active nqd.service; sudo journalctl -u nqd.service -b --no-pager -o short-iso | tail -6; sudo systemctl stop nqd.service; sudo systemctl reset-failed nqd.service 2>/dev/null; true", timeout=120)
+            cont["nqd_start_on_fresh_store"] = text(n2.stdout + n2.stderr)[-2000:]
+            documented_ok = effective(cls2) == "explicitly_absent" and "\nactive\n" in text(n2.stdout)
+        else:
+            # Beyond the documented text: archive the old build's admission locks
+            # with the old store, then re-admit. Recorded as a repair, not relabelled.
+            arch = self.ssh(g, "sudo sh -c 'mkdir -p /var/lib/nq/continuity-quarantine/admissions && mv /var/lib/nq/admissions/* /var/lib/nq/continuity-quarantine/admissions/ 2>/dev/null; chown -R nq:nq /var/lib/nq/continuity-quarantine'; sudo ls -la /var/lib/nq/admissions /var/lib/nq/continuity-quarantine/admissions")
+            cont["repair_archive_old_admission_locks"] = {"exit": arch.returncode, "output": text(arch.stdout + arch.stderr)[-1500:],
+                                                          "note": "not in OPERATIONS.md's continuity rule; applied only after the documented re-admission was refused"}
+            readmit2 = self.admit(g, "host-local")
+            cont["readmit_host_local_after_repair"] = readmit2
+            cls2, _, exe2 = self.execute(g, "host-local", "fresh-store-under-candidate")
+            cont["execute_host_local_after_repair"] = {"exit": exe2.returncode, "effective": effective(cls2), "artifact": cls2}
+            n2 = self.ssh(g, "sudo systemctl start nqd.service; echo start-exit=$?; sleep 3; systemctl is-active nqd.service; sudo journalctl -u nqd.service -b --no-pager -o short-iso | tail -6; sudo systemctl stop nqd.service; sudo systemctl reset-failed nqd.service 2>/dev/null; true", timeout=120)
+            cont["nqd_start_on_fresh_store_after_repair"] = text(n2.stdout + n2.stderr)[-2000:]
+            repair_ok = readmit2["activated"] and effective(cls2) == "explicitly_absent" and "\nactive\n" in text(n2.stdout)
+        pre_backup_ok = bool(cont["pre_upgrade_backup_under_m3"] and cont["pre_upgrade_backup_under_m3"].get("exit_ok") and cont["pre_upgrade_backup_under_m3"].get("still_matches"))
+        continuity_ok = pre_backup_ok and mv.returncode == 0 and init.returncode == 0 and documented_ok
+        cont["documented_path_ok_as_written"] = documented_ok
+        cont["path_ok_after_archiving_old_locks"] = repair_ok
+        ok = upgrade_ok and doctor_truthful and continuity_ok
+        self.record("PASS" if ok else "FAIL", upgrade=upgrade, upgrade_ok=upgrade_ok, backups=backups,
+                    doctor_after_upgrade_exit=doctor.returncode, doctor_claims_healthy=doctor_claims_healthy,
+                    doctor_after_upgrade=doctor_doc, doctor_after_upgrade_stderr=text(doctor.stderr).strip()[-1500:],
+                    doctor_truthful=doctor_truthful, migrated_store_usable=migrated_usable,
+                    historical_artifact_reopen=historical, steps=steps,
+                    continuity=cont, continuity_ok=continuity_ok,
+                    supported_path="fresh store under the candidate after backup and export attempt (OPERATIONS.md store continuity rule)",
+                    note="gate: one upgrade reports 5->13 with verified v5 and v12 backups; doctor's health claim matches the observed usability of the migrated store; the continuity rule as written in OPERATIONS.md (backup under the old build, export attempt, fresh store, re-admit, execute) yields explicitly_absent. Historical-artifact reopening (constellation-nq#12 part B) is recorded verbatim and is expected to refuse; a backup of the migrated store under the candidate is informational")
+
     def case_b05(self, g: Guest) -> None:
+        """Roll back to M3: the old binary must refuse the candidate's store explicitly, and
+        `nq restore` of the v5 backup per OPERATIONS.md must give M3 a readable store."""
+        steps: dict[str, Any] = {}
         dpkg = self.ssh(g, f"sudo dpkg -i /home/nqacceptor/predecessor/{PACKAGE}; echo dpkg-exit=$?", timeout=300)
         info = self.ssh(g, f"/usr/bin/nq --build-info; {MANIFEST_CHECK} && echo manifest-ok")
-        steps: dict[str, Any] = {"dpkg": text(dpkg.stdout + dpkg.stderr)[-3000:], "binary": text(info.stdout + info.stderr)}
-        check = self.ssh(g, f"{NQ} config check")
-        steps["config_check"] = {"exit": check.returncode, "output": text(check.stdout + check.stderr)[-1500:]}
+        steps["dpkg"] = text(dpkg.stdout + dpkg.stderr)[-3000:]
+        steps["binary"] = text(info.stdout + info.stderr)
         old_key = next((k for k in self.exports if k.startswith("b:")), None)
-        if old_key:
-            aid = old_key[2:]
-            e = self.ssh(g, f"{NQ} diagnostics export {aid}")
-            steps["export_old_artifact"] = {"exit": e.returncode, "identical": e.stdout == self.exports[old_key], "output": text(e.stdout + e.stderr)[-1500:] if e.stdout != self.exports[old_key] else "(identical bytes)"}
+        old_aid = old_key[2:] if old_key else None
+
+        # 1. M3 against the store the candidate left behind (fresh schema-13 store).
+        against: dict[str, Any] = {}
+        check = self.ssh(g, f"{NQ} config check")
+        against["config_check"] = {"exit": check.returncode, "output": text(check.stdout + check.stderr)[-1500:]}
         test = self.ssh(g, f"{NQ_RUN} watcher test host-local")
-        steps["watcher_test"] = {"exit": test.returncode, "output": text(test.stdout + test.stderr)[-1500:]}
+        against["watcher_test"] = {"exit": test.returncode, "output": text(test.stdout + test.stderr)[-1500:]}
         admission = self.admit(g, "host-local-3")
-        steps["admit_fresh_instance"] = admission
-        cls, _, exe = self.execute(g, "host-local-3", "rollback-old-binary")
-        steps["execute_fresh_instance"] = {"exit": exe.returncode, "effective": effective(cls), "artifact": cls}
+        against["admit_fresh_instance"] = admission
+        cls, _, exe = self.execute(g, "host-local-3", "rollback-old-binary-candidate-store")
+        against["execute_fresh_instance"] = {"exit": exe.returncode, "effective": effective(cls), "artifact": cls}
         doctor = self.ssh(g, f"{NQ_RUN} --json doctor")
-        steps["doctor"] = {"exit": doctor.returncode, "output": text(doctor.stdout + doctor.stderr)[-3000:]}
+        against["doctor"] = {"exit": doctor.returncode, "output": text(doctor.stdout + doctor.stderr)[-3000:]}
         nqd = self.ssh(g, "sudo systemctl start nqd.service; echo start-exit=$?; sleep 3; systemctl is-active nqd.service; systemctl show nqd.service -p ActiveState,Result; sudo journalctl -u nqd.service -b --no-pager -o short-iso | tail -12; sudo systemctl stop nqd.service; sudo systemctl reset-failed nqd.service 2>/dev/null; true", timeout=120)
-        steps["nqd"] = text(nqd.stdout + nqd.stderr)
+        against["nqd"] = text(nqd.stdout + nqd.stderr)
         silently_accepted = admission["activated"] or effective(cls) in ("present", "explicitly_absent") or "\nactive\n" in text(nqd.stdout)
         explicit_refusal = exe.returncode != 0 and not admission["activated"]
-        self.record("FAIL" if silently_accepted else ("PASS" if explicit_refusal and b"dpkg-exit=0" in dpkg.stdout else "FAIL"),
-                    steps=steps, silently_accepted_unknown_schema=silently_accepted,
-                    note="an explicit refusal of the newer store by the old binary is the expected result; silent acceptance is a defect")
+        steps["old_binary_against_candidate_store"] = against
+        # The M3 unit has no RuntimeDirectoryPreserve, so the failed start above removed
+        # /run/nq; recreate it as the M3 OPERATIONS.md does (tmpfiles) before the wrapper.
+        tmpfiles = self.ssh(g, "sudo systemd-tmpfiles --create /usr/lib/tmpfiles.d/nq.conf; echo tmpfiles-exit=$?; ls -ld /run/nq /run/nq/helpers 2>&1")
+        steps["runtime_dir_recreated_for_m3"] = {"output": text(tmpfiles.stdout + tmpfiles.stderr), "note": "M3 predecessor behaviour (acceptance-001 N-14); not a candidate property"}
+
+        # 2. Restore the v5 backup per OPERATIONS.md under the reinstalled M3 package.
+        restore: dict[str, Any] = {}
+        v5 = self.upgrade_backups.get("v5") or {}
+        restore["v5_backup"] = v5
+        restored_ok = False
+        export_identical = None
+        fresh_effective = None
+        if v5.get("path"):
+            q = self.ssh(g, "sudo install -d -o nq -g nq -m 0700 /var/lib/nq/restore-quarantine && sudo sh -c 'for p in /var/lib/nq/nq.db /var/lib/nq/nq.db-wal /var/lib/nq/nq.db-shm; do if test -e \"$p\"; then mv -- \"$p\" /var/lib/nq/restore-quarantine/; fi; done' && sudo ls -la /var/lib/nq /var/lib/nq/restore-quarantine")
+            restore["quarantine"] = {"exit": q.returncode, "output": text(q.stdout + q.stderr)[-1500:]}
+            r = self.ssh(g, f"{NQ} restore {shlex.quote(str(v5['path']))} /var/lib/nq/nq.db; echo restore-exit=$?; sudo ls -la /var/lib/nq")
+            restore["restore"] = {"exit_ok": b"restore-exit=0" in r.stdout, "output": text(r.stdout + r.stderr)[-2500:]}
+            restored_ok = b"restore-exit=0" in r.stdout
+            d = self.ssh(g, f"{NQ_RUN} --json doctor")
+            restore["doctor"] = {"exit": d.returncode, "output": text(d.stdout + d.stderr)[-3000:]}
+            if old_aid:
+                e = self.ssh(g, f"{NQ} diagnostics export {old_aid}")
+                export_identical = e.returncode == 0 and e.stdout == self.exports[old_key]
+                restore["export_m3_artifact"] = {"exit": e.returncode, "identical_to_m3_export": export_identical,
+                                                 "message": None if export_identical else text(e.stdout + e.stderr).strip()[-1500:]}
+            ev = self.ssh(g, f"{NQ} evaluations export --limit 1000")
+            ev_doc = parse_json(ev.stdout)
+            restore["evaluations_export"] = {"exit": ev.returncode, "record_count": len(ev_doc.get("records", [])) if isinstance(ev_doc, dict) else None,
+                                             "stderr": text(ev.stderr).strip()[-800:]}
+            fi = self.ssh(g, f"{NQ} findings export")
+            fi_doc = parse_json(fi.stdout)
+            restore["findings_export"] = {"exit": fi.returncode, "record_count": len(fi_doc) if isinstance(fi_doc, list) else None,
+                                          "stderr": text(fi.stderr).strip()[-800:]}
+            t = self.ssh(g, f"{NQ_RUN} watcher test host-local")
+            restore["watcher_test_host_local"] = {"exit": t.returncode, "output": text(t.stdout + t.stderr)[-1500:],
+                                                  "note": "host-local's lock file was rewritten by the candidate's re-admission in B-04; drift here is a consequence of the documented path, recorded not gated"}
+            adm = self.admit(g, "host-local-3")
+            restore["admit_fresh_instance"] = adm
+            cls3, _, exe3 = self.execute(g, "host-local-3", "m3-after-restore")
+            fresh_effective = effective(cls3)
+            restore["execute_fresh_instance"] = {"exit": exe3.returncode, "effective": fresh_effective, "artifact": cls3}
+            n = self.ssh(g, "sudo systemctl start nqd.service; echo start-exit=$?; sleep 3; systemctl is-active nqd.service; systemctl show nqd.service -p ActiveState,Result; sudo journalctl -u nqd.service -b --no-pager -o short-iso | tail -10; sudo systemctl stop nqd.service; sudo systemctl reset-failed nqd.service 2>/dev/null; true", timeout=120)
+            restore["nqd_under_m3_after_restore"] = text(n.stdout + n.stderr)[-2500:]
+        else:
+            restore["note"] = "no v5 backup recorded by B-04; restore not attempted"
+        steps["restore_v5_backup_under_m3"] = restore
+        m3_reads_store = restored_ok and export_identical is True and fresh_effective in ("present", "explicitly_absent")
+        ok = b"dpkg-exit=0" in dpkg.stdout and not silently_accepted and explicit_refusal and m3_reads_store
+        self.record("PASS" if ok else "FAIL", steps=steps, silently_accepted_unknown_schema=silently_accepted,
+                    explicit_refusal_of_candidate_store=explicit_refusal, restore_succeeded=restored_ok,
+                    m3_export_identical_after_restore=export_identical, m3_fresh_execution_after_restore=fresh_effective,
+                    note="gate: dpkg rollback succeeds; the old binary refuses the candidate's store explicitly (silent acceptance is a defect); nq restore of the v5 backup succeeds, the M3 artifact exports byte-identical to its B-02 export, and a fresh admitted instance executes under M3")
+
     def collect_guest_logs(self, guest: Guest) -> None:
         try:
             self.ssh(guest, "sudo journalctl -b --no-pager -o short-iso > /home/nqacceptor/journal.txt 2>&1; sudo dmesg > /home/nqacceptor/dmesg.txt 2>&1; sudo journalctl -u nqd.service --no-pager -o short-iso > /home/nqacceptor/nqd-journal.txt 2>&1; sudo cp -r /var/lib/nq/admissions /home/nqacceptor/admissions 2>/dev/null; sudo chown -R nqacceptor /home/nqacceptor/admissions 2>/dev/null; sudo ls -laR /var/lib/nq /etc/nq /run/nq > /home/nqacceptor/nq-layout.txt 2>&1; true", timeout=120)
@@ -1581,6 +1866,7 @@ users:
             # cannot create history on the spare instances the negatives admit lazily.
             self.run_case("A-30", self.case_a30, a)
             self.run_case("A-31", self.case_a31, a)
+            self.run_case("A-32", self.case_a32, a)
             self.run_case("N-14", self.case_n14, a)
             for case_id, fn in (("N-01", self.case_n01), ("N-02", self.case_n02), ("N-03", self.case_n03),
                                 ("N-04", self.case_n04), ("N-05", self.case_n05), ("N-06", self.case_n06),
@@ -1640,6 +1926,12 @@ users:
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--campaign-dir", type=pathlib.Path, default=DEFAULT_CAMPAIGN)
+    p.add_argument("--candidate-dir", default="candidate-001",
+                   help="candidate directory name under --campaign-dir, or a path (default: candidate-001)")
+    p.add_argument("--output-name", default="acceptance-001",
+                   help="result directory name under --campaign-dir (default: acceptance-001)")
+    p.add_argument("--build-exit-file", type=pathlib.Path, default=None,
+                   help="builder exit file to require 0 (default: build-NNN.exit for candidate-NNN, else build.exit)")
     p.add_argument("--state-dir", type=pathlib.Path, default=DEFAULT_STATE)
     p.add_argument("--image", type=pathlib.Path, default=DEFAULT_IMAGE_DIR / IMAGE_NAME)
     p.add_argument("--predecessor-dir", type=pathlib.Path, default=DEFAULT_PREDECESSOR)
