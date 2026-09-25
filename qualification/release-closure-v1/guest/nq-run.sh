@@ -1,0 +1,40 @@
+#!/bin/sh
+# Run one nq command as nq:nq with the four-capability ceiling documented in
+# /usr/share/doc/nq-ng/OPERATIONS.md ("nq_helper_command"). systemd-run passes
+# argv through without shell evaluation. Used for watcher test/admit/rotate,
+# diagnostics execute, collect and doctor; pure exports use `sudo -u nq nq`.
+exec sudo systemd-run --quiet --wait --pipe --collect \
+  --property=User=nq \
+  --property=Group=nq \
+  --property=UMask=0077 \
+  --property=NoNewPrivileges=yes \
+  --property=PrivateTmp=yes \
+  --property='TemporaryFileSystem=/tmp:rw,nosuid,nodev,noexec,mode=1777,size=64M /var/tmp:rw,nosuid,nodev,noexec,mode=1777,size=64M' \
+  --property=ProtectSystem=strict \
+  --property=ProtectHome=yes \
+  --property=ProtectClock=yes \
+  --property=ProtectControlGroups=yes \
+  --property=ProtectKernelLogs=yes \
+  --property=ProtectKernelModules=yes \
+  --property=ProtectKernelTunables=yes \
+  --property=ProtectHostname=yes \
+  --property=RestrictNamespaces=yes \
+  --property=RestrictRealtime=yes \
+  --property=RestrictSUIDSGID=yes \
+  --property=LockPersonality=yes \
+  --property=RemoveIPC=yes \
+  --property=KeyringMode=private \
+  --property=SystemCallArchitectures=native \
+  --property='RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6' \
+  --property=ReadOnlyPaths=/etc/nq \
+  --property='ReadWritePaths=/var/lib/nq /run/nq' \
+  --property='CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_KILL' \
+  --property='AmbientCapabilities=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_KILL' \
+  --property=LimitNOFILE=4096 \
+  --property=LimitFSIZE=1G \
+  --property=LimitCORE=0 \
+  --property=TasksMax=256 \
+  --property=MemoryMax=2G \
+  --property=MemorySwapMax=0 \
+  --property=CPUQuota=200% \
+  -- /usr/bin/nq "$@"
