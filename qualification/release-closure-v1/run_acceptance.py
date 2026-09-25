@@ -592,6 +592,15 @@ class Harness:
         if checked.returncode != 0:
             raise Refusal(f"candidate SHA256SUMS do not verify on the host: {checked.stdout}")
         receipt = json.loads((self.candidate / RECEIPT).read_text())
+        # The commit every binary must report (A-08) is the one the builder
+        # recorded in the container environment, not a value written here.
+        commit = ((receipt.get("build") or {}).get("environment") or {}).get("NQ_SOURCE_COMMIT")
+        if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+            raise Refusal(f"receipt build.environment.NQ_SOURCE_COMMIT is absent or malformed: {commit!r}")
+        head = (receipt.get("source") or {}).get("head")
+        if head != commit:
+            raise Refusal(f"receipt source.head {head!r} differs from NQ_SOURCE_COMMIT {commit!r}")
+        self.source_commit = commit
         self.candidate_identity = {
             "directory": str(self.candidate),
             "build_exit_file": str(exit_file),
@@ -599,6 +608,8 @@ class Harness:
             "tarball_sha256": sha256_file(self.candidate / TARBALL),
             "receipt_sha256": sha256_file(self.candidate / RECEIPT),
             "receipt_source": receipt.get("source"),
+            "source_commit": commit,
+            "source_commit_origin": f"{RECEIPT} build.environment.NQ_SOURCE_COMMIT",
         }
         # Predecessor: verified against its own SHA256SUMS.
         pre = self.args.predecessor_dir
@@ -940,6 +951,9 @@ users:
                     exit=r.returncode, output=text(r.stdout + r.stderr))
 
     def case_a08(self, g: Guest) -> None:
+        """Every compiled binary reports nq.build_info.v2 naming the receipt's source
+        commit; `nq --version` and `nqd --version` print `0.1.0 (<commit>)`."""
+        commit = self.source_commit
         results = {}
         ok = True
         for path in COMPILED:
@@ -947,14 +961,27 @@ users:
             info = parse_json(r.stdout)
             results[path] = info if info is not None else text(r.stdout + r.stderr)
             good = (
-                isinstance(info, dict) and info.get("version") == "0.1.0"
+                isinstance(info, dict) and info.get("schema") == "nq.build_info.v2"
+                and info.get("version") == "0.1.0"
                 and info.get("debug_assertions") is False
                 and info.get("helper_isolation_policy") == "production_separate_identity_required"
                 and info.get("component") == pathlib.Path(path).name
+                and info.get("source_commit") == commit
             )
             ok = ok and good
+        versions = {}
+        for path in ("/usr/bin/nq", "/usr/bin/nqd"):
+            r = self.ssh(g, f"{path} --version")
+            out = text(r.stdout)
+            name = pathlib.Path(path).name
+            match = re.fullmatch(rf"({name}|nq) 0\.1\.0 \({re.escape(commit)}\)\n", out) is not None
+            versions[path] = {"exit": r.returncode, "stdout": out, "stderr": text(r.stderr)[-500:],
+                              "matches": r.returncode == 0 and match}
+            ok = ok and versions[path]["matches"]
         py = self.ssh(g, f"{EXECUTABLES[6]} --build-info </dev/null")
-        self.record("PASS" if ok else "FAIL", build_info=results,
+        self.record("PASS" if ok else "FAIL", expected_source_commit=commit,
+                    expected_source_commit_origin=self.candidate_identity["source_commit_origin"],
+                    build_info=results, version=versions,
                     python_helper={"exit": py.returncode, "output": text(py.stdout + py.stderr)[-500:],
                                    "note": "script, not a compiled binary; recorded for completeness"})
 
@@ -1578,10 +1605,14 @@ users:
                     note="prerm upgrade must stop nqd and leave it inactive; postinst must not start or enable it")
 
     def case_b04(self, g: Guest) -> None:
-        """One `admin upgrade` from schema 5 to 13 with v5 and v12 backups; doctor reports
-        the true store state; the migrated store's usability is recorded exactly; then
-        the documented continuity rule (backup, export attempt, fresh store, re-admit,
-        execute) is exercised as the supported path."""
+        """Gate: the store continuity procedure written in the candidate's OPERATIONS.md,
+        followed exactly. Step 1 ran under M3 in B-02 (backup verified, artifact
+        exported); step 2's stop-and-install ran in B-03; this case quarantines the old
+        database and the whole admissions directory, runs `nq init`, re-admits the
+        watcher admitted under M3 and executes it, then starts nqd. No repair is
+        applied when a documented step refuses. The migrated-store behaviour (one
+        `admin upgrade` 5->13, doctor truthfulness, historical reopen) is recorded
+        first as informational sub-results; it is not the gate."""
         steps: dict[str, Any] = {}
         def cmd(label, command, timeout=300):
             r = self.ssh(g, command, timeout=timeout)
@@ -1599,6 +1630,7 @@ users:
                             "message": None if identical else text(e.stdout + e.stderr).strip()[-1500:]}
             return steps[label]
 
+        # ---- informational: the migrated store (constellation-nq#12), not the gate
         cmd("config_check_old_config_new_binary", f"{NQ} config check")
         cmd("doctor_before_upgrade", f"{NQ_RUN} --json doctor")
         export_old("export_old_artifact_before_upgrade")
@@ -1639,62 +1671,87 @@ users:
         nqd = cmd("nqd_start_on_migrated_store", "sudo systemctl start nqd.service; echo start-exit=$?; sleep 3; systemctl is-active nqd.service; sudo journalctl -u nqd.service -b --no-pager -o short-iso | tail -8; sudo systemctl stop nqd.service; sudo systemctl reset-failed nqd.service 2>/dev/null; true", timeout=120)
         migrated_usable = admission["activated"] and effective(cls1) in ("present", "explicitly_absent") and "\nactive\n" in text(nqd.stdout)
         doctor_truthful = doctor_claims_healthy == migrated_usable
+        b = self.ssh(g, f"{NQ} backup /var/lib/nq/backups/nq-migrated-v13.db; echo backup-exit=$?; sudo sha256sum /var/lib/nq/backups/nq-migrated-v13.db")
+        steps["backup_of_migrated_store"] = {"exit_ok": b"backup-exit=0" in b.stdout, "output": text(b.stdout + b.stderr)[-1500:]}
+        informational = {
+            "upgrade": upgrade, "upgrade_ok": upgrade_ok, "backups": backups,
+            "doctor_after_upgrade_exit": doctor.returncode, "doctor_claims_healthy": doctor_claims_healthy,
+            "doctor_after_upgrade": doctor_doc, "doctor_after_upgrade_stderr": text(doctor.stderr).strip()[-1500:],
+            "doctor_truthful": doctor_truthful, "migrated_store_usable": migrated_usable,
+            "historical_artifact_reopen": historical,
+            "note": "recorded, not gated: the migrated store is not a supported path (OPERATIONS.md: store continuity across NQ builds is not qualified)",
+        }
 
-        # Documented continuity rule: backup, export what must be kept, fresh
-        # store under the new build, re-admit every watcher.
-        cont: dict[str, Any] = {}
+        # ---- gate: OPERATIONS.md "moving to a different NQ build", as written
+        doc: dict[str, Any] = {}
+        # Step 1 (under the old build, B-02): nq backup verified; nq diagnostics export of the artifact to keep.
+        step1: dict[str, Any] = {"backup_under_m3": self.m3_backup, "export_under_m3": None}
         if self.m3_backup and self.m3_backup.get("sha256"):
             r = self.ssh(g, f"sudo sha256sum {self.m3_backup['path']}")
-            cont["pre_upgrade_backup_under_m3"] = {**self.m3_backup, "still_matches": text(r.stdout).split()[0:1] == [self.m3_backup["sha256"]]}
-        else:
-            cont["pre_upgrade_backup_under_m3"] = self.m3_backup
-        b = self.ssh(g, f"{NQ} backup /var/lib/nq/backups/nq-migrated-v13.db; echo backup-exit=$?; sudo sha256sum /var/lib/nq/backups/nq-migrated-v13.db")
-        cont["backup_of_migrated_store"] = {"exit_ok": b"backup-exit=0" in b.stdout, "output": text(b.stdout + b.stderr)[-1500:]}
-        cont["export_retained_m3_artifact"] = export_old("continuity_export_retained_m3_artifact")
-        mv = self.ssh(g, "sudo install -d -o nq -g nq -m 0700 /var/lib/nq/continuity-quarantine && sudo sh -c 'for p in /var/lib/nq/nq.db /var/lib/nq/nq.db-wal /var/lib/nq/nq.db-shm; do if test -e \"$p\"; then mv -- \"$p\" /var/lib/nq/continuity-quarantine/; fi; done' && sudo ls -la /var/lib/nq /var/lib/nq/continuity-quarantine")
-        cont["move_old_store_aside"] = {"exit": mv.returncode, "output": text(mv.stdout + mv.stderr)[-1500:]}
+            step1["backup_under_m3"] = {**self.m3_backup, "still_matches": text(r.stdout).split()[0:1] == [self.m3_backup["sha256"]]}
+        if old_aid is not None:
+            step1["export_under_m3"] = {"artifact_id": old_aid, "bytes": len(self.exports[old_key]),
+                                        "sha256": hashlib.sha256(self.exports[old_key]).hexdigest()}
+        step1["ok"] = bool(step1["backup_under_m3"] and step1["backup_under_m3"].get("exit_ok")
+                           and step1["backup_under_m3"].get("still_matches") and old_aid is not None)
+        doc["step1_backup_and_export_under_old_build"] = step1
+
+        # Step 2: nqd stopped and the new build installed (B-03); then the old database
+        # and the whole admissions directory move into one quarantine directory.
+        state = self.ssh(g, f"systemctl is-active nqd.service; /usr/bin/nq --build-info")
+        installed = next((d for d in (parse_json(l.encode()) for l in text(state.stdout).splitlines()) if isinstance(d, dict)), None) or {}
+        step2: dict[str, Any] = {
+            "install_case": {"case": "B-03", "outcome": self.results["B-03"]["outcome"]},
+            "nqd_state_before_quarantine": text(state.stdout).split("\n")[0],
+            "nqd_not_running_before_quarantine": text(state.stdout).split("\n")[0] in ("inactive", "failed"),
+            "installed_source_commit": installed.get("source_commit"),
+            "installed_is_candidate": installed.get("source_commit") == self.source_commit,
+        }
+        mv = self.ssh(g, "sudo install -d -o nq -g nq -m 0700 /var/lib/nq/continuity-quarantine"
+                         " && sudo sh -c 'for p in /var/lib/nq/nq.db /var/lib/nq/nq.db-wal /var/lib/nq/nq.db-shm; do if test -e \"$p\"; then mv -- \"$p\" /var/lib/nq/continuity-quarantine/; fi; done'"
+                         " && sudo mv -- /var/lib/nq/admissions /var/lib/nq/continuity-quarantine/admissions"
+                         " && sudo ls -laR /var/lib/nq/continuity-quarantine && echo quarantine-ok")
+        after = self.ssh(g, "sudo ls -la /var/lib/nq; sudo test -e /var/lib/nq/nq.db && echo db-present || echo db-absent; sudo test -e /var/lib/nq/admissions && echo admissions-present || echo admissions-absent")
+        step2["quarantine"] = {"exit": mv.returncode, "output": text(mv.stdout + mv.stderr)[-3000:]}
+        step2["var_lib_nq_after"] = text(after.stdout + after.stderr)[-2000:]
+        step2["ok"] = (step2["install_case"]["outcome"] == "PASS" and step2["nqd_not_running_before_quarantine"]
+                       and step2["installed_is_candidate"] and mv.returncode == 0 and b"quarantine-ok" in mv.stdout
+                       and b"db-absent" in after.stdout and b"admissions-absent" in after.stdout)
+        doc["step2_quarantine_database_and_admissions"] = step2
+
+        # Step 3: nq init, re-admit every watcher admitted under the old build, start nqd.
+        step3: dict[str, Any] = {}
         init, init_json = self.nq_json(g, "--json init")
-        cont["init_fresh_store"] = {"exit": init.returncode, "output": init_json or text(init.stdout + init.stderr)[-1000:]}
+        step3["init"] = {"exit": init.returncode, "output": init_json or text(init.stdout + init.stderr)[-1000:]}
         d = self.ssh(g, f"{NQ_RUN} --json doctor")
-        cont["doctor_fresh_store"] = {"exit": d.returncode, "output": text(d.stdout + d.stderr)[-2000:]}
-        readmit = self.admit(g, "host-local")
-        cont["readmit_host_local_as_documented"] = readmit
-        documented_ok = False
-        repair_ok = None
-        cls2 = None
-        n2 = None
-        if readmit["activated"]:
+        step3["doctor_fresh_store_informational"] = {"exit": d.returncode, "output": text(d.stdout + d.stderr)[-2000:]}
+        to_readmit = ["host-local"]  # the watcher B-02 admitted under M3
+        step3["watchers_admitted_under_old_build"] = list(to_readmit)
+        step3["note"] = ("host-local is the only watcher admitted under M3 (B-02); host-local-2 was admitted only "
+                         "during the informational migrated-store probe above and its lock left with the quarantined "
+                         "admissions directory, so it is not re-admitted here")
+        readmits = {w: self.admit(g, w) for w in to_readmit}
+        step3["readmit"] = readmits
+        readmit_ok = bool(readmits) and all(v["activated"] for v in readmits.values())
+        execute_ok = False
+        if readmit_ok:
             cls2, _, exe2 = self.execute(g, "host-local", "fresh-store-under-candidate")
-            cont["execute_host_local"] = {"exit": exe2.returncode, "effective": effective(cls2), "artifact": cls2}
-            n2 = self.ssh(g, "sudo systemctl start nqd.service; echo start-exit=$?; sleep 3; systemctl is-active nqd.service; sudo journalctl -u nqd.service -b --no-pager -o short-iso | tail -6; sudo systemctl stop nqd.service; sudo systemctl reset-failed nqd.service 2>/dev/null; true", timeout=120)
-            cont["nqd_start_on_fresh_store"] = text(n2.stdout + n2.stderr)[-2000:]
-            documented_ok = effective(cls2) == "explicitly_absent" and "\nactive\n" in text(n2.stdout)
+            step3["execute_host_local"] = {"exit": exe2.returncode, "effective": effective(cls2), "artifact": cls2}
+            execute_ok = effective(cls2) == "explicitly_absent"
         else:
-            # Beyond the documented text: archive the old build's admission locks
-            # with the old store, then re-admit. Recorded as a repair, not relabelled.
-            arch = self.ssh(g, "sudo sh -c 'mkdir -p /var/lib/nq/continuity-quarantine/admissions && mv /var/lib/nq/admissions/* /var/lib/nq/continuity-quarantine/admissions/ 2>/dev/null; chown -R nq:nq /var/lib/nq/continuity-quarantine'; sudo ls -la /var/lib/nq/admissions /var/lib/nq/continuity-quarantine/admissions")
-            cont["repair_archive_old_admission_locks"] = {"exit": arch.returncode, "output": text(arch.stdout + arch.stderr)[-1500:],
-                                                          "note": "not in OPERATIONS.md's continuity rule; applied only after the documented re-admission was refused"}
-            readmit2 = self.admit(g, "host-local")
-            cont["readmit_host_local_after_repair"] = readmit2
-            cls2, _, exe2 = self.execute(g, "host-local", "fresh-store-under-candidate")
-            cont["execute_host_local_after_repair"] = {"exit": exe2.returncode, "effective": effective(cls2), "artifact": cls2}
-            n2 = self.ssh(g, "sudo systemctl start nqd.service; echo start-exit=$?; sleep 3; systemctl is-active nqd.service; sudo journalctl -u nqd.service -b --no-pager -o short-iso | tail -6; sudo systemctl stop nqd.service; sudo systemctl reset-failed nqd.service 2>/dev/null; true", timeout=120)
-            cont["nqd_start_on_fresh_store_after_repair"] = text(n2.stdout + n2.stderr)[-2000:]
-            repair_ok = readmit2["activated"] and effective(cls2) == "explicitly_absent" and "\nactive\n" in text(n2.stdout)
-        pre_backup_ok = bool(cont["pre_upgrade_backup_under_m3"] and cont["pre_upgrade_backup_under_m3"].get("exit_ok") and cont["pre_upgrade_backup_under_m3"].get("still_matches"))
-        continuity_ok = pre_backup_ok and mv.returncode == 0 and init.returncode == 0 and documented_ok
-        cont["documented_path_ok_as_written"] = documented_ok
-        cont["path_ok_after_archiving_old_locks"] = repair_ok
-        ok = upgrade_ok and doctor_truthful and continuity_ok
-        self.record("PASS" if ok else "FAIL", upgrade=upgrade, upgrade_ok=upgrade_ok, backups=backups,
-                    doctor_after_upgrade_exit=doctor.returncode, doctor_claims_healthy=doctor_claims_healthy,
-                    doctor_after_upgrade=doctor_doc, doctor_after_upgrade_stderr=text(doctor.stderr).strip()[-1500:],
-                    doctor_truthful=doctor_truthful, migrated_store_usable=migrated_usable,
-                    historical_artifact_reopen=historical, steps=steps,
-                    continuity=cont, continuity_ok=continuity_ok,
-                    supported_path="fresh store under the candidate after backup and export attempt (OPERATIONS.md store continuity rule)",
-                    note="gate: one upgrade reports 5->13 with verified v5 and v12 backups; doctor's health claim matches the observed usability of the migrated store; the continuity rule as written in OPERATIONS.md (backup under the old build, export attempt, fresh store, re-admit, execute) yields explicitly_absent. Historical-artifact reopening (constellation-nq#12 part B) is recorded verbatim and is expected to refuse; a backup of the migrated store under the candidate is informational")
+            step3["execute_host_local"] = {"note": "not attempted: the documented re-admission was refused"}
+        n2 = self.ssh(g, "sudo systemctl start nqd.service; echo start-exit=$?; sleep 3; systemctl is-active nqd.service; sudo journalctl -u nqd.service -b --no-pager -o short-iso | tail -6; sudo systemctl stop nqd.service; sudo systemctl reset-failed nqd.service 2>/dev/null; true", timeout=120)
+        step3["nqd_start"] = text(n2.stdout + n2.stderr)[-2000:]
+        nqd_ok = "\nactive\n" in text(n2.stdout)
+        step3["ok"] = init.returncode == 0 and readmit_ok and execute_ok and nqd_ok
+        doc["step3_init_readmit_execute_start_nqd"] = step3
+
+        ok = step1["ok"] and step2["ok"] and step3["ok"]
+        doc["ok_as_written"] = ok
+        self.record("PASS" if ok else "FAIL", documented_path=doc, documented_path_ok_as_written=ok,
+                    informational_migrated_store=informational, steps=steps,
+                    supported_path="OPERATIONS.md 'moving to a different NQ build': backup and export under the old build; stop nqd, install, quarantine the old database and the whole /var/lib/nq/admissions directory; nq init, re-admit, start nqd",
+                    note="gate: the continuity procedure exactly as written in the candidate's OPERATIONS.md works: the M3 backup verified in B-02 still matches and the M3 artifact export was retained; B-03 installed the candidate with nqd left inactive; the database and the whole admissions directory move into one quarantine; nq init succeeds; the watcher admitted under M3 re-admits without repair; its execution yields explicitly_absent; nqd starts active. The admin upgrade report, doctor truthfulness and historical reopen are informational sub-results only")
 
     def case_b05(self, g: Guest) -> None:
         """Roll back to M3: the old binary must refuse the candidate's store explicitly, and
