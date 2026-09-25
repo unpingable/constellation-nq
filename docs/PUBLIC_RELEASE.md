@@ -148,5 +148,8 @@ The release path now packages `nq-host-resource-helper`, which serves
 `nq.synthetic_cache_executor_result/v1`, under `/usr/lib/nq/helpers/`, and the
 assembler runs `verify_catalog.py --helper` against the packaged
 `nq-host-resource-helper` so a helper whose failure-code vocabularies disagree
-with `nq` is refused at assembly. No bundle containing them has been built or
-published yet.
+with `nq` is refused at assembly. A disposable candidate containing them was built from `fc671a4` by the
+offline Bookworm builder (two byte-equal builds) and qualified with explicit
+limitations; it is not published. Before promotion: `nqd` cannot evaluate
+watchers admitted by the `nq` CLI, store upgrade from earlier builds is not
+supported, and `/run/nq` disappears after `nqd` stops.
