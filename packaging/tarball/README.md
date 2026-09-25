@@ -32,13 +32,14 @@ against the supplied `nq` and against the supplied `nq-host-resource-helper`
 vocabularies disagree with `nq` is refused at assembly. The
 assembler checks architecture, executes each binary's strict `--build-info`
 probe before reading any NQ configuration, rejects debug/test-isolation
-builds, and requires every embedded version to equal the requested package
-version. It also requires the descriptor inventory to equal the strict profile
+builds, requires every embedded version to equal the requested package
+version, and requires every binary to record the same full source commit
+(`NQ_SOURCE_COMMIT` at compile time). It also requires the descriptor inventory to equal the strict profile
 manifest and compiled registry, and matches the exact protocol fixture bytes
 to the receipt emitted by the supplied `nq`. It strictly verifies the
 system-contract assets and requires their compiled-profile fixture to match the
 exact catalog being packaged. It separately verifies the exact v1 and v2
 language-neutral diagnostic contract manifests, schemas, canonical fixtures,
 artifact self-identities, and hostile-vector dispositions before and after
-staging. Release automation must still supply the six binaries as one
-reviewed source-revision cohort; a version string is not a source identity.
+staging. The shared recorded commit makes the six binaries one source-revision
+cohort; release automation must still build that commit from reviewed source.
