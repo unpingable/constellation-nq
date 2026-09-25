@@ -1047,7 +1047,11 @@ fn exact_v3_upgrade_accepts_typed_empty_history_and_refuses_semantic_or_schema_d
     drop(store);
 
     let receipts = read_only_upgrade_receipts(&database);
-    assert_eq!(receipts.len(), 3, "v3 to v12 requires three exact receipts");
+    assert_eq!(
+        receipts.len(),
+        4,
+        "v3 to the current schema requires four exact receipts"
+    );
     let receipt = &receipts[0];
     assert_eq!(receipt.from_version, 3);
     assert_eq!(receipt.to_version, 4);
@@ -1086,6 +1090,20 @@ fn exact_v3_upgrade_accepts_typed_empty_history_and_refuses_semantic_or_schema_d
     assert_eq!(
         serde_json::from_str::<Value>(&receipt.migrations_json).unwrap(),
         serde_json::json!(["schema_v5_to_v12_local_checks_notifications"])
+    );
+    let receipt_v12 = &receipts[3];
+    assert_eq!(receipt_v12.from_version, 12);
+    assert_eq!(receipt_v12.to_version, 13);
+    assert_eq!(receipt_v12.result, "migrated");
+    let v12_backup = PathBuf::from(&receipt_v12.backup_location);
+    assert_eq!(sha256_file(&v12_backup), receipt_v12.backup_digest);
+    assert_eq!(
+        nq_store::Store::database_schema_version(&v12_backup).unwrap(),
+        12
+    );
+    assert_eq!(
+        upgraded["v12_backup_digest"],
+        receipt_v12.backup_digest.as_str()
     );
     let verification: Value = serde_json::from_str(&receipt.verification_json).unwrap();
     assert_eq!(

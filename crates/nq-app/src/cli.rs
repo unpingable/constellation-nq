@@ -2370,12 +2370,21 @@ fn diagnostic_artifact_custody_summary(store: &Store) -> Result<DiagnosticArtifa
     }
 }
 
+/// Verified backups written by one chained upgrade: the schema-5 source and the
+/// intermediate schema-12 store.
+struct ChainedUpgradeBackups {
+    v5: (PathBuf, String),
+    v12: (PathBuf, String),
+}
+
+/// Migrate a schema-5 store all the way to the current schema: v5 to v12, then
+/// v12 to current, each step with its own verified backup and receipt.
 fn upgrade_v5_to_current(
     database_path: &Path,
     backup_directory: &Path,
     binary_digest: &str,
     operator_identity: &CanonicalDocument,
-) -> Result<(PathBuf, String)> {
+) -> Result<ChainedUpgradeBackups> {
     let started_at = chrono::Utc::now();
     let temporary = backup_directory.join(format!(".nq-upgrade-{}.db", uuid::Uuid::new_v4()));
     let artifact = Store::backup_v5_verified(database_path, &temporary)?;
@@ -2402,6 +2411,46 @@ fn upgrade_v5_to_current(
         }))?,
     };
     Store::upgrade_v5_to_v12(database_path, &receipt)?.validate()?;
+    let v12 = upgrade_v12_to_current(
+        database_path,
+        backup_directory,
+        binary_digest,
+        operator_identity,
+    )?;
+    Ok(ChainedUpgradeBackups {
+        v5: (backup, artifact.sha256),
+        v12,
+    })
+}
+
+/// Migrate a schema-12 store to the current schema with a verified backup.
+fn upgrade_v12_to_current(
+    database_path: &Path,
+    backup_directory: &Path,
+    binary_digest: &str,
+    operator_identity: &CanonicalDocument,
+) -> Result<(PathBuf, String)> {
+    let started_at = chrono::Utc::now();
+    let temporary = backup_directory.join(format!(".nq-upgrade-{}.db", uuid::Uuid::new_v4()));
+    let artifact = Store::backup_v12_verified(database_path, &temporary)?;
+    let backup = finalize_upgrade_backup(&temporary, backup_directory, &artifact.sha256)?;
+    let receipt = UpgradeReceiptInput {
+        receipt_id: uuid::Uuid::new_v4().to_string(),
+        from_schema_version: 12,
+        to_schema_version: 13,
+        migrations: CanonicalDocument::from_serializable(&["schema_v12_to_v13_local_successor"])?,
+        binary_digest: binary_digest.to_owned(),
+        backup_digest: artifact.sha256.clone(),
+        backup_location: backup.display().to_string(),
+        started_at: started_at.to_rfc3339(),
+        finished_at: started_at.to_rfc3339(),
+        result: "migrated".into(),
+        operator_identity: operator_identity.clone(),
+        verification: CanonicalDocument::from_serializable(
+            &json!({"integrity":"ok","source_schema_version":12,"source_schema_artifact_digest":nq_store::SCHEMA_V12_ARTIFACT_DIGEST,"backup_reopened":true,"historical_local_successor_acquisitions":"absent_not_synthesized"}),
+        )?,
+    };
+    Store::upgrade_v12_to_v13(database_path, &receipt)?.validate()?;
     Ok((backup, artifact.sha256))
 }
 
@@ -2583,7 +2632,7 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                         }))?,
                     };
                     drop(Store::upgrade_v4_to_v5(&config.database_path, &v4_receipt)?);
-                    let (v5_backup, v5_backup_digest) = upgrade_v5_to_current(
+                    let chained = upgrade_v5_to_current(
                         &config.database_path,
                         &backup_directory,
                         &binary_digest,
@@ -2600,8 +2649,10 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                             "v3_backup_digest": v3_artifact.sha256,
                             "v4_backup": v4_backup,
                             "v4_backup_digest": v4_artifact.sha256,
-                            "v5_backup": v5_backup,
-                            "v5_backup_digest": v5_backup_digest,
+                            "v5_backup": chained.v5.0,
+                            "v5_backup_digest": chained.v5.1,
+                            "v12_backup": chained.v12.0,
+                            "v12_backup_digest": chained.v12.1,
                             "historical_provider_intake": "explicit_gap_only",
                             "historical_diagnostic_artifacts": "no_durable_commitments",
                         }),
@@ -2641,7 +2692,7 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                         }))?,
                     };
                     drop(Store::upgrade_v4_to_v5(&config.database_path, &receipt)?);
-                    let (v5_backup, v5_backup_digest) = upgrade_v5_to_current(
+                    let chained = upgrade_v5_to_current(
                         &config.database_path,
                         &backup_directory,
                         &binary_digest,
@@ -2654,8 +2705,10 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                             "result": "migrated",
                             "from_schema_version": 4,
                             "schema_version": nq_store::SCHEMA_VERSION,
-                            "v5_backup": v5_backup,
-                            "v5_backup_digest": v5_backup_digest,
+                            "v5_backup": chained.v5.0,
+                            "v5_backup_digest": chained.v5.1,
+                            "v12_backup": chained.v12.0,
+                            "v12_backup_digest": chained.v12.1,
                             "backup": backup,
                             "backup_digest": artifact.sha256,
                             "historical_diagnostic_artifacts": "no_durable_commitments",
@@ -2664,49 +2717,34 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                     )
                 }
                 5 => {
-                    let (backup, backup_digest) = upgrade_v5_to_current(
+                    let chained = upgrade_v5_to_current(
+                        &config.database_path,
+                        &backup_directory,
+                        &binary_digest,
+                        &operator_identity,
+                    )?;
+                    let store = Store::open(&config.database_path)?;
+                    store.validate()?;
+                    print_value(
+                        &json!({"result":"migrated", "from_schema_version":5,
+                        "schema_version":nq_store::SCHEMA_VERSION,
+                        "v5_backup":chained.v5.0, "v5_backup_digest":chained.v5.1,
+                        "v12_backup":chained.v12.0, "v12_backup_digest":chained.v12.1,
+                        "historical_saved_checks":"absent_not_synthesized",
+                        "historical_notification_delivery":"absent_not_synthesized",
+                        "historical_local_successor_acquisitions":"absent_not_synthesized"}),
+                        json_output,
+                    )
+                }
+                12 => {
+                    let (backup, backup_digest) = upgrade_v12_to_current(
                         &config.database_path,
                         &backup_directory,
                         &binary_digest,
                         &operator_identity,
                     )?;
                     print_value(
-                        &json!({"result":"migrated", "from_schema_version":5,
-                        "schema_version":nq_store::SCHEMA_VERSION, "backup":backup,
-                        "backup_digest":backup_digest, "historical_saved_checks":"absent_not_synthesized",
-                        "historical_notification_delivery":"absent_not_synthesized"}),
-                        json_output,
-                    )
-                }
-                12 => {
-                    let artifact =
-                        Store::backup_v12_verified(&config.database_path, &temporary_backup)?;
-                    let backup = finalize_upgrade_backup(
-                        &temporary_backup,
-                        &backup_directory,
-                        &artifact.sha256,
-                    )?;
-                    let receipt = UpgradeReceiptInput {
-                        receipt_id: uuid::Uuid::new_v4().to_string(),
-                        from_schema_version: 12,
-                        to_schema_version: 13,
-                        migrations: CanonicalDocument::from_serializable(&[
-                            "schema_v12_to_v13_local_successor",
-                        ])?,
-                        binary_digest,
-                        backup_digest: artifact.sha256.clone(),
-                        backup_location: backup.display().to_string(),
-                        started_at: started_at.to_rfc3339(),
-                        finished_at: started_at.to_rfc3339(),
-                        result: "migrated".into(),
-                        operator_identity,
-                        verification: CanonicalDocument::from_serializable(
-                            &json!({"integrity":"ok","source_schema_version":12,"source_schema_artifact_digest":nq_store::SCHEMA_V12_ARTIFACT_DIGEST,"backup_reopened":true,"historical_local_successor_acquisitions":"absent_not_synthesized"}),
-                        )?,
-                    };
-                    Store::upgrade_v12_to_v13(&config.database_path, &receipt)?.validate()?;
-                    print_value(
-                        &json!({"result":"migrated","from_schema_version":12,"schema_version":nq_store::SCHEMA_VERSION,"backup":backup,"backup_digest":artifact.sha256,"historical_local_successor_acquisitions":"absent_not_synthesized"}),
+                        &json!({"result":"migrated","from_schema_version":12,"schema_version":nq_store::SCHEMA_VERSION,"backup":backup,"backup_digest":backup_digest,"historical_local_successor_acquisitions":"absent_not_synthesized"}),
                         json_output,
                     )
                 }
