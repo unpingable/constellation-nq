@@ -122,7 +122,7 @@ These commands do not initialize NQ. The Debian package also deliberately
 leaves `nqd` stopped and disabled.
 
 To read which build is deployed, ask the installed binary rather than the
-package name: `nq --version` prints `nq 0.1.0 (<commit>)` (and `nqd --version` prints `nqd 0.1.0 (<commit>)`),
+package name: `nq --version` prints `nq 0.2.0 (<commit>)` (and `nqd --version` prints `nqd 0.2.0 (<commit>)`),
 where `<commit>` is the full git commit id release automation recorded at
 compile time through `NQ_SOURCE_COMMIT`; `nq --build-info` prints the same
 commit as `source_commit` in a one-line JSON document
@@ -131,7 +131,7 @@ policy, without reading any configuration. Every binary in a release carries
 the same commit because the assembler refuses a cohort whose commits differ or
 are absent, and the qualification package receipt binds that commit through the
 recorded build environment. A development build without `NQ_SOURCE_COMMIT`
-prints `nq 0.1.0` and `"source_commit":null`, and is not packageable.
+prints `nq 0.2.0` and `"source_commit":null`, and is not packageable.
 
 At every service start under the intact packaged unit, systemd runs the
 installed inner-manifest check from `/usr` before `config check`. Missing or
@@ -790,7 +790,7 @@ cargo build --release --locked
 python3 profiles/verify_catalog.py target/release/nq \
   --helper target/release/nq-host-resource-helper
 SOURCE_DATE_EPOCH=0 scripts/build-release-bundle.sh \
-  0.1.0 amd64 target/release profiles dist
+  0.2.0 amd64 target/release profiles dist
 (cd dist && sha256sum --check SHA256SUMS)
 ```
 
@@ -834,7 +834,7 @@ failure boundaries without touching `dist/`:
 
 ```sh
 scripts/test_release_reproducibility.sh \
-  0.1.0 amd64 target/release profiles
+  0.2.0 amd64 target/release profiles
 scripts/test_release_failure_atomicity.sh \
-  0.1.0 amd64 target/release profiles
+  0.2.0 amd64 target/release profiles
 ```

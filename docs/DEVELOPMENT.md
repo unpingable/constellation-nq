@@ -26,14 +26,14 @@ registry:
 target/debug/nq protocol check
 python3 -B helpers/python-conformance/test_helper.py
 python3 -B profiles/verify_catalog.py target/debug/nq
-python3 -B scripts/verify_protocol_assets.py protocol target/debug/nq 0.1.0
+python3 -B scripts/verify_protocol_assets.py protocol target/debug/nq 0.2.0
 python3 -B system-contract/verify_assets.py \
   --profile-catalog profiles/manifest.json
 python3 -B scripts/test_release_verifiers.py
 scripts/test_release_reproducibility.sh \
-  0.1.0 amd64 target/release profiles
+  0.2.0 amd64 target/release profiles
 scripts/test_release_failure_atomicity.sh \
-  0.1.0 amd64 target/release profiles
+  0.2.0 amd64 target/release profiles
 ```
 
 ## Runtime hardening contracts

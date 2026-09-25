@@ -1175,7 +1175,7 @@ dependencies = [
 
 [[package]]
 name = "nq-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1204,7 +1204,7 @@ dependencies = [
 
 [[package]]
 name = "nq-build-info"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1212,7 +1212,7 @@ dependencies = [
 
 [[package]]
 name = "nq-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "ed25519-dalek",
@@ -1236,7 +1236,7 @@ dependencies = [
 
 [[package]]
 name = "nq-helper-sandbox"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "nix",
@@ -1247,7 +1247,7 @@ dependencies = [
 
 [[package]]
 name = "nq-host-helper"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "nix",
@@ -1261,7 +1261,7 @@ dependencies = [
 
 [[package]]
 name = "nq-host-resource-helper"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "libc",
@@ -1277,7 +1277,7 @@ dependencies = [
 
 [[package]]
 name = "nq-operator-beta-helper"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-io",
  "chrono",
@@ -1297,7 +1297,7 @@ dependencies = [
 
 [[package]]
 name = "nq-profiles"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "hex",
@@ -1310,7 +1310,7 @@ dependencies = [
 
 [[package]]
 name = "nq-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "hex",
@@ -1323,7 +1323,7 @@ dependencies = [
 
 [[package]]
 name = "nq-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "nq-protocol",
@@ -1338,7 +1338,7 @@ dependencies = [
 
 [[package]]
 name = "nq-synthetic-cache-result-helper"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "nix",
@@ -1355,7 +1355,7 @@ dependencies = [
 
 [[package]]
 name = "nq-system-contract"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "nq-profiles",

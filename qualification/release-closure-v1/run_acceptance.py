@@ -48,8 +48,10 @@ DEFAULT_PREDECESSOR = pathlib.Path(
     "/data/git/.campaign-artifacts/operator-beta-completion-20260908/m3-nq-package-001"
 )
 DEFAULT_STATE = pathlib.Path("/home/jbeck/.local/state/release-closure-20260925")
-PACKAGE = "nq-ng_0.1.0_amd64.deb"
-TARBALL = "nq-ng-0.1.0-linux-amd64.tar.gz"
+VERSION = "0.2.0"
+PACKAGE = f"nq-ng_{VERSION}_amd64.deb"
+TARBALL = f"nq-ng-{VERSION}-linux-amd64.tar.gz"
+PREDECESSOR_PACKAGE = "nq-ng_0.1.0_amd64.deb"
 RECEIPT = "bookworm-build-receipt.v1.json"
 BUNDLE_FILES = (PACKAGE, TARBALL, f"{PACKAGE}.sha256", f"{TARBALL}.sha256", "SHA256SUMS")
 GUEST_USER = "nqacceptor"
@@ -617,8 +619,8 @@ class Harness:
         for line in (pre / "SHA256SUMS").read_text().splitlines():
             digest, _, name = line.strip().partition("  ")
             sums[name] = digest
-        pre_digest = sha256_file(pre / PACKAGE)
-        if sums.get(PACKAGE) != pre_digest:
+        pre_digest = sha256_file(pre / PREDECESSOR_PACKAGE)
+        if sums.get(PREDECESSOR_PACKAGE) != pre_digest:
             raise Refusal("predecessor .deb does not match its SHA256SUMS")
         self.predecessor_identity = {"directory": str(pre), "deb_sha256": pre_digest}
         # Base image: verified against the adjacent SHA512SUMS, used read-only.
@@ -952,7 +954,7 @@ users:
 
     def case_a08(self, g: Guest) -> None:
         """Every compiled binary reports nq.build_info.v2 naming the receipt's source
-        commit; `nq --version` and `nqd --version` print `0.1.0 (<commit>)`."""
+        commit; `nq --version` and `nqd --version` print `<VERSION> (<commit>)`."""
         commit = self.source_commit
         results = {}
         ok = True
@@ -962,7 +964,7 @@ users:
             results[path] = info if info is not None else text(r.stdout + r.stderr)
             good = (
                 isinstance(info, dict) and info.get("schema") == "nq.build_info.v2"
-                and info.get("version") == "0.1.0"
+                and info.get("version") == VERSION
                 and info.get("debug_assertions") is False
                 and info.get("helper_isolation_policy") == "production_separate_identity_required"
                 and info.get("component") == pathlib.Path(path).name
@@ -974,7 +976,7 @@ users:
             r = self.ssh(g, f"{path} --version")
             out = text(r.stdout)
             name = pathlib.Path(path).name
-            match = re.fullmatch(rf"({name}|nq) 0\.1\.0 \({re.escape(commit)}\)\n", out) is not None
+            match = re.fullmatch(rf"({name}|nq) {re.escape(VERSION)} \({re.escape(commit)}\)\n", out) is not None
             versions[path] = {"exit": r.returncode, "stdout": out, "stderr": text(r.stderr)[-500:],
                               "matches": r.returncode == 0 and match}
             ok = ok and versions[path]["matches"]
@@ -1549,9 +1551,9 @@ users:
     def case_b01(self, g: Guest) -> None:
         pre = self.args.predecessor_dir
         self.ssh(g, "mkdir -p /home/nqacceptor/predecessor", check=True)
-        self.scp_to(g, [pre / PACKAGE, pre / "SHA256SUMS"], "/home/nqacceptor/predecessor/")
+        self.scp_to(g, [pre / PREDECESSOR_PACKAGE, pre / "SHA256SUMS"], "/home/nqacceptor/predecessor/")
         sums = self.ssh(g, "cd /home/nqacceptor/predecessor && sha256sum --check --ignore-missing --strict SHA256SUMS; echo sums-exit=$?")
-        dpkg = self.ssh(g, f"sudo dpkg -i /home/nqacceptor/predecessor/{PACKAGE}; echo dpkg-exit=$?", timeout=300)
+        dpkg = self.ssh(g, f"sudo dpkg -i /home/nqacceptor/predecessor/{PREDECESSOR_PACKAGE}; echo dpkg-exit=$?", timeout=300)
         info = self.ssh(g, f"/usr/bin/nq --build-info; {MANIFEST_CHECK} && echo manifest-ok; sudo -u nq /usr/bin/nq profiles list; ls -la {HELPER_DIR}")
         profiles = None
         for line in text(info.stdout).splitlines():
@@ -1757,7 +1759,7 @@ users:
         """Roll back to M3: the old binary must refuse the candidate's store explicitly, and
         `nq restore` of the v5 backup per OPERATIONS.md must give M3 a readable store."""
         steps: dict[str, Any] = {}
-        dpkg = self.ssh(g, f"sudo dpkg -i /home/nqacceptor/predecessor/{PACKAGE}; echo dpkg-exit=$?", timeout=300)
+        dpkg = self.ssh(g, f"sudo dpkg -i /home/nqacceptor/predecessor/{PREDECESSOR_PACKAGE}; echo dpkg-exit=$?", timeout=300)
         info = self.ssh(g, f"/usr/bin/nq --build-info; {MANIFEST_CHECK} && echo manifest-ok")
         steps["dpkg"] = text(dpkg.stdout + dpkg.stderr)[-3000:]
         steps["binary"] = text(info.stdout + info.stderr)
